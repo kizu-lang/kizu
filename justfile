@@ -43,6 +43,14 @@ ir file="examples/hello.kizu":
 llvm file="examples/hello.kizu":
     go run ./cmd/kizu build --emit-llvm {{file}}
 
+# Emit WASI WebAssembly text for a Kizu file.
+wasm file="examples/hello.kizu":
+    go run ./cmd/kizu build --target wasm32-wasi {{file}}
+
+# Build and run Phase 2 examples with wasmtime.
+wasi-smoke:
+    scripts/run-wasi-smoke.sh
+
 # Show local Kizu build cache status.
 cache-status:
     go run ./cmd/kizu cache status
@@ -74,6 +82,7 @@ cache-smoke:
     @tmp="$(mktemp -d)"; \
     trap 'rm -rf "$tmp"' EXIT; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --emit-llvm examples/hello.kizu >/dev/null; \
+    KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu >/dev/null; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --emit-llvm examples/hello.kizu >/dev/null; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu why-rebuild examples/hello.kizu; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu cache status; \

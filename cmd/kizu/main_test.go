@@ -73,6 +73,21 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetWASICommandSmoke checks the CLI can dump WASI WebAssembly text.
+func TestBuildTargetWASICommandSmoke(t *testing.T) {
+	cmd := exec.Command(
+		"go", "run", ".", "build", "--target", "wasm32-wasi", "../../examples/hello.kizu",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := `(func $_start (export "_start")`
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
 // TestCacheCommands checks cache status, why-rebuild, and prune.
 func TestCacheCommands(t *testing.T) {
 	cacheDir := t.TempDir()

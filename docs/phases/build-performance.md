@@ -21,6 +21,7 @@ Kizu のコンパイル時間、ビルド時間、キャッシュサイズを早
 - [x] `kizu why-rebuild` の出力形式を決める
 - [x] Phase 8 の `kizu ir` 測定を追加する
 - [x] Phase 9 の LLVM IR generation 測定を追加する
+- [x] Phase 11 の WASM generation 測定を追加する
 - [x] CI で測る項目とローカルだけで測る項目を分ける
 
 ## 受け入れ条件
@@ -34,6 +35,7 @@ Kizu のコンパイル時間、ビルド時間、キャッシュサイズを早
 
 初期 baseline は `scripts/measure-baseline.sh` で測る。
 cache 固有の cold / warm / no-op / small edit は `scripts/measure-cache.sh` で測る。
+WASI smoke は `scripts/run-wasi-smoke.sh` で測る。
 
 cache size の上限方針は ADR-0021 に残す。
 
@@ -41,5 +43,4 @@ cache size の上限方針は ADR-0021 に残す。
 
 - 高度な最適化
 - LLVM backend の実装
-- WASM / WASI backend の実装
 - 分散ビルド

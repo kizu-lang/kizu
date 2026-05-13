@@ -20,6 +20,7 @@
             pkgs.golangci-lint
             pkgs.just
             pkgs.pre-commit
+            pkgs.wasmtime
           ];
         };
       }

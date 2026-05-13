@@ -40,3 +40,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0019: Code comments are written in English and required for packages and functions](0019-code-comments-in-english.md)
 - [ADR-0020: arena / handle は v0 専用構文として扱う](0020-arena-handle-syntax.md)
 - [ADR-0021: ローカルビルドキャッシュは上限付きにする](0021-local-build-cache.md)
+- [ADR-0022: Phase 11 の WASM backend は WAT 生成から始める](0022-wasm-wat-backend.md)

@@ -13,6 +13,7 @@ import (
 	"tiny-safe/internal/ownership"
 	"tiny-safe/internal/parser"
 	"tiny-safe/internal/types"
+	"tiny-safe/internal/wasm"
 )
 
 // main dispatches the kizu command line interface.
@@ -54,6 +55,7 @@ func dispatch(cmd string, args []string) error {
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|ir> <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
 }
@@ -136,11 +138,23 @@ func irFile(path string) error {
 
 // buildFile dispatches build subcommands.
 func buildFile(args []string) error {
-	if len(args) != 2 || args[0] != "--emit-llvm" {
+	if len(args) < 2 {
 		usage()
 		return fmt.Errorf("invalid build command")
 	}
-	return emitLLVMFile(args[1])
+	switch args[0] {
+	case "--emit-llvm":
+		if len(args) != 2 {
+			usage()
+			return fmt.Errorf("invalid build command")
+		}
+		return emitLLVMFile(args[1])
+	case "--target":
+		return emitTargetFile(args[1], args)
+	default:
+		usage()
+		return fmt.Errorf("invalid build command")
+	}
 }
 
 // emitLLVMFile lowers a checked source file to LLVM IR text.
@@ -155,6 +169,35 @@ func emitLLVMFile(path string) error {
 			return "", err
 		}
 		return llvm.Emit(module)
+	})
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Println(result.Output)
+	return nil
+}
+
+// emitTargetFile lowers a checked source file to the requested target.
+func emitTargetFile(target string, args []string) error {
+	if len(args) != 3 || args[1] != "wasm32-wasi" {
+		usage()
+		return fmt.Errorf("invalid build target `%s`", target)
+	}
+	return emitWASMFile(args[2])
+}
+
+// emitWASMFile lowers a checked source file to WASI WebAssembly text.
+func emitWASMFile(path string) error {
+	cache, err := buildcache.New()
+	if err != nil {
+		return err
+	}
+	result, err := cache.GetOrBuild(path, "wasm32-wasi", func() (string, error) {
+		module, err := lowerFile(path)
+		if err != nil {
+			return "", err
+		}
+		return wasm.Emit(module)
 	})
 	if err != nil {
 		return err
