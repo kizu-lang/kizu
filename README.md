@@ -31,6 +31,16 @@ go run ./cmd/kizu run examples/hello.kizu
 go run ./cmd/kizu run examples/arena.kizu
 ```
 
+`just` からも主要コマンドを実行できます。
+
+```sh
+just --list
+just verify
+just perf
+just perf-cache
+just cache-smoke
+```
+
 または、shell に入らずに直接実行できます。
 
 ```sh
