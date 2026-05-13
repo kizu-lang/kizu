@@ -1,0 +1,108 @@
+# Kizu
+
+Kizu は、小さく、明示的で、メモリ安全なシステムプログラミング言語のプロトタイプです。
+
+名前の Kizu は日本語の「傷」に由来します。
+
+> 傷を作らない。傷を隠さない。
+
+Kizu は Rust の安全性の考え方を一部参考にしますが、Rust clone ではありません。
+Rust より単純で、safe code では C/C++/Zig より安全で、CI とビルドキャッシュが重くなりにくい言語を探索します。
+
+[English README](README.md)
+
+## 現在の状態
+
+Kizu は Go 製の初期プロトタイプです。
+
+実装済み phase:
+
+- lexer, parser, AST, CLI
+- interpreter
+- type checker
+- move checker
+- local borrow checker
+- `arena<T>` / `handle<T>`
+- typed SSA IR
+- LLVM IR text backend
+- 上限付きローカルビルドキャッシュと再ビルド理由表示
+- WASI-compatible WebAssembly text backend
+
+まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
+
+## 例
+
+```kizu
+fn main() {
+    print("hello, kizu")
+}
+```
+
+interpreter で実行します。
+
+```sh
+go run ./cmd/kizu run examples/hello.kizu
+```
+
+## 開発環境
+
+推奨する開発環境は Nix flake です。
+
+```sh
+nix develop
+pre-commit install
+```
+
+shell には Go、golangci-lint、pre-commit、just、wasmtime が入ります。
+
+## よく使うコマンド
+
+```sh
+just --list
+just verify
+just perf
+just perf-cache
+just cache-smoke
+just wasi-smoke
+```
+
+直接実行する場合:
+
+```sh
+go test ./...
+golangci-lint run
+pre-commit run --all-files
+
+go run ./cmd/kizu parse examples/hello.kizu
+go run ./cmd/kizu check examples/hello.kizu
+go run ./cmd/kizu run examples/hello.kizu
+go run ./cmd/kizu ir examples/hello.kizu
+go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu cache status
+go run ./cmd/kizu why-rebuild examples/hello.kizu
+```
+
+## CLI
+
+- `kizu parse <file>` は `.kizu` source file を parse します。
+- `kizu check <file>` は type / ownership / move / borrow / arena check を実行します。
+- `kizu run <file>` は interpreter で実行します。
+- `kizu ir <file>` は typed SSA IR を表示します。
+- `kizu build --emit-llvm <file>` は LLVM IR text を出力します。
+- `kizu build --target wasm32-wasi <file>` は WASI-compatible WAT を出力します。
+- `kizu cache status` はローカルビルドキャッシュの状態を表示します。
+- `kizu cache prune` はローカルビルドキャッシュを削除します。
+- `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
+
+## プロジェクト文書
+
+- [SPEC.md](SPEC.md): 言語仕様
+- [PHASES.md](PHASES.md): 実装 phase 管理
+- [docs/adr](docs/adr): Architecture Decision Record
+- [docs/perf.md](docs/perf.md): build/cache performance policy
+- [AGENTS.md](AGENTS.md): Codex agent 向け実装方針
+
+## License
+
+Kizu は [MIT License](LICENSE) で公開します。
