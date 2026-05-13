@@ -22,6 +22,7 @@ type functionInfo struct {
 type paramInfo struct {
 	typeName string
 	borrow   bool
+	comptime bool
 }
 
 type binding struct {
@@ -91,7 +92,9 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 		}
 		params := make([]paramInfo, 0, len(fn.Params))
 		for _, param := range fn.Params {
-			params = append(params, paramInfo{typeName: param.TypeName, borrow: param.Borrow})
+			params = append(params, paramInfo{
+				typeName: param.TypeName, borrow: param.Borrow, comptime: param.Comptime,
+			})
 		}
 		c.functions[fn.Name] = &functionInfo{
 			name: fn.Name, params: params, returnType: fn.ReturnType, decl: fn,
@@ -141,6 +144,8 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkWhileStmt(s, env)
 	case *ast.UnsafeStmt:
 		return c.checkBlock(s.Body, env.child())
+	case *ast.ComptimeIfStmt:
+		return c.checkComptimeIfStmt(s, env)
 	default:
 		return fmt.Errorf("move error: unsupported statement %T", stmt)
 	}
@@ -242,6 +247,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return "string", nil
 	case *ast.BoolExpr:
 		return "bool", nil
+	case *ast.ComptimeExpr:
+		return c.readComptimeExpr(e, env)
 	case *ast.IdentExpr:
 		return readIdent(e.Name, env)
 	case *ast.PrefixExpr:
@@ -330,7 +337,9 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	}
 	defer releaseBorrows(borrowed)
 	for idx, arg := range expr.Args {
-		if fn.params[idx].borrow {
+		if fn.params[idx].comptime {
+			_, err = c.readExpr(arg, env)
+		} else if fn.params[idx].borrow {
 			_, err = c.readExpr(arg, env)
 		} else {
 			_, err = c.moveExpr(arg, env)

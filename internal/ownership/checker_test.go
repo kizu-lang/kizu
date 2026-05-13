@@ -239,6 +239,35 @@ fn main() { unsafe { print(1) } }`,
 	runErrorCases(t, cases)
 }
 
+// TestCheckComptimeDoesNotMoveRuntimeValues checks compile-time arguments are read-only.
+func TestCheckComptimeDoesNotMoveRuntimeValues(t *testing.T) {
+	source := `fn sized(comptime n: int) -> int { return n }
+fn main() {
+    let name = "alice"
+    print(sized(comptime 8))
+    print(name)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckComptimeRejectsRuntimeBoundary checks runtime locals cannot cross comptime.
+func TestCheckComptimeRejectsRuntimeBoundary(t *testing.T) {
+	source := `fn main() {
+    let name = "alice"
+    let alias = comptime name
+    print(alias)
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "runtime value cannot cross comptime boundary") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // runErrorCases checks that each source fails with the expected message.
 func runErrorCases(t *testing.T, cases []struct {
 	name   string

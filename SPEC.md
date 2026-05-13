@@ -404,8 +404,7 @@ ptr<const T> const T*
 
 ## 13. comptime
 
-`comptime` は将来追加します。
-v0 では実装しません。
+`comptime` は、限定的なコンパイル時評価です。
 
 Kizu の `comptime` は macro ではありません。
 コンパイル時に評価される、型検査済みの Kizu コードとして扱います。
@@ -419,18 +418,35 @@ Kizu の `comptime` は macro ではありません。
 * build script として使える任意の副作用は許さない
 
 検討する構文:
+v0.1 の最小構文:
 
 ```kizu
-const size = comptime 4 * 1024
+let size = comptime 4 * 1024
 ```
 
-または:
+comptime parameter:
 
 ```kizu
-fn buffer_size() comptime -> usize {
-    return 4096
+fn sized(comptime n: int) -> int {
+    return n
 }
 ```
+
+comptime branch:
+
+```kizu
+comptime if 1 + 1 == 2 {
+    print(sized(comptime 8))
+} else {
+    print(0)
+}
+```
+
+v0.1 の `comptime` expression は、整数、真偽値、文字列、単項演算、二項演算だけを評価します。
+runtime local value は `comptime` expression から参照できません。
+
+`comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。
+これは token stream や AST を書き換える macro ではありません。
 
 ## 14. 標準ライブラリ方針
 

@@ -136,6 +136,32 @@ fn main() { unsafe { print(get_byte(ptr_read_ptr())) } }`
 	}
 }
 
+// TestParseComptime checks Phase 13 compile-time expression and parameter syntax.
+func TestParseComptime(t *testing.T) {
+	input := `fn sized(comptime n: int) -> int {
+    return n
+}
+fn main() {
+    let size = comptime 4 * 1024
+    comptime if 1 + 1 == 2 {
+        print(sized(comptime size))
+    } else {
+        print(0)
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn sized(comptime n: int) -> int { return n }
+fn main() { let size = comptime (4 * 1024); ` +
+		`comptime if ((1 + 1) == 2) { print(sized(comptime size)) } else { print(0) } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
 func TestParseRejectsExplicitLifetime(t *testing.T) {
 	input := `fn show(s: borrow 'a string) {}`

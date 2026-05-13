@@ -140,6 +140,8 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return l.lowerWhileStmt(s)
 	case *ast.UnsafeStmt:
 		return l.lowerBlock(s.Body)
+	case *ast.ComptimeIfStmt:
+		return l.lowerComptimeIfStmt(s)
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
 	}
@@ -154,6 +156,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.emitConst("string", fmt.Sprintf("%q", e.Value)), nil
 	case *ast.BoolExpr:
 		return l.emitConst("bool", e.String()), nil
+	case *ast.ComptimeExpr:
+		return l.lowerExpr(e.Expr)
 	case *ast.IdentExpr:
 		return l.env[e.Name], nil
 	case *ast.PrefixExpr:

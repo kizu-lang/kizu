@@ -87,6 +87,8 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		return i.evalWhileStmt(s, env)
 	case *ast.UnsafeStmt:
 		return i.evalBlock(s.Body, env.Child())
+	case *ast.ComptimeIfStmt:
+		return i.evalComptimeIfStmt(s, env)
 	default:
 		return voidValue(), false, fmt.Errorf("runtime error: unsupported statement %T", stmt)
 	}
@@ -148,6 +150,24 @@ func (i *Interpreter) evalWhileStmt(stmt *ast.WhileStmt, env *Env) (Value, bool,
 	}
 }
 
+// evalComptimeIfStmt executes the branch selected by a compile-time condition.
+func (i *Interpreter) evalComptimeIfStmt(stmt *ast.ComptimeIfStmt, env *Env) (Value, bool, error) {
+	cond, err := i.evalExpr(stmt.Condition, env)
+	if err != nil {
+		return voidValue(), false, err
+	}
+	if cond.kind != kindBool {
+		return voidValue(), false, fmt.Errorf("runtime error: comptime if condition must be bool")
+	}
+	if cond.b {
+		return i.evalBlock(stmt.Consequence, env.Child())
+	}
+	if stmt.Alternative != nil {
+		return i.evalBlock(stmt.Alternative, env.Child())
+	}
+	return voidValue(), false, nil
+}
+
 // evalExpr evaluates an expression to a runtime value.
 func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	switch e := expr.(type) {
@@ -157,6 +177,8 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 		return stringValue(e.Value), nil
 	case *ast.BoolExpr:
 		return boolValue(e.Value), nil
+	case *ast.ComptimeExpr:
+		return i.evalExpr(e.Expr, env)
 	case *ast.IdentExpr:
 		return evalIdent(e.Name, env)
 	case *ast.PrefixExpr:

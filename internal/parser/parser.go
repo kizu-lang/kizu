@@ -186,6 +186,10 @@ func (p *Parser) parseParams() []ast.Param {
 	}
 	for {
 		param := ast.Param{}
+		if p.cur.Type == token.Comptime {
+			param.Comptime = true
+			p.nextToken()
+		}
 		if p.cur.Type != token.Ident {
 			p.errorf("expected parameter name, got %s", p.cur.Type)
 			return params
@@ -244,6 +248,10 @@ func (p *Parser) parseStatement() ast.Statement {
 		return p.parseWhileStmt()
 	case token.Unsafe:
 		return p.parseUnsafeStmt()
+	case token.Comptime:
+		if p.peek.Type == token.If {
+			return p.parseComptimeIfStmt()
+		}
 	case token.Ident:
 		if p.peek.Type == token.Assign {
 			return p.parseAssignStmt()
@@ -251,6 +259,28 @@ func (p *Parser) parseStatement() ast.Statement {
 	}
 	expr := p.parseExpression(lowest)
 	return &ast.ExprStmt{Expr: expr}
+}
+
+// parseComptimeIfStmt parses a comptime-selected if statement.
+func (p *Parser) parseComptimeIfStmt() ast.Statement {
+	stmt := &ast.ComptimeIfStmt{}
+	if !p.expectPeek(token.If) {
+		return stmt
+	}
+	p.nextToken()
+	stmt.Condition = p.parseExpression(lowest)
+	if !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Consequence = p.parseBlockStmt()
+	if p.peek.Type == token.Else {
+		p.nextToken()
+		if !p.expectPeek(token.LBrace) {
+			return stmt
+		}
+		stmt.Alternative = p.parseBlockStmt()
+	}
+	return stmt
 }
 
 // parseUnsafeStmt parses an unsafe statement block.
@@ -395,6 +425,9 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return &ast.BoolExpr{Value: true}
 	case token.False:
 		return &ast.BoolExpr{Value: false}
+	case token.Comptime:
+		p.nextToken()
+		return &ast.ComptimeExpr{Expr: p.parseExpression(lowest)}
 	case token.Bang, token.Minus:
 		op := p.cur.Literal
 		p.nextToken()

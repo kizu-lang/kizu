@@ -84,12 +84,13 @@ type Checker struct {
 }
 
 type functionType struct {
-	name       string
-	params     []Type
-	returnType Type
-	decl       *ast.FunctionDecl
-	unsafe     bool
-	externABI  string
+	name           string
+	params         []Type
+	comptimeParams []bool
+	returnType     Type
+	decl           *ast.FunctionDecl
+	unsafe         bool
+	externABI      string
 }
 
 type scope struct {
@@ -167,6 +168,7 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 // newFunctionType converts a parsed function declaration into its static type.
 func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	params := make([]Type, 0, len(fn.Params))
+	comptimeParams := make([]bool, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		paramType, err := c.parseType(param.TypeName)
 		if err != nil {
@@ -176,6 +178,7 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 			return nil, fmt.Errorf("type error: parameter `%s` cannot have type void", param.Name)
 		}
 		params = append(params, paramType)
+		comptimeParams = append(comptimeParams, param.Comptime)
 	}
 	ret := typeVoid
 	if fn.ReturnType != "" {
@@ -186,7 +189,7 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		}
 	}
 	return &functionType{
-		name: fn.Name, params: params, returnType: ret, decl: fn,
+		name: fn.Name, params: params, comptimeParams: comptimeParams, returnType: ret, decl: fn,
 		unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
 }
@@ -303,6 +306,8 @@ func (c *Checker) checkStmt(
 		return c.checkWhileStmt(s, env, wantReturn, unsafe)
 	case *ast.UnsafeStmt:
 		return c.checkBlock(s.Body, env.child(), wantReturn, true)
+	case *ast.ComptimeIfStmt:
+		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
 	default:
 		return false, fmt.Errorf("type error: unsupported statement %T", stmt)
 	}
@@ -396,6 +401,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 		return typeString, nil
 	case *ast.BoolExpr:
 		return typeBool, nil
+	case *ast.ComptimeExpr:
+		return c.checkComptimeExpr(e, env, unsafe)
 	case *ast.IdentExpr:
 		return checkIdentExpr(e, env)
 	case *ast.PrefixExpr:
@@ -505,25 +512,40 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	if name.Name == "ptr_write" {
 		return c.checkPtrWrite(expr, env, unsafe)
 	}
-	fn, ok := c.functions[name.Name]
+	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
+}
+
+// checkUserCall validates a declared function call.
+func (c *Checker) checkUserCall(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	fn, ok := c.functions[name]
 	if !ok {
-		return "", fmt.Errorf("type error: undefined function `%s`", name.Name)
+		return "", fmt.Errorf("type error: undefined function `%s`", name)
 	}
 	if (fn.unsafe || fn.externABI != "") && !unsafe {
-		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name.Name)
+		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name)
 	}
-	if len(expr.Args) != len(fn.params) {
+	if len(args) != len(fn.params) {
 		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
-			name.Name, len(fn.params), len(expr.Args))
+			name, len(fn.params), len(args))
 	}
-	for idx, arg := range expr.Args {
+	for idx, arg := range args {
 		got, err := c.checkExpr(arg, env, unsafe)
 		if err != nil {
 			return "", err
 		}
+		if fn.comptimeParams[idx] {
+			if _, err := evalComptime(arg); err != nil {
+				return "", err
+			}
+		}
 		if got != fn.params[idx] {
 			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
-				idx+1, name.Name, fn.params[idx], got)
+				idx+1, name, fn.params[idx], got)
 		}
 	}
 	return fn.returnType, nil

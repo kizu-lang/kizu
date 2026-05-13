@@ -120,6 +120,7 @@ type Param struct {
 	Name     string
 	TypeName string
 	Borrow   bool
+	Comptime bool
 }
 
 // String returns a compact debug representation of the parameter.
@@ -128,7 +129,10 @@ func (p Param) String() string {
 	if p.Borrow {
 		prefix = "borrow "
 	}
-	return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)
+	if !p.Comptime {
+		return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)
+	}
+	return fmt.Sprintf("comptime %s: %s%s", p.Name, prefix, p.TypeName)
 }
 
 // BlockStmt represents a sequence of statements.
@@ -240,6 +244,25 @@ func (s *UnsafeStmt) String() string {
 	return "unsafe " + s.Body.String()
 }
 
+// ComptimeIfStmt represents a branch selected during compilation.
+type ComptimeIfStmt struct {
+	Condition   Expression
+	Consequence *BlockStmt
+	Alternative *BlockStmt
+}
+
+// statementNode marks ComptimeIfStmt as a statement node.
+func (*ComptimeIfStmt) statementNode() {}
+
+// String returns a compact debug representation of the comptime branch.
+func (s *ComptimeIfStmt) String() string {
+	out := fmt.Sprintf("comptime if %s %s", s.Condition.String(), s.Consequence.String())
+	if s.Alternative != nil {
+		out += " else " + s.Alternative.String()
+	}
+	return out
+}
+
 // ExprStmt wraps an expression used as a statement.
 type ExprStmt struct {
 	Expr Expression
@@ -306,6 +329,19 @@ func (e *BoolExpr) String() string {
 		return "true"
 	}
 	return "false"
+}
+
+// ComptimeExpr represents an expression evaluated during compilation.
+type ComptimeExpr struct {
+	Expr Expression
+}
+
+// expressionNode marks ComptimeExpr as an expression node.
+func (*ComptimeExpr) expressionNode() {}
+
+// String returns a compact debug representation of the comptime expression.
+func (e *ComptimeExpr) String() string {
+	return "comptime " + e.Expr.String()
 }
 
 // PrefixExpr represents a unary operator expression.

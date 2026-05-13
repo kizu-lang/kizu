@@ -23,6 +23,7 @@ func TestDumpSnapshots(t *testing.T) {
 		{name: "if", source: ifSource, want: ifSnapshot},
 		{name: "while", source: whileSource, want: whileSnapshot},
 		{name: "arena", source: arenaSource, want: arenaSnapshot},
+		{name: "comptime", source: comptimeSource, want: comptimeSnapshot},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -127,6 +128,15 @@ fn main() {
     print(users.get(alice).name)
 }`
 
+const comptimeSource = `fn main() {
+    let size = comptime 4 * 1024
+    comptime if 1 + 1 == 2 {
+        print(size)
+    } else {
+        print(0)
+    }
+}`
+
 const helloSnapshot = `fn main() -> void {
 entry:
   %1: string = const "hello, kizu"
@@ -204,5 +214,14 @@ entry:
   %5: User = arena.get %1: arena<User>, %4: handle<User>
   %6: string = field.name %5: User
   call.print %6: string
+  return void: void
+}`
+
+const comptimeSnapshot = `fn main() -> void {
+entry:
+  %1: int = const 4
+  %2: int = const 1024
+  %3: int = binary.* %1: int, %2: int
+  call.print %3: int
   return void: void
 }`

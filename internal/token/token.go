@@ -54,6 +54,7 @@ const (
 	Borrow   Type = "borrow"
 	Unsafe   Type = "unsafe"
 	Extern   Type = "extern"
+	Comptime Type = "comptime"
 )
 
 type Token struct {
@@ -64,20 +65,21 @@ type Token struct {
 }
 
 var keywords = map[string]Type{
-	"fn":     Function,
-	"let":    Let,
-	"var":    Var,
-	"return": Return,
-	"if":     If,
-	"else":   Else,
-	"while":  While,
-	"struct": Struct,
-	"enum":   Enum,
-	"true":   True,
-	"false":  False,
-	"borrow": Borrow,
-	"unsafe": Unsafe,
-	"extern": Extern,
+	"fn":       Function,
+	"let":      Let,
+	"var":      Var,
+	"return":   Return,
+	"if":       If,
+	"else":     Else,
+	"while":    While,
+	"struct":   Struct,
+	"enum":     Enum,
+	"true":     True,
+	"false":    False,
+	"borrow":   Borrow,
+	"unsafe":   Unsafe,
+	"extern":   Extern,
+	"comptime": Comptime,
 }
 
 // LookupIdent returns the keyword token for ident or Ident for user names.

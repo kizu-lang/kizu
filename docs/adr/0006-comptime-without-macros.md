@@ -11,7 +11,7 @@ Kizu は Zig に近い低レベル指向を目指す。
 
 ## 決定
 
-`comptime` は将来 Phase として検討する。
+`comptime` は Phase 13 で限定的に採用する。
 ただし macro は採用しない。
 
 方針:
@@ -22,9 +22,19 @@ Kizu は Zig に近い低レベル指向を目指す。
 - runtime borrow が comptime 境界を越えて escape することは禁止する
 - 任意の filesystem access や build script 的副作用は許さない
 
+v0.1 で採用するもの:
+
+- `comptime <expr>`
+- `fn f(comptime n: int)`
+- `comptime if <bool expr> { ... } else { ... }`
+
+v0.1 の `comptime` expression は、リテラル、単項演算、二項演算に限定する。
+runtime local value は `comptime` expression から参照できない。
+
 ## 影響
 
 - `comptime` ありでも borrow checker は技術的に可能
-- comptime の結果は型付きの値または宣言として扱う
+- comptime の結果は型付きの値として扱う
+- branch / call path selection は `comptime if` で表す
 - macro-heavy な表現力は目指さない
-- Phase 13 として管理する
+- type-level comptime と top-level declaration generation は今後の phase で別途判断する

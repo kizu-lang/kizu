@@ -76,6 +76,24 @@ fn main() {
 	}
 }
 
+// TestRunComptime checks Phase 13 expressions and selected branches execute normally.
+func TestRunComptime(t *testing.T) {
+	got := runSource(t, `fn sized(comptime n: int) -> int { return n }
+fn main() {
+    let size = comptime 4 * 1024
+    comptime if 1 + 1 == 2 {
+        print(sized(comptime 8))
+    } else {
+        print(0)
+    }
+    print(size)
+}`)
+	want := "8\n4096\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRuntimeErrorChecksMutableAssignment checks a short readable runtime error.
 func TestRuntimeErrorChecksMutableAssignment(t *testing.T) {
 	_, err := parseAndRun(`fn main() {

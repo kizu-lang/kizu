@@ -220,6 +220,62 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsComptime checks Phase 13 compile-time values and branch selection.
+func TestCheckAcceptsComptime(t *testing.T) {
+	source := `fn sized(comptime n: int) -> int {
+    return n
+}
+fn main() {
+    let size = comptime 4 * 1024
+    comptime if 1 + 1 == 2 {
+        print(sized(comptime 8))
+    } else {
+        print("not checked")
+    }
+    print(size)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsComptimeErrors checks readable Phase 13 diagnostics.
+func TestCheckRejectsComptimeErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "runtime value",
+			source: `fn main() {
+    let x = 1
+    let y = comptime x + 1
+    print(y)
+}`,
+			want: "comptime error: runtime value cannot be used",
+		},
+		{
+			name: "division by zero",
+			source: `fn main() {
+    let x = comptime 1 / 0
+    print(x)
+}`,
+			want: "comptime error: division by zero",
+		},
+		{
+			name: "comptime parameter",
+			source: `fn sized(comptime n: int) -> int { return n }
+fn main() {
+    let x = 8
+    print(sized(x))
+}`,
+			want: "comptime error: runtime value cannot be used",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsUnsafeBoundaryErrors checks unsafe-only operations.
 func TestCheckRejectsUnsafeBoundaryErrors(t *testing.T) {
 	cases := []struct {
