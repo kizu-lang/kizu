@@ -39,7 +39,7 @@ func dispatch(cmd string, args []string) error {
 	case "check":
 		return checkFile(args[0])
 	case "ir":
-		return irFile(args[0])
+		return irCommand(args)
 	case "build":
 		return buildFile(args)
 	case "cache":
@@ -56,9 +56,10 @@ func dispatch(cmd string, args []string) error {
 
 // usage prints the supported command line shape.
 func usage() {
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|ir> <file>")
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm <file>")
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check> <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
@@ -117,22 +118,13 @@ func checkFile(path string) error {
 	return nil
 }
 
-// irFile parses, checks, lowers, and dumps typed SSA IR.
-func irFile(path string) error {
-	program, errs, err := parsePath(path)
+// irCommand parses options and dumps typed SSA IR.
+func irCommand(args []string) error {
+	path, opt, err := parseOptFileArgs(args)
 	if err != nil {
 		return err
 	}
-	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
-		return fmt.Errorf("parse failed")
-	}
-	if err := checkProgram(program); err != nil {
-		return err
-	}
-	module, err := ir.Lower(program)
+	module, err := lowerFile(path, opt)
 	if err != nil {
 		return err
 	}
@@ -148,13 +140,13 @@ func buildFile(args []string) error {
 	}
 	switch args[0] {
 	case "--emit-llvm":
-		if len(args) != 2 {
-			usage()
-			return fmt.Errorf("invalid build command")
+		path, opt, err := parseOptFileArgs(args[1:])
+		if err != nil {
+			return err
 		}
-		return emitLLVMFile(args[1])
+		return emitLLVMFile(path, opt)
 	case "--target":
-		return emitTargetFile(args[1], args)
+		return emitTargetFile(args[1], args[2:])
 	default:
 		usage()
 		return fmt.Errorf("invalid build command")
@@ -162,13 +154,13 @@ func buildFile(args []string) error {
 }
 
 // emitLLVMFile lowers a checked source file to LLVM IR text.
-func emitLLVMFile(path string) error {
+func emitLLVMFile(path string, opt bool) error {
 	cache, err := buildcache.New()
 	if err != nil {
 		return err
 	}
-	result, err := cache.GetOrBuild(path, "emit-llvm", func() (string, error) {
-		module, err := lowerFile(path)
+	result, err := cache.GetOrBuild(path, cacheTarget("emit-llvm", opt), func() (string, error) {
+		module, err := lowerFile(path, opt)
 		if err != nil {
 			return "", err
 		}
@@ -183,21 +175,25 @@ func emitLLVMFile(path string) error {
 
 // emitTargetFile lowers a checked source file to the requested target.
 func emitTargetFile(target string, args []string) error {
-	if len(args) != 3 || args[1] != "wasm32-wasi" {
+	if target != "wasm32-wasi" {
 		usage()
 		return fmt.Errorf("invalid build target `%s`", target)
 	}
-	return emitWASMFile(args[2])
+	path, opt, err := parseOptFileArgs(args)
+	if err != nil {
+		return err
+	}
+	return emitWASMFile(path, opt)
 }
 
 // emitWASMFile lowers a checked source file to WASI WebAssembly text.
-func emitWASMFile(path string) error {
+func emitWASMFile(path string, opt bool) error {
 	cache, err := buildcache.New()
 	if err != nil {
 		return err
 	}
-	result, err := cache.GetOrBuild(path, "wasm32-wasi", func() (string, error) {
-		module, err := lowerFile(path)
+	result, err := cache.GetOrBuild(path, cacheTarget("wasm32-wasi", opt), func() (string, error) {
+		module, err := lowerFile(path, opt)
 		if err != nil {
 			return "", err
 		}
@@ -208,6 +204,26 @@ func emitWASMFile(path string) error {
 	}
 	_, _ = fmt.Println(result.Output)
 	return nil
+}
+
+// parseOptFileArgs parses an optional --opt flag followed by one file path.
+func parseOptFileArgs(args []string) (string, bool, error) {
+	if len(args) == 1 {
+		return args[0], false, nil
+	}
+	if len(args) == 2 && args[0] == "--opt" {
+		return args[1], true, nil
+	}
+	usage()
+	return "", false, fmt.Errorf("invalid command arguments")
+}
+
+// cacheTarget includes the optimization level in cache-shaping inputs.
+func cacheTarget(target string, opt bool) string {
+	if opt {
+		return target + "-opt"
+	}
+	return target
 }
 
 // cacheCommand dispatches cache maintenance commands.
@@ -282,8 +298,8 @@ func importCHeaderFile(path string) error {
 	return nil
 }
 
-// lowerFile parses, checks, and lowers source to typed SSA IR.
-func lowerFile(path string) (*ir.Module, error) {
+// lowerFile parses, checks, lowers, and optionally optimizes source to typed SSA IR.
+func lowerFile(path string, opt bool) (*ir.Module, error) {
 	program, errs, err := parsePath(path)
 	if err != nil {
 		return nil, err
@@ -297,7 +313,14 @@ func lowerFile(path string) (*ir.Module, error) {
 	if err := checkProgram(program); err != nil {
 		return nil, err
 	}
-	return ir.Lower(program)
+	module, err := ir.Lower(program)
+	if err != nil {
+		return nil, err
+	}
+	if opt {
+		ir.Optimize(module)
+	}
+	return module, nil
 }
 
 // checkProgram runs static checks required before compilation or execution.

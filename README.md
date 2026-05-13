@@ -35,6 +35,7 @@ Implemented phases:
 - unsafe boundary and C ABI declaration checks
 - limited `comptime` expressions, parameters, and branch selection
 - limited C header import for extern function declarations
+- opt-in IR optimization pipeline
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -86,7 +87,9 @@ go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
 go run ./cmd/kizu ir examples/hello.kizu
+go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
@@ -98,9 +101,9 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 - `kizu parse <file>` parses a `.kizu` source file.
 - `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
 - `kizu run <file>` executes the file with the interpreter.
-- `kizu ir <file>` prints typed SSA IR.
-- `kizu build --emit-llvm <file>` emits LLVM IR text.
-- `kizu build --target wasm32-wasi <file>` emits WASI-compatible WAT.
+- `kizu ir [--opt] <file>` prints typed SSA IR.
+- `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
+- `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
 - `kizu why-rebuild <file>` explains cache hit or rebuild reasons.

@@ -39,13 +39,25 @@ run file="examples/hello.kizu":
 ir file="examples/hello.kizu":
     go run ./cmd/kizu ir {{file}}
 
+# Dump optimized typed SSA IR for a Kizu file.
+ir-opt file="examples/hello.kizu":
+    go run ./cmd/kizu ir --opt {{file}}
+
 # Emit LLVM IR for a Kizu file.
 llvm file="examples/hello.kizu":
     go run ./cmd/kizu build --emit-llvm {{file}}
 
+# Emit LLVM IR from optimized typed SSA IR.
+llvm-opt file="examples/hello.kizu":
+    go run ./cmd/kizu build --emit-llvm --opt {{file}}
+
 # Emit WASI WebAssembly text for a Kizu file.
 wasm file="examples/hello.kizu":
     go run ./cmd/kizu build --target wasm32-wasi {{file}}
+
+# Emit WASI WebAssembly text from optimized typed SSA IR.
+wasm-opt file="examples/hello.kizu":
+    go run ./cmd/kizu build --target wasm32-wasi --opt {{file}}
 
 # Build and run Phase 2 examples with wasmtime.
 wasi-smoke:
@@ -87,6 +99,12 @@ cache-smoke:
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu why-rebuild examples/hello.kizu; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu cache status; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu cache prune
+
+# Exercise opt-in IR optimization through IR and build commands.
+opt-smoke file="examples/arithmetic.kizu":
+    go run ./cmd/kizu ir --opt {{file}} >/dev/null
+    go run ./cmd/kizu build --emit-llvm --opt {{file}} >/dev/null
+    go run ./cmd/kizu build --target wasm32-wasi --opt {{file}} >/dev/null
 
 # Run the everyday local validation sequence.
 verify: fmt test lint

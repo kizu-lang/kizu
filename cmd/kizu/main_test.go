@@ -60,6 +60,25 @@ func TestIRCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestIROptCommandSmoke checks the CLI can dump optimized typed SSA IR.
+func TestIROptCommandSmoke(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "main.kizu")
+	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2) }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "ir", "--opt", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "%3: int = const 3") {
+		t.Fatalf("got %q", out)
+	}
+	if strings.Contains(string(out), "binary.+") {
+		t.Fatalf("optimized IR still contains binary.+:\n%s", out)
+	}
+}
+
 // TestBuildEmitLLVMCommandSmoke checks the CLI can dump LLVM IR.
 func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "../../examples/hello.kizu")
@@ -70,6 +89,22 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	want := "define void @main()"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
+// TestBuildEmitLLVMOptCommandSmoke checks LLVM build can use optimized IR.
+func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "main.kizu")
+	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2) }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "--opt", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "call void @kizu_print_int(i64 3)") {
+		t.Fatalf("got %q", out)
 	}
 }
 
@@ -118,6 +153,31 @@ func TestCacheCommands(t *testing.T) {
 	prune.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
 	if out, err = prune.CombinedOutput(); err != nil {
 		t.Fatalf("prune failed: %v\n%s", err, out)
+	}
+}
+
+// TestBuildOptUsesSeparateCacheEntry checks optimization level shapes cache keys.
+func TestBuildOptUsesSeparateCacheEntry(t *testing.T) {
+	cacheDir := t.TempDir()
+	source := "../../examples/hello.kizu"
+	plain := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	plain.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	if out, err := plain.CombinedOutput(); err != nil {
+		t.Fatalf("plain build failed: %v\n%s", err, out)
+	}
+	opt := exec.Command("go", "run", ".", "build", "--emit-llvm", "--opt", source)
+	opt.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	if out, err := opt.CombinedOutput(); err != nil {
+		t.Fatalf("opt build failed: %v\n%s", err, out)
+	}
+	status := exec.Command("go", "run", ".", "cache", "status")
+	status.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	out, err := status.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "entries: 2") {
+		t.Fatalf("got %q", out)
 	}
 }
 

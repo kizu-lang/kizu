@@ -22,6 +22,7 @@
 | Phase 12 | 完了 | unsafe / C ABI | [phase-12.md](docs/phases/phase-12.md) |
 | Phase 13 | 完了 | comptime | [phase-13.md](docs/phases/phase-13.md) |
 | Phase 14 | 完了 | C header import | [phase-14.md](docs/phases/phase-14.md) |
+| Phase 15 | 完了 | IR optimization pipeline | [phase-15.md](docs/phases/phase-15.md) |
 
 ## 横断フェーズ
 

@@ -34,6 +34,7 @@ Kizu は Go 製の初期プロトタイプです。
 - unsafe 境界と C ABI 宣言の検査
 - 限定的な `comptime` expression / parameter / branch selection
 - extern function 宣言向けの限定的な C header import
+- opt-in の IR optimization pipeline
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -84,7 +85,9 @@ go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
 go run ./cmd/kizu ir examples/hello.kizu
+go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
@@ -96,9 +99,9 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 - `kizu parse <file>` は `.kizu` source file を parse します。
 - `kizu check <file>` は type / ownership / move / borrow / arena check を実行します。
 - `kizu run <file>` は interpreter で実行します。
-- `kizu ir <file>` は typed SSA IR を表示します。
-- `kizu build --emit-llvm <file>` は LLVM IR text を出力します。
-- `kizu build --target wasm32-wasi <file>` は WASI-compatible WAT を出力します。
+- `kizu ir [--opt] <file>` は typed SSA IR を表示します。
+- `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
+- `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
