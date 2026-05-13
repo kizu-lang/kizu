@@ -16,8 +16,8 @@
 | Phase 6 | 完了 | arena / handle | [phase-6.md](docs/phases/phase-6.md) |
 | Phase 7 | 未着手 | 予約 | [phase-7.md](docs/phases/phase-7.md) |
 | Phase 8 | 完了 | typed SSA IR | [phase-8.md](docs/phases/phase-8.md) |
-| Phase 9 | 次に着手 | LLVM IR backend | [phase-9.md](docs/phases/phase-9.md) |
-| Phase 10 | 未着手 | build cache / why-rebuild | [phase-10.md](docs/phases/phase-10.md) |
+| Phase 9 | 完了 | LLVM IR backend | [phase-9.md](docs/phases/phase-9.md) |
+| Phase 10 | 次に着手 | build cache / why-rebuild | [phase-10.md](docs/phases/phase-10.md) |
 | Phase 11 | 未着手 | WASM / WASI backend | [phase-11.md](docs/phases/phase-11.md) |
 | Phase 12 | 未着手 | unsafe / C ABI | [phase-12.md](docs/phases/phase-12.md) |
 | Phase 13 | 未着手 | comptime | [phase-13.md](docs/phases/phase-13.md) |

@@ -8,6 +8,7 @@ import (
 	"tiny-safe/internal/interp"
 	"tiny-safe/internal/ir"
 	"tiny-safe/internal/lexer"
+	"tiny-safe/internal/llvm"
 	"tiny-safe/internal/ownership"
 	"tiny-safe/internal/parser"
 	"tiny-safe/internal/types"
@@ -21,26 +22,34 @@ func main() {
 	}
 
 	cmd := os.Args[1]
-	path := os.Args[2]
 
 	switch cmd {
 	case "parse":
+		path := os.Args[2]
 		if err := parseFile(path); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	case "run":
+		path := os.Args[2]
 		if err := runFile(path); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	case "check":
+		path := os.Args[2]
 		if err := checkFile(path); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	case "ir":
+		path := os.Args[2]
 		if err := irFile(path); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "build":
+		if err := buildFile(os.Args[2:]); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -53,6 +62,7 @@ func main() {
 // usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|ir> <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm <file>")
 }
 
 // parseFile parses a source file and prints its AST summary.
@@ -129,6 +139,47 @@ func irFile(path string) error {
 	}
 	_, _ = fmt.Println(ir.Dump(module))
 	return nil
+}
+
+// buildFile dispatches build subcommands.
+func buildFile(args []string) error {
+	if len(args) != 2 || args[0] != "--emit-llvm" {
+		usage()
+		return fmt.Errorf("invalid build command")
+	}
+	return emitLLVMFile(args[1])
+}
+
+// emitLLVMFile lowers a checked source file to LLVM IR text.
+func emitLLVMFile(path string) error {
+	module, err := lowerFile(path)
+	if err != nil {
+		return err
+	}
+	out, err := llvm.Emit(module)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Println(out)
+	return nil
+}
+
+// lowerFile parses, checks, and lowers source to typed SSA IR.
+func lowerFile(path string) (*ir.Module, error) {
+	program, errs, err := parsePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(errs) > 0 {
+		for _, msg := range errs {
+			_, _ = fmt.Fprintln(os.Stderr, msg)
+		}
+		return nil, fmt.Errorf("parse failed")
+	}
+	if err := checkProgram(program); err != nil {
+		return nil, err
+	}
+	return ir.Lower(program)
 }
 
 // checkProgram runs static checks required before compilation or execution.

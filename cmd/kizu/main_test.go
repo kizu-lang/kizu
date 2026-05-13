@@ -58,6 +58,19 @@ func TestIRCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildEmitLLVMCommandSmoke checks the CLI can dump LLVM IR.
+func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "../../examples/hello.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "define void @main()"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
 // TestRunCommandRejectsMoveError checks run does not bypass static move checks.
 func TestRunCommandRejectsMoveError(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/move_error.kizu")

@@ -23,6 +23,7 @@ pre-commit run --all-files
 go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
 go run ./cmd/kizu ir examples/hello.kizu
+go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
 go run ./cmd/kizu run examples/arena.kizu
 ```
@@ -36,6 +37,7 @@ nix develop -c pre-commit run --all-files
 nix develop -c go run ./cmd/kizu parse examples/hello.kizu
 nix develop -c go run ./cmd/kizu check examples/hello.kizu
 nix develop -c go run ./cmd/kizu ir examples/hello.kizu
+nix develop -c go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 nix develop -c go run ./cmd/kizu run examples/functions.kizu
 nix develop -c go run ./cmd/kizu run examples/arena.kizu
 ```
@@ -45,6 +47,7 @@ struct literal、field access、arena / handle を実行できます。
 `check` は Phase 6 までの checker を呼び出し、基本型、関数呼び出し、return、
 二項演算、move、local borrow、arena handle provenance を静的に検査できます。
 `ir` は Phase 8 の typed SSA IR lowering を呼び出し、読みやすい IR dump を出力します。
+`build --emit-llvm` は Phase 9 の LLVM IR backend を呼び出し、LLVM IR text を出力します。
 
 ## 方針
 
