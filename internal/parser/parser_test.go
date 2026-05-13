@@ -89,6 +89,29 @@ fn main() {  }`
 	}
 }
 
+// TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
+func TestParseArenaAndStructLiteral(t *testing.T) {
+	input := `struct User {
+    name: string
+}
+fn main() {
+    let users = arena<User>()
+    let alice = users.add(User { name: "alice" })
+    print(users.get(alice).name)
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `struct User { name: string }
+fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice" }); ` +
+		`print(users.get(alice).name) }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
 func TestParseRejectsExplicitLifetime(t *testing.T) {
 	input := `fn show(s: borrow 'a string) {}`

@@ -31,6 +31,8 @@ type binding struct {
 	moved         bool
 	borrowedParam bool
 	activeBorrows int
+	arenaID       int
+	handleArenaID int
 }
 
 type scope struct {
@@ -146,6 +148,12 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 		if exists && value.borrowedParam {
 			return fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
 		}
+		if exists && value.handleArenaID != 0 {
+			return fmt.Errorf("arena error: handle `%s` cannot outlive its arena", ident.Name)
+		}
+	}
+	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 {
+		return fmt.Errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
 	}
 	_, err := c.moveExpr(stmt.Value, env)
 	return err
@@ -157,7 +165,9 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if err != nil {
 		return err
 	}
-	env.define(c.newBinding(stmt.Name, typeName))
+	value := c.newBinding(stmt.Name, typeName)
+	c.setArenaProvenance(value, stmt.Value, env)
+	env.define(value)
 	return nil
 }
 
@@ -173,6 +183,9 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 	}
 	target.typeName = typeName
 	target.moved = false
+	target.arenaID = 0
+	target.handleArenaID = 0
+	c.setArenaProvenance(target, stmt.Value, env)
 	return nil
 }
 
@@ -232,8 +245,12 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readBinaryExpr(e, env)
 	case *ast.CallExpr:
 		return c.checkCallExpr(e, env)
+	case *ast.ArenaNewExpr:
+		return fmt.Sprintf("arena<%s>", e.TypeName), nil
+	case *ast.StructLiteralExpr:
+		return c.readStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
-		return "", fmt.Errorf("move error: field access is not supported in phase 4")
+		return c.readFieldExpr(e, env)
 	default:
 		return "", fmt.Errorf("move error: unsupported expression %T", expr)
 	}
@@ -243,6 +260,9 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
+		if st, ok := expr.(*ast.StructLiteralExpr); ok {
+			return c.moveStructLiteralExpr(st, env)
+		}
 		return c.readExpr(expr, env)
 	}
 	value, ok := env.lookup(ident.Name)
@@ -278,6 +298,9 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 
 // checkCallExpr validates ownership effects of builtin and user calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) {
+	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		return c.checkMethodCallExpr(field, expr.Args, env)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("move error: callee must be a function name")
@@ -309,6 +332,112 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// readStructLiteralExpr checks a literal without consuming field values.
+func (c *Checker) readStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope) (string, error) {
+	for _, field := range expr.Fields {
+		if _, err := c.readExpr(field.Value, env); err != nil {
+			return "", err
+		}
+	}
+	return expr.TypeName, nil
+}
+
+// moveStructLiteralExpr moves field values into a new struct value.
+func (c *Checker) moveStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope) (string, error) {
+	for _, field := range expr.Fields {
+		if _, err := c.moveExpr(field.Value, env); err != nil {
+			return "", err
+		}
+	}
+	return expr.TypeName, nil
+}
+
+// readFieldExpr reads a field without moving the receiver.
+func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error) {
+	return c.readExpr(expr.Receiver, env)
+}
+
+// checkMethodCallExpr validates ownership effects of arena methods.
+func (c *Checker) checkMethodCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	receiver, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return "", fmt.Errorf("arena error: arena method receiver must be a local binding")
+	}
+	arena, exists := env.lookup(receiver.Name)
+	if !exists {
+		return "", fmt.Errorf("arena error: undefined arena `%s`", receiver.Name)
+	}
+	if arena.moved {
+		return "", fmt.Errorf("move error: moved value `%s` was used", receiver.Name)
+	}
+	switch field.Name {
+	case "add":
+		return c.checkArenaAdd(arena, args, env)
+	case "get":
+		return c.checkArenaGet(arena, args, env)
+	default:
+		return "", fmt.Errorf("arena error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// checkArenaAdd moves one value into an arena and returns a handle.
+func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("arena error: `arena.add` expects 1 arg, got %d", len(args))
+	}
+	base, arg, ok := splitGenericType(arena.typeName)
+	if !ok || base != "arena" {
+		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
+	}
+	got, err := c.moveExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != arg {
+		return "", fmt.Errorf("arena error: `arena.add` expects %s, got %s", arg, got)
+	}
+	return fmt.Sprintf("handle<%s>", arg), nil
+}
+
+// checkArenaGet reads a handle and returns a local borrow-like value.
+func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scope) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
+	}
+	base, arg, ok := splitGenericType(arena.typeName)
+	if !ok || base != "arena" {
+		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
+	}
+	if err := c.checkHandleProvenance(arena, args[0], env); err != nil {
+		return "", err
+	}
+	if _, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	}
+	return arg, nil
+}
+
+// checkHandleProvenance rejects handles that came from a different known arena.
+func (c *Checker) checkHandleProvenance(arena *binding, expr ast.Expression, env *scope) error {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	handle, exists := env.lookup(ident.Name)
+	if !exists {
+		return fmt.Errorf("arena error: undefined handle `%s`", ident.Name)
+	}
+	if handle.handleArenaID != 0 && handle.handleArenaID != arena.arenaID {
+		return fmt.Errorf("arena error: handle `%s` does not belong to arena `%s`",
+			ident.Name, arena.name)
+	}
+	return nil
 }
 
 // activateBorrowArgs marks identifier arguments that are borrowed for this call.
@@ -374,6 +503,36 @@ func (c *Checker) newBinding(name string, typeName string) *binding {
 	return &binding{id: c.nextID, name: name, typeName: typeName}
 }
 
+// setArenaProvenance records arena and handle origins for local bindings.
+func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *scope) {
+	if _, ok := expr.(*ast.ArenaNewExpr); ok {
+		value.arenaID = value.id
+		return
+	}
+	arena := c.arenaAddReceiver(expr, env)
+	if arena != nil {
+		value.handleArenaID = arena.arenaID
+	}
+}
+
+// arenaAddReceiver returns the arena binding for arena.add(value) expressions.
+func (c *Checker) arenaAddReceiver(expr ast.Expression, env *scope) *binding {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "add" {
+		return nil
+	}
+	receiver, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	arena, _ := env.lookup(receiver.Name)
+	return arena
+}
+
 // readIdent resolves a variable reference without moving it.
 func readIdent(name string, env *scope) (string, error) {
 	value, ok := env.lookup(name)
@@ -404,6 +563,24 @@ func isCopyType(typeName string) bool {
 	default:
 		return false
 	}
+}
+
+// splitGenericType extracts base and argument from base<arg>.
+func splitGenericType(name string) (string, string, bool) {
+	for idx, ch := range name {
+		if ch != '<' {
+			continue
+		}
+		if len(name) < idx+3 || name[len(name)-1] != '>' {
+			return "", "", false
+		}
+		arg := name[idx+1 : len(name)-1]
+		if arg == "" {
+			return "", "", false
+		}
+		return name[:idx], arg, true
+	}
+	return "", "", false
 }
 
 // newScope creates a lexical ownership scope.

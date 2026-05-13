@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"strings"
 
 	"tiny-safe/internal/ast"
 )
@@ -187,6 +188,15 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 
 // parseType validates a source-level type name.
 func (c *Checker) parseType(name string) (Type, error) {
+	if base, arg, ok := splitGenericType(name); ok {
+		if base != "arena" && base != "handle" {
+			return "", fmt.Errorf("type error: unknown generic type `%s`", base)
+		}
+		if _, err := c.parseType(arg); err != nil {
+			return "", err
+		}
+		return Type(name), nil
+	}
 	typ := Type(name)
 	if !knownTypes[typ] && c.structs[name] == nil {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
@@ -329,8 +339,12 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope) (Type, error) {
 		return c.checkBinaryExpr(e, env)
 	case *ast.CallExpr:
 		return c.checkCallExpr(e, env)
+	case *ast.ArenaNewExpr:
+		return c.checkArenaNewExpr(e)
+	case *ast.StructLiteralExpr:
+		return c.checkStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
-		return "", fmt.Errorf("type error: field access is not supported in phase 3")
+		return c.checkFieldExpr(e, env)
 	default:
 		return "", fmt.Errorf("type error: unsupported expression %T", expr)
 	}
@@ -410,6 +424,9 @@ func isComparison(op string) bool {
 
 // checkCallExpr validates builtin and user function calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (Type, error) {
+	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		return c.checkMethodCallExpr(field, expr.Args, env)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("type error: callee must be a function name")
@@ -436,6 +453,118 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (Type, error) {
 		}
 	}
 	return fn.returnType, nil
+}
+
+// checkArenaNewExpr validates arena<T>() and returns the arena type.
+func (c *Checker) checkArenaNewExpr(expr *ast.ArenaNewExpr) (Type, error) {
+	if _, err := c.parseType(expr.TypeName); err != nil {
+		return "", err
+	}
+	return Type(fmt.Sprintf("arena<%s>", expr.TypeName)), nil
+}
+
+// checkStructLiteralExpr validates field names and initializer types.
+func (c *Checker) checkStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope) (Type, error) {
+	decl := c.structs[expr.TypeName]
+	if decl == nil {
+		return "", fmt.Errorf("type error: unknown struct `%s`", expr.TypeName)
+	}
+	values := map[string]Type{}
+	for _, field := range expr.Fields {
+		got, err := c.checkExpr(field.Value, env)
+		if err != nil {
+			return "", err
+		}
+		values[field.Name] = got
+	}
+	for _, field := range decl.Fields {
+		got, ok := values[field.Name]
+		if !ok {
+			return "", fmt.Errorf("type error: missing field `%s.%s`", expr.TypeName, field.Name)
+		}
+		if got != Type(field.TypeName) {
+			return "", fmt.Errorf("type error: field `%s.%s` expects %s, got %s",
+				expr.TypeName, field.Name, field.TypeName, got)
+		}
+		delete(values, field.Name)
+	}
+	for name := range values {
+		return "", fmt.Errorf("type error: unknown field `%s.%s`", expr.TypeName, name)
+	}
+	return Type(expr.TypeName), nil
+}
+
+// checkFieldExpr returns the declared type of a struct field access.
+func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope) (Type, error) {
+	receiver, err := c.checkExpr(expr.Receiver, env)
+	if err != nil {
+		return "", err
+	}
+	decl := c.structs[string(receiver)]
+	if decl == nil {
+		return "", fmt.Errorf("type error: `%s` has no fields", receiver)
+	}
+	for _, field := range decl.Fields {
+		if field.Name == expr.Name {
+			return Type(field.TypeName), nil
+		}
+	}
+	return "", fmt.Errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+}
+
+// checkMethodCallExpr validates arena methods.
+func (c *Checker) checkMethodCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (Type, error) {
+	receiver, err := c.checkExpr(field.Receiver, env)
+	if err != nil {
+		return "", err
+	}
+	base, arg, ok := splitGenericType(string(receiver))
+	if !ok || base != "arena" {
+		return "", fmt.Errorf("type error: `%s` has no method `%s`", receiver, field.Name)
+	}
+	switch field.Name {
+	case "add":
+		return c.checkArenaAdd(arg, args, env)
+	case "get":
+		return c.checkArenaGet(arg, args, env)
+	default:
+		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// checkArenaAdd validates arena<T>.add(value).
+func (c *Checker) checkArenaAdd(arg string, args []ast.Expression, env *scope) (Type, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `arena.add` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != Type(arg) {
+		return "", fmt.Errorf("type error: `arena.add` expects %s, got %s", arg, got)
+	}
+	return Type(fmt.Sprintf("handle<%s>", arg)), nil
+}
+
+// checkArenaGet validates arena<T>.get(handle<T>).
+func (c *Checker) checkArenaGet(arg string, args []ast.Expression, env *scope) (Type, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `arena.get` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	want := Type(fmt.Sprintf("handle<%s>", arg))
+	if got != want {
+		return "", fmt.Errorf("type error: `arena.get` expects %s, got %s", want, got)
+	}
+	return Type(arg), nil
 }
 
 // checkPrintCall validates the print builtin.
@@ -480,4 +609,17 @@ func (s *scope) lookup(name string) (Type, bool) {
 		}
 	}
 	return "", false
+}
+
+// splitGenericType extracts base and argument from base<arg>.
+func splitGenericType(name string) (string, string, bool) {
+	start := strings.IndexByte(name, '<')
+	if start < 1 || !strings.HasSuffix(name, ">") {
+		return "", "", false
+	}
+	arg := name[start+1 : len(name)-1]
+	if arg == "" || strings.ContainsAny(arg, "<>") {
+		return "", "", false
+	}
+	return name[:start], arg, true
 }

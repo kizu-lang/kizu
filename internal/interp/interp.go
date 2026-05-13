@@ -160,6 +160,12 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 		return i.evalBinaryExpr(e, env)
 	case *ast.CallExpr:
 		return i.evalCallExpr(e, env)
+	case *ast.ArenaNewExpr:
+		return arenaValue(), nil
+	case *ast.StructLiteralExpr:
+		return i.evalStructLiteralExpr(e, env)
+	case *ast.FieldExpr:
+		return i.evalFieldExpr(e, env)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unsupported expression %T", expr)
 	}
@@ -229,11 +235,32 @@ func evalEquality(op string, left Value, right Value) (Value, error) {
 	if left.kind != right.kind {
 		return voidValue(), fmt.Errorf("runtime error: equality operands must have same type")
 	}
-	equal := left == right
+	equal := valuesEqual(left, right)
 	if op == "!=" {
 		equal = !equal
 	}
 	return boolValue(equal), nil
+}
+
+// valuesEqual compares scalar values supported by equality operators.
+func valuesEqual(left Value, right Value) bool {
+	if left.kind != right.kind {
+		return false
+	}
+	switch left.kind {
+	case kindVoid:
+		return true
+	case kindInt:
+		return left.i == right.i
+	case kindBool:
+		return left.b == right.b
+	case kindString:
+		return left.s == right.s
+	case kindHandle:
+		return left.handle == right.handle
+	default:
+		return false
+	}
 }
 
 // evalIntBinary evaluates integer arithmetic and comparison operators.
@@ -280,6 +307,9 @@ func evalModulo(left int64, right int64) (Value, error) {
 
 // evalCallExpr evaluates builtin and user-defined function calls.
 func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) {
+	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		return i.evalMethodCallExpr(field, expr.Args, env)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: callee must be a function name")
@@ -292,6 +322,89 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		return i.callPrint(args)
 	}
 	return i.callFunction(name.Name, args)
+}
+
+// evalStructLiteralExpr evaluates each field initializer into a struct value.
+func (i *Interpreter) evalStructLiteralExpr(expr *ast.StructLiteralExpr, env *Env) (Value, error) {
+	fields := map[string]Value{}
+	for _, field := range expr.Fields {
+		value, err := i.evalExpr(field.Value, env)
+		if err != nil {
+			return voidValue(), err
+		}
+		fields[field.Name] = value
+	}
+	return structValue(fields), nil
+}
+
+// evalFieldExpr reads a field from a struct value.
+func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error) {
+	receiver, err := i.evalExpr(expr.Receiver, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if receiver.kind != kindStruct {
+		return voidValue(), fmt.Errorf("runtime error: field access expects struct")
+	}
+	value, ok := receiver.fields[expr.Name]
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", expr.Name)
+	}
+	return value, nil
+}
+
+// evalMethodCallExpr evaluates arena methods.
+func (i *Interpreter) evalMethodCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	receiver, err := i.evalExpr(field.Receiver, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if receiver.kind != kindArena {
+		return voidValue(), fmt.Errorf("runtime error: method `%s` expects arena", field.Name)
+	}
+	switch field.Name {
+	case "add":
+		return i.evalArenaAdd(receiver.arena, args, env)
+	case "get":
+		return i.evalArenaGet(receiver.arena, args, env)
+	default:
+		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// evalArenaAdd appends one value and returns an opaque handle.
+func (i *Interpreter) evalArenaAdd(arena *Arena, args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: arena.add expected 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	arena.values = append(arena.values, value)
+	return handleValue(arena, len(arena.values)-1), nil
+}
+
+// evalArenaGet resolves a handle back to its arena value.
+func (i *Interpreter) evalArenaGet(arena *Arena, args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: arena.get expected 1 arg")
+	}
+	handle, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if handle.kind != kindHandle || handle.handle.arena != arena {
+		return voidValue(), fmt.Errorf("runtime error: handle does not belong to arena")
+	}
+	if handle.handle.index < 0 || handle.handle.index >= len(arena.values) {
+		return voidValue(), fmt.Errorf("runtime error: invalid arena handle")
+	}
+	return arena.values[handle.handle.index], nil
 }
 
 // evalArgs evaluates call arguments from left to right.

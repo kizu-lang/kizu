@@ -67,7 +67,7 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 		if !p.expectPeek(token.Ident) {
 			return fn
 		}
-		fn.ReturnType = p.cur.Literal
+		fn.ReturnType = p.parseTypeName()
 	}
 	if !p.expectPeek(token.LBrace) {
 		return fn
@@ -124,11 +124,10 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 		field.Borrow = true
 		p.nextToken()
 	}
-	if p.cur.Type != token.Ident {
-		p.errorf("expected field type, got %s", p.cur.Type)
+	field.TypeName = p.parseTypeName()
+	if field.TypeName == "" {
 		return field, false
 	}
-	field.TypeName = p.cur.Literal
 	return field, true
 }
 
@@ -154,11 +153,10 @@ func (p *Parser) parseParams() []ast.Param {
 			param.Borrow = true
 			p.nextToken()
 		}
-		if p.cur.Type != token.Ident {
-			p.errorf("expected parameter type, got %s", p.cur.Type)
+		param.TypeName = p.parseTypeName()
+		if param.TypeName == "" {
 			return params
 		}
-		param.TypeName = p.cur.Literal
 		params = append(params, param)
 
 		if p.peek.Type != token.Comma {
@@ -300,32 +298,7 @@ var precedences = map[token.Type]int{
 
 // parseExpression parses an expression using Pratt parser precedence.
 func (p *Parser) parseExpression(precedence int) ast.Expression {
-	var left ast.Expression
-
-	switch p.cur.Type {
-	case token.Ident:
-		left = &ast.IdentExpr{Name: p.cur.Literal}
-	case token.Int:
-		left = &ast.IntExpr{Value: p.cur.Literal}
-	case token.String:
-		left = &ast.StringExpr{Value: p.cur.Literal}
-	case token.True:
-		left = &ast.BoolExpr{Value: true}
-	case token.False:
-		left = &ast.BoolExpr{Value: false}
-	case token.Bang, token.Minus:
-		op := p.cur.Literal
-		p.nextToken()
-		left = &ast.PrefixExpr{Operator: op, Right: p.parseExpression(prefix)}
-	case token.LParen:
-		p.nextToken()
-		left = p.parseExpression(lowest)
-		p.expectPeek(token.RParen)
-	default:
-		p.errorf("expected expression, got %s", p.cur.Type)
-		return &ast.IdentExpr{Name: "<error>"}
-	}
-
+	left := p.parsePrefixExpression()
 	for p.peek.Type != token.Semicolon && precedence < p.peekPrecedence() {
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
@@ -343,6 +316,61 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 		}
 	}
 	return left
+}
+
+// parsePrefixExpression parses literals, identifiers, and unary expressions.
+func (p *Parser) parsePrefixExpression() ast.Expression {
+	switch p.cur.Type {
+	case token.Ident:
+		if p.cur.Literal == "arena" && p.peek.Type == token.LT {
+			return p.parseArenaNewExpr()
+		}
+		if p.peek.Type == token.LBrace && startsUpper(p.cur.Literal) {
+			return p.parseStructLiteralExpr(p.cur.Literal)
+		}
+		return &ast.IdentExpr{Name: p.cur.Literal}
+	case token.Int:
+		return &ast.IntExpr{Value: p.cur.Literal}
+	case token.String:
+		return &ast.StringExpr{Value: p.cur.Literal}
+	case token.True:
+		return &ast.BoolExpr{Value: true}
+	case token.False:
+		return &ast.BoolExpr{Value: false}
+	case token.Bang, token.Minus:
+		op := p.cur.Literal
+		p.nextToken()
+		return &ast.PrefixExpr{Operator: op, Right: p.parseExpression(prefix)}
+	case token.LParen:
+		p.nextToken()
+		left := p.parseExpression(lowest)
+		p.expectPeek(token.RParen)
+		return left
+	default:
+		p.errorf("expected expression, got %s", p.cur.Type)
+		return &ast.IdentExpr{Name: "<error>"}
+	}
+}
+
+// parseTypeName parses a plain or single-argument generic type name.
+func (p *Parser) parseTypeName() string {
+	if p.cur.Type != token.Ident {
+		p.errorf("expected type, got %s", p.cur.Type)
+		return ""
+	}
+	name := p.cur.Literal
+	if p.peek.Type != token.LT {
+		return name
+	}
+	p.nextToken()
+	if !p.expectPeek(token.Ident) {
+		return ""
+	}
+	arg := p.cur.Literal
+	if !p.expectPeek(token.GT) {
+		return ""
+	}
+	return fmt.Sprintf("%s<%s>", name, arg)
 }
 
 // parseBinaryExpr parses an infix binary expression.
@@ -370,6 +398,60 @@ func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 	}
 	p.expectPeek(token.RParen)
 	return expr
+}
+
+// parseArenaNewExpr parses arena<T>().
+func (p *Parser) parseArenaNewExpr() ast.Expression {
+	expr := &ast.ArenaNewExpr{}
+	if !p.expectPeek(token.LT) {
+		return expr
+	}
+	if !p.expectPeek(token.Ident) {
+		return expr
+	}
+	expr.TypeName = p.cur.Literal
+	if !p.expectPeek(token.GT) {
+		return expr
+	}
+	if !p.expectPeek(token.LParen) || !p.expectPeek(token.RParen) {
+		return expr
+	}
+	return expr
+}
+
+// parseStructLiteralExpr parses Type { field: value }.
+func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
+	expr := &ast.StructLiteralExpr{TypeName: typeName}
+	p.nextToken()
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		field, ok := p.parseFieldValue()
+		if !ok {
+			return expr
+		}
+		expr.Fields = append(expr.Fields, field)
+		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
+			p.nextToken()
+		}
+		p.nextToken()
+	}
+	return expr
+}
+
+// parseFieldValue parses one field initializer.
+func (p *Parser) parseFieldValue() (ast.FieldValue, bool) {
+	field := ast.FieldValue{}
+	if p.cur.Type != token.Ident {
+		p.errorf("expected field name, got %s", p.cur.Type)
+		return field, false
+	}
+	field.Name = p.cur.Literal
+	if !p.expectPeek(token.Colon) {
+		return field, false
+	}
+	p.nextToken()
+	field.Value = p.parseExpression(lowest)
+	return field, true
 }
 
 // parseFieldExpr parses field access on an expression.
@@ -427,4 +509,9 @@ func (p *Parser) peekPrecedence() int {
 func (p *Parser) errorf(format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	p.errors = append(p.errors, fmt.Sprintf("error: %s at %d:%d", message, p.cur.Line, p.cur.Column))
+}
+
+// startsUpper reports whether name follows the v0 struct literal convention.
+func startsUpper(name string) bool {
+	return len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z'
 }

@@ -180,6 +180,21 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsArenaHandle checks Phase 6 arena and handle types.
+func TestCheckAcceptsArenaHandle(t *testing.T) {
+	source := `struct User {
+    name: string
+}
+fn main() {
+    let users = arena<User>()
+    let alice = users.add(User { name: "alice" })
+    print(users.get(alice).name)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // checkSource parses and type-checks a source snippet.
 func checkSource(source string) error {
 	p := parser.New(lexer.New(source))

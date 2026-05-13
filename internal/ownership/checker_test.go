@@ -139,6 +139,53 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsArenaHandle checks arena handles with matching provenance.
+func TestCheckAcceptsArenaHandle(t *testing.T) {
+	source := `struct User {
+    name: string
+}
+fn main() {
+    let users = arena<User>()
+    let alice = users.add(User { name: "alice" })
+    print(users.get(alice).name)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsArenaHandleErrors checks Phase 6 provenance errors.
+func TestCheckRejectsArenaHandleErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "wrong arena",
+			source: `struct User { name: string }
+fn main() {
+    let left = arena<User>()
+    let right = arena<User>()
+    let alice = left.add(User { name: "alice" })
+    print(right.get(alice).name)
+}`,
+			want: "handle `alice` does not belong to arena `right`",
+		},
+		{
+			name: "returned handle",
+			source: `struct User { name: string }
+fn make() -> handle<User> {
+    let users = arena<User>()
+    let alice = users.add(User { name: "alice" })
+    return alice
+}`,
+			want: "handle `alice` cannot outlive its arena",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckBranchMoveMarksOuterValueMoved checks possible moves escape branches.
 func TestCheckBranchMoveMarksOuterValueMoved(t *testing.T) {
 	source := `fn take(s: string) { print(s) }

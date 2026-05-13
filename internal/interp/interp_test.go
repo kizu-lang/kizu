@@ -60,6 +60,22 @@ func TestRunControlFlow(t *testing.T) {
 	}
 }
 
+// TestRunArenaHandle checks Phase 6 arena add/get and field access.
+func TestRunArenaHandle(t *testing.T) {
+	got := runSource(t, `struct User {
+    name: string
+}
+fn main() {
+    let users = arena<User>()
+    let alice = users.add(User { name: "alice" })
+    print(users.get(alice).name)
+}`)
+	want := "alice\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRuntimeErrorChecksMutableAssignment checks a short readable runtime error.
 func TestRuntimeErrorChecksMutableAssignment(t *testing.T) {
 	_, err := parseAndRun(`fn main() {

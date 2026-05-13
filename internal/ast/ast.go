@@ -331,6 +331,48 @@ func (e *CallExpr) String() string {
 	return fmt.Sprintf("%s(%s)", e.Callee.String(), strings.Join(args, ", "))
 }
 
+// ArenaNewExpr represents arena<T>() construction.
+type ArenaNewExpr struct {
+	TypeName string
+}
+
+// expressionNode marks ArenaNewExpr as an expression node.
+func (*ArenaNewExpr) expressionNode() {}
+
+// String returns a compact debug representation of arena construction.
+func (e *ArenaNewExpr) String() string {
+	return fmt.Sprintf("arena<%s>()", e.TypeName)
+}
+
+// StructLiteralExpr represents construction of a struct value.
+type StructLiteralExpr struct {
+	TypeName string
+	Fields   []FieldValue
+}
+
+// expressionNode marks StructLiteralExpr as an expression node.
+func (*StructLiteralExpr) expressionNode() {}
+
+// String returns a compact debug representation of the struct literal.
+func (e *StructLiteralExpr) String() string {
+	fields := make([]string, 0, len(e.Fields))
+	for _, field := range e.Fields {
+		fields = append(fields, field.String())
+	}
+	return fmt.Sprintf("%s { %s }", e.TypeName, strings.Join(fields, ", "))
+}
+
+// FieldValue represents one field initializer in a struct literal.
+type FieldValue struct {
+	Name  string
+	Value Expression
+}
+
+// String returns a compact debug representation of the field initializer.
+func (v FieldValue) String() string {
+	return fmt.Sprintf("%s: %s", v.Name, v.Value.String())
+}
+
 // FieldExpr represents field access on a receiver expression.
 type FieldExpr struct {
 	Receiver Expression

@@ -32,6 +32,19 @@ func TestRunCommandBorrowExample(t *testing.T) {
 	}
 }
 
+// TestRunCommandArenaExample checks the CLI can execute the arena example.
+func TestRunCommandArenaExample(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "run", "../../examples/arena.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "alice\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestRunCommandRejectsMoveError checks run does not bypass static move checks.
 func TestRunCommandRejectsMoveError(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/move_error.kizu")

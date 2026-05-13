@@ -13,7 +13,7 @@
 | Phase 3 | 完了 | Type checker | [phase-3.md](docs/phases/phase-3.md) |
 | Phase 4 | 完了 | Move checker | [phase-4.md](docs/phases/phase-4.md) |
 | Phase 5 | 完了 | Local borrow checker | [phase-5.md](docs/phases/phase-5.md) |
-| Phase 6 | 次に着手 | arena / handle | [phase-6.md](docs/phases/phase-6.md) |
+| Phase 6 | 完了 | arena / handle | [phase-6.md](docs/phases/phase-6.md) |
 | Phase 7 | 未着手 | 予約 | [phase-7.md](docs/phases/phase-7.md) |
 | Phase 8 | 未着手 | typed SSA IR | [phase-8.md](docs/phases/phase-8.md) |
 | Phase 9 | 未着手 | LLVM IR backend | [phase-9.md](docs/phases/phase-9.md) |

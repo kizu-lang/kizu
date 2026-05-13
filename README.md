@@ -2,8 +2,8 @@
 
 Kizu は、小さく、シンプルで、メモリ安全なプログラミング言語のプロトタイプです。
 
-現時点では Go 製の初期実装で、Phase 5 として lexer、parser、AST、CLI、
-interpreter、type checker、move checker、local borrow checker を実装しています。
+現時点では Go 製の初期実装で、Phase 6 として lexer、parser、AST、CLI、
+interpreter、type checker、move checker、local borrow checker、arena / handle を実装しています。
 
 ## 実行方法
 
@@ -23,6 +23,7 @@ pre-commit run --all-files
 go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
+go run ./cmd/kizu run examples/arena.kizu
 ```
 
 または、shell に入らずに直接実行できます。
@@ -34,11 +35,13 @@ nix develop -c pre-commit run --all-files
 nix develop -c go run ./cmd/kizu parse examples/hello.kizu
 nix develop -c go run ./cmd/kizu check examples/hello.kizu
 nix develop -c go run ./cmd/kizu run examples/functions.kizu
+nix develop -c go run ./cmd/kizu run examples/arena.kizu
 ```
 
-`run` は Phase 2 の interpreter を呼び出し、`print`、整数演算、変数、関数、`if`、`while` を実行できます。
-`check` は Phase 5 までの checker を呼び出し、基本型、関数呼び出し、return、
-二項演算、move、local borrow を静的に検査できます。
+`run` は interpreter を呼び出し、`print`、整数演算、変数、関数、`if`、`while`、
+struct literal、field access、arena / handle を実行できます。
+`check` は Phase 6 までの checker を呼び出し、基本型、関数呼び出し、return、
+二項演算、move、local borrow、arena handle provenance を静的に検査できます。
 
 ## 方針
 
