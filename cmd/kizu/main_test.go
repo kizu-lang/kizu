@@ -45,6 +45,19 @@ func TestRunCommandArenaExample(t *testing.T) {
 	}
 }
 
+// TestIRCommandSmoke checks the CLI can dump typed SSA IR.
+func TestIRCommandSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "ir", "../../examples/hello.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "fn main() -> void"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
 // TestRunCommandRejectsMoveError checks run does not bypass static move checks.
 func TestRunCommandRejectsMoveError(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/move_error.kizu")

@@ -1,6 +1,6 @@
 # Phase 8: typed SSA IR
 
-状態: 次に着手
+状態: 完了
 
 ## 目的
 
@@ -11,63 +11,63 @@ Phase 8 は、まず IR の形と dump を固定する。
 
 ## Phase 8A: IR 導入
 
-- [ ] IR の package 構成を決める
-- [ ] IR の型表現を定義する
-- [ ] value / instruction / block / function を定義する
-- [ ] 基本的な terminator を定義する
-- [ ] checked AST から IR へ lower する entrypoint を作る
-- [ ] `kizu ir <file>` の CLI を追加する
-- [ ] IR dump を読みやすくする
-- [ ] IR dump の snapshot test を追加する
-- [ ] `examples/hello.kizu` を IR に lower する
-- [ ] `examples/functions.kizu` を IR に lower する
-- [ ] `examples/variables.kizu` を IR に lower する
-- [ ] baseline 測定に `kizu ir examples/hello.kizu` を追加する
+- [x] IR の package 構成を決める
+- [x] IR の型表現を定義する
+- [x] value / instruction / block / function を定義する
+- [x] 基本的な terminator を定義する
+- [x] checked AST から IR へ lower する entrypoint を作る
+- [x] `kizu ir <file>` の CLI を追加する
+- [x] IR dump を読みやすくする
+- [x] IR dump の snapshot test を追加する
+- [x] `examples/hello.kizu` を IR に lower する
+- [x] `examples/functions.kizu` を IR に lower する
+- [x] `examples/variables.kizu` を IR に lower する
+- [x] baseline 測定に `kizu ir examples/hello.kizu` を追加する
 
 ## Phase 8B: control flow lowering
 
-- [ ] basic block を複数持てるようにする
-- [ ] branch terminator を定義する
-- [ ] `if` を basic block に lower する
-- [ ] `while` を basic block に lower する
-- [ ] phi node を定義する
-- [ ] phi node が必要な代入を扱う
-- [ ] `examples/if.kizu` を IR に lower する
-- [ ] `examples/while.kizu` を IR に lower する
+- [x] basic block を複数持てるようにする
+- [x] branch terminator を定義する
+- [x] `if` を basic block に lower する
+- [x] `while` を basic block に lower する
+- [x] phi node を定義する
+- [x] phi node が必要な代入を扱う
+- [x] `examples/if.kizu` を IR に lower する
+- [x] `examples/while.kizu` を IR に lower する
 
 ## Phase 8C: struct / arena lowering
 
-- [ ] struct literal の IR 表現を定義する
-- [ ] field access の IR 表現を定義する
-- [ ] `arena<T>()` の IR 表現を定義する
-- [ ] `arena.add(value)` の IR 表現を定義する
-- [ ] `arena.get(handle)` の IR 表現を定義する
-- [ ] `examples/arena.kizu` を IR に lower する
+- [x] struct literal の IR 表現を定義する
+- [x] field access の IR 表現を定義する
+- [x] `arena<T>()` の IR 表現を定義する
+- [x] `arena.add(value)` の IR 表現を定義する
+- [x] `arena.get(handle)` の IR 表現を定義する
+- [x] `examples/arena.kizu` を IR に lower する
 
 ## Phase 8D: small optimization passes
 
-- [ ] optimization pass の package 構成を決める
-- [ ] constant folding を追加する
-- [ ] dead code elimination を追加する
-- [ ] simple copy propagation を追加する
-- [ ] 最適化前後の IR dump を snapshot test で検証する
+- [x] optimization pass の package 構成を決める
+- [x] constant folding を追加する
+- [x] dead code elimination を追加する
+- [x] simple copy propagation を追加する
+- [x] 最適化前後の IR dump を snapshot test で検証する
 
 ## 受け入れ条件
 
-- [ ] `pre-commit run --all-files` が通る
-- [ ] `kizu ir examples/hello.kizu` が typed SSA IR を出す
-- [ ] Phase 2 examples を IR に lower できる
-- [ ] IR dump が snapshot test で検証される
-- [ ] baseline 測定に `kizu ir` を追加できる
+- [x] `pre-commit run --all-files` が通る
+- [x] `kizu ir examples/hello.kizu` が typed SSA IR を出す
+- [x] Phase 2 examples を IR に lower できる
+- [x] IR dump が snapshot test で検証される
+- [x] baseline 測定に `kizu ir` を追加できる
 
 ## Phase 8A の完了条件
 
-- [ ] `pre-commit run --all-files` が通る
-- [ ] `go run ./cmd/kizu ir examples/hello.kizu` が IR dump を出す
-- [ ] `go run ./cmd/kizu ir examples/functions.kizu` が IR dump を出す
-- [ ] `go run ./cmd/kizu ir examples/variables.kizu` が IR dump を出す
-- [ ] IR dump の snapshot test がある
-- [ ] `scripts/measure-baseline.sh` が `kizu ir examples/hello.kizu` を測定する
+- [x] `pre-commit run --all-files` が通る
+- [x] `go run ./cmd/kizu ir examples/hello.kizu` が IR dump を出す
+- [x] `go run ./cmd/kizu ir examples/functions.kizu` が IR dump を出す
+- [x] `go run ./cmd/kizu ir examples/variables.kizu` が IR dump を出す
+- [x] IR dump の snapshot test がある
+- [x] `scripts/measure-baseline.sh` が `kizu ir examples/hello.kizu` を測定する
 
 ## 範囲外
 
@@ -75,4 +75,3 @@ Phase 8 は、まず IR の形と dump を固定する。
 - WASM / WASI 生成
 - unsafe / C ABI
 - comptime
-- Phase 8A では control flow、struct、arena、最適化 pass

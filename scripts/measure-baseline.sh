@@ -15,5 +15,6 @@ run() {
 
 run "go test" go test ./...
 run "parse hello" go run ./cmd/kizu parse examples/hello.kizu
+run "ir hello" go run ./cmd/kizu ir examples/hello.kizu
 run "run hello" go run ./cmd/kizu run examples/hello.kizu
 run "pre-commit" pre-commit run --all-files

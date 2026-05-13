@@ -6,6 +6,7 @@ import (
 
 	"tiny-safe/internal/ast"
 	"tiny-safe/internal/interp"
+	"tiny-safe/internal/ir"
 	"tiny-safe/internal/lexer"
 	"tiny-safe/internal/ownership"
 	"tiny-safe/internal/parser"
@@ -38,6 +39,11 @@ func main() {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	case "ir":
+		if err := irFile(path); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -46,7 +52,7 @@ func main() {
 
 // usage prints the supported command line shape.
 func usage() {
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check> <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|ir> <file>")
 }
 
 // parseFile parses a source file and prints its AST summary.
@@ -99,6 +105,29 @@ func checkFile(path string) error {
 		return err
 	}
 	_, _ = fmt.Println("check: ok")
+	return nil
+}
+
+// irFile parses, checks, lowers, and dumps typed SSA IR.
+func irFile(path string) error {
+	program, errs, err := parsePath(path)
+	if err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		for _, msg := range errs {
+			_, _ = fmt.Fprintln(os.Stderr, msg)
+		}
+		return fmt.Errorf("parse failed")
+	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	module, err := ir.Lower(program)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Println(ir.Dump(module))
 	return nil
 }
 
