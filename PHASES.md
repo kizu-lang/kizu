@@ -15,7 +15,7 @@
 | Phase 5 | 完了 | Local borrow checker | [phase-5.md](docs/phases/phase-5.md) |
 | Phase 6 | 完了 | arena / handle | [phase-6.md](docs/phases/phase-6.md) |
 | Phase 7 | 未着手 | 予約 | [phase-7.md](docs/phases/phase-7.md) |
-| Phase 8 | 未着手 | typed SSA IR | [phase-8.md](docs/phases/phase-8.md) |
+| Phase 8 | 次に着手 | typed SSA IR | [phase-8.md](docs/phases/phase-8.md) |
 | Phase 9 | 未着手 | LLVM IR backend | [phase-9.md](docs/phases/phase-9.md) |
 | Phase 10 | 未着手 | build cache / why-rebuild | [phase-10.md](docs/phases/phase-10.md) |
 | Phase 11 | 未着手 | WASM / WASI backend | [phase-11.md](docs/phases/phase-11.md) |
