@@ -7,6 +7,7 @@ import (
 	"tiny-safe/internal/ast"
 	"tiny-safe/internal/interp"
 	"tiny-safe/internal/lexer"
+	"tiny-safe/internal/ownership"
 	"tiny-safe/internal/parser"
 	"tiny-safe/internal/types"
 )
@@ -76,10 +77,13 @@ func runFile(path string) error {
 		}
 		return fmt.Errorf("parse failed")
 	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
 	return interp.New(os.Stdout).Run(program)
 }
 
-// checkFile parses a source file and runs static type checking.
+// checkFile parses a source file and runs static checks.
 func checkFile(path string) error {
 	program, errs, err := parsePath(path)
 	if err != nil {
@@ -91,10 +95,21 @@ func checkFile(path string) error {
 		}
 		return fmt.Errorf("parse failed")
 	}
-	if err := types.New().Check(program); err != nil {
+	if err := checkProgram(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("check: ok")
+	return nil
+}
+
+// checkProgram runs static checks required before compilation or execution.
+func checkProgram(program *ast.Program) error {
+	if err := types.New().Check(program); err != nil {
+		return err
+	}
+	if err := ownership.New().Check(program); err != nil {
+		return err
+	}
 	return nil
 }
 

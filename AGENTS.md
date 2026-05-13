@@ -123,3 +123,21 @@ kizu test
 * examples が壊れていない
 * エラーが読める
 * 挙動が `SPEC.md` に合っている
+
+## Goal ワークフロー
+
+Phase を goal として進める場合は、次を完了まで行ってください。
+
+* 対象 phase の TODO と受け入れ条件を実装前に確認する
+* 実装は対象 phase の範囲に絞る
+* 関連テストと examples を追加または更新する
+* `PHASES.md` と `docs/phases/*.md` の状態を更新する
+* 明示要件と成果物を突き合わせて完了監査する
+* `pre-commit run --all-files` を通す
+* 変更を commit する
+
+commit message は、phase 完了なら次の形を基本にします。
+
+```text
+Complete phase N <short name>
+```

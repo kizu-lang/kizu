@@ -2,6 +2,7 @@ package main
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -15,5 +16,18 @@ func TestRunCommandSmoke(t *testing.T) {
 	want := "hello, kizu\n"
 	if string(out) != want {
 		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestRunCommandRejectsMoveError checks run does not bypass static move checks.
+func TestRunCommandRejectsMoveError(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "run", "../../examples/move_error.kizu")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected command to fail\n%s", out)
+	}
+	want := "move error: moved value `name` was used"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
 	}
 }
