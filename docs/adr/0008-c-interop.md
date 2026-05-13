@@ -1,6 +1,6 @@
 # ADR-0008: C 親和性は ABI / FFI / layout / pointer で確保する
 
-Status: 提案
+Status: 採用
 
 ## 背景
 
@@ -16,9 +16,9 @@ C 親和性は次で確保する。
 - raw pointer 型
 - nullable pointer 型
 - 明示幅整数
-- struct layout
-- alignment
-- link name
+
+Phase 12 ではまず `extern "c" fn` と raw pointer 型を扱う。
+struct layout、alignment、link name は後続 phase で扱う。
 
 検討する構文:
 

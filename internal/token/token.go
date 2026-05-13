@@ -15,6 +15,7 @@ const (
 	Plus     Type = "+"
 	Minus    Type = "-"
 	Bang     Type = "!"
+	Question Type = "?"
 	Asterisk Type = "*"
 	Slash    Type = "/"
 	Percent  Type = "%"
@@ -51,6 +52,8 @@ const (
 	True     Type = "true"
 	False    Type = "false"
 	Borrow   Type = "borrow"
+	Unsafe   Type = "unsafe"
+	Extern   Type = "extern"
 )
 
 type Token struct {
@@ -73,6 +76,8 @@ var keywords = map[string]Type{
 	"true":   True,
 	"false":  False,
 	"borrow": Borrow,
+	"unsafe": Unsafe,
+	"extern": Extern,
 }
 
 // LookupIdent returns the keyword token for ident or Ident for user names.

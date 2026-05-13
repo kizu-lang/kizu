@@ -52,6 +52,8 @@ type FunctionDecl struct {
 	Params     []Param
 	ReturnType string
 	Body       *BlockStmt
+	Unsafe     bool
+	ExternABI  string
 }
 
 // declNode marks FunctionDecl as a declaration node.
@@ -67,7 +69,16 @@ func (d *FunctionDecl) String() string {
 	if d.ReturnType != "" {
 		ret = " -> " + d.ReturnType
 	}
-	return fmt.Sprintf("fn %s(%s)%s %s", d.Name, strings.Join(params, ", "), ret, d.Body.String())
+	prefix := ""
+	if d.Unsafe {
+		prefix = "unsafe "
+	}
+	if d.ExternABI != "" {
+		return fmt.Sprintf("%sextern %q fn %s(%s)%s",
+			prefix, d.ExternABI, d.Name, strings.Join(params, ", "), ret)
+	}
+	return fmt.Sprintf("%sfn %s(%s)%s %s",
+		prefix, d.Name, strings.Join(params, ", "), ret, d.Body.String())
 }
 
 // StructDecl represents a top-level struct declaration.
@@ -214,6 +225,19 @@ func (*WhileStmt) statementNode() {}
 // String returns a compact debug representation of the while statement.
 func (s *WhileStmt) String() string {
 	return fmt.Sprintf("while %s %s", s.Condition.String(), s.Body.String())
+}
+
+// UnsafeStmt represents an explicit unsafe block.
+type UnsafeStmt struct {
+	Body *BlockStmt
+}
+
+// statementNode marks UnsafeStmt as a statement node.
+func (*UnsafeStmt) statementNode() {}
+
+// String returns a compact debug representation of the unsafe block.
+func (s *UnsafeStmt) String() string {
+	return "unsafe " + s.Body.String()
 }
 
 // ExprStmt wraps an expression used as a statement.

@@ -40,6 +40,9 @@ func (l *lowerer) lower() (*Module, error) {
 		if !ok {
 			continue
 		}
+		if fn.ExternABI != "" {
+			continue
+		}
 		lowered, err := l.lowerFunction(fn)
 		if err != nil {
 			return nil, err
@@ -135,6 +138,8 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return l.lowerIfStmt(s)
 	case *ast.WhileStmt:
 		return l.lowerWhileStmt(s)
+	case *ast.UnsafeStmt:
+		return l.lowerBlock(s.Body)
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
 	}

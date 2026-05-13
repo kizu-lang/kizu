@@ -26,6 +26,9 @@ func (i *Interpreter) Run(program *ast.Program) error {
 		if !ok {
 			continue
 		}
+		if fn.ExternABI != "" {
+			continue
+		}
 		i.functions[fn.Name] = fn
 	}
 	_, err := i.callFunction("main", nil)
@@ -82,6 +85,8 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		return i.evalIfStmt(s, env)
 	case *ast.WhileStmt:
 		return i.evalWhileStmt(s, env)
+	case *ast.UnsafeStmt:
+		return i.evalBlock(s.Body, env.Child())
 	default:
 		return voidValue(), false, fmt.Errorf("runtime error: unsupported statement %T", stmt)
 	}

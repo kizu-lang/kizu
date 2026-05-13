@@ -228,7 +228,7 @@ void
 `int` は v0 の簡易整数型です。
 interpreter 上では符号付き整数として扱い、具体的な bit 幅は固定しません。
 
-将来の native backend では、次の明示幅整数を追加します。
+低レベル型として、次の明示幅整数と raw pointer 型を持ちます。
 
 ```text
 i8
@@ -342,15 +342,65 @@ Kizu は将来的に `Option<T>` と `Result<T, E>` を持ちます。
 
 v0 では interpreter error だけでもよいです。
 
-## 12. unsafe
+## 12. unsafe / C ABI
 
-v0 では `unsafe` は不要です。
+`unsafe` は、コンパイラが memory safety を証明しない操作を明示する境界です。
 
-unsafe を追加する場合でも、明示的で、隔離され、レビュー可能でなければなりません。
-`unsafe` 内では raw pointer dereference、C ABI call、unchecked operation などを扱えます。
-これらの memory safety obligation はプログラマが負います。
-ただし、`unsafe` 内でも moved value の safe use や safe borrow escape は error のままです。
-`unsafe` は Kizu の ownership model を無効化しません。
+```kizu
+unsafe {
+    ptr_write(p, 20)
+}
+```
+
+unsafe function も明示します。
+
+```kizu
+unsafe fn raw_write(p: ptr<u8>, value: u8) -> void {
+    ptr_write(p, value)
+}
+```
+
+C ABI declaration は `extern "c" fn` で書きます。
+
+```kizu
+extern "c" fn puts(s: ptr<const u8>) -> i32
+```
+
+ルール:
+
+* raw pointer operation は `unsafe` 内でのみ使える
+* `extern "c" fn` の呼び出しは `unsafe` 内でのみ行える
+* `ptr<T>` は non-null mutable raw pointer
+* `ptr<const T>` は non-null const raw pointer
+* `?ptr<T>` / `?ptr<const T>` は nullable raw pointer
+* safe borrow と raw pointer は別物として扱う
+* `ptr_read(p)` は `ptr<T>` / `ptr<const T>` から `T` を読む
+* `ptr_write(p, value)` は `ptr<T>` に `T` を書く
+* `ptr_write` は `ptr<const T>` と nullable pointer には使えない
+
+unsafe code の memory safety obligation はプログラマが負います。
+ただし、`unsafe` は compiler check を全面的に無効化するものではありません。
+
+`unsafe` 内でも次は error のままです。
+
+* type mismatch
+* moved value の safe use
+* borrow escape
+* safe borrow の lifetime extension
+
+C ABI primitive type mapping:
+
+```text
+i8/u8      signed char / unsigned char 相当
+i16/u16    int16_t / uint16_t 相当
+i32/u32    int32_t / uint32_t 相当
+i64/u64    int64_t / uint64_t 相当
+usize      size_t 相当
+isize      intptr_t 相当
+ptr<T>     T*
+ptr<const T> const T*
+?ptr<T>    nullable T*
+```
 
 ## 13. comptime
 

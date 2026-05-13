@@ -88,6 +88,8 @@ type functionType struct {
 	params     []Type
 	returnType Type
 	decl       *ast.FunctionDecl
+	unsafe     bool
+	externABI  string
 }
 
 type scope struct {
@@ -183,12 +185,21 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 			return nil, err
 		}
 	}
-	return &functionType{name: fn.Name, params: params, returnType: ret, decl: fn}, nil
+	return &functionType{
+		name: fn.Name, params: params, returnType: ret, decl: fn,
+		unsafe: fn.Unsafe, externABI: fn.ExternABI,
+	}, nil
 }
 
 // parseType validates a source-level type name.
 func (c *Checker) parseType(name string) (Type, error) {
+	if strings.HasPrefix(name, "?") {
+		return c.parseNullableType(name)
+	}
 	if base, arg, ok := splitGenericType(name); ok {
+		if base == "ptr" {
+			return c.parsePointerType(name, arg)
+		}
 		if base != "arena" && base != "handle" {
 			return "", fmt.Errorf("type error: unknown generic type `%s`", base)
 		}
@@ -204,15 +215,42 @@ func (c *Checker) parseType(name string) (Type, error) {
 	return typ, nil
 }
 
+// parseNullableType validates nullable pointer types.
+func (c *Checker) parseNullableType(name string) (Type, error) {
+	inner := strings.TrimPrefix(name, "?")
+	base, arg, ok := splitGenericType(inner)
+	if !ok || base != "ptr" {
+		return "", fmt.Errorf("type error: nullable type `%s` must wrap ptr<T>", name)
+	}
+	if _, err := c.parsePointerType(inner, arg); err != nil {
+		return "", err
+	}
+	return Type(name), nil
+}
+
+// parsePointerType validates raw pointer element types.
+func (c *Checker) parsePointerType(name string, arg string) (Type, error) {
+	if strings.HasPrefix(arg, "const ") {
+		arg = strings.TrimPrefix(arg, "const ")
+	}
+	if _, err := c.parseType(arg); err != nil {
+		return "", err
+	}
+	return Type(name), nil
+}
+
 // checkFunction validates one function body against its signature.
 func (c *Checker) checkFunction(fn *functionType) error {
+	if fn.externABI != "" {
+		return nil
+	}
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {
 		if err := env.define(param.Name, fn.params[idx]); err != nil {
 			return err
 		}
 	}
-	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType)
+	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
 	if err != nil {
 		return err
 	}
@@ -223,9 +261,14 @@ func (c *Checker) checkFunction(fn *functionType) error {
 }
 
 // checkBlock validates statements and reports whether the block always returns.
-func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope, wantReturn Type) (bool, error) {
+func (c *Checker) checkBlock(
+	block *ast.BlockStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe bool,
+) (bool, error) {
 	for _, stmt := range block.Statements {
-		returns, err := c.checkStmt(stmt, env, wantReturn)
+		returns, err := c.checkStmt(stmt, env, wantReturn, unsafe)
 		if err != nil || returns {
 			return returns, err
 		}
@@ -234,37 +277,44 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope, wantReturn Type) 
 }
 
 // checkStmt validates a statement and reports explicit return flow.
-func (c *Checker) checkStmt(stmt ast.Statement, env *scope, wantReturn Type) (bool, error) {
+func (c *Checker) checkStmt(
+	stmt ast.Statement,
+	env *scope,
+	wantReturn Type,
+	unsafe bool,
+) (bool, error) {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
-		typ, err := c.checkExpr(s.Value, env)
+		typ, err := c.checkExpr(s.Value, env, unsafe)
 		if err != nil {
 			return false, err
 		}
 		return false, env.define(s.Name, typ)
 	case *ast.AssignStmt:
-		return c.checkAssignStmt(s, env)
+		return c.checkAssignStmt(s, env, unsafe)
 	case *ast.ReturnStmt:
-		return c.checkReturnStmt(s, env, wantReturn)
+		return c.checkReturnStmt(s, env, wantReturn, unsafe)
 	case *ast.ExprStmt:
-		_, err := c.checkExpr(s.Expr, env)
+		_, err := c.checkExpr(s.Expr, env, unsafe)
 		return false, err
 	case *ast.IfStmt:
-		return c.checkIfStmt(s, env, wantReturn)
+		return c.checkIfStmt(s, env, wantReturn, unsafe)
 	case *ast.WhileStmt:
-		return c.checkWhileStmt(s, env, wantReturn)
+		return c.checkWhileStmt(s, env, wantReturn, unsafe)
+	case *ast.UnsafeStmt:
+		return c.checkBlock(s.Body, env.child(), wantReturn, true)
 	default:
 		return false, fmt.Errorf("type error: unsupported statement %T", stmt)
 	}
 }
 
 // checkAssignStmt validates assignment to an existing binding.
-func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) (bool, error) {
+func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope, unsafe bool) (bool, error) {
 	want, ok := env.lookup(stmt.Name)
 	if !ok {
 		return false, fmt.Errorf("type error: undefined variable `%s`", stmt.Name)
 	}
-	got, err := c.checkExpr(stmt.Value, env)
+	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -275,8 +325,13 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) (bool, error
 }
 
 // checkReturnStmt validates that return value type matches the function result.
-func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope, want Type) (bool, error) {
-	got, err := c.checkExpr(stmt.Value, env)
+func (c *Checker) checkReturnStmt(
+	stmt *ast.ReturnStmt,
+	env *scope,
+	want Type,
+	unsafe bool,
+) (bool, error) {
+	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -287,22 +342,27 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope, want Type) (
 }
 
 // checkIfStmt validates a branch and tracks whether both arms return.
-func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope, wantReturn Type) (bool, error) {
-	cond, err := c.checkExpr(stmt.Condition, env)
+func (c *Checker) checkIfStmt(
+	stmt *ast.IfStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe bool,
+) (bool, error) {
+	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
 		return false, err
 	}
 	if cond != typeBool {
 		return false, fmt.Errorf("type error: if condition must be bool, got %s", cond)
 	}
-	leftReturns, err := c.checkBlock(stmt.Consequence, env.child(), wantReturn)
+	leftReturns, err := c.checkBlock(stmt.Consequence, env.child(), wantReturn, unsafe)
 	if err != nil {
 		return false, err
 	}
 	if stmt.Alternative == nil {
 		return false, nil
 	}
-	rightReturns, err := c.checkBlock(stmt.Alternative, env.child(), wantReturn)
+	rightReturns, err := c.checkBlock(stmt.Alternative, env.child(), wantReturn, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -310,20 +370,25 @@ func (c *Checker) checkIfStmt(stmt *ast.IfStmt, env *scope, wantReturn Type) (bo
 }
 
 // checkWhileStmt validates loop condition and body types.
-func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope, wantReturn Type) (bool, error) {
-	cond, err := c.checkExpr(stmt.Condition, env)
+func (c *Checker) checkWhileStmt(
+	stmt *ast.WhileStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe bool,
+) (bool, error) {
+	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
 		return false, err
 	}
 	if cond != typeBool {
 		return false, fmt.Errorf("type error: while condition must be bool, got %s", cond)
 	}
-	_, err = c.checkBlock(stmt.Body, env.child(), wantReturn)
+	_, err = c.checkBlock(stmt.Body, env.child(), wantReturn, unsafe)
 	return false, err
 }
 
 // checkExpr computes the static type of an expression.
-func (c *Checker) checkExpr(expr ast.Expression, env *scope) (Type, error) {
+func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
 		return typeInt, nil
@@ -334,17 +399,17 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope) (Type, error) {
 	case *ast.IdentExpr:
 		return checkIdentExpr(e, env)
 	case *ast.PrefixExpr:
-		return c.checkPrefixExpr(e, env)
+		return c.checkPrefixExpr(e, env, unsafe)
 	case *ast.BinaryExpr:
-		return c.checkBinaryExpr(e, env)
+		return c.checkBinaryExpr(e, env, unsafe)
 	case *ast.CallExpr:
-		return c.checkCallExpr(e, env)
+		return c.checkCallExpr(e, env, unsafe)
 	case *ast.ArenaNewExpr:
 		return c.checkArenaNewExpr(e)
 	case *ast.StructLiteralExpr:
-		return c.checkStructLiteralExpr(e, env)
+		return c.checkStructLiteralExpr(e, env, unsafe)
 	case *ast.FieldExpr:
-		return c.checkFieldExpr(e, env)
+		return c.checkFieldExpr(e, env, unsafe)
 	default:
 		return "", fmt.Errorf("type error: unsupported expression %T", expr)
 	}
@@ -360,8 +425,8 @@ func checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) {
 }
 
 // checkPrefixExpr validates unary operators.
-func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope) (Type, error) {
-	right, err := c.checkExpr(expr.Right, env)
+func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope, unsafe bool) (Type, error) {
+	right, err := c.checkExpr(expr.Right, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -382,12 +447,12 @@ func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope) (Type, error
 }
 
 // checkBinaryExpr validates arithmetic, equality, and comparison operators.
-func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope) (Type, error) {
-	left, err := c.checkExpr(expr.Left, env)
+func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool) (Type, error) {
+	left, err := c.checkExpr(expr.Left, env, unsafe)
 	if err != nil {
 		return "", err
 	}
-	right, err := c.checkExpr(expr.Right, env)
+	right, err := c.checkExpr(expr.Right, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -423,27 +488,36 @@ func isComparison(op string) bool {
 }
 
 // checkCallExpr validates builtin and user function calls.
-func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (Type, error) {
+func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		return c.checkMethodCallExpr(field, expr.Args, env)
+		return c.checkMethodCallExpr(field, expr.Args, env, unsafe)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("type error: callee must be a function name")
 	}
 	if name.Name == "print" {
-		return c.checkPrintCall(expr, env)
+		return c.checkPrintCall(expr, env, unsafe)
+	}
+	if name.Name == "ptr_read" {
+		return c.checkPtrRead(expr, env, unsafe)
+	}
+	if name.Name == "ptr_write" {
+		return c.checkPtrWrite(expr, env, unsafe)
 	}
 	fn, ok := c.functions[name.Name]
 	if !ok {
 		return "", fmt.Errorf("type error: undefined function `%s`", name.Name)
+	}
+	if (fn.unsafe || fn.externABI != "") && !unsafe {
+		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name.Name)
 	}
 	if len(expr.Args) != len(fn.params) {
 		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
 			name.Name, len(fn.params), len(expr.Args))
 	}
 	for idx, arg := range expr.Args {
-		got, err := c.checkExpr(arg, env)
+		got, err := c.checkExpr(arg, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -464,14 +538,18 @@ func (c *Checker) checkArenaNewExpr(expr *ast.ArenaNewExpr) (Type, error) {
 }
 
 // checkStructLiteralExpr validates field names and initializer types.
-func (c *Checker) checkStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope) (Type, error) {
+func (c *Checker) checkStructLiteralExpr(
+	expr *ast.StructLiteralExpr,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
 	decl := c.structs[expr.TypeName]
 	if decl == nil {
 		return "", fmt.Errorf("type error: unknown struct `%s`", expr.TypeName)
 	}
 	values := map[string]Type{}
 	for _, field := range expr.Fields {
-		got, err := c.checkExpr(field.Value, env)
+		got, err := c.checkExpr(field.Value, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -495,8 +573,8 @@ func (c *Checker) checkStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope
 }
 
 // checkFieldExpr returns the declared type of a struct field access.
-func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope) (Type, error) {
-	receiver, err := c.checkExpr(expr.Receiver, env)
+func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (Type, error) {
+	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -517,8 +595,9 @@ func (c *Checker) checkMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
+	unsafe bool,
 ) (Type, error) {
-	receiver, err := c.checkExpr(field.Receiver, env)
+	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -528,20 +607,25 @@ func (c *Checker) checkMethodCallExpr(
 	}
 	switch field.Name {
 	case "add":
-		return c.checkArenaAdd(arg, args, env)
+		return c.checkArenaAdd(arg, args, env, unsafe)
 	case "get":
-		return c.checkArenaGet(arg, args, env)
+		return c.checkArenaGet(arg, args, env, unsafe)
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
 	}
 }
 
 // checkArenaAdd validates arena<T>.add(value).
-func (c *Checker) checkArenaAdd(arg string, args []ast.Expression, env *scope) (Type, error) {
+func (c *Checker) checkArenaAdd(
+	arg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("type error: `arena.add` expects 1 arg, got %d", len(args))
 	}
-	got, err := c.checkExpr(args[0], env)
+	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -552,11 +636,16 @@ func (c *Checker) checkArenaAdd(arg string, args []ast.Expression, env *scope) (
 }
 
 // checkArenaGet validates arena<T>.get(handle<T>).
-func (c *Checker) checkArenaGet(arg string, args []ast.Expression, env *scope) (Type, error) {
+func (c *Checker) checkArenaGet(
+	arg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("type error: `arena.get` expects 1 arg, got %d", len(args))
 	}
-	got, err := c.checkExpr(args[0], env)
+	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -567,12 +656,67 @@ func (c *Checker) checkArenaGet(arg string, args []ast.Expression, env *scope) (
 	return Type(arg), nil
 }
 
+// checkPtrRead validates unsafe raw pointer reads.
+func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
+	if !unsafe {
+		return "", fmt.Errorf("unsafe error: ptr_read requires unsafe block")
+	}
+	if len(expr.Args) != 1 {
+		return "", fmt.Errorf("type error: `ptr_read` expects 1 arg, got %d", len(expr.Args))
+	}
+	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := pointerElement(ptrType)
+	if !ok || strings.HasPrefix(string(ptrType), "?") {
+		return "", fmt.Errorf("type error: `ptr_read` expects non-null raw pointer, got %s", ptrType)
+	}
+	return Type(strings.TrimPrefix(elem, "const ")), nil
+}
+
+// checkPtrWrite validates unsafe raw pointer writes.
+func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
+	if !unsafe {
+		return "", fmt.Errorf("unsafe error: ptr_write requires unsafe block")
+	}
+	if len(expr.Args) != 2 {
+		return "", fmt.Errorf("type error: `ptr_write` expects 2 args, got %d", len(expr.Args))
+	}
+	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := pointerElement(ptrType)
+	if !ok || strings.HasPrefix(string(ptrType), "?") || strings.HasPrefix(elem, "const ") {
+		return "", fmt.Errorf("type error: `ptr_write` expects mutable non-null raw pointer")
+	}
+	valueType, err := c.checkExpr(expr.Args[1], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if valueType != Type(elem) {
+		return "", fmt.Errorf("type error: `ptr_write` expects %s, got %s", elem, valueType)
+	}
+	return typeVoid, nil
+}
+
+// pointerElement extracts the element type from ptr<T> or ?ptr<T>.
+func pointerElement(typ Type) (string, bool) {
+	name := strings.TrimPrefix(string(typ), "?")
+	base, arg, ok := splitGenericType(name)
+	if !ok || base != "ptr" {
+		return "", false
+	}
+	return arg, true
+}
+
 // checkPrintCall validates the print builtin.
-func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope) (Type, error) {
+func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
 	if len(expr.Args) != 1 {
 		return "", fmt.Errorf("type error: `print` expects 1 arg, got %d", len(expr.Args))
 	}
-	got, err := c.checkExpr(expr.Args[0], env)
+	got, err := c.checkExpr(expr.Args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}

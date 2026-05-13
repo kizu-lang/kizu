@@ -1,6 +1,6 @@
 # ADR-0007: unsafe は低レベル操作の明示境界にする
 
-Status: 提案
+Status: 採用
 
 ## 背景
 
@@ -18,7 +18,7 @@ unsafe は safe Kizu の所有権モデルを無効化しない。
 unsafe が許すのは、コンパイラが証明しない低レベル操作の実行であり、
 safe borrow / move / type の基本検査は継続する。
 
-検討する構文:
+採用する構文:
 
 ```kizu
 unsafe {
@@ -32,12 +32,15 @@ unsafe fn raw_write(p: ptr<u8>, len: usize) -> void {
 }
 ```
 
-unsafe で許す候補:
+Phase 12 で unsafe 必須にする操作:
 
 - raw pointer dereference
+- C ABI call
+
+Phase 12 で予約し、後続 phase に残す操作:
+
 - pointer cast
 - unchecked indexing
-- C ABI call
 - allocator primitive
 - volatile / atomic primitive
 

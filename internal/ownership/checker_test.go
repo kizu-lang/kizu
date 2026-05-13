@@ -203,6 +203,42 @@ fn main() {
 	}
 }
 
+// TestCheckUnsafeDoesNotDisableMoveAndBorrowRules checks unsafe keeps safe rules.
+func TestCheckUnsafeDoesNotDisableMoveAndBorrowRules(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "moved value in unsafe block",
+			source: `fn take(s: string) { print(s) }
+fn main() {
+    let name = "alice"
+    take(name)
+    unsafe { print(name) }
+}`,
+			want: "moved value `name` was used",
+		},
+		{
+			name: "borrow escape in unsafe function",
+			source: `unsafe fn bad(s: borrow string) -> string {
+    return s
+}`,
+			want: "borrowed value `s` cannot escape",
+		},
+		{
+			name: "borrow field in unsafe-adjacent code",
+			source: `struct Bad {
+    value: borrow string
+}
+fn main() { unsafe { print(1) } }`,
+			want: "struct field `Bad.value` cannot store borrow",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // runErrorCases checks that each source fails with the expected message.
 func runErrorCases(t *testing.T, cases []struct {
 	name   string

@@ -112,6 +112,30 @@ fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice
 	}
 }
 
+// TestParseUnsafeAndExtern checks Phase 12 unsafe and C ABI declarations.
+func TestParseUnsafeAndExtern(t *testing.T) {
+	input := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
+unsafe fn write_byte(p: ptr<u8>, value: u8) {
+    ptr_write(p, value)
+}
+fn main() {
+    unsafe {
+        print(get_byte(ptr_read_ptr()))
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
+unsafe fn write_byte(p: ptr<u8>, value: u8) { ptr_write(p, value) }
+fn main() { unsafe { print(get_byte(ptr_read_ptr())) } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
 func TestParseRejectsExplicitLifetime(t *testing.T) {
 	input := `fn show(s: borrow 'a string) {}`

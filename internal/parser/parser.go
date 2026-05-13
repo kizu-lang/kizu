@@ -37,6 +37,12 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Function:
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
+		case token.Unsafe:
+			program.Decls = append(program.Decls, p.parseUnsafeDecl())
+			p.nextToken()
+		case token.Extern:
+			program.Decls = append(program.Decls, p.parseExternDecl(false))
+			p.nextToken()
 		case token.Struct:
 			program.Decls = append(program.Decls, p.parseStructDecl())
 			p.nextToken()
@@ -48,9 +54,45 @@ func (p *Parser) ParseProgram() *ast.Program {
 	return program
 }
 
+// parseUnsafeDecl parses unsafe top-level declarations.
+func (p *Parser) parseUnsafeDecl() ast.Decl {
+	switch p.peek.Type {
+	case token.Function:
+		p.nextToken()
+		decl := p.parseFunctionDecl()
+		if fn, ok := decl.(*ast.FunctionDecl); ok {
+			fn.Unsafe = true
+		}
+		return decl
+	case token.Extern:
+		p.nextToken()
+		return p.parseExternDecl(true)
+	default:
+		p.errorf("expected fn or extern after unsafe, got %s", p.peek.Type)
+		return &ast.FunctionDecl{Unsafe: true}
+	}
+}
+
+// parseExternDecl parses extern "abi" fn declarations.
+func (p *Parser) parseExternDecl(unsafe bool) ast.Decl {
+	fn := &ast.FunctionDecl{Unsafe: unsafe}
+	if !p.expectPeek(token.String) {
+		return fn
+	}
+	fn.ExternABI = p.cur.Literal
+	if !p.expectPeek(token.Function) {
+		return fn
+	}
+	return p.parseFunctionSignature(fn, false)
+}
+
 // parseFunctionDecl parses a top-level function declaration.
 func (p *Parser) parseFunctionDecl() ast.Decl {
-	fn := &ast.FunctionDecl{}
+	return p.parseFunctionSignature(&ast.FunctionDecl{}, true)
+}
+
+// parseFunctionSignature parses a function declaration after the fn token.
+func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) ast.Decl {
 	if !p.expectPeek(token.Ident) {
 		return fn
 	}
@@ -64,10 +106,14 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 	}
 	if p.peek.Type == token.Arrow {
 		p.nextToken()
-		if !p.expectPeek(token.Ident) {
+		p.nextToken()
+		fn.ReturnType = p.parseTypeName()
+		if fn.ReturnType == "" {
 			return fn
 		}
-		fn.ReturnType = p.parseTypeName()
+	}
+	if !requireBody {
+		return fn
 	}
 	if !p.expectPeek(token.LBrace) {
 		return fn
@@ -196,6 +242,8 @@ func (p *Parser) parseStatement() ast.Statement {
 		return p.parseIfStmt()
 	case token.While:
 		return p.parseWhileStmt()
+	case token.Unsafe:
+		return p.parseUnsafeStmt()
 	case token.Ident:
 		if p.peek.Type == token.Assign {
 			return p.parseAssignStmt()
@@ -203,6 +251,16 @@ func (p *Parser) parseStatement() ast.Statement {
 	}
 	expr := p.parseExpression(lowest)
 	return &ast.ExprStmt{Expr: expr}
+}
+
+// parseUnsafeStmt parses an unsafe statement block.
+func (p *Parser) parseUnsafeStmt() ast.Statement {
+	stmt := &ast.UnsafeStmt{}
+	if !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Body = p.parseBlockStmt()
+	return stmt
 }
 
 // parseLetStmt parses a let or var declaration.
@@ -352,25 +410,56 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	}
 }
 
-// parseTypeName parses a plain or single-argument generic type name.
+// parseTypeName parses a plain, pointer, or single-argument generic type name.
 func (p *Parser) parseTypeName() string {
+	nullable := false
+	if p.cur.Type == token.Question {
+		nullable = true
+		p.nextToken()
+	}
 	if p.cur.Type != token.Ident {
 		p.errorf("expected type, got %s", p.cur.Type)
 		return ""
 	}
 	name := p.cur.Literal
 	if p.peek.Type != token.LT {
+		if nullable {
+			return "?" + name
+		}
 		return name
 	}
 	p.nextToken()
-	if !p.expectPeek(token.Ident) {
+	p.nextToken()
+	arg := p.parseTypeArg()
+	if arg == "" || !p.expectTypeClose() {
 		return ""
 	}
-	arg := p.cur.Literal
-	if !p.expectPeek(token.GT) {
-		return ""
+	out := fmt.Sprintf("%s<%s>", name, arg)
+	if nullable {
+		return "?" + out
 	}
-	return fmt.Sprintf("%s<%s>", name, arg)
+	return out
+}
+
+// expectTypeClose consumes or accepts the closing generic angle bracket.
+func (p *Parser) expectTypeClose() bool {
+	if p.cur.Type == token.GT {
+		return true
+	}
+	return p.expectPeek(token.GT)
+}
+
+// parseTypeArg parses a generic type argument.
+func (p *Parser) parseTypeArg() string {
+	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
+		p.nextToken()
+		inner := p.parseTypeName()
+		if inner == "" {
+			return ""
+		}
+		return "const " + inner
+	}
+	return p.parseTypeName()
 }
 
 // parseBinaryExpr parses an infix binary expression.

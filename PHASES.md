@@ -19,8 +19,8 @@
 | Phase 9 | 完了 | LLVM IR backend | [phase-9.md](docs/phases/phase-9.md) |
 | Phase 10 | 完了 | build cache / why-rebuild | [phase-10.md](docs/phases/phase-10.md) |
 | Phase 11 | 完了 | WASM / WASI backend | [phase-11.md](docs/phases/phase-11.md) |
-| Phase 12 | 次に着手 | unsafe / C ABI | [phase-12.md](docs/phases/phase-12.md) |
-| Phase 13 | 未着手 | comptime | [phase-13.md](docs/phases/phase-13.md) |
+| Phase 12 | 完了 | unsafe / C ABI | [phase-12.md](docs/phases/phase-12.md) |
+| Phase 13 | 次に着手 | comptime | [phase-13.md](docs/phases/phase-13.md) |
 | Phase 14 | 未着手 | C header import | [phase-14.md](docs/phases/phase-14.md) |
 
 ## 横断フェーズ

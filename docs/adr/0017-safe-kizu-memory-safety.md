@@ -44,6 +44,7 @@ unsafe 内でも次は引き続き error にする。
 - syntax error
 - moved value の safe use
 - safe borrow の escape
+- safe borrow の lifetime extension
 
 ## 影響
 

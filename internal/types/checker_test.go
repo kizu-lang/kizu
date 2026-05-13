@@ -195,6 +195,85 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsUnsafePointerOperations checks raw pointer ops inside unsafe.
+func TestCheckAcceptsUnsafePointerOperations(t *testing.T) {
+	source := `extern "c" fn source() -> ptr<int>
+fn main() {
+    unsafe {
+        let p = source()
+        ptr_write(p, 1)
+        print(ptr_read(p))
+    }
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckAcceptsPointerTypes checks non-null and nullable raw pointer types.
+func TestCheckAcceptsPointerTypes(t *testing.T) {
+	source := `extern "c" fn read_const(p: ptr<const u8>) -> u8
+extern "c" fn maybe_data() -> ?ptr<const u8>
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsUnsafeBoundaryErrors checks unsafe-only operations.
+func TestCheckRejectsUnsafeBoundaryErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "ptr read outside unsafe",
+			source: `extern "c" fn source() -> ptr<int>
+fn main() {
+    let p = source()
+    print(ptr_read(p))
+}`,
+			want: "call to `source` requires unsafe block",
+		},
+		{
+			name: "ptr read outside unsafe with pointer param",
+			source: `fn read(p: ptr<u8>) -> u8 {
+    return ptr_read(p)
+}`,
+			want: "ptr_read requires unsafe block",
+		},
+		{
+			name: "extern call outside unsafe",
+			source: `extern "c" fn source() -> u8
+fn main() {
+    print(source())
+}`,
+			want: "call to `source` requires unsafe block",
+		},
+		{
+			name: "unsafe function call outside unsafe",
+			source: `unsafe fn source() -> int { return 1 }
+fn main() {
+    print(source())
+}`,
+			want: "call to `source` requires unsafe block",
+		},
+		{
+			name: "write through const pointer",
+			source: `extern "c" fn source() -> ptr<const int>
+fn main() {
+    unsafe {
+        let p = source()
+        ptr_write(p, 1)
+    }
+}`,
+			want: "ptr_write` expects mutable non-null raw pointer",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // checkSource parses and type-checks a source snippet.
 func checkSource(source string) error {
 	p := parser.New(lexer.New(source))

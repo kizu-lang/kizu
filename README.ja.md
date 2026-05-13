@@ -27,6 +27,7 @@ Kizu は Go 製の初期プロトタイプです。
 - LLVM IR text backend
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
 - WASI-compatible WebAssembly text backend
+- unsafe 境界と C ABI 宣言の検査
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 

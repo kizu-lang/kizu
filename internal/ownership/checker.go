@@ -102,6 +102,9 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 
 // checkFunction validates one function body.
 func (c *Checker) checkFunction(fn *functionInfo) error {
+	if fn.decl.ExternABI != "" {
+		return nil
+	}
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, fn.params[idx].typeName)
@@ -136,6 +139,8 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkIfStmt(s, env)
 	case *ast.WhileStmt:
 		return c.checkWhileStmt(s, env)
+	case *ast.UnsafeStmt:
+		return c.checkBlock(s.Body, env.child())
 	default:
 		return fmt.Errorf("move error: unsupported statement %T", stmt)
 	}
@@ -308,6 +313,9 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if name.Name == "print" {
 		return c.checkPrintCall(expr, env)
 	}
+	if name.Name == "ptr_read" || name.Name == "ptr_write" {
+		return c.checkPointerBuiltin(expr, env)
+	}
 	fn, ok := c.functions[name.Name]
 	if !ok {
 		return "", fmt.Errorf("move error: undefined function `%s`", name.Name)
@@ -332,6 +340,19 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// checkPointerBuiltin reads raw pointer builtin arguments without moving values.
+func (c *Checker) checkPointerBuiltin(expr *ast.CallExpr, env *scope) (string, error) {
+	for _, arg := range expr.Args {
+		if _, err := c.readExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	if name, ok := expr.Callee.(*ast.IdentExpr); ok && name.Name == "ptr_read" {
+		return "int", nil
+	}
+	return "void", nil
 }
 
 // readStructLiteralExpr checks a literal without consuming field values.
@@ -555,6 +576,9 @@ func returnTypeName(fn *functionInfo) string {
 
 // isCopyType reports whether values of typeName can be reused after move contexts.
 func isCopyType(typeName string) bool {
+	if isRawPointerType(typeName) {
+		return true
+	}
 	switch typeName {
 	case "bool", "int", "void",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
@@ -563,6 +587,16 @@ func isCopyType(typeName string) bool {
 	default:
 		return false
 	}
+}
+
+// isRawPointerType reports whether typeName is a raw pointer spelling.
+func isRawPointerType(typeName string) bool {
+	name := typeName
+	if len(name) > 0 && name[0] == '?' {
+		name = name[1:]
+	}
+	base, _, ok := splitGenericType(name)
+	return ok && base == "ptr"
 }
 
 // splitGenericType extracts base and argument from base<arg>.

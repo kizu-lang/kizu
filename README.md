@@ -28,6 +28,7 @@ Implemented phases:
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations
 - WASI-compatible WebAssembly text backend
+- unsafe boundary and C ABI declaration checks
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
