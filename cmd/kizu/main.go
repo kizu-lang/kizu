@@ -8,6 +8,7 @@ import (
 	"tiny-safe/internal/interp"
 	"tiny-safe/internal/lexer"
 	"tiny-safe/internal/parser"
+	"tiny-safe/internal/types"
 )
 
 // main dispatches the kizu command line interface.
@@ -78,9 +79,9 @@ func runFile(path string) error {
 	return interp.New(os.Stdout).Run(program)
 }
 
-// checkFile parses a source file and runs the current checker stub.
+// checkFile parses a source file and runs static type checking.
 func checkFile(path string) error {
-	_, errs, err := parsePath(path)
+	program, errs, err := parsePath(path)
 	if err != nil {
 		return err
 	}
@@ -90,7 +91,10 @@ func checkFile(path string) error {
 		}
 		return fmt.Errorf("parse failed")
 	}
-	_, _ = fmt.Println("check: type checker is not implemented yet")
+	if err := types.New().Check(program); err != nil {
+		return err
+	}
+	_, _ = fmt.Println("check: ok")
 	return nil
 }
 
