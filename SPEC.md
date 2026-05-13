@@ -402,6 +402,59 @@ ptr<const T> const T*
 ?ptr<T>    nullable T*
 ```
 
+### 12.1 C header import
+
+Kizu は C header の完全互換 parser は持ちません。
+Phase 14 の header import は、小さな C function prototype を `extern "c" fn` に変換する補助機能です。
+
+CLI:
+
+```sh
+kizu import-c-header <file>
+```
+
+例:
+
+```c
+int puts(const char *s);
+void write_byte(unsigned char *p, unsigned char value);
+```
+
+出力:
+
+```kizu
+extern "c" fn puts(s: ptr<const i8>) -> i32
+extern "c" fn write_byte(p: ptr<u8>, value: u8) -> void
+```
+
+Phase 14 で対応するもの:
+
+* function prototype
+* `void`
+* `char` / `signed char` / `unsigned char`
+* `short` / `int` / `long long` と unsigned variant
+* `int*_t` / `uint*_t`
+* `size_t` / `intptr_t`
+* `float` / `double`
+* 単純な pointer
+* `const T*` から `ptr<const T>` への変換
+
+Phase 14 で対応しないもの:
+
+* C preprocessor 完全互換
+* macro import
+* typedef
+* struct / enum / union declaration
+* variadic function
+* function pointer
+* array parameter
+* C++ header
+
+header import は build script ではありません。
+外部 tool には依存せず、入力 header text から deterministic に extern 宣言を出力します。
+将来 build cache に統合する場合の cache key は、importer version、header path、header content hash、
+target ABI、import option を含めます。
+
 ## 13. comptime
 
 `comptime` は、限定的なコンパイル時評価です。

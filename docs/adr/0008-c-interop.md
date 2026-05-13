@@ -18,6 +18,7 @@ C 親和性は次で確保する。
 - 明示幅整数
 
 Phase 12 ではまず `extern "c" fn` と raw pointer 型を扱う。
+Phase 14 では、小さな C function prototype から `extern "c" fn` を生成する。
 struct layout、alignment、link name は後続 phase で扱う。
 
 検討する構文:
@@ -41,6 +42,10 @@ extern struct Point {
 - `void*` の暗黙変換
 - 配列と pointer の暗黙変換
 - null の暗黙許容
+
+Phase 14 の header import は、clang / libclang に依存しない限定 parser とする。
+対応するのは function prototype、C ABI primitive、単純な pointer だけである。
+unsupported syntax は importer が読める error として返す。
 
 ## 影響
 

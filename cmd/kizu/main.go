@@ -6,6 +6,7 @@ import (
 
 	"tiny-safe/internal/ast"
 	"tiny-safe/internal/buildcache"
+	"tiny-safe/internal/cimport"
 	"tiny-safe/internal/interp"
 	"tiny-safe/internal/ir"
 	"tiny-safe/internal/lexer"
@@ -45,6 +46,8 @@ func dispatch(cmd string, args []string) error {
 		return cacheCommand(args)
 	case "why-rebuild":
 		return whyRebuildFile(args[0])
+	case "import-c-header":
+		return importCHeaderFile(args[0])
 	default:
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
@@ -58,6 +61,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
 }
 
 // parseFile parses a source file and prints its AST summary.
@@ -261,6 +265,20 @@ func whyRebuildFile(path string) error {
 		return err
 	}
 	_, _ = fmt.Println(reason)
+	return nil
+}
+
+// importCHeaderFile converts supported C prototypes into Kizu extern declarations.
+func importCHeaderFile(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	output, err := cimport.Import(string(b))
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Println(output)
 	return nil
 }
 

@@ -29,6 +29,7 @@ Kizu は Go 製の初期プロトタイプです。
 - WASI-compatible WebAssembly text backend
 - unsafe 境界と C ABI 宣言の検査
 - 限定的な `comptime` expression / parameter / branch selection
+- extern function 宣言向けの限定的な C header import
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -83,6 +84,7 @@ go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
+go run ./cmd/kizu import-c-header examples/tiny.h
 ```
 
 ## CLI
@@ -96,6 +98,7 @@ go run ./cmd/kizu why-rebuild examples/hello.kizu
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
+- `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
 
 ## プロジェクト文書
 

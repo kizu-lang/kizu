@@ -121,6 +121,41 @@ func TestCacheCommands(t *testing.T) {
 	}
 }
 
+// TestImportCHeaderCommandSmoke checks the Phase 14 C header importer CLI.
+func TestImportCHeaderCommandSmoke(t *testing.T) {
+	header := filepath.Join(t.TempDir(), "tiny.h")
+	source := []byte("int puts(const char *s);\n")
+	if err := os.WriteFile(header, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "import-c-header", header)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("import failed: %v\n%s", err, out)
+	}
+	want := "extern \"c\" fn puts(s: ptr<const i8>) -> i32\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestImportCHeaderCommandRejectsUnsupportedSyntax checks readable CLI errors.
+func TestImportCHeaderCommandRejectsUnsupportedSyntax(t *testing.T) {
+	header := filepath.Join(t.TempDir(), "bad.h")
+	if err := os.WriteFile(header, []byte("int printf(const char *fmt, ...);\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "import-c-header", header)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected import to fail\n%s", out)
+	}
+	want := "c import error: variadic functions are unsupported"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
 // TestWhyRebuildChangedSource checks CLI rebuild reasons after a small edit.
 func TestWhyRebuildChangedSource(t *testing.T) {
 	cacheDir := t.TempDir()

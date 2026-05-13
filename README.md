@@ -30,6 +30,7 @@ Implemented phases:
 - WASI-compatible WebAssembly text backend
 - unsafe boundary and C ABI declaration checks
 - limited `comptime` expressions, parameters, and branch selection
+- limited C header import for extern function declarations
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -85,6 +86,7 @@ go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
+go run ./cmd/kizu import-c-header examples/tiny.h
 ```
 
 ## CLI
@@ -98,6 +100,7 @@ go run ./cmd/kizu why-rebuild examples/hello.kizu
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
 - `kizu why-rebuild <file>` explains cache hit or rebuild reasons.
+- `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 
 ## Project Documents
 
