@@ -42,6 +42,10 @@ Phase 2 までは Go 実装と interpreter が中心なので、まず次を測�
 ```sh
 go test ./...
 go run ./cmd/kizu parse examples/hello.kizu
+go run ./cmd/kizu ir examples/hello.kizu
+go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+go run ./cmd/kizu why-rebuild examples/hello.kizu
+go run ./cmd/kizu cache status
 go run ./cmd/kizu run examples/hello.kizu
 pre-commit run --all-files
 ```
@@ -55,6 +59,7 @@ kizu run <file>
 kizu ir <file>
 kizu build <file>
 kizu cache status
+kizu cache prune
 kizu why-rebuild <file>
 ```
 

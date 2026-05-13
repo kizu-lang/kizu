@@ -2,8 +2,9 @@
 
 Kizu は、小さく、シンプルで、メモリ安全なプログラミング言語のプロトタイプです。
 
-現時点では Go 製の初期実装で、Phase 6 として lexer、parser、AST、CLI、
-interpreter、type checker、move checker、local borrow checker、arena / handle を実装しています。
+現時点では Go 製の初期実装で、Phase 10 として lexer、parser、AST、CLI、
+interpreter、type checker、move checker、local borrow checker、arena / handle、
+typed SSA IR、LLVM IR backend、ローカルビルドキャッシュを実装しています。
 
 ## 実行方法
 
@@ -24,6 +25,8 @@ go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
 go run ./cmd/kizu ir examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+go run ./cmd/kizu cache status
+go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
 go run ./cmd/kizu run examples/arena.kizu
 ```
@@ -38,6 +41,8 @@ nix develop -c go run ./cmd/kizu parse examples/hello.kizu
 nix develop -c go run ./cmd/kizu check examples/hello.kizu
 nix develop -c go run ./cmd/kizu ir examples/hello.kizu
 nix develop -c go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+nix develop -c go run ./cmd/kizu cache status
+nix develop -c go run ./cmd/kizu why-rebuild examples/hello.kizu
 nix develop -c go run ./cmd/kizu run examples/functions.kizu
 nix develop -c go run ./cmd/kizu run examples/arena.kizu
 ```
@@ -48,6 +53,7 @@ struct literal、field access、arena / handle を実行できます。
 二項演算、move、local borrow、arena handle provenance を静的に検査できます。
 `ir` は Phase 8 の typed SSA IR lowering を呼び出し、読みやすい IR dump を出力します。
 `build --emit-llvm` は Phase 9 の LLVM IR backend を呼び出し、LLVM IR text を出力します。
+`cache status` / `cache prune` / `why-rebuild` は Phase 10 のローカルビルドキャッシュを扱います。
 
 ## 方針
 

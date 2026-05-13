@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -68,6 +70,65 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	want := "define void @main()"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
+// TestCacheCommands checks cache status, why-rebuild, and prune.
+func TestCacheCommands(t *testing.T) {
+	cacheDir := t.TempDir()
+	build := exec.Command("go", "run", ".", "build", "--emit-llvm", "../../examples/hello.kizu")
+	build.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+	why := exec.Command("go", "run", ".", "why-rebuild", "../../examples/hello.kizu")
+	why.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	out, err := why.CombinedOutput()
+	if err != nil {
+		t.Fatalf("why-rebuild failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "cache hit") {
+		t.Fatalf("got %q", out)
+	}
+	status := exec.Command("go", "run", ".", "cache", "status")
+	status.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	out, err = status.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "entries: 1") {
+		t.Fatalf("got %q", out)
+	}
+	prune := exec.Command("go", "run", ".", "cache", "prune")
+	prune.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	if out, err = prune.CombinedOutput(); err != nil {
+		t.Fatalf("prune failed: %v\n%s", err, out)
+	}
+}
+
+// TestWhyRebuildChangedSource checks CLI rebuild reasons after a small edit.
+func TestWhyRebuildChangedSource(t *testing.T) {
+	cacheDir := t.TempDir()
+	source := filepath.Join(t.TempDir(), "main.kizu")
+	if err := os.WriteFile(source, []byte(`fn main() { print("hello") }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	build.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(source, []byte(`fn main() { print("changed") }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	why := exec.Command("go", "run", ".", "why-rebuild", source)
+	why.Env = append(os.Environ(), "KIZU_CACHE_DIR="+cacheDir)
+	out, err := why.CombinedOutput()
+	if err != nil {
+		t.Fatalf("why-rebuild failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "source changed") {
+		t.Fatalf("got %q", out)
 	}
 }
 

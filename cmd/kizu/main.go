@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"tiny-safe/internal/ast"
+	"tiny-safe/internal/buildcache"
 	"tiny-safe/internal/interp"
 	"tiny-safe/internal/ir"
 	"tiny-safe/internal/lexer"
@@ -20,42 +21,32 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if err := dispatch(os.Args[1], os.Args[2:]); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
 
-	cmd := os.Args[1]
-
+// dispatch runs one CLI command.
+func dispatch(cmd string, args []string) error {
 	switch cmd {
 	case "parse":
-		path := os.Args[2]
-		if err := parseFile(path); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+		return parseFile(args[0])
 	case "run":
-		path := os.Args[2]
-		if err := runFile(path); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+		return runFile(args[0])
 	case "check":
-		path := os.Args[2]
-		if err := checkFile(path); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+		return checkFile(args[0])
 	case "ir":
-		path := os.Args[2]
-		if err := irFile(path); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+		return irFile(args[0])
 	case "build":
-		if err := buildFile(os.Args[2:]); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+		return buildFile(args)
+	case "cache":
+		return cacheCommand(args)
+	case "why-rebuild":
+		return whyRebuildFile(args[0])
 	default:
 		usage()
-		os.Exit(2)
+		return fmt.Errorf("unknown command `%s`", cmd)
 	}
 }
 
@@ -63,6 +54,8 @@ func main() {
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|ir> <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
 }
 
 // parseFile parses a source file and prints its AST summary.
@@ -152,15 +145,79 @@ func buildFile(args []string) error {
 
 // emitLLVMFile lowers a checked source file to LLVM IR text.
 func emitLLVMFile(path string) error {
-	module, err := lowerFile(path)
+	cache, err := buildcache.New()
 	if err != nil {
 		return err
 	}
-	out, err := llvm.Emit(module)
+	result, err := cache.GetOrBuild(path, "emit-llvm", func() (string, error) {
+		module, err := lowerFile(path)
+		if err != nil {
+			return "", err
+		}
+		return llvm.Emit(module)
+	})
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Println(out)
+	_, _ = fmt.Println(result.Output)
+	return nil
+}
+
+// cacheCommand dispatches cache maintenance commands.
+func cacheCommand(args []string) error {
+	if len(args) != 1 {
+		usage()
+		return fmt.Errorf("invalid cache command")
+	}
+	cache, err := buildcache.New()
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "status":
+		return printCacheStatus(cache)
+	case "prune":
+		return pruneCache(cache)
+	default:
+		usage()
+		return fmt.Errorf("invalid cache command")
+	}
+}
+
+// printCacheStatus prints cache size, entry count, and limit.
+func printCacheStatus(cache *buildcache.Cache) error {
+	status, err := cache.Status()
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Printf("cache dir: %s\n", status.Dir)
+	_, _ = fmt.Printf("entries: %d\n", status.Entries)
+	_, _ = fmt.Printf("size bytes: %d\n", status.SizeBytes)
+	_, _ = fmt.Printf("max bytes: %d\n", status.MaxBytes)
+	return nil
+}
+
+// pruneCache removes local cache entries.
+func pruneCache(cache *buildcache.Cache) error {
+	entries, bytes, err := cache.Prune()
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Printf("cache pruned: removed %d entries, freed %d bytes\n", entries, bytes)
+	return nil
+}
+
+// whyRebuildFile explains the cache state for a source file.
+func whyRebuildFile(path string) error {
+	cache, err := buildcache.New()
+	if err != nil {
+		return err
+	}
+	reason, err := cache.WhyRebuild(path, "emit-llvm")
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Println(reason)
 	return nil
 }
 
