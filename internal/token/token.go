@@ -1,5 +1,6 @@
 package token
 
+// Type identifies the kind of lexical token.
 type Type string
 
 const (
@@ -74,6 +75,7 @@ var keywords = map[string]Type{
 	"borrow": Borrow,
 }
 
+// LookupIdent returns the keyword token for ident or Ident for user names.
 func LookupIdent(ident string) Type {
 	if tok, ok := keywords[ident]; ok {
 		return tok

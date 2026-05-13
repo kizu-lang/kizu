@@ -11,6 +11,13 @@ Kizu はシステムプログラミング言語として、raw pointer、C ABI�
 
 `unsafe` はコンパイラが証明しない低レベル操作を、人間が明示して使う境界にする。
 
+unsafe code の memory safety obligation はプログラマが負う。
+ただし、unsafe は compiler check を全面的に無効化するものではない。
+
+unsafe は safe Kizu の所有権モデルを無効化しない。
+unsafe が許すのは、コンパイラが証明しない低レベル操作の実行であり、
+safe borrow / move / type の基本検査は継続する。
+
 検討する構文:
 
 ```kizu
@@ -38,6 +45,7 @@ unsafe でも許さないもの:
 
 - moved value の再利用
 - borrow escape
+- safe borrow の lifetime extension
 - 型不一致
 - 初期化前の通常変数使用
 - arbitrary AST rewrite

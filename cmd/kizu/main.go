@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"os"
 
+	"tiny-safe/internal/ast"
+	"tiny-safe/internal/interp"
 	"tiny-safe/internal/lexer"
 	"tiny-safe/internal/parser"
 )
 
+// main dispatches the kizu command line interface.
 func main() {
 	if len(os.Args) < 3 {
 		usage()
@@ -39,10 +42,12 @@ func main() {
 	}
 }
 
+// usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check> <file>")
 }
 
+// parseFile parses a source file and prints its AST summary.
 func parseFile(path string) error {
 	program, errs, err := parsePath(path)
 	if err != nil {
@@ -58,8 +63,9 @@ func parseFile(path string) error {
 	return nil
 }
 
+// runFile parses a source file and executes it with the interpreter.
 func runFile(path string) error {
-	_, errs, err := parsePath(path)
+	program, errs, err := parsePath(path)
 	if err != nil {
 		return err
 	}
@@ -69,10 +75,10 @@ func runFile(path string) error {
 		}
 		return fmt.Errorf("parse failed")
 	}
-	_, _ = fmt.Println("run: interpreter is not implemented yet")
-	return nil
+	return interp.New(os.Stdout).Run(program)
 }
 
+// checkFile parses a source file and runs the current checker stub.
 func checkFile(path string) error {
 	_, errs, err := parsePath(path)
 	if err != nil {
@@ -88,7 +94,8 @@ func checkFile(path string) error {
 	return nil
 }
 
-func parsePath(path string) (fmt.Stringer, []string, error) {
+// parsePath reads and parses a source file.
+func parsePath(path string) (*ast.Program, []string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err

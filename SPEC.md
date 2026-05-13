@@ -15,6 +15,10 @@ Rust より単純で、C/C++/Zig より安全で、CI とビルドキャッシ�
 Kizu はシステムプログラミング言語を目指します。
 型名や数値型の設計は Zig に近い、低レベル寄りの明示性を優先します。
 
+Kizu のメモリ安全性保証は safe Kizu に対して行います。
+`unsafe` を使うコードでは、memory safety obligation はプログラマが負います。
+ただし、`unsafe` は型検査、move check、borrow check を全面的に無効化するものではありません。
+
 ## 1. 目標
 
 Kizu は次を目指します。
@@ -79,6 +83,7 @@ Kizu の値は、基本的に1つの所有者を持ちます。
 move された値を再利用するとコンパイルエラーになります。
 
 Kizu には borrow がありますが、borrow はローカル限定です。
+Rust のような明示 lifetime annotation は採用しません。
 
 borrow は次のことができません。
 
@@ -143,6 +148,25 @@ fn add(a: int, b: int) -> int {
 ```
 
 戻り値の型を省略した場合は `void` を返します。
+
+戻り値を返す場合は `return` を必須にします。
+Rust のような末尾式 return は採用しません。
+セミコロンの有無で戻り値が変わる仕様も採用しません。
+
+```kizu
+fn bad_add(a: int, b: int) -> int {
+    a + b // error: non-void function must return explicitly
+}
+```
+
+`void` 関数では `return` を省略できます。
+早期 return が必要な場合は `return` を書きます。
+
+```kizu
+fn log(message: string) -> void {
+    print(message)
+}
+```
 
 ### 6.4 struct
 
@@ -302,6 +326,16 @@ print(users.get(alice).name)
 
 `handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
 
+ルール:
+
+* `arena<T>.add(value)` は value を arena に move する
+* `arena<T>.add(value)` は `handle<T>` を返す
+* `arena<T>.get(handle)` はローカル borrow を返す
+* handle は borrow より長生きしてよい
+* handle は対応する arena より長生きしてはいけない
+* handle は raw pointer ではない
+* v0 では arena からの削除は実装しなくてよい
+
 ## 11. エラー処理
 
 Kizu は将来的に `Option<T>` と `Result<T, E>` を持ちます。
@@ -313,6 +347,10 @@ v0 では interpreter error だけでもよいです。
 v0 では `unsafe` は不要です。
 
 unsafe を追加する場合でも、明示的で、隔離され、レビュー可能でなければなりません。
+`unsafe` 内では raw pointer dereference、C ABI call、unchecked operation などを扱えます。
+これらの memory safety obligation はプログラマが負います。
+ただし、`unsafe` 内でも moved value の safe use や safe borrow escape は error のままです。
+`unsafe` は Kizu の ownership model を無効化しません。
 
 ## 13. comptime
 

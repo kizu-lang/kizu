@@ -8,6 +8,7 @@ import (
 	"tiny-safe/internal/token"
 )
 
+// Parser consumes tokens and builds a Kizu AST.
 type Parser struct {
 	l      *lexer.Lexer
 	cur    token.Token
@@ -15,6 +16,7 @@ type Parser struct {
 	errors []string
 }
 
+// New creates a parser over l.
 func New(l *lexer.Lexer) *Parser {
 	p := &Parser{l: l}
 	p.nextToken()
@@ -22,10 +24,12 @@ func New(l *lexer.Lexer) *Parser {
 	return p
 }
 
+// Errors returns parse errors collected so far.
 func (p *Parser) Errors() []string {
 	return p.errors
 }
 
+// ParseProgram parses a complete source file.
 func (p *Parser) ParseProgram() *ast.Program {
 	program := &ast.Program{}
 	for p.cur.Type != token.EOF {
@@ -41,6 +45,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 	return program
 }
 
+// parseFunctionDecl parses a top-level function declaration.
 func (p *Parser) parseFunctionDecl() ast.Decl {
 	fn := &ast.FunctionDecl{}
 	if !p.expectPeek(token.Ident) {
@@ -68,6 +73,7 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 	return fn
 }
 
+// parseParams parses a function parameter list.
 func (p *Parser) parseParams() []ast.Param {
 	params := []ast.Param{}
 	p.nextToken()
@@ -108,6 +114,7 @@ func (p *Parser) parseParams() []ast.Param {
 	return params
 }
 
+// parseBlockStmt parses a brace-delimited statement block.
 func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 	block := &ast.BlockStmt{}
 	p.nextToken()
@@ -119,6 +126,7 @@ func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 	return block
 }
 
+// parseStatement parses a single statement.
 func (p *Parser) parseStatement() ast.Statement {
 	switch p.cur.Type {
 	case token.Let:
@@ -127,6 +135,10 @@ func (p *Parser) parseStatement() ast.Statement {
 		return p.parseLetStmt(true)
 	case token.Return:
 		return p.parseReturnStmt()
+	case token.If:
+		return p.parseIfStmt()
+	case token.While:
+		return p.parseWhileStmt()
 	case token.Ident:
 		if p.peek.Type == token.Assign {
 			return p.parseAssignStmt()
@@ -136,6 +148,7 @@ func (p *Parser) parseStatement() ast.Statement {
 	return &ast.ExprStmt{Expr: expr}
 }
 
+// parseLetStmt parses a let or var declaration.
 func (p *Parser) parseLetStmt(mutable bool) ast.Statement {
 	stmt := &ast.LetStmt{Mutable: mutable}
 	if !p.expectPeek(token.Ident) {
@@ -150,6 +163,7 @@ func (p *Parser) parseLetStmt(mutable bool) ast.Statement {
 	return stmt
 }
 
+// parseAssignStmt parses assignment to an existing binding.
 func (p *Parser) parseAssignStmt() ast.Statement {
 	stmt := &ast.AssignStmt{Name: p.cur.Literal}
 	p.nextToken()
@@ -158,10 +172,42 @@ func (p *Parser) parseAssignStmt() ast.Statement {
 	return stmt
 }
 
+// parseReturnStmt parses an explicit return statement.
 func (p *Parser) parseReturnStmt() ast.Statement {
 	stmt := &ast.ReturnStmt{}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
+	return stmt
+}
+
+// parseIfStmt parses an if statement with an optional else block.
+func (p *Parser) parseIfStmt() ast.Statement {
+	stmt := &ast.IfStmt{}
+	p.nextToken()
+	stmt.Condition = p.parseExpression(lowest)
+	if !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Consequence = p.parseBlockStmt()
+	if p.peek.Type == token.Else {
+		p.nextToken()
+		if !p.expectPeek(token.LBrace) {
+			return stmt
+		}
+		stmt.Alternative = p.parseBlockStmt()
+	}
+	return stmt
+}
+
+// parseWhileStmt parses a while loop statement.
+func (p *Parser) parseWhileStmt() ast.Statement {
+	stmt := &ast.WhileStmt{}
+	p.nextToken()
+	stmt.Condition = p.parseExpression(lowest)
+	if !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Body = p.parseBlockStmt()
 	return stmt
 }
 
@@ -193,6 +239,7 @@ var precedences = map[token.Type]int{
 	token.Dot:      field,
 }
 
+// parseExpression parses an expression using Pratt parser precedence.
 func (p *Parser) parseExpression(precedence int) ast.Expression {
 	var left ast.Expression
 
@@ -239,6 +286,7 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 	return left
 }
 
+// parseBinaryExpr parses an infix binary expression.
 func (p *Parser) parseBinaryExpr(left ast.Expression) ast.Expression {
 	expr := &ast.BinaryExpr{Left: left, Operator: p.cur.Literal}
 	precedence := p.curPrecedence()
@@ -247,6 +295,7 @@ func (p *Parser) parseBinaryExpr(left ast.Expression) ast.Expression {
 	return expr
 }
 
+// parseCallExpr parses a function call expression.
 func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 	expr := &ast.CallExpr{Callee: callee}
 	if p.peek.Type == token.RParen {
@@ -264,6 +313,7 @@ func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 	return expr
 }
 
+// parseFieldExpr parses field access on an expression.
 func (p *Parser) parseFieldExpr(receiver ast.Expression) ast.Expression {
 	expr := &ast.FieldExpr{Receiver: receiver}
 	if !p.expectPeek(token.Ident) {
@@ -273,11 +323,13 @@ func (p *Parser) parseFieldExpr(receiver ast.Expression) ast.Expression {
 	return expr
 }
 
+// nextToken advances the current and lookahead tokens.
 func (p *Parser) nextToken() {
 	p.cur = p.peek
 	p.peek = p.l.NextToken()
 }
 
+// expectCur reports whether the current token has type t.
 func (p *Parser) expectCur(t token.Type) bool {
 	if p.cur.Type == t {
 		return true
@@ -286,6 +338,7 @@ func (p *Parser) expectCur(t token.Type) bool {
 	return false
 }
 
+// expectPeek advances if the lookahead token has type t.
 func (p *Parser) expectPeek(t token.Type) bool {
 	if p.peek.Type == t {
 		p.nextToken()
@@ -295,6 +348,7 @@ func (p *Parser) expectPeek(t token.Type) bool {
 	return false
 }
 
+// curPrecedence returns the precedence of the current token.
 func (p *Parser) curPrecedence() int {
 	if prec, ok := precedences[p.cur.Type]; ok {
 		return prec
@@ -302,6 +356,7 @@ func (p *Parser) curPrecedence() int {
 	return lowest
 }
 
+// peekPrecedence returns the precedence of the lookahead token.
 func (p *Parser) peekPrecedence() int {
 	if prec, ok := precedences[p.peek.Type]; ok {
 		return prec
@@ -309,6 +364,7 @@ func (p *Parser) peekPrecedence() int {
 	return lowest
 }
 
+// errorf records a parse error at the current token.
 func (p *Parser) errorf(format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	p.errors = append(p.errors, fmt.Sprintf("error: %s at %d:%d", message, p.cur.Line, p.cur.Column))

@@ -93,6 +93,10 @@ Go の compiler 実装では、次を守ります。
 * 1 関数 45 statement 以内
 * 1 行 100 文字以内
 
+Go code comments は英語で書きます。
+package / command comment と、すべての function / method comment は必須です。
+コメントは処理の逐語説明ではなく、責務、前提、境界条件、失敗条件を説明してください。
+
 ## CLI
 
 必須コマンド:

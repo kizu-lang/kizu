@@ -20,6 +20,8 @@ Kizu の基本型と関数呼び出しを静的に検査する。
 - [ ] 引数の数の不一致を検出する
 - [ ] 引数の型の不一致を検出する
 - [ ] 戻り値の型の不一致を検出する
+- [ ] non-void 関数に explicit return path があることを検査する
+- [ ] tail expression return を error にする
 - [ ] 不正な二項演算を検出する
 
 ## 受け入れ条件
@@ -27,6 +29,7 @@ Kizu の基本型と関数呼び出しを静的に検査する。
 - [ ] `pre-commit run --all-files` が通る
 - [ ] `kizu check` が基本的な型エラーを検出できる
 - [ ] 正しい Phase 2 examples が `kizu check` を通る
+- [ ] non-void 関数の return 漏れが error になる
 
 ## 範囲外
 

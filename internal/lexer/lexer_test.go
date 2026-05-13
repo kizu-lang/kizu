@@ -6,6 +6,7 @@ import (
 	"tiny-safe/internal/token"
 )
 
+// TestNextToken checks the lexer token stream for representative syntax.
 func TestNextToken(t *testing.T) {
 	input := `fn main() {
     let name = "alice"

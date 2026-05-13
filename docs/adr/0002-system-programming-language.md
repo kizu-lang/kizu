@@ -19,6 +19,7 @@ Kizu はシステムプログラミング言語を目指す。
 - comptime
 - 小さく読める処理系
 - macro や build script に依存しない設計
+- 明示 lifetime annotation に依存しない設計
 
 ## 影響
 
@@ -26,3 +27,4 @@ Kizu はシステムプログラミング言語を目指す。
 - 将来 `i32` / `u64` / `usize` などを追加する
 - C 親和性、WASM / WASI、LLVM backend を後続 Phase として扱う
 - 安全性は捨てず、危険な操作は明示境界に閉じ込める
+- 長寿命の関係は lifetime parameter ではなく arena / handle で扱う

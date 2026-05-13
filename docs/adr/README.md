@@ -34,3 +34,7 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0013: raw pointer は ptr<T> / ptr<const T>、nullable pointer は ?ptr<T> にする](0013-pointer-and-nullability.md)
 - [ADR-0014: Kizu IR は typed SSA IR にする](0014-typed-ssa-ir.md)
 - [ADR-0015: string は標準ライブラリ管理に寄せる](0015-string-and-stdlib.md)
+- [ADR-0016: 明示 lifetime annotation は採用しない](0016-no-explicit-lifetimes.md)
+- [ADR-0017: safe Kizu のメモリ安全性を保証する](0017-safe-kizu-memory-safety.md)
+- [ADR-0018: 戻り値は explicit return にする](0018-explicit-return-no-rust-tail-expression.md)
+- [ADR-0019: Code comments are written in English and required for packages and functions](0019-code-comments-in-english.md)
