@@ -1,5 +1,9 @@
 # Kizu
 
+<p align="center">
+  <img src="docs/assets/kizu-logo.svg" alt="Kizu logo" width="180">
+</p>
+
 Kizu is a small, explicit, memory-safe systems programming language prototype.
 
 The name comes from the Japanese word "kizu", meaning "wound" or "scratch".

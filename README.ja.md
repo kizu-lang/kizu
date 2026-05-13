@@ -1,5 +1,9 @@
 # Kizu
 
+<p align="center">
+  <img src="docs/assets/kizu-logo.svg" alt="Kizu logo" width="180">
+</p>
+
 Kizu は、小さく、明示的で、メモリ安全なシステムプログラミング言語のプロトタイプです。
 
 名前の Kizu は日本語の「傷」に由来します。
