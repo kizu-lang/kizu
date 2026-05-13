@@ -1,0 +1,36 @@
+# ADR
+
+ADR は Architecture Decision Record の略です。
+
+Kizu の設計判断は、仕様本文とは別にこのディレクトリで管理します。
+
+## 目的
+
+- なぜその設計にしたかを残す
+- 未確定の方針と採用済みの方針を分ける
+- 後から仕様を変更するときに判断の履歴を追えるようにする
+
+## ステータス
+
+- `提案`: 方針として有力だが、まだ実装または仕様確定していない
+- `採用`: 現時点の方針として採用する
+- `置換`: 別の ADR に置き換えられた
+- `却下`: 検討したが採用しない
+
+## 一覧
+
+- [ADR-0001: ADR で設計判断を管理する](0001-use-adr.md)
+- [ADR-0002: Kizu は低レベル寄りのシステムプログラミング言語を目指す](0002-system-programming-language.md)
+- [ADR-0003: 基本型は Zig 寄りの小文字表記にする](0003-lowercase-primitive-types.md)
+- [ADR-0004: ローカル束縛は let / var を使う](0004-let-var-bindings.md)
+- [ADR-0005: 実装フェーズは Markdown の TODO と受け入れ条件で管理する](0005-phase-documents.md)
+- [ADR-0006: comptime は採用候補とし、macro は採用しない](0006-comptime-without-macros.md)
+- [ADR-0007: unsafe は低レベル操作の明示境界にする](0007-unsafe-boundary.md)
+- [ADR-0008: C 親和性は ABI / FFI / layout / pointer で確保する](0008-c-interop.md)
+- [ADR-0009: compiler backend の前に Kizu IR を導入する](0009-kizu-ir-before-backends.md)
+- [ADR-0010: ビルド時間とキャッシュサイズの評価方法を早期に確立する](0010-build-performance-evaluation.md)
+- [ADR-0011: Phase 8 以降は IR、LLVM、性能評価、WASM、unsafe/C ABI の順に進める](0011-phase-order-to-llvm.md)
+- [ADR-0012: 低レベル型セットは Zig 寄りに広めに持つ](0012-low-level-type-set.md)
+- [ADR-0013: raw pointer は ptr<T> / ptr<const T>、nullable pointer は ?ptr<T> にする](0013-pointer-and-nullability.md)
+- [ADR-0014: Kizu IR は typed SSA IR にする](0014-typed-ssa-ir.md)
+- [ADR-0015: string は標準ライブラリ管理に寄せる](0015-string-and-stdlib.md)
