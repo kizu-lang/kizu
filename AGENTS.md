@@ -72,6 +72,9 @@ tests
 
 ## 品質ゲート
 
+日常コマンドは `justfile` にまとめています。利用可能な recipe は `just --list` で確認してください。
+特に build/cache 性能確認は `just perf`、`just perf-cache`、`just cache-smoke` を使ってください。
+
 commit 前に次を通してください。
 
 ```sh
