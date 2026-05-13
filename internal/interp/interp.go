@@ -24,7 +24,7 @@ func (i *Interpreter) Run(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
 		if !ok {
-			return fmt.Errorf("runtime error: unsupported declaration %T", decl)
+			continue
 		}
 		i.functions[fn.Name] = fn
 	}

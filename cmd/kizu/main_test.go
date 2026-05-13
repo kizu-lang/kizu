@@ -19,6 +19,19 @@ func TestRunCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestRunCommandBorrowExample checks borrow parameters preserve ownership.
+func TestRunCommandBorrowExample(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "run", "../../examples/borrow.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "alice\nalice\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestRunCommandRejectsMoveError checks run does not bypass static move checks.
 func TestRunCommandRejectsMoveError(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "run", "../../examples/move_error.kizu")

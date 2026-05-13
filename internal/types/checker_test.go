@@ -167,6 +167,19 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsStructDeclarations checks Phase 5 struct declarations.
+func TestCheckAcceptsStructDeclarations(t *testing.T) {
+	source := `struct User {
+    name: string
+    age: int
+}
+fn take(user: User) {}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // checkSource parses and type-checks a source snippet.
 func checkSource(source string) error {
 	p := parser.New(lexer.New(source))

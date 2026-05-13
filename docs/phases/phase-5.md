@@ -1,6 +1,6 @@
 # Phase 5: Local borrow checker
 
-状態: 未着手
+状態: 完了
 
 ## 目的
 
@@ -8,22 +8,22 @@
 
 ## TODO
 
-- [ ] `borrow T` parameter を検査する
-- [ ] borrow が値を move しないことを検査する
-- [ ] borrow 中の値を move できないことを検査する
-- [ ] borrow を関数から返せないことを検査する
-- [ ] borrow を struct field に保存できないことを検査する
-- [ ] borrow が lexical block の外へ escape できないことを検査する
-- [ ] 明示 lifetime annotation を syntax として受け付けない
-- [ ] mutable borrow conflict を検査する
+- [x] `borrow T` parameter を検査する
+- [x] borrow が値を move しないことを検査する
+- [x] borrow 中の値を move できないことを検査する
+- [x] borrow を関数から返せないことを検査する
+- [x] borrow を struct field に保存できないことを検査する
+- [x] borrow が lexical block の外へ escape できないことを検査する
+- [x] 明示 lifetime annotation を syntax として受け付けない
+- [x] mutable borrow conflict を検査する
 
 ## 受け入れ条件
 
-- [ ] `pre-commit run --all-files` が通る
-- [ ] `examples/borrow.kizu` が通る
-- [ ] borrow escape の例が期待どおり error になる
-- [ ] borrow を返す関数が error になる
-- [ ] borrow field を持つ struct が error になる
+- [x] `pre-commit run --all-files` が通る
+- [x] `examples/borrow.kizu` が通る
+- [x] borrow escape の例が期待どおり error になる
+- [x] borrow を返す関数が error になる
+- [x] borrow field を持つ struct が error になる
 
 ## 範囲外
 
@@ -31,3 +31,10 @@
 - non-local borrow
 - arena / handle provenance
 - unsafe pointer proof
+
+## 実装メモ
+
+v0 の borrow は immutable borrow のみです。
+そのため mutable borrow conflict は、mutable borrow 構文を導入しないことで発生不能にしています。
+同一 call 内では borrow 引数と move 引数の lifetime が重なるものとして扱い、
+同じ値を borrow しながら move しようとすると error にします。

@@ -25,10 +25,12 @@ type paramInfo struct {
 }
 
 type binding struct {
-	id       int
-	name     string
-	typeName string
-	moved    bool
+	id            int
+	name          string
+	typeName      string
+	moved         bool
+	borrowedParam bool
+	activeBorrows int
 }
 
 type scope struct {
@@ -43,6 +45,9 @@ func New() *Checker {
 
 // Check validates ownership rules and returns the first move error.
 func (c *Checker) Check(program *ast.Program) error {
+	if err := c.checkStructs(program); err != nil {
+		return err
+	}
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
@@ -58,12 +63,29 @@ func (c *Checker) Check(program *ast.Program) error {
 	return nil
 }
 
+// checkStructs rejects struct fields that would store a local borrow.
+func (c *Checker) checkStructs(program *ast.Program) error {
+	for _, decl := range program.Decls {
+		st, ok := decl.(*ast.StructDecl)
+		if !ok {
+			continue
+		}
+		for _, field := range st.Fields {
+			if field.Borrow {
+				return fmt.Errorf("borrow error: struct field `%s.%s` cannot store borrow",
+					st.Name, field.Name)
+			}
+		}
+	}
+	return nil
+}
+
 // collectFunctions registers top-level signatures before body checks.
 func (c *Checker) collectFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
 		if !ok {
-			return fmt.Errorf("move error: unsupported declaration %T", decl)
+			continue
 		}
 		params := make([]paramInfo, 0, len(fn.Params))
 		for _, param := range fn.Params {
@@ -80,7 +102,9 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 func (c *Checker) checkFunction(fn *functionInfo) error {
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {
-		env.define(c.newBinding(param.Name, fn.params[idx].typeName))
+		value := c.newBinding(param.Name, fn.params[idx].typeName)
+		value.borrowedParam = fn.params[idx].borrow
+		env.define(value)
 	}
 	return c.checkBlock(fn.decl.Body, env)
 }
@@ -103,8 +127,7 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 	case *ast.AssignStmt:
 		return c.checkAssignStmt(s, env)
 	case *ast.ReturnStmt:
-		_, err := c.moveExpr(s.Value, env)
-		return err
+		return c.checkReturnStmt(s, env)
 	case *ast.ExprStmt:
 		return c.checkExprStmt(s, env)
 	case *ast.IfStmt:
@@ -114,6 +137,18 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 	default:
 		return fmt.Errorf("move error: unsupported statement %T", stmt)
 	}
+}
+
+// checkReturnStmt rejects borrowed values before applying normal move rules.
+func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
+	if ident, ok := stmt.Value.(*ast.IdentExpr); ok {
+		value, exists := env.lookup(ident.Name)
+		if exists && value.borrowedParam {
+			return fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
+		}
+	}
+	_, err := c.moveExpr(stmt.Value, env)
+	return err
 }
 
 // checkLetStmt moves the initializer into a new binding when needed.
@@ -217,6 +252,12 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	if value.moved {
 		return "", fmt.Errorf("move error: moved value `%s` was used", ident.Name)
 	}
+	if value.borrowedParam {
+		return "", fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
+	}
+	if value.activeBorrows > 0 && !isCopyType(value.typeName) {
+		return "", fmt.Errorf("borrow error: value `%s` cannot be moved while borrowed", ident.Name)
+	}
 	if !isCopyType(value.typeName) {
 		value.moved = true
 	}
@@ -248,8 +289,16 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if !ok {
 		return "", fmt.Errorf("move error: undefined function `%s`", name.Name)
 	}
+	if len(expr.Args) != len(fn.params) {
+		return "", fmt.Errorf("move error: `%s` expects %d args, got %d",
+			name.Name, len(fn.params), len(expr.Args))
+	}
+	borrowed, err := c.activateBorrowArgs(fn, expr.Args, env)
+	if err != nil {
+		return "", err
+	}
+	defer releaseBorrows(borrowed)
 	for idx, arg := range expr.Args {
-		var err error
 		if fn.params[idx].borrow {
 			_, err = c.readExpr(arg, env)
 		} else {
@@ -260,6 +309,53 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// activateBorrowArgs marks identifier arguments that are borrowed for this call.
+func (c *Checker) activateBorrowArgs(
+	fn *functionInfo,
+	args []ast.Expression,
+	env *scope,
+) ([]*binding, error) {
+	borrowed := []*binding{}
+	for idx, arg := range args {
+		if !fn.params[idx].borrow {
+			continue
+		}
+		value, err := borrowedIdent(arg, env)
+		if err != nil {
+			releaseBorrows(borrowed)
+			return nil, err
+		}
+		if value != nil {
+			value.activeBorrows++
+			borrowed = append(borrowed, value)
+		}
+	}
+	return borrowed, nil
+}
+
+// borrowedIdent resolves an identifier borrow target when the argument is a name.
+func borrowedIdent(expr ast.Expression, env *scope) (*binding, error) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return nil, nil
+	}
+	value, exists := env.lookup(ident.Name)
+	if !exists {
+		return nil, fmt.Errorf("borrow error: undefined variable `%s`", ident.Name)
+	}
+	if value.moved {
+		return nil, fmt.Errorf("borrow error: moved value `%s` was borrowed", ident.Name)
+	}
+	return value, nil
+}
+
+// releaseBorrows clears temporary borrow state for a completed call.
+func releaseBorrows(values []*binding) {
+	for _, value := range values {
+		value.activeBorrows--
+	}
 }
 
 // checkPrintCall reads the printed value without taking ownership.

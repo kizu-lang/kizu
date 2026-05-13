@@ -78,6 +78,67 @@ fn main() {
 	}
 }
 
+// TestCheckRejectsBorrowEscape checks borrowed parameters cannot become owned values.
+func TestCheckRejectsBorrowEscape(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "return borrowed parameter",
+			source: `fn bad(s: borrow string) -> string {
+    return s
+}`,
+			want: "borrowed value `s` cannot escape",
+		},
+		{
+			name: "store borrowed parameter in local",
+			source: `fn bad(s: borrow string) {
+    let alias = s
+    print(alias)
+}`,
+			want: "borrowed value `s` cannot escape",
+		},
+		{
+			name: "pass borrowed parameter to owner",
+			source: `fn take(s: string) { print(s) }
+fn bad(s: borrow string) {
+    take(s)
+}`,
+			want: "borrowed value `s` cannot escape",
+		},
+		{
+			name: "borrow field",
+			source: `struct Bad {
+    value: borrow string
+}
+fn main() {}`,
+			want: "struct field `Bad.value` cannot store borrow",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsMoveWhileBorrowed checks overlapping borrow and move in a call.
+func TestCheckRejectsMoveWhileBorrowed(t *testing.T) {
+	source := `fn use(a: borrow string, b: string) {
+    print(a)
+    print(b)
+}
+fn main() {
+    let name = "alice"
+    use(name, name)
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "value `name` cannot be moved while borrowed") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckBranchMoveMarksOuterValueMoved checks possible moves escape branches.
 func TestCheckBranchMoveMarksOuterValueMoved(t *testing.T) {
 	source := `fn take(s: string) { print(s) }

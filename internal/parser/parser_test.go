@@ -68,3 +68,33 @@ func TestParseIfAndWhile(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// TestParseStructDecl checks top-level struct field parsing.
+func TestParseStructDecl(t *testing.T) {
+	input := `struct User {
+    name: string
+    age: int
+}
+fn main() {}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	got := program.String()
+	want := `struct User { name: string; age: int }
+fn main() {  }`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
+func TestParseRejectsExplicitLifetime(t *testing.T) {
+	input := `fn show(s: borrow 'a string) {}`
+	p := New(lexer.New(input))
+	_ = p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatalf("expected parser error")
+	}
+}

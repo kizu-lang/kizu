@@ -37,6 +37,9 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Function:
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
+		case token.Struct:
+			program.Decls = append(program.Decls, p.parseStructDecl())
+			p.nextToken()
 		default:
 			p.errorf("expected declaration, got %s", p.cur.Type)
 			p.nextToken()
@@ -71,6 +74,62 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 	}
 	fn.Body = p.parseBlockStmt()
 	return fn
+}
+
+// parseStructDecl parses a top-level struct declaration.
+func (p *Parser) parseStructDecl() ast.Decl {
+	decl := &ast.StructDecl{}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.Name = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Fields = p.parseStructFields()
+	return decl
+}
+
+// parseStructFields parses newline- or comma-separated struct fields.
+func (p *Parser) parseStructFields() []ast.Field {
+	fields := []ast.Field{}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		field, ok := p.parseStructField()
+		if !ok {
+			return fields
+		}
+		fields = append(fields, field)
+		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
+			p.nextToken()
+		}
+		p.nextToken()
+	}
+	return fields
+}
+
+// parseStructField parses one struct field declaration.
+func (p *Parser) parseStructField() (ast.Field, bool) {
+	field := ast.Field{}
+	if p.cur.Type != token.Ident {
+		p.errorf("expected field name, got %s", p.cur.Type)
+		return field, false
+	}
+	field.Name = p.cur.Literal
+	if !p.expectPeek(token.Colon) {
+		return field, false
+	}
+	p.nextToken()
+	if p.cur.Type == token.Borrow {
+		field.Borrow = true
+		p.nextToken()
+	}
+	if p.cur.Type != token.Ident {
+		p.errorf("expected field type, got %s", p.cur.Type)
+		return field, false
+	}
+	field.TypeName = p.cur.Literal
+	return field, true
 }
 
 // parseParams parses a function parameter list.

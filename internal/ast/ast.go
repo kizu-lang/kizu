@@ -70,6 +70,40 @@ func (d *FunctionDecl) String() string {
 	return fmt.Sprintf("fn %s(%s)%s %s", d.Name, strings.Join(params, ", "), ret, d.Body.String())
 }
 
+// StructDecl represents a top-level struct declaration.
+type StructDecl struct {
+	Name   string
+	Fields []Field
+}
+
+// declNode marks StructDecl as a declaration node.
+func (*StructDecl) declNode() {}
+
+// String returns a compact debug representation of the struct declaration.
+func (d *StructDecl) String() string {
+	fields := make([]string, 0, len(d.Fields))
+	for _, field := range d.Fields {
+		fields = append(fields, field.String())
+	}
+	return fmt.Sprintf("struct %s { %s }", d.Name, strings.Join(fields, "; "))
+}
+
+// Field represents a named struct field.
+type Field struct {
+	Name     string
+	TypeName string
+	Borrow   bool
+}
+
+// String returns a compact debug representation of the field.
+func (f Field) String() string {
+	prefix := ""
+	if f.Borrow {
+		prefix = "borrow "
+	}
+	return fmt.Sprintf("%s: %s%s", f.Name, prefix, f.TypeName)
+}
+
 // Param represents a function parameter.
 type Param struct {
 	Name     string

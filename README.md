@@ -2,7 +2,8 @@
 
 Kizu は、小さく、シンプルで、メモリ安全なプログラミング言語のプロトタイプです。
 
-現時点では Go 製の初期実装で、Phase 3 として lexer、parser、AST、CLI、interpreter、type checker を実装しています。
+現時点では Go 製の初期実装で、Phase 5 として lexer、parser、AST、CLI、
+interpreter、type checker、move checker、local borrow checker を実装しています。
 
 ## 実行方法
 
@@ -36,7 +37,8 @@ nix develop -c go run ./cmd/kizu run examples/functions.kizu
 ```
 
 `run` は Phase 2 の interpreter を呼び出し、`print`、整数演算、変数、関数、`if`、`while` を実行できます。
-`check` は Phase 3 の type checker を呼び出し、基本型、関数呼び出し、return、二項演算を静的に検査できます。
+`check` は Phase 5 までの checker を呼び出し、基本型、関数呼び出し、return、
+二項演算、move、local borrow を静的に検査できます。
 
 ## 方針
 

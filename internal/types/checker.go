@@ -79,6 +79,7 @@ var integerTypes = map[Type]bool{
 // Checker validates type rules for a parsed program.
 type Checker struct {
 	functions map[string]*functionType
+	structs   map[string]*ast.StructDecl
 }
 
 type functionType struct {
@@ -95,7 +96,7 @@ type scope struct {
 
 // New creates an empty type checker.
 func New() *Checker {
-	return &Checker{functions: map[string]*functionType{}}
+	return &Checker{functions: map[string]*functionType{}, structs: map[string]*ast.StructDecl{}}
 }
 
 // Check validates the program and returns the first type error.
@@ -118,14 +119,26 @@ func (c *Checker) Check(program *ast.Program) error {
 // collectFunctions registers top-level function signatures before body checks.
 func (c *Checker) collectFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			if err := c.collectStruct(d); err != nil {
+				return err
+			}
+		case *ast.FunctionDecl:
+			continue
+		default:
+			return fmt.Errorf("type error: unsupported declaration %T", decl)
+		}
+	}
+	for _, decl := range program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
 		if !ok {
-			return fmt.Errorf("type error: unsupported declaration %T", decl)
+			continue
 		}
 		if _, exists := c.functions[fn.Name]; exists {
 			return fmt.Errorf("type error: duplicate function `%s`", fn.Name)
 		}
-		fnType, err := newFunctionType(fn)
+		fnType, err := c.newFunctionType(fn)
 		if err != nil {
 			return err
 		}
@@ -134,11 +147,25 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 	return nil
 }
 
+// collectStruct registers and validates a struct declaration.
+func (c *Checker) collectStruct(decl *ast.StructDecl) error {
+	if _, exists := c.structs[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate struct `%s`", decl.Name)
+	}
+	c.structs[decl.Name] = decl
+	for _, field := range decl.Fields {
+		if _, err := c.parseType(field.TypeName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // newFunctionType converts a parsed function declaration into its static type.
-func newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
+func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	params := make([]Type, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		paramType, err := parseType(param.TypeName)
+		paramType, err := c.parseType(param.TypeName)
 		if err != nil {
 			return nil, err
 		}
@@ -150,7 +177,7 @@ func newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	ret := typeVoid
 	if fn.ReturnType != "" {
 		var err error
-		ret, err = parseType(fn.ReturnType)
+		ret, err = c.parseType(fn.ReturnType)
 		if err != nil {
 			return nil, err
 		}
@@ -159,9 +186,9 @@ func newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 }
 
 // parseType validates a source-level type name.
-func parseType(name string) (Type, error) {
+func (c *Checker) parseType(name string) (Type, error) {
 	typ := Type(name)
-	if !knownTypes[typ] {
+	if !knownTypes[typ] && c.structs[name] == nil {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
