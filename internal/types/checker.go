@@ -344,6 +344,8 @@ func (c *Checker) checkStmt(
 		return c.checkIfStmt(s, env, wantReturn, unsafe)
 	case *ast.WhileStmt:
 		return c.checkWhileStmt(s, env, wantReturn, unsafe)
+	case *ast.MatchStmt:
+		return c.checkMatchStmt(s, env, wantReturn, unsafe)
 	case *ast.UnsafeStmt:
 		return c.checkBlock(s.Body, env.child(), wantReturn, true)
 	case *ast.ComptimeIfStmt:
@@ -430,6 +432,54 @@ func (c *Checker) checkWhileStmt(
 	}
 	_, err = c.checkBlock(stmt.Body, env.child(), wantReturn, unsafe)
 	return false, err
+}
+
+// checkMatchStmt validates exhaustive simple enum tag matches.
+func (c *Checker) checkMatchStmt(
+	stmt *ast.MatchStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe bool,
+) (bool, error) {
+	valueType, err := c.checkExpr(stmt.Value, env, unsafe)
+	if err != nil {
+		return false, err
+	}
+	enumType := c.enums[string(valueType)]
+	if enumType == nil {
+		return false, fmt.Errorf("type error: match expects enum, got %s", valueType)
+	}
+	return c.checkMatchArms(stmt.Arms, enumType, env, wantReturn, unsafe)
+}
+
+// checkMatchArms validates tag patterns and return flow for match arms.
+func (c *Checker) checkMatchArms(
+	arms []ast.MatchArm,
+	enumType *enumType,
+	env *scope,
+	wantReturn Type,
+	unsafe bool,
+) (bool, error) {
+	seen := map[string]bool{}
+	allReturn := len(arms) > 0
+	for _, arm := range arms {
+		if !enumType.tags[arm.Tag] {
+			return false, fmt.Errorf("type error: unknown enum tag `%s.%s`", enumType.name, arm.Tag)
+		}
+		if seen[arm.Tag] {
+			return false, fmt.Errorf("type error: duplicate match tag `%s.%s`", enumType.name, arm.Tag)
+		}
+		seen[arm.Tag] = true
+		returns, err := c.checkStmt(arm.Body, env.child(), wantReturn, unsafe)
+		if err != nil {
+			return false, err
+		}
+		allReturn = allReturn && returns
+	}
+	if len(seen) != len(enumType.tags) {
+		return false, fmt.Errorf("type error: match on `%s` is not exhaustive", enumType.name)
+	}
+	return allReturn, nil
 }
 
 // checkExpr computes the static type of an expression.

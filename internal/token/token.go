@@ -20,14 +20,15 @@ const (
 	Slash    Type = "/"
 	Percent  Type = "%"
 
-	Eq    Type = "=="
-	NotEq Type = "!="
-	LT    Type = "<"
-	LTE   Type = "<="
-	GT    Type = ">"
-	GTE   Type = ">="
-	Arrow Type = "->"
-	Dot   Type = "."
+	Eq       Type = "=="
+	FatArrow Type = "=>"
+	NotEq    Type = "!="
+	LT       Type = "<"
+	LTE      Type = "<="
+	GT       Type = ">"
+	GTE      Type = ">="
+	Arrow    Type = "->"
+	Dot      Type = "."
 
 	Comma     Type = ","
 	Colon     Type = ":"
@@ -47,6 +48,7 @@ const (
 	If       Type = "if"
 	Else     Type = "else"
 	While    Type = "while"
+	Match    Type = "match"
 	Struct   Type = "struct"
 	Enum     Type = "enum"
 	True     Type = "true"
@@ -73,6 +75,7 @@ var keywords = map[string]Type{
 	"if":       If,
 	"else":     Else,
 	"while":    While,
+	"match":    Match,
 	"struct":   Struct,
 	"enum":     Enum,
 	"true":     True,

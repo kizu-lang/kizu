@@ -94,6 +94,27 @@ fn main() {
 	}
 }
 
+// TestRunEnumMatch checks simple enum tag match execution.
+func TestRunEnumMatch(t *testing.T) {
+	got := runSource(t, `enum Color {
+    Red
+    Green
+    Blue
+}
+fn main() {
+    let color = Color.Blue
+    match color {
+        Red => print("red")
+        Green => print("green")
+        Blue => print("blue")
+    }
+}`)
+	want := "blue\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunComptime checks Phase 13 expressions and selected branches execute normally.
 func TestRunComptime(t *testing.T) {
 	got := runSource(t, `fn sized(comptime n: int) -> int { return n }

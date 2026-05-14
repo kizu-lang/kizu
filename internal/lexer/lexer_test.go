@@ -12,7 +12,7 @@ func TestNextToken(t *testing.T) {
     let name = "alice"
     var age = 30
     age = age + 1
-    return age >= 20
+    match Color.Red { Red => return age >= 20 }
 }`
 
 	tests := []struct {
@@ -37,10 +37,18 @@ func TestNextToken(t *testing.T) {
 		{token.Ident, "age"},
 		{token.Plus, "+"},
 		{token.Int, "1"},
+		{token.Match, "match"},
+		{token.Ident, "Color"},
+		{token.Dot, "."},
+		{token.Ident, "Red"},
+		{token.LBrace, "{"},
+		{token.Ident, "Red"},
+		{token.FatArrow, "=>"},
 		{token.Return, "return"},
 		{token.Ident, "age"},
 		{token.GTE, ">="},
 		{token.Int, "20"},
+		{token.RBrace, "}"},
 		{token.RBrace, "}"},
 		{token.EOF, ""},
 	}

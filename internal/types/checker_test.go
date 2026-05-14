@@ -232,6 +232,71 @@ fn main() { print(Color.Blue) }`,
 	runErrorCases(t, cases)
 }
 
+// TestCheckAcceptsEnumMatch checks exhaustive simple enum match statements.
+func TestCheckAcceptsEnumMatch(t *testing.T) {
+	source := `enum Color {
+    Red
+    Green
+    Blue
+}
+fn main() {
+    let color = Color.Green
+    match color {
+        Red => print("red")
+        Green => print("green")
+        Blue => print("blue")
+    }
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsEnumMatchErrors checks simple enum match diagnostics.
+func TestCheckRejectsEnumMatchErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "non enum",
+			source: `fn main() {
+    match 1 { Red => print("red") }
+}`,
+			want: "match expects enum, got int",
+		},
+		{
+			name: "unknown tag",
+			source: `enum Color { Red Green }
+fn main() {
+    let color = Color.Red
+    match color { Red => print("red") Blue => print("blue") }
+}`,
+			want: "unknown enum tag `Color.Blue`",
+		},
+		{
+			name: "duplicate tag",
+			source: `enum Color { Red Green }
+fn main() {
+    let color = Color.Red
+    match color { Red => print("red") Red => print("again") Green => print("green") }
+}`,
+			want: "duplicate match tag `Color.Red`",
+		},
+		{
+			name: "not exhaustive",
+			source: `enum Color { Red Green }
+fn main() {
+    let color = Color.Red
+    match color { Red => print("red") }
+}`,
+			want: "match on `Color` is not exhaustive",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckAcceptsArenaHandle checks Phase 6 arena and handle types.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {

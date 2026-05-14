@@ -159,6 +159,8 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkIfStmt(s, env)
 	case *ast.WhileStmt:
 		return c.checkWhileStmt(s, env)
+	case *ast.MatchStmt:
+		return c.checkMatchStmt(s, env)
 	case *ast.UnsafeStmt:
 		return c.checkBlock(s.Body, env.child())
 	case *ast.ComptimeIfStmt:
@@ -252,6 +254,29 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 		return err
 	}
 	env.mergeMovedFrom(body)
+	return nil
+}
+
+// checkMatchStmt merges possible moves from enum match arms into the outer scope.
+func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
+	valueType, err := c.readExpr(stmt.Value, env)
+	if err != nil {
+		return err
+	}
+	tags := c.enums[valueType]
+	if tags == nil {
+		return fmt.Errorf("move error: match expects enum, got %s", valueType)
+	}
+	for _, arm := range stmt.Arms {
+		if !tags[arm.Tag] {
+			return fmt.Errorf("move error: unknown enum tag `%s.%s`", valueType, arm.Tag)
+		}
+		armEnv := env.clone()
+		if err := c.checkStmt(arm.Body, armEnv.child()); err != nil {
+			return err
+		}
+		env.mergeMovedFrom(armEnv)
+	}
 	return nil
 }
 

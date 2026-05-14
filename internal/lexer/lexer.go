@@ -63,6 +63,12 @@ func (l *Lexer) NextToken() token.Token {
 			return l.NextToken()
 		}
 		tok = l.oneCharToken(token.Slash)
+	case '=':
+		if l.peekChar() == '>' {
+			tok = l.twoCharToken(token.FatArrow)
+			break
+		}
+		tok = l.readCompoundToken(compoundTokens[l.ch])
 	case '"':
 		tok.Type = token.String
 		tok.Literal = l.readString()

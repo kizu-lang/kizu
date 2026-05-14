@@ -281,6 +281,8 @@ func (p *Parser) parseStatement() ast.Statement {
 		return p.parseIfStmt()
 	case token.While:
 		return p.parseWhileStmt()
+	case token.Match:
+		return p.parseMatchStmt()
 	case token.Unsafe:
 		return p.parseUnsafeStmt()
 	case token.Comptime:
@@ -389,6 +391,52 @@ func (p *Parser) parseWhileStmt() ast.Statement {
 	}
 	stmt.Body = p.parseBlockStmt()
 	return stmt
+}
+
+// parseMatchStmt parses a simple enum tag match statement.
+func (p *Parser) parseMatchStmt() ast.Statement {
+	stmt := &ast.MatchStmt{}
+	p.nextToken()
+	stmt.Value = p.parseExpression(lowest)
+	if !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Arms = p.parseMatchArms()
+	return stmt
+}
+
+// parseMatchArms parses enum tag arms until the closing brace.
+func (p *Parser) parseMatchArms() []ast.MatchArm {
+	arms := []ast.MatchArm{}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		arm, ok := p.parseMatchArm()
+		if !ok {
+			return arms
+		}
+		arms = append(arms, arm)
+		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
+			p.nextToken()
+		}
+		p.nextToken()
+	}
+	return arms
+}
+
+// parseMatchArm parses one enum tag arm.
+func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
+	arm := ast.MatchArm{}
+	if p.cur.Type != token.Ident {
+		p.errorf("expected match tag, got %s", p.cur.Type)
+		return arm, false
+	}
+	arm.Tag = p.cur.Literal
+	if !p.expectPeek(token.FatArrow) {
+		return arm, false
+	}
+	p.nextToken()
+	arm.Body = p.parseStatement()
+	return arm, true
 }
 
 const (

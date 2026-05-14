@@ -114,6 +114,8 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		return i.evalIfStmt(s, env)
 	case *ast.WhileStmt:
 		return i.evalWhileStmt(s, env)
+	case *ast.MatchStmt:
+		return i.evalMatchStmt(s, env)
 	case *ast.UnsafeStmt:
 		return i.evalBlock(s.Body, env.Child())
 	case *ast.ComptimeIfStmt:
@@ -177,6 +179,23 @@ func (i *Interpreter) evalWhileStmt(stmt *ast.WhileStmt, env *Env) (Value, bool,
 			return result, returned, err
 		}
 	}
+}
+
+// evalMatchStmt executes the matching enum tag arm.
+func (i *Interpreter) evalMatchStmt(stmt *ast.MatchStmt, env *Env) (Value, bool, error) {
+	value, err := i.evalExpr(stmt.Value, env)
+	if err != nil {
+		return voidValue(), false, err
+	}
+	if value.kind != kindEnum {
+		return voidValue(), false, fmt.Errorf("runtime error: match expects enum")
+	}
+	for _, arm := range stmt.Arms {
+		if arm.Tag == value.enum.tag {
+			return i.evalStmt(arm.Body, env.Child())
+		}
+	}
+	return voidValue(), false, fmt.Errorf("runtime error: no match arm for `%s`", value.String())
 }
 
 // evalComptimeIfStmt executes the branch selected by a compile-time condition.

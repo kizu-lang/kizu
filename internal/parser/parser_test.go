@@ -112,6 +112,34 @@ fn main() { print(Color.Red) }`
 	}
 }
 
+// TestParseMatchStmt checks simple enum tag match parsing.
+func TestParseMatchStmt(t *testing.T) {
+	input := `enum Color {
+    Red
+    Green
+    Blue
+}
+fn main() {
+    let color = Color.Red
+    match color {
+        Red => print("red")
+        Green => print("green")
+        Blue => print("blue")
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `enum Color { Red; Green; Blue }
+fn main() { let color = Color.Red; match color { Red => print("red"); ` +
+		`Green => print("green"); Blue => print("blue") } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
 func TestParseArenaAndStructLiteral(t *testing.T) {
 	input := `struct User {

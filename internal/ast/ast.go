@@ -245,6 +245,35 @@ func (s *WhileStmt) String() string {
 	return fmt.Sprintf("while %s %s", s.Condition.String(), s.Body.String())
 }
 
+// MatchStmt represents a simple enum tag match statement.
+type MatchStmt struct {
+	Value Expression
+	Arms  []MatchArm
+}
+
+// statementNode marks MatchStmt as a statement node.
+func (*MatchStmt) statementNode() {}
+
+// String returns a compact debug representation of the match statement.
+func (s *MatchStmt) String() string {
+	arms := make([]string, 0, len(s.Arms))
+	for _, arm := range s.Arms {
+		arms = append(arms, arm.String())
+	}
+	return fmt.Sprintf("match %s { %s }", s.Value.String(), strings.Join(arms, "; "))
+}
+
+// MatchArm represents one enum tag branch in a match statement.
+type MatchArm struct {
+	Tag  string
+	Body Statement
+}
+
+// String returns a compact debug representation of the match arm.
+func (a MatchArm) String() string {
+	return fmt.Sprintf("%s => %s", a.Tag, a.Body.String())
+}
+
 // UnsafeStmt represents an explicit unsafe block.
 type UnsafeStmt struct {
 	Body *BlockStmt
