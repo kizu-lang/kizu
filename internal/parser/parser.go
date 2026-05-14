@@ -410,6 +410,9 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 func (p *Parser) parsePrefixExpression() ast.Expression {
 	switch p.cur.Type {
 	case token.Ident:
+		if p.cur.Literal == "cast" && p.peek.Type == token.LT {
+			return p.parseCastExpr()
+		}
 		if p.cur.Literal == "arena" && p.peek.Type == token.LT {
 			return p.parseArenaNewExpr()
 		}
@@ -441,6 +444,26 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		p.errorf("expected expression, got %s", p.cur.Type)
 		return &ast.IdentExpr{Name: "<error>"}
 	}
+}
+
+// parseCastExpr parses cast<T>(value).
+func (p *Parser) parseCastExpr() ast.Expression {
+	expr := &ast.CastExpr{}
+	if !p.expectPeek(token.LT) {
+		return expr
+	}
+	p.nextToken()
+	expr.TargetType = p.parseTypeName()
+	if expr.TargetType == "" || !p.expectPeek(token.GT) {
+		return expr
+	}
+	if !p.expectPeek(token.LParen) {
+		return expr
+	}
+	p.nextToken()
+	expr.Value = p.parseExpression(lowest)
+	p.expectPeek(token.RParen)
+	return expr
 }
 
 // parseTypeName parses a plain, pointer, or single-argument generic type name.

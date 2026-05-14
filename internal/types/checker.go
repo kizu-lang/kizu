@@ -411,6 +411,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 		return c.checkBinaryExpr(e, env, unsafe)
 	case *ast.CallExpr:
 		return c.checkCallExpr(e, env, unsafe)
+	case *ast.CastExpr:
+		return c.checkCastExpr(e, env, unsafe)
 	case *ast.ArenaNewExpr:
 		return c.checkArenaNewExpr(e)
 	case *ast.StructLiteralExpr:
@@ -492,6 +494,28 @@ func checkEquality(op string, left Type, right Type) (Type, error) {
 // isComparison reports whether op returns bool for int operands.
 func isComparison(op string) bool {
 	return op == "<" || op == "<=" || op == ">" || op == ">="
+}
+
+// checkCastExpr validates explicit low-level casts.
+func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe bool) (Type, error) {
+	target, err := c.parseType(expr.TargetType)
+	if err != nil {
+		return "", err
+	}
+	source, err := c.checkExpr(expr.Value, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if numericTypes[source] && numericTypes[target] {
+		return target, nil
+	}
+	if isPointerType(source) && isPointerType(target) {
+		if !unsafe {
+			return "", fmt.Errorf("unsafe error: pointer cast requires unsafe block")
+		}
+		return target, nil
+	}
+	return "", fmt.Errorf("type error: cannot cast %s to %s", source, target)
 }
 
 // checkCallExpr validates builtin and user function calls.
@@ -731,6 +755,12 @@ func pointerElement(typ Type) (string, bool) {
 		return "", false
 	}
 	return arg, true
+}
+
+// isPointerType reports whether typ is ptr<T> or ?ptr<T>.
+func isPointerType(typ Type) bool {
+	_, ok := pointerElement(typ)
+	return ok
 }
 
 // checkPrintCall validates the print builtin.

@@ -23,6 +23,7 @@
 | Phase 13 | 完了 | comptime | [phase-13.md](docs/phases/phase-13.md) |
 | Phase 14 | 完了 | C header import | [phase-14.md](docs/phases/phase-14.md) |
 | Phase 15 | 完了 | IR optimization pipeline | [phase-15.md](docs/phases/phase-15.md) |
+| Phase 16 | 完了 | low-level type system hardening | [phase-16.md](docs/phases/phase-16.md) |
 
 ## 横断フェーズ
 

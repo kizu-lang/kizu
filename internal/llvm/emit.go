@@ -133,6 +133,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "call."):
 		return e.writeCall(instr)
+	case instr.Op == "cast":
+		return e.writeCast(instr)
 	case instr.Op == "phi":
 		return e.writePhi(instr)
 	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
@@ -207,6 +209,16 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	return nil
 }
 
+// writeCast emits a no-op value conversion for the Phase 16 low-level subset.
+func (e *emitter) writeCast(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: cast expects 1 arg")
+	}
+	value := e.value(instr.Args[0])
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+	return nil
+}
+
 // writePrint writes calls to the Kizu runtime print ABI.
 func (e *emitter) writePrint(args []ir.Value) error {
 	if len(args) != 1 {
@@ -217,7 +229,7 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	case "string":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n",
 			value.operand, value.length)
-	case "int":
+	case "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", value.operand)
 	case "bool":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_bool(i1 %s)\n", value.operand)

@@ -257,6 +257,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readBinaryExpr(e, env)
 	case *ast.CallExpr:
 		return c.checkCallExpr(e, env)
+	case *ast.CastExpr:
+		return c.readCastExpr(e, env)
 	case *ast.ArenaNewExpr:
 		return fmt.Sprintf("arena<%s>", e.TypeName), nil
 	case *ast.StructLiteralExpr:
@@ -266,6 +268,14 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	default:
 		return "", fmt.Errorf("move error: unsupported expression %T", expr)
 	}
+}
+
+// readCastExpr reads the source value and returns the explicit target type.
+func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
+	if _, err := c.readExpr(expr.Value, env); err != nil {
+		return "", err
+	}
+	return expr.TargetType, nil
 }
 
 // moveExpr checks an expression and consumes a non-copy identifier when present.

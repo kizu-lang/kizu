@@ -276,6 +276,67 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckAcceptsExplicitNumericCast checks safe explicit numeric conversions.
+func TestCheckAcceptsExplicitNumericCast(t *testing.T) {
+	source := `fn take(x: i32) -> i32 { return x }
+fn main() {
+    let x = cast<i32>(1)
+    print(take(x))
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckAcceptsUnsafePointerCast checks pointer casts remain inside unsafe.
+func TestCheckAcceptsUnsafePointerCast(t *testing.T) {
+	source := `extern "c" fn raw() -> ptr<const u8>
+fn main() {
+    unsafe {
+        let p = raw()
+        let writable = cast<ptr<u8>>(p)
+        ptr_write(writable, cast<u8>(1))
+    }
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsCastErrors checks explicit cast boundaries.
+func TestCheckRejectsCastErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "pointer outside unsafe",
+			source: `fn bad(p: ptr<const u8>) -> ptr<u8> {
+    return cast<ptr<u8>>(p)
+}`,
+			want: "pointer cast requires unsafe block",
+		},
+		{
+			name: "invalid value cast",
+			source: `fn main() {
+    let x = cast<i32>("no")
+    print(x)
+}`,
+			want: "cannot cast string to i32",
+		},
+		{
+			name: "bool is not numeric",
+			source: `fn main() {
+    let x = cast<i32>(true)
+    print(x)
+}`,
+			want: "cannot cast bool to i32",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsUnsafeBoundaryErrors checks unsafe-only operations.
 func TestCheckRejectsUnsafeBoundaryErrors(t *testing.T) {
 	cases := []struct {

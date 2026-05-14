@@ -24,6 +24,7 @@ func TestDumpSnapshots(t *testing.T) {
 		{name: "while", source: whileSource, want: whileSnapshot},
 		{name: "arena", source: arenaSource, want: arenaSnapshot},
 		{name: "comptime", source: comptimeSource, want: comptimeSnapshot},
+		{name: "cast", source: castSource, want: castSnapshot},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -137,6 +138,11 @@ const comptimeSource = `fn main() {
     }
 }`
 
+const castSource = `fn main() {
+    let x = cast<i32>(1)
+    print(x)
+}`
+
 const helloSnapshot = `fn main() -> void {
 entry:
   %1: string = const "hello, kizu"
@@ -223,5 +229,13 @@ entry:
   %2: int = const 1024
   %3: int = binary.* %1: int, %2: int
   call.print %3: int
+  return void: void
+}`
+
+const castSnapshot = `fn main() -> void {
+entry:
+  %1: int = const 1
+  %2: i32 = cast %1: int, i32
+  call.print %2: i32
   return void: void
 }`

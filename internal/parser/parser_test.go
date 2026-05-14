@@ -162,6 +162,25 @@ fn main() { let size = comptime (4 * 1024); ` +
 	}
 }
 
+// TestParseCast checks explicit low-level cast syntax.
+func TestParseCast(t *testing.T) {
+	input := `fn main() {
+    let x = cast<i32>(1)
+    unsafe {
+        let p = cast<ptr<u8>>(raw())
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() { let x = cast<i32>(1); unsafe { let p = cast<ptr<u8>>(raw()) } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
 func TestParseRejectsExplicitLifetime(t *testing.T) {
 	input := `fn show(s: borrow 'a string) {}`

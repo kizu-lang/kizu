@@ -228,6 +228,9 @@ void
 `int` は v0 の簡易整数型です。
 interpreter 上では符号付き整数として扱い、具体的な bit 幅は固定しません。
 
+`void` は値を返さない関数の戻り値です。
+Kizu v0.1 では `Unit` という別名は導入しません。
+
 低レベル型として、次の明示幅整数と raw pointer 型を持ちます。
 
 ```text
@@ -269,6 +272,55 @@ slice<T>
 ```
 
 v0 では、generics は構文だけ先に予約してもよいですが、完全実装は不要です。
+
+### 7.1 明示 cast
+
+Kizu は暗黙の numeric promotion をしません。
+異なる numeric type の間で値を渡す場合は、明示的に `cast<T>(value)` を使います。
+
+```kizu
+fn take(x: i32) -> i32 {
+    return x
+}
+
+fn main() {
+    let x = cast<i32>(1)
+    print(take(x))
+}
+```
+
+safe code で許可する cast:
+
+```text
+numeric type -> numeric type
+```
+
+safe code で許可しない cast:
+
+```text
+string -> numeric
+bool -> numeric
+numeric -> pointer
+pointer -> numeric
+pointer -> pointer
+```
+
+raw pointer 間の cast は `unsafe` 内でのみ許可します。
+
+```kizu
+fn write_as_mut(p: ptr<const u8>) {
+    unsafe {
+        let q = cast<ptr<u8>>(p)
+        ptr_write(q, 1)
+    }
+}
+```
+
+pointer cast の memory safety obligation はプログラマが負います。
+ただし、`unsafe` 内でも type check / move check / borrow check は無効化されません。
+
+type alias は v0.1 では導入しません。
+必要になった場合は、別 phase で syntax と ABI 上の扱いを決めます。
 
 ## 8. 所有権
 

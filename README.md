@@ -36,6 +36,7 @@ Implemented phases:
 - limited `comptime` expressions, parameters, and branch selection
 - limited C header import for extern function declarations
 - opt-in IR optimization pipeline
+- explicit `cast<T>(value)` for low-level type conversions
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.

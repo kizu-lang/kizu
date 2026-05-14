@@ -187,6 +187,8 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 		return i.evalBinaryExpr(e, env)
 	case *ast.CallExpr:
 		return i.evalCallExpr(e, env)
+	case *ast.CastExpr:
+		return i.evalExpr(e.Value, env)
 	case *ast.ArenaNewExpr:
 		return arenaValue(), nil
 	case *ast.StructLiteralExpr:

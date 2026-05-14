@@ -166,6 +166,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerBinaryExpr(e)
 	case *ast.CallExpr:
 		return l.lowerCallExpr(e)
+	case *ast.CastExpr:
+		return l.lowerCastExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
 	case *ast.FieldExpr:
@@ -175,6 +177,15 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression %T", expr)
 	}
+}
+
+// lowerCastExpr lowers an explicit cast as a typed conversion instruction.
+func (l *lowerer) lowerCastExpr(expr *ast.CastExpr) (Value, error) {
+	value, err := l.lowerExpr(expr.Value)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("cast", expr.TargetType, []Value{value}, expr.TargetType), nil
 }
 
 // lowerPrefixExpr lowers unary operators.

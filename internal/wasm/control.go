@@ -37,6 +37,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "call."):
 		return e.writeCall(instr)
+	case instr.Op == "cast":
+		return e.writeCast(instr)
 	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
 		return e.writeUnsupportedOpaque(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
@@ -44,6 +46,16 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	default:
 		return fmt.Errorf("wasm error: unsupported instruction `%s`", instr.Op)
 	}
+}
+
+// writeCast records a no-op value conversion for the Phase 16 low-level subset.
+func (e *emitter) writeCast(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("wasm error: cast expects 1 arg")
+	}
+	value := e.value(instr.Args[0])
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, expr: value.expr}
+	return nil
 }
 
 // writeConst records scalar and string constants.

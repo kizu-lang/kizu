@@ -391,6 +391,20 @@ func (e *CallExpr) String() string {
 	return fmt.Sprintf("%s(%s)", e.Callee.String(), strings.Join(args, ", "))
 }
 
+// CastExpr represents an explicit cast<T>(value) conversion.
+type CastExpr struct {
+	TargetType string
+	Value      Expression
+}
+
+// expressionNode marks CastExpr as an expression node.
+func (*CastExpr) expressionNode() {}
+
+// String returns a compact debug representation of the cast.
+func (e *CastExpr) String() string {
+	return fmt.Sprintf("cast<%s>(%s)", e.TargetType, e.Value.String())
+}
+
 // ArenaNewExpr represents arena<T>() construction.
 type ArenaNewExpr struct {
 	TypeName string

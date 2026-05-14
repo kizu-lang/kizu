@@ -41,3 +41,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0020: arena / handle は v0 専用構文として扱う](0020-arena-handle-syntax.md)
 - [ADR-0021: ローカルビルドキャッシュは上限付きにする](0021-local-build-cache.md)
 - [ADR-0022: Phase 11 の WASM backend は WAT 生成から始める](0022-wasm-wat-backend.md)
+- [ADR-0023: low-level type conversion は明示 cast に限定する](0023-low-level-type-conversion.md)
