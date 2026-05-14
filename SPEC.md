@@ -369,20 +369,36 @@ v0.1 の `union` は次に限定します。
 
 ### 6.7 if
 
+Kizu v0.1 の `if` は statement と expression の両方で使えます。
+
 ```kizu
 if age >= 20 {
-    print("adult")
+    print("adult");
 } else {
-    print("minor")
+    print("minor");
 }
 ```
+
+expression 位置の `if` は `else` が必須です。
+各 branch block の最後の expression statement が branch value になります。
+
+```kizu
+let level = if age >= 20 {
+    1;
+} else {
+    0;
+};
+```
+
+両 branch の value type は一致しなければなりません。
+branch 内で move された値は、`if` expression の外側でも moved として扱います。
 
 ### 6.8 while
 
 ```kizu
 while i < 10 {
-    print(i)
-    i = i + 1
+    print(i);
+    i = i + 1;
 }
 ```
 
@@ -391,7 +407,7 @@ Kizu v0.1 は `loop` keyword を採用しません。
 
 ```kizu
 while true {
-    break
+    break;
 }
 ```
 

@@ -86,6 +86,22 @@ func TestParseIfAndWhile(t *testing.T) {
 	}
 }
 
+// TestParseIfExpression checks value-producing if expression parsing.
+func TestParseIfExpression(t *testing.T) {
+	input := `fn main() {
+    let value = if true { 1; } else { 2; };
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() { let value = if true { 1; } else { 2; }; }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseLoopControl checks for loops and labeled branches.
 func TestParseLoopControl(t *testing.T) {
 	input := `fn main() {

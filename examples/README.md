@@ -29,6 +29,7 @@ go test ./...
 | function call and explicit return type | `functions.kizu` | prints `3` |
 | empty `return` in `void` function | `return.kizu` | exits early and prints `done` |
 | `if` / `else` | `if.kizu` | prints `adult` |
+| `if` expression | `if_expression.kizu` | selects and prints `1` |
 | `while` | `while.kizu` | prints `0`, `1`, `2` |
 | `break` / `continue` | `break_continue.kizu` | controls a `while` loop |
 | labeled loop branch | `labeled_loop.kizu` | exits an outer loop explicitly |
@@ -64,6 +65,12 @@ go test ./...
 | moved values cannot be reused | `negative/moved_value.kizu` | `moved value` |
 | assignment moves non-copy values | `negative/assignment_move.kizu` | `moved value` |
 | double move is rejected | `negative/double_move.kizu` | `moved value` |
+| branch moves are visible after `if` | `negative/if_branch_move.kizu` | `moved value` |
+| one-sided branch moves are visible after `if` | `negative/if_branch_partial_move.kizu` | `moved value` |
+| `if` expression branch value can move | `negative/if_expression_branch_move.kizu` | `moved value` |
+| `if` expression requires `else` | `negative/if_expression_missing_else.kizu` | `expected next token else` |
+| `if` expression branch types must match | `negative/if_expression_type_mismatch.kizu` | `branch types differ` |
+| loop body moves are visible after the loop | `negative/while_body_move.kizu` | `moved value` |
 | statement semicolons are required | `negative/missing_semicolon.kizu` | `expected ;` |
 | borrowed non-copy values cannot be moved | `negative/move_while_borrowed.kizu` | `cannot be moved while borrowed` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
@@ -78,6 +85,7 @@ go test ./...
 | handles are tied to one arena | `negative/arena_wrong_handle.kizu` | `does not belong to arena` |
 | inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |
 | unknown handle provenance is rejected | `negative/arena_unknown_handle.kizu` | `unknown provenance` |
+| handles cannot outlive their arena | `negative/arena_handle_outlive.kizu` | `cannot outlive` |
 | `let` bindings are immutable | `negative/immutable_assignment.kizu` | `cannot assign` |
 | `break` outside loops is rejected | `negative/break_outside_loop.kizu` | `outside loop` |
 | `continue` outside loops is rejected | `negative/continue_outside_loop.kizu` | `outside loop` |

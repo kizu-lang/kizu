@@ -768,6 +768,8 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return &ast.BoolExpr{Value: true}
 	case token.False:
 		return &ast.BoolExpr{Value: false}
+	case token.If:
+		return p.parseIfExpr()
 	case token.Comptime:
 		p.nextToken()
 		return &ast.ComptimeExpr{Expr: p.parseExpression(lowest)}
@@ -787,6 +789,25 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		p.errorf("expected expression, got %s", p.cur.Type)
 		return &ast.IdentExpr{Name: "<error>"}
 	}
+}
+
+// parseIfExpr parses a value-producing if expression.
+func (p *Parser) parseIfExpr() ast.Expression {
+	expr := &ast.IfExpr{}
+	p.nextToken()
+	expr.Condition = p.parseExpression(lowest)
+	if !p.expectPeek(token.LBrace) {
+		return expr
+	}
+	expr.Consequence = p.parseBlockStmt()
+	if !p.expectPeek(token.Else) {
+		return expr
+	}
+	if !p.expectPeek(token.LBrace) {
+		return expr
+	}
+	expr.Alternative = p.parseBlockStmt()
+	return expr
 }
 
 // parseIdentPrefixExpression parses identifiers and identifier-led special forms.

@@ -170,12 +170,10 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 // lowerExpr lowers an expression and returns its typed SSA value.
 func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr:
-		return l.emitConst("i64", e.Value), nil
-	case *ast.StringExpr:
-		return l.emitConst("[]const u8", fmt.Sprintf("%q", e.Value)), nil
-	case *ast.BoolExpr:
-		return l.emitConst("bool", e.String()), nil
+	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
+		return l.lowerLiteralExpr(e)
+	case *ast.IfExpr:
+		return l.lowerIfExpr(e)
 	case *ast.ComptimeExpr:
 		return l.lowerExpr(e.Expr)
 	case *ast.IdentExpr:
@@ -200,6 +198,20 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.emit("arena.new", "arena<"+e.TypeName+">", nil, e.TypeName), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression %T", expr)
+	}
+}
+
+// lowerLiteralExpr lowers scalar literals.
+func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
+	switch e := expr.(type) {
+	case *ast.IntExpr:
+		return l.emitConst("i64", e.Value), nil
+	case *ast.StringExpr:
+		return l.emitConst("[]const u8", fmt.Sprintf("%q", e.Value)), nil
+	case *ast.BoolExpr:
+		return l.emitConst("bool", e.String()), nil
+	default:
+		return Value{}, fmt.Errorf("ir error: unsupported literal %T", expr)
 	}
 }
 

@@ -381,12 +381,10 @@ func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string
 // readExpr checks an expression without consuming owned values.
 func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr:
-		return "i64", nil
-	case *ast.StringExpr:
-		return "[]const u8", nil
-	case *ast.BoolExpr:
-		return "bool", nil
+	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
+		return readLiteralType(e)
+	case *ast.IfExpr:
+		return c.readIfExpr(e, env)
 	case *ast.ComptimeExpr:
 		return c.readComptimeExpr(e, env)
 	case *ast.IdentExpr:
@@ -414,6 +412,20 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	}
 }
 
+// readLiteralType returns the ownership type of scalar literals.
+func readLiteralType(expr ast.Expression) (string, error) {
+	switch expr.(type) {
+	case *ast.IntExpr:
+		return "i64", nil
+	case *ast.StringExpr:
+		return "[]const u8", nil
+	case *ast.BoolExpr:
+		return "bool", nil
+	default:
+		return "", fmt.Errorf("move error: unsupported literal %T", expr)
+	}
+}
+
 // readCastExpr reads the source value and returns the explicit target type.
 func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 	if _, err := c.readExpr(expr.Value, env); err != nil {
@@ -426,22 +438,7 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
-		if deref, ok := expr.(*ast.DerefExpr); ok {
-			return c.moveDerefExpr(deref, env)
-		}
-		if c.isArenaGetExpr(expr) {
-			if _, err := c.readExpr(expr, env); err != nil {
-				return "", err
-			}
-			return "", fmt.Errorf("arena error: arena.get returns a local borrow and cannot be moved")
-		}
-		if st, ok := expr.(*ast.StructLiteralExpr); ok {
-			return c.moveStructLiteralExpr(st, env)
-		}
-		if field, ok := expr.(*ast.FieldExpr); ok {
-			return c.moveFieldExpr(field, env)
-		}
-		return c.readExpr(expr, env)
+		return c.moveNonIdentExpr(expr, env)
 	}
 	value, ok := env.lookup(ident.Name)
 	if !ok {
@@ -463,6 +460,94 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 		value.moved = true
 	}
 	return value.typeName, nil
+}
+
+// moveNonIdentExpr handles move contexts for compound expressions.
+func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, error) {
+	if ifExpr, ok := expr.(*ast.IfExpr); ok {
+		return c.moveIfExpr(ifExpr, env)
+	}
+	if deref, ok := expr.(*ast.DerefExpr); ok {
+		return c.moveDerefExpr(deref, env)
+	}
+	if c.isArenaGetExpr(expr) {
+		if _, err := c.readExpr(expr, env); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("arena error: arena.get returns a local borrow and cannot be moved")
+	}
+	if st, ok := expr.(*ast.StructLiteralExpr); ok {
+		return c.moveStructLiteralExpr(st, env)
+	}
+	if field, ok := expr.(*ast.FieldExpr); ok {
+		return c.moveFieldExpr(field, env)
+	}
+	return c.readExpr(expr, env)
+}
+
+// readIfExpr reads branch values without consuming non-copy branch results.
+func (c *Checker) readIfExpr(expr *ast.IfExpr, env *scope) (string, error) {
+	return c.checkIfExprOwnership(expr, env, false)
+}
+
+// moveIfExpr consumes the selected branch value and merges possible moves.
+func (c *Checker) moveIfExpr(expr *ast.IfExpr, env *scope) (string, error) {
+	return c.checkIfExprOwnership(expr, env, true)
+}
+
+// checkIfExprOwnership validates branch ownership effects.
+func (c *Checker) checkIfExprOwnership(
+	expr *ast.IfExpr,
+	env *scope,
+	moveResult bool,
+) (string, error) {
+	if _, err := c.readExpr(expr.Condition, env); err != nil {
+		return "", err
+	}
+	if expr.Alternative == nil {
+		return "", fmt.Errorf("move error: if expression requires else branch")
+	}
+	left := env.clone()
+	leftType, err := c.checkIfExprBlock(expr.Consequence, left.child(), moveResult)
+	if err != nil {
+		return "", err
+	}
+	right := env.clone()
+	rightType, err := c.checkIfExprBlock(expr.Alternative, right.child(), moveResult)
+	if err != nil {
+		return "", err
+	}
+	env.mergeMovedFrom(left)
+	env.mergeMovedFrom(right)
+	if leftType != rightType {
+		return "", fmt.Errorf("move error: if expression branch types differ")
+	}
+	return leftType, nil
+}
+
+// checkIfExprBlock checks statements before the final branch value.
+func (c *Checker) checkIfExprBlock(
+	block *ast.BlockStmt,
+	env *scope,
+	moveResult bool,
+) (string, error) {
+	if block == nil || len(block.Statements) == 0 {
+		return "", fmt.Errorf("move error: if expression branch must end with a value")
+	}
+	last := len(block.Statements) - 1
+	for _, stmt := range block.Statements[:last] {
+		if err := c.checkStmt(stmt, env); err != nil {
+			return "", err
+		}
+	}
+	exprStmt, ok := block.Statements[last].(*ast.ExprStmt)
+	if !ok {
+		return "", fmt.Errorf("move error: if expression branch must end with a value")
+	}
+	if moveResult {
+		return c.moveExpr(exprStmt.Expr, env)
+	}
+	return c.readExpr(exprStmt.Expr, env)
 }
 
 // moveDerefExpr rejects moving a non-copy value out through a local borrow.

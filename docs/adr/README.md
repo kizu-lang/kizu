@@ -55,3 +55,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0034: dereference と field assignment は Zig 寄りにする](0034-zig-style-deref-and-field-assignment.md)
 - [ADR-0035: v0.1 loop control は while / for / labeled branch に限定する](0035-v0-1-loop-control.md)
 - [ADR-0036: statement semicolon を必須にする](0036-require-statement-semicolons.md)
+- [ADR-0037: v0.1 で if expression を採用する](0037-if-expression-in-v0-1.md)

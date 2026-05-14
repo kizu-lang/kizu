@@ -153,6 +153,7 @@ memory-safety invariants to representative examples.
 | Invariant | Positive coverage | Negative coverage |
 | --- | --- | --- |
 | move after ownership transfer is rejected | `examples/functions.kizu` | `examples/move_error.kizu`, `examples/negative/moved_value.kizu`, `examples/negative/double_move.kizu` |
+| branch and loop moves remain visible after control flow | `examples/if_expression.kizu` | `examples/negative/if_branch_move.kizu`, `examples/negative/if_branch_partial_move.kizu`, `examples/negative/if_expression_branch_move.kizu`, `examples/negative/while_body_move.kizu` |
 | copy values can be reused after owner-like calls | `examples/copy_after_move.kizu` | |
 | assignment moves non-copy values | `examples/variables.kizu` | `examples/negative/assignment_move.kizu` |
 | borrow does not move owner | `examples/borrow.kizu` | `examples/negative/borrow_escape.kizu` |
@@ -166,6 +167,7 @@ memory-safety invariants to representative examples.
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
 | arena get is local-borrow-like | `examples/arena.kizu` | `examples/negative/arena_get_move.kizu` |
 | handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu` |
+| handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
 | handle is not a raw pointer | | `examples/negative/handle_as_pointer.kizu` |
 | unsafe is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
 | unsafe does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
