@@ -31,14 +31,12 @@ Implemented language-core pieces:
 - move checker
 - local borrow checker
 - `arena<T>` / `handle<T>`
+- `while`, `break`, `continue`, labeled loop branches, and bounded `for`
 - limited `comptime` expressions, parameters, and branch selection
 - minimal `!T` and `try` error propagation
 - unsafe boundary and C ABI declaration checks
 - explicit `cast<T>(value)` checker policy
 - Zig/C-style tag `enum`, tagged `union`, and exhaustive `match`
-
-Additional v0.1 target pieces tracked in GitHub Issues:
-
 - `Io` capability and `TaskGroup` structured task model
 - `contract`, `satisfy`, and `&Dyn<Contract>`
 
