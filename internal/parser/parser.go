@@ -49,6 +49,15 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Enum:
 			program.Decls = append(program.Decls, p.parseEnumDecl())
 			p.nextToken()
+		case token.Contract:
+			program.Decls = append(program.Decls, p.parseContractDecl())
+			p.nextToken()
+		case token.Impl:
+			program.Decls = append(program.Decls, p.parseImplDecl())
+			p.nextToken()
+		case token.Satisfy:
+			program.Decls = append(program.Decls, p.parseSatisfyDecl())
+			p.nextToken()
 		default:
 			p.errorf("expected declaration, got %s", p.cur.Type)
 			p.nextToken()
@@ -123,6 +132,87 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 	}
 	fn.Body = p.parseBlockStmt()
 	return fn
+}
+
+// parseContractDecl parses a contract with method requirements.
+func (p *Parser) parseContractDecl() ast.Decl {
+	decl := &ast.ContractDecl{}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.Name = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Methods = p.parseContractMethods()
+	return decl
+}
+
+// parseContractMethods parses fn signatures inside a contract.
+func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
+	methods := []*ast.FunctionDecl{}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		if p.cur.Type != token.Function {
+			p.errorf("expected contract method, got %s", p.cur.Type)
+			return methods
+		}
+		method := p.parseFunctionSignature(&ast.FunctionDecl{}, false)
+		if fn, ok := method.(*ast.FunctionDecl); ok {
+			methods = append(methods, fn)
+		}
+		p.nextToken()
+	}
+	return methods
+}
+
+// parseImplDecl parses an impl block with method bodies.
+func (p *Parser) parseImplDecl() ast.Decl {
+	decl := &ast.ImplDecl{}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.TypeName = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Methods = p.parseImplMethods()
+	return decl
+}
+
+// parseImplMethods parses method declarations inside an impl block.
+func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
+	methods := []*ast.FunctionDecl{}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		if p.cur.Type != token.Function {
+			p.errorf("expected impl method, got %s", p.cur.Type)
+			return methods
+		}
+		method := p.parseFunctionSignature(&ast.FunctionDecl{}, true)
+		if fn, ok := method.(*ast.FunctionDecl); ok {
+			methods = append(methods, fn)
+		}
+		p.nextToken()
+	}
+	return methods
+}
+
+// parseSatisfyDecl parses an explicit contract satisfaction declaration.
+func (p *Parser) parseSatisfyDecl() ast.Decl {
+	decl := &ast.SatisfyDecl{}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.ContractName = p.cur.Literal
+	if !p.expectPeek(token.For) {
+		return decl
+	}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.TypeName = p.cur.Literal
+	return decl
 }
 
 // parseStructDecl parses a top-level struct declaration.

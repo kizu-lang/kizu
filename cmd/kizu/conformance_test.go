@@ -42,6 +42,11 @@ func TestV01PositiveExamples(t *testing.T) {
 			path: "../../examples/user_registry.kizu",
 			out:  "alice\nadmin\n8\nbob\nguest\n3\n0\n1\nready\n",
 		},
+		{
+			name: "contract_writer",
+			path: "../../examples/contract_writer.kizu",
+			out:  "out\nhello\n2\n",
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -159,6 +164,24 @@ func staticNegativeCases() []conformanceErrorCase {
 			command: "check",
 			path:    "../../examples/negative/nullable_ptr_read.kizu",
 			want:    "ptr_read` expects non-null raw pointer",
+		},
+		{
+			name:    "missing contract method",
+			command: "check",
+			path:    "../../examples/negative/missing_contract_method.kizu",
+			want:    "missing method `write`",
+		},
+		{
+			name:    "unsatisfied dyn",
+			command: "check",
+			path:    "../../examples/negative/unsatisfied_dyn.kizu",
+			want:    "File does not satisfy `Writer`",
+		},
+		{
+			name:    "owned dyn",
+			command: "check",
+			path:    "../../examples/negative/owned_dyn.kizu",
+			want:    "Dyn parameter `writer` must be borrowed",
 		},
 		{
 			name:    "non exhaustive match",

@@ -12,6 +12,7 @@ import (
 type Interpreter struct {
 	out       io.Writer
 	functions map[string]*ast.FunctionDecl
+	impls     map[string]map[string]*ast.FunctionDecl
 	enums     map[string]map[string]bool
 }
 
@@ -29,6 +30,7 @@ func New(out io.Writer) *Interpreter {
 	return &Interpreter{
 		out:       out,
 		functions: map[string]*ast.FunctionDecl{},
+		impls:     map[string]map[string]*ast.FunctionDecl{},
 		enums:     map[string]map[string]bool{},
 	}
 }
@@ -44,12 +46,26 @@ func (i *Interpreter) Run(program *ast.Program) error {
 				continue
 			}
 			i.functions[d.Name] = d
+		case *ast.ImplDecl:
+			i.registerImpl(d)
 		default:
 			continue
 		}
 	}
 	_, err := i.callFunction("main", nil)
 	return err
+}
+
+// registerImpl records concrete methods for runtime dispatch.
+func (i *Interpreter) registerImpl(decl *ast.ImplDecl) {
+	methods := i.impls[decl.TypeName]
+	if methods == nil {
+		methods = map[string]*ast.FunctionDecl{}
+		i.impls[decl.TypeName] = methods
+	}
+	for _, method := range decl.Methods {
+		methods[method.Name] = method
+	}
 }
 
 // enumTags returns a lookup set for runtime enum tag validation.
@@ -442,7 +458,7 @@ func (i *Interpreter) evalStructLiteralExpr(expr *ast.StructLiteralExpr, env *En
 		}
 		fields[field.Name] = value
 	}
-	return structValue(fields), nil
+	return structValue(expr.TypeName, fields), nil
 }
 
 // evalFieldExpr reads a field from a struct value.
@@ -481,6 +497,9 @@ func (i *Interpreter) evalMethodCallExpr(
 		return voidValue(), err
 	}
 	if receiver.kind != kindArena {
+		if receiver.kind == kindStruct {
+			return i.evalImplMethod(receiver, field.Name, args, env)
+		}
 		return voidValue(), fmt.Errorf("runtime error: method `%s` expects arena", field.Name)
 	}
 	switch field.Name {
@@ -491,6 +510,43 @@ func (i *Interpreter) evalMethodCallExpr(
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// evalImplMethod dispatches a concrete impl method with implicit self.
+func (i *Interpreter) evalImplMethod(
+	receiver Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	methods := i.impls[receiver.typeName]
+	if methods == nil || methods[name] == nil {
+		return voidValue(), fmt.Errorf("runtime error: `%s` has no method `%s`", receiver.typeName, name)
+	}
+	values, err := i.evalArgs(args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	callArgs := append([]Value{receiver}, values...)
+	return i.callMethod(methods[name], callArgs)
+}
+
+// callMethod invokes an impl method declaration.
+func (i *Interpreter) callMethod(fn *ast.FunctionDecl, args []Value) (Value, error) {
+	if len(args) != len(fn.Params) {
+		return voidValue(), fmt.Errorf("runtime error: `%s` expected %d args", fn.Name, len(fn.Params))
+	}
+	env := NewEnv()
+	for idx, param := range fn.Params {
+		if err := env.Define(param.Name, args[idx], false); err != nil {
+			return voidValue(), err
+		}
+	}
+	result, returned, err := i.evalBlock(fn.Body, env)
+	if err != nil || returned {
+		return result, err
+	}
+	return voidValue(), nil
 }
 
 // evalArenaAdd appends one value and returns an opaque handle.

@@ -18,15 +18,16 @@ const (
 
 // Value is a runtime value produced by the Phase 2 interpreter.
 type Value struct {
-	kind   valueKind
-	i      int64
-	b      bool
-	s      string
-	fields map[string]Value
-	arena  *Arena
-	handle Handle
-	result *Result
-	enum   Enum
+	kind     valueKind
+	i        int64
+	b        bool
+	s        string
+	typeName string
+	fields   map[string]Value
+	arena    *Arena
+	handle   Handle
+	result   *Result
+	enum     Enum
 }
 
 // Arena stores values and gives out opaque handles.
@@ -106,8 +107,8 @@ func stringValue(v string) Value {
 }
 
 // structValue returns a runtime struct value.
-func structValue(fields map[string]Value) Value {
-	return Value{kind: kindStruct, fields: fields}
+func structValue(typeName string, fields map[string]Value) Value {
+	return Value{kind: kindStruct, typeName: typeName, fields: fields}
 }
 
 // arenaValue returns an empty runtime arena.

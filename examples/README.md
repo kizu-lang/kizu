@@ -40,6 +40,7 @@ go test ./...
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper example |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
+| `contract`, `satisfy`, `borrow Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 
 ## Negative Examples
 
@@ -57,6 +58,9 @@ go test ./...
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |
 | nullable raw pointers cannot be read directly | `negative/nullable_ptr_read.kizu` | `non-null raw pointer` |
+| satisfy requires every contract method | `negative/missing_contract_method.kizu` | `missing method` |
+| `Dyn<Contract>` requires explicit satisfy | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
+| owned `Dyn<Contract>` is not v0.1 | `negative/owned_dyn.kizu` | `must be borrowed` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
 
 ## v0.1 Features Still Tracked By Issues
@@ -67,5 +71,3 @@ cannot silently look complete before the implementation is complete.
 | Feature | Tracking issue |
 | --- | --- |
 | `Io` capability and `TaskGroup` | #17 |
-| `contract` and `satisfy` | #18 |
-| `borrow Dyn<Contract>` | #19 |

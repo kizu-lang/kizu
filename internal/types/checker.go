@@ -14,6 +14,7 @@ const (
 	typeBool   Type = "bool"
 	typeInt    Type = "int"
 	typeString Type = "string"
+	typeSelf   Type = "Self"
 	typeVoid   Type = "void"
 )
 
@@ -82,6 +83,9 @@ type Checker struct {
 	functions     map[string]*functionType
 	structs       map[string]*ast.StructDecl
 	enums         map[string]*enumType
+	contracts     map[string]*contractType
+	impls         map[string]map[string]*functionType
+	satisfactions map[string]map[string]bool
 	currentReturn Type
 }
 
@@ -93,11 +97,17 @@ type enumType struct {
 type functionType struct {
 	name           string
 	params         []Type
+	borrowParams   []bool
 	comptimeParams []bool
 	returnType     Type
 	decl           *ast.FunctionDecl
 	unsafe         bool
 	externABI      string
+}
+
+type contractType struct {
+	name    string
+	methods map[string]*functionType
 }
 
 type scope struct {
@@ -109,9 +119,12 @@ type scope struct {
 // New creates an empty type checker.
 func New() *Checker {
 	return &Checker{
-		functions: map[string]*functionType{},
-		structs:   map[string]*ast.StructDecl{},
-		enums:     map[string]*enumType{},
+		functions:     map[string]*functionType{},
+		structs:       map[string]*ast.StructDecl{},
+		enums:         map[string]*enumType{},
+		contracts:     map[string]*contractType{},
+		impls:         map[string]map[string]*functionType{},
+		satisfactions: map[string]map[string]bool{},
 	}
 }
 
@@ -121,12 +134,15 @@ func (c *Checker) Check(program *ast.Program) error {
 		return err
 	}
 	for _, decl := range program.Decls {
-		fnDecl, ok := decl.(*ast.FunctionDecl)
-		if !ok {
-			continue
-		}
-		if err := c.checkFunction(c.functions[fnDecl.Name]); err != nil {
-			return err
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			if err := c.checkFunction(c.functions[d.Name]); err != nil {
+				return err
+			}
+		case *ast.ImplDecl:
+			if err := c.checkImpl(d); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -134,6 +150,17 @@ func (c *Checker) Check(program *ast.Program) error {
 
 // collectFunctions registers top-level function signatures before body checks.
 func (c *Checker) collectFunctions(program *ast.Program) error {
+	if err := c.collectTypesAndMethods(program); err != nil {
+		return err
+	}
+	if err := c.collectTopLevelFunctions(program); err != nil {
+		return err
+	}
+	return c.collectSatisfyDecls(program)
+}
+
+// collectTypesAndMethods registers declarations needed before function signatures.
+func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
@@ -144,12 +171,27 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 			if err := c.collectEnum(d); err != nil {
 				return err
 			}
+		case *ast.ContractDecl:
+			if err := c.collectContract(d); err != nil {
+				return err
+			}
+		case *ast.ImplDecl:
+			if err := c.collectImpl(d); err != nil {
+				return err
+			}
+		case *ast.SatisfyDecl:
+			continue
 		case *ast.FunctionDecl:
 			continue
 		default:
 			return fmt.Errorf("type error: unsupported declaration %T", decl)
 		}
 	}
+	return nil
+}
+
+// collectTopLevelFunctions registers top-level function signatures.
+func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
 		if !ok {
@@ -164,6 +206,90 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 		}
 		c.functions[fn.Name] = fnType
 	}
+	return nil
+}
+
+// collectSatisfyDecls validates explicit satisfy declarations after impls exist.
+func (c *Checker) collectSatisfyDecls(program *ast.Program) error {
+	for _, decl := range program.Decls {
+		satisfy, ok := decl.(*ast.SatisfyDecl)
+		if !ok {
+			continue
+		}
+		if err := c.collectSatisfy(satisfy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// collectContract registers a required method set.
+func (c *Checker) collectContract(decl *ast.ContractDecl) error {
+	if _, exists := c.contracts[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate contract `%s`", decl.Name)
+	}
+	methods := map[string]*functionType{}
+	for _, method := range decl.Methods {
+		if _, exists := methods[method.Name]; exists {
+			return fmt.Errorf("type error: duplicate contract method `%s.%s`", decl.Name, method.Name)
+		}
+		fnType, err := c.newFunctionType(method)
+		if err != nil {
+			return err
+		}
+		methods[method.Name] = fnType
+	}
+	c.contracts[decl.Name] = &contractType{name: decl.Name, methods: methods}
+	return nil
+}
+
+// collectImpl registers concrete methods for a type.
+func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
+	if _, err := c.parseType(decl.TypeName); err != nil {
+		return err
+	}
+	methods := c.impls[decl.TypeName]
+	if methods == nil {
+		methods = map[string]*functionType{}
+		c.impls[decl.TypeName] = methods
+	}
+	for _, method := range decl.Methods {
+		if _, exists := methods[method.Name]; exists {
+			return fmt.Errorf("type error: duplicate impl method `%s.%s`", decl.TypeName, method.Name)
+		}
+		fnType, err := c.newFunctionType(method)
+		if err != nil {
+			return err
+		}
+		methods[method.Name] = fnType
+	}
+	return nil
+}
+
+// collectSatisfy validates and records explicit contract satisfaction.
+func (c *Checker) collectSatisfy(decl *ast.SatisfyDecl) error {
+	contract := c.contracts[decl.ContractName]
+	if contract == nil {
+		return fmt.Errorf("type error: unknown contract `%s`", decl.ContractName)
+	}
+	if _, err := c.parseType(decl.TypeName); err != nil {
+		return err
+	}
+	for name, want := range contract.methods {
+		got := c.implMethod(decl.TypeName, name)
+		if got == nil {
+			return fmt.Errorf("type error: `%s` does not satisfy `%s`: missing method `%s`",
+				decl.TypeName, decl.ContractName, name)
+		}
+		if !methodMatches(decl.TypeName, want, got) {
+			return fmt.Errorf("type error: `%s.%s` does not match contract `%s`",
+				decl.TypeName, name, decl.ContractName)
+		}
+	}
+	if c.satisfactions[decl.ContractName] == nil {
+		c.satisfactions[decl.ContractName] = map[string]bool{}
+	}
+	c.satisfactions[decl.ContractName][decl.TypeName] = true
 	return nil
 }
 
@@ -206,6 +332,7 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 // newFunctionType converts a parsed function declaration into its static type.
 func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	params := make([]Type, 0, len(fn.Params))
+	borrowParams := make([]bool, 0, len(fn.Params))
 	comptimeParams := make([]bool, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		paramType, err := c.parseType(param.TypeName)
@@ -215,7 +342,11 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		if paramType == typeVoid {
 			return nil, fmt.Errorf("type error: parameter `%s` cannot have type void", param.Name)
 		}
+		if _, ok := dynContract(paramType); ok && !param.Borrow {
+			return nil, fmt.Errorf("type error: Dyn parameter `%s` must be borrowed", param.Name)
+		}
 		params = append(params, paramType)
+		borrowParams = append(borrowParams, param.Borrow)
 		comptimeParams = append(comptimeParams, param.Comptime)
 	}
 	ret := typeVoid
@@ -227,8 +358,8 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		}
 	}
 	return &functionType{
-		name: fn.Name, params: params, comptimeParams: comptimeParams, returnType: ret, decl: fn,
-		unsafe: fn.Unsafe, externABI: fn.ExternABI,
+		name: fn.Name, params: params, borrowParams: borrowParams, comptimeParams: comptimeParams,
+		returnType: ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
 }
 
@@ -241,6 +372,12 @@ func (c *Checker) parseType(name string) (Type, error) {
 		if base == "ptr" {
 			return c.parsePointerType(name, arg)
 		}
+		if base == "Dyn" {
+			if c.contracts[arg] == nil {
+				return "", fmt.Errorf("type error: unknown contract `%s`", arg)
+			}
+			return Type(name), nil
+		}
 		if base != "arena" && base != "handle" && base != "result" && base != "option" {
 			return "", fmt.Errorf("type error: unknown generic type `%s`", base)
 		}
@@ -250,6 +387,9 @@ func (c *Checker) parseType(name string) (Type, error) {
 		return Type(name), nil
 	}
 	typ := Type(name)
+	if typ == typeSelf {
+		return typ, nil
+	}
 	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
@@ -300,6 +440,20 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	}
 	if fn.returnType != typeVoid && !returns {
 		return fmt.Errorf("type error: function `%s` must return %s", fn.name, fn.returnType)
+	}
+	return nil
+}
+
+// checkImpl validates method bodies in an impl block.
+func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
+	for _, method := range decl.Methods {
+		fnType := c.implMethod(decl.TypeName, method.Name)
+		if fnType == nil {
+			return fmt.Errorf("type error: missing impl method `%s.%s`", decl.TypeName, method.Name)
+		}
+		if err := c.checkFunction(fnType); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -724,6 +878,12 @@ func (c *Checker) checkUserCall(
 				return "", err
 			}
 		}
+		if contractName, ok := dynContract(fn.params[idx]); ok {
+			if !c.satisfies(contractName, got) {
+				return "", fmt.Errorf("type error: %s does not satisfy `%s`", got, contractName)
+			}
+			continue
+		}
 		if got != fn.params[idx] {
 			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, name, fn.params[idx], got)
@@ -820,8 +980,15 @@ func (c *Checker) checkMethodCallExpr(
 	if err != nil {
 		return "", err
 	}
+	if contractName, ok := dynContract(receiver); ok {
+		return c.checkDynMethodCall(contractName, field.Name, args, env, unsafe)
+	}
 	base, arg, ok := splitGenericType(string(receiver))
 	if !ok || base != "arena" {
+		method := c.implMethod(string(receiver), field.Name)
+		if method != nil {
+			return c.checkMethodArgs(method, receiver, args, env, unsafe)
+		}
 		return "", fmt.Errorf("type error: `%s` has no method `%s`", receiver, field.Name)
 	}
 	switch field.Name {
@@ -832,6 +999,54 @@ func (c *Checker) checkMethodCallExpr(
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkDynMethodCall validates a method call through borrow Dyn<Contract>.
+func (c *Checker) checkDynMethodCall(
+	contractName string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	contract := c.contracts[contractName]
+	if contract == nil || contract.methods[name] == nil {
+		return "", fmt.Errorf("type error: `Dyn<%s>` has no method `%s`", contractName, name)
+	}
+	return c.checkMethodArgs(contract.methods[name], typeSelf, args, env, unsafe)
+}
+
+// checkMethodArgs validates method-call arguments after the implicit self receiver.
+func (c *Checker) checkMethodArgs(
+	method *functionType,
+	receiver Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if len(method.params) == 0 {
+		return "", fmt.Errorf("type error: method `%s` must have self parameter", method.name)
+	}
+	if len(args) != len(method.params)-1 {
+		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
+			method.name, len(method.params)-1, len(args))
+	}
+	if method.params[0] != receiver && method.params[0] != typeSelf {
+		return "", fmt.Errorf("type error: method `%s` self expects %s, got %s",
+			method.name, method.params[0], receiver)
+	}
+	for idx, arg := range args {
+		want := method.params[idx+1]
+		got, err := c.checkExpr(arg, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != want {
+			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+				idx+1, method.name, want, got)
+		}
+	}
+	return method.returnType, nil
 }
 
 // checkArenaAdd validates arena<T>.add(value).
@@ -934,6 +1149,43 @@ func pointerElement(typ Type) (string, bool) {
 func isPointerType(typ Type) bool {
 	_, ok := pointerElement(typ)
 	return ok
+}
+
+// dynContract extracts C from Dyn<C>.
+func dynContract(typ Type) (string, bool) {
+	base, arg, ok := splitGenericType(string(typ))
+	return arg, ok && base == "Dyn"
+}
+
+// implMethod returns a concrete method implementation.
+func (c *Checker) implMethod(typeName string, method string) *functionType {
+	methods := c.impls[typeName]
+	if methods == nil {
+		return nil
+	}
+	return methods[method]
+}
+
+// satisfies reports whether a type explicitly satisfies a contract.
+func (c *Checker) satisfies(contractName string, typ Type) bool {
+	return c.satisfactions[contractName] != nil && c.satisfactions[contractName][string(typ)]
+}
+
+// methodMatches checks an impl method against a contract method.
+func methodMatches(typeName string, want *functionType, got *functionType) bool {
+	if len(want.params) != len(got.params) || want.returnType != got.returnType {
+		return false
+	}
+	for idx, wantParam := range want.params {
+		expected := wantParam
+		if expected == typeSelf {
+			expected = Type(typeName)
+		}
+		if expected != got.params[idx] || want.borrowParams[idx] != got.borrowParams[idx] {
+			return false
+		}
+	}
+	return true
 }
 
 // resultElement extracts T from result<T>.

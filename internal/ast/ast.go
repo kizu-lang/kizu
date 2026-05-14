@@ -113,6 +113,56 @@ func (d *EnumDecl) String() string {
 	return fmt.Sprintf("enum %s { %s }", d.Name, strings.Join(d.Tags, "; "))
 }
 
+// ContractDecl represents required method signatures.
+type ContractDecl struct {
+	Name    string
+	Methods []*FunctionDecl
+}
+
+// declNode marks ContractDecl as a declaration node.
+func (*ContractDecl) declNode() {}
+
+// String returns a compact debug representation of the contract declaration.
+func (d *ContractDecl) String() string {
+	methods := make([]string, 0, len(d.Methods))
+	for _, method := range d.Methods {
+		methods = append(methods, method.String())
+	}
+	return fmt.Sprintf("contract %s { %s }", d.Name, strings.Join(methods, "; "))
+}
+
+// ImplDecl represents methods implemented for one concrete type.
+type ImplDecl struct {
+	TypeName string
+	Methods  []*FunctionDecl
+}
+
+// declNode marks ImplDecl as a declaration node.
+func (*ImplDecl) declNode() {}
+
+// String returns a compact debug representation of the impl declaration.
+func (d *ImplDecl) String() string {
+	methods := make([]string, 0, len(d.Methods))
+	for _, method := range d.Methods {
+		methods = append(methods, method.String())
+	}
+	return fmt.Sprintf("impl %s { %s }", d.TypeName, strings.Join(methods, "; "))
+}
+
+// SatisfyDecl represents explicit contract satisfaction.
+type SatisfyDecl struct {
+	ContractName string
+	TypeName     string
+}
+
+// declNode marks SatisfyDecl as a declaration node.
+func (*SatisfyDecl) declNode() {}
+
+// String returns a compact debug representation of the satisfy declaration.
+func (d *SatisfyDecl) String() string {
+	return fmt.Sprintf("satisfy %s for %s", d.ContractName, d.TypeName)
+}
+
 // Field represents a named struct field.
 type Field struct {
 	Name     string

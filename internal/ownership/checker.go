@@ -522,6 +522,15 @@ func (c *Checker) checkMethodCallExpr(
 	if arena.moved {
 		return "", fmt.Errorf("move error: moved value `%s` was used", receiver.Name)
 	}
+	base, _, ok := splitGenericType(arena.typeName)
+	if !ok || base != "arena" {
+		for _, arg := range args {
+			if _, err := c.readExpr(arg, env); err != nil {
+				return "", err
+			}
+		}
+		return "result<unknown>", nil
+	}
 	switch field.Name {
 	case "add":
 		return c.checkArenaAdd(arena, args, env)

@@ -51,6 +51,10 @@ const (
 	Match    Type = "match"
 	Struct   Type = "struct"
 	Enum     Type = "enum"
+	Contract Type = "contract"
+	Satisfy  Type = "satisfy"
+	For      Type = "for"
+	Impl     Type = "impl"
 	True     Type = "true"
 	False    Type = "false"
 	Borrow   Type = "borrow"
@@ -78,6 +82,10 @@ var keywords = map[string]Type{
 	"match":    Match,
 	"struct":   Struct,
 	"enum":     Enum,
+	"contract": Contract,
+	"satisfy":  Satisfy,
+	"for":      For,
+	"impl":     Impl,
 	"true":     True,
 	"false":    False,
 	"borrow":   Borrow,
