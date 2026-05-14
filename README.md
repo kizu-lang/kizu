@@ -87,6 +87,7 @@ pre-commit run --all-files
 
 go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
+go run ./cmd/kizu fmt examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
 go run ./cmd/kizu ir examples/hello.kizu
 go run ./cmd/kizu ir --opt examples/hello.kizu
@@ -102,6 +103,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 
 - `kizu parse <file>` parses a `.kizu` source file.
 - `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
+- `kizu fmt <file>` prints stable formatted source.
 - `kizu run <file>` executes the file with the interpreter.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.

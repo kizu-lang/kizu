@@ -31,6 +31,10 @@ parse file="examples/hello.kizu":
 kizu-check file="examples/hello.kizu":
     go run ./cmd/kizu check {{file}}
 
+# Print stable formatted Kizu source.
+kizu-fmt file="examples/hello.kizu":
+    go run ./cmd/kizu fmt {{file}}
+
 # Run a Kizu file through the interpreter.
 run file="examples/hello.kizu":
     go run ./cmd/kizu run {{file}}

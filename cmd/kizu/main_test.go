@@ -60,6 +60,19 @@ func TestIRCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
+func TestFmtCommandSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "fmt", "../../examples/hello.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "fn main() { print(\"hello, kizu\") }\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestIROptCommandSmoke checks the CLI can dump optimized typed SSA IR.
 func TestIROptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")

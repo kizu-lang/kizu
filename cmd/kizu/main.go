@@ -38,6 +38,8 @@ func dispatch(cmd string, args []string) error {
 		return runFile(args[0])
 	case "check":
 		return checkFile(args[0])
+	case "fmt":
+		return fmtFile(args[0])
 	case "ir":
 		return irCommand(args)
 	case "build":
@@ -56,7 +58,7 @@ func dispatch(cmd string, args []string) error {
 
 // usage prints the supported command line shape.
 func usage() {
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check> <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|fmt> <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -115,6 +117,22 @@ func checkFile(path string) error {
 		return err
 	}
 	_, _ = fmt.Println("check: ok")
+	return nil
+}
+
+// fmtFile prints the stable formatter output for a Kizu source file.
+func fmtFile(path string) error {
+	program, errs, err := parsePath(path)
+	if err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		for _, msg := range errs {
+			_, _ = fmt.Fprintln(os.Stderr, msg)
+		}
+		return fmt.Errorf("format failed")
+	}
+	_, _ = fmt.Println(program.String())
 	return nil
 }
 

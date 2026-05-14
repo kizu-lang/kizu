@@ -27,6 +27,7 @@
 | Phase 17 | 完了 | C ABI layout / link policy | [phase-17.md](docs/phases/phase-17.md) |
 | Phase 18 | 完了 | result<T> / try error handling | [phase-18.md](docs/phases/phase-18.md) |
 | Phase 19 | 完了 | stdlib foundation | [phase-19.md](docs/phases/phase-19.md) |
+| Phase 20 | 完了 | developer CLI experience | [phase-20.md](docs/phases/phase-20.md) |
 
 ## 横断フェーズ
 
