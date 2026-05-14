@@ -26,9 +26,39 @@ slice<const u8> 将来の低レベル表現候補
 std.string      将来の owned string 候補
 ```
 
+Phase 19 では stdlib 基盤を次のように整理する。
+
+```text
+string           v0.1 の owned-ish runtime string value
+slice<T>         contiguous mutable view, future
+slice<const T>   contiguous read-only view, future
+array<T>         owned contiguous collection, future
+map<K, V>        hash map, later
+set<T>           hash set, later
+```
+
+`string` と C ABI の間に暗黙変換は置かない。
+C へ渡す場合は、将来 `std.string.as_bytes` や `std.string.as_c_string` のような明示 API を使う。
+
+stdlib module naming は lowercase dotted names にする。
+
+```text
+std.string
+std.io
+std.fs
+std.mem
+std.slice
+std.array
+```
+
+v0.1 の stdlib 実装は `print` だけでよい。
+ただし、今後の API は上の module 境界に寄せる。
+
 ## 影響
 
 - Phase 2 interpreter では `string` を簡易値として扱ってよい
 - Phase 3 type checker は `string` を v0 型として検査する
 - allocator を必要とする string 操作は標準ライブラリ側に寄せる
 - C ABI では `string` を暗黙に `ptr<const u8>` へ変換しない
+- collection は `array<T>` を先に検討し、`map` / `set` は後続 phase に回す
+- async I/O は stdlib 基盤から切り離して別 phase で扱う

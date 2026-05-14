@@ -642,6 +642,33 @@ v0 で必要なのはこれだけです。
 print
 ```
 
+stdlib module は lowercase dotted names にします。
+
+```text
+std.string
+std.io
+std.fs
+std.mem
+std.slice
+std.array
+```
+
+`string` は v0.1 では簡易 runtime string value として扱います。
+将来は `slice<const u8>` を低レベル表現の土台にします。
+
+C ABI へ `string` を暗黙に渡してはいけません。
+C へ渡す場合は、将来 `std.string.as_bytes` や `std.string.as_c_string` のような明示 API を使います。
+
+collection は次の順で検討します。
+
+```text
+array<T>         先に検討する owned contiguous collection
+slice<T>         contiguous mutable view
+slice<const T>   contiguous read-only view
+map<K, V>        後続 phase
+set<T>           後続 phase
+```
+
 ## 15. ビルドとキャッシュ
 
 Kizu の toolchain は、キャッシュが無制限に肥大化しない設計にします。

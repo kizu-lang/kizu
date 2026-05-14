@@ -26,6 +26,7 @@
 | Phase 16 | 完了 | low-level type system hardening | [phase-16.md](docs/phases/phase-16.md) |
 | Phase 17 | 完了 | C ABI layout / link policy | [phase-17.md](docs/phases/phase-17.md) |
 | Phase 18 | 完了 | result<T> / try error handling | [phase-18.md](docs/phases/phase-18.md) |
+| Phase 19 | 完了 | stdlib foundation | [phase-19.md](docs/phases/phase-19.md) |
 
 ## 横断フェーズ
 
