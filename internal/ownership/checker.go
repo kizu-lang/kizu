@@ -9,6 +9,7 @@ import (
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
 	functions map[string]*functionInfo
+	structs   map[string]map[string]string
 	enums     map[string]map[string]bool
 	unions    map[string]map[string]string
 	nextID    int
@@ -48,6 +49,7 @@ type scope struct {
 func New() *Checker {
 	return &Checker{
 		functions: map[string]*functionInfo{},
+		structs:   map[string]map[string]string{},
 		enums:     map[string]map[string]bool{},
 		unions:    map[string]map[string]string{},
 	}
@@ -112,12 +114,15 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 		if !ok {
 			continue
 		}
+		fields := map[string]string{}
 		for _, field := range st.Fields {
 			if field.Borrow {
 				return fmt.Errorf("borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
+			fields[field.Name] = field.TypeName
 		}
+		c.structs[st.Name] = fields
 	}
 	return nil
 }
@@ -382,6 +387,9 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 		if st, ok := expr.(*ast.StructLiteralExpr); ok {
 			return c.moveStructLiteralExpr(st, env)
 		}
+		if field, ok := expr.(*ast.FieldExpr); ok {
+			return c.moveFieldExpr(field, env)
+		}
 		return c.readExpr(expr, env)
 	}
 	value, ok := env.lookup(ident.Name)
@@ -564,7 +572,53 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 			return ident.Name, nil
 		}
 	}
-	return c.readExpr(expr.Receiver, env)
+	receiverType, err := c.readExpr(expr.Receiver, env)
+	if err != nil {
+		return "", err
+	}
+	if fields := c.structs[receiverType]; fields != nil {
+		if typ, ok := fields[expr.Name]; ok {
+			return typ, nil
+		}
+	}
+	return receiverType, nil
+}
+
+// moveFieldExpr rejects partial moves from borrowed or aggregate values.
+func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error) {
+	typeName, err := c.readFieldExpr(expr, env)
+	if err != nil {
+		return "", err
+	}
+	if c.isCopyType(typeName) {
+		return typeName, nil
+	}
+	if name, ok := c.borrowedFieldRoot(expr, env); ok {
+		return "", fmt.Errorf(
+			"borrow error: field `%s` cannot be moved out of borrowed value `%s`",
+			expr.String(),
+			name,
+		)
+	}
+	if c.containsArenaGet(expr.Receiver) {
+		return "", fmt.Errorf(
+			"arena error: arena.get returns a local borrow and its fields cannot be moved",
+		)
+	}
+	return "", fmt.Errorf("move error: field `%s` cannot be moved out of aggregate", expr.String())
+}
+
+// borrowedFieldRoot returns the borrowed identifier at the root of a field chain.
+func (c *Checker) borrowedFieldRoot(expr ast.Expression, env *scope) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.FieldExpr:
+		return c.borrowedFieldRoot(e.Receiver, env)
+	case *ast.IdentExpr:
+		value, ok := env.lookup(e.Name)
+		return e.Name, ok && value.borrowedParam
+	default:
+		return "", false
+	}
 }
 
 // checkUnionConstructor validates ownership effects of Union.Variant(payload).
@@ -747,15 +801,28 @@ func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scop
 
 // checkHandleProvenance rejects handles that came from a different known arena.
 func (c *Checker) checkHandleProvenance(arena *binding, expr ast.Expression, env *scope) error {
+	if arena.arenaID == 0 {
+		return fmt.Errorf("arena error: arena `%s` has unknown provenance", arena.name)
+	}
+	if addArena := c.arenaAddReceiver(expr, env); addArena != nil {
+		if addArena.arenaID != arena.arenaID {
+			return fmt.Errorf("arena error: handle from `%s` does not belong to arena `%s`",
+				addArena.name, arena.name)
+		}
+		return nil
+	}
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
-		return nil
+		return fmt.Errorf("arena error: handle expression has unknown arena provenance")
 	}
 	handle, exists := env.lookup(ident.Name)
 	if !exists {
 		return fmt.Errorf("arena error: undefined handle `%s`", ident.Name)
 	}
-	if handle.handleArenaID != 0 && handle.handleArenaID != arena.arenaID {
+	if handle.handleArenaID == 0 {
+		return fmt.Errorf("arena error: handle `%s` has unknown arena provenance", ident.Name)
+	}
+	if handle.handleArenaID != arena.arenaID {
 		return fmt.Errorf("arena error: handle `%s` does not belong to arena `%s`",
 			ident.Name, arena.name)
 	}
@@ -863,6 +930,34 @@ func (c *Checker) isArenaGetExpr(expr ast.Expression) bool {
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	return ok && field.Name == "get"
+}
+
+// containsArenaGet reports whether an expression reads through arena.get.
+func (c *Checker) containsArenaGet(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		if c.isArenaGetExpr(e) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if c.containsArenaGet(arg) {
+				return true
+			}
+		}
+	case *ast.FieldExpr:
+		return c.containsArenaGet(e.Receiver)
+	case *ast.PrefixExpr:
+		return c.containsArenaGet(e.Right)
+	case *ast.BinaryExpr:
+		return c.containsArenaGet(e.Left) || c.containsArenaGet(e.Right)
+	case *ast.CastExpr:
+		return c.containsArenaGet(e.Value)
+	case *ast.TryExpr:
+		return c.containsArenaGet(e.Value)
+	case *ast.ComptimeExpr:
+		return c.containsArenaGet(e.Expr)
+	}
+	return false
 }
 
 // readIdent resolves a variable reference without moving it.

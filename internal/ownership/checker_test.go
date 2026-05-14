@@ -143,6 +143,23 @@ fn main() {
 	}
 }
 
+// TestCheckRejectsBorrowedFieldMove checks field access cannot bypass borrow rules.
+func TestCheckRejectsBorrowedFieldMove(t *testing.T) {
+	source := `struct User { name: []const u8 }
+struct Box { user: User }
+fn take(user: User) { print(user.name) }
+fn bad(box: borrow Box) {
+    take(box.user)
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "cannot be moved out of borrowed value `box`") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckAcceptsArenaHandle checks arena handles with matching provenance.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
@@ -177,6 +194,24 @@ fn main() {
 			want: "handle `alice` does not belong to arena `right`",
 		},
 		{
+			name: "inline wrong arena",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let left = arena<User>()
+    let right = arena<User>()
+    print(right.get(left.add(User { name: "alice" })).name)
+}`,
+			want: "handle from `left` does not belong to arena `right`",
+		},
+		{
+			name: "unknown handle parameter",
+			source: `struct User { name: []const u8 }
+fn show(users: arena<User>, user: handle<User>) {
+    print(users.get(user).name)
+}`,
+			want: "arena `users` has unknown provenance",
+		},
+		{
 			name: "returned handle",
 			source: `struct User { name: []const u8 }
 fn make() -> handle<User> {
@@ -197,6 +232,18 @@ fn main() {
     print(users.get(alice).name)
 }`,
 			want: "moved value `user` was used",
+		},
+		{
+			name: "move field from arena borrow",
+			source: `struct User { name: []const u8 }
+struct Box { user: User }
+fn take(user: User) { print(user.name) }
+fn main() {
+    let boxes = arena<Box>()
+    let h = boxes.add(Box { user: User { name: "alice" } })
+    take(boxes.get(h).user)
+}`,
+			want: "arena.get returns a local borrow and its fields cannot be moved",
 		},
 	}
 	runErrorCases(t, cases)

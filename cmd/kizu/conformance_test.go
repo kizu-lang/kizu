@@ -94,7 +94,7 @@ func TestV01NegativeExamples(t *testing.T) {
 
 // ownershipNegativeCases returns move, borrow, and mutability error examples.
 func ownershipNegativeCases() []conformanceErrorCase {
-	return []conformanceErrorCase{
+	cases := []conformanceErrorCase{
 		{
 			name:    "moved value",
 			command: "check",
@@ -143,6 +143,20 @@ func ownershipNegativeCases() []conformanceErrorCase {
 			path:    "../../examples/negative/arena_get_move.kizu",
 			want:    "arena.get returns a local borrow and cannot be moved",
 		},
+	}
+	cases = append(cases, arenaProvenanceNegativeCases()...)
+	cases = append(cases, conformanceErrorCase{
+		name:    "immutable assignment",
+		command: "check",
+		path:    "../../examples/negative/immutable_assignment.kizu",
+		want:    "cannot assign to immutable binding `x`",
+	})
+	return cases
+}
+
+// arenaProvenanceNegativeCases returns arena and handle provenance error examples.
+func arenaProvenanceNegativeCases() []conformanceErrorCase {
+	return []conformanceErrorCase{
 		{
 			name:    "arena wrong handle",
 			command: "check",
@@ -150,10 +164,16 @@ func ownershipNegativeCases() []conformanceErrorCase {
 			want:    "handle `alice` does not belong to arena `right`",
 		},
 		{
-			name:    "immutable assignment",
+			name:    "arena inline wrong handle",
 			command: "check",
-			path:    "../../examples/negative/immutable_assignment.kizu",
-			want:    "cannot assign to immutable binding `x`",
+			path:    "../../examples/negative/arena_inline_wrong_handle.kizu",
+			want:    "handle from `left` does not belong to arena `right`",
+		},
+		{
+			name:    "arena unknown handle",
+			command: "check",
+			path:    "../../examples/negative/arena_unknown_handle.kizu",
+			want:    "arena `users` has unknown provenance",
 		},
 	}
 }

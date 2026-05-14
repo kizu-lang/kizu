@@ -57,6 +57,8 @@ go test ./...
 | `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
 | `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |
 | handles are tied to one arena | `negative/arena_wrong_handle.kizu` | `does not belong to arena` |
+| inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |
+| unknown handle provenance is rejected | `negative/arena_unknown_handle.kizu` | `unknown provenance` |
 | `let` bindings are immutable | `negative/immutable_assignment.kizu` | `cannot assign` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
