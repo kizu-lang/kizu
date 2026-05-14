@@ -16,6 +16,8 @@ Kizu v0.1 では `async fn` / `await` syntax は実装しない。
 ただし、I/O と並行処理の境界は v0.1 から実装する。
 最初の design では `async fn` を中心にしない。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示する。
+`Io` / `Task` / `TaskGroup` は v0.1 では言語組み込みの実験的な型として扱い、
+将来は `std.io` と `std.task` に移す。
 
 ## Io capability
 
@@ -42,6 +44,7 @@ let text = task.await()
 
 spawn された task は await または cancel されなければならない。
 TaskGroup を抜ける前に、全 task は完了または cancel される。
+task は `TaskGroup` の structured scope を越えて escape できない。
 
 ## Borrow boundary
 
@@ -49,6 +52,7 @@ spawn された task は local borrow を捕まえられない。
 
 task へ渡す値は owned value または copy value でなければならない。
 non-copy value を task に渡す場合、その値は move される。
+safe Kizu では task 間で mutable state を暗黙共有できない。
 
 ```kizu
 let name = "alice"
@@ -62,4 +66,7 @@ print(name) // error: moved into task
 - borrow checker と task lifetime の複雑さを抑える
 - cancellation と cleanup の境界を TaskGroup に寄せる
 - v0.1 は interpreter 上の structured task model を実装対象にする
+- v0.1 interpreter の `spawn` は同期評価であり、OS thread や event loop を作らない
+- 実並行 runtime を導入する場合も、owned/copy value だけを task 境界に渡す方針を維持する
+- 標準ライブラリ化するときは `std.io` と `std.task` の API に分ける
 - OS thread、event loop、networking stdlib は別 phase に分離する

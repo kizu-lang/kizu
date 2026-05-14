@@ -945,6 +945,8 @@ Kizu v0.1 では `async fn` / `await` syntax は実装しません。
 
 ただし、I/O と並行処理の境界は v0.1 から実装対象にします。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
+`Io` / `Task` / `TaskGroup` は v0.1 では言語組み込みの実験的な型です。
+将来は `std.io` と `std.task` の API として整理します。
 
 ```kizu
 fn read_config(io: Io, path: []const u8) -> ![]const u8 {
@@ -960,9 +962,13 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 * task は local borrow を捕まえられない
 * task へ渡す non-copy value は move される
 * 野良 task は許可しない
+* task は `TaskGroup` の structured scope を越えて escape できない
+* safe Kizu では task 間で mutable state を暗黙共有できない
 
 v0.1 の `TaskGroup` は interpreter 上の structured task model として実装します。
+`spawn` は OS thread や event loop を作らず、同期的に対象関数を評価して `Task<T>` に結果を保持します。
 OS thread、event loop、networking stdlib は後続 phase で扱います。
+実並行 runtime を導入する場合も、上記の ownership / borrow / structured scope の制約を維持します。
 
 ## 16. contract / satisfy / Dyn 方針
 

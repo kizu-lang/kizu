@@ -43,6 +43,7 @@ stdlib module naming は lowercase dotted names にする。
 ```text
 std.string
 std.io
+std.task
 std.fs
 std.mem
 std.slice
@@ -59,4 +60,5 @@ v0.1 の stdlib 実装は `print` だけでよい。
 - allocator を必要とする string 操作は標準ライブラリ側に寄せる
 - C ABI では `std.string` を暗黙に `ptr<const u8>` へ変換しない
 - collection は `array<T>` を先に検討し、`map` / `set` は後続 phase に回す
-- async I/O は stdlib 基盤から切り離して別 phase で扱う
+- `Io` は将来 `std.io`、`Task` / `TaskGroup` は将来 `std.task` に寄せる
+- async runtime は stdlib API と分けて設計し、safe Kizu の ownership / borrow 制約を維持する
