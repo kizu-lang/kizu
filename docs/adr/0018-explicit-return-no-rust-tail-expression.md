@@ -18,7 +18,7 @@ Rust 風の tail expression return は採用しない。
 セミコロンの有無で戻り値が変わる仕様も採用しない。
 
 ```kizu
-fn add(a: int, b: int) -> int {
+fn add(a: i64, b: i64) -> i64 {
     return a + b
 }
 ```
@@ -26,7 +26,7 @@ fn add(a: int, b: int) -> int {
 次は error にする。
 
 ```kizu
-fn add(a: int, b: int) -> int {
+fn add(a: i64, b: i64) -> i64 {
     a + b
 }
 ```

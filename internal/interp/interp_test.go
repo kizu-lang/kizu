@@ -20,7 +20,7 @@ func TestRunHello(t *testing.T) {
 
 // TestRunFunctionsAndReturn checks user function calls and explicit return.
 func TestRunFunctionsAndReturn(t *testing.T) {
-	got := runSource(t, `fn add(a: int, b: int) -> int { return a + b }
+	got := runSource(t, `fn add(a: i64, b: i64) -> i64 { return a + b }
 fn main() { print(add(1, 2)) }`)
 	want := "3\n"
 	if got != want {
@@ -117,7 +117,7 @@ fn main() {
 
 // TestRunComptime checks Phase 13 expressions and selected branches execute normally.
 func TestRunComptime(t *testing.T) {
-	got := runSource(t, `fn sized(comptime n: int) -> int { return n }
+	got := runSource(t, `fn sized(comptime n: i64) -> i64 { return n }
 fn main() {
     let size = comptime 4 * 1024
     comptime if 1 + 1 == 2 {
@@ -135,10 +135,10 @@ fn main() {
 
 // TestRunErrorUnionTry checks minimal !T propagation at runtime.
 func TestRunErrorUnionTry(t *testing.T) {
-	got := runSource(t, `fn parse() -> !int {
+	got := runSource(t, `fn parse() -> !i64 {
     return 1
 }
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     print(value)
     return value + 1
@@ -151,10 +151,10 @@ fn main() -> !int {
 
 // TestRunErrorUnionTryPropagatesError checks try returns error-union errors without printing.
 func TestRunErrorUnionTryPropagatesError(t *testing.T) {
-	got := runSource(t, `fn parse() -> !int {
+	got := runSource(t, `fn parse() -> !i64 {
     return error("bad")
 }
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     print(value)
     return value

@@ -29,7 +29,7 @@ Go 製 interpreter を実装し、基本的な Kizu プログラムを `kizu run
 ### Interpreter
 
 - [x] `print` builtin を実装する
-- [x] `int` を実行できる
+- [x] `i64` を実行できる
 - [x] `bool` を実行できる
 - [x] `string` を実行できる
 - [x] `void` を扱える

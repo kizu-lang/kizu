@@ -70,7 +70,7 @@ func lowerSource(t *testing.T, source string) *ir.Module {
 	return module
 }
 
-const functionsSource = `fn add(a: int, b: int) -> int {
+const functionsSource = `fn add(a: i64, b: i64) -> i64 {
     return a + b
 }
 fn main() {

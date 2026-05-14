@@ -47,7 +47,7 @@ let size = comptime 4 * 1024
 comptime parameter:
 
 ```kizu
-fn sized(comptime n: int) -> int {
+fn sized(comptime n: i64) -> i64 {
     return n
 }
 ```

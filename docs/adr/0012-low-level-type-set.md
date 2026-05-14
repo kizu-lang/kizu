@@ -40,7 +40,8 @@ bool
 void
 ```
 
-`int` は v0 の簡易整数型として残すが、IR / backend では明示幅整数へ lowering する方針を検討する。
+`int` は残さない。
+整数 literal は `i64` として扱い、幅を変える場合は `cast<T>(value)` で明示する。
 
 ## 影響
 

@@ -11,7 +11,7 @@ import (
 
 // TestCheckAcceptsCopyReuse checks that copy values are reusable after move contexts.
 func TestCheckAcceptsCopyReuse(t *testing.T) {
-	source := `fn take(a: int) { print(a) }
+	source := `fn take(a: i64) { print(a) }
 fn main() {
     let a = 1
     let b = a
@@ -241,7 +241,7 @@ fn main() { unsafe { print(1) } }`,
 
 // TestCheckComptimeDoesNotMoveRuntimeValues checks compile-time arguments are read-only.
 func TestCheckComptimeDoesNotMoveRuntimeValues(t *testing.T) {
-	source := `fn sized(comptime n: int) -> int { return n }
+	source := `fn sized(comptime n: i64) -> i64 { return n }
 fn main() {
     let name = "alice"
     print(sized(comptime 8))

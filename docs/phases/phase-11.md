@@ -38,7 +38,7 @@ just wasi-smoke
 
 対応する target subset:
 
-- `int` は `i64`
+- `i64` は WebAssembly `i64`
 - `bool` は `i32`
 - `string` は linear memory 上の data segment
 - function call

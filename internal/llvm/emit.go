@@ -151,8 +151,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 // writeConst writes scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
 	switch instr.Result.Type {
-	case "int":
-		e.values[instr.Result.Name] = valueInfo{typ: "int", operand: instr.Immediate}
+	case "i64":
+		e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: instr.Immediate}
 	case "bool":
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: llvmBool(instr.Immediate)}
 	case "string":
@@ -231,7 +231,7 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	case "string":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n",
 			value.operand, value.length)
-	case "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", value.operand)
 	case "bool":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_bool(i1 %s)\n", value.operand)

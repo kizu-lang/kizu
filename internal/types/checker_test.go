@@ -13,7 +13,7 @@ import (
 func TestCheckValidPhase2Programs(t *testing.T) {
 	cases := []string{
 		`fn main() { print("hello, kizu") }`,
-		`fn add(a: int, b: int) -> int { return a + b }
+		`fn add(a: i64, b: i64) -> i64 { return a + b }
 fn main() { print(add(1, 2)) }`,
 		`fn main() {
     let name = "alice"
@@ -52,22 +52,22 @@ func TestCheckRejectsNameAndCallErrors(t *testing.T) {
 		},
 		{
 			name: "arg count",
-			source: `fn add(a: int, b: int) -> int { return a + b }
+			source: `fn add(a: i64, b: i64) -> i64 { return a + b }
 fn main() { print(add(1)) }`,
 			want: "`add` expects 2 args, got 1",
 		},
 		{
 			name: "arg type",
-			source: `fn take(a: int) -> int { return a }
+			source: `fn take(a: i64) -> i64 { return a }
 fn main() { print(take("no")) }`,
-			want: "arg 1 of `take` expects int, got string",
+			want: "arg 1 of `take` expects i64, got string",
 		},
 		{
 			name: "return type",
-			source: `fn bad() -> int {
+			source: `fn bad() -> i64 {
     return "no"
 }`,
-			want: "return expects int, got string",
+			want: "return expects i64, got string",
 		},
 	}
 	runErrorCases(t, cases)
@@ -82,17 +82,17 @@ func TestCheckRejectsReturnAndOperatorErrors(t *testing.T) {
 	}{
 		{
 			name: "missing return",
-			source: `fn bad() -> int {
+			source: `fn bad() -> i64 {
     1
 }`,
-			want: "function `bad` must return int",
+			want: "function `bad` must return i64",
 		},
 		{
 			name: "if return path",
-			source: `fn bad(ok: bool) -> int {
+			source: `fn bad(ok: bool) -> i64 {
     if ok { return 1 }
 }`,
-			want: "function `bad` must return int",
+			want: "function `bad` must return i64",
 		},
 		{
 			name: "binary operands",
@@ -119,7 +119,7 @@ func TestCheckRejectsReturnAndOperatorErrors(t *testing.T) {
 			name: "no integer promotion",
 			source: `fn take(a: i32) -> i32 { return a }
 fn main() { print(take(1)) }`,
-			want: "arg 1 of `take` expects i32, got int",
+			want: "arg 1 of `take` expects i32, got i64",
 		},
 	}
 	runErrorCases(t, cases)
@@ -171,7 +171,7 @@ fn main() {}`
 func TestCheckAcceptsStructDeclarations(t *testing.T) {
 	source := `struct User {
     name: string
-    age: int
+    age: i64
 }
 fn take(user: User) {}
 fn main() {}`
@@ -264,7 +264,7 @@ func TestCheckRejectsEnumMatchErrors(t *testing.T) {
 			source: `fn main() {
     match 1 { Red => print("red") }
 }`,
-			want: "match expects enum, got int",
+			want: "match expects enum, got i64",
 		},
 		{
 			name: "unknown tag",
@@ -314,7 +314,7 @@ fn main() {
 
 // TestCheckAcceptsUnsafePointerOperations checks raw pointer ops inside unsafe.
 func TestCheckAcceptsUnsafePointerOperations(t *testing.T) {
-	source := `extern "c" fn source() -> ptr<int>
+	source := `extern "c" fn source() -> ptr<i64>
 fn main() {
     unsafe {
         let p = source()
@@ -339,7 +339,7 @@ fn main() {}`
 
 // TestCheckAcceptsComptime checks Phase 13 compile-time values and branch selection.
 func TestCheckAcceptsComptime(t *testing.T) {
-	source := `fn sized(comptime n: int) -> int {
+	source := `fn sized(comptime n: i64) -> i64 {
     return n
 }
 fn main() {
@@ -382,7 +382,7 @@ func TestCheckRejectsComptimeErrors(t *testing.T) {
 		},
 		{
 			name: "comptime parameter",
-			source: `fn sized(comptime n: int) -> int { return n }
+			source: `fn sized(comptime n: i64) -> i64 { return n }
 fn main() {
     let x = 8
     print(sized(x))
@@ -456,10 +456,10 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 
 // TestCheckAcceptsErrorUnionTry checks minimal !T propagation.
 func TestCheckAcceptsErrorUnionTry(t *testing.T) {
-	source := `fn parse() -> !int {
+	source := `fn parse() -> !i64 {
     return 1
 }
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     return value + 1
 }`
@@ -470,10 +470,10 @@ fn main() -> !int {
 
 // TestCheckAcceptsErrorUnionError checks explicit error value construction.
 func TestCheckAcceptsErrorUnionError(t *testing.T) {
-	source := `fn parse() -> !int {
+	source := `fn parse() -> !i64 {
     return error("bad")
 }
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     return value
 }`
@@ -491,7 +491,7 @@ func TestCheckRejectsTryErrors(t *testing.T) {
 	}{
 		{
 			name: "non error-union function",
-			source: `fn parse() -> !int { return 1 }
+			source: `fn parse() -> !i64 { return 1 }
 fn main() {
     let x = try parse()
     print(x)
@@ -500,15 +500,15 @@ fn main() {
 		},
 		{
 			name: "non error-union expression",
-			source: `fn main() -> !int {
+			source: `fn main() -> !i64 {
     let x = try 1
     return x
 }`,
-			want: "try expects !T, got int",
+			want: "try expects !T, got i64",
 		},
 		{
 			name: "error message type",
-			source: `fn main() -> !int {
+			source: `fn main() -> !i64 {
     return error(1)
 }`,
 			want: "`error` expects string",
@@ -526,7 +526,7 @@ func TestCheckRejectsUnsafeBoundaryErrors(t *testing.T) {
 	}{
 		{
 			name: "ptr read outside unsafe",
-			source: `extern "c" fn source() -> ptr<int>
+			source: `extern "c" fn source() -> ptr<i64>
 fn main() {
     let p = source()
     print(ptr_read(p))
@@ -550,7 +550,7 @@ fn main() {
 		},
 		{
 			name: "unsafe function call outside unsafe",
-			source: `unsafe fn source() -> int { return 1 }
+			source: `unsafe fn source() -> i64 { return 1 }
 fn main() {
     print(source())
 }`,
@@ -558,7 +558,7 @@ fn main() {
 		},
 		{
 			name: "write through const pointer",
-			source: `extern "c" fn source() -> ptr<const int>
+			source: `extern "c" fn source() -> ptr<const i64>
 fn main() {
     unsafe {
         let p = source()

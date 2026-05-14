@@ -84,7 +84,7 @@ func TestIROptCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "%3: int = const 3") {
+	if !strings.Contains(string(out), "%3: i64 = const 3") {
 		t.Fatalf("got %q", out)
 	}
 	if strings.Contains(string(out), "binary.+") {

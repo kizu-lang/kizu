@@ -44,11 +44,11 @@ func TestOptimizePasses(t *testing.T) {
 	fn := module.Functions[0]
 	block := &Block{Name: "entry"}
 	fn.Blocks = append(fn.Blocks, block)
-	c1 := Value{Name: "%1", Type: "int"}
-	c2 := Value{Name: "%2", Type: "int"}
-	sum := Value{Name: "%3", Type: "int"}
-	copyValue := Value{Name: "%4", Type: "int"}
-	dead := Value{Name: "%5", Type: "int"}
+	c1 := Value{Name: "%1", Type: "i64"}
+	c2 := Value{Name: "%2", Type: "i64"}
+	sum := Value{Name: "%3", Type: "i64"}
+	copyValue := Value{Name: "%4", Type: "i64"}
+	dead := Value{Name: "%5", Type: "i64"}
 	block.Instrs = []*Instr{
 		{Result: c1, Op: "const", Immediate: "1"},
 		{Result: c2, Op: "const", Immediate: "2"},
@@ -61,8 +61,8 @@ func TestOptimizePasses(t *testing.T) {
 	got := Dump(module)
 	want := `fn main() -> void {
 entry:
-  %3: int = const 3
-  return %3: int
+  %3: i64 = const 3
+  return %3: i64
 }`
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
@@ -93,7 +93,7 @@ func lowerSource(t *testing.T, source string) *Module {
 	return module
 }
 
-const functionsSource = `fn add(a: int, b: int) -> int {
+const functionsSource = `fn add(a: i64, b: i64) -> i64 {
     return a + b
 }
 fn main() {
@@ -144,10 +144,10 @@ const castSource = `fn main() {
     print(x)
 }`
 
-const errorUnionSource = `fn parse() -> !int {
+const errorUnionSource = `fn parse() -> !i64 {
     return 1
 }
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     return value
 }`
@@ -159,36 +159,36 @@ entry:
   return void: void
 }`
 
-const functionsSnapshot = `fn add(%a: int, %b: int) -> int {
+const functionsSnapshot = `fn add(%a: i64, %b: i64) -> i64 {
 entry:
-  %1: int = binary.+ %a: int, %b: int
-  return %1: int
+  %1: i64 = binary.+ %a: i64, %b: i64
+  return %1: i64
 }
 fn main() -> void {
 entry:
-  %1: int = const 1
-  %2: int = const 2
-  %3: int = call.add %1: int, %2: int
-  call.print %3: int
+  %1: i64 = const 1
+  %2: i64 = const 2
+  %3: i64 = call.add %1: i64, %2: i64
+  call.print %3: i64
   return void: void
 }`
 
 const variablesSnapshot = `fn main() -> void {
 entry:
   %1: string = const "alice"
-  %2: int = const 30
-  %3: int = const 1
-  %4: int = binary.+ %2: int, %3: int
+  %2: i64 = const 30
+  %3: i64 = const 1
+  %4: i64 = binary.+ %2: i64, %3: i64
   call.print %1: string
-  call.print %4: int
+  call.print %4: i64
   return void: void
 }`
 
 const ifSnapshot = `fn main() -> void {
 entry:
-  %1: int = const 20
-  %2: int = const 20
-  %3: bool = binary.>= %1: int, %2: int
+  %1: i64 = const 20
+  %2: i64 = const 20
+  %3: bool = binary.>= %1: i64, %2: i64
   branch %3: bool, if.then.1, if.else.2
 if.then.1:
   %4: string = const "adult"
@@ -204,17 +204,17 @@ if.end.3:
 
 const whileSnapshot = `fn main() -> void {
 entry:
-  %1: int = const 0
+  %1: i64 = const 0
   jump while.header.1
 while.header.1:
-  %2: int = phi [entry, %1: int], [while.body.2, %7: int]
-  %3: int = const 3
-  %4: bool = binary.< %2: int, %3: int
+  %2: i64 = phi [entry, %1: i64], [while.body.2, %7: i64]
+  %3: i64 = const 3
+  %4: bool = binary.< %2: i64, %3: i64
   branch %4: bool, while.body.2, while.end.3
 while.body.2:
-  call.print %2: int
-  %6: int = const 1
-  %7: int = binary.+ %2: int, %6: int
+  call.print %2: i64
+  %6: i64 = const 1
+  %7: i64 = binary.+ %2: i64, %6: i64
   jump while.header.1
 while.end.3:
   return void: void
@@ -234,29 +234,29 @@ entry:
 
 const comptimeSnapshot = `fn main() -> void {
 entry:
-  %1: int = const 4
-  %2: int = const 1024
-  %3: int = binary.* %1: int, %2: int
-  call.print %3: int
+  %1: i64 = const 4
+  %2: i64 = const 1024
+  %3: i64 = binary.* %1: i64, %2: i64
+  call.print %3: i64
   return void: void
 }`
 
 const castSnapshot = `fn main() -> void {
 entry:
-  %1: int = const 1
-  %2: i32 = cast %1: int, i32
+  %1: i64 = const 1
+  %2: i32 = cast %1: i64, i32
   call.print %2: i32
   return void: void
 }`
 
-const errorUnionSnapshot = `fn parse() -> !int {
+const errorUnionSnapshot = `fn parse() -> !i64 {
 entry:
-  %1: int = const 1
-  return %1: int
+  %1: i64 = const 1
+  return %1: i64
 }
-fn main() -> !int {
+fn main() -> !i64 {
 entry:
-  %1: !int = call.parse
-  %2: int = error.try %1: !int
-  return %2: int
+  %1: !i64 = call.parse
+  %2: i64 = error.try %1: !i64
+  return %2: i64
 }`

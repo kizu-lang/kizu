@@ -67,7 +67,7 @@ func evalComptime(expr ast.Expression) (comptimeValue, error) {
 		if err != nil {
 			return comptimeValue{}, fmt.Errorf("comptime error: invalid integer `%s`", e.Value)
 		}
-		return comptimeValue{typ: typeInt, i: value}, nil
+		return comptimeValue{typ: typeI64, i: value}, nil
 	case *ast.BoolExpr:
 		return comptimeValue{typ: typeBool, b: e.Value}, nil
 	case *ast.StringExpr:
@@ -89,10 +89,10 @@ func evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error) {
 	}
 	switch expr.Operator {
 	case "-":
-		if right.typ != typeInt {
-			return comptimeValue{}, fmt.Errorf("comptime error: unary - expects int")
+		if right.typ != typeI64 {
+			return comptimeValue{}, fmt.Errorf("comptime error: unary - expects integer")
 		}
-		return comptimeValue{typ: typeInt, i: -right.i}, nil
+		return comptimeValue{typ: typeI64, i: -right.i}, nil
 	case "!":
 		if right.typ != typeBool {
 			return comptimeValue{}, fmt.Errorf("comptime error: unary ! expects bool")
@@ -116,8 +116,11 @@ func evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error) {
 	if expr.Operator == "==" || expr.Operator == "!=" {
 		return evalComptimeEquality(expr.Operator, left, right)
 	}
-	if left.typ != typeInt || right.typ != typeInt {
-		return comptimeValue{}, fmt.Errorf("comptime error: operator `%s` expects ints", expr.Operator)
+	if left.typ != typeI64 || right.typ != typeI64 {
+		return comptimeValue{}, fmt.Errorf(
+			"comptime error: operator `%s` expects integers",
+			expr.Operator,
+		)
 	}
 	return evalComptimeIntBinary(expr.Operator, left.i, right.i)
 }
@@ -142,11 +145,11 @@ func evalComptimeEquality(
 func evalComptimeIntBinary(op string, left int64, right int64) (comptimeValue, error) {
 	switch op {
 	case "+":
-		return comptimeValue{typ: typeInt, i: left + right}, nil
+		return comptimeValue{typ: typeI64, i: left + right}, nil
 	case "-":
-		return comptimeValue{typ: typeInt, i: left - right}, nil
+		return comptimeValue{typ: typeI64, i: left - right}, nil
 	case "*":
-		return comptimeValue{typ: typeInt, i: left * right}, nil
+		return comptimeValue{typ: typeI64, i: left * right}, nil
 	case "/":
 		return evalComptimeDivision(left, right)
 	case "%":
@@ -163,7 +166,7 @@ func evalComptimeDivision(left int64, right int64) (comptimeValue, error) {
 	if right == 0 {
 		return comptimeValue{}, fmt.Errorf("comptime error: division by zero")
 	}
-	return comptimeValue{typ: typeInt, i: left / right}, nil
+	return comptimeValue{typ: typeI64, i: left / right}, nil
 }
 
 // evalComptimeModulo evaluates checked integer remainder.
@@ -171,7 +174,7 @@ func evalComptimeModulo(left int64, right int64) (comptimeValue, error) {
 	if right == 0 {
 		return comptimeValue{}, fmt.Errorf("comptime error: modulo by zero")
 	}
-	return comptimeValue{typ: typeInt, i: left % right}, nil
+	return comptimeValue{typ: typeI64, i: left % right}, nil
 }
 
 // compareInts evaluates a compile-time integer comparison.

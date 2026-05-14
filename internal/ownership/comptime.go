@@ -101,7 +101,7 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 	case *ast.ComptimeExpr:
 		return c.readComptimeOnly(e.Expr)
 	case *ast.IntExpr:
-		return "int", nil
+		return "i64", nil
 	case *ast.StringExpr:
 		return "string", nil
 	case *ast.BoolExpr:

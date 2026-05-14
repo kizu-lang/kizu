@@ -155,7 +155,7 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
-		return l.emitConst("int", e.Value), nil
+		return l.emitConst("i64", e.Value), nil
 	case *ast.StringExpr:
 		return l.emitConst("string", fmt.Sprintf("%q", e.Value)), nil
 	case *ast.BoolExpr:

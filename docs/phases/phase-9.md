@@ -39,7 +39,7 @@ declare void @kizu_print_bool(i1)
 ```
 
 `string` は `ptr` と length の組を print ABI に渡す。
-`int` は v0 では基本的に `i64` へ lower する。
+整数 literal は `i64` として lower する。
 
 struct / arena / handle は Phase 9 では LLVM の具体 layout へ lower しない。
 必要になった値は opaque pointer 相当として扱い、native 実行は後続 phase で扱う。

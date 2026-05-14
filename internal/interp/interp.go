@@ -299,7 +299,7 @@ func (i *Interpreter) evalPrefixExpr(expr *ast.PrefixExpr, env *Env) (Value, err
 	switch expr.Operator {
 	case "-":
 		if right.kind != kindInt {
-			return voidValue(), fmt.Errorf("runtime error: unary - expects int")
+			return voidValue(), fmt.Errorf("runtime error: unary - expects integer")
 		}
 		return intValue(-right.i), nil
 	case "!":
@@ -326,7 +326,7 @@ func (i *Interpreter) evalBinaryExpr(expr *ast.BinaryExpr, env *Env) (Value, err
 		return evalEquality(expr.Operator, left, right)
 	}
 	if left.kind != kindInt || right.kind != kindInt {
-		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects ints", expr.Operator)
+		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects integers", expr.Operator)
 	}
 	return evalIntBinary(expr.Operator, left.i, right.i)
 }

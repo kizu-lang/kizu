@@ -288,7 +288,7 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
-		return "int", nil
+		return "i64", nil
 	case *ast.StringExpr:
 		return "string", nil
 	case *ast.BoolExpr:
@@ -471,7 +471,7 @@ func (c *Checker) checkPointerBuiltin(expr *ast.CallExpr, env *scope) (string, e
 		}
 	}
 	if name, ok := expr.Callee.(*ast.IdentExpr); ok && name.Name == "ptr_read" {
-		return "int", nil
+		return "i64", nil
 	}
 	return "void", nil
 }
@@ -814,7 +814,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	switch typeName {
-	case "bool", "int", "void", "Io",
+	case "bool", "void", "Io",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64":
 		return true

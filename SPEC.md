@@ -44,7 +44,7 @@ fn
 explicit return
 let / var
 assignment
-int
+i64
 bool
 string
 void
@@ -233,7 +233,7 @@ fn main() {
 ### 6.3 関数
 
 ```kizu
-fn add(a: int, b: int) -> int {
+fn add(a: i64, b: i64) -> i64 {
     return a + b
 }
 ```
@@ -245,7 +245,7 @@ Rust のような末尾式 return は採用しません。
 セミコロンの有無で戻り値が変わる仕様も採用しません。
 
 ```kizu
-fn bad_add(a: int, b: int) -> int {
+fn bad_add(a: i64, b: i64) -> i64 {
     a + b // error: non-void function must return explicitly
 }
 ```
@@ -264,7 +264,7 @@ fn log(message: string) -> void {
 ```kizu
 struct User {
     name: string
-    age: int
+    age: i64
 }
 ```
 
@@ -334,14 +334,13 @@ payload pattern、guard、destructuring は v0.1 では扱いません。
 v0.1 の基本型:
 
 ```text
-int
 bool
 string
 void
 ```
 
-`int` は v0.1 の簡易整数型です。
-interpreter 上では符号付き整数として扱い、具体的な bit 幅は固定しません。
+`i64` は整数 literal のデフォルト型です。
+Kizu は `int` のような幅が曖昧な整数型を導入しません。
 
 `void` は値を返さない関数の戻り値です。
 Kizu v0.1 では `Unit` という別名は導入しません。
@@ -368,6 +367,8 @@ ptr<const T>
 ?ptr<T>
 ?ptr<const T>
 ```
+
+type alias は v0.1 では導入しません。
 
 v0.1 では collection runtime API を実装しません。
 将来追加する collection 型:
@@ -447,9 +448,20 @@ type alias は v0.1 では導入しません。
 v0.1 の copy 型:
 
 ```text
-int
 bool
 void
+i8
+i16
+i32
+i64
+u8
+u16
+u32
+u64
+usize
+isize
+f32
+f64
 ```
 
 copy できない型:
@@ -522,11 +534,11 @@ error payload は標準の `string` message として扱います。
 error 値は `error(message)` で作ります。
 
 ```kizu
-fn parse() -> !int {
+fn parse() -> !i64 {
     return 1
 }
 
-fn fail() -> !int {
+fn fail() -> !i64 {
     return error("bad")
 }
 ```
@@ -535,7 +547,7 @@ fn fail() -> !int {
 error の場合は、現在の関数からその error value を返します。
 
 ```kizu
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     return value + 1
 }
@@ -733,7 +745,7 @@ let size = comptime 4 * 1024
 comptime parameter:
 
 ```kizu
-fn sized(comptime n: int) -> int {
+fn sized(comptime n: i64) -> i64 {
     return n
 }
 ```
@@ -833,7 +845,7 @@ method body は書けません。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> !int
+    fn write(self: borrow Self, bytes: borrow Bytes) -> !i64
 }
 ```
 
@@ -848,7 +860,7 @@ method body は型のそばに置きます。
 
 ```kizu
 impl File {
-    fn write(self: borrow File, bytes: borrow Bytes) -> !int {
+    fn write(self: borrow File, bytes: borrow Bytes) -> !i64 {
         return os.write(self.fd, bytes)
     }
 }

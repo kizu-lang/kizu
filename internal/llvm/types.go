@@ -9,7 +9,7 @@ func llvmType(typ string) string {
 		return "void"
 	case "bool":
 		return "i1"
-	case "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		return integerLLVMType(typ)
 	case "string":
 		return "ptr"

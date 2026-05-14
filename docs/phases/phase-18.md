@@ -35,11 +35,11 @@ Kizu のエラー処理を exception ではなく値として扱う。
 ## 構文
 
 ```kizu
-fn parse() -> !int {
+fn parse() -> !i64 {
     return 1
 }
 
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     return value + 1
 }

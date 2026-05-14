@@ -29,7 +29,7 @@ method body は書けない。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> !int
+    fn write(self: borrow Self, bytes: borrow Bytes) -> !i64
 }
 ```
 

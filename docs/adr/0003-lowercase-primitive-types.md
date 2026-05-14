@@ -12,14 +12,14 @@ Status: 採用
 v0 の基本型は次にする。
 
 ```text
-int
+i64
 bool
 string
 void
 ```
 
-`int` は v0 の簡易整数型とする。
-将来の native backend では明示幅整数を追加する。
+`i64` は整数 literal のデフォルト型とする。
+`int` は幅が曖昧なため採用しない。
 
 ```text
 i8 i16 i32 i64
@@ -33,4 +33,4 @@ f32 f64
 - examples と parser tests は小文字型を使う
 - `void` は戻り値省略時の型として扱う
 - `string` は v0 の組み込み文字列型として扱う
-- `String` / `Unit` は採用しない
+- `Int` / `String` / `Unit` は採用しない

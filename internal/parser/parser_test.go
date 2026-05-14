@@ -28,7 +28,7 @@ func TestParseHello(t *testing.T) {
 
 // TestParseFunctionWithParamsAndReturn checks typed parameters and return parsing.
 func TestParseFunctionWithParamsAndReturn(t *testing.T) {
-	input := `fn add(a: int, b: int) -> int {
+	input := `fn add(a: i64, b: i64) -> i64 {
     return a + b
 }`
 	p := New(lexer.New(input))
@@ -37,7 +37,7 @@ func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn add(a: int, b: int) -> int { return (a + b) }`
+	want := `fn add(a: i64, b: i64) -> i64 { return (a + b) }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -73,7 +73,7 @@ func TestParseIfAndWhile(t *testing.T) {
 func TestParseStructDecl(t *testing.T) {
 	input := `struct User {
     name: string
-    age: int
+    age: i64
 }
 fn main() {}`
 	p := New(lexer.New(input))
@@ -82,7 +82,7 @@ fn main() {}`
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `struct User { name: string; age: int }
+	want := `struct User { name: string; age: i64 }
 fn main() {  }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -189,7 +189,7 @@ fn main() { unsafe { print(get_byte(ptr_read_ptr())) } }`
 
 // TestParseComptime checks Phase 13 compile-time expression and parameter syntax.
 func TestParseComptime(t *testing.T) {
-	input := `fn sized(comptime n: int) -> int {
+	input := `fn sized(comptime n: i64) -> i64 {
     return n
 }
 fn main() {
@@ -205,7 +205,7 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn sized(comptime n: int) -> int { return n }
+	want := `fn sized(comptime n: i64) -> i64 { return n }
 fn main() { let size = comptime (4 * 1024); ` +
 		`comptime if ((1 + 1) == 2) { print(sized(comptime size)) } else { print(0) } }`
 	if got := program.String(); got != want {
@@ -234,7 +234,7 @@ func TestParseCast(t *testing.T) {
 
 // TestParseTry checks error-union propagation syntax.
 func TestParseTry(t *testing.T) {
-	input := `fn main() -> !int {
+	input := `fn main() -> !i64 {
     let x = try parse()
     return x
 }`
@@ -243,7 +243,7 @@ func TestParseTry(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() -> !int { let x = try parse(); return x }`
+	want := `fn main() -> !i64 { let x = try parse(); return x }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

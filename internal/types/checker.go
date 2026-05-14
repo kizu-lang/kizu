@@ -12,7 +12,7 @@ type Type string
 
 const (
 	typeBool   Type = "bool"
-	typeInt    Type = "int"
+	typeI64    Type = "i64"
 	typeString Type = "string"
 	typeSelf   Type = "Self"
 	typeVoid   Type = "void"
@@ -20,13 +20,12 @@ const (
 
 var knownTypes = map[Type]bool{
 	typeBool:    true,
-	typeInt:     true,
+	typeI64:     true,
 	typeString:  true,
 	typeVoid:    true,
 	"i8":        true,
 	"i16":       true,
 	"i32":       true,
-	"i64":       true,
 	"u8":        true,
 	"u16":       true,
 	"u32":       true,
@@ -40,7 +39,6 @@ var knownTypes = map[Type]bool{
 }
 
 var numericTypes = map[Type]bool{
-	typeInt: true,
 	"i8":    true,
 	"i16":   true,
 	"i32":   true,
@@ -56,7 +54,6 @@ var numericTypes = map[Type]bool{
 }
 
 var signedNumericTypes = map[Type]bool{
-	typeInt: true,
 	"i8":    true,
 	"i16":   true,
 	"i32":   true,
@@ -67,7 +64,6 @@ var signedNumericTypes = map[Type]bool{
 }
 
 var integerTypes = map[Type]bool{
-	typeInt: true,
 	"i8":    true,
 	"i16":   true,
 	"i32":   true,
@@ -675,7 +671,7 @@ func (c *Checker) checkMatchArms(
 func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr:
-		return typeInt, nil
+		return typeI64, nil
 	case *ast.StringExpr:
 		return typeString, nil
 	case *ast.BoolExpr:
@@ -775,7 +771,7 @@ func checkEquality(op string, left Type, right Type) (Type, error) {
 	return typeBool, nil
 }
 
-// isComparison reports whether op returns bool for int operands.
+// isComparison reports whether op returns bool for numeric operands.
 func isComparison(op string) bool {
 	return op == "<" || op == "<=" || op == ">" || op == ">="
 }

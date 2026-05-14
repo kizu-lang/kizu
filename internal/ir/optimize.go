@@ -51,7 +51,7 @@ func DeadCodeEliminate(module *Module) {
 func constantsIn(block *Block) map[string]int64 {
 	consts := map[string]int64{}
 	for _, instr := range block.Instrs {
-		if instr.Op != "const" || instr.Result.Type != "int" {
+		if instr.Op != "const" || instr.Result.Type != "i64" {
 			continue
 		}
 		value, err := strconv.ParseInt(instr.Immediate, 10, 64)
@@ -64,7 +64,7 @@ func constantsIn(block *Block) map[string]int64 {
 
 // foldInstr folds one instruction when both operands are known constants.
 func foldInstr(instr *Instr, consts map[string]int64) {
-	if len(instr.Args) != 2 || instr.Result.Type != "int" {
+	if len(instr.Args) != 2 || instr.Result.Type != "i64" {
 		return
 	}
 	left, okLeft := consts[instr.Args[0].Name]

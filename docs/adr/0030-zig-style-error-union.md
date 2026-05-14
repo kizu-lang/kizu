@@ -14,15 +14,15 @@ Kizu v0.1 では `result<T>` / `ok(value)` を採用しない。
 エラー処理は Zig に近い error union 構文として `!T` を使う。
 
 ```kizu
-fn parse() -> !int {
+fn parse() -> !i64 {
     return 1
 }
 
-fn fail() -> !int {
+fn fail() -> !i64 {
     return error("bad")
 }
 
-fn main() -> !int {
+fn main() -> !i64 {
     let value = try parse()
     return value + 1
 }

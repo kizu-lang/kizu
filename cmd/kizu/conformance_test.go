@@ -140,13 +140,13 @@ func typeNegativeCases() []conformanceErrorCase {
 			name:    "empty return value",
 			command: "check",
 			path:    "../../examples/negative/empty_return_value.kizu",
-			want:    "return expects int, got void",
+			want:    "return expects i64, got void",
 		},
 		{
 			name:    "missing return",
 			command: "check",
 			path:    "../../examples/negative/missing_return.kizu",
-			want:    "function `bad` must return int",
+			want:    "function `bad` must return i64",
 		},
 		{
 			name:    "invalid try",

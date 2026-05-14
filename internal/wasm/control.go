@@ -63,8 +63,8 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 // writeConst records scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
 	switch instr.Result.Type {
-	case "int":
-		e.values[instr.Result.Name] = valueInfo{typ: "int", expr: "(i64.const " + instr.Immediate + ")"}
+	case "i64":
+		e.values[instr.Result.Name] = valueInfo{typ: "i64", expr: "(i64.const " + instr.Immediate + ")"}
 	case "bool":
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", expr: wasmBool(instr.Immediate)}
 	case "string":
@@ -130,7 +130,7 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	case "string":
 		fmt.Fprintf(&e.out, "            (call $__write_line %s (i32.const %d))\n",
 			value.expr, value.length)
-	case "int":
+	case "i64":
 		fmt.Fprintf(&e.out, "            (call $__print_i64 %s)\n", value.expr)
 	case "bool":
 		fmt.Fprintf(&e.out, "            (call $__print_bool %s)\n", value.expr)

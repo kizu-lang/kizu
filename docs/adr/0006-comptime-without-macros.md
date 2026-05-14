@@ -25,7 +25,7 @@ Kizu は Zig に近い低レベル指向を目指す。
 v0.1 で採用するもの:
 
 - `comptime <expr>`
-- `fn f(comptime n: int)`
+- `fn f(comptime n: i64)`
 - `comptime if <bool expr> { ... } else { ... }`
 
 v0.1 の `comptime` expression は、リテラル、単項演算、二項演算に限定する。
