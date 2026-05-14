@@ -10,7 +10,7 @@ import (
 // TestGetOrBuildCachesNoOpRebuild checks that identical inputs hit cache.
 func TestGetOrBuildCachesNoOpRebuild(t *testing.T) {
 	cache := &Cache{Dir: t.TempDir(), MaxBytes: DefaultMaxBytes}
-	source := writeTempSource(t, `fn main() { print("hello") }`)
+	source := writeTempSource(t, `fn main() { print("hello"); }`)
 	builds := 0
 	build := func() (string, error) {
 		builds++
@@ -32,7 +32,7 @@ func TestGetOrBuildCachesNoOpRebuild(t *testing.T) {
 // TestWhyRebuildExplainsChangedSource checks rebuild reasons for edits.
 func TestWhyRebuildExplainsChangedSource(t *testing.T) {
 	cache := &Cache{Dir: t.TempDir(), MaxBytes: DefaultMaxBytes}
-	source := writeTempSource(t, `fn main() { print("hello") }`)
+	source := writeTempSource(t, `fn main() { print("hello"); }`)
 	_, err := cache.GetOrBuild(source, "emit-llvm", func() (string, error) {
 		return "artifact", nil
 	})
@@ -46,7 +46,7 @@ func TestWhyRebuildExplainsChangedSource(t *testing.T) {
 	if !strings.Contains(hit, "cache hit") {
 		t.Fatalf("got %q", hit)
 	}
-	if err := os.WriteFile(source, []byte(`fn main() { print("changed") }`), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte(`fn main() { print("changed"); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	miss, err := cache.WhyRebuild(source, "emit-llvm")
@@ -61,7 +61,7 @@ func TestWhyRebuildExplainsChangedSource(t *testing.T) {
 // TestStatusAndPrune checks cache accounting and pruning.
 func TestStatusAndPrune(t *testing.T) {
 	cache := &Cache{Dir: t.TempDir(), MaxBytes: DefaultMaxBytes}
-	source := writeTempSource(t, `fn main() { print("hello") }`)
+	source := writeTempSource(t, `fn main() { print("hello"); }`)
 	_, err := cache.GetOrBuild(source, "emit-llvm", func() (string, error) {
 		return "artifact", nil
 	})

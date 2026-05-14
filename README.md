@@ -63,7 +63,7 @@ change while the language design is being tested.
 
 ```kizu
 fn main() {
-    print("hello, kizu")
+    print("hello, kizu");
 }
 ```
 

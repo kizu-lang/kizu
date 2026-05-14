@@ -9,11 +9,11 @@ import (
 // TestNextToken checks the lexer token stream for representative syntax.
 func TestNextToken(t *testing.T) {
 	input := `fn main() {
-    let name = "alice"
-    var age = 30
-    update(&mut user)
-    age = age + 1
-    match Color.Red { Red => return age >= 20 }
+    let name = "alice";
+    var age = 30;
+    update(&mut user);
+    age = age + 1;
+    match Color.Red { Red => return age >= 20 ;}
 }`
 
 	tests := []struct {
@@ -29,21 +29,25 @@ func TestNextToken(t *testing.T) {
 		{token.Ident, "name"},
 		{token.Assign, "="},
 		{token.String, "alice"},
+		{token.Semicolon, ";"},
 		{token.Var, "var"},
 		{token.Ident, "age"},
 		{token.Assign, "="},
 		{token.Int, "30"},
+		{token.Semicolon, ";"},
 		{token.Ident, "update"},
 		{token.LParen, "("},
 		{token.Amp, "&"},
 		{token.Mut, "mut"},
 		{token.Ident, "user"},
 		{token.RParen, ")"},
+		{token.Semicolon, ";"},
 		{token.Ident, "age"},
 		{token.Assign, "="},
 		{token.Ident, "age"},
 		{token.Plus, "+"},
 		{token.Int, "1"},
+		{token.Semicolon, ";"},
 		{token.Match, "match"},
 		{token.Ident, "Color"},
 		{token.Dot, "."},
@@ -55,6 +59,7 @@ func TestNextToken(t *testing.T) {
 		{token.Ident, "age"},
 		{token.GTE, ">="},
 		{token.Int, "20"},
+		{token.Semicolon, ";"},
 		{token.RBrace, "}"},
 		{token.RBrace, "}"},
 		{token.EOF, ""},
@@ -71,8 +76,8 @@ func TestNextToken(t *testing.T) {
 
 // TestLoopControlTokens checks v0.1 loop-control syntax.
 func TestLoopControlTokens(t *testing.T) {
-	input := `for 0..3 |i| { continue }
-break :outer`
+	input := `for 0..3 |i| { continue; }
+break :outer;`
 	tests := []struct {
 		typ token.Type
 		lit string
@@ -86,10 +91,12 @@ break :outer`
 		{token.Pipe, "|"},
 		{token.LBrace, "{"},
 		{token.Continue, "continue"},
+		{token.Semicolon, ";"},
 		{token.RBrace, "}"},
 		{token.Break, "break"},
 		{token.Colon, ":"},
 		{token.Ident, "outer"},
+		{token.Semicolon, ";"},
 		{token.EOF, ""},
 	}
 	l := New(input)

@@ -18,7 +18,7 @@ func TestEmitPhase2Subsets(t *testing.T) {
 		src   string
 		wants []string
 	}{
-		{name: "hello", src: `fn main() { print("hello, kizu") }`, wants: []string{
+		{name: "hello", src: `fn main() { print("hello, kizu"); }`, wants: []string{
 			`(import "wasi_snapshot_preview1" "fd_write"`,
 			`(data (i32.const 4096) "hello, kizu")`,
 			`(func $_start (export "_start")`,
@@ -71,16 +71,16 @@ func lowerSource(t *testing.T, source string) *ir.Module {
 }
 
 const functionsSource = `fn add(a: i64, b: i64) -> i64 {
-    return a + b
+    return a + b;
 }
 fn main() {
-    print(add(1, 2))
+    print(add(1, 2));
 }`
 
 const whileSource = `fn main() {
-    var i = 0
+    var i = 0;
     while i < 3 {
-        print(i)
-        i = i + 1
+        print(i);
+        i = i + 1;
     }
 }`

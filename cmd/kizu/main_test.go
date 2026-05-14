@@ -67,7 +67,7 @@ func TestFmtCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "fn main() { print(\"hello, kizu\") }\n"
+	want := "fn main() { print(\"hello, kizu\"); }\n"
 	if string(out) != want {
 		t.Fatalf("got %q, want %q", out, want)
 	}
@@ -76,7 +76,7 @@ func TestFmtCommandSmoke(t *testing.T) {
 // TestIROptCommandSmoke checks the CLI can dump optimized typed SSA IR.
 func TestIROptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
-	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2) }`), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("go", "run", ".", "ir", "--opt", source)
@@ -108,7 +108,7 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 // TestBuildEmitLLVMOptCommandSmoke checks LLVM build can use optimized IR.
 func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
-	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2) }`), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte(`fn main() { print(1 + 2); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "--opt", source)
@@ -233,7 +233,7 @@ func TestImportCHeaderCommandRejectsUnsupportedSyntax(t *testing.T) {
 func TestWhyRebuildChangedSource(t *testing.T) {
 	cacheDir := t.TempDir()
 	source := filepath.Join(t.TempDir(), "main.kizu")
-	if err := os.WriteFile(source, []byte(`fn main() { print("hello") }`), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte(`fn main() { print("hello"); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	build := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
@@ -241,7 +241,7 @@ func TestWhyRebuildChangedSource(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}
-	if err := os.WriteFile(source, []byte(`fn main() { print("changed") }`), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte(`fn main() { print("changed"); }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	why := exec.Command("go", "run", ".", "why-rebuild", source)

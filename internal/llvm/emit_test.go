@@ -18,7 +18,7 @@ func TestEmitSnapshots(t *testing.T) {
 		source string
 		want   string
 	}{
-		{name: "hello", source: `fn main() { print("hello, kizu") }`, want: helloLLVM},
+		{name: "hello", source: `fn main() { print("hello, kizu"); }`, want: helloLLVM},
 		{name: "functions", source: functionsSource, want: functionsLLVM},
 		{name: "variables", source: variablesSource, want: variablesLLVM},
 		{name: "if", source: ifSource, want: ifLLVM},
@@ -63,30 +63,30 @@ func lowerSource(t *testing.T, source string) *ir.Module {
 }
 
 const functionsSource = `fn add(a: i64, b: i64) -> i64 {
-    return a + b
+    return a + b;
 }
 fn main() {
-    print(add(1, 2))
+    print(add(1, 2));
 }`
 
 const variablesSource = `fn main() {
-    let name = "alice"
-    var age = 30
-    age = age + 1
-    print(name)
-    print(age)
+    let name = "alice";
+    var age = 30;
+    age = age + 1;
+    print(name);
+    print(age);
 }`
 
 const ifSource = `fn main() {
-    let age = 20
-    if age >= 20 { print("adult") } else { print("minor") }
+    let age = 20;
+    if age >= 20 { print("adult"); } else { print("minor"); }
 }`
 
 const whileSource = `fn main() {
-    var i = 0
+    var i = 0;
     while i < 3 {
-        print(i)
-        i = i + 1
+        print(i);
+        i = i + 1;
     }
 }`
 

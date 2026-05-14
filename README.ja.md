@@ -61,7 +61,7 @@ LLVM と WASM は interpreter より限定された subset だけを扱います
 
 ```kizu
 fn main() {
-    print("hello, kizu")
+    print("hello, kizu");
 }
 ```
 

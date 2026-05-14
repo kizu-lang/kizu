@@ -11,7 +11,7 @@ import (
 
 // TestRunHello checks the print builtin on a minimal program.
 func TestRunHello(t *testing.T) {
-	got := runSource(t, `fn main() { print("hello, kizu") }`)
+	got := runSource(t, `fn main() { print("hello, kizu"); }`)
 	want := "hello, kizu\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -20,8 +20,8 @@ func TestRunHello(t *testing.T) {
 
 // TestRunFunctionsAndReturn checks user function calls and explicit return.
 func TestRunFunctionsAndReturn(t *testing.T) {
-	got := runSource(t, `fn add(a: i64, b: i64) -> i64 { return a + b }
-fn main() { print(add(1, 2)) }`)
+	got := runSource(t, `fn add(a: i64, b: i64) -> i64 { return a + b ;}
+fn main() { print(add(1, 2)); }`)
 	want := "3\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -31,11 +31,11 @@ fn main() { print(add(1, 2)) }`)
 // TestRunVariablesAndAssignment checks let, var, and mutable assignment.
 func TestRunVariablesAndAssignment(t *testing.T) {
 	got := runSource(t, `fn main() {
-    let name = "alice"
-    var age = 30
-    age = age + 1
-    print(name)
-    print(age)
+    let name = "alice";
+    var age = 30;
+    age = age + 1;
+    print(name);
+    print(age);
 }`)
 	want := "alice\n31\n"
 	if got != want {
@@ -50,14 +50,14 @@ func TestRunFieldAndDerefAssignment(t *testing.T) {
     age: i64
 }
 fn rename(user: &mut User) -> void {
-    user.*.name = "bob"
+    user.*.name = "bob";
 }
 fn main() -> void {
-    var user = User { name: "alice", age: 30 }
-    user.age = user.age + 1
-    rename(user)
-    print(user.name)
-    print(user.age)
+    var user = User { name: "alice", age: 30 };
+    user.age = user.age + 1;
+    rename(user);
+    print(user.name);
+    print(user.age);
 }`)
 	want := "bob\n31\n"
 	if got != want {
@@ -68,12 +68,12 @@ fn main() -> void {
 // TestRunControlFlow checks if/else and while execution.
 func TestRunControlFlow(t *testing.T) {
 	got := runSource(t, `fn main() {
-    let age = 20
-    if age >= 20 { print("adult") } else { print("minor") }
-    var i = 0
+    let age = 20;
+    if age >= 20 { print("adult"); } else { print("minor"); }
+    var i = 0;
     while i < 3 {
-        print(i)
-        i = i + 1
+        print(i);
+        i = i + 1;
     }
 }`)
 	want := "adult\n0\n1\n2\n"
@@ -85,14 +85,14 @@ func TestRunControlFlow(t *testing.T) {
 // TestRunLoopControl checks break, continue, labels, and bounded for loops.
 func TestRunLoopControl(t *testing.T) {
 	got := runSource(t, `fn main() -> void {
-    var i = 0
+    var i = 0;
     outer: while true {
         for 0..4 |j| {
-            if j == 1 { continue }
-            if i == 1 { break :outer }
-            print(i * 10 + j)
+            if j == 1 { continue; }
+            if i == 1 { break :outer; }
+            print(i * 10 + j);
         }
-        i = i + 1
+        i = i + 1;
     }
 }`)
 	want := "0\n2\n3\n"
@@ -107,9 +107,9 @@ func TestRunArenaHandle(t *testing.T) {
     name: []const u8
 }
 fn main() {
-    let users = arena<User>()
-    let alice = users.add(User { name: "alice" })
-    print(users.get(alice).name)
+    let users = arena<User>();
+    let alice = users.add(User { name: "alice" });
+    print(users.get(alice).name);
 }`)
 	want := "alice\n"
 	if got != want {
@@ -125,9 +125,9 @@ func TestRunEnumValueAccess(t *testing.T) {
     Blue
 }
 fn main() {
-    let color = Color.Green
-    print(color)
-    print(color == Color.Green)
+    let color = Color.Green;
+    print(color);
+    print(color == Color.Green);
 }`)
 	want := "Color.Green\ntrue\n"
 	if got != want {
@@ -143,11 +143,11 @@ func TestRunEnumMatch(t *testing.T) {
     Blue
 }
 fn main() {
-    let color = Color.Blue
+    let color = Color.Blue;
     match color {
-        Red => print("red")
-        Green => print("green")
-        Blue => print("blue")
+        Red => print("red");
+        Green => print("green");
+        Blue => print("blue");
     }
 }`)
 	want := "blue\n"
@@ -160,21 +160,21 @@ fn main() {
 func TestRunTaggedUnionMatch(t *testing.T) {
 	got := runSource(t, `union Shape {
     Point
-    Circle(i64)
-    Label([]const u8)
+    Circle(i64);
+    Label([]const u8);
 }
 fn main() {
-    let first = Shape.Circle(10)
-    let second = Shape.Label("name")
-    describe(first)
-    describe(second)
-    describe(Shape.Point)
+    let first = Shape.Circle(10);
+    let second = Shape.Label("name");
+    describe(first);
+    describe(second);
+    describe(Shape.Point);
 }
 fn describe(shape: &Shape) -> void {
     match shape {
-        Point => print("point")
-        Circle(radius) => print(radius)
-        Label(text) => print(text)
+        Point => print("point");
+        Circle(radius) => print(radius);
+        Label(text) => print(text);
     }
 }`)
 	want := "10\nname\npoint\n"
@@ -185,15 +185,15 @@ fn describe(shape: &Shape) -> void {
 
 // TestRunComptime checks Phase 13 expressions and selected branches execute normally.
 func TestRunComptime(t *testing.T) {
-	got := runSource(t, `fn sized(comptime n: i64) -> i64 { return n }
+	got := runSource(t, `fn sized(comptime n: i64) -> i64 { return n ;}
 fn main() {
-    let size = comptime 4 * 1024
+    let size = comptime 4 * 1024;
     comptime if 1 + 1 == 2 {
-        print(sized(comptime 8))
+        print(sized(comptime 8));
     } else {
-        print(0)
+        print(0);
     }
-    print(size)
+    print(size);
 }`)
 	want := "8\n4096\n"
 	if got != want {
@@ -204,12 +204,12 @@ fn main() {
 // TestRunErrorUnionTry checks minimal !T propagation at runtime.
 func TestRunErrorUnionTry(t *testing.T) {
 	got := runSource(t, `fn parse() -> !i64 {
-    return 1
+    return 1;
 }
 fn main() -> !i64 {
-    let value = try parse()
-    print(value)
-    return value + 1
+    let value = try parse();
+    print(value);
+    return value + 1;
 }`)
 	want := "1\n"
 	if got != want {
@@ -220,12 +220,12 @@ fn main() -> !i64 {
 // TestRunErrorUnionTryPropagatesError checks try returns error-union errors without printing.
 func TestRunErrorUnionTryPropagatesError(t *testing.T) {
 	got := runSource(t, `fn parse() -> !i64 {
-    return error("bad")
+    return error("bad");
 }
 fn main() -> !i64 {
-    let value = try parse()
-    print(value)
-    return value
+    let value = try parse();
+    print(value);
+    return value;
 }`)
 	if got != "" {
 		t.Fatalf("got %q, want empty output", got)
@@ -235,8 +235,8 @@ fn main() -> !i64 {
 // TestRuntimeErrorChecksMutableAssignment checks a short readable runtime error.
 func TestRuntimeErrorChecksMutableAssignment(t *testing.T) {
 	_, err := parseAndRun(`fn main() {
-    let x = 1
-    x = 2
+    let x = 1;
+    x = 2;
 }`)
 	if err == nil {
 		t.Fatalf("expected error")

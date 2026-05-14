@@ -11,13 +11,13 @@ import (
 
 // TestCheckAcceptsCopyReuse checks that copy values are reusable after move contexts.
 func TestCheckAcceptsCopyReuse(t *testing.T) {
-	source := `fn take(a: i64) { print(a) }
+	source := `fn take(a: i64) { print(a); }
 fn main() {
-    let a = 1
-    let b = a
-    take(a)
-    print(a)
-    print(b)
+    let a = 1;
+    let b = a;
+    take(a);
+    print(a);
+    print(b);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -35,32 +35,32 @@ func TestCheckRejectsMoveErrors(t *testing.T) {
 			name: "assignment move",
 			source: `struct Name { value: []const u8 }
 fn main() {
-    let a = Name { value: "hello" }
-    let b = a
-    print(a.value)
-    print(b.value)
+    let a = Name { value: "hello" };
+    let b = a;
+    print(a.value);
+    print(b.value);
 }`,
 			want: "moved value `a` was used",
 		},
 		{
 			name: "function argument move",
 			source: `struct Name { value: []const u8 }
-fn take(name: Name) { print(name.value) }
+fn take(name: Name) { print(name.value); }
 fn main() {
-    let name = Name { value: "alice" }
-    take(name)
-    print(name.value)
+    let name = Name { value: "alice" };
+    take(name);
+    print(name.value);
 }`,
 			want: "moved value `name` was used",
 		},
 		{
 			name: "double move",
 			source: `struct Name { value: []const u8 }
-fn take(name: Name) { print(name.value) }
+fn take(name: Name) { print(name.value); }
 fn main() {
-    let name = Name { value: "alice" }
-    take(name)
-    take(name)
+    let name = Name { value: "alice" };
+    take(name);
+    take(name);
 }`,
 			want: "moved value `name` was used",
 		},
@@ -70,11 +70,11 @@ fn main() {
 
 // TestCheckBorrowArgumentDoesNotMove checks borrow parameters preserve ownership.
 func TestCheckBorrowArgumentDoesNotMove(t *testing.T) {
-	source := `fn show(s: &[]const u8) { print(s) }
+	source := `fn show(s: &[]const u8) { print(s); }
 fn main() {
-    let name = "alice"
-    show(name)
-    print(name)
+    let name = "alice";
+    show(name);
+    print(name);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -84,11 +84,11 @@ fn main() {
 // TestCheckMutableBorrowArgumentDoesNotMove checks &mut preserves ownership.
 func TestCheckMutableBorrowArgumentDoesNotMove(t *testing.T) {
 	source := `struct User { name: []const u8 }
-fn show(user: &mut User) { print(user.name) }
+fn show(user: &mut User) { print(user.name); }
 fn main() {
-    let user = User { name: "alice" }
-    show(user)
-    print(user.name)
+    let user = User { name: "alice" };
+    show(user);
+    print(user.name);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -105,23 +105,23 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 		{
 			name: "return borrowed parameter",
 			source: `fn bad(s: &[]const u8) -> []const u8 {
-    return s
+    return s;
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
 		{
 			name: "store borrowed parameter in local",
 			source: `fn bad(s: &[]const u8) {
-    let alias = s
-    print(alias)
+    let alias = s;
+    print(alias);
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
 		{
 			name: "pass borrowed parameter to owner",
-			source: `fn take(s: []const u8) { print(s) }
+			source: `fn take(s: []const u8) { print(s); }
 fn bad(s: &[]const u8) {
-    take(s)
+    take(s);
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
@@ -137,7 +137,7 @@ fn main() {}`,
 			name: "move non-copy deref",
 			source: `struct User { name: []const u8 }
 fn bad(user: &User) -> User {
-    return user.*
+    return user.*;
 }`,
 			want: "cannot be moved out of borrow",
 		},
@@ -145,7 +145,7 @@ fn bad(user: &User) -> User {
 			name: "move non-copy mutable deref",
 			source: `struct User { name: []const u8 }
 fn bad(user: &mut User) -> User {
-    return user.*
+    return user.*;
 }`,
 			want: "cannot be moved out of borrow",
 		},
@@ -156,11 +156,11 @@ fn bad(user: &mut User) -> User {
 // TestCheckAllowsCopyDeref checks copying a primitive through a borrow is allowed.
 func TestCheckAllowsCopyDeref(t *testing.T) {
 	source := `fn copy_value(value: &i64) -> i64 {
-    return value.*
+    return value.*;
 }
 fn main() {
-    let x = 1
-    print(copy_value(x))
+    let x = 1;
+    print(copy_value(x));
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -171,12 +171,12 @@ fn main() {
 func TestCheckRejectsMoveWhileBorrowed(t *testing.T) {
 	source := `struct Name { value: []const u8 }
 fn use(a: &Name, b: Name) {
-    print(a.value)
-    print(b.value)
+    print(a.value);
+    print(b.value);
 }
 fn main() {
-    let name = Name { value: "alice" }
-    use(name, name)
+    let name = Name { value: "alice" };
+    use(name, name);
 }`
 	err := checkSource(source)
 	if err == nil {
@@ -198,12 +198,12 @@ func TestCheckRejectsMutableBorrowConflicts(t *testing.T) {
 			name: "shared then mutable",
 			source: `struct User { name: []const u8 }
 fn use(left: &User, right: &mut User) {
-    print(left.name)
-    print(right.name)
+    print(left.name);
+    print(right.name);
 }
 fn main() {
-    let user = User { name: "alice" }
-    use(user, user)
+    let user = User { name: "alice" };
+    use(user, user);
 }`,
 			want: "cannot be mutably borrowed while borrowed",
 		},
@@ -211,12 +211,12 @@ fn main() {
 			name: "mutable then shared",
 			source: `struct User { name: []const u8 }
 fn use(left: &mut User, right: &User) {
-    print(left.name)
-    print(right.name)
+    print(left.name);
+    print(right.name);
 }
 fn main() {
-    let user = User { name: "alice" }
-    use(user, user)
+    let user = User { name: "alice" };
+    use(user, user);
 }`,
 			want: "cannot be borrowed while mutably borrowed",
 		},
@@ -224,12 +224,12 @@ fn main() {
 			name: "double mutable",
 			source: `struct User { name: []const u8 }
 fn use(left: &mut User, right: &mut User) {
-    print(left.name)
-    print(right.name)
+    print(left.name);
+    print(right.name);
 }
 fn main() {
-    let user = User { name: "alice" }
-    use(user, user)
+    let user = User { name: "alice" };
+    use(user, user);
 }`,
 			want: "cannot be borrowed while mutably borrowed",
 		},
@@ -241,9 +241,9 @@ fn main() {
 func TestCheckRejectsBorrowedFieldMove(t *testing.T) {
 	source := `struct User { name: []const u8 }
 struct Box { user: User }
-fn take(user: User) { print(user.name) }
+fn take(user: User) { print(user.name); }
 fn bad(box: &Box) {
-    take(box.user)
+    take(box.user);
 }`
 	err := checkSource(source)
 	if err == nil {
@@ -260,9 +260,9 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
     name: []const u8
 }
 fn main() {
-    let users = arena<User>()
-    let alice = users.add(User { name: "alice" })
-    print(users.get(alice).name)
+    let users = arena<User>();
+    let alice = users.add(User { name: "alice" });
+    print(users.get(alice).name);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -280,10 +280,10 @@ func TestCheckRejectsArenaHandleErrors(t *testing.T) {
 			name: "wrong arena",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let left = arena<User>()
-    let right = arena<User>()
-    let alice = left.add(User { name: "alice" })
-    print(right.get(alice).name)
+    let left = arena<User>();
+    let right = arena<User>();
+    let alice = left.add(User { name: "alice" });
+    print(right.get(alice).name);
 }`,
 			want: "handle `alice` does not belong to arena `right`",
 		},
@@ -291,9 +291,9 @@ fn main() {
 			name: "inline wrong arena",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let left = arena<User>()
-    let right = arena<User>()
-    print(right.get(left.add(User { name: "alice" })).name)
+    let left = arena<User>();
+    let right = arena<User>();
+    print(right.get(left.add(User { name: "alice" })).name);
 }`,
 			want: "handle from `left` does not belong to arena `right`",
 		},
@@ -301,7 +301,7 @@ fn main() {
 			name: "unknown handle parameter",
 			source: `struct User { name: []const u8 }
 fn show(users: arena<User>, user: handle<User>) {
-    print(users.get(user).name)
+    print(users.get(user).name);
 }`,
 			want: "arena `users` has unknown provenance",
 		},
@@ -309,9 +309,9 @@ fn show(users: arena<User>, user: handle<User>) {
 			name: "returned handle",
 			source: `struct User { name: []const u8 }
 fn make() -> handle<User> {
-    let users = arena<User>()
-    let alice = users.add(User { name: "alice" })
-    return alice
+    let users = arena<User>();
+    let alice = users.add(User { name: "alice" });
+    return alice;
 }`,
 			want: "handle `alice` cannot outlive its arena",
 		},
@@ -319,11 +319,11 @@ fn make() -> handle<User> {
 			name: "move after arena add",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let users = arena<User>()
-    let user = User { name: "alice" }
-    let alice = users.add(user)
-    print(user.name)
-    print(users.get(alice).name)
+    let users = arena<User>();
+    let user = User { name: "alice" };
+    let alice = users.add(user);
+    print(user.name);
+    print(users.get(alice).name);
 }`,
 			want: "moved value `user` was used",
 		},
@@ -331,11 +331,11 @@ fn main() {
 			name: "move field from arena borrow",
 			source: `struct User { name: []const u8 }
 struct Box { user: User }
-fn take(user: User) { print(user.name) }
+fn take(user: User) { print(user.name); }
 fn main() {
-    let boxes = arena<Box>()
-    let h = boxes.add(Box { user: User { name: "alice" } })
-    take(boxes.get(h).user)
+    let boxes = arena<Box>();
+    let h = boxes.add(Box { user: User { name: "alice" } });
+    take(boxes.get(h).user);
 }`,
 			want: "arena.get returns a local borrow and its fields cannot be moved",
 		},
@@ -346,11 +346,11 @@ fn main() {
 // TestCheckBranchMoveMarksOuterValueMoved checks possible moves escape branches.
 func TestCheckBranchMoveMarksOuterValueMoved(t *testing.T) {
 	source := `struct Name { value: []const u8 }
-fn take(name: Name) { print(name.value) }
+fn take(name: Name) { print(name.value); }
 fn main() {
-    let name = Name { value: "alice" }
-    if true { take(name) }
-    print(name.value)
+    let name = Name { value: "alice" };
+    if true { take(name); }
+    print(name.value);
 }`
 	err := checkSource(source)
 	if err == nil {
@@ -371,18 +371,18 @@ func TestCheckUnsafeDoesNotDisableMoveAndBorrowRules(t *testing.T) {
 		{
 			name: "moved value in unsafe block",
 			source: `struct Name { value: []const u8 }
-fn take(name: Name) { print(name.value) }
+fn take(name: Name) { print(name.value); }
 fn main() {
-    let name = Name { value: "alice" }
-    take(name)
-    unsafe { print(name.value) }
+    let name = Name { value: "alice" };
+    take(name);
+    unsafe { print(name.value); }
 }`,
 			want: "moved value `name` was used",
 		},
 		{
 			name: "borrow escape in unsafe function",
 			source: `unsafe fn bad(s: &[]const u8) -> []const u8 {
-    return s
+    return s;
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
@@ -390,8 +390,8 @@ fn main() {
 			name: "borrow escape in unsafe block",
 			source: `fn bad(s: &[]const u8) {
     unsafe {
-        let alias = s
-        print(alias)
+        let alias = s;
+        print(alias);
     }
 }`,
 			want: "borrowed value `s` cannot escape",
@@ -401,7 +401,7 @@ fn main() {
 			source: `struct Bad {
     value: &[]const u8
 }
-fn main() { unsafe { print(1) } }`,
+fn main() { unsafe { print(1); } }`,
 			want: "struct field `Bad.value` cannot store borrow",
 		},
 	}
@@ -410,11 +410,11 @@ fn main() { unsafe { print(1) } }`,
 
 // TestCheckComptimeDoesNotMoveRuntimeValues checks compile-time arguments are read-only.
 func TestCheckComptimeDoesNotMoveRuntimeValues(t *testing.T) {
-	source := `fn sized(comptime n: i64) -> i64 { return n }
+	source := `fn sized(comptime n: i64) -> i64 { return n ;}
 fn main() {
-    let name = "alice"
-    print(sized(comptime 8))
-    print(name)
+    let name = "alice";
+    print(sized(comptime 8));
+    print(name);
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -424,8 +424,8 @@ fn main() {
 // TestCheckRejectsComptimeRuntimeBorrow checks runtime borrows cannot cross comptime.
 func TestCheckRejectsComptimeRuntimeBorrow(t *testing.T) {
 	source := `fn bad(s: &[]const u8) -> []const u8 {
-    let alias = comptime s
-    return alias
+    let alias = comptime s;
+    return alias;
 }`
 	err := checkSource(source)
 	if err == nil {
@@ -439,9 +439,9 @@ func TestCheckRejectsComptimeRuntimeBorrow(t *testing.T) {
 // TestCheckComptimeRejectsRuntimeBoundary checks runtime locals cannot cross comptime.
 func TestCheckComptimeRejectsRuntimeBoundary(t *testing.T) {
 	source := `fn main() {
-    let name = "alice"
-    let alias = comptime name
-    print(alias)
+    let name = "alice";
+    let alias = comptime name;
+    print(alias);
 }`
 	err := checkSource(source)
 	if err == nil {

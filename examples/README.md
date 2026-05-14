@@ -64,6 +64,7 @@ go test ./...
 | moved values cannot be reused | `negative/moved_value.kizu` | `moved value` |
 | assignment moves non-copy values | `negative/assignment_move.kizu` | `moved value` |
 | double move is rejected | `negative/double_move.kizu` | `moved value` |
+| statement semicolons are required | `negative/missing_semicolon.kizu` | `expected ;` |
 | borrowed non-copy values cannot be moved | `negative/move_while_borrowed.kizu` | `cannot be moved while borrowed` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |

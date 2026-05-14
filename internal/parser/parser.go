@@ -164,6 +164,9 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 		if fn, ok := method.(*ast.FunctionDecl); ok {
 			methods = append(methods, fn)
 		}
+		if p.peek.Type == token.Semicolon {
+			p.nextToken()
+		}
 		p.nextToken()
 	}
 	return methods
@@ -433,6 +436,7 @@ func (p *Parser) parseStatement() ast.Statement {
 	if p.peek.Type == token.Assign {
 		return p.parseAssignStmt(expr)
 	}
+	p.expectStatementTerminator("expression statement")
 	return &ast.ExprStmt{Expr: expr}
 }
 
@@ -527,6 +531,7 @@ func (p *Parser) parseLetStmt(mutable bool) ast.Statement {
 	}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
+	p.expectStatementTerminator("let statement")
 	return stmt
 }
 
@@ -536,17 +541,20 @@ func (p *Parser) parseAssignStmt(target ast.Expression) ast.Statement {
 	p.nextToken()
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
+	p.expectStatementTerminator("assignment")
 	return stmt
 }
 
 // parseReturnStmt parses an explicit return statement.
 func (p *Parser) parseReturnStmt() ast.Statement {
 	stmt := &ast.ReturnStmt{}
-	if p.peek.Type == token.RBrace || p.peek.Type == token.EOF {
+	if p.peek.Type == token.Semicolon {
+		p.nextToken()
 		return stmt
 	}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
+	p.expectStatementTerminator("return statement")
 	return stmt
 }
 
@@ -604,12 +612,16 @@ func (p *Parser) parseForStmt(label string) ast.Statement {
 
 // parseBreakStmt parses break with an optional target label.
 func (p *Parser) parseBreakStmt() ast.Statement {
-	return &ast.BreakStmt{Label: p.parseOptionalBranchLabel()}
+	stmt := &ast.BreakStmt{Label: p.parseOptionalBranchLabel()}
+	p.expectStatementTerminator("break statement")
+	return stmt
 }
 
 // parseContinueStmt parses continue with an optional target label.
 func (p *Parser) parseContinueStmt() ast.Statement {
-	return &ast.ContinueStmt{Label: p.parseOptionalBranchLabel()}
+	stmt := &ast.ContinueStmt{Label: p.parseOptionalBranchLabel()}
+	p.expectStatementTerminator("continue statement")
+	return stmt
 }
 
 // parseOptionalBranchLabel parses Zig-style :label branch targets.
@@ -622,6 +634,19 @@ func (p *Parser) parseOptionalBranchLabel() string {
 		return ""
 	}
 	return p.cur.Literal
+}
+
+// expectStatementTerminator requires Zig/C-style semicolons after simple statements.
+func (p *Parser) expectStatementTerminator(context string) bool {
+	if p.cur.Type == token.Semicolon {
+		return true
+	}
+	if p.peek.Type == token.Semicolon {
+		p.nextToken()
+		return true
+	}
+	p.errorf("expected `;` after %s", context)
+	return false
 }
 
 // parseMatchStmt parses a simple enum tag match statement.

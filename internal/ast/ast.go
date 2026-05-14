@@ -251,7 +251,7 @@ func (s *BlockStmt) String() string {
 	for _, stmt := range s.Statements {
 		parts = append(parts, stmt.String())
 	}
-	return "{ " + strings.Join(parts, "; ") + " }"
+	return "{ " + strings.Join(parts, " ") + " }"
 }
 
 // LetStmt represents a let or var declaration.
@@ -270,7 +270,7 @@ func (s *LetStmt) String() string {
 	if s.Mutable {
 		kw = "var"
 	}
-	return fmt.Sprintf("%s %s = %s", kw, s.Name, s.Value.String())
+	return fmt.Sprintf("%s %s = %s;", kw, s.Name, s.Value.String())
 }
 
 // AssignStmt represents assignment to an existing binding.
@@ -284,7 +284,7 @@ func (*AssignStmt) statementNode() {}
 
 // String returns a compact debug representation of the assignment.
 func (s *AssignStmt) String() string {
-	return fmt.Sprintf("%s = %s", s.Target.String(), s.Value.String())
+	return fmt.Sprintf("%s = %s;", s.Target.String(), s.Value.String())
 }
 
 // ReturnStmt represents an explicit return statement.
@@ -298,9 +298,9 @@ func (*ReturnStmt) statementNode() {}
 // String returns a compact debug representation of the return statement.
 func (s *ReturnStmt) String() string {
 	if s.Value == nil {
-		return "return"
+		return "return;"
 	}
-	return "return " + s.Value.String()
+	return "return " + s.Value.String() + ";"
 }
 
 // IfStmt represents a conditional branch.
@@ -374,9 +374,9 @@ func (*BreakStmt) statementNode() {}
 // String returns a compact debug representation of break.
 func (s *BreakStmt) String() string {
 	if s.Label != "" {
-		return "break :" + s.Label
+		return "break :" + s.Label + ";"
 	}
-	return "break"
+	return "break;"
 }
 
 // ContinueStmt skips to the next iteration of the nearest or named loop.
@@ -390,9 +390,9 @@ func (*ContinueStmt) statementNode() {}
 // String returns a compact debug representation of continue.
 func (s *ContinueStmt) String() string {
 	if s.Label != "" {
-		return "continue :" + s.Label
+		return "continue :" + s.Label + ";"
 	}
-	return "continue"
+	return "continue;"
 }
 
 // MatchStmt represents a simple enum tag match statement.
@@ -410,7 +410,7 @@ func (s *MatchStmt) String() string {
 	for _, arm := range s.Arms {
 		arms = append(arms, arm.String())
 	}
-	return fmt.Sprintf("match %s { %s }", s.Value.String(), strings.Join(arms, "; "))
+	return fmt.Sprintf("match %s { %s }", s.Value.String(), strings.Join(arms, " "))
 }
 
 // MatchArm represents one enum tag branch in a match statement.
@@ -470,7 +470,7 @@ func (*ExprStmt) statementNode() {}
 
 // String returns a compact debug representation of the expression statement.
 func (s *ExprStmt) String() string {
-	return s.Expr.String()
+	return s.Expr.String() + ";"
 }
 
 // IdentExpr represents a name reference.

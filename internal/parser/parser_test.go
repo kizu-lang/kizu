@@ -9,7 +9,7 @@ import (
 // TestParseHello checks that a minimal program parses cleanly.
 func TestParseHello(t *testing.T) {
 	input := `fn main() {
-    print("hello, kizu")
+    print("hello, kizu");
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -20,7 +20,7 @@ func TestParseHello(t *testing.T) {
 		t.Fatalf("got %d declarations, want 1", len(program.Decls))
 	}
 	got := program.String()
-	want := `fn main() { print("hello, kizu") }`
+	want := `fn main() { print("hello, kizu"); }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -29,7 +29,7 @@ func TestParseHello(t *testing.T) {
 // TestParseFunctionWithParamsAndReturn checks typed parameters and return parsing.
 func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 	input := `fn add(a: &i64, b: &mut i64) -> i64 {
-    return a + b
+    return a + b;
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -37,7 +37,7 @@ func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn add(a: &i64, b: &mut i64) -> i64 { return (a + b) }`
+	want := `fn add(a: &i64, b: &mut i64) -> i64 { return (a + b); }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -46,7 +46,7 @@ func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 // TestParseFieldAndDerefAssignment checks assignment targets beyond identifiers.
 func TestParseFieldAndDerefAssignment(t *testing.T) {
 	input := `fn rename(user: &mut User) -> void {
-    user.*.name = "bob"
+    user.*.name = "bob";
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -54,7 +54,7 @@ func TestParseFieldAndDerefAssignment(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn rename(user: &mut User) -> void { user.*.name = "bob" }`
+	want := `fn rename(user: &mut User) -> void { user.*.name = "bob"; }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -63,14 +63,14 @@ func TestParseFieldAndDerefAssignment(t *testing.T) {
 // TestParseIfAndWhile checks Phase 2 control-flow statement parsing.
 func TestParseIfAndWhile(t *testing.T) {
 	input := `fn main() {
-    var i = 0
+    var i = 0;
     if i < 3 {
-        print(i)
+        print(i);
     } else {
-        print("done")
+        print("done");
     }
     while i < 3 {
-        i = i + 1
+        i = i + 1;
     }
 }`
 	p := New(lexer.New(input))
@@ -79,8 +79,8 @@ func TestParseIfAndWhile(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn main() { var i = 0; if (i < 3) { print(i) } else { print("done") }; ` +
-		`while (i < 3) { i = (i + 1) } }`
+	want := `fn main() { var i = 0; if (i < 3) { print(i); } else { print("done"); } ` +
+		`while (i < 3) { i = (i + 1); } }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -91,9 +91,9 @@ func TestParseLoopControl(t *testing.T) {
 	input := `fn main() {
     outer: while true {
         for 0..3 |i| {
-            continue :outer
+            continue :outer;
         }
-        break
+        break;
     }
 }`
 	p := New(lexer.New(input))
@@ -102,7 +102,7 @@ func TestParseLoopControl(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn main() { outer: while true { for 0..3 |i| { continue :outer }; break } }`
+	want := `fn main() { outer: while true { for 0..3 |i| { continue :outer; } break; } }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -136,7 +136,7 @@ func TestParseEnumDecl(t *testing.T) {
     Blue
 }
 fn main() {
-    print(Color.Red)
+    print(Color.Red);
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -145,7 +145,7 @@ fn main() {
 	}
 	got := program.String()
 	want := `enum Color { Red; Green; Blue }
-fn main() { print(Color.Red) }`
+fn main() { print(Color.Red); }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -155,15 +155,15 @@ fn main() { print(Color.Red) }`
 func TestParseUnionDecl(t *testing.T) {
 	input := `union Shape {
     Point
-    Circle(i64)
-    Label([]const u8)
+    Circle(i64);
+    Label([]const u8);
 }
 fn main() {
-    let shape = Shape.Circle(10)
+    let shape = Shape.Circle(10);
     match shape {
-        Point => print("point")
-        Circle(radius) => print(radius)
-        Label(text) => print(text)
+        Point => print("point");
+        Circle(radius) => print(radius);
+        Label(text) => print(text);
     }
 }`
 	p := New(lexer.New(input))
@@ -173,7 +173,7 @@ fn main() {
 	}
 	want := `union Shape { Point; Circle(i64); Label([]const u8) }
 fn main() { let shape = Shape.Circle(10); match shape { Point => print("point"); ` +
-		`Circle(radius) => print(radius); Label(text) => print(text) } }`
+		`Circle(radius) => print(radius); Label(text) => print(text); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -187,11 +187,11 @@ func TestParseMatchStmt(t *testing.T) {
     Blue
 }
 fn main() {
-    let color = Color.Red
+    let color = Color.Red;
     match color {
-        Red => print("red")
-        Green => print("green")
-        Blue => print("blue")
+        Red => print("red");
+        Green => print("green");
+        Blue => print("blue");
     }
 }`
 	p := New(lexer.New(input))
@@ -201,7 +201,7 @@ fn main() {
 	}
 	want := `enum Color { Red; Green; Blue }
 fn main() { let color = Color.Red; match color { Red => print("red"); ` +
-		`Green => print("green"); Blue => print("blue") } }`
+		`Green => print("green"); Blue => print("blue"); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -213,9 +213,9 @@ func TestParseArenaAndStructLiteral(t *testing.T) {
     name: []const u8
 }
 fn main() {
-    let users = arena<User>()
-    let alice = users.add(User { name: "alice" })
-    print(users.get(alice).name)
+    let users = arena<User>();
+    let alice = users.add(User { name: "alice" });
+    print(users.get(alice).name);
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -224,7 +224,7 @@ fn main() {
 	}
 	want := `struct User { name: []const u8 }
 fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice" }); ` +
-		`print(users.get(alice).name) }`
+		`print(users.get(alice).name); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -234,11 +234,11 @@ fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice
 func TestParseUnsafeAndExtern(t *testing.T) {
 	input := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
 unsafe fn write_byte(p: ptr<u8>, value: u8) {
-    ptr_write(p, value)
+    ptr_write(p, value);
 }
 fn main() {
     unsafe {
-        print(get_byte(ptr_read_ptr()))
+        print(get_byte(ptr_read_ptr()));
     }
 }`
 	p := New(lexer.New(input))
@@ -247,8 +247,8 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
-unsafe fn write_byte(p: ptr<u8>, value: u8) { ptr_write(p, value) }
-fn main() { unsafe { print(get_byte(ptr_read_ptr())) } }`
+unsafe fn write_byte(p: ptr<u8>, value: u8) { ptr_write(p, value); }
+fn main() { unsafe { print(get_byte(ptr_read_ptr())); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -257,14 +257,14 @@ fn main() { unsafe { print(get_byte(ptr_read_ptr())) } }`
 // TestParseComptime checks Phase 13 compile-time expression and parameter syntax.
 func TestParseComptime(t *testing.T) {
 	input := `fn sized(comptime n: i64) -> i64 {
-    return n
+    return n;
 }
 fn main() {
-    let size = comptime 4 * 1024
+    let size = comptime 4 * 1024;
     comptime if 1 + 1 == 2 {
-        print(sized(comptime size))
+        print(sized(comptime size));
     } else {
-        print(0)
+        print(0);
     }
 }`
 	p := New(lexer.New(input))
@@ -272,9 +272,9 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn sized(comptime n: i64) -> i64 { return n }
+	want := `fn sized(comptime n: i64) -> i64 { return n; }
 fn main() { let size = comptime (4 * 1024); ` +
-		`comptime if ((1 + 1) == 2) { print(sized(comptime size)) } else { print(0) } }`
+		`comptime if ((1 + 1) == 2) { print(sized(comptime size)); } else { print(0); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -283,9 +283,9 @@ fn main() { let size = comptime (4 * 1024); ` +
 // TestParseCast checks explicit low-level cast syntax.
 func TestParseCast(t *testing.T) {
 	input := `fn main() {
-    let x = cast<i32>(1)
+    let x = cast<i32>(1);
     unsafe {
-        let p = cast<ptr<u8>>(raw())
+        let p = cast<ptr<u8>>(raw());
     }
 }`
 	p := New(lexer.New(input))
@@ -293,7 +293,7 @@ func TestParseCast(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() { let x = cast<i32>(1); unsafe { let p = cast<ptr<u8>>(raw()) } }`
+	want := `fn main() { let x = cast<i32>(1); unsafe { let p = cast<ptr<u8>>(raw()); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -302,15 +302,15 @@ func TestParseCast(t *testing.T) {
 // TestParseTry checks error-union propagation syntax.
 func TestParseTry(t *testing.T) {
 	input := `fn main() -> !i64 {
-    let x = try parse()
-    return x
+    let x = try parse();
+    return x;
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() -> !i64 { let x = try parse(); return x }`
+	want := `fn main() -> !i64 { let x = try parse(); return x; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

@@ -47,6 +47,7 @@ v0.1 に含める runtime 言語機能:
 ```text
 fn
 explicit return
+statement semicolon
 let / var
 assignment
 i64
@@ -257,9 +258,9 @@ fn main() {
 
 ```kizu
 fn main() {
-    let name = "alice"
-    var count = 0
-    count = count + 1
+    let name = "alice";
+    var count = 0;
+    count = count + 1;
 }
 ```
 
@@ -269,7 +270,7 @@ fn main() {
 
 ```kizu
 fn add(a: i64, b: i64) -> i64 {
-    return a + b
+    return a + b;
 }
 ```
 
@@ -278,10 +279,11 @@ fn add(a: i64, b: i64) -> i64 {
 戻り値を返す場合は `return` を必須にします。
 Rust のような末尾式 return は採用しません。
 セミコロンの有無で戻り値が変わる仕様も採用しません。
+simple statement の終端には `;` を必須にします。
 
 ```kizu
 fn bad_add(a: i64, b: i64) -> i64 {
-    a + b // error: non-void function must return explicitly
+    a + b; // error: non-void function must return explicitly
 }
 ```
 
@@ -290,7 +292,7 @@ fn bad_add(a: i64, b: i64) -> i64 {
 
 ```kizu
 fn log(message: []const u8) -> void {
-    print(message)
+    print(message);
 }
 ```
 
