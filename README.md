@@ -20,7 +20,10 @@ code, and less likely to grow heavy CI and build caches.
 
 Kizu is an early prototype implemented in Go.
 
-Implemented phases:
+The v0.1 target is an interpreter-first language core. The authoritative v0.1
+behavior is the Go interpreter plus `kizu check`.
+
+Implemented language-core pieces:
 
 - lexer, parser, AST, and CLI
 - interpreter
@@ -28,16 +31,28 @@ Implemented phases:
 - move checker
 - local borrow checker
 - `arena<T>` / `handle<T>`
+- limited `comptime` expressions, parameters, and branch selection
+- minimal `result<T>` and `try` error propagation
+- unsafe boundary and C ABI declaration checks
+- explicit `cast<T>(value)` checker policy
+
+Additional v0.1 target pieces tracked in GitHub Issues:
+
+- Zig/C-style tag `enum` and simple enum `match`
+- `Io` capability and `TaskGroup` structured task model
+- `contract`, `satisfy`, and `borrow Dyn<Contract>`
+
+Experimental compiler and tooling pieces:
+
 - typed SSA IR
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations
 - WASI-compatible WebAssembly text backend
-- unsafe boundary and C ABI declaration checks
-- limited `comptime` expressions, parameters, and branch selection
 - limited C header import for extern function declarations
 - opt-in IR optimization pipeline
-- explicit `cast<T>(value)` for low-level type conversions
-- minimal `result<T>` and `try` error propagation
+
+These experimental pieces are not v0.1 completion criteria yet. LLVM and WASM
+currently support smaller target subsets than the interpreter.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -116,7 +131,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 ## Project Documents
 
 - [SPEC.md](SPEC.md): language specification
-- [PHASES.md](PHASES.md): implementation phase tracker
+- [PHASES.md](PHASES.md): historical phase index
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy
 - [AGENTS.md](AGENTS.md): implementation guidance for Codex agents

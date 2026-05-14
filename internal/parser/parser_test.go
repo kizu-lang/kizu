@@ -89,6 +89,29 @@ fn main() {  }`
 	}
 }
 
+// TestParseEnumDecl checks Zig/C-style tag enum parsing.
+func TestParseEnumDecl(t *testing.T) {
+	input := `enum Color {
+    Red
+    Green
+    Blue
+}
+fn main() {
+    print(Color.Red)
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	got := program.String()
+	want := `enum Color { Red; Green; Blue }
+fn main() { print(Color.Red) }`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
 func TestParseArenaAndStructLiteral(t *testing.T) {
 	input := `struct User {

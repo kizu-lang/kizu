@@ -19,6 +19,97 @@ Kizu のメモリ安全性保証は safe Kizu に対して行います。
 `unsafe` を使うコードでは、memory safety obligation はプログラマが負います。
 ただし、`unsafe` は型検査、move check、borrow check を全面的に無効化するものではありません。
 
+## 0. v0.1 の範囲
+
+Kizu v0.1 は、Go 製 interpreter による language core release とします。
+
+v0.1 で完成させる対象は、parser、type checker、move checker、borrow checker、
+ownership model、arena / handle、result / try、限定的な comptime、
+および interpreter で実行できる言語コアです。
+
+LLVM IR backend、WASM / WASI backend、C header import、build cache は experimental として扱います。
+これらは将来の compiler work の土台ですが、v0.1 の正ではありません。
+
+v0.1 の完了条件には、self-hosting compiler、native executable generation、
+full stdlib、Rust 同等以上の runtime performance guarantee は含めません。
+
+### 0.1 v0.1 に含めるもの
+
+v0.1 の正は Go 製 interpreter と `kizu check` です。
+
+v0.1 に含める runtime 言語機能:
+
+```text
+fn
+explicit return
+let / var
+assignment
+int
+bool
+string
+void
+arithmetic / comparison
+if / else
+while
+struct
+field access
+simple enum
+enum value access
+match over simple enum values
+function call
+borrow parameter
+move semantics
+arena<T> / handle<T>
+result<T> / ok / error / try
+limited comptime
+Io capability
+Task / TaskGroup
+contract
+satisfy
+borrow Dyn<Contract>
+```
+
+v0.1 に含める static / policy 機能:
+
+```text
+unsafe boundary checks
+extern "c" fn declaration checks
+raw pointer type spelling
+nullable pointer type spelling
+explicit cast<T>(value) checker policy
+low-level integer type names in checker
+f32 / f64 type names in checker
+structured task ownership checks
+contract satisfaction checks
+```
+
+static / policy 機能は、v0.1 interpreter 上で完全な低レベル実行 semantics を約束しません。
+
+### 0.2 v0.1 に含めないもの
+
+次は v0.1 の完了条件に含めません。
+
+```text
+payload enum
+full generics
+type alias
+complete fixed-width integer runtime semantics
+float literals and float runtime arithmetic
+overflow / truncation behavior for every numeric cast
+raw pointer runtime operations
+actual extern C call execution
+array / map / set / slice runtime API
+option<T> runtime helper
+full stdlib
+kizu test
+kizu lint
+native executable generation
+self-hosting compiler
+async fn / await syntax
+OS thread / event loop / networking runtime
+Rust 同等以上の runtime performance guarantee
+```
+
 ## 1. 目標
 
 Kizu は次を目指します。
@@ -179,7 +270,10 @@ struct User {
 
 ### 6.5 enum
 
-v0 の enum は、まず単純なタグ付き値だけでよいです。
+Kizu の `enum` は Zig/C 寄りの tag enum です。
+Rust の payload enum / algebraic data type とは分けます。
+
+v0.1 の enum は、payload を持たない named tag だけを実装します。
 
 ```kizu
 enum Color {
@@ -189,7 +283,14 @@ enum Color {
 }
 ```
 
-将来的には payload を持つ enum を追加します。
+値は `Color.Red` のように enum 型名で修飾して参照します。
+
+```kizu
+let color = Color.Red
+```
+
+payload を持つ sum type は `enum` では扱いません。
+将来必要になった場合は、`union` または `tagged union` として別機能で設計します。
 
 ### 6.6 if
 
@@ -212,11 +313,25 @@ while i < 10 {
 
 ### 6.8 match
 
-`match` は将来追加します。v0 では optional です。
+v0.1 の `match` は、単純な enum value を分岐する用途に限定します。
+
+```kizu
+fn main() {
+    let color = Color.Red
+
+    match color {
+        Red => print("red")
+        Green => print("green")
+        Blue => print("blue")
+    }
+}
+```
+
+payload pattern、guard、destructuring は v0.1 では扱いません。
 
 ## 7. 型
 
-v0 の基本型:
+v0.1 の基本型:
 
 ```text
 int
@@ -225,13 +340,15 @@ string
 void
 ```
 
-`int` は v0 の簡易整数型です。
+`int` は v0.1 の簡易整数型です。
 interpreter 上では符号付き整数として扱い、具体的な bit 幅は固定しません。
 
 `void` は値を返さない関数の戻り値です。
 Kizu v0.1 では `Unit` という別名は導入しません。
 
-低レベル型として、次の明示幅整数と raw pointer 型を持ちます。
+低レベル型として、次の明示幅整数、浮動小数点、raw pointer 型名を予約します。
+v0.1 では主に checker / unsafe / extern declaration のために扱います。
+interpreter 上の完全な fixed-width arithmetic、float literal、overflow semantics は後続 phase で扱います。
 
 ```text
 i8
@@ -252,6 +369,7 @@ ptr<const T>
 ?ptr<const T>
 ```
 
+v0.1 では collection runtime API を実装しません。
 将来追加する collection 型:
 
 ```text
@@ -260,18 +378,18 @@ map<K, V>
 set<T>
 ```
 
+v0.1 では `arena<T>` / `handle<T>` だけを実装対象にします。
 将来追加する ownership/container 型:
 
 ```text
 box<T>
 shared<T>
-arena<T>
-handle<T>
 borrow<T>
 slice<T>
 ```
 
-v0 では、generics は構文だけ先に予約してもよいですが、完全実装は不要です。
+v0.1 では full generics を実装しません。
+`arena<T>`、`handle<T>`、`result<T>`、raw pointer 型は専用の型構文として扱います。
 
 ### 7.1 明示 cast
 
@@ -326,7 +444,7 @@ type alias は v0.1 では導入しません。
 
 所有される値を代入または関数引数として渡すと move されます。
 
-v0 の copy 型:
+v0.1 の copy 型:
 
 ```text
 int
@@ -345,6 +463,9 @@ arena-owned value
 non-copy field を含む struct
 ```
 
+`array`、`map`、`box` は v0.1 では実装しません。
+将来追加する場合も、copy できない所有値として扱います。
+
 ## 9. borrow
 
 borrow は一時的に値を参照するための仕組みです。
@@ -362,7 +483,7 @@ borrow のルール:
 * borrow は関数から返せない
 * borrow 中の値は move できない
 * mutable borrow と immutable borrow は重複できない
-* v0 では mutable borrow は後回しでもよい
+* v0.1 では mutable borrow 構文は実装しない
 
 ## 10. arena / handle
 
@@ -386,7 +507,7 @@ print(users.get(alice).name)
 * handle は borrow より長生きしてよい
 * handle は対応する arena より長生きしてはいけない
 * handle は raw pointer ではない
-* v0 では arena からの削除は実装しなくてよい
+* v0.1 では arena からの削除は実装しない
 
 ## 11. エラー処理
 
@@ -493,6 +614,7 @@ ptr<const T> const T*
 
 Kizu は C header の完全互換 parser は持ちません。
 Phase 14 の header import は、小さな C function prototype を `extern "c" fn` に変換する補助機能です。
+これは v0.1 の正ではなく experimental です。
 
 CLI:
 
@@ -601,7 +723,6 @@ Kizu の `comptime` は macro ではありません。
 * comptime の結果は型付きの値または宣言として扱う
 * build script として使える任意の副作用は許さない
 
-検討する構文:
 v0.1 の最小構文:
 
 ```kizu
@@ -659,6 +780,7 @@ std.array
 C ABI へ `string` を暗黙に渡してはいけません。
 C へ渡す場合は、将来 `std.string.as_bytes` や `std.string.as_c_string` のような明示 API を使います。
 
+v0.1 では collection runtime API を実装しません。
 collection は次の順で検討します。
 
 ```text
@@ -671,9 +793,9 @@ set<T>           後続 phase
 
 ## 15. async 方針
 
-Kizu v0 では async を実装しません。
+Kizu v0.1 では `async fn` / `await` syntax は実装しません。
 
-将来 async を扱う場合も、最初の async design では `async fn` / `await` を中心にしません。
+ただし、I/O と並行処理の境界は v0.1 から実装対象にします。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
 
 ```kizu
@@ -691,13 +813,13 @@ fn read_config(io: Io, path: string) -> result<string> {
 * task へ渡す non-copy value は move される
 * 野良 task は許可しない
 
-async runtime、event loop、networking stdlib は後続 phase で扱います。
+v0.1 の `TaskGroup` は interpreter 上の structured task model として実装します。
+OS thread、event loop、networking stdlib は後続 phase で扱います。
 
 ## 16. contract / satisfy / Dyn 方針
 
-Kizu v0 では contract system を実装しません。
-
-将来抽象化を導入する場合は、Rust trait clone ではなく、次の3つに分けます。
+Kizu v0.1 では、Rust trait clone ではない明示的な抽象化として、
+`contract`、`satisfy`、`Dyn` を実装対象にします。
 
 ```text
 contract  型が満たすべき要求
@@ -740,7 +862,8 @@ fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> result<void> {
 }
 ```
 
-contract parser、generic bounds、vtable layout は後続 phase で扱います。
+v0.1 の `Dyn` は `borrow Dyn<Contract>` の動的 dispatch に限定します。
+owned dynamic object、generic bounds、最適化された vtable layout は後続 phase で扱います。
 
 ## 17. ビルドとキャッシュ
 
@@ -759,7 +882,7 @@ kizu cache prune
 kizu why-rebuild
 ```
 
-## 16. v0 実装構成
+## 18. v0.1 実装構成
 
 推奨リポジトリ構成:
 
@@ -785,7 +908,7 @@ kizu/
   tests/
 ```
 
-## 17. 実装マイルストーン
+## 19. 実装マイルストーン
 
 ### Milestone 1: Lexer
 
@@ -881,7 +1004,7 @@ macro / proc macro / AST rewrite は実装しません。
 
 C header から Kizu の extern 宣言を生成できるようにします。
 
-## 18. 最初に通す examples
+## 20. 最初に通す examples
 
 最初に `examples/hello.kizu` を通します。
 
@@ -891,7 +1014,7 @@ fn main() {
 }
 ```
 
-## 19. エラーメッセージ方針
+## 21. エラーメッセージ方針
 
 エラーは短く、直接的で、読めるものにします。
 
@@ -902,7 +1025,7 @@ error: moved value `name` was used
   --> examples/move_error.kizu:8:11
 ```
 
-## 20. 言語の性格
+## 22. 言語の性格
 
 Kizu は次のような言語にします。
 

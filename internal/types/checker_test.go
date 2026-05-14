@@ -180,6 +180,58 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsEnumDeclarations checks Zig/C-style tag enum values.
+func TestCheckAcceptsEnumDeclarations(t *testing.T) {
+	source := `enum Color {
+    Red
+    Green
+    Blue
+}
+fn take(color: Color) -> Color { return color }
+fn main() {
+    let red = Color.Red
+    print(take(red))
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsEnumErrors checks duplicate and unknown enum tags.
+func TestCheckRejectsEnumErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "duplicate enum",
+			source: `enum Color { Red }
+enum Color { Green }
+fn main() {}`,
+			want: "duplicate enum `Color`",
+		},
+		{
+			name: "duplicate tag",
+			source: `enum Color { Red Red }
+fn main() {}`,
+			want: "duplicate enum tag `Color.Red`",
+		},
+		{
+			name: "unknown tag",
+			source: `enum Color { Red }
+fn main() { print(Color.Blue) }`,
+			want: "unknown enum tag `Color.Blue`",
+		},
+		{
+			name:   "unknown enum namespace",
+			source: `fn main() { print(Color.Red) }`,
+			want:   "undefined variable `Color`",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckAcceptsArenaHandle checks Phase 6 arena and handle types.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {

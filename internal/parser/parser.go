@@ -46,6 +46,9 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Struct:
 			program.Decls = append(program.Decls, p.parseStructDecl())
 			p.nextToken()
+		case token.Enum:
+			program.Decls = append(program.Decls, p.parseEnumDecl())
+			p.nextToken()
 		default:
 			p.errorf("expected declaration, got %s", p.cur.Type)
 			p.nextToken()
@@ -175,6 +178,38 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 		return field, false
 	}
 	return field, true
+}
+
+// parseEnumDecl parses a top-level Zig/C-style tag enum declaration.
+func (p *Parser) parseEnumDecl() ast.Decl {
+	decl := &ast.EnumDecl{}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.Name = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Tags = p.parseEnumTags()
+	return decl
+}
+
+// parseEnumTags parses newline-, comma-, or semicolon-separated enum tags.
+func (p *Parser) parseEnumTags() []string {
+	tags := []string{}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		if p.cur.Type != token.Ident {
+			p.errorf("expected enum tag, got %s", p.cur.Type)
+			return tags
+		}
+		tags = append(tags, p.cur.Literal)
+		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
+			p.nextToken()
+		}
+		p.nextToken()
+	}
+	return tags
 }
 
 // parseParams parses a function parameter list.

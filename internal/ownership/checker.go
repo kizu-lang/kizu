@@ -9,6 +9,7 @@ import (
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
 	functions map[string]*functionInfo
+	enums     map[string]map[string]bool
 	nextID    int
 }
 
@@ -43,7 +44,7 @@ type scope struct {
 
 // New creates an empty ownership checker.
 func New() *Checker {
-	return &Checker{functions: map[string]*functionInfo{}}
+	return &Checker{functions: map[string]*functionInfo{}, enums: map[string]map[string]bool{}}
 }
 
 // Check validates ownership rules and returns the first move error.
@@ -51,6 +52,7 @@ func (c *Checker) Check(program *ast.Program) error {
 	if err := c.checkStructs(program); err != nil {
 		return err
 	}
+	c.collectEnums(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
@@ -64,6 +66,21 @@ func (c *Checker) Check(program *ast.Program) error {
 		}
 	}
 	return nil
+}
+
+// collectEnums records tag enum declarations for enum value reads.
+func (c *Checker) collectEnums(program *ast.Program) {
+	for _, decl := range program.Decls {
+		enumDecl, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		tags := map[string]bool{}
+		for _, tag := range enumDecl.Tags {
+			tags[tag] = true
+		}
+		c.enums[enumDecl.Name] = tags
+	}
 }
 
 // checkStructs rejects struct fields that would store a local borrow.
@@ -299,10 +316,10 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	if value.borrowedParam {
 		return "", fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
-	if value.activeBorrows > 0 && !isCopyType(value.typeName) {
+	if value.activeBorrows > 0 && !c.isCopyType(value.typeName) {
 		return "", fmt.Errorf("borrow error: value `%s` cannot be moved while borrowed", ident.Name)
 	}
-	if !isCopyType(value.typeName) {
+	if !c.isCopyType(value.typeName) {
 		value.moved = true
 	}
 	return value.typeName, nil
@@ -440,6 +457,14 @@ func (c *Checker) moveStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope)
 
 // readFieldExpr reads a field without moving the receiver.
 func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error) {
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
+		if tags, exists := c.enums[ident.Name]; exists {
+			if !tags[expr.Name] {
+				return "", fmt.Errorf("move error: unknown enum tag `%s.%s`", ident.Name, expr.Name)
+			}
+			return ident.Name, nil
+		}
+	}
 	return c.readExpr(expr.Receiver, env)
 }
 
@@ -638,8 +663,11 @@ func returnTypeName(fn *functionInfo) string {
 }
 
 // isCopyType reports whether values of typeName can be reused after move contexts.
-func isCopyType(typeName string) bool {
+func (c *Checker) isCopyType(typeName string) bool {
 	if isRawPointerType(typeName) {
+		return true
+	}
+	if c.enums[typeName] != nil {
 		return true
 	}
 	switch typeName {

@@ -11,9 +11,10 @@ Kizu の抽象化は、人間がレビューしやすく、dynamic dispatch が�
 
 ## 決定
 
-Kizu v0 では contract system を実装しない。
+Kizu v0.1 では contract system を実装対象にする。
+ただし、Rust trait system の完全再現はしない。
 
-将来導入する場合は、次の3つに分ける。
+Kizu の抽象化は次の3つに分ける。
 
 ```text
 contract  型が満たすべき要求
@@ -79,5 +80,5 @@ Zig 手書き vtable との差分:
 
 - 抽象化の意図がコード上に残る
 - dynamic dispatch が隠れない
-- v0 は ownership / move / borrow / backend を優先できる
-- contract parser、generic bounds、vtable layout は後続 phase に分離する
+- v0.1 は `contract` / `satisfy` / `borrow Dyn<Contract>` を実装対象にする
+- generic bounds、owned dynamic object、最適化された vtable layout は後続 phase に分離する

@@ -76,6 +76,24 @@ fn main() {
 	}
 }
 
+// TestRunEnumValueAccess checks Zig/C-style tag enum runtime values.
+func TestRunEnumValueAccess(t *testing.T) {
+	got := runSource(t, `enum Color {
+    Red
+    Green
+    Blue
+}
+fn main() {
+    let color = Color.Green
+    print(color)
+    print(color == Color.Green)
+}`)
+	want := "Color.Green\ntrue\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunComptime checks Phase 13 expressions and selected branches execute normally.
 func TestRunComptime(t *testing.T) {
 	got := runSource(t, `fn sized(comptime n: int) -> int { return n }

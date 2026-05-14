@@ -13,6 +13,7 @@ const (
 	kindArena
 	kindHandle
 	kindResult
+	kindEnum
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
@@ -25,6 +26,7 @@ type Value struct {
 	arena  *Arena
 	handle Handle
 	result *Result
+	enum   Enum
 }
 
 // Arena stores values and gives out opaque handles.
@@ -43,6 +45,12 @@ type Result struct {
 	ok      bool
 	value   Value
 	message string
+}
+
+// Enum stores a Zig/C-style enum tag value.
+type Enum struct {
+	typeName string
+	tag      string
 }
 
 // String formats a value for the print builtin and test assertions.
@@ -70,6 +78,8 @@ func (v Value) String() string {
 			return "<ok>"
 		}
 		return "<error: " + v.result.message + ">"
+	case kindEnum:
+		return v.enum.typeName + "." + v.enum.tag
 	default:
 		return "<invalid>"
 	}
@@ -118,4 +128,9 @@ func resultOkValue(value Value) Value {
 // resultErrorValue returns an error result runtime value.
 func resultErrorValue(message string) Value {
 	return Value{kind: kindResult, result: &Result{message: message}}
+}
+
+// enumValue returns a tag enum runtime value.
+func enumValue(typeName string, tag string) Value {
+	return Value{kind: kindEnum, enum: Enum{typeName: typeName, tag: tag}}
 }

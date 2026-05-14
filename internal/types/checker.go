@@ -81,7 +81,13 @@ var integerTypes = map[Type]bool{
 type Checker struct {
 	functions     map[string]*functionType
 	structs       map[string]*ast.StructDecl
+	enums         map[string]*enumType
 	currentReturn Type
+}
+
+type enumType struct {
+	name string
+	tags map[string]bool
 }
 
 type functionType struct {
@@ -101,7 +107,11 @@ type scope struct {
 
 // New creates an empty type checker.
 func New() *Checker {
-	return &Checker{functions: map[string]*functionType{}, structs: map[string]*ast.StructDecl{}}
+	return &Checker{
+		functions: map[string]*functionType{},
+		structs:   map[string]*ast.StructDecl{},
+		enums:     map[string]*enumType{},
+	}
 }
 
 // Check validates the program and returns the first type error.
@@ -129,6 +139,10 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 			if err := c.collectStruct(d); err != nil {
 				return err
 			}
+		case *ast.EnumDecl:
+			if err := c.collectEnum(d); err != nil {
+				return err
+			}
 		case *ast.FunctionDecl:
 			continue
 		default:
@@ -152,10 +166,32 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 	return nil
 }
 
+// collectEnum registers and validates a tag enum declaration.
+func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
+	if _, exists := c.enums[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate enum `%s`", decl.Name)
+	}
+	if _, exists := c.structs[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+	}
+	enum := &enumType{name: decl.Name, tags: map[string]bool{}}
+	for _, tag := range decl.Tags {
+		if enum.tags[tag] {
+			return fmt.Errorf("type error: duplicate enum tag `%s.%s`", decl.Name, tag)
+		}
+		enum.tags[tag] = true
+	}
+	c.enums[decl.Name] = enum
+	return nil
+}
+
 // collectStruct registers and validates a struct declaration.
 func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 	if _, exists := c.structs[decl.Name]; exists {
 		return fmt.Errorf("type error: duplicate struct `%s`", decl.Name)
+	}
+	if _, exists := c.enums[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	c.structs[decl.Name] = decl
 	for _, field := range decl.Fields {
@@ -213,7 +249,7 @@ func (c *Checker) parseType(name string) (Type, error) {
 		return Type(name), nil
 	}
 	typ := Type(name)
-	if !knownTypes[typ] && c.structs[name] == nil {
+	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
@@ -678,6 +714,12 @@ func (c *Checker) checkStructLiteralExpr(
 
 // checkFieldExpr returns the declared type of a struct field access.
 func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (Type, error) {
+	if enumType, ok := enumReceiver(expr.Receiver, c.enums); ok {
+		if !enumType.tags[expr.Name] {
+			return "", fmt.Errorf("type error: unknown enum tag `%s.%s`", enumType.name, expr.Name)
+		}
+		return Type(enumType.name), nil
+	}
 	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
 	if err != nil {
 		return "", err
@@ -692,6 +734,16 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 		}
 	}
 	return "", fmt.Errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+}
+
+// enumReceiver returns an enum namespace used by EnumName.Tag expressions.
+func enumReceiver(expr ast.Expression, enums map[string]*enumType) (*enumType, bool) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	enumType, ok := enums[ident.Name]
+	return enumType, ok
 }
 
 // checkMethodCallExpr validates arena methods.

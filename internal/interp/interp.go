@@ -12,6 +12,7 @@ import (
 type Interpreter struct {
 	out       io.Writer
 	functions map[string]*ast.FunctionDecl
+	enums     map[string]map[string]bool
 }
 
 type trySignal struct {
@@ -25,23 +26,39 @@ func (s trySignal) Error() string {
 
 // New creates an interpreter that writes builtin output to out.
 func New(out io.Writer) *Interpreter {
-	return &Interpreter{out: out, functions: map[string]*ast.FunctionDecl{}}
+	return &Interpreter{
+		out:       out,
+		functions: map[string]*ast.FunctionDecl{},
+		enums:     map[string]map[string]bool{},
+	}
 }
 
 // Run registers top-level declarations and calls main.
 func (i *Interpreter) Run(program *ast.Program) error {
 	for _, decl := range program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok {
+		switch d := decl.(type) {
+		case *ast.EnumDecl:
+			i.enums[d.Name] = enumTags(d.Tags)
+		case *ast.FunctionDecl:
+			if d.ExternABI != "" {
+				continue
+			}
+			i.functions[d.Name] = d
+		default:
 			continue
 		}
-		if fn.ExternABI != "" {
-			continue
-		}
-		i.functions[fn.Name] = fn
 	}
 	_, err := i.callFunction("main", nil)
 	return err
+}
+
+// enumTags returns a lookup set for runtime enum tag validation.
+func enumTags(tags []string) map[string]bool {
+	out := map[string]bool{}
+	for _, tag := range tags {
+		out[tag] = true
+	}
+	return out
 }
 
 // callFunction invokes a declared function by name.
@@ -301,6 +318,8 @@ func valuesEqual(left Value, right Value) bool {
 		return left.s == right.s
 	case kindHandle:
 		return left.handle == right.handle
+	case kindEnum:
+		return left.enum == right.enum
 	default:
 		return false
 	}
@@ -403,6 +422,15 @@ func (i *Interpreter) evalStructLiteralExpr(expr *ast.StructLiteralExpr, env *En
 
 // evalFieldExpr reads a field from a struct value.
 func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error) {
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
+		if tags, exists := i.enums[ident.Name]; exists {
+			if !tags[expr.Name] {
+				return voidValue(), fmt.Errorf("runtime error: unknown enum tag `%s.%s`",
+					ident.Name, expr.Name)
+			}
+			return enumValue(ident.Name, expr.Name), nil
+		}
+	}
 	receiver, err := i.evalExpr(expr.Receiver, env)
 	if err != nil {
 		return voidValue(), err

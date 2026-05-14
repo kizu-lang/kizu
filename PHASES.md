@@ -1,8 +1,9 @@
 # Kizu 実装フェーズ
 
-このファイルは、Kizu の実装状態を追跡するための入口です。
+このファイルは、Kizu の過去フェーズを参照するための索引です。
 
-詳細な TODO と受け入れ条件は `docs/phases/` 配下でフェーズごとに管理します。
+進行中の TODO、受け入れ条件、作業状態は GitHub Issues で管理します。
+Markdown の phase 文書は履歴と設計メモとして残し、active tracker にはしません。
 
 ## フェーズ一覧
 
@@ -37,6 +38,10 @@
 | --- | --- | --- |
 | 完了 | ビルド性能とキャッシュ評価 | [build-performance.md](docs/phases/build-performance.md) |
 
+## Active Work
+
+現在の v0.1 作業は GitHub Issues の `v0.1` label で管理します。
+
 ## 状態の意味
 
 - `未着手`: まだ実装しない
@@ -47,8 +52,9 @@
 
 ## 更新ルール
 
-- TODO は完了したら `[x]` にする
-- 受け入れ条件がすべて満たされたら、その Phase を `完了` にする
+- 新しい TODO は Markdown ではなく GitHub Issue として作る
+- 受け入れ条件は Issue body に置く
+- 作業が完了したら対応する Issue を close する
 - 範囲外の機能を途中で追加しない
 - 仕様変更が必要な場合は、先に `SPEC.md` を更新する
 - commit 前に `pre-commit run --all-files` を通す

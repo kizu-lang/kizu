@@ -11,9 +11,10 @@ borrow、cancellation、resource cleanup、compiler lowering が重くなる。
 
 ## 決定
 
-Kizu v0 では async を実装しない。
+Kizu v0.1 では `async fn` / `await` syntax は実装しない。
 
-将来 async を扱う場合も、最初の design では `async fn` を中心にしない。
+ただし、I/O と並行処理の境界は v0.1 から実装する。
+最初の design では `async fn` を中心にしない。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示する。
 
 ## Io capability
@@ -60,4 +61,5 @@ print(name) // error: moved into task
 - 隠れた async work を作らない
 - borrow checker と task lifetime の複雑さを抑える
 - cancellation と cleanup の境界を TaskGroup に寄せる
-- async runtime、event loop、networking stdlib は別 phase に分離する
+- v0.1 は interpreter 上の structured task model を実装対象にする
+- OS thread、event loop、networking stdlib は別 phase に分離する

@@ -129,18 +129,21 @@ kizu test
 
 ## Goal ワークフロー
 
-Phase を goal として進める場合は、次を完了まで行ってください。
+Goal は GitHub Issue を正として進めてください。
+Markdown の phase 文書は履歴と設計メモであり、active TODO tracker ではありません。
 
-* 対象 phase の TODO と受け入れ条件を実装前に確認する
-* 実装は対象 phase の範囲に絞る
+* 対象 Issue の本文、受け入れ条件、コメントを実装前に確認する
+* 実装は対象 Issue の範囲に絞る
 * 関連テストと examples を追加または更新する
-* `PHASES.md` と `docs/phases/*.md` の状態を更新する
+* 新しい TODO は Markdown ではなく GitHub Issue として作る
+* 仕様や設計判断が変わる場合だけ `SPEC.md` または `docs/adr/` を更新する
 * 明示要件と成果物を突き合わせて完了監査する
 * `pre-commit run --all-files` を通す
 * 変更を commit する
+* 対応する Issue に結果をコメントし、完了したら close する
 
-commit message は、phase 完了なら次の形を基本にします。
+commit message は、Issue 完了なら次の形を基本にします。
 
 ```text
-Complete phase N <short name>
+Complete #<issue-number> <short name>
 ```

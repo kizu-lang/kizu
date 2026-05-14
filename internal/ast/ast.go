@@ -99,6 +99,20 @@ func (d *StructDecl) String() string {
 	return fmt.Sprintf("struct %s { %s }", d.Name, strings.Join(fields, "; "))
 }
 
+// EnumDecl represents a Zig/C-style tag enum declaration.
+type EnumDecl struct {
+	Name string
+	Tags []string
+}
+
+// declNode marks EnumDecl as a declaration node.
+func (*EnumDecl) declNode() {}
+
+// String returns a compact debug representation of the enum declaration.
+func (d *EnumDecl) String() string {
+	return fmt.Sprintf("enum %s { %s }", d.Name, strings.Join(d.Tags, "; "))
+}
+
 // Field represents a named struct field.
 type Field struct {
 	Name     string

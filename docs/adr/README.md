@@ -45,3 +45,6 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0024: C ABI layout と native linking は明示指定に限定する](0024-c-abi-layout-and-linking.md)
 - [ADR-0025: async は Io / TaskGroup で明示する](0025-async-io-taskgroup-policy.md)
 - [ADR-0026: contract / satisfy / Dyn は明示的な抽象化として扱う](0026-contract-satisfy-dyn-policy.md)
+- [ADR-0027: v0.1 は interpreter-first language core とする](0027-v0-1-interpreter-first.md)
+- [ADR-0028: enum は Zig/C 寄りの tag enum にする](0028-zig-style-enum-and-tagged-union.md)
+- [ADR-0029: active work は GitHub Issues で管理する](0029-issue-based-work-tracking.md)
