@@ -75,6 +75,8 @@ go run ./cmd/kizu run examples/hello.kizu
 [v0.1 examples catalog](examples/README.md) にまとめています。
 機械判定用の conformance manifest は
 [tests/conformance/v0_1.json](tests/conformance/v0_1.json) です。
+safe code のメモリ安全契約は
+[docs/memory-safety.md](docs/memory-safety.md) に明文化しています。
 
 ## 開発環境
 
@@ -138,6 +140,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 ## プロジェクト文書
 
 - [SPEC.md](SPEC.md): 言語仕様
+- [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
 - [examples](examples/README.md): v0.1 examples catalog
 - [tests/conformance](tests/conformance/README.md): reusable v0.1 test manifest
 - [docs/adr](docs/adr): Architecture Decision Record

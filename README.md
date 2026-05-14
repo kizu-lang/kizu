@@ -76,6 +76,8 @@ go run ./cmd/kizu run examples/hello.kizu
 See the [v0.1 examples catalog](examples/README.md) for runnable feature
 examples and negative safety-rule examples. The machine-readable conformance
 manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json).
+The safe-code memory-safety contract is documented in
+[docs/memory-safety.md](docs/memory-safety.md).
 
 ## Development Environment
 
@@ -139,6 +141,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 ## Project Documents
 
 - [SPEC.md](SPEC.md): language specification
+- [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
 - [examples](examples/README.md): v0.1 examples catalog
 - [tests/conformance](tests/conformance/README.md): reusable v0.1 test manifest
 - [docs/adr](docs/adr): architecture decision records

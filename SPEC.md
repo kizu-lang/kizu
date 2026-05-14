@@ -18,6 +18,8 @@ Kizu はシステムプログラミング言語を目指します。
 Kizu のメモリ安全性保証は safe Kizu に対して行います。
 `unsafe` を使うコードでは、memory safety obligation はプログラマが負います。
 ただし、`unsafe` は型検査、move check、borrow check を全面的に無効化するものではありません。
+safe Kizu の詳細な安全契約と regression coverage は
+[`docs/memory-safety.md`](docs/memory-safety.md) を正とします。
 
 ## 0. v0.1 の範囲
 
