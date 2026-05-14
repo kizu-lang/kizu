@@ -27,6 +27,6 @@ run "cold wasm" go run ./cmd/kizu build --target wasm32-wasi "$tmp/hello.kizu"
 run "warm wasm" go run ./cmd/kizu build --target wasm32-wasi "$tmp/hello.kizu"
 run "no-op why" go run ./cmd/kizu why-rebuild "$tmp/hello.kizu"
 printf '\n' >> "$tmp/hello.kizu"
-run "small edit why" go run ./cmd/kizu why-rebuild "$tmp/hello.kizu"
+run "single-file edit why" go run ./cmd/kizu why-rebuild "$tmp/hello.kizu"
 run "cache status" go run ./cmd/kizu cache status
 printf 'cache size\t%s\n' "$(du -sh "$KIZU_CACHE_DIR" | awk '{ print $1 }')"

@@ -9,7 +9,7 @@ Kizu は LLVM だけでなく WASM / WASI への出力も持ちたい。
 typed SSA IR から WASI で実行できる形に下げられることを確認すること。
 
 binary `.wasm` を直接生成すると、encoder、section layout、validation の実装範囲が広がる。
-初期段階では、テキスト形式の WAT を生成し、`wasmtime` に validation と実行を任せる方が小さい。
+初期段階では、テキスト形式の WAT を生成し、`wasmtime` に validation と実行を任せる方が実装範囲を抑えられる。
 
 ## 決定
 

@@ -2,7 +2,7 @@ package ir
 
 import "strconv"
 
-// Optimize applies small local cleanup passes to a module.
+// Optimize applies bounded local cleanup passes to a module.
 func Optimize(module *Module) {
 	ConstantFold(module)
 	CopyPropagate(module)

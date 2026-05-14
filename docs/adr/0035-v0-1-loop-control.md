@@ -6,7 +6,7 @@ Status: 採用
 
 Kizu v0.1 には、システムプログラミング言語として最低限の loop control が必要です。
 Kizu は Zig 寄りの低レベル言語を目指すため、Rust の `loop` keyword や iterator-heavy
-な `for` ではなく、明示的で小さい構文を優先します。
+な `for` ではなく、明示的で範囲を絞った構文を優先します。
 
 ## 決定
 
@@ -51,5 +51,5 @@ outer: while i < 10 {
 
 ## 影響
 
-v0.1 の control flow は小さく、interpreter と将来の self-host compiler で再実装しやすい。
+v0.1 の control flow は範囲を絞り、interpreter と将来の self-host compiler で再実装しやすい。
 `for` は将来 std collection が整った後に拡張できます。

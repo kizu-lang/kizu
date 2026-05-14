@@ -36,6 +36,6 @@ native object、link result、package dependency graph、remote cache は扱わ�
 
 - キャッシュは無制限に増えない
 - no-op rebuild は cache hit にできる
-- small edit rebuild は source content hash の変化として説明できる
+- single-file edit rebuild は source content hash の変化として説明できる
 - cache key に source path を含めるため、同じ内容でも別 file は別 entry になる
 - remote cache や分散ビルドは将来 phase で別途判断する

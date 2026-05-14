@@ -96,7 +96,7 @@ actual native linking を実装する phase では、最小 smoke test として
 Kizu source -> LLVM IR -> object -> native executable -> run
 ```
 
-対象は小さな C function call 1つに限定する。
+対象は限定された C function call 1つにする。
 
 ## 影響
 

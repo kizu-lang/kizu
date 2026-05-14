@@ -4,7 +4,7 @@
   <img src="docs/assets/kizu-logo.svg" alt="Kizu logo" width="180">
 </p>
 
-Kizu は、小さく、明示的で、メモリ安全なシステムプログラミング言語のプロトタイプです。
+Kizu は、明示的で、メモリ安全なシステムプログラミング言語のプロトタイプです。
 
 名前の Kizu は日本語の「傷」に由来します。
 
@@ -49,7 +49,7 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 - opt-in の IR optimization pipeline
 
 これらは将来の compiler work の土台ですが、まだ v0.1 completion criteria ではありません。
-LLVM と WASM は interpreter より小さい subset だけを扱います。
+LLVM と WASM は interpreter より限定された subset だけを扱います。
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -112,7 +112,7 @@ go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
-go run ./cmd/kizu import-c-header examples/tiny.h
+go run ./cmd/kizu import-c-header examples/c_abi.h
 ```
 
 ## CLI

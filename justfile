@@ -83,7 +83,7 @@ why file="examples/hello.kizu":
 perf:
     scripts/measure-baseline.sh
 
-# Run cache-specific cold, warm, no-op, and small-edit timings.
+# Run cache-specific cold, warm, no-op, and single-file edit timings.
 perf-cache:
     scripts/measure-cache.sh
 

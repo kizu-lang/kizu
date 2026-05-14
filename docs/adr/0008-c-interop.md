@@ -18,7 +18,7 @@ C 親和性は次で確保する。
 - 明示幅整数
 
 Phase 12 ではまず `extern "c" fn` と raw pointer 型を扱う。
-Phase 14 では、小さな C function prototype から `extern "c" fn` を生成する。
+Phase 14 では、限定された C function prototype から `extern "c" fn` を生成する。
 struct layout、alignment、link name は後続 phase で扱う。
 
 検討する構文:

@@ -196,7 +196,7 @@ func TestBuildOptUsesSeparateCacheEntry(t *testing.T) {
 
 // TestImportCHeaderCommandSmoke checks the Phase 14 C header importer CLI.
 func TestImportCHeaderCommandSmoke(t *testing.T) {
-	header := filepath.Join(t.TempDir(), "tiny.h")
+	header := filepath.Join(t.TempDir(), "c_abi.h")
 	source := []byte("int puts(const char *s);\n")
 	if err := os.WriteFile(header, source, 0o644); err != nil {
 		t.Fatal(err)
@@ -229,7 +229,7 @@ func TestImportCHeaderCommandRejectsUnsupportedSyntax(t *testing.T) {
 	}
 }
 
-// TestWhyRebuildChangedSource checks CLI rebuild reasons after a small edit.
+// TestWhyRebuildChangedSource checks CLI rebuild reasons after a single-file edit.
 func TestWhyRebuildChangedSource(t *testing.T) {
 	cacheDir := t.TempDir()
 	source := filepath.Join(t.TempDir(), "main.kizu")

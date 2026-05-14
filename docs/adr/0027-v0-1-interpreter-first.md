@@ -5,7 +5,7 @@ Status: 採用
 ## 背景
 
 Kizu の長期目標には、低レベルシステムプログラミング、native compile、
-小さい build cache、短い build time、Rust と比較できる性能が含まれる。
+抑えられた build cache、短い build time、Rust と比較できる性能が含まれる。
 
 一方で、これらをすべて最初の v0.1 完了条件に含めると、仕様固定、checker、
 runtime、backend、stdlib、benchmark、self-hosting が同時に必要になり、release が終わらない。
@@ -56,7 +56,7 @@ backend が対応できない機能は、silent fallback ではなく明示 erro
 ## 影響
 
 - v0.1 の完了条件が現実的になる
-- SPEC と実装の差分を小さくできる
+- SPEC と実装の差分を抑えられる
 - TODO なしの対象を v0.1 scope に限定できる
 - native compiler と performance work を後続 milestone に分離できる
 - 長期目標を捨てずに、まず言語の形を固定できる

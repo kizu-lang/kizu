@@ -57,7 +57,7 @@ guard、多段 destructuring、wildcard pattern `_` は v0.1 では扱わない�
 
 ## 影響
 
-- `enum` の概念が小さく保たれる
+- `enum` の概念を絞れる
 - C ABI や Zig-style enum へ寄せやすい
 - Rust-style payload enum と混同しにくい
 - payload を持つ sum type は `union` として明示的に扱える

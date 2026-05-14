@@ -1,6 +1,6 @@
 # Kizu 言語仕様 v0.1
 
-Kizu は、小さく、シンプルで、メモリ安全なプログラミング言語です。
+Kizu は、明示的で、シンプルで、メモリ安全なプログラミング言語です。
 
 名前の Kizu は日本語の「傷」に由来します。
 
@@ -152,7 +152,7 @@ Kizu は次を目指します。
 - 標準ライブラリを厚めにする
 - CIを速くする
 - ビルドキャッシュを肥大化させない
-- 依存グラフを小さく保つ
+- 依存グラフを抑える
 
 ## 2. 非目標
 
@@ -233,7 +233,7 @@ Go
 理由:
 
 * 実装が速い
-* 依存を小さく保ちやすい
+* 依存を抑えやすい
 * CLIを作りやすい
 * lexer/parser/interpreter/type checker の実験に向いている
 
@@ -761,7 +761,7 @@ ptr<const T> const T*
 ### 12.1 C header import
 
 Kizu は C header の完全互換 parser は持ちません。
-Phase 14 の header import は、小さな C function prototype を `extern "c" fn` に変換する補助機能です。
+Phase 14 の header import は、限定された C function prototype を `extern "c" fn` に変換する補助機能です。
 これは v0.1 の正ではなく experimental です。
 
 CLI:
@@ -1143,7 +1143,7 @@ checked AST から typed SSA IR に lowering します。
 ### Milestone 9: LLVM IR backend
 
 typed SSA IR から LLVM IR を生成します。
-LLVM lowering は interpreter より小さい subset だけを扱います。
+LLVM lowering は interpreter より限定された subset だけを扱います。
 これは v0.1 の正ではありません。
 
 ### Milestone 10: build cache / why-rebuild
@@ -1154,7 +1154,7 @@ build cache は compiler work のための experimental tooling です。
 ### Milestone 11: WASM / WASI backend
 
 typed SSA IR から WASM を生成し、WASI で実行できるようにします。
-WASM target は interpreter より小さい subset だけを扱います。
+WASM target は interpreter より限定された subset だけを扱います。
 これは v0.1 の正ではありません。
 
 ### Milestone 12: unsafe / C ABI
@@ -1196,7 +1196,7 @@ error: moved value `name` was used
 
 Kizu は次のような言語にします。
 
-* 小さい
+* 仕様を絞る
 * 直接的
 * 厳格
 * 実用的

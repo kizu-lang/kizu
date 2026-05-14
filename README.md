@@ -4,7 +4,7 @@
   <img src="docs/assets/kizu-logo.svg" alt="Kizu logo" width="180">
 </p>
 
-Kizu is a small, explicit, memory-safe systems programming language prototype.
+Kizu is an explicit, memory-safe systems programming language prototype.
 
 The name comes from the Japanese word "kizu", meaning "wound" or "scratch".
 
@@ -50,7 +50,7 @@ Experimental compiler and tooling pieces:
 - opt-in IR optimization pipeline
 
 These experimental pieces are not v0.1 completion criteria yet. LLVM and WASM
-currently support smaller target subsets than the interpreter.
+currently support more limited target subsets than the interpreter.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -113,7 +113,7 @@ go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
-go run ./cmd/kizu import-c-header examples/tiny.h
+go run ./cmd/kizu import-c-header examples/c_abi.h
 ```
 
 ## CLI

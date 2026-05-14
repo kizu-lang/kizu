@@ -7,7 +7,8 @@ Status: 採用
 Kizu は Zig に近い低レベル指向を目指す。
 そのため `comptime` は有力な機能である。
 
-一方、macro / proc macro / AST rewrite は仕様とビルドを複雑にし、Kizu の小ささと明快さを損なう可能性が高い。
+一方、macro / proc macro / AST rewrite は仕様とビルドを複雑にし、Kizu の明快さと
+仕様を絞る方針を損なう可能性が高い。
 
 ## 決定
 

@@ -1,14 +1,14 @@
 # AGENTS.md
 
-このリポジトリでは、Kizu という小さなメモリ安全言語を実装します。
+このリポジトリでは、Kizu というメモリ安全なシステムプログラミング言語を実装します。
 
 ## プロジェクト目標
 
-Kizu v0.1 を Go 製の小さな interpreter-first language core として実装します。
+Kizu v0.1 を Go 製の interpreter-first language core として実装します。
 
 Kizu は Rust clone ではありません。
 
-Rust 風の安全性のうち、次だけを小さく採用します。
+Rust 風の安全性のうち、次を限定して採用します。
 
 - ownership
 - move semantics
