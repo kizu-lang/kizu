@@ -585,11 +585,7 @@ func (c *Checker) checkStmt(
 ) (bool, error) {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
-		typ, err := c.checkExpr(s.Value, env, unsafe)
-		if err != nil {
-			return false, err
-		}
-		return false, env.define(s.Name, typ, s.Mutable)
+		return c.checkLetStmt(s, env, unsafe)
 	case *ast.AssignStmt:
 		return c.checkAssignStmt(s, env, unsafe)
 	case *ast.ReturnStmt:
@@ -616,6 +612,22 @@ func (c *Checker) checkStmt(
 	default:
 		return false, fmt.Errorf("type error: unsupported statement %T", stmt)
 	}
+}
+
+// checkLetStmt validates a let or var declaration.
+func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool, error) {
+	if borrow, ok := borrowPrefix(stmt.Value); ok {
+		typ, mutable, err := c.checkBorrowPrefix(borrow, env, unsafe)
+		if err != nil {
+			return false, err
+		}
+		return false, env.defineParam(stmt.Name, typ, true, mutable)
+	}
+	typ, err := c.checkExpr(stmt.Value, env, unsafe)
+	if err != nil {
+		return false, err
+	}
+	return false, env.define(stmt.Name, typ, stmt.Mutable)
 }
 
 // checkAssignStmt validates assignment to an existing binding.
@@ -1051,6 +1063,10 @@ func checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) {
 
 // checkPrefixExpr validates unary operators.
 func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope, unsafe bool) (Type, error) {
+	if expr.Operator == "&" || expr.Operator == "&mut" {
+		typ, _, err := c.checkBorrowPrefix(expr, env, unsafe)
+		return typ, err
+	}
 	right, err := c.checkExpr(expr.Right, env, unsafe)
 	if err != nil {
 		return "", err
@@ -1069,6 +1085,28 @@ func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope, unsafe bool)
 	default:
 		return "", fmt.Errorf("type error: unsupported unary `%s`", expr.Operator)
 	}
+}
+
+// checkBorrowPrefix validates an explicit local borrow expression.
+func (c *Checker) checkBorrowPrefix(
+	expr *ast.PrefixExpr,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	mutable := expr.Operator == "&mut"
+	if mutable {
+		if err := requireMutableBorrowArg(expr.Right, env); err != nil {
+			return "", false, err
+		}
+	}
+	if err := checkBorrowTargetShape(expr.Right); err != nil {
+		return "", false, err
+	}
+	typ, err := c.checkExpr(expr.Right, env, unsafe)
+	if err != nil {
+		return "", false, err
+	}
+	return typ, mutable, nil
 }
 
 // checkBinaryExpr validates arithmetic, equality, and comparison operators.
@@ -2040,12 +2078,43 @@ func (c *Checker) checkMethodArgs(
 func requireMutableBorrowArg(expr ast.Expression, env *scope) error {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+		field, fieldOK := expr.(*ast.FieldExpr)
+		if !fieldOK {
+			return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+		}
+		ident, ok = field.Receiver.(*ast.IdentExpr)
+		if !ok {
+			return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+		}
 	}
 	if !env.isMutable(ident.Name) {
 		return fmt.Errorf("type error: &mut argument `%s` must be mutable", ident.Name)
 	}
 	return nil
+}
+
+// borrowPrefix reports whether an expression is &T or &mut T syntax.
+func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
+	prefix, ok := expr.(*ast.PrefixExpr)
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&mut") {
+		return nil, false
+	}
+	return prefix, true
+}
+
+// checkBorrowTargetShape restricts v0.1 explicit borrows to direct locals or one field.
+func checkBorrowTargetShape(expr ast.Expression) error {
+	switch target := expr.(type) {
+	case *ast.IdentExpr:
+		return nil
+	case *ast.FieldExpr:
+		if _, ok := target.Receiver.(*ast.IdentExpr); ok {
+			return nil
+		}
+		return fmt.Errorf("type error: v0.1 field borrow only supports one direct field")
+	default:
+		return fmt.Errorf("type error: borrow target must be a local binding or direct field")
+	}
 }
 
 // checkArenaAdd validates arena<T>.add(value).

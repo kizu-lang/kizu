@@ -232,6 +232,13 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 
 // evalLetStmt executes a let or var declaration.
 func (i *Interpreter) evalLetStmt(stmt *ast.LetStmt, env *Env) (Value, bool, error) {
+	if borrow, ok := borrowPrefix(stmt.Value); ok {
+		value, err := i.evalBorrowPrefix(borrow, env)
+		if err != nil {
+			return voidValue(), false, err
+		}
+		return voidValue(), false, env.Define(stmt.Name, value, stmt.Mutable)
+	}
 	value, err := i.evalExpr(stmt.Value, env)
 	if err != nil {
 		return voidValue(), false, err
@@ -328,6 +335,11 @@ func assignStructField(target *Value, field string, value Value) error {
 func assignRef(target Value, value Value) error {
 	if target.kind != kindRef {
 		return fmt.Errorf("runtime error: assignment target is not a borrow")
+	}
+	if target.ref.fieldParent != nil {
+		target.ref.fieldParent.value.fields[target.ref.fieldName] = value
+		target.ref.value = value
+		return nil
 	}
 	target.ref.value = value
 	return nil
@@ -604,6 +616,9 @@ func evalIdent(name string, env *Env) (Value, error) {
 
 // evalPrefixExpr evaluates supported unary operators.
 func (i *Interpreter) evalPrefixExpr(expr *ast.PrefixExpr, env *Env) (Value, error) {
+	if expr.Operator == "&" || expr.Operator == "&mut" {
+		return i.evalBorrowPrefix(expr, env)
+	}
 	right, err := i.evalExpr(expr.Right, env)
 	if err != nil {
 		return voidValue(), err
@@ -621,6 +636,41 @@ func (i *Interpreter) evalPrefixExpr(expr *ast.PrefixExpr, env *Env) (Value, err
 		return boolValue(!right.b), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unsupported unary `%s`", expr.Operator)
+	}
+}
+
+// evalBorrowPrefix creates a local runtime borrow reference.
+func (i *Interpreter) evalBorrowPrefix(expr *ast.PrefixExpr, env *Env) (Value, error) {
+	switch target := expr.Right.(type) {
+	case *ast.IdentExpr:
+		binding, ok := env.Binding(target.Name)
+		if !ok {
+			return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", target.Name)
+		}
+		return refValue(binding), nil
+	case *ast.FieldExpr:
+		ident, ok := target.Receiver.(*ast.IdentExpr)
+		if !ok {
+			return voidValue(), fmt.Errorf("runtime error: v0.1 field borrow only supports one direct field")
+		}
+		ownerBinding, ok := env.Binding(ident.Name)
+		if !ok {
+			return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", ident.Name)
+		}
+		if ownerBinding.value.kind != kindStruct {
+			return voidValue(), fmt.Errorf("runtime error: field borrow expects struct")
+		}
+		fieldValue, ok := ownerBinding.value.fields[target.Name]
+		if !ok {
+			return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", target.Name)
+		}
+		cell := &binding{
+			value: fieldValue, mutable: expr.Operator == "&mut",
+			fieldParent: ownerBinding, fieldName: target.Name,
+		}
+		return refValue(cell), nil
+	default:
+		return voidValue(), fmt.Errorf("runtime error: borrow target must be local")
 	}
 }
 
@@ -1562,4 +1612,13 @@ func qualifiedName(expr ast.Expression) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// borrowPrefix reports whether an expression is &T or &mut T syntax.
+func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
+	prefix, ok := expr.(*ast.PrefixExpr)
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&mut") {
+		return nil, false
+	}
+	return prefix, true
 }

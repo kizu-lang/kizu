@@ -780,6 +780,14 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	case token.Try:
 		p.nextToken()
 		return &ast.TryExpr{Value: p.parseExpression(prefix)}
+	case token.Amp:
+		p.nextToken()
+		op := "&"
+		if p.cur.Type == token.Mut {
+			op = "&mut"
+			p.nextToken()
+		}
+		return &ast.PrefixExpr{Operator: op, Right: p.parseExpression(prefix)}
 	case token.Bang, token.Minus:
 		op := p.cur.Literal
 		p.nextToken()

@@ -3,8 +3,10 @@ package interp
 import "fmt"
 
 type binding struct {
-	value   Value
-	mutable bool
+	value       Value
+	mutable     bool
+	fieldParent *binding
+	fieldName   string
 }
 
 // Env stores lexical bindings for a function call or block execution.
