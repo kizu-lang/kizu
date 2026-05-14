@@ -652,6 +652,14 @@ func (p *Parser) parseCastExpr() ast.Expression {
 
 // parseTypeName parses a plain, pointer, or single-argument generic type name.
 func (p *Parser) parseTypeName() string {
+	if p.cur.Type == token.Bang {
+		p.nextToken()
+		inner := p.parseTypeName()
+		if inner == "" {
+			return ""
+		}
+		return "!" + inner
+	}
 	nullable := false
 	if p.cur.Type == token.Question {
 		nullable = true

@@ -454,35 +454,35 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 	runErrorCases(t, cases)
 }
 
-// TestCheckAcceptsResultTry checks minimal result<T> propagation.
-func TestCheckAcceptsResultTry(t *testing.T) {
-	source := `fn parse() -> result<int> {
-    return ok(1)
+// TestCheckAcceptsErrorUnionTry checks minimal !T propagation.
+func TestCheckAcceptsErrorUnionTry(t *testing.T) {
+	source := `fn parse() -> !int {
+    return 1
 }
-fn main() -> result<int> {
+fn main() -> !int {
     let value = try parse()
-    return ok(value + 1)
+    return value + 1
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
 }
 
-// TestCheckAcceptsResultError checks explicit error value construction.
-func TestCheckAcceptsResultError(t *testing.T) {
-	source := `fn parse() -> result<int> {
+// TestCheckAcceptsErrorUnionError checks explicit error value construction.
+func TestCheckAcceptsErrorUnionError(t *testing.T) {
+	source := `fn parse() -> !int {
     return error("bad")
 }
-fn main() -> result<int> {
+fn main() -> !int {
     let value = try parse()
-    return ok(value)
+    return value
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
 }
 
-// TestCheckRejectsTryErrors checks readable result propagation errors.
+// TestCheckRejectsTryErrors checks readable error propagation errors.
 func TestCheckRejectsTryErrors(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -490,25 +490,25 @@ func TestCheckRejectsTryErrors(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "non result function",
-			source: `fn parse() -> result<int> { return ok(1) }
+			name: "non error-union function",
+			source: `fn parse() -> !int { return 1 }
 fn main() {
     let x = try parse()
     print(x)
 }`,
-			want: "try requires function to return result<T>",
+			want: "try requires function to return !T",
 		},
 		{
-			name: "non result expression",
-			source: `fn main() -> result<int> {
+			name: "non error-union expression",
+			source: `fn main() -> !int {
     let x = try 1
-    return ok(x)
+    return x
 }`,
-			want: "try expects result<T>, got int",
+			want: "try expects !T, got int",
 		},
 		{
 			name: "error message type",
-			source: `fn main() -> result<int> {
+			source: `fn main() -> !int {
     return error(1)
 }`,
 			want: "`error` expects string",

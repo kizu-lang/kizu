@@ -86,10 +86,10 @@ func arenaElementType(arena string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(arena, "arena<"), ">")
 }
 
-// resultElementType returns T for result<T>.
-func resultElementType(result string) string {
-	if !strings.HasPrefix(result, "result<") || !strings.HasSuffix(result, ">") {
+// errorUnionElementType returns T for !T.
+func errorUnionElementType(result string) string {
+	if !strings.HasPrefix(result, "!") || len(result) == 1 {
 		return "unknown"
 	}
-	return strings.TrimSuffix(strings.TrimPrefix(result, "result<"), ">")
+	return strings.TrimPrefix(result, "!")
 }

@@ -43,7 +43,7 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeUnsupportedOpaque(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
 		return e.writeUnsupportedOpaque(instr)
-	case instr.Op == "result.ok" || instr.Op == "result.error" || instr.Op == "result.try":
+	case instr.Op == "error.error" || instr.Op == "error.try":
 		return e.writeUnsupportedOpaque(instr)
 	default:
 		return fmt.Errorf("wasm error: unsupported instruction `%s`", instr.Op)

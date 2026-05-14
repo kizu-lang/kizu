@@ -501,7 +501,7 @@ func (e *CastExpr) String() string {
 	return fmt.Sprintf("cast<%s>(%s)", e.TargetType, e.Value.String())
 }
 
-// TryExpr unwraps a result<T> or returns the error from the current function.
+// TryExpr unwraps a !T value or returns the error from the current function.
 type TryExpr struct {
 	Value Expression
 }

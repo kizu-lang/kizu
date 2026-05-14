@@ -428,9 +428,6 @@ func (c *Checker) checkBuiltinCall(
 	case "ptr_read", "ptr_write":
 		result, err := c.checkPointerBuiltin(expr, env)
 		return result, true, err
-	case "ok":
-		result, err := c.checkOkCall(expr, env)
-		return result, true, err
 	case "error":
 		result, err := c.checkErrorCall(expr, env)
 		return result, true, err
@@ -442,19 +439,7 @@ func (c *Checker) checkBuiltinCall(
 	}
 }
 
-// checkOkCall moves the success value into a result<T>.
-func (c *Checker) checkOkCall(expr *ast.CallExpr, env *scope) (string, error) {
-	if len(expr.Args) != 1 {
-		return "", fmt.Errorf("move error: `ok` expects 1 arg, got %d", len(expr.Args))
-	}
-	got, err := c.moveExpr(expr.Args[0], env)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("result<%s>", got), nil
-}
-
-// checkErrorCall reads the error message and returns the current result shape.
+// checkErrorCall reads the error message and returns the current error-union shape.
 func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope) (string, error) {
 	if len(expr.Args) != 1 {
 		return "", fmt.Errorf("move error: `error` expects 1 arg, got %d", len(expr.Args))
@@ -462,18 +447,18 @@ func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope) (string, error)
 	if _, err := c.readExpr(expr.Args[0], env); err != nil {
 		return "", err
 	}
-	return "result<unknown>", nil
+	return "!unknown", nil
 }
 
-// readTryExpr reads a result<T> expression and returns T.
+// readTryExpr reads a !T expression and returns T.
 func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	got, err := c.readExpr(expr.Value, env)
 	if err != nil {
 		return "", err
 	}
-	base, arg, ok := splitGenericType(got)
-	if !ok || base != "result" {
-		return "", fmt.Errorf("move error: try expects result<T>, got %s", got)
+	arg, ok := errorUnionElement(got)
+	if !ok {
+		return "", fmt.Errorf("move error: try expects !T, got %s", got)
 	}
 	return arg, nil
 }
@@ -629,7 +614,7 @@ func (c *Checker) checkPlainMethodArgs(args []ast.Expression, env *scope) (strin
 			return "", err
 		}
 	}
-	return "result<unknown>", nil
+	return "!unknown", nil
 }
 
 // checkArenaAdd moves one value into an arena and returns a handle.
@@ -802,6 +787,14 @@ func readIdent(name string, env *scope) (string, error) {
 		return "void", nil
 	}
 	return "", fmt.Errorf("move error: undefined variable `%s`", name)
+}
+
+// errorUnionElement extracts T from !T.
+func errorUnionElement(typeName string) (string, bool) {
+	if len(typeName) <= 1 || typeName[0] != '!' {
+		return "", false
+	}
+	return typeName[1:], true
 }
 
 // returnTypeName returns void for functions without an explicit return type.

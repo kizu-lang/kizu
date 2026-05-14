@@ -22,7 +22,7 @@ v0.1 の主な目的は次の通り。
 
 - 言語仕様を実装済み範囲へ絞る
 - interpreter で仕様どおりに動かす
-- type / move / borrow / arena / result / comptime の安全性を検査する
+- type / move / borrow / arena / error union / comptime の安全性を検査する
 - Zig/C-style tag enum / match のような SPEC 上の基本構文を interpreter で実行できるようにする
 - `Io` capability / `TaskGroup` による structured task model を interpreter で扱う
 - `contract` / `satisfy` / `borrow Dyn<Contract>` による明示抽象化を扱う

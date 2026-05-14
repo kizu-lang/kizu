@@ -37,13 +37,13 @@ v0 では実装せず、将来の v1/v2 候補として管理する。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> result<int>
+    fn write(self: borrow Self, bytes: borrow Bytes) -> !int
 }
 ```
 
 ```kizu
 impl File {
-    fn write(self: borrow File, bytes: borrow Bytes) -> result<int> {
+    fn write(self: borrow File, bytes: borrow Bytes) -> !int {
         return os.write(self.fd, bytes)
     }
 }
@@ -52,9 +52,9 @@ satisfy Writer for File
 ```
 
 ```kizu
-fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> result<void> {
+fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> !void {
     let n = writer.write(bytes)
-    return ok(void)
+    return void
 }
 ```
 

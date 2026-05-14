@@ -37,18 +37,18 @@ Kizu v0 では async を実装しない。
 ## 例
 
 ```kizu
-fn read_config(io: Io, path: string) -> result<string> {
+fn read_config(io: Io, path: string) -> !string {
     return fs.read_to_string(io, path)
 }
 ```
 
 ```kizu
-fn main(io: Io) -> result<void> {
+fn main(io: Io) -> !void {
     let group = TaskGroup()
     let task = group.spawn(io, read_config, "config.toml")
     let text = task.await()
     print(text)
-    return ok(void)
+    return void
 }
 ```
 

@@ -243,11 +243,8 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	if name.Name == "ok" {
-		return l.emit("result.ok", "result<"+args[0].Type+">", args, ""), nil
-	}
 	if name.Name == "error" {
-		return l.emit("result.error", l.current.Return, args, ""), nil
+		return l.emit("error.error", l.current.Return, args, ""), nil
 	}
 	ret := "void"
 	if sig, ok := l.signatures[name.Name]; ok {
@@ -256,13 +253,13 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	return l.emit("call."+name.Name, ret, args, ""), nil
 }
 
-// lowerTryExpr lowers result propagation as an explicit IR instruction.
+// lowerTryExpr lowers error-union propagation as an explicit IR instruction.
 func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
 	value, err := l.lowerExpr(expr.Value)
 	if err != nil {
 		return Value{}, err
 	}
-	return l.emit("result.try", resultElementType(value.Type), []Value{value}, ""), nil
+	return l.emit("error.try", errorUnionElementType(value.Type), []Value{value}, ""), nil
 }
 
 // lowerMethodCallExpr lowers arena method calls.

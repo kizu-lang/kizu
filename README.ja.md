@@ -33,7 +33,7 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 - unsafe 境界と C ABI 宣言の検査
 - 限定的な `comptime` expression / parameter / branch selection
 - 低レベル型変換向けの明示 `cast<T>(value)`
-- 最小の `result<T>` と `try` error propagation
+- 最小の `!T` と `try` error propagation
 - Zig/C-style tag `enum` と simple enum `match`
 
 追加の v0.1 対象として、次は GitHub Issues で追跡しています。

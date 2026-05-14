@@ -12,7 +12,7 @@ const (
 	kindStruct
 	kindArena
 	kindHandle
-	kindResult
+	kindErrorUnion
 	kindEnum
 	kindIo
 	kindTaskGroup
@@ -29,7 +29,7 @@ type Value struct {
 	fields   map[string]Value
 	arena    *Arena
 	handle   Handle
-	result   *Result
+	errUnion *ErrorUnion
 	enum     Enum
 	task     *Task
 }
@@ -45,10 +45,8 @@ type Handle struct {
 	index int
 }
 
-// Result stores a success or error value for result<T>.
-type Result struct {
-	ok      bool
-	value   Value
+// ErrorUnion stores an error value for !T runtime propagation.
+type ErrorUnion struct {
 	message string
 }
 
@@ -84,11 +82,8 @@ func (v Value) String() string {
 		return "<arena>"
 	case kindHandle:
 		return "<handle>"
-	case kindResult:
-		if v.result.ok {
-			return "<ok>"
-		}
-		return "<error: " + v.result.message + ">"
+	case kindErrorUnion:
+		return "<error: " + v.errUnion.message + ">"
 	case kindEnum:
 		return v.enum.typeName + "." + v.enum.tag
 	case kindIo:
@@ -137,14 +132,9 @@ func handleValue(arena *Arena, index int) Value {
 	return Value{kind: kindHandle, handle: Handle{arena: arena, index: index}}
 }
 
-// resultOkValue returns a successful result runtime value.
-func resultOkValue(value Value) Value {
-	return Value{kind: kindResult, result: &Result{ok: true, value: value}}
-}
-
-// resultErrorValue returns an error result runtime value.
-func resultErrorValue(message string) Value {
-	return Value{kind: kindResult, result: &Result{message: message}}
+// errorUnionValue returns an error-union error runtime value.
+func errorUnionValue(message string) Value {
+	return Value{kind: kindErrorUnion, errUnion: &ErrorUnion{message: message}}
 }
 
 // enumValue returns a tag enum runtime value.

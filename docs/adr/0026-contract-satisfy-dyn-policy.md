@@ -29,7 +29,7 @@ method body は書けない。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> result<int>
+    fn write(self: borrow Self, bytes: borrow Bytes) -> !int
 }
 ```
 
@@ -50,9 +50,9 @@ method body は `impl Type` に置く。
 `Dyn<Contract>` は dynamic dispatch を型に見せる。
 
 ```kizu
-fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> result<void> {
+fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> !void {
     let n = writer.write(bytes)
-    return ok(void)
+    return void
 }
 ```
 

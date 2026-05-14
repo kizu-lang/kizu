@@ -424,9 +424,6 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 	if name.Name == "print" {
 		return i.callPrint(args)
 	}
-	if name.Name == "ok" {
-		return callOk(args)
-	}
 	if name.Name == "error" {
 		return callError(args)
 	}
@@ -439,17 +436,14 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 	return i.callFunction(name.Name, args)
 }
 
-// evalTryExpr unwraps ok results or returns an error result from the current function.
+// evalTryExpr unwraps a successful !T value or propagates an error.
 func (i *Interpreter) evalTryExpr(expr *ast.TryExpr, env *Env) (Value, error) {
 	value, err := i.evalExpr(expr.Value, env)
 	if err != nil {
 		return voidValue(), err
 	}
-	if value.kind != kindResult {
-		return voidValue(), fmt.Errorf("runtime error: try expects result")
-	}
-	if value.result.ok {
-		return value.result.value, nil
+	if value.kind != kindErrorUnion {
+		return value, nil
 	}
 	return voidValue(), trySignal{value: value}
 }
@@ -665,20 +659,12 @@ func (i *Interpreter) callPrint(args []Value) (Value, error) {
 	return voidValue(), nil
 }
 
-// callOk constructs a successful result value.
-func callOk(args []Value) (Value, error) {
-	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: ok expected 1 arg")
-	}
-	return resultOkValue(args[0]), nil
-}
-
-// callError constructs an error result value.
+// callError constructs an error-union error value.
 func callError(args []Value) (Value, error) {
 	if len(args) != 1 || args[0].kind != kindString {
 		return voidValue(), fmt.Errorf("runtime error: error expected string")
 	}
-	return resultErrorValue(args[0].s), nil
+	return errorUnionValue(args[0].s), nil
 }
 
 // callIo constructs an explicit I/O capability value.

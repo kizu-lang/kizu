@@ -32,8 +32,8 @@ go test ./...
 | `struct` and field access | `struct.kizu` | prints `alice`, `30` |
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
 | `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle |
-| `result<T>`, `ok`, `try` | `result_try.kizu` | propagates success and prints `1` |
-| `result<void>` and `ok(void)` | `result_void.kizu` | propagates success without a payload |
+| `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
+| `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | limited `comptime` | `comptime.kizu` | evaluates compile-time expressions |
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
@@ -55,7 +55,7 @@ go test ./...
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
-| `try` requires a result-returning function | `negative/invalid_try.kizu` | `try requires` |
+| `try` requires an error-union-returning function | `negative/invalid_try.kizu` | `try requires` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |
 | nullable raw pointers cannot be read directly | `negative/nullable_ptr_read.kizu` | `non-null raw pointer` |

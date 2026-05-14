@@ -133,15 +133,15 @@ fn main() {
 	}
 }
 
-// TestRunResultTry checks minimal result<T> propagation at runtime.
-func TestRunResultTry(t *testing.T) {
-	got := runSource(t, `fn parse() -> result<int> {
-    return ok(1)
+// TestRunErrorUnionTry checks minimal !T propagation at runtime.
+func TestRunErrorUnionTry(t *testing.T) {
+	got := runSource(t, `fn parse() -> !int {
+    return 1
 }
-fn main() -> result<int> {
+fn main() -> !int {
     let value = try parse()
     print(value)
-    return ok(value + 1)
+    return value + 1
 }`)
 	want := "1\n"
 	if got != want {
@@ -149,15 +149,15 @@ fn main() -> result<int> {
 	}
 }
 
-// TestRunResultTryPropagatesError checks try returns error results without printing.
-func TestRunResultTryPropagatesError(t *testing.T) {
-	got := runSource(t, `fn parse() -> result<int> {
+// TestRunErrorUnionTryPropagatesError checks try returns error-union errors without printing.
+func TestRunErrorUnionTryPropagatesError(t *testing.T) {
+	got := runSource(t, `fn parse() -> !int {
     return error("bad")
 }
-fn main() -> result<int> {
+fn main() -> !int {
     let value = try parse()
     print(value)
-    return ok(value)
+    return value
 }`)
 	if got != "" {
 		t.Fatalf("got %q, want empty output", got)

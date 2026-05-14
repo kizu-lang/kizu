@@ -65,6 +65,9 @@ func formatGenericInstr(instr *Instr) string {
 	if instr.Result.Type == "void" {
 		return fmt.Sprintf("%s %s", instr.Op, args)
 	}
+	if args == "" {
+		return fmt.Sprintf("%s = %s", instr.Result.String(), instr.Op)
+	}
 	return fmt.Sprintf("%s = %s %s", instr.Result.String(), instr.Op, args)
 }
 

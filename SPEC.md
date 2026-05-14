@@ -24,7 +24,7 @@ Kizu のメモリ安全性保証は safe Kizu に対して行います。
 Kizu v0.1 は、Go 製 interpreter による language core release とします。
 
 v0.1 で完成させる対象は、parser、type checker、move checker、borrow checker、
-ownership model、arena / handle、result / try、限定的な comptime、
+ownership model、arena / handle、error union / try、限定的な comptime、
 および interpreter で実行できる言語コアです。
 
 LLVM IR backend、WASM / WASI backend、C header import、build cache は experimental として扱います。
@@ -60,7 +60,7 @@ function call
 borrow parameter
 move semantics
 arena<T> / handle<T>
-result<T> / ok / error / try
+!T / error / try
 limited comptime
 Io capability
 Task / TaskGroup
@@ -389,7 +389,7 @@ slice<T>
 ```
 
 v0.1 では full generics を実装しません。
-`arena<T>`、`handle<T>`、`result<T>`、raw pointer 型は専用の型構文として扱います。
+`arena<T>`、`handle<T>`、`!T`、raw pointer 型は専用の型構文として扱います。
 
 ### 7.1 明示 cast
 
@@ -514,38 +514,39 @@ print(users.get(alice).name)
 Kizu は exception を使いません。
 error は値として扱います。
 
-v0.1 では full generics を実装しないため、まず `result<T>` を導入します。
+v0.1 では Zig に近い `!T` を導入します。
+`!T` は「成功時は `T`、失敗時は error」を表します。
 error payload は標準の `string` message として扱います。
 
-成功値は `ok(value)` で作ります。
+成功時は通常の `T` をそのまま `return` します。
 error 値は `error(message)` で作ります。
 
 ```kizu
-fn parse() -> result<int> {
-    return ok(1)
+fn parse() -> !int {
+    return 1
 }
 
-fn fail() -> result<int> {
+fn fail() -> !int {
     return error("bad")
 }
 ```
 
-`try` は `result<T>` を unwrap します。
-error の場合は、現在の関数からその error result を返します。
+`try` は `!T` を unwrap します。
+error の場合は、現在の関数からその error value を返します。
 
 ```kizu
-fn main() -> result<int> {
+fn main() -> !int {
     let value = try parse()
-    return ok(value + 1)
+    return value + 1
 }
 ```
 
 ルール:
 
-* `try` は `result<T>` を返す関数内でだけ使える
-* `try` の operand は `result<T>` でなければならない
-* `ok(value)` は `result<T>` を作る
-* `error(message)` は `result<T>` を返す関数内でだけ使える
+* `try` は `!T` を返す関数内でだけ使える
+* `try` の operand は `!T` でなければならない
+* `!T` 関数では `T` を返すと成功値として扱う
+* `error(message)` は `!T` を返す関数内でだけ使える
 * `error(message)` の message は `string`
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない
@@ -799,7 +800,7 @@ Kizu v0.1 では `async fn` / `await` syntax は実装しません。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
 
 ```kizu
-fn read_config(io: Io, path: string) -> result<string> {
+fn read_config(io: Io, path: string) -> !string {
     return fs.read_to_string(io, path)
 }
 ```
@@ -832,7 +833,7 @@ method body は書けません。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> result<int>
+    fn write(self: borrow Self, bytes: borrow Bytes) -> !int
 }
 ```
 
@@ -847,7 +848,7 @@ method body は型のそばに置きます。
 
 ```kizu
 impl File {
-    fn write(self: borrow File, bytes: borrow Bytes) -> result<int> {
+    fn write(self: borrow File, bytes: borrow Bytes) -> !int {
         return os.write(self.fd, bytes)
     }
 }
@@ -856,9 +857,9 @@ impl File {
 `Dyn<Contract>` は dynamic dispatch を型に見せます。
 
 ```kizu
-fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> result<void> {
+fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> !void {
     let n = writer.write(bytes)
-    return ok(void)
+    return void
 }
 ```
 

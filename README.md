@@ -32,7 +32,7 @@ Implemented language-core pieces:
 - local borrow checker
 - `arena<T>` / `handle<T>`
 - limited `comptime` expressions, parameters, and branch selection
-- minimal `result<T>` and `try` error propagation
+- minimal `!T` and `try` error propagation
 - unsafe boundary and C ABI declaration checks
 - explicit `cast<T>(value)` checker policy
 - Zig/C-style tag `enum` and simple enum `match`
