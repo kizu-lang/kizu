@@ -61,6 +61,18 @@ std.channel.Channel<T>  owned message passing
 `std.thread`、`std.atomic`、`std.sync` は必要だが、v0.1 では safe structured API の
 実装基盤または実験的 API として扱う。ユーザーに最初から raw thread sharing を中心に書かせない。
 
+`std.channel.Channel<T>` は owned message passing とする。`send(value)` は non-copy
+value を move し、`recv()` は owned value を返す。borrow と raw pointer は safe Kizu
+では channel boundary を越えられない。
+
+`std.task.parallel_for` は data-parallel API とする。disjoint output は
+`std.task.partition_mut`、worker-local scratch は `std.task.LocalBuffer` のような
+trusted std API に閉じ込める。v0.1 interpreter は逐次実行でもよいが、API と checker
+rule は実並行 runtime でも維持できる形にする。
+
+`std.atomic.Atomic` は v0.1 では seq_cst-only とする。memory order を細かく選ぶ API は、
+safe structured API が固まった後に追加する。
+
 ## Borrow boundary
 
 spawn された task は local borrow を捕まえられない。

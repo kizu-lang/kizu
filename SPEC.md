@@ -986,6 +986,28 @@ std.task.parallel_for   safe data parallelism
 std.channel.Channel<T>  owned message passing
 ```
 
+`std.channel.Channel<T>` is owned message passing:
+
+* `send(value)` moves non-copy values into the channel
+* `recv()` returns an owned value
+* borrow values and raw pointers cannot cross the channel boundary in safe Kizu
+* v0.1 does not include `select`
+
+`std.task.parallel_for` is safe data parallelism:
+
+* v0.1 workers are `fn(i: i64) -> void` or `fn(i: i64) -> !void`
+* `std.task.partition_mut` is the trusted boundary for disjoint output
+* `std.task.LocalBuffer` is the trusted boundary for worker-local scratch
+* first error propagation uses the existing `!void` / `try` model
+* the interpreter may execute workers sequentially while preserving the API contract
+
+Low-level concurrency boundary:
+
+* `std.thread.scoped` is scoped and joined by construction
+* `std.atomic.Atomic` is v0.1 seq_cst-only
+* `std.sync.Mutex` is the explicit shared-mutable-state wrapper
+* raw pointers cannot cross thread/task/channel boundaries in safe Kizu
+
 OS thread、event loop、networking runtime、atomic ordering の詳細 API は、
 safe structured API の後に追加します。
 実並行 runtime を導入する場合も、上記の ownership / borrow / structured scope の制約を維持します。

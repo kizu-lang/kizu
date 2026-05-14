@@ -37,6 +37,9 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 - 最小の `!T` と `try` error propagation
 - Zig/C-style tag `enum`、tagged `union`、exhaustive `match`
 - `Io` capability と `TaskGroup` structured task model
+- `std.channel` owned message passing
+- `std.task.parallel_for` safe data-parallel prototype
+- scoped thread、seq_cst atomic、mutex boundary prototype
 - `contract`、`satisfy`、`&Dyn<Contract>`
 
 実験的な compiler / tooling:

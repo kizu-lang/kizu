@@ -381,11 +381,20 @@ func (i *Interpreter) evalForStmt(stmt *ast.ForStmt, env *Env) (Value, bool, err
 
 // evalForBounds evaluates and validates for range bounds.
 func (i *Interpreter) evalForBounds(stmt *ast.ForStmt, env *Env) (int64, int64, error) {
-	start, err := i.evalExpr(stmt.Start, env)
+	return i.evalRangeBounds(stmt.Start, stmt.End, env)
+}
+
+// evalRangeBounds evaluates and validates i64 range bounds.
+func (i *Interpreter) evalRangeBounds(
+	startExpr ast.Expression,
+	endExpr ast.Expression,
+	env *Env,
+) (int64, int64, error) {
+	start, err := i.evalExpr(startExpr, env)
 	if err != nil {
 		return 0, 0, err
 	}
-	end, err := i.evalExpr(stmt.End, env)
+	end, err := i.evalExpr(endExpr, env)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -643,6 +652,9 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		if value, ok, err := i.evalUnionConstructor(field, expr.Args, env); ok || err != nil {
 			return value, err
 		}
+		if value, ok, err := i.evalQualifiedBuiltin(field, expr.Args, env); ok || err != nil {
+			return value, err
+		}
 		return i.evalMethodCallExpr(field, expr.Args, env)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
@@ -669,6 +681,44 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		return callTaskGroup(args)
 	}
 	return i.callFunction(name.Name, args)
+}
+
+// evalQualifiedBuiltin evaluates std.* prototype calls without a module system.
+func (i *Interpreter) evalQualifiedBuiltin(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return voidValue(), false, nil
+	}
+	switch name {
+	case "std.task.Group":
+		return callTaskGroupFromExprs(args), true, nil
+	case "std.channel.Channel":
+		return callChannelFromExprs(args), true, nil
+	case "std.task.partition_mut":
+		value, err := i.evalPartitionMut(args, env)
+		return value, true, err
+	case "std.task.LocalBuffer":
+		value, err := i.evalLocalBuffer(args, env)
+		return value, true, err
+	case "std.task.parallel_for":
+		value, err := i.evalParallelFor(args, env)
+		return value, true, err
+	case "std.thread.scoped":
+		value, err := i.evalThreadScoped(args, env)
+		return value, true, err
+	case "std.atomic.Atomic":
+		value, err := i.evalAtomic(args, env)
+		return value, true, err
+	case "std.sync.Mutex":
+		value, err := i.evalMutex(args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
 }
 
 // evalTryExpr unwraps a successful !T value or propagates an error.
@@ -802,6 +852,21 @@ func (i *Interpreter) evalMethodCallExpr(
 		if receiver.kind == kindTask {
 			return evalTaskMethod(receiver, field.Name, args)
 		}
+		if receiver.kind == kindChannel {
+			return i.evalChannelMethod(receiver, field.Name, args, env)
+		}
+		if receiver.kind == kindPartition {
+			return i.evalPartitionMethod(receiver, field.Name, args, env)
+		}
+		if receiver.kind == kindLocalBuffer {
+			return i.evalLocalBufferMethod(receiver, field.Name, args, env)
+		}
+		if receiver.kind == kindAtomic {
+			return i.evalAtomicMethod(receiver, field.Name, args, env)
+		}
+		if receiver.kind == kindMutex {
+			return i.evalMutexMethod(receiver, field.Name, args, env)
+		}
 		if receiver.kind == kindStruct {
 			return i.evalImplMethod(receiver, field.Name, args, env)
 		}
@@ -815,6 +880,110 @@ func (i *Interpreter) evalMethodCallExpr(
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// evalPartitionMut constructs a v0.1 partition marker.
+func (i *Interpreter) evalPartitionMut(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 2 {
+		return voidValue(), fmt.Errorf("runtime error: std.task.partition_mut expects 2 args")
+	}
+	count, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if count.kind != kindInt {
+		return voidValue(), fmt.Errorf("runtime error: partition count expects i64")
+	}
+	return partitionValue(count.i), nil
+}
+
+// evalLocalBuffer constructs worker-local scratch slots.
+func (i *Interpreter) evalLocalBuffer(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 2 {
+		return voidValue(), fmt.Errorf("runtime error: std.task.LocalBuffer expects 2 args")
+	}
+	count, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	init, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if count.kind != kindInt {
+		return voidValue(), fmt.Errorf("runtime error: LocalBuffer count expects i64")
+	}
+	return localBufferValue(count.i, init), nil
+}
+
+// evalParallelFor runs worker(i) sequentially in the v0.1 interpreter.
+func (i *Interpreter) evalParallelFor(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 4 {
+		return voidValue(), fmt.Errorf("runtime error: std.task.parallel_for expects 4 args")
+	}
+	if _, err := i.evalExpr(args[0], env); err != nil {
+		return voidValue(), err
+	}
+	start, end, err := i.evalRangeBounds(args[1], args[2], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	target, ok := args[3].(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: parallel_for expects function name")
+	}
+	for idx := start; idx < end; idx++ {
+		if _, err := i.callFunction(target.Name, []Value{intValue(idx)}); err != nil {
+			return voidValue(), err
+		}
+	}
+	return voidValue(), nil
+}
+
+// evalThreadScoped runs a function synchronously with an explicit thread boundary.
+func (i *Interpreter) evalThreadScoped(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) < 2 {
+		return voidValue(), fmt.Errorf("runtime error: std.thread.scoped expects io and function")
+	}
+	if _, err := i.evalExpr(args[0], env); err != nil {
+		return voidValue(), err
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: std.thread.scoped expects function name")
+	}
+	values, err := i.evalArgs(args[2:], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.callFunction(target.Name, values)
+}
+
+// evalAtomic constructs a seq_cst integer atomic value.
+func (i *Interpreter) evalAtomic(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std.atomic.Atomic expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindInt {
+		return voidValue(), fmt.Errorf("runtime error: Atomic expects i64")
+	}
+	return atomicValue(value.i), nil
+}
+
+// evalMutex constructs a synchronous protected value.
+func (i *Interpreter) evalMutex(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std.sync.Mutex expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return mutexValue(value), nil
 }
 
 // evalTaskGroupMethod executes the v0.1 synchronous spawn model.
@@ -863,6 +1032,140 @@ func evalTaskMethod(task Value, name string, args []ast.Expression) (Value, erro
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Task has no method `%s`", name)
+	}
+}
+
+// evalChannelMethod executes owned message passing operations.
+func (i *Interpreter) evalChannelMethod(
+	channel Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	switch name {
+	case "send":
+		if len(args) != 1 {
+			return voidValue(), fmt.Errorf("runtime error: channel.send expects 1 arg")
+		}
+		value, err := i.evalExpr(args[0], env)
+		if err != nil {
+			return voidValue(), err
+		}
+		channel.channel.values = append(channel.channel.values, value)
+		return voidValue(), nil
+	case "recv":
+		if len(args) != 0 {
+			return voidValue(), fmt.Errorf("runtime error: channel.recv expects 0 args")
+		}
+		if len(channel.channel.values) == 0 {
+			return voidValue(), fmt.Errorf("runtime error: channel is empty")
+		}
+		value := channel.channel.values[0]
+		channel.channel.values = channel.channel.values[1:]
+		return value, nil
+	case "close":
+		if len(args) != 0 {
+			return voidValue(), fmt.Errorf("runtime error: channel.close expects 0 args")
+		}
+		channel.channel.closed = true
+		return voidValue(), nil
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Channel has no method `%s`", name)
+	}
+}
+
+// evalPartitionMethod returns a disjoint part marker for an index.
+func (i *Interpreter) evalPartitionMethod(
+	partition Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if name != "at" {
+		return voidValue(), fmt.Errorf("runtime error: Partition has no method `%s`", name)
+	}
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: partition.at expects 1 arg")
+	}
+	index, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index.kind != kindInt || index.i < 0 || index.i >= partition.partition.count {
+		return voidValue(), fmt.Errorf("runtime error: partition index out of bounds")
+	}
+	return intValue(index.i), nil
+}
+
+// evalLocalBufferMethod returns one worker-local scratch value by index.
+func (i *Interpreter) evalLocalBufferMethod(
+	buffer Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if name != "get" {
+		return voidValue(), fmt.Errorf("runtime error: LocalBuffer has no method `%s`", name)
+	}
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: LocalBuffer.get expects 1 arg")
+	}
+	index, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index.kind != kindInt || index.i < 0 || int(index.i) >= len(buffer.localBuf.values) {
+		return voidValue(), fmt.Errorf("runtime error: LocalBuffer index out of bounds")
+	}
+	return buffer.localBuf.values[int(index.i)], nil
+}
+
+// evalAtomicMethod executes seq_cst-only integer atomic operations.
+func (i *Interpreter) evalAtomicMethod(
+	atomic Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	switch name {
+	case "load":
+		if len(args) != 0 {
+			return voidValue(), fmt.Errorf("runtime error: atomic.load expects 0 args")
+		}
+		return intValue(atomic.atomic.value), nil
+	case "store":
+		if len(args) != 1 {
+			return voidValue(), fmt.Errorf("runtime error: atomic.store expects 1 arg")
+		}
+		value, err := i.evalExpr(args[0], env)
+		if err != nil {
+			return voidValue(), err
+		}
+		if value.kind != kindInt {
+			return voidValue(), fmt.Errorf("runtime error: atomic.store expects i64")
+		}
+		atomic.atomic.value = value.i
+		return voidValue(), nil
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Atomic has no method `%s`", name)
+	}
+}
+
+// evalMutexMethod executes synchronous lock-free prototype operations.
+func (i *Interpreter) evalMutexMethod(
+	mutex Value,
+	name string,
+	args []ast.Expression,
+	_ *Env,
+) (Value, error) {
+	switch name {
+	case "get":
+		if len(args) != 0 {
+			return voidValue(), fmt.Errorf("runtime error: mutex.get expects 0 args")
+		}
+		return mutex.mutex.value, nil
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Mutex has no method `%s`", name)
 	}
 }
 
@@ -980,4 +1283,36 @@ func callTaskGroup(args []Value) (Value, error) {
 		return voidValue(), fmt.Errorf("runtime error: TaskGroup expected 0 args")
 	}
 	return taskGroupValue(), nil
+}
+
+// callTaskGroupFromExprs validates std.task.Group has no constructor args.
+func callTaskGroupFromExprs(args []ast.Expression) Value {
+	if len(args) != 0 {
+		return errorUnionValue("std.task.Group expected 0 args")
+	}
+	return taskGroupValue()
+}
+
+// callChannelFromExprs validates std.channel.Channel has no constructor args.
+func callChannelFromExprs(args []ast.Expression) Value {
+	if len(args) != 0 {
+		return errorUnionValue("std.channel.Channel expected 0 args")
+	}
+	return channelValue()
+}
+
+// qualifiedName renders a dotted identifier chain such as std.task.Group.
+func qualifiedName(expr ast.Expression) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name, true
+	case *ast.FieldExpr:
+		left, ok := qualifiedName(e.Receiver)
+		if !ok {
+			return "", false
+		}
+		return left + "." + e.Name, true
+	default:
+		return "", false
+	}
 }

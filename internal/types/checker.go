@@ -36,6 +36,11 @@ var knownTypes = map[Type]bool{
 	"f64":          true,
 	"Io":           true,
 	"TaskGroup":    true,
+	"Channel":      true,
+	"Partition":    true,
+	"LocalBuffer":  true,
+	"Atomic":       true,
+	"Mutex":        true,
 }
 
 var numericTypes = map[Type]bool{
@@ -1053,6 +1058,9 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 		if typ, ok, err := c.checkUnionConstructorCall(field, expr.Args, env, unsafe); ok || err != nil {
 			return typ, err
 		}
+		if typ, ok, err := c.checkQualifiedBuiltin(field, expr.Args, env, unsafe); ok || err != nil {
+			return typ, err
+		}
 		return c.checkMethodCallExpr(field, expr.Args, env, unsafe)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
@@ -1078,6 +1086,41 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 		return checkNoArgConstructor("TaskGroup", expr.Args, "TaskGroup")
 	}
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
+}
+
+// checkQualifiedBuiltin validates std.* prototype calls.
+func (c *Checker) checkQualifiedBuiltin(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return "", false, nil
+	}
+	switch name {
+	case "std.task.Group":
+		typ, err := checkNoArgConstructor(name, args, "TaskGroup")
+		return typ, true, err
+	case "std.channel.Channel":
+		typ, err := checkNoArgConstructor(name, args, "Channel")
+		return typ, true, err
+	case "std.task.partition_mut":
+		return c.checkPartitionMut(args, env, unsafe)
+	case "std.task.LocalBuffer":
+		return c.checkLocalBuffer(args, env, unsafe)
+	case "std.task.parallel_for":
+		return c.checkParallelFor(args, env, unsafe)
+	case "std.thread.scoped":
+		return c.checkThreadScoped(args, env, unsafe)
+	case "std.atomic.Atomic":
+		return c.checkAtomic(args, env, unsafe)
+	case "std.sync.Mutex":
+		return c.checkMutex(args, env, unsafe)
+	default:
+		return "", false, nil
+	}
 }
 
 // checkErrorCall validates error-union error construction.
@@ -1334,6 +1377,18 @@ func (c *Checker) checkMethodCallExpr(
 	if elem, ok := taskElement(receiver); ok {
 		return checkTaskMethod(field.Name, elem, args)
 	}
+	switch receiver {
+	case "Channel":
+		return c.checkChannelMethod(field.Name, args, env, unsafe)
+	case "Partition":
+		return c.checkPartitionMethod(field.Name, args, env, unsafe)
+	case "LocalBuffer":
+		return c.checkLocalBufferMethod(field.Name, args, env, unsafe)
+	case "Atomic":
+		return c.checkAtomicMethod(field.Name, args, env, unsafe)
+	case "Mutex":
+		return c.checkMutexMethod(field.Name, args)
+	}
 	base, arg, ok := splitGenericType(string(receiver))
 	if !ok || base != "arena" {
 		method := c.implMethod(string(receiver), field.Name)
@@ -1414,6 +1469,124 @@ func (c *Checker) checkTaskArgs(
 	return nil
 }
 
+// checkChannelMethod validates owned message passing operations.
+func (c *Checker) checkChannelMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch name {
+	case "send":
+		if len(args) != 1 {
+			return "", fmt.Errorf("type error: `channel.send` expects 1 arg, got %d", len(args))
+		}
+		if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
+			return "", err
+		}
+		return typeVoid, nil
+	case "recv":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `channel.recv` expects 0 args, got %d", len(args))
+		}
+		return typeI64, nil
+	case "close":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `channel.close` expects 0 args, got %d", len(args))
+		}
+		return typeVoid, nil
+	default:
+		return "", fmt.Errorf("type error: Channel has no method `%s`", name)
+	}
+}
+
+// checkPartitionMethod validates access to one disjoint partition index.
+func (c *Checker) checkPartitionMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if name != "at" {
+		return "", fmt.Errorf("type error: Partition has no method `%s`", name)
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `partition.at` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != typeI64 {
+		return "", fmt.Errorf("type error: `partition.at` expects i64, got %s", got)
+	}
+	return typeI64, nil
+}
+
+// checkLocalBufferMethod validates worker-local scratch access.
+func (c *Checker) checkLocalBufferMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if name != "get" {
+		return "", fmt.Errorf("type error: LocalBuffer has no method `%s`", name)
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `LocalBuffer.get` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != typeI64 {
+		return "", fmt.Errorf("type error: `LocalBuffer.get` expects i64, got %s", got)
+	}
+	return typeI64, nil
+}
+
+// checkAtomicMethod validates seq_cst-only atomic operations.
+func (c *Checker) checkAtomicMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch name {
+	case "load":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `atomic.load` expects 0 args, got %d", len(args))
+		}
+		return typeI64, nil
+	case "store":
+		if len(args) != 1 {
+			return "", fmt.Errorf("type error: `atomic.store` expects 1 arg, got %d", len(args))
+		}
+		got, err := c.checkExpr(args[0], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != typeI64 {
+			return "", fmt.Errorf("type error: `atomic.store` expects i64, got %s", got)
+		}
+		return typeVoid, nil
+	default:
+		return "", fmt.Errorf("type error: Atomic has no method `%s`", name)
+	}
+}
+
+// checkMutexMethod validates the minimal synchronized wrapper API.
+func (c *Checker) checkMutexMethod(name string, args []ast.Expression) (Type, error) {
+	if name != "get" {
+		return "", fmt.Errorf("type error: Mutex has no method `%s`", name)
+	}
+	if len(args) != 0 {
+		return "", fmt.Errorf("type error: `mutex.get` expects 0 args, got %d", len(args))
+	}
+	return typeI64, nil
+}
+
 // checkTaskMethod validates await/cancel on a task value.
 func checkTaskMethod(name string, elem string, args []ast.Expression) (Type, error) {
 	if len(args) != 0 {
@@ -1427,6 +1600,130 @@ func checkTaskMethod(name string, elem string, args []ast.Expression) (Type, err
 	default:
 		return "", fmt.Errorf("type error: Task has no method `%s`", name)
 	}
+}
+
+// checkPartitionMut validates a trusted disjoint partition constructor.
+func (c *Checker) checkPartitionMut(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 2 {
+		return "", true, fmt.Errorf("type error: `std.task.partition_mut` expects 2 args")
+	}
+	if _, err := c.checkExpr(args[0], env, unsafe); err != nil {
+		return "", true, err
+	}
+	count, err := c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if count != typeI64 {
+		return "", true, fmt.Errorf("type error: partition count expects i64, got %s", count)
+	}
+	return "Partition", true, nil
+}
+
+// checkLocalBuffer validates worker-local scratch construction.
+func (c *Checker) checkLocalBuffer(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 2 {
+		return "", true, fmt.Errorf("type error: `std.task.LocalBuffer` expects 2 args")
+	}
+	count, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if count != typeI64 {
+		return "", true, fmt.Errorf("type error: LocalBuffer count expects i64, got %s", count)
+	}
+	if _, err := c.checkExpr(args[1], env, unsafe); err != nil {
+		return "", true, err
+	}
+	return "LocalBuffer", true, nil
+}
+
+// checkParallelFor validates the safe data-parallel prototype.
+func (c *Checker) checkParallelFor(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 4 {
+		return "", true, fmt.Errorf("type error: `std.task.parallel_for` expects 4 args")
+	}
+	if err := c.checkIoAndRange(args, env, unsafe, "std.task.parallel_for"); err != nil {
+		return "", true, err
+	}
+	target, ok := args[3].(*ast.IdentExpr)
+	if !ok {
+		return "", true, fmt.Errorf("type error: `std.task.parallel_for` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", true, fmt.Errorf("type error: undefined function `%s`", target.Name)
+	}
+	if len(fn.params) != 1 || fn.params[0] != typeI64 {
+		return "", true, fmt.Errorf("type error: parallel worker `%s` must accept i64", target.Name)
+	}
+	typ, err := c.parallelReturnType(fn)
+	return typ, true, err
+}
+
+// checkThreadScoped validates explicit low-level scoped thread boundaries.
+func (c *Checker) checkThreadScoped(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) < 2 {
+		return "", true, fmt.Errorf("type error: `std.thread.scoped` expects io and function")
+	}
+	ioType, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if ioType != "Io" {
+		return "", true, fmt.Errorf("type error: `std.thread.scoped` expects Io, got %s", ioType)
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return "", true, fmt.Errorf("type error: `std.thread.scoped` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", true, fmt.Errorf("type error: undefined function `%s`", target.Name)
+	}
+	return c.checkThreadScopedArgs(target.Name, fn, args[2:], env, unsafe)
+}
+
+// checkAtomic validates the v0.1 seq_cst integer atomic constructor.
+func (c *Checker) checkAtomic(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `std.atomic.Atomic` expects 1 arg")
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != typeI64 {
+		return "", true, fmt.Errorf("type error: `std.atomic.Atomic` expects i64, got %s", got)
+	}
+	return "Atomic", true, nil
+}
+
+// checkMutex validates an explicit synchronized ownership wrapper.
+func (c *Checker) checkMutex(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `std.sync.Mutex` expects 1 arg")
+	}
+	if _, err := c.checkExpr(args[0], env, unsafe); err != nil {
+		return "", true, err
+	}
+	return "Mutex", true, nil
 }
 
 // checkDynMethodCall validates a method call through &Dyn<Contract>.
@@ -1611,6 +1908,105 @@ func taskElement(typ Type) (string, bool) {
 		return "", false
 	}
 	return arg, true
+}
+
+// checkIoAndRange validates common io/start/end arguments.
+func (c *Checker) checkIoAndRange(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	name string,
+) error {
+	ioType, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if ioType != "Io" {
+		return fmt.Errorf("type error: `%s` expects Io, got %s", name, ioType)
+	}
+	for idx := 1; idx <= 2; idx++ {
+		got, err := c.checkExpr(args[idx], env, unsafe)
+		if err != nil {
+			return err
+		}
+		if got != typeI64 {
+			return fmt.Errorf("type error: `%s` range expects i64, got %s", name, got)
+		}
+	}
+	return nil
+}
+
+// parallelReturnType restricts parallel workers to void or !void.
+func (c *Checker) parallelReturnType(fn *functionType) (Type, error) {
+	if fn.returnType == typeVoid {
+		return typeVoid, nil
+	}
+	if elem, ok := errorUnionElement(fn.returnType); ok && elem == string(typeVoid) {
+		return fn.returnType, nil
+	}
+	return "", fmt.Errorf("type error: parallel worker `%s` must return void or !void", fn.name)
+}
+
+// checkThreadScopedArgs validates explicit low-level thread boundary arguments.
+func (c *Checker) checkThreadScopedArgs(
+	name string,
+	fn *functionType,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != len(fn.params) {
+		return "", true, fmt.Errorf("type error: `%s` expects %d args, got %d",
+			name, len(fn.params), len(args))
+	}
+	for idx, arg := range args {
+		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
+			return "", true, fmt.Errorf("type error: thread cannot capture borrow parameter `%s`", name)
+		}
+		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
+			return "", true, err
+		}
+		got, err := c.checkExpr(arg, env, unsafe)
+		if err != nil {
+			return "", true, err
+		}
+		if got != fn.params[idx] {
+			return "", true, fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+				idx+1, name, fn.params[idx], got)
+		}
+	}
+	return fn.returnType, true, nil
+}
+
+// rejectThreadBoundaryArg rejects values unsafe to move across concurrency boundaries.
+func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe bool) error {
+	if ident, ok := arg.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
+		return fmt.Errorf("type error: borrow cannot cross concurrency boundary")
+	}
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if isPointerType(got) && !unsafe {
+		return fmt.Errorf("type error: raw pointer cannot cross concurrency boundary in safe code")
+	}
+	return nil
+}
+
+// qualifiedName renders a dotted identifier chain such as std.task.Group.
+func qualifiedName(expr ast.Expression) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name, true
+	case *ast.FieldExpr:
+		left, ok := qualifiedName(e.Receiver)
+		if !ok {
+			return "", false
+		}
+		return left + "." + e.Name, true
+	default:
+		return "", false
+	}
 }
 
 // dynContract extracts C from Dyn<C>.

@@ -50,6 +50,9 @@ go test ./...
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 | `contract`, `satisfy`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
+| owned message passing | `channel.kizu` | sends and receives owned values through `std.channel` |
+| safe data parallelism | `parallel_for.kizu` | runs a structured `std.task.parallel_for` worker |
+| low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
 
 ## Negative Examples
 
@@ -91,6 +94,11 @@ go test ./...
 | tasks must be awaited or canceled | `negative/unawaited_task.kizu` | `must be awaited or canceled` |
 | task args move non-copy values | `negative/task_move.kizu` | `moved value` |
 | tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
+| channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
+| channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
+| channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
+| parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
+| scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
 | duplicate match tags are rejected | `negative/match_duplicate_tag.kizu` | `duplicate match tag` |

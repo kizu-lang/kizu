@@ -18,24 +18,34 @@ const (
 	kindIo
 	kindTaskGroup
 	kindTask
+	kindChannel
+	kindPartition
+	kindLocalBuffer
+	kindAtomic
+	kindMutex
 	kindRef
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
 type Value struct {
-	kind     valueKind
-	i        int64
-	b        bool
-	s        string
-	typeName string
-	fields   map[string]Value
-	arena    *Arena
-	handle   Handle
-	errUnion *ErrorUnion
-	enum     Enum
-	union    Union
-	task     *Task
-	ref      *binding
+	kind      valueKind
+	i         int64
+	b         bool
+	s         string
+	typeName  string
+	fields    map[string]Value
+	arena     *Arena
+	handle    Handle
+	errUnion  *ErrorUnion
+	enum      Enum
+	union     Union
+	task      *Task
+	channel   *Channel
+	partition Partition
+	localBuf  LocalBuffer
+	atomic    *Atomic
+	mutex     *Mutex
+	ref       *binding
 }
 
 // Arena stores values and gives out opaque handles.
@@ -58,6 +68,32 @@ type ErrorUnion struct {
 type Task struct {
 	value Value
 	done  bool
+}
+
+// Channel stores owned messages for the v0.1 synchronous channel model.
+type Channel struct {
+	values []Value
+	closed bool
+}
+
+// Partition stores a bounded index partition used by safe data-parallel examples.
+type Partition struct {
+	count int64
+}
+
+// LocalBuffer stores per-worker scratch slots for the v0.1 sequential model.
+type LocalBuffer struct {
+	values []Value
+}
+
+// Atomic stores one integer with seq_cst-only semantics in v0.1.
+type Atomic struct {
+	value int64
+}
+
+// Mutex stores one protected value for the v0.1 synchronous model.
+type Mutex struct {
+	value Value
 }
 
 // Enum stores a Zig/C-style enum tag value.
@@ -115,12 +151,30 @@ func (v Value) objectString() string {
 		return v.enum.typeName + "." + v.enum.tag
 	case kindUnion:
 		return v.union.typeName + "." + v.union.tag
+	default:
+		return v.capabilityString()
+	}
+}
+
+// capabilityString formats capability and concurrency runtime values.
+func (v Value) capabilityString() string {
+	switch v.kind {
 	case kindIo:
 		return "<io>"
 	case kindTaskGroup:
 		return "<taskgroup>"
 	case kindTask:
 		return "<task>"
+	case kindChannel:
+		return "<channel>"
+	case kindPartition:
+		return "<partition>"
+	case kindLocalBuffer:
+		return "<localbuffer>"
+	case kindAtomic:
+		return "<atomic>"
+	case kindMutex:
+		return "<mutex>"
 	case kindRef:
 		return v.ref.value.String()
 	default:
@@ -191,6 +245,38 @@ func taskGroupValue() Value {
 // taskValue returns a completed synchronous task value.
 func taskValue(value Value) Value {
 	return Value{kind: kindTask, task: &Task{value: value}}
+}
+
+// channelValue returns an empty owned-message channel.
+func channelValue() Value {
+	return Value{kind: kindChannel, channel: &Channel{}}
+}
+
+// partitionValue returns a bounded partition marker.
+func partitionValue(count int64) Value {
+	return Value{kind: kindPartition, partition: Partition{count: count}}
+}
+
+// localBufferValue returns worker-local scratch slots.
+func localBufferValue(count int64, init Value) Value {
+	if count < 0 {
+		count = 0
+	}
+	values := make([]Value, 0, count)
+	for idx := int64(0); idx < count; idx++ {
+		values = append(values, init)
+	}
+	return Value{kind: kindLocalBuffer, localBuf: LocalBuffer{values: values}}
+}
+
+// atomicValue returns a seq_cst integer atomic value.
+func atomicValue(value int64) Value {
+	return Value{kind: kindAtomic, atomic: &Atomic{value: value}}
+}
+
+// mutexValue returns a protected synchronous value.
+func mutexValue(value Value) Value {
+	return Value{kind: kindMutex, mutex: &Mutex{value: value}}
 }
 
 // refValue returns a local borrow reference to a runtime binding.
