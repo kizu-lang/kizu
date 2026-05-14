@@ -111,6 +111,34 @@ OS thread / event loop / networking runtime
 Rust 同等以上の runtime performance guarantee
 ```
 
+### 0.3 v0.1 メモリ安全 release gate
+
+Kizu v0.1 は、safe Kizu のメモリ安全性を release blocker として扱います。
+
+v0.1 では次を必ず守ります。
+
+```text
+use-after-move を許さない
+double move を許さない
+borrow 中の値の move を許さない
+borrow escape を許さない
+borrow を struct field に保存させない
+borrow を task / comptime / unsafe 境界で延命させない
+arena.get(handle) は local borrow だけを返す
+別 arena の handle 使用を許さない
+handle を raw pointer として扱わせない
+unsafe 内でも type check / move check / borrow check を全面的に無効化しない
+```
+
+v0.1 release 前に、上記の各項目は checker test または `examples/negative/` で検証します。
+safe example は `kizu check` と `kizu run` の対象として維持します。
+
+raw pointer operation、C ABI call、unchecked operation は safe Kizu の保証外です。
+これらを使う場合、memory safety obligation はプログラマが負います。
+
+mutable borrow 構文、allocator primitive、raw pointer runtime operation は v0.1 では
+完全実装しません。実装済みの safe guarantee として扱ってはいけません。
+
 ## 1. 目標
 
 Kizu は次を目指します。

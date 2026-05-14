@@ -48,3 +48,6 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0027: v0.1 は interpreter-first language core とする](0027-v0-1-interpreter-first.md)
 - [ADR-0028: enum は Zig/C 寄りの tag enum にする](0028-zig-style-enum-and-tagged-union.md)
 - [ADR-0029: active work は GitHub Issues で管理する](0029-issue-based-work-tracking.md)
+- [ADR-0030: エラー処理は Zig 風の !T に寄せる](0030-zig-style-error-union.md)
+- [ADR-0031: 幅が曖昧な int を廃止する](0031-remove-ambiguous-int.md)
+- [ADR-0032: v0.1 はメモリ安全性監査を release gate にする](0032-v0-1-memory-safety-release-gate.md)
