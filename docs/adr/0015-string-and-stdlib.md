@@ -44,6 +44,7 @@ stdlib module naming は lowercase dotted names にする。
 std.string
 std.io
 std.task
+std.channel
 std.fs
 std.mem
 std.slice

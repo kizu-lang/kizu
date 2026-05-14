@@ -32,6 +32,9 @@ LLVM IR backend、WASM / WASI backend、C header import、build cache は experi
 
 v0.1 の完了条件には、self-hosting compiler、native executable generation、
 full stdlib、Rust 同等以上の runtime performance guarantee は含めません。
+ただし、マルチスレッドと async は Kizu の重要な言語特性として扱い、
+v0.1 では safe structured concurrency の仕様、checker ルール、interpreter 上の
+最小 runtime model を完成対象に含めます。
 
 ### 0.1 v0.1 に含めるもの
 
@@ -66,6 +69,7 @@ arena<T> / handle<T>
 limited comptime
 Io capability
 Task / TaskGroup
+std.task structured API
 contract
 satisfy
 &Dyn<Contract>
@@ -939,14 +943,14 @@ map<K, V>        後続 phase
 set<T>           後続 phase
 ```
 
-## 15. async 方針
+## 15. concurrency / async 方針
 
 Kizu v0.1 では `async fn` / `await` syntax は実装しません。
 
 ただし、I/O と並行処理の境界は v0.1 から実装対象にします。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
-`Io` / `Task` / `TaskGroup` は v0.1 では言語組み込みの実験的な型です。
-将来は `std.io` と `std.task` の API として整理します。
+`Io` / `Task` / `TaskGroup` は v0.1 では interpreter builtin から始めますが、
+v0.1 のうちに `std.io` と `std.task` の API 境界へ寄せます。
 
 ```kizu
 fn read_config(io: Io, path: []const u8) -> ![]const u8 {
@@ -958,16 +962,32 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 
 * I/O する関数は `Io` を受け取る
 * `TaskGroup` で structured concurrency に寄せる
+* detached task は許可しない
 * spawn された task は await または cancel される必要がある
 * task は local borrow を捕まえられない
 * task へ渡す non-copy value は move される
 * 野良 task は許可しない
 * task は `TaskGroup` の structured scope を越えて escape できない
 * safe Kizu では task 間で mutable state を暗黙共有できない
+* channel に送れる値は owned value または copy value に限定する
+* data parallelism は `std.task.parallel_for` のような structured API に閉じ込める
+* shared mutable state は `std.sync` / `std.atomic` の明示型だけで扱う
 
-v0.1 の `TaskGroup` は interpreter 上の structured task model として実装します。
-`spawn` は OS thread や event loop を作らず、同期的に対象関数を評価して `Task<T>` に結果を保持します。
-OS thread、event loop、networking stdlib は後続 phase で扱います。
+v0.1 の最初の `TaskGroup` は interpreter 上の structured task model として実装します。
+現在の `spawn` は OS thread や event loop を作らず、同期的に対象関数を評価して
+`Task<T>` に結果を保持します。
+
+v0.1 で追加していく concurrency foundation:
+
+```text
+std.task.Group          structured task scope
+std.task.Queue          deterministic deferred task queue
+std.task.parallel_for   safe data parallelism
+std.channel.Channel<T>  owned message passing
+```
+
+OS thread、event loop、networking runtime、atomic ordering の詳細 API は、
+safe structured API の後に追加します。
 実並行 runtime を導入する場合も、上記の ownership / borrow / structured scope の制約を維持します。
 
 ## 16. contract / satisfy / Dyn 方針
