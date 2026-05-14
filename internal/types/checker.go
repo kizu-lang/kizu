@@ -525,10 +525,13 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 // checkIdentExpr resolves a variable reference in lexical scopes.
 func checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) {
 	typ, ok := env.lookup(expr.Name)
-	if !ok {
-		return "", fmt.Errorf("type error: undefined variable `%s`", expr.Name)
+	if ok {
+		return typ, nil
 	}
-	return typ, nil
+	if expr.Name == "void" {
+		return typeVoid, nil
+	}
+	return "", fmt.Errorf("type error: undefined variable `%s`", expr.Name)
 }
 
 // checkPrefixExpr validates unary operators.

@@ -163,7 +163,7 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	case *ast.ComptimeExpr:
 		return l.lowerExpr(e.Expr)
 	case *ast.IdentExpr:
-		return l.env[e.Name], nil
+		return l.lowerIdentExpr(e)
 	case *ast.PrefixExpr:
 		return l.lowerPrefixExpr(e)
 	case *ast.BinaryExpr:
@@ -183,6 +183,18 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression %T", expr)
 	}
+}
+
+// lowerIdentExpr lowers a local binding or the built-in void value.
+func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
+	value, ok := l.env[expr.Name]
+	if ok {
+		return value, nil
+	}
+	if expr.Name == "void" {
+		return Value{Name: "void", Type: "void"}, nil
+	}
+	return Value{}, fmt.Errorf("ir error: undefined value `%s`", expr.Name)
 }
 
 // lowerCastExpr lowers an explicit cast as a typed conversion instruction.

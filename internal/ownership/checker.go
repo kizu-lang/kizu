@@ -342,6 +342,9 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	}
 	value, ok := env.lookup(ident.Name)
 	if !ok {
+		if ident.Name == "void" {
+			return "void", nil
+		}
 		return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
 	}
 	if value.moved {
@@ -689,13 +692,16 @@ func (c *Checker) isArenaGetExpr(expr ast.Expression) bool {
 // readIdent resolves a variable reference without moving it.
 func readIdent(name string, env *scope) (string, error) {
 	value, ok := env.lookup(name)
-	if !ok {
-		return "", fmt.Errorf("move error: undefined variable `%s`", name)
+	if ok {
+		if value.moved {
+			return "", fmt.Errorf("move error: moved value `%s` was used", name)
+		}
+		return value.typeName, nil
 	}
-	if value.moved {
-		return "", fmt.Errorf("move error: moved value `%s` was used", name)
+	if name == "void" {
+		return "void", nil
 	}
-	return value.typeName, nil
+	return "", fmt.Errorf("move error: undefined variable `%s`", name)
 }
 
 // returnTypeName returns void for functions without an explicit return type.

@@ -33,6 +33,7 @@ go test ./...
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
 | `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle |
 | `result<T>`, `ok`, `try` | `result_try.kizu` | propagates success and prints `1` |
+| `result<void>` and `ok(void)` | `result_void.kizu` | propagates success without a payload |
 | limited `comptime` | `comptime.kizu` | evaluates compile-time expressions |
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |

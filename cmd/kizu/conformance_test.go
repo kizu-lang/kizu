@@ -33,6 +33,7 @@ func TestV01PositiveExamples(t *testing.T) {
 		{name: "borrow", path: "../../examples/borrow.kizu", out: "alice\nalice\n"},
 		{name: "arena", path: "../../examples/arena.kizu", out: "alice\n"},
 		{name: "result_try", path: "../../examples/result_try.kizu", out: "1\n"},
+		{name: "result_void", path: "../../examples/result_void.kizu", out: "ok\n"},
 		{name: "comptime", path: "../../examples/comptime.kizu", out: "8\n4096\n"},
 		{name: "enum", path: "../../examples/enum.kizu", out: "Color.Green\ntrue\n"},
 		{name: "match", path: "../../examples/match.kizu", out: "blue\n"},

@@ -265,10 +265,13 @@ func parseInt(lit string) (Value, error) {
 // evalIdent resolves a name from the current environment.
 func evalIdent(name string, env *Env) (Value, error) {
 	value, ok := env.Get(name)
-	if !ok {
-		return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", name)
+	if ok {
+		return value, nil
 	}
-	return value, nil
+	if name == "void" {
+		return voidValue(), nil
+	}
+	return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", name)
 }
 
 // evalPrefixExpr evaluates supported unary operators.
