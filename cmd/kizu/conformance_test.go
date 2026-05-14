@@ -47,6 +47,11 @@ func TestV01PositiveExamples(t *testing.T) {
 			path: "../../examples/contract_writer.kizu",
 			out:  "out\nhello\n2\n",
 		},
+		{
+			name: "task_group",
+			path: "../../examples/task_group.kizu",
+			out:  "config\n42\n",
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,7 +72,9 @@ func TestV01CheckOnlyExamples(t *testing.T) {
 
 // TestV01NegativeExamples checks representative readable diagnostics.
 func TestV01NegativeExamples(t *testing.T) {
-	cases := append(ownershipNegativeCases(), staticNegativeCases()...)
+	cases := append(ownershipNegativeCases(), typeNegativeCases()...)
+	cases = append(cases, lowLevelNegativeCases()...)
+	cases = append(cases, abstractionNegativeCases()...)
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			out, err := runKizu(tt.command, tt.path)
@@ -120,8 +127,8 @@ func ownershipNegativeCases() []conformanceErrorCase {
 	}
 }
 
-// staticNegativeCases returns type, unsafe, and exhaustiveness error examples.
-func staticNegativeCases() []conformanceErrorCase {
+// typeNegativeCases returns core type-system error examples.
+func typeNegativeCases() []conformanceErrorCase {
 	return []conformanceErrorCase{
 		{
 			name:    "invalid field",
@@ -154,6 +161,18 @@ func staticNegativeCases() []conformanceErrorCase {
 			want:    "cannot cast string to i32",
 		},
 		{
+			name:    "non exhaustive match",
+			command: "check",
+			path:    "../../examples/negative/match_non_exhaustive.kizu",
+			want:    "match on `Color` is not exhaustive",
+		},
+	}
+}
+
+// lowLevelNegativeCases returns unsafe and pointer policy error examples.
+func lowLevelNegativeCases() []conformanceErrorCase {
+	return []conformanceErrorCase{
+		{
 			name:    "unsafe operation",
 			command: "check",
 			path:    "../../examples/negative/unsafe_call.kizu",
@@ -165,6 +184,12 @@ func staticNegativeCases() []conformanceErrorCase {
 			path:    "../../examples/negative/nullable_ptr_read.kizu",
 			want:    "ptr_read` expects non-null raw pointer",
 		},
+	}
+}
+
+// abstractionNegativeCases returns contract, Dyn, and task error examples.
+func abstractionNegativeCases() []conformanceErrorCase {
+	return []conformanceErrorCase{
 		{
 			name:    "missing contract method",
 			command: "check",
@@ -184,10 +209,22 @@ func staticNegativeCases() []conformanceErrorCase {
 			want:    "Dyn parameter `writer` must be borrowed",
 		},
 		{
-			name:    "non exhaustive match",
+			name:    "unawaited task",
 			command: "check",
-			path:    "../../examples/negative/match_non_exhaustive.kizu",
-			want:    "match on `Color` is not exhaustive",
+			path:    "../../examples/negative/unawaited_task.kizu",
+			want:    "task `task` must be awaited or canceled",
+		},
+		{
+			name:    "task move",
+			command: "check",
+			path:    "../../examples/negative/task_move.kizu",
+			want:    "moved value `name` was used",
+		},
+		{
+			name:    "task borrow capture",
+			command: "check",
+			path:    "../../examples/negative/task_borrow_capture.kizu",
+			want:    "task cannot capture borrow parameter",
 		},
 	}
 }

@@ -14,6 +14,9 @@ const (
 	kindHandle
 	kindResult
 	kindEnum
+	kindIo
+	kindTaskGroup
+	kindTask
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
@@ -28,6 +31,7 @@ type Value struct {
 	handle   Handle
 	result   *Result
 	enum     Enum
+	task     *Task
 }
 
 // Arena stores values and gives out opaque handles.
@@ -46,6 +50,12 @@ type Result struct {
 	ok      bool
 	value   Value
 	message string
+}
+
+// Task stores the synchronous result of a spawned interpreter task.
+type Task struct {
+	value Value
+	done  bool
 }
 
 // Enum stores a Zig/C-style enum tag value.
@@ -81,6 +91,12 @@ func (v Value) String() string {
 		return "<error: " + v.result.message + ">"
 	case kindEnum:
 		return v.enum.typeName + "." + v.enum.tag
+	case kindIo:
+		return "<io>"
+	case kindTaskGroup:
+		return "<taskgroup>"
+	case kindTask:
+		return "<task>"
 	default:
 		return "<invalid>"
 	}
@@ -134,4 +150,19 @@ func resultErrorValue(message string) Value {
 // enumValue returns a tag enum runtime value.
 func enumValue(typeName string, tag string) Value {
 	return Value{kind: kindEnum, enum: Enum{typeName: typeName, tag: tag}}
+}
+
+// ioValue returns an explicit I/O capability value.
+func ioValue() Value {
+	return Value{kind: kindIo}
+}
+
+// taskGroupValue returns a structured task group value.
+func taskGroupValue() Value {
+	return Value{kind: kindTaskGroup}
+}
+
+// taskValue returns a completed synchronous task value.
+func taskValue(value Value) Value {
+	return Value{kind: kindTask, task: &Task{value: value}}
 }

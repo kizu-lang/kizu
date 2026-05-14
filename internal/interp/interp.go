@@ -430,6 +430,12 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 	if name.Name == "error" {
 		return callError(args)
 	}
+	if name.Name == "Io" {
+		return callIo(args)
+	}
+	if name.Name == "TaskGroup" {
+		return callTaskGroup(args)
+	}
 	return i.callFunction(name.Name, args)
 }
 
@@ -497,6 +503,12 @@ func (i *Interpreter) evalMethodCallExpr(
 		return voidValue(), err
 	}
 	if receiver.kind != kindArena {
+		if receiver.kind == kindTaskGroup {
+			return i.evalTaskGroupMethod(field.Name, args, env)
+		}
+		if receiver.kind == kindTask {
+			return evalTaskMethod(receiver, field.Name, args)
+		}
 		if receiver.kind == kindStruct {
 			return i.evalImplMethod(receiver, field.Name, args, env)
 		}
@@ -509,6 +521,55 @@ func (i *Interpreter) evalMethodCallExpr(
 		return i.evalArenaGet(receiver.arena, args, env)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// evalTaskGroupMethod executes the v0.1 synchronous spawn model.
+func (i *Interpreter) evalTaskGroupMethod(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if name != "spawn" {
+		return voidValue(), fmt.Errorf("runtime error: TaskGroup has no method `%s`", name)
+	}
+	if len(args) < 2 {
+		return voidValue(), fmt.Errorf("runtime error: TaskGroup.spawn expects io, function, and args")
+	}
+	ioValue, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: TaskGroup.spawn expects function name")
+	}
+	values, err := i.evalArgs(args[2:], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	callArgs := append([]Value{ioValue}, values...)
+	result, err := i.callFunction(target.Name, callArgs)
+	if err != nil {
+		return voidValue(), err
+	}
+	return taskValue(result), nil
+}
+
+// evalTaskMethod awaits or cancels a synchronous task value.
+func evalTaskMethod(task Value, name string, args []ast.Expression) (Value, error) {
+	if len(args) != 0 {
+		return voidValue(), fmt.Errorf("runtime error: task.%s expected 0 args", name)
+	}
+	switch name {
+	case "await":
+		task.task.done = true
+		return task.task.value, nil
+	case "cancel":
+		task.task.done = true
+		return voidValue(), nil
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Task has no method `%s`", name)
 	}
 }
 
@@ -618,4 +679,20 @@ func callError(args []Value) (Value, error) {
 		return voidValue(), fmt.Errorf("runtime error: error expected string")
 	}
 	return resultErrorValue(args[0].s), nil
+}
+
+// callIo constructs an explicit I/O capability value.
+func callIo(args []Value) (Value, error) {
+	if len(args) != 0 {
+		return voidValue(), fmt.Errorf("runtime error: Io expected 0 args")
+	}
+	return ioValue(), nil
+}
+
+// callTaskGroup constructs a structured task group value.
+func callTaskGroup(args []Value) (Value, error) {
+	if len(args) != 0 {
+		return voidValue(), fmt.Errorf("runtime error: TaskGroup expected 0 args")
+	}
+	return taskGroupValue(), nil
 }

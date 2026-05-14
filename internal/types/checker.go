@@ -19,22 +19,24 @@ const (
 )
 
 var knownTypes = map[Type]bool{
-	typeBool:   true,
-	typeInt:    true,
-	typeString: true,
-	typeVoid:   true,
-	"i8":       true,
-	"i16":      true,
-	"i32":      true,
-	"i64":      true,
-	"u8":       true,
-	"u16":      true,
-	"u32":      true,
-	"u64":      true,
-	"usize":    true,
-	"isize":    true,
-	"f32":      true,
-	"f64":      true,
+	typeBool:    true,
+	typeInt:     true,
+	typeString:  true,
+	typeVoid:    true,
+	"i8":        true,
+	"i16":       true,
+	"i32":       true,
+	"i64":       true,
+	"u8":        true,
+	"u16":       true,
+	"u32":       true,
+	"u64":       true,
+	"usize":     true,
+	"isize":     true,
+	"f32":       true,
+	"f64":       true,
+	"Io":        true,
+	"TaskGroup": true,
 }
 
 var numericTypes = map[Type]bool{
@@ -369,22 +371,7 @@ func (c *Checker) parseType(name string) (Type, error) {
 		return c.parseNullableType(name)
 	}
 	if base, arg, ok := splitGenericType(name); ok {
-		if base == "ptr" {
-			return c.parsePointerType(name, arg)
-		}
-		if base == "Dyn" {
-			if c.contracts[arg] == nil {
-				return "", fmt.Errorf("type error: unknown contract `%s`", arg)
-			}
-			return Type(name), nil
-		}
-		if base != "arena" && base != "handle" && base != "result" && base != "option" {
-			return "", fmt.Errorf("type error: unknown generic type `%s`", base)
-		}
-		if _, err := c.parseType(arg); err != nil {
-			return "", err
-		}
-		return Type(name), nil
+		return c.parseGenericType(name, base, arg)
 	}
 	typ := Type(name)
 	if typ == typeSelf {
@@ -394,6 +381,27 @@ func (c *Checker) parseType(name string) (Type, error) {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
+}
+
+// parseGenericType validates supported generic-like type spellings.
+func (c *Checker) parseGenericType(name string, base string, arg string) (Type, error) {
+	if base == "ptr" {
+		return c.parsePointerType(name, arg)
+	}
+	if base == "Dyn" {
+		if c.contracts[arg] == nil {
+			return "", fmt.Errorf("type error: unknown contract `%s`", arg)
+		}
+		return Type(name), nil
+	}
+	if base != "arena" && base != "handle" && base != "result" &&
+		base != "option" && base != "Task" {
+		return "", fmt.Errorf("type error: unknown generic type `%s`", base)
+	}
+	if _, err := c.parseType(arg); err != nil {
+		return "", err
+	}
+	return Type(name), nil
 }
 
 // parseNullableType validates nullable pointer types.
@@ -817,6 +825,12 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	if name.Name == "error" {
 		return c.checkErrorCall(expr, env, unsafe)
 	}
+	if name.Name == "Io" {
+		return checkNoArgConstructor("Io", expr.Args, "Io")
+	}
+	if name.Name == "TaskGroup" {
+		return checkNoArgConstructor("TaskGroup", expr.Args, "TaskGroup")
+	}
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
 }
 
@@ -983,6 +997,12 @@ func (c *Checker) checkMethodCallExpr(
 	if contractName, ok := dynContract(receiver); ok {
 		return c.checkDynMethodCall(contractName, field.Name, args, env, unsafe)
 	}
+	if receiver == "TaskGroup" {
+		return c.checkTaskGroupMethod(field.Name, args, env, unsafe)
+	}
+	if elem, ok := taskElement(receiver); ok {
+		return checkTaskMethod(field.Name, elem, args)
+	}
 	base, arg, ok := splitGenericType(string(receiver))
 	if !ok || base != "arena" {
 		method := c.implMethod(string(receiver), field.Name)
@@ -998,6 +1018,83 @@ func (c *Checker) checkMethodCallExpr(
 		return c.checkArenaGet(arg, args, env, unsafe)
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// checkTaskGroupMethod validates structured task spawning.
+func (c *Checker) checkTaskGroupMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if name != "spawn" {
+		return "", fmt.Errorf("type error: TaskGroup has no method `%s`", name)
+	}
+	if len(args) < 2 {
+		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects io, function, and args")
+	}
+	ioType, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if ioType != "Io" {
+		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects Io, got %s", ioType)
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", fmt.Errorf("type error: undefined function `%s`", target.Name)
+	}
+	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
+	if err := c.checkTaskArgs(target.Name, fn, spawnArgs, env, unsafe); err != nil {
+		return "", err
+	}
+	return Type(fmt.Sprintf("Task<%s>", fn.returnType)), nil
+}
+
+// checkTaskArgs validates spawned function arguments.
+func (c *Checker) checkTaskArgs(
+	name string,
+	fn *functionType,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != len(fn.params) {
+		return fmt.Errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), len(args))
+	}
+	for idx, arg := range args {
+		if fn.borrowParams[idx] {
+			return fmt.Errorf("type error: task cannot capture borrow parameter `%s`", name)
+		}
+		got, err := c.checkExpr(arg, env, unsafe)
+		if err != nil {
+			return err
+		}
+		if got != fn.params[idx] {
+			return fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+				idx+1, name, fn.params[idx], got)
+		}
+	}
+	return nil
+}
+
+// checkTaskMethod validates await/cancel on a task value.
+func checkTaskMethod(name string, elem string, args []ast.Expression) (Type, error) {
+	if len(args) != 0 {
+		return "", fmt.Errorf("type error: `task.%s` expects 0 args, got %d", name, len(args))
+	}
+	switch name {
+	case "await":
+		return Type(elem), nil
+	case "cancel":
+		return typeVoid, nil
+	default:
+		return "", fmt.Errorf("type error: Task has no method `%s`", name)
 	}
 }
 
@@ -1151,6 +1248,23 @@ func isPointerType(typ Type) bool {
 	return ok
 }
 
+// checkNoArgConstructor validates a zero-argument builtin constructor.
+func checkNoArgConstructor(name string, args []ast.Expression, typ Type) (Type, error) {
+	if len(args) != 0 {
+		return "", fmt.Errorf("type error: `%s` expects 0 args, got %d", name, len(args))
+	}
+	return typ, nil
+}
+
+// taskElement extracts T from Task<T>.
+func taskElement(typ Type) (string, bool) {
+	base, arg, ok := splitGenericType(string(typ))
+	if !ok || base != "Task" {
+		return "", false
+	}
+	return arg, true
+}
+
 // dynContract extracts C from Dyn<C>.
 func dynContract(typ Type) (string, bool) {
 	base, arg, ok := splitGenericType(string(typ))
@@ -1259,7 +1373,7 @@ func splitGenericType(name string) (string, string, bool) {
 		return "", "", false
 	}
 	arg := name[start+1 : len(name)-1]
-	if arg == "" || strings.ContainsAny(arg, "<>") {
+	if arg == "" {
 		return "", "", false
 	}
 	return name[:start], arg, true

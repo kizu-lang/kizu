@@ -35,6 +35,7 @@ type binding struct {
 	activeBorrows int
 	arenaID       int
 	handleArenaID int
+	taskDone      bool
 }
 
 type scope struct {
@@ -141,7 +142,7 @@ func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 			return err
 		}
 	}
-	return nil
+	return env.checkPendingTasks()
 }
 
 // checkStmt validates one statement.
@@ -383,17 +384,8 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if !ok {
 		return "", fmt.Errorf("move error: callee must be a function name")
 	}
-	if name.Name == "print" {
-		return c.checkPrintCall(expr, env)
-	}
-	if name.Name == "ptr_read" || name.Name == "ptr_write" {
-		return c.checkPointerBuiltin(expr, env)
-	}
-	if name.Name == "ok" {
-		return c.checkOkCall(expr, env)
-	}
-	if name.Name == "error" {
-		return c.checkErrorCall(expr, env)
+	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
+		return result, err
 	}
 	fn, ok := c.functions[name.Name]
 	if !ok {
@@ -421,6 +413,33 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// checkBuiltinCall validates ownership effects for builtin calls.
+func (c *Checker) checkBuiltinCall(
+	name string,
+	expr *ast.CallExpr,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "print":
+		result, err := c.checkPrintCall(expr, env)
+		return result, true, err
+	case "ptr_read", "ptr_write":
+		result, err := c.checkPointerBuiltin(expr, env)
+		return result, true, err
+	case "ok":
+		result, err := c.checkOkCall(expr, env)
+		return result, true, err
+	case "error":
+		result, err := c.checkErrorCall(expr, env)
+		return result, true, err
+	case "Io", "TaskGroup":
+		result, err := checkNoArgOwnershipCall(name, expr.Args)
+		return result, true, err
+	default:
+		return "", false, nil
+	}
 }
 
 // checkOkCall moves the success value into a result<T>.
@@ -524,12 +543,13 @@ func (c *Checker) checkMethodCallExpr(
 	}
 	base, _, ok := splitGenericType(arena.typeName)
 	if !ok || base != "arena" {
-		for _, arg := range args {
-			if _, err := c.readExpr(arg, env); err != nil {
-				return "", err
-			}
+		if arena.typeName == "TaskGroup" {
+			return c.checkTaskGroupMethod(field.Name, args, env)
 		}
-		return "result<unknown>", nil
+		if elem, ok := taskElement(arena.typeName); ok {
+			return c.checkTaskMethod(arena, field.Name, elem, args)
+		}
+		return c.checkPlainMethodArgs(args, env)
 	}
 	switch field.Name {
 	case "add":
@@ -539,6 +559,77 @@ func (c *Checker) checkMethodCallExpr(
 	default:
 		return "", fmt.Errorf("arena error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkTaskGroupMethod validates spawn ownership effects.
+func (c *Checker) checkTaskGroupMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if name != "spawn" {
+		return "", fmt.Errorf("task error: TaskGroup has no method `%s`", name)
+	}
+	if len(args) < 2 {
+		return "", fmt.Errorf("task error: `TaskGroup.spawn` expects io, function, and args")
+	}
+	if _, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return "", fmt.Errorf("task error: `TaskGroup.spawn` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", fmt.Errorf("task error: undefined function `%s`", target.Name)
+	}
+	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
+	if len(spawnArgs) != len(fn.params) {
+		return "", fmt.Errorf("task error: `%s` expects %d args, got %d",
+			target.Name, len(fn.params), len(spawnArgs))
+	}
+	for idx, arg := range spawnArgs {
+		if fn.params[idx].borrow {
+			return "", fmt.Errorf("task error: task cannot capture borrow parameter `%s`", target.Name)
+		}
+		if _, err := c.moveExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("Task<%s>", returnTypeName(fn)), nil
+}
+
+// checkTaskMethod marks task completion for await/cancel.
+func (c *Checker) checkTaskMethod(
+	task *binding,
+	name string,
+	elem string,
+	args []ast.Expression,
+) (string, error) {
+	if len(args) != 0 {
+		return "", fmt.Errorf("task error: `task.%s` expects 0 args, got %d", name, len(args))
+	}
+	switch name {
+	case "await":
+		task.taskDone = true
+		return elem, nil
+	case "cancel":
+		task.taskDone = true
+		return "void", nil
+	default:
+		return "", fmt.Errorf("task error: Task has no method `%s`", name)
+	}
+}
+
+// checkPlainMethodArgs reads non-arena method arguments after type checking.
+func (c *Checker) checkPlainMethodArgs(args []ast.Expression, env *scope) (string, error) {
+	for _, arg := range args {
+		if _, err := c.readExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	return "result<unknown>", nil
 }
 
 // checkArenaAdd moves one value into an arena and returns a handle.
@@ -730,7 +821,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	switch typeName {
-	case "bool", "int", "void",
+	case "bool", "int", "void", "Io",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64":
 		return true
@@ -747,6 +838,23 @@ func isRawPointerType(typeName string) bool {
 	}
 	base, _, ok := splitGenericType(name)
 	return ok && base == "ptr"
+}
+
+// checkNoArgOwnershipCall validates a zero-argument builtin constructor.
+func checkNoArgOwnershipCall(name string, args []ast.Expression) (string, error) {
+	if len(args) != 0 {
+		return "", fmt.Errorf("move error: `%s` expects 0 args, got %d", name, len(args))
+	}
+	return name, nil
+}
+
+// taskElement extracts T from Task<T>.
+func taskElement(typeName string) (string, bool) {
+	base, arg, ok := splitGenericType(typeName)
+	if !ok || base != "Task" {
+		return "", false
+	}
+	return arg, true
 }
 
 // splitGenericType extracts base and argument from base<arg>.
@@ -790,6 +898,16 @@ func (s *scope) lookup(name string) (*binding, bool) {
 		}
 	}
 	return nil, false
+}
+
+// checkPendingTasks rejects tasks that leave scope without await or cancel.
+func (s *scope) checkPendingTasks() error {
+	for name, value := range s.values {
+		if _, ok := taskElement(value.typeName); ok && !value.taskDone {
+			return fmt.Errorf("task error: task `%s` must be awaited or canceled", name)
+		}
+	}
+	return nil
 }
 
 // clone copies a scope chain so branch checks do not interfere with each other.

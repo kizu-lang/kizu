@@ -41,6 +41,7 @@ go test ./...
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 | `contract`, `satisfy`, `borrow Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
+| `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 
 ## Negative Examples
 
@@ -61,13 +62,7 @@ go test ./...
 | satisfy requires every contract method | `negative/missing_contract_method.kizu` | `missing method` |
 | `Dyn<Contract>` requires explicit satisfy | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
 | owned `Dyn<Contract>` is not v0.1 | `negative/owned_dyn.kizu` | `must be borrowed` |
+| tasks must be awaited or canceled | `negative/unawaited_task.kizu` | `must be awaited or canceled` |
+| task args move non-copy values | `negative/task_move.kizu` | `moved value` |
+| tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
-
-## v0.1 Features Still Tracked By Issues
-
-The following v0.1 target features are intentionally listed here so the catalog
-cannot silently look complete before the implementation is complete.
-
-| Feature | Tracking issue |
-| --- | --- |
-| `Io` capability and `TaskGroup` | #17 |
