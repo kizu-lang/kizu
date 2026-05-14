@@ -39,6 +39,7 @@ go test ./...
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper example |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
+| combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 
 ## Negative Examples
 

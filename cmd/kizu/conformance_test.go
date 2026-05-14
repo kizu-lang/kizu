@@ -37,6 +37,11 @@ func TestV01PositiveExamples(t *testing.T) {
 		{name: "comptime", path: "../../examples/comptime.kizu", out: "8\n4096\n"},
 		{name: "enum", path: "../../examples/enum.kizu", out: "Color.Green\ntrue\n"},
 		{name: "match", path: "../../examples/match.kizu", out: "blue\n"},
+		{
+			name: "user_registry",
+			path: "../../examples/user_registry.kizu",
+			out:  "alice\nadmin\n8\nbob\nguest\n3\n0\n1\nready\n",
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
