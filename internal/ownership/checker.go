@@ -23,21 +23,23 @@ type functionInfo struct {
 }
 
 type paramInfo struct {
-	typeName string
-	borrow   bool
-	comptime bool
+	typeName  string
+	borrow    bool
+	mutBorrow bool
+	comptime  bool
 }
 
 type binding struct {
-	id            int
-	name          string
-	typeName      string
-	moved         bool
-	borrowedParam bool
-	activeBorrows int
-	arenaID       int
-	handleArenaID int
-	taskDone      bool
+	id               int
+	name             string
+	typeName         string
+	moved            bool
+	borrowedParam    bool
+	activeBorrows    int
+	activeMutBorrows int
+	arenaID          int
+	handleArenaID    int
+	taskDone         bool
 }
 
 type scope struct {
@@ -137,7 +139,8 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 		params := make([]paramInfo, 0, len(fn.Params))
 		for _, param := range fn.Params {
 			params = append(params, paramInfo{
-				typeName: param.TypeName, borrow: param.Borrow, comptime: param.Comptime,
+				typeName: param.TypeName, borrow: param.Borrow, mutBorrow: param.MutBorrow,
+				comptime: param.Comptime,
 			})
 		}
 		c.functions[fn.Name] = &functionInfo{
@@ -405,7 +408,7 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	if value.borrowedParam {
 		return "", fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
-	if value.activeBorrows > 0 && !c.isCopyType(value.typeName) {
+	if (value.activeBorrows > 0 || value.activeMutBorrows > 0) && !c.isCopyType(value.typeName) {
 		return "", fmt.Errorf("borrow error: value `%s` cannot be moved while borrowed", ident.Name)
 	}
 	if !c.isCopyType(value.typeName) {
@@ -846,11 +849,36 @@ func (c *Checker) activateBorrowArgs(
 			return nil, err
 		}
 		if value != nil {
-			value.activeBorrows++
+			if err := checkBorrowConflict(value, fn.params[idx].mutBorrow); err != nil {
+				releaseBorrows(borrowed)
+				return nil, err
+			}
+			if fn.params[idx].mutBorrow {
+				value.activeMutBorrows++
+			} else {
+				value.activeBorrows++
+			}
 			borrowed = append(borrowed, value)
 		}
 	}
 	return borrowed, nil
+}
+
+// checkBorrowConflict rejects aliasing that would overlap a mutable borrow.
+func checkBorrowConflict(value *binding, mutable bool) error {
+	if mutable && value.activeBorrows > 0 {
+		return fmt.Errorf(
+			"borrow error: value `%s` cannot be mutably borrowed while borrowed",
+			value.name,
+		)
+	}
+	if value.activeMutBorrows > 0 {
+		return fmt.Errorf(
+			"borrow error: value `%s` cannot be borrowed while mutably borrowed",
+			value.name,
+		)
+	}
+	return nil
 }
 
 // borrowedIdent resolves an identifier borrow target when the argument is a name.
@@ -872,7 +900,11 @@ func borrowedIdent(expr ast.Expression, env *scope) (*binding, error) {
 // releaseBorrows clears temporary borrow state for a completed call.
 func releaseBorrows(values []*binding) {
 	for _, value := range values {
-		value.activeBorrows--
+		if value.activeMutBorrows > 0 {
+			value.activeMutBorrows--
+		} else {
+			value.activeBorrows--
+		}
 	}
 }
 

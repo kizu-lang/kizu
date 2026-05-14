@@ -29,7 +29,7 @@ method body は書けない。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> !i64
+    fn write(self: &Self, bytes: &Bytes) -> !i64
 }
 ```
 
@@ -50,7 +50,7 @@ method body は `impl Type` に置く。
 `Dyn<Contract>` は dynamic dispatch を型に見せる。
 
 ```kizu
-fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> !void {
+fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
     let n = writer.write(bytes)
     return void
 }
@@ -80,5 +80,5 @@ Zig 手書き vtable との差分:
 
 - 抽象化の意図がコード上に残る
 - dynamic dispatch が隠れない
-- v0.1 は `contract` / `satisfy` / `borrow Dyn<Contract>` を実装対象にする
+- v0.1 は `contract` / `satisfy` / `&Dyn<Contract>` を実装対象にする
 - generic bounds、owned dynamic object、最適化された vtable layout は後続 phase に分離する

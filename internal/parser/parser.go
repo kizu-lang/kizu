@@ -262,9 +262,13 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 		return field, false
 	}
 	p.nextToken()
-	if p.cur.Type == token.Borrow {
+	if p.cur.Type == token.Amp {
 		field.Borrow = true
 		p.nextToken()
+		if p.cur.Type == token.Mut {
+			field.MutBorrow = true
+			p.nextToken()
+		}
 	}
 	field.TypeName = p.parseTypeName()
 	if field.TypeName == "" {
@@ -379,9 +383,13 @@ func (p *Parser) parseParams() []ast.Param {
 			return params
 		}
 		p.nextToken()
-		if p.cur.Type == token.Borrow {
+		if p.cur.Type == token.Amp {
 			param.Borrow = true
 			p.nextToken()
+			if p.cur.Type == token.Mut {
+				param.MutBorrow = true
+				p.nextToken()
+			}
 		}
 		param.TypeName = p.parseTypeName()
 		if param.TypeName == "" {

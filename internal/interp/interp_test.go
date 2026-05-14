@@ -129,7 +129,7 @@ fn main() {
     describe(second)
     describe(Shape.Point)
 }
-fn describe(shape: borrow Shape) -> void {
+fn describe(shape: &Shape) -> void {
     match shape {
         Point => print("point")
         Circle(radius) => print(radius)

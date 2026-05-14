@@ -39,7 +39,7 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 追加の v0.1 対象として、次は GitHub Issues で追跡しています。
 
 - `Io` capability と `TaskGroup` structured task model
-- `contract`、`satisfy`、`borrow Dyn<Contract>`
+- `contract`、`satisfy`、`&Dyn<Contract>`
 
 実験的な compiler / tooling:
 

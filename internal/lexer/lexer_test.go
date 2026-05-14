@@ -11,6 +11,7 @@ func TestNextToken(t *testing.T) {
 	input := `fn main() {
     let name = "alice"
     var age = 30
+    update(&mut user)
     age = age + 1
     match Color.Red { Red => return age >= 20 }
 }`
@@ -32,6 +33,12 @@ func TestNextToken(t *testing.T) {
 		{token.Ident, "age"},
 		{token.Assign, "="},
 		{token.Int, "30"},
+		{token.Ident, "update"},
+		{token.LParen, "("},
+		{token.Amp, "&"},
+		{token.Mut, "mut"},
+		{token.Ident, "user"},
+		{token.RParen, ")"},
 		{token.Ident, "age"},
 		{token.Assign, "="},
 		{token.Ident, "age"},

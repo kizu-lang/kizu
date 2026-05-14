@@ -32,6 +32,7 @@ go test ./...
 | `while` | `while.kizu` | prints `0`, `1`, `2` |
 | `struct` and field access | `struct.kizu` | prints `alice`, `30` |
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
+| mutable borrow parameter | `mutable_borrow.kizu` | `&mut` does not move the owner |
 | `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
@@ -42,7 +43,7 @@ go test ./...
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper; caller owns the unsafe obligation |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
-| `contract`, `satisfy`, `borrow Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
+| `contract`, `satisfy`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 
 ## Negative Examples
@@ -54,6 +55,8 @@ go test ./...
 | double move is rejected | `negative/double_move.kizu` | `moved value` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
+| mutable borrow conflicts are rejected | `negative/mut_borrow_conflict.kizu` | `mutably borrowed while borrowed` |
+| `&mut` requires mutable binding | `negative/mut_borrow_immutable.kizu` | `must be mutable` |
 | runtime borrow cannot cross comptime | `negative/comptime_borrow_escape.kizu` | `runtime value cannot be used` |
 | `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
 | `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |

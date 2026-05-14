@@ -25,7 +25,7 @@ Kizu v0.1 は、safe Kizu に対して次を release blocker として扱う。
 - `arena<T>.get(handle<T>)` は local borrow だけを返す
 - handle は対応する arena 以外に使えない
 - handle は raw pointer として扱えない
-- mutable borrow 構文は v0.1 で未実装にし、実装済みのように見せない
+- mutable borrow conflict を検査する
 - unsafe は type check / move check / borrow check を全面的に無効化しない
 - raw pointer operation、C ABI call、unchecked operation は safe Kizu の保証外として明示する
 
@@ -43,4 +43,4 @@ v0.1 release 前に、次を必ず満たす。
 - v0.1 の release issue にはメモリ安全監査を必須 checklist として含める
 - checker を拡張するときは、対応する negative example を同じ変更に含める
 - unsafe を拡張するときは、safe check が無効化されていないことを test で確認する
-- mutable borrow、allocator、raw pointer runtime operation は、実装するまで v0.1 の安全保証に含めない
+- allocator、raw pointer runtime operation は、実装するまで v0.1 の安全保証に含めない

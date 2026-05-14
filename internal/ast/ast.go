@@ -197,33 +197,39 @@ func (d *SatisfyDecl) String() string {
 
 // Field represents a named struct field.
 type Field struct {
-	Name     string
-	TypeName string
-	Borrow   bool
+	Name      string
+	TypeName  string
+	Borrow    bool
+	MutBorrow bool
 }
 
 // String returns a compact debug representation of the field.
 func (f Field) String() string {
 	prefix := ""
-	if f.Borrow {
-		prefix = "borrow "
+	if f.MutBorrow {
+		prefix = "&mut "
+	} else if f.Borrow {
+		prefix = "&"
 	}
 	return fmt.Sprintf("%s: %s%s", f.Name, prefix, f.TypeName)
 }
 
 // Param represents a function parameter.
 type Param struct {
-	Name     string
-	TypeName string
-	Borrow   bool
-	Comptime bool
+	Name      string
+	TypeName  string
+	Borrow    bool
+	MutBorrow bool
+	Comptime  bool
 }
 
 // String returns a compact debug representation of the parameter.
 func (p Param) String() string {
 	prefix := ""
-	if p.Borrow {
-		prefix = "borrow "
+	if p.MutBorrow {
+		prefix = "&mut "
+	} else if p.Borrow {
+		prefix = "&"
 	}
 	if !p.Comptime {
 		return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)

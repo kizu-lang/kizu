@@ -14,6 +14,7 @@ type Lexer struct {
 
 var singleCharTokens = map[rune]token.Type{
 	'+': token.Plus,
+	'&': token.Amp,
 	'*': token.Asterisk,
 	'%': token.Percent,
 	'?': token.Question,

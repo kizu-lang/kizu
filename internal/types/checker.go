@@ -99,14 +99,15 @@ type unionType struct {
 }
 
 type functionType struct {
-	name           string
-	params         []Type
-	borrowParams   []bool
-	comptimeParams []bool
-	returnType     Type
-	decl           *ast.FunctionDecl
-	unsafe         bool
-	externABI      string
+	name            string
+	params          []Type
+	borrowParams    []bool
+	mutBorrowParams []bool
+	comptimeParams  []bool
+	returnType      Type
+	decl            *ast.FunctionDecl
+	unsafe          bool
+	externABI       string
 }
 
 type contractType struct {
@@ -376,6 +377,7 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	params := make([]Type, 0, len(fn.Params))
 	borrowParams := make([]bool, 0, len(fn.Params))
+	mutBorrowParams := make([]bool, 0, len(fn.Params))
 	comptimeParams := make([]bool, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		paramType, err := c.parseType(param.TypeName)
@@ -390,6 +392,7 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		}
 		params = append(params, paramType)
 		borrowParams = append(borrowParams, param.Borrow)
+		mutBorrowParams = append(mutBorrowParams, param.MutBorrow)
 		comptimeParams = append(comptimeParams, param.Comptime)
 	}
 	ret := typeVoid
@@ -401,7 +404,8 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		}
 	}
 	return &functionType{
-		name: fn.Name, params: params, borrowParams: borrowParams, comptimeParams: comptimeParams,
+		name: fn.Name, params: params, borrowParams: borrowParams,
+		mutBorrowParams: mutBorrowParams, comptimeParams: comptimeParams,
 		returnType: ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
 }
@@ -993,6 +997,11 @@ func (c *Checker) checkUserCall(
 			name, len(fn.params), len(args))
 	}
 	for idx, arg := range args {
+		if fn.mutBorrowParams[idx] {
+			if err := requireMutableBorrowArg(arg, env); err != nil {
+				return "", err
+			}
+		}
 		got, err := c.checkExpr(arg, env, unsafe)
 		if err != nil {
 			return "", err
@@ -1235,7 +1244,7 @@ func (c *Checker) checkTaskArgs(
 		return fmt.Errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), len(args))
 	}
 	for idx, arg := range args {
-		if fn.borrowParams[idx] {
+		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
 			return fmt.Errorf("type error: task cannot capture borrow parameter `%s`", name)
 		}
 		got, err := c.checkExpr(arg, env, unsafe)
@@ -1265,7 +1274,7 @@ func checkTaskMethod(name string, elem string, args []ast.Expression) (Type, err
 	}
 }
 
-// checkDynMethodCall validates a method call through borrow Dyn<Contract>.
+// checkDynMethodCall validates a method call through &Dyn<Contract>.
 func (c *Checker) checkDynMethodCall(
 	contractName string,
 	name string,
@@ -1301,6 +1310,11 @@ func (c *Checker) checkMethodArgs(
 	}
 	for idx, arg := range args {
 		want := method.params[idx+1]
+		if method.mutBorrowParams[idx+1] {
+			if err := requireMutableBorrowArg(arg, env); err != nil {
+				return "", err
+			}
+		}
 		got, err := c.checkExpr(arg, env, unsafe)
 		if err != nil {
 			return "", err
@@ -1311,6 +1325,18 @@ func (c *Checker) checkMethodArgs(
 		}
 	}
 	return method.returnType, nil
+}
+
+// requireMutableBorrowArg restricts &mut arguments to mutable local bindings.
+func requireMutableBorrowArg(expr ast.Expression, env *scope) error {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+	}
+	if !env.isMutable(ident.Name) {
+		return fmt.Errorf("type error: &mut argument `%s` must be mutable", ident.Name)
+	}
+	return nil
 }
 
 // checkArenaAdd validates arena<T>.add(value).

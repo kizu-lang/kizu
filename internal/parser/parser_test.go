@@ -28,7 +28,7 @@ func TestParseHello(t *testing.T) {
 
 // TestParseFunctionWithParamsAndReturn checks typed parameters and return parsing.
 func TestParseFunctionWithParamsAndReturn(t *testing.T) {
-	input := `fn add(a: i64, b: i64) -> i64 {
+	input := `fn add(a: &i64, b: &mut i64) -> i64 {
     return a + b
 }`
 	p := New(lexer.New(input))
@@ -37,7 +37,7 @@ func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn add(a: i64, b: i64) -> i64 { return (a + b) }`
+	want := `fn add(a: &i64, b: &mut i64) -> i64 { return (a + b) }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -279,7 +279,7 @@ func TestParseTry(t *testing.T) {
 
 // TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
 func TestParseRejectsExplicitLifetime(t *testing.T) {
-	input := `fn show(s: borrow 'a []const u8) {}`
+	input := `fn show(s: &'a []const u8) {}`
 	p := New(lexer.New(input))
 	_ = p.ParseProgram()
 	if len(p.Errors()) == 0 {

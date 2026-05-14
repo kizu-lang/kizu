@@ -8,7 +8,8 @@
 
 ## TODO
 
-- [x] `borrow T` parameter を検査する
+- [x] `&T` parameter を検査する
+- [x] `&mut T` parameter を検査する
 - [x] borrow が値を move しないことを検査する
 - [x] borrow 中の値を move できないことを検査する
 - [x] borrow を関数から返せないことを検査する
@@ -21,6 +22,7 @@
 
 - [x] `pre-commit run --all-files` が通る
 - [x] `examples/borrow.kizu` が通る
+- [x] `examples/mutable_borrow.kizu` が通る
 - [x] borrow escape の例が期待どおり error になる
 - [x] borrow を返す関数が error になる
 - [x] borrow field を持つ struct が error になる
@@ -34,7 +36,7 @@
 
 ## 実装メモ
 
-v0 の borrow は immutable borrow のみです。
-そのため mutable borrow conflict は、mutable borrow 構文を導入しないことで発生不能にしています。
+v0.1 の borrow syntax は `&T` と `&mut T` です。
 同一 call 内では borrow 引数と move 引数の lifetime が重なるものとして扱い、
 同じ値を borrow しながら move しようとすると error にします。
+`&T` と `&mut T`、および `&mut T` 同士の overlap も error にします。

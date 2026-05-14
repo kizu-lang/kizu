@@ -37,13 +37,13 @@ v0 では実装せず、将来の v1/v2 候補として管理する。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> !i64
+    fn write(self: &Self, bytes: &Bytes) -> !i64
 }
 ```
 
 ```kizu
 impl File {
-    fn write(self: borrow File, bytes: borrow Bytes) -> !i64 {
+    fn write(self: &File, bytes: &Bytes) -> !i64 {
         return os.write(self.fd, bytes)
     }
 }
@@ -52,7 +52,7 @@ satisfy Writer for File
 ```
 
 ```kizu
-fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> !void {
+fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
     let n = writer.write(bytes)
     return void
 }
@@ -65,7 +65,7 @@ v0: contract なし
 v1: impl Type による method system
 v2: contract / satisfy
 v3: generic bound
-v4: borrow Dyn<Contract>
+v4: &Dyn<Contract>
 v5: owned dynamic object を検討
 ```
 

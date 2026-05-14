@@ -59,7 +59,7 @@ match over simple enum values
 tagged union
 match payload binding
 function call
-borrow parameter
+&T / &mut T borrow parameter
 move semantics
 arena<T> / handle<T>
 !T / error / try
@@ -68,7 +68,7 @@ Io capability
 Task / TaskGroup
 contract
 satisfy
-borrow Dyn<Contract>
+&Dyn<Contract>
 ```
 
 v0.1 に含める static / policy 機能:
@@ -136,8 +136,8 @@ safe example は `kizu check` と `kizu run` の対象として維持します�
 raw pointer operation、C ABI call、unchecked operation は safe Kizu の保証外です。
 これらを使う場合、memory safety obligation はプログラマが負います。
 
-mutable borrow 構文、allocator primitive、raw pointer runtime operation は v0.1 では
-完全実装しません。実装済みの safe guarantee として扱ってはいけません。
+allocator primitive、raw pointer runtime operation は v0.1 では完全実装しません。
+実装済みの safe guarantee として扱ってはいけません。
 
 ## 1. 目標
 
@@ -455,7 +455,6 @@ v0.1 では `arena<T>` / `handle<T>` だけを実装対象にします。
 ```text
 box<T>
 shared<T>
-borrow<T>
 slice<T>
 ```
 
@@ -552,8 +551,16 @@ non-copy field を含む struct
 borrow は一時的に値を参照するための仕組みです。
 
 ```kizu
-fn show(s: borrow []const u8) {
+fn show(s: &[]const u8) {
     print(s)
+}
+```
+
+mutable borrow には `&mut T` を使います。
+
+```kizu
+fn update(user: &mut User) -> void {
+    print(user.name)
 }
 ```
 
@@ -563,8 +570,9 @@ borrow のルール:
 * borrow は struct に保存できない
 * borrow は関数から返せない
 * borrow 中の値は move できない
-* mutable borrow と immutable borrow は重複できない
-* v0.1 では mutable borrow 構文は実装しない
+* `&T` と `&mut T` は重複できない
+* `&mut T` 同士は同じ値に対して重複できない
+* `&mut T` argument は mutable local binding に限定する
 
 ## 10. arena / handle
 
@@ -914,7 +922,7 @@ method body は書けません。
 
 ```kizu
 contract Writer {
-    fn write(self: borrow Self, bytes: borrow Bytes) -> !i64
+    fn write(self: &Self, bytes: &Bytes) -> !i64
 }
 ```
 
@@ -929,7 +937,7 @@ method body は型のそばに置きます。
 
 ```kizu
 impl File {
-    fn write(self: borrow File, bytes: borrow Bytes) -> !i64 {
+    fn write(self: &File, bytes: &Bytes) -> !i64 {
         return os.write(self.fd, bytes)
     }
 }
@@ -938,13 +946,13 @@ impl File {
 `Dyn<Contract>` は dynamic dispatch を型に見せます。
 
 ```kizu
-fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> !void {
+fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
     let n = writer.write(bytes)
     return void
 }
 ```
 
-v0.1 の `Dyn` は `borrow Dyn<Contract>` の動的 dispatch に限定します。
+v0.1 の `Dyn` は `&Dyn<Contract>` の動的 dispatch に限定します。
 owned dynamic object、generic bounds、最適化された vtable layout は後続 phase で扱います。
 
 ## 17. ビルドとキャッシュ

@@ -16,6 +16,7 @@ const (
 	Minus    Type = "-"
 	Bang     Type = "!"
 	Question Type = "?"
+	Amp      Type = "&"
 	Asterisk Type = "*"
 	Slash    Type = "/"
 	Percent  Type = "%"
@@ -58,7 +59,7 @@ const (
 	Impl     Type = "impl"
 	True     Type = "true"
 	False    Type = "false"
-	Borrow   Type = "borrow"
+	Mut      Type = "mut"
 	Unsafe   Type = "unsafe"
 	Extern   Type = "extern"
 	Comptime Type = "comptime"
@@ -90,7 +91,7 @@ var keywords = map[string]Type{
 	"impl":     Impl,
 	"true":     True,
 	"false":    False,
-	"borrow":   Borrow,
+	"mut":      Mut,
 	"unsafe":   Unsafe,
 	"extern":   Extern,
 	"comptime": Comptime,

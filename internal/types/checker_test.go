@@ -259,7 +259,7 @@ func TestCheckAcceptsTaggedUnionMatch(t *testing.T) {
     Circle(i64)
     Label([]const u8)
 }
-fn describe(shape: borrow Shape) -> void {
+fn describe(shape: &Shape) -> void {
     match shape {
         Point => print("point")
         Circle(radius) => print(radius)
@@ -271,6 +271,23 @@ fn main() {
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsMutableBorrowTypeErrors checks &mut requires mutable locals.
+func TestCheckRejectsMutableBorrowTypeErrors(t *testing.T) {
+	source := `struct User { name: []const u8 }
+fn update(user: &mut User) -> void { print(user.name) }
+fn main() {
+    let user = User { name: "alice" }
+    update(user)
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "&mut argument `user` must be mutable") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 

@@ -40,7 +40,7 @@ Implemented language-core pieces:
 Additional v0.1 target pieces tracked in GitHub Issues:
 
 - `Io` capability and `TaskGroup` structured task model
-- `contract`, `satisfy`, and `borrow Dyn<Contract>`
+- `contract`, `satisfy`, and `&Dyn<Contract>`
 
 Experimental compiler and tooling pieces:
 

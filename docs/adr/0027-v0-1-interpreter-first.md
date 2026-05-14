@@ -25,7 +25,7 @@ v0.1 の主な目的は次の通り。
 - type / move / borrow / arena / error union / comptime の安全性を検査する
 - Zig/C-style tag enum / tagged union / match を interpreter で実行できるようにする
 - `Io` capability / `TaskGroup` による structured task model を interpreter で扱う
-- `contract` / `satisfy` / `borrow Dyn<Contract>` による明示抽象化を扱う
+- `contract` / `satisfy` / `&Dyn<Contract>` による明示抽象化を扱う
 - examples と negative tests で仕様を固定する
 - 将来の compiler / performance work の測定基盤を残す
 

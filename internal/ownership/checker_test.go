@@ -70,11 +70,25 @@ fn main() {
 
 // TestCheckBorrowArgumentDoesNotMove checks borrow parameters preserve ownership.
 func TestCheckBorrowArgumentDoesNotMove(t *testing.T) {
-	source := `fn show(s: borrow []const u8) { print(s) }
+	source := `fn show(s: &[]const u8) { print(s) }
 fn main() {
     let name = "alice"
     show(name)
     print(name)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckMutableBorrowArgumentDoesNotMove checks &mut preserves ownership.
+func TestCheckMutableBorrowArgumentDoesNotMove(t *testing.T) {
+	source := `struct User { name: []const u8 }
+fn show(user: &mut User) { print(user.name) }
+fn main() {
+    let user = User { name: "alice" }
+    show(user)
+    print(user.name)
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -90,14 +104,14 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 	}{
 		{
 			name: "return borrowed parameter",
-			source: `fn bad(s: borrow []const u8) -> []const u8 {
+			source: `fn bad(s: &[]const u8) -> []const u8 {
     return s
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
 		{
 			name: "store borrowed parameter in local",
-			source: `fn bad(s: borrow []const u8) {
+			source: `fn bad(s: &[]const u8) {
     let alias = s
     print(alias)
 }`,
@@ -106,7 +120,7 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 		{
 			name: "pass borrowed parameter to owner",
 			source: `fn take(s: []const u8) { print(s) }
-fn bad(s: borrow []const u8) {
+fn bad(s: &[]const u8) {
     take(s)
 }`,
 			want: "borrowed value `s` cannot escape",
@@ -114,7 +128,7 @@ fn bad(s: borrow []const u8) {
 		{
 			name: "borrow field",
 			source: `struct Bad {
-    value: borrow []const u8
+    value: &[]const u8
 }
 fn main() {}`,
 			want: "struct field `Bad.value` cannot store borrow",
@@ -126,7 +140,7 @@ fn main() {}`,
 // TestCheckRejectsMoveWhileBorrowed checks overlapping borrow and move in a call.
 func TestCheckRejectsMoveWhileBorrowed(t *testing.T) {
 	source := `struct Name { value: []const u8 }
-fn use(a: borrow Name, b: Name) {
+fn use(a: &Name, b: Name) {
     print(a.value)
     print(b.value)
 }
@@ -143,12 +157,62 @@ fn main() {
 	}
 }
 
+// TestCheckRejectsMutableBorrowConflicts checks & and &mut cannot overlap.
+func TestCheckRejectsMutableBorrowConflicts(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "shared then mutable",
+			source: `struct User { name: []const u8 }
+fn use(left: &User, right: &mut User) {
+    print(left.name)
+    print(right.name)
+}
+fn main() {
+    let user = User { name: "alice" }
+    use(user, user)
+}`,
+			want: "cannot be mutably borrowed while borrowed",
+		},
+		{
+			name: "mutable then shared",
+			source: `struct User { name: []const u8 }
+fn use(left: &mut User, right: &User) {
+    print(left.name)
+    print(right.name)
+}
+fn main() {
+    let user = User { name: "alice" }
+    use(user, user)
+}`,
+			want: "cannot be borrowed while mutably borrowed",
+		},
+		{
+			name: "double mutable",
+			source: `struct User { name: []const u8 }
+fn use(left: &mut User, right: &mut User) {
+    print(left.name)
+    print(right.name)
+}
+fn main() {
+    let user = User { name: "alice" }
+    use(user, user)
+}`,
+			want: "cannot be borrowed while mutably borrowed",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsBorrowedFieldMove checks field access cannot bypass borrow rules.
 func TestCheckRejectsBorrowedFieldMove(t *testing.T) {
 	source := `struct User { name: []const u8 }
 struct Box { user: User }
 fn take(user: User) { print(user.name) }
-fn bad(box: borrow Box) {
+fn bad(box: &Box) {
     take(box.user)
 }`
 	err := checkSource(source)
@@ -287,14 +351,14 @@ fn main() {
 		},
 		{
 			name: "borrow escape in unsafe function",
-			source: `unsafe fn bad(s: borrow []const u8) -> []const u8 {
+			source: `unsafe fn bad(s: &[]const u8) -> []const u8 {
     return s
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
 		{
 			name: "borrow escape in unsafe block",
-			source: `fn bad(s: borrow []const u8) {
+			source: `fn bad(s: &[]const u8) {
     unsafe {
         let alias = s
         print(alias)
@@ -305,7 +369,7 @@ fn main() {
 		{
 			name: "borrow field in unsafe-adjacent code",
 			source: `struct Bad {
-    value: borrow []const u8
+    value: &[]const u8
 }
 fn main() { unsafe { print(1) } }`,
 			want: "struct field `Bad.value` cannot store borrow",
@@ -329,7 +393,7 @@ fn main() {
 
 // TestCheckRejectsComptimeRuntimeBorrow checks runtime borrows cannot cross comptime.
 func TestCheckRejectsComptimeRuntimeBorrow(t *testing.T) {
-	source := `fn bad(s: borrow []const u8) -> []const u8 {
+	source := `fn bad(s: &[]const u8) -> []const u8 {
     let alias = comptime s
     return alias
 }`
