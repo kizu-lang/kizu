@@ -564,6 +564,8 @@ func (c *Checker) checkQualifiedBuiltin(
 		return c.checkLocalBuffer(args, env)
 	case "std.task.parallel_for":
 		return c.checkParallelFor(args, env)
+	case "std.task.parallel_map":
+		return c.checkParallelMap(args, env)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env)
 	case "std.atomic.Atomic":
@@ -1389,8 +1391,12 @@ func (c *Checker) checkPartitionMut(args []ast.Expression, env *scope) (string, 
 	if len(args) != 2 {
 		return "", true, fmt.Errorf("parallel error: `std.task.partition_mut` expects 2 args")
 	}
-	if _, err := c.readExpr(args[0], env); err != nil {
+	init, err := c.readExpr(args[0], env)
+	if err != nil {
 		return "", true, err
+	}
+	if !c.isCopyType(init) {
+		return "", true, fmt.Errorf("parallel error: partition init must be copy, got %s", init)
 	}
 	if _, err := c.readExpr(args[1], env); err != nil {
 		return "", true, err
@@ -1425,6 +1431,27 @@ func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, b
 	target, ok := args[3].(*ast.IdentExpr)
 	if !ok {
 		return "", true, fmt.Errorf("parallel error: `std.task.parallel_for` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target.Name)
+	}
+	return returnTypeName(fn), true, nil
+}
+
+// checkParallelMap validates ownership for disjoint partition output.
+func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, bool, error) {
+	if len(args) != 5 {
+		return "", true, fmt.Errorf("parallel error: `std.task.parallel_map` expects 5 args")
+	}
+	for idx := 0; idx < 4; idx++ {
+		if _, err := c.readExpr(args[idx], env); err != nil {
+			return "", true, err
+		}
+	}
+	target, ok := args[4].(*ast.IdentExpr)
+	if !ok {
+		return "", true, fmt.Errorf("parallel error: `std.task.parallel_map` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {

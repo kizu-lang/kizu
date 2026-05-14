@@ -639,9 +639,31 @@ func (c *Checker) checkAssignableTarget(
 		return c.checkAssignableField(target, env, unsafe)
 	case *ast.DerefExpr:
 		return c.checkAssignableDeref(target, env, unsafe)
+	case *ast.CallExpr:
+		return c.checkAssignableCall(target, env, unsafe)
 	default:
 		return "", fmt.Errorf("type error: invalid assignment target `%s`", expr.String())
 	}
+}
+
+// checkAssignableCall accepts assignment through trusted mutable slot accessors.
+func (c *Checker) checkAssignableCall(
+	expr *ast.CallExpr,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	field, ok := expr.Callee.(*ast.FieldExpr)
+	if !ok {
+		return "", fmt.Errorf("type error: invalid assignment target `%s`", expr.String())
+	}
+	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if receiver != "Partition" || field.Name != "at" {
+		return "", fmt.Errorf("type error: invalid assignment target `%s`", expr.String())
+	}
+	return c.checkPartitionMethod(field.Name, expr.Args, env, unsafe)
 }
 
 // checkAssignableIdent validates direct binding assignment.
@@ -1116,6 +1138,8 @@ func (c *Checker) checkQualifiedBuiltin(
 		return c.checkLocalBuffer(args, env, unsafe)
 	case "std.task.parallel_for":
 		return c.checkParallelFor(args, env, unsafe)
+	case "std.task.parallel_map":
+		return c.checkParallelMap(args, env, unsafe)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env, unsafe)
 	case "std.atomic.Atomic":
@@ -1700,8 +1724,12 @@ func (c *Checker) checkPartitionMut(
 	if len(args) != 2 {
 		return "", true, fmt.Errorf("type error: `std.task.partition_mut` expects 2 args")
 	}
-	if _, err := c.checkExpr(args[0], env, unsafe); err != nil {
+	init, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
 		return "", true, err
+	}
+	if init != typeI64 {
+		return "", true, fmt.Errorf("type error: partition init expects i64, got %s", init)
 	}
 	count, err := c.checkExpr(args[1], env, unsafe)
 	if err != nil {
@@ -1760,6 +1788,35 @@ func (c *Checker) checkParallelFor(
 	}
 	typ, err := c.parallelReturnType(fn)
 	return typ, true, err
+}
+
+// checkParallelMap validates disjoint partition output from a worker result.
+func (c *Checker) checkParallelMap(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 5 {
+		return "", true, fmt.Errorf("type error: `std.task.parallel_map` expects 5 args")
+	}
+	if err := c.checkIoAndPartitionRange(args, env, unsafe); err != nil {
+		return "", true, err
+	}
+	target, ok := args[4].(*ast.IdentExpr)
+	if !ok {
+		return "", true, fmt.Errorf("type error: `std.task.parallel_map` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", true, fmt.Errorf("type error: undefined function `%s`", target.Name)
+	}
+	if len(fn.params) != 1 || fn.params[0] != typeI64 {
+		return "", true, fmt.Errorf("type error: parallel map worker `%s` must accept i64", target.Name)
+	}
+	if fn.returnType != typeI64 {
+		return "", true, fmt.Errorf("type error: parallel map worker `%s` must return i64", target.Name)
+	}
+	return typeVoid, true, nil
 }
 
 // checkThreadScoped validates explicit low-level scoped thread boundaries.
@@ -2020,6 +2077,39 @@ func (c *Checker) checkIoAndRange(
 		}
 		if got != typeI64 {
 			return fmt.Errorf("type error: `%s` range expects i64, got %s", name, got)
+		}
+	}
+	return nil
+}
+
+// checkIoAndPartitionRange validates io, partition, start, and end arguments.
+func (c *Checker) checkIoAndPartitionRange(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	ioType, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if ioType != "Io" {
+		return fmt.Errorf("type error: `std.task.parallel_map` expects Io, got %s", ioType)
+	}
+	partitionType, err := c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if partitionType != "Partition" {
+		return fmt.Errorf("type error: `std.task.parallel_map` expects Partition, got %s",
+			partitionType)
+	}
+	for idx := 2; idx <= 3; idx++ {
+		got, err := c.checkExpr(args[idx], env, unsafe)
+		if err != nil {
+			return err
+		}
+		if got != typeI64 {
+			return fmt.Errorf("type error: `std.task.parallel_map` range expects i64, got %s", got)
 		}
 	}
 	return nil

@@ -55,6 +55,7 @@ v0.1 で目指す標準 API 境界:
 std.task.Group          structured task scope
 std.task.Queue          deterministic deferred task queue
 std.task.parallel_for   safe data parallelism
+std.task.parallel_map   disjoint partition output
 std.channel.Channel<T>  owned message passing
 ```
 
@@ -66,9 +67,11 @@ value を move し、`recv()` は owned value を返す。borrow と raw pointer
 では channel boundary を越えられない。
 
 `std.task.parallel_for` は data-parallel API とする。disjoint output は
-`std.task.partition_mut`、worker-local scratch は `std.task.LocalBuffer` のような
-trusted std API に閉じ込める。v0.1 interpreter は逐次実行でもよいが、API と checker
-rule は実並行 runtime でも維持できる形にする。
+`std.task.partition_mut(init: i64, count: i64)` と
+`std.task.parallel_map(io, partition, start, end, worker)` に閉じ込める。
+worker-local scratch は `std.task.LocalBuffer` のような trusted std API に閉じ込める。
+v0.1 interpreter は逐次実行でもよいが、API と checker rule は実並行 runtime でも
+維持できる形にする。
 
 `std.atomic.Atomic` は v0.1 では seq_cst-only とする。memory order を細かく選ぶ API は、
 safe structured API が固まった後に追加する。

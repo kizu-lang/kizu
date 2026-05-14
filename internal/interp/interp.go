@@ -249,9 +249,24 @@ func (i *Interpreter) assignTarget(target ast.Expression, value Value, env *Env)
 			return err
 		}
 		return assignRef(ref, value)
+	case *ast.CallExpr:
+		return i.assignCallTarget(expr, value, env)
 	default:
 		return fmt.Errorf("runtime error: invalid assignment target `%s`", target.String())
 	}
+}
+
+// assignCallTarget writes through an assignable method result such as partition.at.
+func (i *Interpreter) assignCallTarget(expr *ast.CallExpr, value Value, env *Env) error {
+	target, err := i.evalExpr(expr, env)
+	if err != nil {
+		return err
+	}
+	if target.kind != kindPartitionSlot {
+		return fmt.Errorf("runtime error: invalid assignment target `%s`", expr.String())
+	}
+	target.slot.partition.values[target.slot.index] = value
+	return nil
 }
 
 // assignField writes a struct field through a mutable binding or &mut dereference.
@@ -709,6 +724,9 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	case "std.task.parallel_for":
 		value, err := i.evalParallelFor(args, env)
 		return value, true, err
+	case "std.task.parallel_map":
+		value, err := i.evalParallelMap(args, env)
+		return value, true, err
 	case "std.thread.scoped":
 		value, err := i.evalThreadScoped(args, env)
 		return value, true, err
@@ -945,10 +963,14 @@ func (i *Interpreter) evalQueueDrain(queue Value, args []ast.Expression) (Value,
 	return voidValue(), nil
 }
 
-// evalPartitionMut constructs a v0.1 partition marker.
+// evalPartitionMut constructs v0.1 disjoint output slots.
 func (i *Interpreter) evalPartitionMut(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 2 {
 		return voidValue(), fmt.Errorf("runtime error: std.task.partition_mut expects 2 args")
+	}
+	init, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
 	}
 	count, err := i.evalExpr(args[1], env)
 	if err != nil {
@@ -957,7 +979,7 @@ func (i *Interpreter) evalPartitionMut(args []ast.Expression, env *Env) (Value, 
 	if count.kind != kindInt {
 		return voidValue(), fmt.Errorf("runtime error: partition count expects i64")
 	}
-	return partitionValue(count.i), nil
+	return partitionValue(init, count.i), nil
 }
 
 // evalLocalBuffer constructs worker-local scratch slots.
@@ -999,6 +1021,52 @@ func (i *Interpreter) evalParallelFor(args []ast.Expression, env *Env) (Value, e
 		if _, err := i.callFunction(target.Name, []Value{intValue(idx)}); err != nil {
 			return voidValue(), err
 		}
+	}
+	return voidValue(), nil
+}
+
+// evalParallelMap writes worker(i) into partition slot i in the sequential model.
+func (i *Interpreter) evalParallelMap(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 5 {
+		return voidValue(), fmt.Errorf("runtime error: std.task.parallel_map expects 5 args")
+	}
+	if _, err := i.evalExpr(args[0], env); err != nil {
+		return voidValue(), err
+	}
+	partition, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if partition.kind != kindPartition {
+		return voidValue(), fmt.Errorf("runtime error: parallel_map expects Partition")
+	}
+	start, end, err := i.evalRangeBounds(args[2], args[3], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	target, ok := args[4].(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: parallel_map expects function name")
+	}
+	return i.fillPartition(partition.partition, start, end, target.Name)
+}
+
+// fillPartition runs the worker over a bounds-checked slot range.
+func (i *Interpreter) fillPartition(
+	partition *Partition,
+	start int64,
+	end int64,
+	worker string,
+) (Value, error) {
+	if start < 0 || end > int64(len(partition.values)) {
+		return voidValue(), fmt.Errorf("runtime error: parallel_map range out of bounds")
+	}
+	for idx := start; idx < end; idx++ {
+		value, err := i.callFunction(worker, []Value{intValue(idx)})
+		if err != nil {
+			return voidValue(), err
+		}
+		partition.values[int(idx)] = value
 	}
 	return voidValue(), nil
 }
@@ -1154,10 +1222,10 @@ func (i *Interpreter) evalPartitionMethod(
 	if err != nil {
 		return voidValue(), err
 	}
-	if index.kind != kindInt || index.i < 0 || index.i >= partition.partition.count {
+	if index.kind != kindInt || index.i < 0 || int(index.i) >= len(partition.partition.values) {
 		return voidValue(), fmt.Errorf("runtime error: partition index out of bounds")
 	}
-	return intValue(index.i), nil
+	return partitionSlotValue(partition.partition, int(index.i)), nil
 }
 
 // evalLocalBufferMethod returns one worker-local scratch value by index.

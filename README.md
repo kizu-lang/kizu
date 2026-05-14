@@ -40,7 +40,7 @@ Implemented language-core pieces:
 - `Io` capability and `TaskGroup` structured task model
 - `std.channel` owned message passing
 - `std.task.Queue` deterministic deferred task queue
-- `std.task.parallel_for` safe data-parallel prototype
+- `std.task.parallel_for` and `std.task.parallel_map` safe data-parallel prototypes
 - scoped thread, seq_cst atomic, and mutex boundary prototypes
 - `contract`, `satisfy`, and `&Dyn<Contract>`
 

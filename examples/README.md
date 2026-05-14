@@ -52,7 +52,7 @@ go test ./...
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std.channel` |
 | deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
-| safe data parallelism | `parallel_for.kizu` | runs a structured `std.task.parallel_for` worker |
+| safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
 
 ## Negative Examples

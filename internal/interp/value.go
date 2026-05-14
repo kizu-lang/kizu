@@ -21,6 +21,7 @@ const (
 	kindQueue
 	kindChannel
 	kindPartition
+	kindPartitionSlot
 	kindLocalBuffer
 	kindAtomic
 	kindMutex
@@ -43,7 +44,8 @@ type Value struct {
 	task      *Task
 	queue     *Queue
 	channel   *Channel
-	partition Partition
+	partition *Partition
+	slot      PartitionSlot
 	localBuf  LocalBuffer
 	atomic    *Atomic
 	mutex     *Mutex
@@ -89,9 +91,15 @@ type Channel struct {
 	closed bool
 }
 
-// Partition stores a bounded index partition used by safe data-parallel examples.
+// Partition stores bounded disjoint output slots for safe data-parallel examples.
 type Partition struct {
-	count int64
+	values []Value
+}
+
+// PartitionSlot identifies one mutable slot inside a Partition.
+type PartitionSlot struct {
+	partition *Partition
+	index     int
 }
 
 // LocalBuffer stores per-worker scratch slots for the v0.1 sequential model.
@@ -184,6 +192,8 @@ func (v Value) capabilityString() string {
 		return "<channel>"
 	case kindPartition:
 		return "<partition>"
+	case kindPartitionSlot:
+		return v.slot.partition.values[v.slot.index].String()
 	case kindLocalBuffer:
 		return "<localbuffer>"
 	case kindAtomic:
@@ -272,9 +282,21 @@ func channelValue() Value {
 	return Value{kind: kindChannel, channel: &Channel{}}
 }
 
-// partitionValue returns a bounded partition marker.
-func partitionValue(count int64) Value {
-	return Value{kind: kindPartition, partition: Partition{count: count}}
+// partitionValue returns a bounded partition initialized with copied values.
+func partitionValue(init Value, count int64) Value {
+	if count < 0 {
+		count = 0
+	}
+	values := make([]Value, 0, count)
+	for idx := int64(0); idx < count; idx++ {
+		values = append(values, init)
+	}
+	return Value{kind: kindPartition, partition: &Partition{values: values}}
+}
+
+// partitionSlotValue returns a mutable view into one disjoint partition slot.
+func partitionSlotValue(partition *Partition, index int) Value {
+	return Value{kind: kindPartitionSlot, slot: PartitionSlot{partition: partition, index: index}}
 }
 
 // localBufferValue returns worker-local scratch slots.

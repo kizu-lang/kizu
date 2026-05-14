@@ -983,6 +983,7 @@ v0.1 で追加していく concurrency foundation:
 std.task.Group          structured task scope
 std.task.Queue          deterministic deferred task queue
 std.task.parallel_for   safe data parallelism
+std.task.parallel_map   disjoint partition output
 std.channel.Channel<T>  owned message passing
 ```
 
@@ -996,7 +997,9 @@ std.channel.Channel<T>  owned message passing
 `std.task.parallel_for` is safe data parallelism:
 
 * v0.1 workers are `fn(i: i64) -> void` or `fn(i: i64) -> !void`
-* `std.task.partition_mut` is the trusted boundary for disjoint output
+* `std.task.partition_mut(init: i64, count: i64)` creates disjoint `i64` output slots
+* `partition.at(i)` reads or writes one checked slot
+* `std.task.parallel_map(io, partition, start, end, worker)` writes `worker(i)` to slot `i`
 * `std.task.LocalBuffer` is the trusted boundary for worker-local scratch
 * first error propagation uses the existing `!void` / `try` model
 * the interpreter may execute workers sequentially while preserving the API contract
