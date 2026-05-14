@@ -101,8 +101,9 @@ type functionType struct {
 }
 
 type scope struct {
-	parent *scope
-	values map[string]Type
+	parent  *scope
+	values  map[string]Type
+	mutable map[string]bool
 }
 
 // New creates an empty type checker.
@@ -286,7 +287,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	}
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {
-		if err := env.define(param.Name, fn.params[idx]); err != nil {
+		if err := env.define(param.Name, fn.params[idx], false); err != nil {
 			return err
 		}
 	}
@@ -332,7 +333,7 @@ func (c *Checker) checkStmt(
 		if err != nil {
 			return false, err
 		}
-		return false, env.define(s.Name, typ)
+		return false, env.define(s.Name, typ, s.Mutable)
 	case *ast.AssignStmt:
 		return c.checkAssignStmt(s, env, unsafe)
 	case *ast.ReturnStmt:
@@ -360,6 +361,9 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope, unsafe bool)
 	want, ok := env.lookup(stmt.Name)
 	if !ok {
 		return false, fmt.Errorf("type error: undefined variable `%s`", stmt.Name)
+	}
+	if !env.isMutable(stmt.Name) {
+		return false, fmt.Errorf("type error: cannot assign to immutable binding `%s`", stmt.Name)
 	}
 	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
@@ -958,7 +962,7 @@ func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe bool) (T
 
 // newScope creates a lexical type scope.
 func newScope(parent *scope) *scope {
-	return &scope{parent: parent, values: map[string]Type{}}
+	return &scope{parent: parent, values: map[string]Type{}, mutable: map[string]bool{}}
 }
 
 // child creates a nested lexical type scope.
@@ -967,11 +971,12 @@ func (s *scope) child() *scope {
 }
 
 // define binds a local name to a type in the current scope.
-func (s *scope) define(name string, typ Type) error {
+func (s *scope) define(name string, typ Type, mutable bool) error {
 	if _, exists := s.values[name]; exists {
 		return fmt.Errorf("type error: duplicate variable `%s`", name)
 	}
 	s.values[name] = typ
+	s.mutable[name] = mutable
 	return nil
 }
 
@@ -983,6 +988,16 @@ func (s *scope) lookup(name string) (Type, bool) {
 		}
 	}
 	return "", false
+}
+
+// isMutable reports whether a resolved local name may be assigned.
+func (s *scope) isMutable(name string) bool {
+	for cur := s; cur != nil; cur = cur.parent {
+		if _, ok := cur.values[name]; ok {
+			return cur.mutable[name]
+		}
+	}
+	return false
 }
 
 // splitGenericType extracts base and argument from base<arg>.

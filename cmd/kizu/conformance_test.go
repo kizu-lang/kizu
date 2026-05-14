@@ -99,7 +99,7 @@ func ownershipNegativeCases() []conformanceErrorCase {
 		},
 		{
 			name:    "immutable assignment",
-			command: "run",
+			command: "check",
 			path:    "../../examples/negative/immutable_assignment.kizu",
 			want:    "cannot assign to immutable binding `x`",
 		},
