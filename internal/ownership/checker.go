@@ -36,8 +36,14 @@ type binding struct {
 	typeName         string
 	moved            bool
 	borrowedParam    bool
+	localBorrow      bool
+	borrowTarget     *binding
+	borrowField      string
+	mutBorrow        bool
 	activeBorrows    int
 	activeMutBorrows int
+	fieldBorrows     map[string]int
+	fieldMutBorrows  map[string]int
 	arenaID          int
 	handleArenaID    int
 	taskDone         bool
@@ -170,10 +176,12 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 
 // checkBlock validates statements in a lexical block.
 func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
-	for _, stmt := range block.Statements {
+	lastUses := blockLastUses(block)
+	for idx, stmt := range block.Statements {
 		if err := c.checkStmt(stmt, env); err != nil {
 			return err
 		}
+		env.releaseLastUseBorrows(idx, lastUses)
 	}
 	return env.checkPendingTasks()
 }
@@ -233,6 +241,9 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 
 // checkLetStmt moves the initializer into a new binding when needed.
 func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
+	if borrow, ok := borrowPrefix(stmt.Value); ok {
+		return c.checkBorrowLetStmt(stmt, borrow, env)
+	}
 	typeName, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
 		return err
@@ -243,6 +254,88 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	return nil
 }
 
+// checkBorrowLetStmt binds a local borrow and activates its owner until last use.
+func (c *Checker) checkBorrowLetStmt(
+	stmt *ast.LetStmt,
+	borrow *ast.PrefixExpr,
+	env *scope,
+) error {
+	target, field, err := c.borrowTarget(borrow.Right, env)
+	if err != nil {
+		return err
+	}
+	mutable := borrow.Operator == "&mut"
+	if err := checkBorrowConflictForField(target, field, mutable); err != nil {
+		return err
+	}
+	typeName, err := c.readExpr(borrow.Right, env)
+	if err != nil {
+		return err
+	}
+	c.activateBorrow(target, field, mutable)
+	value := c.newBinding(stmt.Name, typeName)
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.borrowTarget = target
+	value.borrowField = field
+	value.mutBorrow = mutable
+	env.define(value)
+	return nil
+}
+
+// borrowTarget resolves a v0.1 explicit borrow target.
+func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, string, error) {
+	switch target := expr.(type) {
+	case *ast.IdentExpr:
+		value, ok := env.lookup(target.Name)
+		if !ok {
+			return nil, "", fmt.Errorf("borrow error: undefined variable `%s`", target.Name)
+		}
+		if value.moved {
+			return nil, "", fmt.Errorf("borrow error: moved value `%s` was borrowed", target.Name)
+		}
+		return value, "", nil
+	case *ast.FieldExpr:
+		ident, ok := target.Receiver.(*ast.IdentExpr)
+		if !ok {
+			return nil, "", fmt.Errorf("borrow error: v0.1 field borrow only supports one direct field")
+		}
+		value, ok := env.lookup(ident.Name)
+		if !ok {
+			return nil, "", fmt.Errorf("borrow error: undefined variable `%s`", ident.Name)
+		}
+		if value.moved {
+			return nil, "", fmt.Errorf("borrow error: moved value `%s` was borrowed", ident.Name)
+		}
+		return value, target.Name, nil
+	default:
+		return nil, "", fmt.Errorf("borrow error: borrow target must be a local binding or direct field")
+	}
+}
+
+// activateBorrow records one active whole-value or field borrow on a target.
+func (c *Checker) activateBorrow(target *binding, field string, mutable bool) {
+	if field == "" {
+		if mutable {
+			target.activeMutBorrows++
+		} else {
+			target.activeBorrows++
+		}
+		return
+	}
+	if mutable {
+		if target.fieldMutBorrows == nil {
+			target.fieldMutBorrows = map[string]int{}
+		}
+		target.fieldMutBorrows[field]++
+		return
+	}
+	if target.fieldBorrows == nil {
+		target.fieldBorrows = map[string]int{}
+	}
+	target.fieldBorrows[field]++
+}
+
 // checkAssignStmt moves the assigned value into an existing binding.
 func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 	typeName, err := c.moveExpr(stmt.Value, env)
@@ -250,12 +343,19 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		return err
 	}
 	if target, ok := directAssignmentRoot(stmt.Target, env); ok {
+		if target.hasAnyBorrow() && !c.isCopyType(target.typeName) {
+			return fmt.Errorf("borrow error: value `%s` cannot be assigned while borrowed",
+				target.name)
+		}
 		target.typeName = typeName
 		target.moved = false
 		target.arenaID = 0
 		target.handleArenaID = 0
 		c.setArenaProvenance(target, stmt.Value, env)
 		return nil
+	}
+	if err := c.checkAssignmentBorrowConflict(stmt.Target, env); err != nil {
+		return err
 	}
 	if _, ok := assignmentRoot(stmt.Target, env); !ok {
 		_, err := c.readExpr(stmt.Target, env)
@@ -453,7 +553,7 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	if value.borrowedParam {
 		return "", fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
-	if (value.activeBorrows > 0 || value.activeMutBorrows > 0) && !c.isCopyType(value.typeName) {
+	if value.hasAnyBorrow() && !c.isCopyType(value.typeName) {
 		return "", fmt.Errorf("borrow error: value `%s` cannot be moved while borrowed", ident.Name)
 	}
 	if !c.isCopyType(value.typeName) {
@@ -778,6 +878,16 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	if err != nil {
 		return "", err
 	}
+	if root, field, ok := directFieldRoot(expr, env); ok {
+		if root.activeMutBorrows > 0 {
+			return "", fmt.Errorf("borrow error: value `%s` cannot be read while mutably borrowed",
+				root.name)
+		}
+		if root.fieldMutBorrows[field] > 0 {
+			return "", fmt.Errorf("borrow error: field `%s.%s` cannot be read while mutably borrowed",
+				root.name, field)
+		}
+	}
 	if fields := c.structs[receiverType]; fields != nil {
 		if typ, ok := fields[expr.Name]; ok {
 			return typ, nil
@@ -835,6 +945,29 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 		)
 	}
 	return "", fmt.Errorf("move error: field `%s` cannot be moved out of aggregate", expr.String())
+}
+
+// checkAssignmentBorrowConflict rejects writes that overlap active borrows.
+func (c *Checker) checkAssignmentBorrowConflict(expr ast.Expression, env *scope) error {
+	root, field, ok := directFieldRoot(expr, env)
+	if !ok {
+		return nil
+	}
+	if field == "" {
+		if root.hasAnyBorrow() && !c.isCopyType(root.typeName) {
+			return fmt.Errorf("borrow error: value `%s` cannot be assigned while borrowed", root.name)
+		}
+		return nil
+	}
+	if root.activeBorrows > 0 || root.activeMutBorrows > 0 {
+		return fmt.Errorf("borrow error: field `%s.%s` cannot be assigned while value is borrowed",
+			root.name, field)
+	}
+	if root.fieldBorrows[field] > 0 || root.fieldMutBorrows[field] > 0 {
+		return fmt.Errorf("borrow error: field `%s.%s` cannot be assigned while borrowed",
+			root.name, field)
+	}
+	return nil
 }
 
 // borrowedFieldRoot returns the borrowed identifier at the root of a field chain.
@@ -1327,15 +1460,56 @@ func (c *Checker) activateBorrowArgs(
 
 // checkBorrowConflict rejects aliasing that would overlap a mutable borrow.
 func checkBorrowConflict(value *binding, mutable bool) error {
+	return checkBorrowConflictForField(value, "", mutable)
+}
+
+// checkBorrowConflictForField rejects overlapping whole-value or field borrows.
+func checkBorrowConflictForField(value *binding, field string, mutable bool) error {
+	if field != "" {
+		if value.activeMutBorrows > 0 {
+			return fmt.Errorf(
+				"borrow error: value `%s` cannot be borrowed while mutably borrowed",
+				value.name,
+			)
+		}
+		if mutable && value.activeBorrows > 0 {
+			return fmt.Errorf(
+				"borrow error: field `%s.%s` cannot be mutably borrowed while value is borrowed",
+				value.name,
+				field,
+			)
+		}
+		if mutable && value.fieldBorrows[field] > 0 {
+			return fmt.Errorf(
+				"borrow error: field `%s.%s` cannot be mutably borrowed while borrowed",
+				value.name,
+				field,
+			)
+		}
+		if value.fieldMutBorrows[field] > 0 {
+			return fmt.Errorf(
+				"borrow error: field `%s.%s` cannot be borrowed while mutably borrowed",
+				value.name,
+				field,
+			)
+		}
+		return nil
+	}
 	if mutable && value.activeBorrows > 0 {
 		return fmt.Errorf(
 			"borrow error: value `%s` cannot be mutably borrowed while borrowed",
 			value.name,
 		)
 	}
-	if value.activeMutBorrows > 0 {
+	if value.activeMutBorrows > 0 || len(value.fieldMutBorrows) > 0 {
 		return fmt.Errorf(
 			"borrow error: value `%s` cannot be borrowed while mutably borrowed",
+			value.name,
+		)
+	}
+	if mutable && len(value.fieldBorrows) > 0 {
+		return fmt.Errorf(
+			"borrow error: value `%s` cannot be mutably borrowed while field is borrowed",
 			value.name,
 		)
 	}
@@ -1365,6 +1539,35 @@ func releaseBorrows(values []*binding) {
 			value.activeMutBorrows--
 		} else {
 			value.activeBorrows--
+		}
+	}
+}
+
+// releaseBorrow clears one local borrow from its owner.
+func releaseBorrow(value *binding) {
+	target := value.borrowTarget
+	if target == nil {
+		return
+	}
+	if value.borrowField == "" {
+		if value.mutBorrow && target.activeMutBorrows > 0 {
+			target.activeMutBorrows--
+		} else if target.activeBorrows > 0 {
+			target.activeBorrows--
+		}
+		return
+	}
+	if value.mutBorrow && target.fieldMutBorrows[value.borrowField] > 0 {
+		target.fieldMutBorrows[value.borrowField]--
+		if target.fieldMutBorrows[value.borrowField] == 0 {
+			delete(target.fieldMutBorrows, value.borrowField)
+		}
+		return
+	}
+	if target.fieldBorrows[value.borrowField] > 0 {
+		target.fieldBorrows[value.borrowField]--
+		if target.fieldBorrows[value.borrowField] == 0 {
+			delete(target.fieldBorrows, value.borrowField)
 		}
 	}
 }
@@ -1757,6 +1960,179 @@ func (s *scope) checkPendingTasks() error {
 		}
 	}
 	return nil
+}
+
+// releaseLastUseBorrows ends local borrows whose binding is no longer used.
+func (s *scope) releaseLastUseBorrows(stmtIndex int, lastUses map[string]int) {
+	for name, value := range s.values {
+		if !value.localBorrow || value.borrowTarget == nil {
+			continue
+		}
+		last, ok := lastUses[name]
+		if ok && last > stmtIndex {
+			continue
+		}
+		releaseBorrow(value)
+		value.borrowTarget = nil
+	}
+}
+
+// hasAnyBorrow reports whether a whole value or any direct field is borrowed.
+func (b *binding) hasAnyBorrow() bool {
+	return b.activeBorrows > 0 || b.activeMutBorrows > 0 ||
+		len(b.fieldBorrows) > 0 || len(b.fieldMutBorrows) > 0
+}
+
+// directFieldRoot returns a direct local field assignment or read target.
+func directFieldRoot(expr ast.Expression, env *scope) (*binding, string, bool) {
+	switch target := expr.(type) {
+	case *ast.IdentExpr:
+		value, ok := env.lookup(target.Name)
+		return value, "", ok
+	case *ast.FieldExpr:
+		ident, ok := target.Receiver.(*ast.IdentExpr)
+		if !ok {
+			return nil, "", false
+		}
+		value, exists := env.lookup(ident.Name)
+		return value, target.Name, exists
+	default:
+		return nil, "", false
+	}
+}
+
+// blockLastUses returns the last statement index where each identifier appears.
+func blockLastUses(block *ast.BlockStmt) map[string]int {
+	lastUses := map[string]int{}
+	for idx, stmt := range block.Statements {
+		for _, name := range loopIdentUses(stmt) {
+			lastUses[name] = len(block.Statements) + 1
+		}
+		for _, name := range stmtIdentUses(stmt) {
+			if lastUses[name] > len(block.Statements) {
+				continue
+			}
+			lastUses[name] = idx
+		}
+	}
+	return lastUses
+}
+
+// loopIdentUses returns identifiers used inside loop bodies.
+func loopIdentUses(stmt ast.Statement) []string {
+	switch s := stmt.(type) {
+	case *ast.WhileStmt:
+		return blockIdentUses(s.Body)
+	case *ast.ForStmt:
+		return blockIdentUses(s.Body)
+	default:
+		return nil
+	}
+}
+
+// stmtIdentUses collects identifier reads from one statement.
+func stmtIdentUses(stmt ast.Statement) []string {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		return exprIdentUses(s.Value)
+	case *ast.AssignStmt:
+		uses := exprIdentUses(s.Value)
+		return append(uses, exprIdentUses(s.Target)...)
+	case *ast.ReturnStmt:
+		return exprIdentUses(s.Value)
+	case *ast.ExprStmt:
+		return exprIdentUses(s.Expr)
+	case *ast.IfStmt:
+		uses := exprIdentUses(s.Condition)
+		uses = append(uses, blockIdentUses(s.Consequence)...)
+		uses = append(uses, blockIdentUses(s.Alternative)...)
+		return uses
+	case *ast.WhileStmt:
+		uses := exprIdentUses(s.Condition)
+		return append(uses, blockIdentUses(s.Body)...)
+	case *ast.ForStmt:
+		uses := exprIdentUses(s.Start)
+		uses = append(uses, exprIdentUses(s.End)...)
+		return append(uses, blockIdentUses(s.Body)...)
+	case *ast.MatchStmt:
+		uses := exprIdentUses(s.Value)
+		for _, arm := range s.Arms {
+			uses = append(uses, stmtIdentUses(arm.Body)...)
+		}
+		return uses
+	case *ast.UnsafeStmt:
+		return blockIdentUses(s.Body)
+	case *ast.ComptimeIfStmt:
+		uses := exprIdentUses(s.Condition)
+		uses = append(uses, blockIdentUses(s.Consequence)...)
+		uses = append(uses, blockIdentUses(s.Alternative)...)
+		return uses
+	default:
+		return nil
+	}
+}
+
+// blockIdentUses collects identifier reads inside a nested block.
+func blockIdentUses(block *ast.BlockStmt) []string {
+	if block == nil {
+		return nil
+	}
+	uses := []string{}
+	for _, stmt := range block.Statements {
+		uses = append(uses, stmtIdentUses(stmt)...)
+	}
+	return uses
+}
+
+// exprIdentUses collects identifier reads from an expression.
+func exprIdentUses(expr ast.Expression) []string {
+	switch e := expr.(type) {
+	case nil:
+		return nil
+	case *ast.IdentExpr:
+		return []string{e.Name}
+	case *ast.PrefixExpr:
+		return exprIdentUses(e.Right)
+	case *ast.BinaryExpr:
+		return append(exprIdentUses(e.Left), exprIdentUses(e.Right)...)
+	case *ast.CallExpr:
+		uses := exprIdentUses(e.Callee)
+		for _, arg := range e.Args {
+			uses = append(uses, exprIdentUses(arg)...)
+		}
+		return uses
+	case *ast.CastExpr:
+		return exprIdentUses(e.Value)
+	case *ast.TryExpr:
+		return exprIdentUses(e.Value)
+	case *ast.StructLiteralExpr:
+		uses := []string{}
+		for _, field := range e.Fields {
+			uses = append(uses, exprIdentUses(field.Value)...)
+		}
+		return uses
+	case *ast.FieldExpr:
+		return exprIdentUses(e.Receiver)
+	case *ast.DerefExpr:
+		return exprIdentUses(e.Receiver)
+	case *ast.IfExpr:
+		uses := exprIdentUses(e.Condition)
+		uses = append(uses, blockIdentUses(e.Consequence)...)
+		return append(uses, blockIdentUses(e.Alternative)...)
+	case *ast.ComptimeExpr:
+		return exprIdentUses(e.Expr)
+	default:
+		return nil
+	}
+}
+
+// borrowPrefix reports whether an expression is &T or &mut T syntax.
+func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
+	prefix, ok := expr.(*ast.PrefixExpr)
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&mut") {
+		return nil, false
+	}
+	return prefix, true
 }
 
 // clone copies a scope chain so branch checks do not interfere with each other.

@@ -95,7 +95,7 @@ contract satisfaction checks
 
 static / policy 機能は、v0.1 interpreter 上で完全な低レベル実行 semantics を約束しません。
 
-### 0.2 v0.1 に含めないもの
+### 0.2 v0.1 の範囲外
 
 次は v0.1 の完了条件に含めません。
 
@@ -640,25 +640,58 @@ mutable borrow には `&mut T` を使います。
 
 ```kizu
 fn update(user: &mut User) -> void {
-    user.*.name = "bob"
+    user.*.name = "bob";
 }
 ```
 
 borrow のルール:
 
 * borrow は一時的
+* local borrow binding は straight-line code では最後に使った場所で終了する
+* borrow argument は呼び出し statement の終了で終了する
 * borrow は struct に保存できない
 * borrow は関数から返せない
 * borrow 中の値は move できない
 * `&T` と `&mut T` は重複できない
 * `&mut T` 同士は同じ値に対して重複できない
 * `&mut T` argument は mutable local binding に限定する
+* v0.1 は `&user.name` のような one-level direct field borrow を許可する
+* field borrow 中でも disjoint field assignment は許可する
+* field borrow 中の owner 全体の move と同一 field assignment は禁止する
+* v0.1 は `&user.profile.name` と `&items[0]` のような nested / indexed borrow を拒否する
 
 明示 dereference は Zig に合わせて postfix の `.*` を使います。
 
 ```kizu
 fn rename(user: &mut User) -> void {
-    user.*.name = "bob"
+    user.*.name = "bob";
+}
+```
+
+local borrow binding:
+
+```kizu
+fn main() -> void {
+    let name = "alice";
+    let r = &name;
+    print(r.*);
+    print(name); // ok: r は最後の使用後に終了している
+}
+```
+
+field borrow:
+
+```kizu
+struct User {
+    name: []const u8;
+    age: i64;
+}
+
+fn main() -> void {
+    var user = User { name: "alice", age: 30 };
+    let name = &user.name;
+    user.age = 31; // ok: name と age は disjoint field
+    print(name.*);
 }
 ```
 

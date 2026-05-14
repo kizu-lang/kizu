@@ -67,6 +67,8 @@ policy.
 - `&mut T` is a mutable local borrow.
 - Borrowing does not move ownership.
 - A borrowed non-copy value cannot be moved while the borrow is active.
+- A local borrow binding is active until its last use in straight-line code.
+- A borrow argument is active only for the call statement.
 - A borrowed parameter cannot be returned as an owned value.
 - A borrowed parameter cannot be stored in a local owned binding.
 - A borrowed parameter cannot be passed to an owning parameter.
@@ -76,6 +78,12 @@ policy.
 - `&T` cannot be used for mutation.
 - `&mut T` requires a mutable local binding.
 - `&T` and `&mut T` cannot overlap in a way that creates mutable aliasing.
+- v0.1 supports one-level direct field borrow such as `&user.name`.
+- A field borrow allows disjoint field assignment, such as assigning `user.age`
+  while `user.name` is borrowed.
+- A field borrow blocks owner moves and conflicting access to the same field.
+- v0.1 rejects nested field borrow and indexed borrow, such as
+  `&user.profile.name` and `&items[0]`.
 
 ### Arena and Handle
 
@@ -99,6 +107,15 @@ policy.
 - `unsafe` does not permit moved values, borrow escape, or safe-borrow lifetime
   extension.
 
+| Operation | Safe Kizu | `unsafe` Kizu |
+| --- | --- | --- |
+| call `extern "c" fn` | rejected | allowed, caller owns ABI and memory obligation |
+| raw pointer read/write | rejected | allowed by explicit operation policy |
+| nullable raw pointer read as non-null | rejected | rejected until an explicit conversion policy exists |
+| use moved safe value | rejected | rejected |
+| return or store safe borrow | rejected | rejected |
+| extend safe borrow lifetime | rejected | rejected |
+
 ### Concurrency Boundaries
 
 - Tasks must be awaited or canceled.
@@ -108,10 +125,16 @@ policy.
 - Sending a non-copy value through a channel moves it.
 - Safe Kizu does not allow implicit shared mutable state across tasks.
 - Data parallel mutation is restricted to trusted structured APIs.
-- `std.task.partition_mut(init, count)` creates checked disjoint output slots.
+- `std::task::partition_mut(init, count)` creates checked disjoint output slots.
 - `partition.at(i)` bounds-checks slot access.
-- `std.task.parallel_map(io, partition, start, end, worker)` writes only into the
+- `std::task::parallel_map(io, partition, start, end, worker)` writes only into the
   checked slot range.
+
+These language runtime boundaries are separate from GitHub Actions or CI event
+boundaries. For example, `pull_request_target` is a repository automation
+security concern, while Kizu task, channel, queue, and thread boundaries are
+language-level ownership boundaries. Both must be treated conservatively, but
+they are enforced by different systems.
 
 ### Comptime
 
@@ -156,8 +179,9 @@ memory-safety invariants to representative examples.
 | branch and loop moves remain visible after control flow | `examples/if_expression.kizu` | `examples/negative/if_branch_move.kizu`, `examples/negative/if_branch_partial_move.kizu`, `examples/negative/if_expression_branch_move.kizu`, `examples/negative/while_body_move.kizu` |
 | copy values can be reused after owner-like calls | `examples/copy_after_move.kizu` | |
 | assignment moves non-copy values | `examples/variables.kizu` | `examples/negative/assignment_move.kizu` |
-| borrow does not move owner | `examples/borrow.kizu` | `examples/negative/borrow_escape.kizu` |
-| non-copy value cannot move while borrowed | | `examples/negative/move_while_borrowed.kizu` |
+| borrow does not move owner | `examples/borrow.kizu`, `examples/last_use_borrow.kizu` | `examples/negative/borrow_escape.kizu` |
+| non-copy value cannot move while borrowed | | `examples/negative/move_while_borrowed.kizu`, `examples/negative/borrow_before_last_use_move.kizu`, `examples/negative/borrow_loop_last_use.kizu` |
+| one-level field borrow permits disjoint fields | `examples/field_borrow.kizu` | `examples/negative/field_borrow_same_field_assignment.kizu`, `examples/negative/field_borrow_owner_move.kizu`, `examples/negative/nested_field_borrow.kizu` |
 | borrow cannot be stored | | `examples/negative/borrow_field.kizu` |
 | copy value can be copied through borrow deref | `examples/borrow_deref_copy.kizu` | |
 | non-copy value cannot move out of borrow deref | `examples/borrow_deref_copy.kizu` | `examples/negative/borrow_deref_move.kizu`, `examples/negative/mut_borrow_deref_move.kizu` |

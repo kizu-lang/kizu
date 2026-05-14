@@ -38,6 +38,8 @@ go test ./...
 | `struct` and field access | `struct.kizu` | prints `alice`, `30` |
 | mutable struct field assignment | `field_assignment.kizu` | updates fields on a `var` binding |
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
+| last-use borrow | `last_use_borrow.kizu` | local borrow ends at its final use |
+| one-level field borrow | `field_borrow.kizu` | updates a disjoint field while a field is borrowed |
 | copy through borrow dereference | `borrow_deref_copy.kizu` | copies an `i64` through `.*` |
 | copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
 | mutable borrow parameter | `mutable_borrow.kizu` | `&mut` updates through explicit `.*` dereference |
@@ -75,6 +77,11 @@ go test ./...
 | loop body moves are visible after the loop | `negative/while_body_move.kizu` | `moved value` |
 | statement semicolons are required | `negative/missing_semicolon.kizu` | `expected ;` |
 | borrowed non-copy values cannot be moved | `negative/move_while_borrowed.kizu` | `cannot be moved while borrowed` |
+| local borrow blocks moves until last use | `negative/borrow_before_last_use_move.kizu` | `cannot be moved while borrowed` |
+| loop body use does not end an outer borrow | `negative/borrow_loop_last_use.kizu` | `cannot be moved while borrowed` |
+| field borrow blocks same-field assignment | `negative/field_borrow_same_field_assignment.kizu` | `cannot be assigned while borrowed` |
+| field borrow blocks owner move | `negative/field_borrow_owner_move.kizu` | `cannot be moved while borrowed` |
+| v0.1 rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
 | non-copy values cannot move out of borrow deref | `negative/borrow_deref_move.kizu` | `cannot be moved out of borrow` |
