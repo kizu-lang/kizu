@@ -121,7 +121,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 
 - `kizu parse <file>` parses a `.kizu` source file.
 - `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
-- `kizu fmt <file>` prints stable formatted source.
+- `kizu fmt <file>` prints the current compact AST formatter output.
 - `kizu run <file>` executes the file with the interpreter.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
@@ -130,6 +130,8 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 - `kizu cache prune` clears local build cache entries.
 - `kizu why-rebuild <file>` explains cache hit or rebuild reasons.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
+
+`kizu test` and `kizu lint` are not implemented in v0.1.
 
 ## Project Documents
 

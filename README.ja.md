@@ -19,7 +19,10 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 
 Kizu は Go 製の初期プロトタイプです。
 
-実装済み phase:
+v0.1 の対象は interpreter-first の language core です。
+v0.1 の正は Go 製 interpreter と `kizu check` です。
+
+実装済み language core:
 
 - lexer, parser, AST, CLI
 - interpreter
@@ -27,14 +30,8 @@ Kizu は Go 製の初期プロトタイプです。
 - move checker
 - local borrow checker
 - `arena<T>` / `handle<T>`
-- typed SSA IR
-- LLVM IR text backend
-- 上限付きローカルビルドキャッシュと再ビルド理由表示
-- WASI-compatible WebAssembly text backend
 - unsafe 境界と C ABI 宣言の検査
 - 限定的な `comptime` expression / parameter / branch selection
-- extern function 宣言向けの限定的な C header import
-- opt-in の IR optimization pipeline
 - 低レベル型変換向けの明示 `cast<T>(value)`
 - 最小の `result<T>` と `try` error propagation
 - Zig/C-style tag `enum` と simple enum `match`
@@ -43,6 +40,18 @@ Kizu は Go 製の初期プロトタイプです。
 
 - `Io` capability と `TaskGroup` structured task model
 - `contract`、`satisfy`、`borrow Dyn<Contract>`
+
+実験的な compiler / tooling:
+
+- typed SSA IR
+- LLVM IR text backend
+- 上限付きローカルビルドキャッシュと再ビルド理由表示
+- WASI-compatible WebAssembly text backend
+- extern function 宣言向けの限定的な C header import
+- opt-in の IR optimization pipeline
+
+これらは将来の compiler work の土台ですが、まだ v0.1 completion criteria ではありません。
+LLVM と WASM は interpreter より小さい subset だけを扱います。
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -110,7 +119,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 
 - `kizu parse <file>` は `.kizu` source file を parse します。
 - `kizu check <file>` は type / ownership / move / borrow / arena check を実行します。
-- `kizu fmt <file>` は安定した format 済み source を出力します。
+- `kizu fmt <file>` は現在の compact AST formatter output を出力します。
 - `kizu run <file>` は interpreter で実行します。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
@@ -119,6 +128,8 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
+
+`kizu test` と `kizu lint` は v0.1 では未実装です。
 
 ## プロジェクト文書
 

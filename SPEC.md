@@ -869,18 +869,30 @@ owned dynamic object、generic bounds、最適化された vtable layout は後�
 
 Kizu の toolchain は、キャッシュが無制限に肥大化しない設計にします。
 
-将来のコマンド:
+v0.1 の正として扱うコマンド:
+
+```text
+kizu parse
+kizu check
+kizu run
+kizu fmt
+```
+
+`kizu fmt` は現時点では compact AST formatter output です。
+完全な source-preserving formatter ではありません。
+
+experimental tooling:
 
 ```text
 kizu build
-kizu run
-kizu test
-kizu fmt
-kizu lint
+kizu ir
 kizu cache status
 kizu cache prune
 kizu why-rebuild
+kizu import-c-header
 ```
+
+`kizu test` と `kizu lint` は v0.1 では未実装です。
 
 ## 18. v0.1 実装構成
 
@@ -978,18 +990,24 @@ borrow escape、borrow 中の move、mutable borrow conflict を検査します�
 ### Milestone 8: typed SSA IR
 
 checked AST から typed SSA IR に lowering します。
+これは v0.1 の正ではなく experimental tooling です。
 
 ### Milestone 9: LLVM IR backend
 
 typed SSA IR から LLVM IR を生成します。
+LLVM lowering は interpreter より小さい subset だけを扱います。
+これは v0.1 の正ではありません。
 
 ### Milestone 10: build cache / why-rebuild
 
 キャッシュ状態、キャッシュ削除、再ビルド理由を確認できるようにします。
+build cache は compiler work のための experimental tooling です。
 
 ### Milestone 11: WASM / WASI backend
 
 typed SSA IR から WASM を生成し、WASI で実行できるようにします。
+WASM target は interpreter より小さい subset だけを扱います。
+これは v0.1 の正ではありません。
 
 ### Milestone 12: unsafe / C ABI
 
@@ -1003,6 +1021,7 @@ macro / proc macro / AST rewrite は実装しません。
 ### Milestone 14: C header import
 
 C header から Kizu の extern 宣言を生成できるようにします。
+これは v0.1 の正ではなく experimental tooling です。
 
 ## 20. 最初に通す examples
 
