@@ -37,6 +37,12 @@ Kizu は Go 製の初期プロトタイプです。
 - opt-in の IR optimization pipeline
 - 低レベル型変換向けの明示 `cast<T>(value)`
 - 最小の `result<T>` と `try` error propagation
+- Zig/C-style tag `enum` と simple enum `match`
+
+追加の v0.1 対象として、次は GitHub Issues で追跡しています。
+
+- `Io` capability と `TaskGroup` structured task model
+- `contract`、`satisfy`、`borrow Dyn<Contract>`
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -53,6 +59,9 @@ interpreter で実行します。
 ```sh
 go run ./cmd/kizu run examples/hello.kizu
 ```
+
+機能ごとの実行例と失敗すべき安全性ルールは
+[v0.1 examples catalog](examples/README.md) にまとめています。
 
 ## 開発環境
 
@@ -114,6 +123,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 ## プロジェクト文書
 
 - [SPEC.md](SPEC.md): 言語仕様
+- [examples](examples/README.md): v0.1 examples catalog
 - [PHASES.md](PHASES.md): 実装 phase 管理
 - [docs/adr](docs/adr): Architecture Decision Record
 - [docs/perf.md](docs/perf.md): build/cache performance policy

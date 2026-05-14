@@ -35,10 +35,10 @@ Implemented language-core pieces:
 - minimal `result<T>` and `try` error propagation
 - unsafe boundary and C ABI declaration checks
 - explicit `cast<T>(value)` checker policy
+- Zig/C-style tag `enum` and simple enum `match`
 
 Additional v0.1 target pieces tracked in GitHub Issues:
 
-- Zig/C-style tag `enum` and simple enum `match`
 - `Io` capability and `TaskGroup` structured task model
 - `contract`, `satisfy`, and `borrow Dyn<Contract>`
 
@@ -70,6 +70,9 @@ Run it with the interpreter:
 ```sh
 go run ./cmd/kizu run examples/hello.kizu
 ```
+
+See the [v0.1 examples catalog](examples/README.md) for runnable feature
+examples and negative safety-rule examples.
 
 ## Development Environment
 
@@ -131,6 +134,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 ## Project Documents
 
 - [SPEC.md](SPEC.md): language specification
+- [examples](examples/README.md): v0.1 examples catalog
 - [PHASES.md](PHASES.md): historical phase index
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy

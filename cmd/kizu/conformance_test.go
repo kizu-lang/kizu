@@ -1,9 +1,7 @@
 package main
 
 import (
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -17,7 +15,6 @@ type conformanceRunCase struct {
 type conformanceErrorCase struct {
 	name    string
 	command string
-	source  string
 	path    string
 	want    string
 }
@@ -60,11 +57,7 @@ func TestV01NegativeExamples(t *testing.T) {
 	cases := append(ownershipNegativeCases(), staticNegativeCases()...)
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			path := tt.path
-			if path == "" {
-				path = writeKizuSource(t, tt.source)
-			}
-			out, err := runKizu(tt.command, path)
+			out, err := runKizu(tt.command, tt.path)
 			if err == nil {
 				t.Fatalf("expected command to fail\n%s", out)
 			}
@@ -81,28 +74,25 @@ func ownershipNegativeCases() []conformanceErrorCase {
 		{
 			name:    "moved value",
 			command: "check",
-			path:    "../../examples/move_error.kizu",
+			path:    "../../examples/negative/moved_value.kizu",
 			want:    "moved value `name` was used",
 		},
 		{
 			name:    "borrow escape",
 			command: "check",
-			source:  "fn bad(s: borrow string) -> string { return s }",
+			path:    "../../examples/negative/borrow_escape.kizu",
 			want:    "borrowed value `s` cannot escape",
 		},
 		{
 			name:    "borrow field",
 			command: "check",
-			source: `struct Bad {
-    value: borrow string
-}
-fn main() {}`,
-			want: "struct field `Bad.value` cannot store borrow",
+			path:    "../../examples/negative/borrow_field.kizu",
+			want:    "struct field `Bad.value` cannot store borrow",
 		},
 		{
 			name:    "immutable assignment",
 			command: "run",
-			source:  "fn main() { let x = 1 x = 2 }",
+			path:    "../../examples/negative/immutable_assignment.kizu",
 			want:    "cannot assign to immutable binding `x`",
 		},
 	}
@@ -114,69 +104,34 @@ func staticNegativeCases() []conformanceErrorCase {
 		{
 			name:    "invalid field",
 			command: "check",
-			source: `struct User {
-    name: string
-}
-fn main() {
-    let user = User { name: "alice" }
-    print(user.age)
-}`,
-			want: "unknown field `User.age`",
+			path:    "../../examples/negative/invalid_field.kizu",
+			want:    "unknown field `User.age`",
 		},
 		{
 			name:    "invalid try",
 			command: "check",
-			source: `fn parse() -> result<int> { return ok(1) }
-fn main() {
-    let x = try parse()
-    print(x)
-}`,
-			want: "try requires function to return result<T>",
+			path:    "../../examples/negative/invalid_try.kizu",
+			want:    "try requires function to return result<T>",
 		},
 		{
 			name:    "invalid cast",
 			command: "check",
-			source: `fn main() {
-    let x = cast<i32>("no")
-    print(x)
-}`,
-			want: "cannot cast string to i32",
+			path:    "../../examples/negative/invalid_cast.kizu",
+			want:    "cannot cast string to i32",
 		},
 		{
 			name:    "unsafe operation",
 			command: "check",
-			source: `extern "c" fn source() -> u8
-fn main() {
-    print(source())
-}`,
-			want: "call to `source` requires unsafe block",
+			path:    "../../examples/negative/unsafe_call.kizu",
+			want:    "call to `source` requires unsafe block",
 		},
 		{
 			name:    "non exhaustive match",
 			command: "check",
-			source: `enum Color {
-    Red
-    Green
-}
-fn main() {
-    let color = Color.Red
-    match color {
-        Red => print("red")
-    }
-}`,
-			want: "match on `Color` is not exhaustive",
+			path:    "../../examples/negative/match_non_exhaustive.kizu",
+			want:    "match on `Color` is not exhaustive",
 		},
 	}
-}
-
-// writeKizuSource writes a temporary Kizu source file.
-func writeKizuSource(t *testing.T, source string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "main.kizu")
-	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 // runKizuOK runs the Kizu CLI and fails the test on errors.
