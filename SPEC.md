@@ -56,6 +56,8 @@ field access
 simple enum
 enum value access
 match over simple enum values
+tagged union
+match payload binding
 function call
 borrow parameter
 move semantics
@@ -90,7 +92,6 @@ static / policy 機能は、v0.1 interpreter 上で完全な低レベル実行 s
 次は v0.1 の完了条件に含めません。
 
 ```text
-payload enum
 full generics
 type alias
 complete fixed-width integer runtime semantics
@@ -290,9 +291,47 @@ let color = Color.Red
 ```
 
 payload を持つ sum type は `enum` では扱いません。
-将来必要になった場合は、`union` または `tagged union` として別機能で設計します。
+`union` として別機能で扱います。
 
-### 6.6 if
+### 6.6 union
+
+Kizu の `union` は payload を持てる tagged union です。
+tag だけの値が必要な場合は `enum` を使います。
+
+```kizu
+union Shape {
+    Point
+    Circle(i64)
+    Label(string)
+}
+```
+
+payload を持つ variant は `Shape.Circle(10)` のように構築します。
+payload を持たない variant は `Shape.Point` のように参照します。
+
+```kizu
+let a = Shape.Circle(10)
+let b = Shape.Point
+```
+
+`match` では payload binding を書けます。
+
+```kizu
+match a {
+    Point => print("point")
+    Circle(radius) => print(radius)
+    Label(text) => print(text)
+}
+```
+
+v0.1 の `union` は次に限定します。
+
+* variant ごとの payload は0個または1個
+* pattern guard はない
+* destructuring は payload binding 1つだけ
+* `match` は exhaustive でなければならない
+
+### 6.7 if
 
 ```kizu
 if age >= 20 {
@@ -302,7 +341,7 @@ if age >= 20 {
 }
 ```
 
-### 6.7 while
+### 6.8 while
 
 ```kizu
 while i < 10 {
@@ -311,9 +350,9 @@ while i < 10 {
 }
 ```
 
-### 6.8 match
+### 6.9 match
 
-v0.1 の `match` は、単純な enum value を分岐する用途に限定します。
+v0.1 の `match` は、単純な enum value と tagged union value を分岐する用途に限定します。
 
 ```kizu
 fn main() {
@@ -327,7 +366,8 @@ fn main() {
 }
 ```
 
-payload pattern、guard、destructuring は v0.1 では扱いません。
+guard と多段 destructuring は v0.1 では扱いません。
+tagged union の payload binding だけを扱います。
 
 ## 7. 型
 

@@ -37,6 +37,7 @@ go test ./...
 | limited `comptime` | `comptime.kizu` | evaluates compile-time expressions |
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
+| tagged `union` with payloads | `union.kizu` | binds payload values in `match` arms |
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper example |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |

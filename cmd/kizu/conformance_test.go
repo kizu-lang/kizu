@@ -37,6 +37,7 @@ func TestV01PositiveExamples(t *testing.T) {
 		{name: "comptime", path: "../../examples/comptime.kizu", out: "8\n4096\n"},
 		{name: "enum", path: "../../examples/enum.kizu", out: "Color.Green\ntrue\n"},
 		{name: "match", path: "../../examples/match.kizu", out: "blue\n"},
+		{name: "union", path: "../../examples/union.kizu", out: "10\nname\npoint\n"},
 		{
 			name: "user_registry",
 			path: "../../examples/user_registry.kizu",

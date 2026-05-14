@@ -14,6 +14,7 @@ type Interpreter struct {
 	functions map[string]*ast.FunctionDecl
 	impls     map[string]map[string]*ast.FunctionDecl
 	enums     map[string]map[string]bool
+	unions    map[string]map[string]string
 }
 
 type trySignal struct {
@@ -32,6 +33,7 @@ func New(out io.Writer) *Interpreter {
 		functions: map[string]*ast.FunctionDecl{},
 		impls:     map[string]map[string]*ast.FunctionDecl{},
 		enums:     map[string]map[string]bool{},
+		unions:    map[string]map[string]string{},
 	}
 }
 
@@ -41,6 +43,8 @@ func (i *Interpreter) Run(program *ast.Program) error {
 		switch d := decl.(type) {
 		case *ast.EnumDecl:
 			i.enums[d.Name] = enumTags(d.Tags)
+		case *ast.UnionDecl:
+			i.unions[d.Name] = unionVariants(d.Variants)
 		case *ast.FunctionDecl:
 			if d.ExternABI != "" {
 				continue
@@ -73,6 +77,15 @@ func enumTags(tags []string) map[string]bool {
 	out := map[string]bool{}
 	for _, tag := range tags {
 		out[tag] = true
+	}
+	return out
+}
+
+// unionVariants returns a variant payload lookup for runtime construction.
+func unionVariants(variants []ast.UnionVariant) map[string]string {
+	out := map[string]string{}
+	for _, variant := range variants {
+		out[variant.Name] = variant.Payload
 	}
 	return out
 }
@@ -200,21 +213,45 @@ func (i *Interpreter) evalWhileStmt(stmt *ast.WhileStmt, env *Env) (Value, bool,
 	}
 }
 
-// evalMatchStmt executes the matching enum tag arm.
+// evalMatchStmt executes the matching enum or union tag arm.
 func (i *Interpreter) evalMatchStmt(stmt *ast.MatchStmt, env *Env) (Value, bool, error) {
 	value, err := i.evalExpr(stmt.Value, env)
 	if err != nil {
 		return voidValue(), false, err
 	}
-	if value.kind != kindEnum {
-		return voidValue(), false, fmt.Errorf("runtime error: match expects enum")
+	if value.kind != kindEnum && value.kind != kindUnion {
+		return voidValue(), false, fmt.Errorf("runtime error: match expects enum or union")
 	}
 	for _, arm := range stmt.Arms {
-		if arm.Tag == value.enum.tag {
-			return i.evalStmt(arm.Body, env.Child())
+		if arm.Tag == matchArmTag(value) {
+			child := env.Child()
+			if err := bindUnionPayload(value, arm, child); err != nil {
+				return voidValue(), false, err
+			}
+			return i.evalStmt(arm.Body, child)
 		}
 	}
 	return voidValue(), false, fmt.Errorf("runtime error: no match arm for `%s`", value.String())
+}
+
+// matchArmTag returns the active tag for a matchable runtime value.
+func matchArmTag(value Value) string {
+	if value.kind == kindEnum {
+		return value.enum.tag
+	}
+	return value.union.tag
+}
+
+// bindUnionPayload binds a tagged union payload into a matching arm scope.
+func bindUnionPayload(value Value, arm ast.MatchArm, env *Env) error {
+	if value.kind != kindUnion || arm.Binding == "" {
+		return nil
+	}
+	if value.union.payload == nil {
+		return fmt.Errorf("runtime error: union variant `%s.%s` has no payload",
+			value.union.typeName, value.union.tag)
+	}
+	return env.Define(arm.Binding, *value.union.payload, false)
 }
 
 // evalComptimeIfStmt executes the branch selected by a compile-time condition.
@@ -411,6 +448,9 @@ func evalModulo(left int64, right int64) (Value, error) {
 // evalCallExpr evaluates builtin and user-defined function calls.
 func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		if value, ok, err := i.evalUnionConstructor(field, expr.Args, env); ok || err != nil {
+			return value, err
+		}
 		return i.evalMethodCallExpr(field, expr.Args, env)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
@@ -471,6 +511,18 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 			}
 			return enumValue(ident.Name, expr.Name), nil
 		}
+		if variants, exists := i.unions[ident.Name]; exists {
+			payload, ok := variants[expr.Name]
+			if !ok {
+				return voidValue(), fmt.Errorf("runtime error: unknown union variant `%s.%s`",
+					ident.Name, expr.Name)
+			}
+			if payload != "" {
+				return voidValue(), fmt.Errorf("runtime error: union variant `%s.%s` expects payload",
+					ident.Name, expr.Name)
+			}
+			return unionValue(ident.Name, expr.Name, nil), nil
+		}
 	}
 	receiver, err := i.evalExpr(expr.Receiver, env)
 	if err != nil {
@@ -484,6 +536,40 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", expr.Name)
 	}
 	return value, nil
+}
+
+// evalUnionConstructor evaluates Union.Variant(payload) construction.
+func (i *Interpreter) evalUnionConstructor(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), false, nil
+	}
+	variants, exists := i.unions[ident.Name]
+	if !exists {
+		return voidValue(), false, nil
+	}
+	payloadType, exists := variants[field.Name]
+	if !exists {
+		return voidValue(), true, fmt.Errorf("runtime error: unknown union variant `%s.%s`",
+			ident.Name, field.Name)
+	}
+	if payloadType == "" {
+		return voidValue(), true, fmt.Errorf("runtime error: union variant `%s.%s` expects 0 args",
+			ident.Name, field.Name)
+	}
+	if len(args) != 1 {
+		return voidValue(), true, fmt.Errorf("runtime error: union variant `%s.%s` expects 1 arg",
+			ident.Name, field.Name)
+	}
+	payload, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), true, err
+	}
+	return unionValue(ident.Name, field.Name, &payload), true, nil
 }
 
 // evalMethodCallExpr evaluates arena methods.

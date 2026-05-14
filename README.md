@@ -35,7 +35,7 @@ Implemented language-core pieces:
 - minimal `!T` and `try` error propagation
 - unsafe boundary and C ABI declaration checks
 - explicit `cast<T>(value)` checker policy
-- Zig/C-style tag `enum` and simple enum `match`
+- Zig/C-style tag `enum`, tagged `union`, and exhaustive `match`
 
 Additional v0.1 target pieces tracked in GitHub Issues:
 

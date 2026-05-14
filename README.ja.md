@@ -34,7 +34,7 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 - 限定的な `comptime` expression / parameter / branch selection
 - 低レベル型変換向けの明示 `cast<T>(value)`
 - 最小の `!T` と `try` error propagation
-- Zig/C-style tag `enum` と simple enum `match`
+- Zig/C-style tag `enum`、tagged `union`、exhaustive `match`
 
 追加の v0.1 対象として、次は GitHub Issues で追跡しています。
 

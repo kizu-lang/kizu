@@ -252,6 +252,66 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsTaggedUnionMatch checks tagged union constructors and payload matches.
+func TestCheckAcceptsTaggedUnionMatch(t *testing.T) {
+	source := `union Shape {
+    Point
+    Circle(i64)
+    Label(string)
+}
+fn describe(shape: borrow Shape) -> void {
+    match shape {
+        Point => print("point")
+        Circle(radius) => print(radius)
+        Label(text) => print(text)
+    }
+}
+fn main() {
+    describe(Shape.Circle(10))
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsTaggedUnionErrors checks tagged union diagnostics.
+func TestCheckRejectsTaggedUnionErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "constructor type",
+			source: `union Shape { Circle(i64) }
+fn main() {
+    let shape = Shape.Circle("large")
+    print(shape)
+}`,
+			want: "union variant `Shape.Circle` expects i64, got string",
+		},
+		{
+			name: "exhaustiveness",
+			source: `union Shape { Point Circle(i64) }
+fn main() {
+    let shape = Shape.Point
+    match shape { Point => print("point") }
+}`,
+			want: "match on `Shape` is not exhaustive",
+		},
+		{
+			name: "payload on empty variant",
+			source: `union Shape { Point }
+fn main() {
+    let shape = Shape.Point
+    match shape { Point(x) => print(x) }
+}`,
+			want: "union variant `Shape.Point` has no payload",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsEnumMatchErrors checks simple enum match diagnostics.
 func TestCheckRejectsEnumMatchErrors(t *testing.T) {
 	cases := []struct {
@@ -264,7 +324,7 @@ func TestCheckRejectsEnumMatchErrors(t *testing.T) {
 			source: `fn main() {
     match 1 { Red => print("red") }
 }`,
-			want: "match expects enum, got i64",
+			want: "match expects enum or union, got i64",
 		},
 		{
 			name: "unknown tag",

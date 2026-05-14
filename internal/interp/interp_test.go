@@ -115,6 +115,33 @@ fn main() {
 	}
 }
 
+// TestRunTaggedUnionMatch checks payload binding in tagged union matches.
+func TestRunTaggedUnionMatch(t *testing.T) {
+	got := runSource(t, `union Shape {
+    Point
+    Circle(i64)
+    Label(string)
+}
+fn main() {
+    let first = Shape.Circle(10)
+    let second = Shape.Label("name")
+    describe(first)
+    describe(second)
+    describe(Shape.Point)
+}
+fn describe(shape: borrow Shape) -> void {
+    match shape {
+        Point => print("point")
+        Circle(radius) => print(radius)
+        Label(text) => print(text)
+    }
+}`)
+	want := "10\nname\npoint\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunComptime checks Phase 13 expressions and selected branches execute normally.
 func TestRunComptime(t *testing.T) {
 	got := runSource(t, `fn sized(comptime n: i64) -> i64 { return n }

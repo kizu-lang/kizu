@@ -49,6 +49,9 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Enum:
 			program.Decls = append(program.Decls, p.parseEnumDecl())
 			p.nextToken()
+		case token.Union:
+			program.Decls = append(program.Decls, p.parseUnionDecl())
+			p.nextToken()
 		case token.Contract:
 			program.Decls = append(program.Decls, p.parseContractDecl())
 			p.nextToken()
@@ -302,6 +305,58 @@ func (p *Parser) parseEnumTags() []string {
 	return tags
 }
 
+// parseUnionDecl parses a top-level tagged union declaration.
+func (p *Parser) parseUnionDecl() ast.Decl {
+	decl := &ast.UnionDecl{}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.Name = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Variants = p.parseUnionVariants()
+	return decl
+}
+
+// parseUnionVariants parses tagged union variants until the closing brace.
+func (p *Parser) parseUnionVariants() []ast.UnionVariant {
+	variants := []ast.UnionVariant{}
+	p.nextToken()
+	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
+		variant, ok := p.parseUnionVariant()
+		if !ok {
+			return variants
+		}
+		variants = append(variants, variant)
+		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
+			p.nextToken()
+		}
+		p.nextToken()
+	}
+	return variants
+}
+
+// parseUnionVariant parses one tagged union variant declaration.
+func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
+	variant := ast.UnionVariant{}
+	if p.cur.Type != token.Ident {
+		p.errorf("expected union variant, got %s", p.cur.Type)
+		return variant, false
+	}
+	variant.Name = p.cur.Literal
+	if p.peek.Type != token.LParen {
+		return variant, true
+	}
+	p.nextToken()
+	p.nextToken()
+	variant.Payload = p.parseTypeName()
+	if variant.Payload == "" || !p.expectPeek(token.RParen) {
+		return variant, false
+	}
+	return variant, true
+}
+
 // parseParams parses a function parameter list.
 func (p *Parser) parseParams() []ast.Param {
 	params := []ast.Param{}
@@ -524,6 +579,16 @@ func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 		return arm, false
 	}
 	arm.Tag = p.cur.Literal
+	if p.peek.Type == token.LParen {
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return arm, false
+		}
+		arm.Binding = p.cur.Literal
+		if !p.expectPeek(token.RParen) {
+			return arm, false
+		}
+	}
 	if !p.expectPeek(token.FatArrow) {
 		return arm, false
 	}

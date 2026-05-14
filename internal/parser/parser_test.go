@@ -112,6 +112,34 @@ fn main() { print(Color.Red) }`
 	}
 }
 
+// TestParseUnionDecl checks tagged union declaration parsing.
+func TestParseUnionDecl(t *testing.T) {
+	input := `union Shape {
+    Point
+    Circle(i64)
+    Label(string)
+}
+fn main() {
+    let shape = Shape.Circle(10)
+    match shape {
+        Point => print("point")
+        Circle(radius) => print(radius)
+        Label(text) => print(text)
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `union Shape { Point; Circle(i64); Label(string) }
+fn main() { let shape = Shape.Circle(10); match shape { Point => print("point"); ` +
+		`Circle(radius) => print(radius); Label(text) => print(text) } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseMatchStmt checks simple enum tag match parsing.
 func TestParseMatchStmt(t *testing.T) {
 	input := `enum Color {

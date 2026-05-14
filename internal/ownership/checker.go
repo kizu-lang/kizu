@@ -10,6 +10,7 @@ import (
 type Checker struct {
 	functions map[string]*functionInfo
 	enums     map[string]map[string]bool
+	unions    map[string]map[string]string
 	nextID    int
 }
 
@@ -45,7 +46,11 @@ type scope struct {
 
 // New creates an empty ownership checker.
 func New() *Checker {
-	return &Checker{functions: map[string]*functionInfo{}, enums: map[string]map[string]bool{}}
+	return &Checker{
+		functions: map[string]*functionInfo{},
+		enums:     map[string]map[string]bool{},
+		unions:    map[string]map[string]string{},
+	}
 }
 
 // Check validates ownership rules and returns the first move error.
@@ -54,6 +59,7 @@ func (c *Checker) Check(program *ast.Program) error {
 		return err
 	}
 	c.collectEnums(program)
+	c.collectUnions(program)
 	if err := c.collectFunctions(program); err != nil {
 		return err
 	}
@@ -81,6 +87,21 @@ func (c *Checker) collectEnums(program *ast.Program) {
 			tags[tag] = true
 		}
 		c.enums[enumDecl.Name] = tags
+	}
+}
+
+// collectUnions records tagged union declarations for variant construction and matches.
+func (c *Checker) collectUnions(program *ast.Program) {
+	for _, decl := range program.Decls {
+		unionDecl, ok := decl.(*ast.UnionDecl)
+		if !ok {
+			continue
+		}
+		variants := map[string]string{}
+		for _, variant := range unionDecl.Variants {
+			variants[variant.Name] = variant.Payload
+		}
+		c.unions[unionDecl.Name] = variants
 	}
 }
 
@@ -261,27 +282,49 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 	return nil
 }
 
-// checkMatchStmt merges possible moves from enum match arms into the outer scope.
+// checkMatchStmt merges possible moves from enum or union match arms into the outer scope.
 func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	valueType, err := c.readExpr(stmt.Value, env)
 	if err != nil {
 		return err
 	}
-	tags := c.enums[valueType]
-	if tags == nil {
-		return fmt.Errorf("move error: match expects enum, got %s", valueType)
+	tags, unionPayloads, ok := c.matchTags(valueType)
+	if !ok {
+		return fmt.Errorf("move error: match expects enum or union, got %s", valueType)
 	}
 	for _, arm := range stmt.Arms {
 		if !tags[arm.Tag] {
-			return fmt.Errorf("move error: unknown enum tag `%s.%s`", valueType, arm.Tag)
+			return fmt.Errorf("move error: unknown match tag `%s.%s`", valueType, arm.Tag)
 		}
 		armEnv := env.clone()
-		if err := c.checkStmt(arm.Body, armEnv.child()); err != nil {
+		child := armEnv.child()
+		if payload := unionPayloads[arm.Tag]; payload != "" && arm.Binding != "" {
+			value := c.newBinding(arm.Binding, payload)
+			value.borrowedParam = true
+			child.define(value)
+		}
+		if err := c.checkStmt(arm.Body, child); err != nil {
 			return err
 		}
 		env.mergeMovedFrom(armEnv)
 	}
 	return nil
+}
+
+// matchTags returns known tags for enum and union match ownership checks.
+func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string, bool) {
+	if tags := c.enums[typeName]; tags != nil {
+		return tags, nil, true
+	}
+	payloads := c.unions[typeName]
+	if payloads == nil {
+		return nil, nil, false
+	}
+	tags := map[string]bool{}
+	for tag := range payloads {
+		tags[tag] = true
+	}
+	return tags, payloads, true
 }
 
 // readExpr checks an expression without consuming owned values.
@@ -378,6 +421,9 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 // checkCallExpr validates ownership effects of builtin and user calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		if typ, ok, err := c.checkUnionConstructor(field, expr.Args, env); ok || err != nil {
+			return typ, err
+		}
 		return c.checkMethodCallExpr(field, expr.Args, env)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
@@ -505,8 +551,53 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 			}
 			return ident.Name, nil
 		}
+		if variants, exists := c.unions[ident.Name]; exists {
+			payload, ok := variants[expr.Name]
+			if !ok {
+				return "", fmt.Errorf("move error: unknown union variant `%s.%s`",
+					ident.Name, expr.Name)
+			}
+			if payload != "" {
+				return "", fmt.Errorf("move error: union variant `%s.%s` expects payload",
+					ident.Name, expr.Name)
+			}
+			return ident.Name, nil
+		}
 	}
 	return c.readExpr(expr.Receiver, env)
+}
+
+// checkUnionConstructor validates ownership effects of Union.Variant(payload).
+func (c *Checker) checkUnionConstructor(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return "", false, nil
+	}
+	variants := c.unions[ident.Name]
+	if variants == nil {
+		return "", false, nil
+	}
+	payload, exists := variants[field.Name]
+	if !exists {
+		return "", true, fmt.Errorf("move error: unknown union variant `%s.%s`",
+			ident.Name, field.Name)
+	}
+	if payload == "" {
+		return "", true, fmt.Errorf("move error: union variant `%s.%s` expects 0 args",
+			ident.Name, field.Name)
+	}
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("move error: union variant `%s.%s` expects 1 arg, got %d",
+			ident.Name, field.Name, len(args))
+	}
+	if _, err := c.moveExpr(args[0], env); err != nil {
+		return "", true, err
+	}
+	return ident.Name, true, nil
 }
 
 // checkMethodCallExpr validates ownership effects of arena methods.

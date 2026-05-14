@@ -5,7 +5,7 @@ Status: 採用
 ## 背景
 
 Rust の `enum` は payload を持てるため、tagged union / algebraic data type に近い。
-Kizu は Zig 寄りの低レベル言語を目指すため、tag だけの enum と payload を持つ union を分けたい。
+Kizu は Zig 寄りの低レベル言語を目指すため、tag だけの enum と payload を持つ union を分ける。
 
 ## 決定
 
@@ -27,11 +27,19 @@ fn main() {
 ```
 
 payload を持つ sum type は `enum` では扱わない。
-将来必要になった場合は、`union` または `tagged union` として別機能で設計する。
+v0.1 では `union` として別機能で実装する。
+
+```kizu
+union Shape {
+    Point
+    Circle(i64)
+    Label(string)
+}
+```
 
 ## match
 
-v0.1 の `match` は simple enum value の分岐に限定する。
+v0.1 の `match` は simple enum value と tagged union value の分岐に限定する。
 
 ```kizu
 match color {
@@ -41,11 +49,12 @@ match color {
 }
 ```
 
-payload pattern、guard、destructuring は v0.1 では扱わない。
+tagged union の payload binding は扱う。
+guard と多段 destructuring は v0.1 では扱わない。
 
 ## 影響
 
 - `enum` の概念が小さく保たれる
 - C ABI や Zig-style enum へ寄せやすい
 - Rust-style payload enum と混同しにくい
-- payload を持つ sum type は後続 phase で明示的に設計できる
+- payload を持つ sum type は `union` として明示的に扱える

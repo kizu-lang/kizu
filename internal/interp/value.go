@@ -14,6 +14,7 @@ const (
 	kindHandle
 	kindErrorUnion
 	kindEnum
+	kindUnion
 	kindIo
 	kindTaskGroup
 	kindTask
@@ -31,6 +32,7 @@ type Value struct {
 	handle   Handle
 	errUnion *ErrorUnion
 	enum     Enum
+	union    Union
 	task     *Task
 }
 
@@ -62,6 +64,13 @@ type Enum struct {
 	tag      string
 }
 
+// Union stores a tagged union runtime value.
+type Union struct {
+	typeName string
+	tag      string
+	payload  *Value
+}
+
 // String formats a value for the print builtin and test assertions.
 func (v Value) String() string {
 	switch v.kind {
@@ -86,6 +95,8 @@ func (v Value) String() string {
 		return "<error: " + v.errUnion.message + ">"
 	case kindEnum:
 		return v.enum.typeName + "." + v.enum.tag
+	case kindUnion:
+		return v.union.typeName + "." + v.union.tag
 	case kindIo:
 		return "<io>"
 	case kindTaskGroup:
@@ -140,6 +151,11 @@ func errorUnionValue(message string) Value {
 // enumValue returns a tag enum runtime value.
 func enumValue(typeName string, tag string) Value {
 	return Value{kind: kindEnum, enum: Enum{typeName: typeName, tag: tag}}
+}
+
+// unionValue returns a tagged union runtime value.
+func unionValue(typeName string, tag string, payload *Value) Value {
+	return Value{kind: kindUnion, union: Union{typeName: typeName, tag: tag, payload: payload}}
 }
 
 // ioValue returns an explicit I/O capability value.

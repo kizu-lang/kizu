@@ -69,6 +69,7 @@ Go 製 interpreter を実装し、基本的な Kizu プログラムを `kizu run
 
 - struct
 - enum
+- union
 - type checker
 - move checker
 - borrow checker

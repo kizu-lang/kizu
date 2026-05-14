@@ -113,6 +113,38 @@ func (d *EnumDecl) String() string {
 	return fmt.Sprintf("enum %s { %s }", d.Name, strings.Join(d.Tags, "; "))
 }
 
+// UnionDecl represents a tagged union declaration.
+type UnionDecl struct {
+	Name     string
+	Variants []UnionVariant
+}
+
+// declNode marks UnionDecl as a declaration node.
+func (*UnionDecl) declNode() {}
+
+// String returns a compact debug representation of the union declaration.
+func (d *UnionDecl) String() string {
+	variants := make([]string, 0, len(d.Variants))
+	for _, variant := range d.Variants {
+		variants = append(variants, variant.String())
+	}
+	return fmt.Sprintf("union %s { %s }", d.Name, strings.Join(variants, "; "))
+}
+
+// UnionVariant represents one tagged union variant.
+type UnionVariant struct {
+	Name    string
+	Payload string
+}
+
+// String returns a compact debug representation of the union variant.
+func (v UnionVariant) String() string {
+	if v.Payload == "" {
+		return v.Name
+	}
+	return fmt.Sprintf("%s(%s)", v.Name, v.Payload)
+}
+
 // ContractDecl represents required method signatures.
 type ContractDecl struct {
 	Name    string
@@ -318,12 +350,16 @@ func (s *MatchStmt) String() string {
 
 // MatchArm represents one enum tag branch in a match statement.
 type MatchArm struct {
-	Tag  string
-	Body Statement
+	Tag     string
+	Binding string
+	Body    Statement
 }
 
 // String returns a compact debug representation of the match arm.
 func (a MatchArm) String() string {
+	if a.Binding != "" {
+		return fmt.Sprintf("%s(%s) => %s", a.Tag, a.Binding, a.Body.String())
+	}
 	return fmt.Sprintf("%s => %s", a.Tag, a.Body.String())
 }
 

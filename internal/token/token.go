@@ -51,6 +51,7 @@ const (
 	Match    Type = "match"
 	Struct   Type = "struct"
 	Enum     Type = "enum"
+	Union    Type = "union"
 	Contract Type = "contract"
 	Satisfy  Type = "satisfy"
 	For      Type = "for"
@@ -82,6 +83,7 @@ var keywords = map[string]Type{
 	"match":    Match,
 	"struct":   Struct,
 	"enum":     Enum,
+	"union":    Union,
 	"contract": Contract,
 	"satisfy":  Satisfy,
 	"for":      For,

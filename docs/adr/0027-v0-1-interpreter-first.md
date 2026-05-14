@@ -16,14 +16,14 @@ Kizu v0.1 は Go 製 interpreter による language core release とする。
 
 SPEC に見えている言語表面は、実装量が現実的で安全性の設計を壊さない限り、
 なるべく v0.1 に持ち込む。
-そのため、Zig/C-style tag enum と simple enum match は v0.1 の実装対象に含める。
+そのため、Zig/C-style tag enum、tagged union、simple match は v0.1 の実装対象に含める。
 
 v0.1 の主な目的は次の通り。
 
 - 言語仕様を実装済み範囲へ絞る
 - interpreter で仕様どおりに動かす
 - type / move / borrow / arena / error union / comptime の安全性を検査する
-- Zig/C-style tag enum / match のような SPEC 上の基本構文を interpreter で実行できるようにする
+- Zig/C-style tag enum / tagged union / match を interpreter で実行できるようにする
 - `Io` capability / `TaskGroup` による structured task model を interpreter で扱う
 - `contract` / `satisfy` / `borrow Dyn<Contract>` による明示抽象化を扱う
 - examples と negative tests で仕様を固定する

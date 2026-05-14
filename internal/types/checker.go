@@ -81,6 +81,7 @@ type Checker struct {
 	functions     map[string]*functionType
 	structs       map[string]*ast.StructDecl
 	enums         map[string]*enumType
+	unions        map[string]*unionType
 	contracts     map[string]*contractType
 	impls         map[string]map[string]*functionType
 	satisfactions map[string]map[string]bool
@@ -90,6 +91,11 @@ type Checker struct {
 type enumType struct {
 	name string
 	tags map[string]bool
+}
+
+type unionType struct {
+	name     string
+	variants map[string]string
 }
 
 type functionType struct {
@@ -120,6 +126,7 @@ func New() *Checker {
 		functions:     map[string]*functionType{},
 		structs:       map[string]*ast.StructDecl{},
 		enums:         map[string]*enumType{},
+		unions:        map[string]*unionType{},
 		contracts:     map[string]*contractType{},
 		impls:         map[string]map[string]*functionType{},
 		satisfactions: map[string]map[string]bool{},
@@ -167,6 +174,10 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 			}
 		case *ast.EnumDecl:
 			if err := c.collectEnum(d); err != nil {
+				return err
+			}
+		case *ast.UnionDecl:
+			if err := c.collectUnion(d); err != nil {
 				return err
 			}
 		case *ast.ContractDecl:
@@ -299,6 +310,9 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 	if _, exists := c.structs[decl.Name]; exists {
 		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
+	if _, exists := c.unions[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+	}
 	enum := &enumType{name: decl.Name, tags: map[string]bool{}}
 	for _, tag := range decl.Tags {
 		if enum.tags[tag] {
@@ -310,12 +324,43 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 	return nil
 }
 
+// collectUnion registers and validates a tagged union declaration.
+func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
+	if _, exists := c.unions[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate union `%s`", decl.Name)
+	}
+	if _, exists := c.structs[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+	}
+	if _, exists := c.enums[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+	}
+	union := &unionType{name: decl.Name, variants: map[string]string{}}
+	for _, variant := range decl.Variants {
+		if _, exists := union.variants[variant.Name]; exists {
+			return fmt.Errorf("type error: duplicate union variant `%s.%s`",
+				decl.Name, variant.Name)
+		}
+		if variant.Payload != "" {
+			if _, err := c.parseType(variant.Payload); err != nil {
+				return err
+			}
+		}
+		union.variants[variant.Name] = variant.Payload
+	}
+	c.unions[decl.Name] = union
+	return nil
+}
+
 // collectStruct registers and validates a struct declaration.
 func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 	if _, exists := c.structs[decl.Name]; exists {
 		return fmt.Errorf("type error: duplicate struct `%s`", decl.Name)
 	}
 	if _, exists := c.enums[decl.Name]; exists {
+		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+	}
+	if _, exists := c.unions[decl.Name]; exists {
 		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	c.structs[decl.Name] = decl
@@ -376,7 +421,8 @@ func (c *Checker) parseType(name string) (Type, error) {
 	if typ == typeSelf {
 		return typ, nil
 	}
-	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil {
+	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil &&
+		c.unions[name] == nil {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
@@ -630,17 +676,21 @@ func (c *Checker) checkMatchStmt(
 	if err != nil {
 		return false, err
 	}
-	enumType := c.enums[string(valueType)]
-	if enumType == nil {
-		return false, fmt.Errorf("type error: match expects enum, got %s", valueType)
+	if enumType := c.enums[string(valueType)]; enumType != nil {
+		return c.checkMatchArms(stmt.Arms, enumType, nil, env, wantReturn, unsafe)
 	}
-	return c.checkMatchArms(stmt.Arms, enumType, env, wantReturn, unsafe)
+	unionType := c.unions[string(valueType)]
+	if unionType != nil {
+		return c.checkMatchArms(stmt.Arms, nil, unionType, env, wantReturn, unsafe)
+	}
+	return false, fmt.Errorf("type error: match expects enum or union, got %s", valueType)
 }
 
 // checkMatchArms validates tag patterns and return flow for match arms.
 func (c *Checker) checkMatchArms(
 	arms []ast.MatchArm,
 	enumType *enumType,
+	unionType *unionType,
 	env *scope,
 	wantReturn Type,
 	unsafe bool,
@@ -648,23 +698,71 @@ func (c *Checker) checkMatchArms(
 	seen := map[string]bool{}
 	allReturn := len(arms) > 0
 	for _, arm := range arms {
-		if !enumType.tags[arm.Tag] {
-			return false, fmt.Errorf("type error: unknown enum tag `%s.%s`", enumType.name, arm.Tag)
+		payload, err := matchPayloadType(enumType, unionType, arm)
+		if err != nil {
+			return false, err
 		}
+		typeName := matchTypeName(enumType, unionType)
 		if seen[arm.Tag] {
-			return false, fmt.Errorf("type error: duplicate match tag `%s.%s`", enumType.name, arm.Tag)
+			return false, fmt.Errorf("type error: duplicate match tag `%s.%s`", typeName, arm.Tag)
 		}
 		seen[arm.Tag] = true
-		returns, err := c.checkStmt(arm.Body, env.child(), wantReturn, unsafe)
+		armEnv := env.child()
+		if payload != "" && arm.Binding != "" {
+			if err := armEnv.define(arm.Binding, Type(payload), false); err != nil {
+				return false, err
+			}
+		}
+		returns, err := c.checkStmt(arm.Body, armEnv, wantReturn, unsafe)
 		if err != nil {
 			return false, err
 		}
 		allReturn = allReturn && returns
 	}
-	if len(seen) != len(enumType.tags) {
-		return false, fmt.Errorf("type error: match on `%s` is not exhaustive", enumType.name)
+	if len(seen) != matchVariantCount(enumType, unionType) {
+		return false, fmt.Errorf("type error: match on `%s` is not exhaustive",
+			matchTypeName(enumType, unionType))
 	}
 	return allReturn, nil
+}
+
+// matchPayloadType validates a match arm pattern and returns its payload type.
+func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm) (string, error) {
+	if enumType != nil {
+		if !enumType.tags[arm.Tag] {
+			return "", fmt.Errorf("type error: unknown enum tag `%s.%s`", enumType.name, arm.Tag)
+		}
+		if arm.Binding != "" {
+			return "", fmt.Errorf("type error: enum tag `%s.%s` has no payload",
+				enumType.name, arm.Tag)
+		}
+		return "", nil
+	}
+	payload, ok := unionType.variants[arm.Tag]
+	if !ok {
+		return "", fmt.Errorf("type error: unknown union variant `%s.%s`", unionType.name, arm.Tag)
+	}
+	if payload == "" && arm.Binding != "" {
+		return "", fmt.Errorf("type error: union variant `%s.%s` has no payload",
+			unionType.name, arm.Tag)
+	}
+	return payload, nil
+}
+
+// matchTypeName returns the matched enum or union type name.
+func matchTypeName(enumType *enumType, unionType *unionType) string {
+	if enumType != nil {
+		return enumType.name
+	}
+	return unionType.name
+}
+
+// matchVariantCount returns the number of variants in a match target.
+func matchVariantCount(enumType *enumType, unionType *unionType) int {
+	if enumType != nil {
+		return len(enumType.tags)
+	}
+	return len(unionType.variants)
 }
 
 // checkExpr computes the static type of an expression.
@@ -817,6 +915,9 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type
 // checkCallExpr validates builtin and user function calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		if typ, ok, err := c.checkUnionConstructorCall(field, expr.Args, env, unsafe); ok || err != nil {
+			return typ, err
+		}
 		return c.checkMethodCallExpr(field, expr.Args, env, unsafe)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
@@ -904,6 +1005,41 @@ func (c *Checker) checkUserCall(
 	return fn.returnType, nil
 }
 
+// checkUnionConstructorCall validates Union.Variant(payload) construction.
+func (c *Checker) checkUnionConstructorCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	unionType, ok := unionReceiver(field.Receiver, c.unions)
+	if !ok {
+		return "", false, nil
+	}
+	payload, exists := unionType.variants[field.Name]
+	if !exists {
+		return "", true, fmt.Errorf("type error: unknown union variant `%s.%s`",
+			unionType.name, field.Name)
+	}
+	if payload == "" {
+		return "", true, fmt.Errorf("type error: union variant `%s.%s` expects 0 args",
+			unionType.name, field.Name)
+	}
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: union variant `%s.%s` expects 1 arg, got %d",
+			unionType.name, field.Name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != Type(payload) {
+		return "", true, fmt.Errorf("type error: union variant `%s.%s` expects %s, got %s",
+			unionType.name, field.Name, payload, got)
+	}
+	return Type(unionType.name), true, nil
+}
+
 // checkArenaNewExpr validates arena<T>() and returns the arena type.
 func (c *Checker) checkArenaNewExpr(expr *ast.ArenaNewExpr) (Type, error) {
 	if _, err := c.parseType(expr.TypeName); err != nil {
@@ -955,6 +1091,18 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 		}
 		return Type(enumType.name), nil
 	}
+	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
+		payload, exists := unionType.variants[expr.Name]
+		if !exists {
+			return "", fmt.Errorf("type error: unknown union variant `%s.%s`",
+				unionType.name, expr.Name)
+		}
+		if payload != "" {
+			return "", fmt.Errorf("type error: union variant `%s.%s` expects payload",
+				unionType.name, expr.Name)
+		}
+		return Type(unionType.name), nil
+	}
 	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
 	if err != nil {
 		return "", err
@@ -979,6 +1127,16 @@ func enumReceiver(expr ast.Expression, enums map[string]*enumType) (*enumType, b
 	}
 	enumType, ok := enums[ident.Name]
 	return enumType, ok
+}
+
+// unionReceiver returns a union namespace used by UnionName.Variant expressions.
+func unionReceiver(expr ast.Expression, unions map[string]*unionType) (*unionType, bool) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	unionType, ok := unions[ident.Name]
+	return unionType, ok
 }
 
 // checkMethodCallExpr validates arena methods.
