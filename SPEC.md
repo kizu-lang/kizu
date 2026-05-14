@@ -669,7 +669,31 @@ map<K, V>        後続 phase
 set<T>           後続 phase
 ```
 
-## 15. ビルドとキャッシュ
+## 15. async 方針
+
+Kizu v0 では async を実装しません。
+
+将来 async を扱う場合も、最初の async design では `async fn` / `await` を中心にしません。
+I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
+
+```kizu
+fn read_config(io: Io, path: string) -> result<string> {
+    return fs.read_to_string(io, path)
+}
+```
+
+方針:
+
+* I/O する関数は `Io` を受け取る
+* `TaskGroup` で structured concurrency に寄せる
+* spawn された task は await または cancel される必要がある
+* task は local borrow を捕まえられない
+* task へ渡す non-copy value は move される
+* 野良 task は許可しない
+
+async runtime、event loop、networking stdlib は後続 phase で扱います。
+
+## 16. ビルドとキャッシュ
 
 Kizu の toolchain は、キャッシュが無制限に肥大化しない設計にします。
 

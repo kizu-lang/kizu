@@ -28,6 +28,7 @@
 | Phase 18 | 完了 | result<T> / try error handling | [phase-18.md](docs/phases/phase-18.md) |
 | Phase 19 | 完了 | stdlib foundation | [phase-19.md](docs/phases/phase-19.md) |
 | Phase 20 | 完了 | developer CLI experience | [phase-20.md](docs/phases/phase-20.md) |
+| Phase XX | 完了 | async policy | [phase-xx-async.md](docs/phases/phase-xx-async.md) |
 
 ## 横断フェーズ
 
