@@ -69,6 +69,8 @@ go run ./cmd/kizu run examples/hello.kizu
 
 機能ごとの実行例と失敗すべき安全性ルールは
 [v0.1 examples catalog](examples/README.md) にまとめています。
+機械判定用の conformance manifest は
+[tests/conformance/v0_1.json](tests/conformance/v0_1.json) です。
 
 ## 開発環境
 

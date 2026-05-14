@@ -4,7 +4,7 @@
 
 ## プロジェクト目標
 
-Kizu v0.1 を Go 製の小さな interpreter として実装します。
+Kizu v0.1 を Go 製の小さな interpreter-first language core として実装します。
 
 Kizu は Rust clone ではありません。
 
@@ -22,13 +22,13 @@ Rust 風の安全性のうち、次だけを小さく採用します。
 
 作りすぎないこと。
 
-最初の目標は、次が動く CLI です。
+基本の実行経路は、次が動く CLI です。
 
 ```sh
 kizu run examples/hello.kizu
 ```
 
-その後、段階的に以下を実装します。
+v0.1 の中心は以下です。
 
 1. lexer
 2. parser
@@ -38,6 +38,9 @@ kizu run examples/hello.kizu
 6. move checker
 7. borrow checker
 8. Arena / Handle
+
+active work は GitHub Issues を正として管理します。
+Markdown の phase TODO 文書は使いません。
 
 ## リポジトリ構成
 
@@ -130,7 +133,7 @@ kizu test
 ## Goal ワークフロー
 
 Goal は GitHub Issue を正として進めてください。
-Markdown の phase 文書は履歴と設計メモであり、active TODO tracker ではありません。
+Markdown の phase TODO 文書は削除済みであり、active TODO tracker ではありません。
 
 * 対象 Issue の本文、受け入れ条件、コメントを実装前に確認する
 * 実装は対象 Issue の範囲に絞る
