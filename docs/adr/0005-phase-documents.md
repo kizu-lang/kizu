@@ -2,6 +2,8 @@
 
 Status: 置換
 
+注: `PHASES.md` と `docs/phases/` は削除済み。この ADR は判断履歴としてのみ残す。
+
 置換先: [ADR-0029: active work は GitHub Issues で管理する](0029-issue-based-work-tracking.md)
 
 ## 背景
@@ -27,4 +29,5 @@ Kizu の実装範囲は広い。
 v0.1 の作業範囲が広くなり、実装 TODO、受け入れ条件、議論、完了状態を Markdown だけで管理すると、
 実際の開発タスクとの対応が追いにくくなった。
 
-以後の active work は GitHub Issues を正とし、Markdown は仕様、ADR、履歴、設計メモに限定する。
+以後の active work は GitHub Issues を正とし、Markdown は仕様、ADR、性能方針、examples catalog に限定する。
+過去の `docs/phases/` 文書は削除し、必要な判断履歴は ADR に残す。

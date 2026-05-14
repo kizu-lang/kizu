@@ -11,10 +11,12 @@ Kizu は言語仕様、処理系実装、低レベル機能、将来の backend 
 
 設計判断は `docs/adr/` に ADR として残す。
 
-`SPEC.md` は現時点の仕様、`PHASES.md` と `docs/phases/` は実装計画、ADR は判断の背景と理由を管理する。
+`SPEC.md` は現時点の仕様、ADR は判断の背景と理由を管理する。
+active work は GitHub Issues で管理する。
 
 ## 影響
 
 - 方針変更時は新しい ADR を追加する
 - 古い ADR は消さず、`置換` または `却下` にする
 - Codex は設計に関わる変更を行う前に関連 ADR を確認する
+- 実装タスク、TODO、受け入れ条件は GitHub Issues を正にする

@@ -17,8 +17,9 @@ Markdown は次の用途に限定する。
 
 - `SPEC.md`: 言語仕様
 - `docs/adr/`: 採用した設計判断
-- `PHASES.md`: 過去フェーズの索引
-- `docs/phases/`: 過去フェーズの履歴と設計メモ
+- `docs/perf.md`: 性能評価方針
+- `examples/README.md`: v0.1 examples catalog
+- `tests/conformance/`: reusable conformance manifest の説明
 
 新しい TODO、受け入れ条件、v0.1 完了作業は GitHub Issue として作る。
 
@@ -41,5 +42,6 @@ v0.1 関連 issue には `v0.1` label を付ける。
 
 - Codex goal は GitHub Issue を作業単位にする
 - Markdown の checklist 更新は行わない
+- `docs/phases/` は active work として扱わず、削除する
 - 完了状態は Issue close で管理する
 - 仕様と実装タスクの境界が分かりやすくなる

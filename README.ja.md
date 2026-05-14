@@ -133,7 +133,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 
 - [SPEC.md](SPEC.md): 言語仕様
 - [examples](examples/README.md): v0.1 examples catalog
-- [PHASES.md](PHASES.md): 実装 phase 管理
+- [tests/conformance](tests/conformance/README.md): reusable v0.1 test manifest
 - [docs/adr](docs/adr): Architecture Decision Record
 - [docs/perf.md](docs/perf.md): build/cache performance policy
 - [AGENTS.md](AGENTS.md): Codex agent 向け実装方針

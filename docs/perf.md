@@ -37,7 +37,7 @@
 
 ## 初期ベースライン
 
-Phase 2 までは Go 実装と interpreter が中心なので、まず次を測定対象にする。
+Go 実装と interpreter を中心に、まず次を測定対象にする。
 
 ```sh
 go test ./...

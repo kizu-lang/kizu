@@ -137,7 +137,6 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 - [SPEC.md](SPEC.md): language specification
 - [examples](examples/README.md): v0.1 examples catalog
 - [tests/conformance](tests/conformance/README.md): reusable v0.1 test manifest
-- [PHASES.md](PHASES.md): historical phase index
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy
 - [AGENTS.md](AGENTS.md): implementation guidance for Codex agents

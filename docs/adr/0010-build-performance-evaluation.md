@@ -41,7 +41,7 @@ kizu why-rebuild <file>
 - debug artifact と optimized artifact は cache key を分ける
 - build script と proc macro は採用しない
 - 巨大な中間生成物は opt-in で保存する
-- performance regression は Phase の受け入れ条件で扱えるようにする
+- performance regression は GitHub Issues の受け入れ条件で扱えるようにする
 
 ## 初期の測定対象
 
@@ -63,6 +63,6 @@ compiler backend が入った後は、次を追加する。
 ## 影響
 
 - `docs/perf.md` を性能評価の入口にする
-- `docs/phases/build-performance.md` で横断 TODO を管理する
-- Phase 8 以降は、受け入れ条件に性能測定または cache size 確認を含める
+- performance 関連 TODO は GitHub Issues で管理する
+- backend や cache 関連 issue は、受け入れ条件に性能測定または cache size 確認を含める
 - 最適化を入れる前に、測定可能な状態を作る
