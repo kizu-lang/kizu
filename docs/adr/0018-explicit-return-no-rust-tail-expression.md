@@ -19,7 +19,7 @@ Rust 風の tail expression return は採用しない。
 
 ```kizu
 fn add(a: i64, b: i64) -> i64 {
-    return a + b
+    return a + b;
 }
 ```
 
@@ -27,7 +27,7 @@ fn add(a: i64, b: i64) -> i64 {
 
 ```kizu
 fn add(a: i64, b: i64) -> i64 {
-    a + b
+    a + b;
 }
 ```
 
@@ -36,17 +36,17 @@ fn add(a: i64, b: i64) -> i64 {
 
 ```kizu
 fn log(message: []const u8) -> void {
-    print(message)
+    print(message);
 }
 ```
 
 ```kizu
 fn maybe_log(enabled: bool) -> void {
     if !enabled {
-        return
+        return;
     }
 
-    print("enabled")
+    print("enabled");
 }
 ```
 

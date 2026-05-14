@@ -39,6 +39,7 @@ go test ./...
 | mutable struct field assignment | `field_assignment.kizu` | updates fields on a `var` binding |
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
 | last-use borrow | `last_use_borrow.kizu` | local borrow ends at its final use |
+| borrow call then owner move | `borrow_call_then_move.kizu` | a call-scoped borrow does not block a later owner move |
 | one-level field borrow | `field_borrow.kizu` | updates a disjoint field while a field is borrowed |
 | copy through borrow dereference | `borrow_deref_copy.kizu` | copies an `i64` through `.*` |
 | copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
@@ -67,6 +68,7 @@ go test ./...
 | Safety rule | Example | Expected diagnostic substring |
 | --- | --- | --- |
 | moved values cannot be reused | `negative/moved_value.kizu` | `moved value` |
+| root move error example | `move_error.kizu` | `moved value` |
 | assignment moves non-copy values | `negative/assignment_move.kizu` | `moved value` |
 | double move is rejected | `negative/double_move.kizu` | `moved value` |
 | branch moves are visible after `if` | `negative/if_branch_move.kizu` | `moved value` |
@@ -84,6 +86,8 @@ go test ./...
 | v0.1 rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
+| borrowed parameters cannot be stored in owned locals | `negative/borrow_local_alias.kizu` | `borrowed value` |
+| borrowed parameters cannot be passed as owned values | `negative/borrow_to_owner.kizu` | `borrowed value` |
 | non-copy values cannot move out of borrow deref | `negative/borrow_deref_move.kizu` | `cannot be moved out of borrow` |
 | mutable borrow conflicts are rejected | `negative/mut_borrow_conflict.kizu` | `mutably borrowed while borrowed` |
 | non-copy values cannot move out of mutable borrow deref | `negative/mut_borrow_deref_move.kizu` | `cannot be moved out of borrow` |
@@ -120,17 +124,25 @@ go test ./...
 | tasks must be awaited or canceled | `negative/unawaited_task.kizu` | `must be awaited or canceled` |
 | task args move non-copy values | `negative/task_move.kizu` | `moved value` |
 | tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
+| tasks cannot capture safe raw pointers | `negative/task_spawn_pointer.kizu` | `raw pointer` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
+| empty channel receive is checked | `negative/channel_empty_recv.kizu` | `channel is empty` |
 | queue cannot capture borrow params | `negative/queue_borrow_capture.kizu` | `queue cannot capture borrow` |
+| queue cannot capture safe raw pointers | `negative/queue_enqueue_pointer.kizu` | `raw pointer` |
 | parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
 | parallel map workers must return slot values | `negative/parallel_map_wrong_worker.kizu` | `must return i64` |
 | partition initialization is copy-only | `negative/partition_mut_non_i64.kizu` | `partition init expects i64` |
 | partition slot access is bounds-checked | `negative/partition_index_out_of_bounds.kizu` | `out of bounds` |
 | parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
+| scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |
+| atomic store is i64-only | `negative/atomic_store_wrong_type.kizu` | `atomic.store` |
+| mutex cannot wrap safe raw pointers | `negative/mutex_pointer.kizu` | `raw pointer` |
 | shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
 | duplicate match tags are rejected | `negative/match_duplicate_tag.kizu` | `duplicate match tag` |
 | unknown match tags are rejected | `negative/match_unknown_tag.kizu` | `unknown match tag` |
+| enum variants use `::`, not `.` | `negative/enum_dot_variant.kizu` | `use ::` |
+| union variants use `::`, not `.` | `negative/union_dot_variant.kizu` | `use ::` |

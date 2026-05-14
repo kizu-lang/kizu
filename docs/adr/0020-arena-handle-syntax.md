@@ -19,9 +19,9 @@ v0 では `arena<T>()` を専用の組み込み構文として扱う。
 採用する構文:
 
 ```kizu
-let users = arena<User>()
-let alice = users.add(User { name: "alice" })
-print(users.get(alice).name)
+let users = arena<User>();
+let alice = users.add(User { name: "alice" });
+print(users.get(alice).name);
 ```
 
 意味:

@@ -82,8 +82,9 @@ policy.
 - A field borrow allows disjoint field assignment, such as assigning `user.age`
   while `user.name` is borrowed.
 - A field borrow blocks owner moves and conflicting access to the same field.
-- v0.1 rejects nested field borrow and indexed borrow, such as
-  `&user.profile.name` and `&items[0]`.
+- v0.1 rejects nested field borrow, such as `&user.profile.name`.
+- v0.1 does not implement indexed borrow syntax. If indexed access is added later,
+  `&items[0]` must get explicit safety rules and regression coverage first.
 
 ### Arena and Handle
 
@@ -179,10 +180,10 @@ memory-safety invariants to representative examples.
 | branch and loop moves remain visible after control flow | `examples/if_expression.kizu` | `examples/negative/if_branch_move.kizu`, `examples/negative/if_branch_partial_move.kizu`, `examples/negative/if_expression_branch_move.kizu`, `examples/negative/while_body_move.kizu` |
 | copy values can be reused after owner-like calls | `examples/copy_after_move.kizu` | |
 | assignment moves non-copy values | `examples/variables.kizu` | `examples/negative/assignment_move.kizu` |
-| borrow does not move owner | `examples/borrow.kizu`, `examples/last_use_borrow.kizu` | `examples/negative/borrow_escape.kizu` |
+| borrow does not move owner | `examples/borrow.kizu`, `examples/last_use_borrow.kizu`, `examples/borrow_call_then_move.kizu` | `examples/negative/borrow_escape.kizu` |
 | non-copy value cannot move while borrowed | | `examples/negative/move_while_borrowed.kizu`, `examples/negative/borrow_before_last_use_move.kizu`, `examples/negative/borrow_loop_last_use.kizu` |
 | one-level field borrow permits disjoint fields | `examples/field_borrow.kizu` | `examples/negative/field_borrow_same_field_assignment.kizu`, `examples/negative/field_borrow_owner_move.kizu`, `examples/negative/nested_field_borrow.kizu` |
-| borrow cannot be stored | | `examples/negative/borrow_field.kizu` |
+| borrow cannot be stored or passed as owned | | `examples/negative/borrow_field.kizu`, `examples/negative/borrow_local_alias.kizu`, `examples/negative/borrow_to_owner.kizu` |
 | copy value can be copied through borrow deref | `examples/borrow_deref_copy.kizu` | |
 | non-copy value cannot move out of borrow deref | `examples/borrow_deref_copy.kizu` | `examples/negative/borrow_deref_move.kizu`, `examples/negative/mut_borrow_deref_move.kizu` |
 | mutable borrow requires mutable binding | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_immutable.kizu` |
@@ -190,19 +191,21 @@ memory-safety invariants to representative examples.
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
 | arena get is local-borrow-like | `examples/arena.kizu` | `examples/negative/arena_get_move.kizu` |
-| handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu` |
+| handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu`; invalid-index handles are covered by `internal/interp` unit tests |
 | handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
 | handle is not a raw pointer | | `examples/negative/handle_as_pointer.kizu` |
 | unsafe is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
 | unsafe does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |
 | runtime borrow cannot cross comptime | `examples/comptime.kizu` | `examples/negative/comptime_borrow_escape.kizu` |
-| task ownership is structured | `examples/task_group.kizu` | `examples/negative/unawaited_task.kizu`, `examples/negative/task_move.kizu`, `examples/negative/task_borrow_capture.kizu` |
-| channel sends owned values | `examples/channel.kizu` | `examples/negative/channel_send_move.kizu`, `examples/negative/channel_send_borrow.kizu`, `examples/negative/channel_send_pointer.kizu` |
-| queued work cannot capture borrows | `examples/task_queue.kizu` | `examples/negative/queue_borrow_capture.kizu` |
+| task ownership is structured | `examples/task_group.kizu` | `examples/negative/unawaited_task.kizu`, `examples/negative/task_move.kizu`, `examples/negative/task_borrow_capture.kizu`, `examples/negative/task_spawn_pointer.kizu` |
+| channel sends owned values | `examples/channel.kizu` | `examples/negative/channel_send_move.kizu`, `examples/negative/channel_send_borrow.kizu`, `examples/negative/channel_send_pointer.kizu`, `examples/negative/channel_empty_recv.kizu` |
+| queued work cannot capture borrows or raw pointers | `examples/task_queue.kizu` | `examples/negative/queue_borrow_capture.kizu`, `examples/negative/queue_enqueue_pointer.kizu` |
 | structured data parallelism uses disjoint output | `examples/parallel_for.kizu` | `examples/negative/parallel_shared_mutable.kizu`, `examples/negative/parallel_map_wrong_worker.kizu`, `examples/negative/partition_mut_non_i64.kizu` |
 | partition bounds are checked | `examples/parallel_for.kizu` | `examples/negative/partition_index_out_of_bounds.kizu`, `examples/negative/parallel_map_out_of_bounds.kizu` |
-| scoped thread boundary rejects borrows | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu` |
+| scoped thread boundary rejects borrows and raw pointers | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu` |
+| atomic prototype is i64-only | `examples/thread_boundary.kizu` | `examples/negative/atomic_store_wrong_type.kizu` |
+| mutex prototype rejects raw pointer sharing | `examples/thread_boundary.kizu` | `examples/negative/mutex_pointer.kizu` |
 
 ## Release Gate
 

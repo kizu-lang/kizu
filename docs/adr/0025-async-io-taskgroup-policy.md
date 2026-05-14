@@ -28,7 +28,7 @@ I/O する関数は `Io` を受け取る。
 
 ```kizu
 fn read_config(io: Io, path: []const u8) -> ![]const u8 {
-    return fs.read_to_string(io, path)
+    return std::fs::read_to_string(io, path);
 }
 ```
 
@@ -40,9 +40,9 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 並行処理は `TaskGroup` を通して明示する。
 
 ```kizu
-let group = TaskGroup()
-let task = group.spawn(io, read_config, "config.toml")
-let text = task.await()
+let group = std::task::Group();
+let task = group.spawn(io, read_config, "config.toml");
+let text = task.await();
 ```
 
 spawn された task は await または cancel されなければならない。
@@ -86,9 +86,9 @@ non-copy value を task に渡す場合、その値は move される。
 safe Kizu では task 間で mutable state を暗黙共有できない。
 
 ```kizu
-let name = "alice"
-let task = group.spawn(io, print_name, name)
-print(name) // error: moved into task
+let name = "alice";
+let task = group.spawn(io, print_name, name);
+print(name); // error: moved into task
 ```
 
 ## 影響
