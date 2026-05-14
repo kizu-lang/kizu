@@ -72,7 +72,8 @@ go run ./cmd/kizu run examples/hello.kizu
 ```
 
 See the [v0.1 examples catalog](examples/README.md) for runnable feature
-examples and negative safety-rule examples.
+examples and negative safety-rule examples. The machine-readable conformance
+manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json).
 
 ## Development Environment
 
@@ -137,6 +138,7 @@ go run ./cmd/kizu import-c-header examples/tiny.h
 
 - [SPEC.md](SPEC.md): language specification
 - [examples](examples/README.md): v0.1 examples catalog
+- [tests/conformance](tests/conformance/README.md): reusable v0.1 test manifest
 - [PHASES.md](PHASES.md): historical phase index
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy

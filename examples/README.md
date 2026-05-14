@@ -2,9 +2,10 @@
 
 This directory is the user-visible catalog for Kizu v0.1 behavior.
 
-Executable examples are verified by `TestV01PositiveExamples` in
-`cmd/kizu/conformance_test.go`. Negative examples are verified by
-`TestV01NegativeExamples` with expected diagnostic substrings.
+Executable and negative examples are listed in
+[`tests/conformance/v0_1.json`](../tests/conformance/v0_1.json). The Go test
+runner reads that manifest, and the future self-host compiler should reuse it
+as the v0.1 compatibility corpus.
 
 Run the full catalog through the normal project gate:
 
