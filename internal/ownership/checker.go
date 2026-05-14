@@ -426,6 +426,9 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
+		if deref, ok := expr.(*ast.DerefExpr); ok {
+			return c.moveDerefExpr(deref, env)
+		}
 		if c.isArenaGetExpr(expr) {
 			if _, err := c.readExpr(expr, env); err != nil {
 				return "", err
@@ -460,6 +463,19 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 		value.moved = true
 	}
 	return value.typeName, nil
+}
+
+// moveDerefExpr rejects moving a non-copy value out through a local borrow.
+func (c *Checker) moveDerefExpr(expr *ast.DerefExpr, env *scope) (string, error) {
+	typeName, err := c.readDerefExpr(expr, env)
+	if err != nil {
+		return "", err
+	}
+	if c.isCopyType(typeName) {
+		return typeName, nil
+	}
+	return "", fmt.Errorf("borrow error: value `%s` cannot be moved out of borrow",
+		expr.Receiver.String())
 }
 
 // readBinaryExpr reads both operands and preserves the left operand type.

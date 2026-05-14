@@ -133,8 +133,38 @@ fn bad(s: &[]const u8) {
 fn main() {}`,
 			want: "struct field `Bad.value` cannot store borrow",
 		},
+		{
+			name: "move non-copy deref",
+			source: `struct User { name: []const u8 }
+fn bad(user: &User) -> User {
+    return user.*
+}`,
+			want: "cannot be moved out of borrow",
+		},
+		{
+			name: "move non-copy mutable deref",
+			source: `struct User { name: []const u8 }
+fn bad(user: &mut User) -> User {
+    return user.*
+}`,
+			want: "cannot be moved out of borrow",
+		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckAllowsCopyDeref checks copying a primitive through a borrow is allowed.
+func TestCheckAllowsCopyDeref(t *testing.T) {
+	source := `fn copy_value(value: &i64) -> i64 {
+    return value.*
+}
+fn main() {
+    let x = 1
+    print(copy_value(x))
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
 }
 
 // TestCheckRejectsMoveWhileBorrowed checks overlapping borrow and move in a call.
