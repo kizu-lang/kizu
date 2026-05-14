@@ -42,13 +42,22 @@ Phase 2 までは Go 実装と interpreter が中心なので、まず次を測�
 ```sh
 go test ./...
 go run ./cmd/kizu parse examples/hello.kizu
+go run ./cmd/kizu check examples/hello.kizu
+go run ./cmd/kizu run examples/hello.kizu
+go run ./cmd/kizu parse examples/user_registry.kizu
+go run ./cmd/kizu check examples/user_registry.kizu
+go run ./cmd/kizu run examples/user_registry.kizu
 go run ./cmd/kizu ir examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu cache status
-go run ./cmd/kizu run examples/hello.kizu
 pre-commit run --all-files
 ```
+
+`examples/user_registry.kizu` は v0.1 の complex app baseline として扱う。
+
+v0.1 の完了条件に Rust 同等以上の runtime performance guarantee は含めない。
+この段階では、継続的に同じ対象を測り、悪化を見つけられることを優先する。
 
 ## 将来の測定対象
 

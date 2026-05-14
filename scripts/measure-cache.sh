@@ -11,12 +11,14 @@ run() {
   name="$1"
   shift
 
-  start="$(date +%s)"
-  "$@" >/dev/null
-  end="$(date +%s)"
-
-  elapsed="$((end - start))"
-  printf '%s\t%ss\n' "$name" "$elapsed"
+  out="$tmp/time.txt"
+  if /usr/bin/time -p "$@" >/dev/null 2>"$out"; then
+    elapsed="$(awk '/^real / { print $2 }' "$out")"
+    printf '%s\t%ss\n' "$name" "$elapsed"
+  else
+    cat "$out" >&2
+    return 1
+  fi
 }
 
 run "cold llvm" go run ./cmd/kizu build --emit-llvm "$tmp/hello.kizu"
@@ -27,3 +29,4 @@ run "no-op why" go run ./cmd/kizu why-rebuild "$tmp/hello.kizu"
 printf '\n' >> "$tmp/hello.kizu"
 run "small edit why" go run ./cmd/kizu why-rebuild "$tmp/hello.kizu"
 run "cache status" go run ./cmd/kizu cache status
+printf 'cache size\t%s\n' "$(du -sh "$KIZU_CACHE_DIR" | awk '{ print $1 }')"
