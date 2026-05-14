@@ -18,6 +18,7 @@ const (
 	kindIo
 	kindTaskGroup
 	kindTask
+	kindQueue
 	kindChannel
 	kindPartition
 	kindLocalBuffer
@@ -40,6 +41,7 @@ type Value struct {
 	enum      Enum
 	union     Union
 	task      *Task
+	queue     *Queue
 	channel   *Channel
 	partition Partition
 	localBuf  LocalBuffer
@@ -68,6 +70,17 @@ type ErrorUnion struct {
 type Task struct {
 	value Value
 	done  bool
+}
+
+// Queue stores deterministic deferred jobs for the v0.1 task API.
+type Queue struct {
+	jobs []QueuedJob
+}
+
+// QueuedJob stores a function call captured by std.task.Queue.enqueue.
+type QueuedJob struct {
+	name string
+	args []Value
 }
 
 // Channel stores owned messages for the v0.1 synchronous channel model.
@@ -165,6 +178,8 @@ func (v Value) capabilityString() string {
 		return "<taskgroup>"
 	case kindTask:
 		return "<task>"
+	case kindQueue:
+		return "<queue>"
 	case kindChannel:
 		return "<channel>"
 	case kindPartition:
@@ -245,6 +260,11 @@ func taskGroupValue() Value {
 // taskValue returns a completed synchronous task value.
 func taskValue(value Value) Value {
 	return Value{kind: kindTask, task: &Task{value: value}}
+}
+
+// queueValue returns an empty deterministic task queue.
+func queueValue() Value {
+	return Value{kind: kindQueue, queue: &Queue{}}
 }
 
 // channelValue returns an empty owned-message channel.

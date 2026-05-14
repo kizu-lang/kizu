@@ -36,6 +36,7 @@ var knownTypes = map[Type]bool{
 	"f64":          true,
 	"Io":           true,
 	"TaskGroup":    true,
+	"Queue":        true,
 	"Channel":      true,
 	"Partition":    true,
 	"LocalBuffer":  true,
@@ -1106,6 +1107,9 @@ func (c *Checker) checkQualifiedBuiltin(
 	case "std.channel.Channel":
 		typ, err := checkNoArgConstructor(name, args, "Channel")
 		return typ, true, err
+	case "std.task.Queue":
+		typ, err := checkNoArgConstructor(name, args, "Queue")
+		return typ, true, err
 	case "std.task.partition_mut":
 		return c.checkPartitionMut(args, env, unsafe)
 	case "std.task.LocalBuffer":
@@ -1377,17 +1381,9 @@ func (c *Checker) checkMethodCallExpr(
 	if elem, ok := taskElement(receiver); ok {
 		return checkTaskMethod(field.Name, elem, args)
 	}
-	switch receiver {
-	case "Channel":
-		return c.checkChannelMethod(field.Name, args, env, unsafe)
-	case "Partition":
-		return c.checkPartitionMethod(field.Name, args, env, unsafe)
-	case "LocalBuffer":
-		return c.checkLocalBufferMethod(field.Name, args, env, unsafe)
-	case "Atomic":
-		return c.checkAtomicMethod(field.Name, args, env, unsafe)
-	case "Mutex":
-		return c.checkMutexMethod(field.Name, args)
+	typ, ok, err := c.checkConcurrencyMethod(receiver, field.Name, args, env, unsafe)
+	if ok || err != nil {
+		return typ, err
 	}
 	base, arg, ok := splitGenericType(string(receiver))
 	if !ok || base != "arena" {
@@ -1404,6 +1400,38 @@ func (c *Checker) checkMethodCallExpr(
 		return c.checkArenaGet(arg, args, env, unsafe)
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// checkConcurrencyMethod validates std concurrency prototype instance methods.
+func (c *Checker) checkConcurrencyMethod(
+	receiver Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch receiver {
+	case "Queue":
+		typ, err := c.checkQueueMethod(name, args, env, unsafe)
+		return typ, true, err
+	case "Channel":
+		typ, err := c.checkChannelMethod(name, args, env, unsafe)
+		return typ, true, err
+	case "Partition":
+		typ, err := c.checkPartitionMethod(name, args, env, unsafe)
+		return typ, true, err
+	case "LocalBuffer":
+		typ, err := c.checkLocalBufferMethod(name, args, env, unsafe)
+		return typ, true, err
+	case "Atomic":
+		typ, err := c.checkAtomicMethod(name, args, env, unsafe)
+		return typ, true, err
+	case "Mutex":
+		typ, err := c.checkMutexMethod(name, args)
+		return typ, true, err
+	default:
+		return "", false, nil
 	}
 }
 
@@ -1467,6 +1495,67 @@ func (c *Checker) checkTaskArgs(
 		}
 	}
 	return nil
+}
+
+// checkQueueMethod validates deterministic deferred task queue operations.
+func (c *Checker) checkQueueMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch name {
+	case "enqueue":
+		return c.checkQueueEnqueue(args, env, unsafe)
+	case "drain":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `queue.drain` expects 0 args, got %d", len(args))
+		}
+		return typeVoid, nil
+	default:
+		return "", fmt.Errorf("type error: Queue has no method `%s`", name)
+	}
+}
+
+// checkQueueEnqueue validates one deferred function call.
+func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope, unsafe bool) (Type, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("type error: `queue.enqueue` expects io, function, and args")
+	}
+	ioType, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if ioType != "Io" {
+		return "", fmt.Errorf("type error: `queue.enqueue` expects Io, got %s", ioType)
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return "", fmt.Errorf("type error: `queue.enqueue` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", fmt.Errorf("type error: undefined function `%s`", target.Name)
+	}
+	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
+	if len(spawnArgs) != len(fn.params) {
+		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
+			target.Name, len(fn.params), len(spawnArgs))
+	}
+	for idx, arg := range spawnArgs {
+		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
+			return "", fmt.Errorf("type error: queue cannot capture borrow parameter `%s`", target.Name)
+		}
+		got, err := c.checkExpr(arg, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != fn.params[idx] {
+			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+				idx+1, target.Name, fn.params[idx], got)
+		}
+	}
+	return typeVoid, nil
 }
 
 // checkChannelMethod validates owned message passing operations.

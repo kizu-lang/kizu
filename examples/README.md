@@ -51,6 +51,7 @@ go test ./...
 | `contract`, `satisfy`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std.channel` |
+| deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
 | safe data parallelism | `parallel_for.kizu` | runs a structured `std.task.parallel_for` worker |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
 
@@ -97,6 +98,7 @@ go test ./...
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
+| queue cannot capture borrow params | `negative/queue_borrow_capture.kizu` | `queue cannot capture borrow` |
 | parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |

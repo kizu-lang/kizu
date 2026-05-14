@@ -698,6 +698,8 @@ func (i *Interpreter) evalQualifiedBuiltin(
 		return callTaskGroupFromExprs(args), true, nil
 	case "std.channel.Channel":
 		return callChannelFromExprs(args), true, nil
+	case "std.task.Queue":
+		return callQueueFromExprs(args), true, nil
 	case "std.task.partition_mut":
 		value, err := i.evalPartitionMut(args, env)
 		return value, true, err
@@ -852,6 +854,9 @@ func (i *Interpreter) evalMethodCallExpr(
 		if receiver.kind == kindTask {
 			return evalTaskMethod(receiver, field.Name, args)
 		}
+		if receiver.kind == kindQueue {
+			return i.evalQueueMethod(receiver, field.Name, args, env)
+		}
 		if receiver.kind == kindChannel {
 			return i.evalChannelMethod(receiver, field.Name, args, env)
 		}
@@ -880,6 +885,64 @@ func (i *Interpreter) evalMethodCallExpr(
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// evalQueueMethod executes deterministic deferred queue operations.
+func (i *Interpreter) evalQueueMethod(
+	queue Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	switch name {
+	case "enqueue":
+		return i.evalQueueEnqueue(queue, args, env)
+	case "drain":
+		return i.evalQueueDrain(queue, args)
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Queue has no method `%s`", name)
+	}
+}
+
+// evalQueueEnqueue captures a function call for later deterministic drain.
+func (i *Interpreter) evalQueueEnqueue(
+	queue Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) < 2 {
+		return voidValue(), fmt.Errorf("runtime error: queue.enqueue expects io and function")
+	}
+	ioValue, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: queue.enqueue expects function name")
+	}
+	values, err := i.evalArgs(args[2:], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	callArgs := append([]Value{ioValue}, values...)
+	queue.queue.jobs = append(queue.queue.jobs, QueuedJob{name: target.Name, args: callArgs})
+	return voidValue(), nil
+}
+
+// evalQueueDrain runs queued jobs in FIFO order before returning.
+func (i *Interpreter) evalQueueDrain(queue Value, args []ast.Expression) (Value, error) {
+	if len(args) != 0 {
+		return voidValue(), fmt.Errorf("runtime error: queue.drain expects 0 args")
+	}
+	for len(queue.queue.jobs) > 0 {
+		job := queue.queue.jobs[0]
+		queue.queue.jobs = queue.queue.jobs[1:]
+		if _, err := i.callFunction(job.name, job.args); err != nil {
+			return voidValue(), err
+		}
+	}
+	return voidValue(), nil
 }
 
 // evalPartitionMut constructs a v0.1 partition marker.
@@ -1299,6 +1362,14 @@ func callChannelFromExprs(args []ast.Expression) Value {
 		return errorUnionValue("std.channel.Channel expected 0 args")
 	}
 	return channelValue()
+}
+
+// callQueueFromExprs validates std.task.Queue has no constructor args.
+func callQueueFromExprs(args []ast.Expression) Value {
+	if len(args) != 0 {
+		return errorUnionValue("std.task.Queue expected 0 args")
+	}
+	return queueValue()
 }
 
 // qualifiedName renders a dotted identifier chain such as std.task.Group.

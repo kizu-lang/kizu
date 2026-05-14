@@ -552,6 +552,12 @@ func (c *Checker) checkQualifiedBuiltin(
 			return "", true, err
 		}
 		return "Channel", true, nil
+	case "std.task.Queue":
+		_, err := checkNoArgOwnershipCall(name, args)
+		if err != nil {
+			return "", true, err
+		}
+		return "Queue", true, nil
 	case "std.task.partition_mut":
 		return c.checkPartitionMut(args, env)
 	case "std.task.LocalBuffer":
@@ -820,17 +826,9 @@ func (c *Checker) checkMethodCallExpr(
 		if elem, ok := taskElement(arena.typeName); ok {
 			return c.checkTaskMethod(arena, field.Name, elem, args)
 		}
-		switch arena.typeName {
-		case "Channel":
-			return c.checkChannelMethod(field.Name, args, env)
-		case "Partition":
-			return c.checkPartitionMethod(field.Name, args, env)
-		case "LocalBuffer":
-			return c.checkLocalBufferMethod(field.Name, args, env)
-		case "Atomic":
-			return c.checkAtomicMethod(field.Name, args, env)
-		case "Mutex":
-			return c.checkMutexMethod(field.Name, args, env)
+		typ, ok, err := c.checkConcurrencyMethod(arena.typeName, field.Name, args, env)
+		if ok || err != nil {
+			return typ, err
 		}
 		return c.checkPlainMethodArgs(args, env)
 	}
@@ -841,6 +839,37 @@ func (c *Checker) checkMethodCallExpr(
 		return c.checkArenaGet(arena, args, env)
 	default:
 		return "", fmt.Errorf("arena error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// checkConcurrencyMethod validates std concurrency prototype method moves.
+func (c *Checker) checkConcurrencyMethod(
+	receiver string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch receiver {
+	case "Queue":
+		typ, err := c.checkQueueMethod(name, args, env)
+		return typ, true, err
+	case "Channel":
+		typ, err := c.checkChannelMethod(name, args, env)
+		return typ, true, err
+	case "Partition":
+		typ, err := c.checkPartitionMethod(name, args, env)
+		return typ, true, err
+	case "LocalBuffer":
+		typ, err := c.checkLocalBufferMethod(name, args, env)
+		return typ, true, err
+	case "Atomic":
+		typ, err := c.checkAtomicMethod(name, args, env)
+		return typ, true, err
+	case "Mutex":
+		typ, err := c.checkMutexMethod(name, args, env)
+		return typ, true, err
+	default:
+		return "", false, nil
 	}
 }
 
@@ -903,6 +932,53 @@ func (c *Checker) checkTaskMethod(
 	default:
 		return "", fmt.Errorf("task error: Task has no method `%s`", name)
 	}
+}
+
+// checkQueueMethod applies deterministic deferred queue move rules.
+func (c *Checker) checkQueueMethod(name string, args []ast.Expression, env *scope) (string, error) {
+	switch name {
+	case "enqueue":
+		return c.checkQueueEnqueue(args, env)
+	case "drain":
+		if len(args) != 0 {
+			return "", fmt.Errorf("task error: `queue.drain` expects 0 args, got %d", len(args))
+		}
+		return "void", nil
+	default:
+		return "", fmt.Errorf("task error: Queue has no method `%s`", name)
+	}
+}
+
+// checkQueueEnqueue moves queued function arguments into the queue.
+func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope) (string, error) {
+	if len(args) < 2 {
+		return "", fmt.Errorf("task error: `queue.enqueue` expects io, function, and args")
+	}
+	if _, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	}
+	target, ok := args[1].(*ast.IdentExpr)
+	if !ok {
+		return "", fmt.Errorf("task error: `queue.enqueue` expects function name")
+	}
+	fn := c.functions[target.Name]
+	if fn == nil {
+		return "", fmt.Errorf("task error: undefined function `%s`", target.Name)
+	}
+	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
+	if len(spawnArgs) != len(fn.params) {
+		return "", fmt.Errorf("task error: `%s` expects %d args, got %d",
+			target.Name, len(fn.params), len(spawnArgs))
+	}
+	for idx, arg := range spawnArgs {
+		if fn.params[idx].borrow {
+			return "", fmt.Errorf("task error: queue cannot capture borrow parameter `%s`", target.Name)
+		}
+		if _, err := c.moveExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	return "void", nil
 }
 
 // checkChannelMethod applies owned message passing move rules.
