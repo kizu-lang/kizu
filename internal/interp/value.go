@@ -18,6 +18,7 @@ const (
 	kindIo
 	kindTaskGroup
 	kindTask
+	kindRef
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
@@ -34,6 +35,7 @@ type Value struct {
 	enum     Enum
 	union    Union
 	task     *Task
+	ref      *binding
 }
 
 // Arena stores values and gives out opaque handles.
@@ -73,18 +75,34 @@ type Union struct {
 
 // String formats a value for the print builtin and test assertions.
 func (v Value) String() string {
+	if out, ok := v.scalarString(); ok {
+		return out
+	}
+	return v.objectString()
+}
+
+// scalarString formats primitive runtime values.
+func (v Value) scalarString() (string, bool) {
 	switch v.kind {
 	case kindVoid:
-		return "void"
+		return "void", true
 	case kindInt:
-		return fmt.Sprintf("%d", v.i)
+		return fmt.Sprintf("%d", v.i), true
 	case kindBool:
 		if v.b {
-			return "true"
+			return "true", true
 		}
-		return "false"
+		return "false", true
 	case kindString:
-		return v.s
+		return v.s, true
+	default:
+		return "", false
+	}
+}
+
+// objectString formats aggregate and capability runtime values.
+func (v Value) objectString() string {
+	switch v.kind {
 	case kindStruct:
 		return "<struct>"
 	case kindArena:
@@ -103,6 +121,8 @@ func (v Value) String() string {
 		return "<taskgroup>"
 	case kindTask:
 		return "<task>"
+	case kindRef:
+		return v.ref.value.String()
 	default:
 		return "<invalid>"
 	}
@@ -171,4 +191,9 @@ func taskGroupValue() Value {
 // taskValue returns a completed synchronous task value.
 func taskValue(value Value) Value {
 	return Value{kind: kindTask, task: &Task{value: value}}
+}
+
+// refValue returns a local borrow reference to a runtime binding.
+func refValue(binding *binding) Value {
+	return Value{kind: kindRef, ref: binding}
 }

@@ -125,7 +125,9 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return err
 	case *ast.AssignStmt:
 		value, err := l.lowerExpr(s.Value)
-		l.env[s.Name] = value
+		if ident, ok := s.Target.(*ast.IdentExpr); ok {
+			l.env[ident.Name] = value
+		}
 		return err
 	case *ast.ReturnStmt:
 		if s.Value == nil {
@@ -178,6 +180,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerStructLiteralExpr(e)
 	case *ast.FieldExpr:
 		return l.lowerFieldExpr(e)
+	case *ast.DerefExpr:
+		return l.lowerExpr(e.Receiver)
 	case *ast.ArenaNewExpr:
 		return l.emit("arena.new", "arena<"+e.TypeName+">", nil, e.TypeName), nil
 	default:

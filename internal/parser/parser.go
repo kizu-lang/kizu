@@ -442,12 +442,11 @@ func (p *Parser) parseStatement() ast.Statement {
 		if p.peek.Type == token.If {
 			return p.parseComptimeIfStmt()
 		}
-	case token.Ident:
-		if p.peek.Type == token.Assign {
-			return p.parseAssignStmt()
-		}
 	}
 	expr := p.parseExpression(lowest)
+	if p.peek.Type == token.Assign {
+		return p.parseAssignStmt(expr)
+	}
 	return &ast.ExprStmt{Expr: expr}
 }
 
@@ -498,9 +497,9 @@ func (p *Parser) parseLetStmt(mutable bool) ast.Statement {
 	return stmt
 }
 
-// parseAssignStmt parses assignment to an existing binding.
-func (p *Parser) parseAssignStmt() ast.Statement {
-	stmt := &ast.AssignStmt{Name: p.cur.Literal}
+// parseAssignStmt parses assignment to a binding, field, or dereference target.
+func (p *Parser) parseAssignStmt(target ast.Expression) ast.Statement {
+	stmt := &ast.AssignStmt{Target: target}
 	p.nextToken()
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
@@ -877,6 +876,10 @@ func (p *Parser) parseFieldValue() (ast.FieldValue, bool) {
 
 // parseFieldExpr parses field access on an expression.
 func (p *Parser) parseFieldExpr(receiver ast.Expression) ast.Expression {
+	if p.peek.Type == token.Asterisk {
+		p.nextToken()
+		return &ast.DerefExpr{Receiver: receiver}
+	}
 	expr := &ast.FieldExpr{Receiver: receiver}
 	if !p.expectPeek(token.Ident) {
 		return expr

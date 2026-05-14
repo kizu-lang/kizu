@@ -43,6 +43,28 @@ func TestRunVariablesAndAssignment(t *testing.T) {
 	}
 }
 
+// TestRunFieldAndDerefAssignment checks mutable fields and &mut writes.
+func TestRunFieldAndDerefAssignment(t *testing.T) {
+	got := runSource(t, `struct User {
+    name: []const u8
+    age: i64
+}
+fn rename(user: &mut User) -> void {
+    user.*.name = "bob"
+}
+fn main() -> void {
+    var user = User { name: "alice", age: 30 }
+    user.age = user.age + 1
+    rename(user)
+    print(user.name)
+    print(user.age)
+}`)
+	want := "bob\n31\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunControlFlow checks if/else and while execution.
 func TestRunControlFlow(t *testing.T) {
 	got := runSource(t, `fn main() {

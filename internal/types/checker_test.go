@@ -291,6 +291,46 @@ fn main() {
 	}
 }
 
+// TestCheckFieldAndDerefAssignment validates mutable assignment targets.
+func TestCheckFieldAndDerefAssignment(t *testing.T) {
+	source := `struct User { name: []const u8 }
+fn rename(user: &mut User) -> void { user.*.name = "bob" }
+fn main() -> void {
+    var user = User { name: "alice" }
+    user.name = "carol"
+    rename(user)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsInvalidFieldAssignment checks immutable and shared-borrow writes.
+func TestCheckRejectsInvalidFieldAssignment(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "immutable field",
+			source: `struct User { name: []const u8 }
+fn main() -> void {
+    let user = User { name: "alice" }
+    user.name = "bob"
+}`,
+			want: "cannot assign field of immutable binding `user`",
+		},
+		{
+			name: "shared borrow deref",
+			source: `struct User { name: []const u8 }
+fn rename(user: &User) -> void { user.*.name = "bob" }`,
+			want: "`user` is not a mutable borrow",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsTaggedUnionErrors checks tagged union diagnostics.
 func TestCheckRejectsTaggedUnionErrors(t *testing.T) {
 	cases := []struct {

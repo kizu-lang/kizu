@@ -116,9 +116,11 @@ type contractType struct {
 }
 
 type scope struct {
-	parent  *scope
-	values  map[string]Type
-	mutable map[string]bool
+	parent    *scope
+	values    map[string]Type
+	mutable   map[string]bool
+	borrowed  map[string]bool
+	mutBorrow map[string]bool
 }
 
 // New creates an empty type checker.
@@ -506,7 +508,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	}
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {
-		if err := env.define(param.Name, fn.params[idx], false); err != nil {
+		if err := env.defineParam(param.Name, fn.params[idx], param.Borrow, param.MutBorrow); err != nil {
 			return err
 		}
 	}
@@ -591,21 +593,49 @@ func (c *Checker) checkStmt(
 
 // checkAssignStmt validates assignment to an existing binding.
 func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope, unsafe bool) (bool, error) {
-	want, ok := env.lookup(stmt.Name)
-	if !ok {
-		return false, fmt.Errorf("type error: undefined variable `%s`", stmt.Name)
-	}
-	if !env.isMutable(stmt.Name) {
-		return false, fmt.Errorf("type error: cannot assign to immutable binding `%s`", stmt.Name)
+	want, err := c.checkAssignableTarget(stmt.Target, env, unsafe)
+	if err != nil {
+		return false, err
 	}
 	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
 	}
 	if got != want {
-		return false, fmt.Errorf("type error: cannot assign %s to `%s` of type %s", got, stmt.Name, want)
+		return false, fmt.Errorf("type error: cannot assign %s to `%s` of type %s",
+			got, stmt.Target.String(), want)
 	}
 	return false, nil
+}
+
+// checkAssignableTarget returns the type that a valid assignment target accepts.
+func (c *Checker) checkAssignableTarget(
+	expr ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch target := expr.(type) {
+	case *ast.IdentExpr:
+		return checkAssignableIdent(target, env)
+	case *ast.FieldExpr:
+		return c.checkAssignableField(target, env, unsafe)
+	case *ast.DerefExpr:
+		return c.checkAssignableDeref(target, env, unsafe)
+	default:
+		return "", fmt.Errorf("type error: invalid assignment target `%s`", expr.String())
+	}
+}
+
+// checkAssignableIdent validates direct binding assignment.
+func checkAssignableIdent(expr *ast.IdentExpr, env *scope) (Type, error) {
+	want, ok := env.lookup(expr.Name)
+	if !ok {
+		return "", fmt.Errorf("type error: undefined variable `%s`", expr.Name)
+	}
+	if !env.isMutable(expr.Name) {
+		return "", fmt.Errorf("type error: cannot assign to immutable binding `%s`", expr.Name)
+	}
+	return want, nil
 }
 
 // checkReturnStmt validates that return value type matches the function result.
@@ -809,6 +839,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 		return c.checkStructLiteralExpr(e, env, unsafe)
 	case *ast.FieldExpr:
 		return c.checkFieldExpr(e, env, unsafe)
+	case *ast.DerefExpr:
+		return c.checkDerefExpr(e, env, unsafe)
 	default:
 		return "", fmt.Errorf("type error: unsupported expression %T", expr)
 	}
@@ -1137,6 +1169,41 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 		}
 	}
 	return "", fmt.Errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+}
+
+// checkDerefExpr returns the value type behind a local borrow parameter.
+func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe bool) (Type, error) {
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
+		typ, _ := env.lookup(ident.Name)
+		return typ, nil
+	}
+	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("type error: `%s` is not a borrow and cannot be dereferenced", receiver)
+}
+
+// checkAssignableField validates mutation of a field on a mutable value.
+func (c *Checker) checkAssignableField(expr *ast.FieldExpr, env *scope, unsafe bool) (Type, error) {
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && !env.isMutable(ident.Name) {
+		return "", fmt.Errorf("type error: cannot assign field of immutable binding `%s`", ident.Name)
+	}
+	if _, ok := expr.Receiver.(*ast.DerefExpr); ok {
+		if _, err := c.checkAssignableDeref(expr.Receiver.(*ast.DerefExpr), env, unsafe); err != nil {
+			return "", err
+		}
+	}
+	return c.checkFieldExpr(expr, env, unsafe)
+}
+
+// checkAssignableDeref validates mutation through an &mut local borrow.
+func (c *Checker) checkAssignableDeref(expr *ast.DerefExpr, env *scope, unsafe bool) (Type, error) {
+	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	if !ok || !env.isMutBorrowed(ident.Name) {
+		return "", fmt.Errorf("type error: `%s` is not a mutable borrow", expr.Receiver.String())
+	}
+	return c.checkDerefExpr(expr, env, unsafe)
 }
 
 // enumReceiver returns an enum namespace used by EnumName.Tag expressions.
@@ -1521,7 +1588,10 @@ func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe bool) (T
 
 // newScope creates a lexical type scope.
 func newScope(parent *scope) *scope {
-	return &scope{parent: parent, values: map[string]Type{}, mutable: map[string]bool{}}
+	return &scope{
+		parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
+		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
+	}
 }
 
 // child creates a nested lexical type scope.
@@ -1536,6 +1606,16 @@ func (s *scope) define(name string, typ Type, mutable bool) error {
 	}
 	s.values[name] = typ
 	s.mutable[name] = mutable
+	return nil
+}
+
+// defineParam binds a function parameter and records borrow capabilities.
+func (s *scope) defineParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
+	if err := s.define(name, typ, false); err != nil {
+		return err
+	}
+	s.borrowed[name] = borrowed
+	s.mutBorrow[name] = mutBorrow
 	return nil
 }
 
@@ -1554,6 +1634,26 @@ func (s *scope) isMutable(name string) bool {
 	for cur := s; cur != nil; cur = cur.parent {
 		if _, ok := cur.values[name]; ok {
 			return cur.mutable[name]
+		}
+	}
+	return false
+}
+
+// isBorrowed reports whether a local name is an &T or &mut T parameter.
+func (s *scope) isBorrowed(name string) bool {
+	for cur := s; cur != nil; cur = cur.parent {
+		if _, ok := cur.values[name]; ok {
+			return cur.borrowed[name]
+		}
+	}
+	return false
+}
+
+// isMutBorrowed reports whether a local name is an &mut T parameter.
+func (s *scope) isMutBorrowed(name string) bool {
+	for cur := s; cur != nil; cur = cur.parent {
+		if _, ok := cur.values[name]; ok {
+			return cur.mutBorrow[name]
 		}
 	}
 	return false

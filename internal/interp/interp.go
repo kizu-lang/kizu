@@ -112,6 +112,51 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 	return voidValue(), nil
 }
 
+// callFunctionExpr invokes a function and preserves local borrow aliases.
+func (i *Interpreter) callFunctionExpr(
+	fn *ast.FunctionDecl,
+	args []ast.Expression,
+	caller *Env,
+) (Value, error) {
+	if len(args) != len(fn.Params) {
+		return voidValue(), fmt.Errorf("runtime error: `%s` expected %d args", fn.Name, len(fn.Params))
+	}
+	env := NewEnv()
+	for idx, param := range fn.Params {
+		value, err := i.evalCallArg(param, args[idx], caller)
+		if err != nil {
+			return voidValue(), err
+		}
+		if err := env.Define(param.Name, value, false); err != nil {
+			return voidValue(), err
+		}
+	}
+	result, returned, err := i.evalBlock(fn.Body, env)
+	if err != nil || returned {
+		return result, err
+	}
+	return voidValue(), nil
+}
+
+// evalCallArg evaluates owned arguments or creates a local borrow reference.
+func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env) (Value, error) {
+	if !param.Borrow {
+		return i.evalExpr(arg, env)
+	}
+	ident, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		if param.MutBorrow {
+			return voidValue(), fmt.Errorf("runtime error: mutable borrow argument must be local")
+		}
+		return i.evalExpr(arg, env)
+	}
+	binding, ok := env.Binding(ident.Name)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", ident.Name)
+	}
+	return refValue(binding), nil
+}
+
 // evalBlock executes statements in a lexical block.
 func (i *Interpreter) evalBlock(block *ast.BlockStmt, env *Env) (Value, bool, error) {
 	for _, stmt := range block.Statements {
@@ -172,7 +217,77 @@ func (i *Interpreter) evalAssignStmt(stmt *ast.AssignStmt, env *Env) (Value, boo
 	if err != nil {
 		return voidValue(), false, err
 	}
-	return voidValue(), false, env.Assign(stmt.Name, value)
+	return voidValue(), false, i.assignTarget(stmt.Target, value, env)
+}
+
+// assignTarget writes a value into a binding, field, or dereferenced borrow.
+func (i *Interpreter) assignTarget(target ast.Expression, value Value, env *Env) error {
+	switch expr := target.(type) {
+	case *ast.IdentExpr:
+		return env.Assign(expr.Name, value)
+	case *ast.FieldExpr:
+		return i.assignField(expr, value, env)
+	case *ast.DerefExpr:
+		ref, err := i.evalExpr(expr.Receiver, env)
+		if err != nil {
+			return err
+		}
+		return assignRef(ref, value)
+	default:
+		return fmt.Errorf("runtime error: invalid assignment target `%s`", target.String())
+	}
+}
+
+// assignField writes a struct field through a mutable binding or &mut dereference.
+func (i *Interpreter) assignField(expr *ast.FieldExpr, value Value, env *Env) error {
+	switch receiver := expr.Receiver.(type) {
+	case *ast.IdentExpr:
+		return assignBindingField(receiver.Name, expr.Name, value, env)
+	case *ast.DerefExpr:
+		base, err := i.evalExpr(receiver.Receiver, env)
+		if err != nil {
+			return err
+		}
+		if base.kind != kindRef {
+			return fmt.Errorf("runtime error: `%s` is not a borrow", receiver.Receiver.String())
+		}
+		return assignStructField(&base.ref.value, expr.Name, value)
+	default:
+		return fmt.Errorf("runtime error: invalid field assignment target `%s`", expr.String())
+	}
+}
+
+// assignBindingField writes a field on a mutable local struct binding.
+func assignBindingField(name string, field string, value Value, env *Env) error {
+	binding, ok := env.Binding(name)
+	if !ok {
+		return fmt.Errorf("runtime error: undefined binding `%s`", name)
+	}
+	if !binding.mutable {
+		return fmt.Errorf("runtime error: cannot assign field of immutable binding `%s`", name)
+	}
+	return assignStructField(&binding.value, field, value)
+}
+
+// assignStructField writes one field on a runtime struct value.
+func assignStructField(target *Value, field string, value Value) error {
+	if target.kind != kindStruct {
+		return fmt.Errorf("runtime error: field assignment expects struct")
+	}
+	if _, ok := target.fields[field]; !ok {
+		return fmt.Errorf("runtime error: unknown field `%s`", field)
+	}
+	target.fields[field] = value
+	return nil
+}
+
+// assignRef writes through a local borrow reference.
+func assignRef(target Value, value Value) error {
+	if target.kind != kindRef {
+		return fmt.Errorf("runtime error: assignment target is not a borrow")
+	}
+	target.ref.value = value
+	return nil
 }
 
 // evalIfStmt executes a branch after checking the condition is boolean.
@@ -218,6 +333,9 @@ func (i *Interpreter) evalMatchStmt(stmt *ast.MatchStmt, env *Env) (Value, bool,
 	value, err := i.evalExpr(stmt.Value, env)
 	if err != nil {
 		return voidValue(), false, err
+	}
+	if value.kind == kindRef {
+		value = value.ref.value
 	}
 	if value.kind != kindEnum && value.kind != kindUnion {
 		return voidValue(), false, fmt.Errorf("runtime error: match expects enum or union")
@@ -301,6 +419,8 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 		return i.evalStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
 		return i.evalFieldExpr(e, env)
+	case *ast.DerefExpr:
+		return i.evalDerefExpr(e, env)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unsupported expression %T", expr)
 	}
@@ -457,6 +577,9 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: callee must be a function name")
 	}
+	if fn, ok := i.functions[name.Name]; ok {
+		return i.callFunctionExpr(fn, expr.Args, env)
+	}
 	args, err := i.evalArgs(expr.Args, env)
 	if err != nil {
 		return voidValue(), err
@@ -528,6 +651,9 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 	if err != nil {
 		return voidValue(), err
 	}
+	if receiver.kind == kindRef {
+		receiver = receiver.ref.value
+	}
 	if receiver.kind != kindStruct {
 		return voidValue(), fmt.Errorf("runtime error: field access expects struct")
 	}
@@ -536,6 +662,18 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", expr.Name)
 	}
 	return value, nil
+}
+
+// evalDerefExpr reads the value behind a local borrow reference.
+func (i *Interpreter) evalDerefExpr(expr *ast.DerefExpr, env *Env) (Value, error) {
+	value, err := i.evalExpr(expr.Receiver, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindRef {
+		return voidValue(), fmt.Errorf("runtime error: `%s` is not a borrow", value.String())
+	}
+	return value.ref.value, nil
 }
 
 // evalUnionConstructor evaluates Union.Variant(payload) construction.
@@ -581,6 +719,9 @@ func (i *Interpreter) evalMethodCallExpr(
 	receiver, err := i.evalExpr(field.Receiver, env)
 	if err != nil {
 		return voidValue(), err
+	}
+	if receiver.kind == kindRef {
+		receiver = receiver.ref.value
 	}
 	if receiver.kind != kindArena {
 		if receiver.kind == kindTaskGroup {

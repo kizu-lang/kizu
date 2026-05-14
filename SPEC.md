@@ -560,7 +560,7 @@ mutable borrow には `&mut T` を使います。
 
 ```kizu
 fn update(user: &mut User) -> void {
-    print(user.name)
+    user.*.name = "bob"
 }
 ```
 
@@ -573,6 +573,29 @@ borrow のルール:
 * `&T` と `&mut T` は重複できない
 * `&mut T` 同士は同じ値に対して重複できない
 * `&mut T` argument は mutable local binding に限定する
+
+明示 dereference は Zig に合わせて postfix の `.*` を使います。
+
+```kizu
+fn rename(user: &mut User) -> void {
+    user.*.name = "bob"
+}
+```
+
+assignment のルール:
+
+* `let` binding への再代入は禁止
+* `let` binding の field assignment は禁止
+* `var` binding の field assignment は許可
+* `&T` 経由の dereference assignment は禁止
+* `&mut T` 経由の dereference assignment は許可
+
+```kizu
+fn main() -> void {
+    var user = User { name: "alice" }
+    user.name = "bob"
+}
+```
 
 ## 10. arena / handle
 

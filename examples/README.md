@@ -31,8 +31,9 @@ go test ./...
 | `if` / `else` | `if.kizu` | prints `adult` |
 | `while` | `while.kizu` | prints `0`, `1`, `2` |
 | `struct` and field access | `struct.kizu` | prints `alice`, `30` |
+| mutable struct field assignment | `field_assignment.kizu` | updates fields on a `var` binding |
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
-| mutable borrow parameter | `mutable_borrow.kizu` | `&mut` does not move the owner |
+| mutable borrow parameter | `mutable_borrow.kizu` | `&mut` updates through explicit `.*` dereference |
 | `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
@@ -64,6 +65,7 @@ go test ./...
 | inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |
 | unknown handle provenance is rejected | `negative/arena_unknown_handle.kizu` | `unknown provenance` |
 | `let` bindings are immutable | `negative/immutable_assignment.kizu` | `cannot assign` |
+| fields on `let` bindings are immutable | `negative/immutable_field_assignment.kizu` | `cannot assign field` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
@@ -81,4 +83,5 @@ go test ./...
 | tasks must be awaited or canceled | `negative/unawaited_task.kizu` | `must be awaited or canceled` |
 | task args move non-copy values | `negative/task_move.kizu` | `moved value` |
 | tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
+| shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |

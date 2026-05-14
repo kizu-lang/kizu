@@ -156,7 +156,9 @@ func assignedNames(block *ast.BlockStmt) map[string]bool {
 func collectAssigned(stmt ast.Statement, names map[string]bool) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
-		names[s.Name] = true
+		if ident, ok := s.Target.(*ast.IdentExpr); ok {
+			names[ident.Name] = true
+		}
 	case *ast.IfStmt:
 		collectBlockAssigned(s.Consequence, names)
 		if s.Alternative != nil {

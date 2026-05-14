@@ -275,8 +275,8 @@ func (s *LetStmt) String() string {
 
 // AssignStmt represents assignment to an existing binding.
 type AssignStmt struct {
-	Name  string
-	Value Expression
+	Target Expression
+	Value  Expression
 }
 
 // statementNode marks AssignStmt as a statement node.
@@ -284,7 +284,7 @@ func (*AssignStmt) statementNode() {}
 
 // String returns a compact debug representation of the assignment.
 func (s *AssignStmt) String() string {
-	return fmt.Sprintf("%s = %s", s.Name, s.Value.String())
+	return fmt.Sprintf("%s = %s", s.Target.String(), s.Value.String())
 }
 
 // ReturnStmt represents an explicit return statement.
@@ -610,4 +610,17 @@ func (*FieldExpr) expressionNode() {}
 // String returns a compact debug representation of the field access.
 func (e *FieldExpr) String() string {
 	return e.Receiver.String() + "." + e.Name
+}
+
+// DerefExpr represents explicit postfix dereference with Zig-style .*
+type DerefExpr struct {
+	Receiver Expression
+}
+
+// expressionNode marks DerefExpr as an expression node.
+func (*DerefExpr) expressionNode() {}
+
+// String returns a compact debug representation of explicit dereference.
+func (e *DerefExpr) String() string {
+	return e.Receiver.String() + ".*"
 }

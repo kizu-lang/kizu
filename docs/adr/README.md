@@ -52,3 +52,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0031: 幅が曖昧な int を廃止する](0031-remove-ambiguous-int.md)
 - [ADR-0032: v0.1 はメモリ安全性監査を release gate にする](0032-v0-1-memory-safety-release-gate.md)
 - [ADR-0033: borrow syntax は &T / &mut T にする](0033-reference-borrow-syntax.md)
+- [ADR-0034: dereference と field assignment は Zig 寄りにする](0034-zig-style-deref-and-field-assignment.md)

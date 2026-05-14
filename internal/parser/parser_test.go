@@ -43,6 +43,23 @@ func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 	}
 }
 
+// TestParseFieldAndDerefAssignment checks assignment targets beyond identifiers.
+func TestParseFieldAndDerefAssignment(t *testing.T) {
+	input := `fn rename(user: &mut User) -> void {
+    user.*.name = "bob"
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	got := program.String()
+	want := `fn rename(user: &mut User) -> void { user.*.name = "bob" }`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseIfAndWhile checks Phase 2 control-flow statement parsing.
 func TestParseIfAndWhile(t *testing.T) {
 	input := `fn main() {

@@ -235,19 +235,22 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 
 // checkAssignStmt moves the assigned value into an existing binding.
 func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
-	target, ok := env.lookup(stmt.Name)
-	if !ok {
-		return fmt.Errorf("move error: undefined variable `%s`", stmt.Name)
-	}
 	typeName, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
 		return err
 	}
-	target.typeName = typeName
-	target.moved = false
-	target.arenaID = 0
-	target.handleArenaID = 0
-	c.setArenaProvenance(target, stmt.Value, env)
+	if target, ok := directAssignmentRoot(stmt.Target, env); ok {
+		target.typeName = typeName
+		target.moved = false
+		target.arenaID = 0
+		target.handleArenaID = 0
+		c.setArenaProvenance(target, stmt.Value, env)
+		return nil
+	}
+	if _, ok := assignmentRoot(stmt.Target, env); !ok {
+		_, err := c.readExpr(stmt.Target, env)
+		return err
+	}
 	return nil
 }
 
@@ -364,6 +367,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
 		return c.readFieldExpr(e, env)
+	case *ast.DerefExpr:
+		return c.readDerefExpr(e, env)
 	default:
 		return "", fmt.Errorf("move error: unsupported expression %T", expr)
 	}
@@ -616,12 +621,53 @@ func (c *Checker) borrowedFieldRoot(expr ast.Expression, env *scope) (string, bo
 	switch e := expr.(type) {
 	case *ast.FieldExpr:
 		return c.borrowedFieldRoot(e.Receiver, env)
+	case *ast.DerefExpr:
+		return c.borrowedFieldRoot(e.Receiver, env)
 	case *ast.IdentExpr:
 		value, ok := env.lookup(e.Name)
 		return e.Name, ok && value.borrowedParam
 	default:
 		return "", false
 	}
+}
+
+// readDerefExpr reads the value behind a local borrow parameter.
+func (c *Checker) readDerefExpr(expr *ast.DerefExpr, env *scope) (string, error) {
+	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return "", fmt.Errorf("borrow error: dereference expects a local borrow")
+	}
+	value, ok := env.lookup(ident.Name)
+	if !ok {
+		return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
+	}
+	if !value.borrowedParam {
+		return "", fmt.Errorf("borrow error: `%s` is not a borrow", ident.Name)
+	}
+	return value.typeName, nil
+}
+
+// assignmentRoot finds the binding invalidated by an assignment target.
+func assignmentRoot(expr ast.Expression, env *scope) (*binding, bool) {
+	switch target := expr.(type) {
+	case *ast.IdentExpr:
+		return env.lookup(target.Name)
+	case *ast.FieldExpr:
+		return assignmentRoot(target.Receiver, env)
+	case *ast.DerefExpr:
+		return assignmentRoot(target.Receiver, env)
+	default:
+		return nil, false
+	}
+}
+
+// directAssignmentRoot returns a binding only for whole-binding assignment.
+func directAssignmentRoot(expr ast.Expression, env *scope) (*binding, bool) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	return env.lookup(ident.Name)
 }
 
 // checkUnionConstructor validates ownership effects of Union.Variant(payload).
