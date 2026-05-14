@@ -71,7 +71,7 @@ func evalComptime(expr ast.Expression) (comptimeValue, error) {
 	case *ast.BoolExpr:
 		return comptimeValue{typ: typeBool, b: e.Value}, nil
 	case *ast.StringExpr:
-		return comptimeValue{typ: typeString, s: e.Value}, nil
+		return comptimeValue{typ: typeByteString, s: e.Value}, nil
 	case *ast.PrefixExpr:
 		return evalComptimePrefix(e)
 	case *ast.BinaryExpr:

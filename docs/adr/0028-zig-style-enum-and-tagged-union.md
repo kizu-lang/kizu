@@ -33,7 +33,7 @@ v0.1 では `union` として別機能で実装する。
 union Shape {
     Point
     Circle(i64)
-    Label(string)
+    Label([]const u8)
 }
 ```
 

@@ -81,7 +81,8 @@ func (e *emitter) sortedStringLiteralsByDiscovery() []string {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if instr.Op == "const" && instr.Result.Type == "string" && !found[instr.Immediate] {
+				if instr.Op == "const" && instr.Result.Type == "[]const u8" &&
+					!found[instr.Immediate] {
 					found[instr.Immediate] = true
 					literals = append(literals, instr.Immediate)
 				}
@@ -264,7 +265,7 @@ func (e *emitter) writeLocals(fn *ir.Function) {
 // needsLocal reports whether an instruction result needs a WebAssembly local.
 func needsLocal(instr *ir.Instr) bool {
 	return instr.Result.Type != "" && instr.Result.Type != "void" &&
-		!(instr.Op == "const" && instr.Result.Type == "string")
+		!(instr.Op == "const" && instr.Result.Type == "[]const u8")
 }
 
 // blockIndexes maps block names to dispatch ids.

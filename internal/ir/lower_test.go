@@ -122,7 +122,7 @@ const whileSource = `fn main() {
 }`
 
 const arenaSource = `struct User {
-    name: string
+    name: []const u8
 }
 fn main() {
     let users = arena<User>()
@@ -154,8 +154,8 @@ fn main() -> !i64 {
 
 const helloSnapshot = `fn main() -> void {
 entry:
-  %1: string = const "hello, kizu"
-  call.print %1: string
+  %1: []const u8 = const "hello, kizu"
+  call.print %1: []const u8
   return void: void
 }`
 
@@ -175,11 +175,11 @@ entry:
 
 const variablesSnapshot = `fn main() -> void {
 entry:
-  %1: string = const "alice"
+  %1: []const u8 = const "alice"
   %2: i64 = const 30
   %3: i64 = const 1
   %4: i64 = binary.+ %2: i64, %3: i64
-  call.print %1: string
+  call.print %1: []const u8
   call.print %4: i64
   return void: void
 }`
@@ -191,12 +191,12 @@ entry:
   %3: bool = binary.>= %1: i64, %2: i64
   branch %3: bool, if.then.1, if.else.2
 if.then.1:
-  %4: string = const "adult"
-  call.print %4: string
+  %4: []const u8 = const "adult"
+  call.print %4: []const u8
   jump if.end.3
 if.else.2:
-  %6: string = const "minor"
-  call.print %6: string
+  %6: []const u8 = const "minor"
+  call.print %6: []const u8
   jump if.end.3
 if.end.3:
   return void: void
@@ -223,12 +223,12 @@ while.end.3:
 const arenaSnapshot = `fn main() -> void {
 entry:
   %1: arena<User> = arena.new User
-  %2: string = const "alice"
-  %3: User = struct.new {name: %2: string}
+  %2: []const u8 = const "alice"
+  %3: User = struct.new {name: %2: []const u8}
   %4: handle<User> = arena.add %1: arena<User>, %3: User
   %5: User = arena.get %1: arena<User>, %4: handle<User>
-  %6: string = field.name %5: User
-  call.print %6: string
+  %6: []const u8 = field.name %5: User
+  call.print %6: []const u8
   return void: void
 }`
 

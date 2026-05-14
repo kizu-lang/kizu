@@ -22,7 +22,7 @@ I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup
 I/O する関数は `Io` を受け取る。
 
 ```kizu
-fn read_config(io: Io, path: string) -> !string {
+fn read_config(io: Io, path: []const u8) -> ![]const u8 {
     return fs.read_to_string(io, path)
 }
 ```

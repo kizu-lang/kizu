@@ -46,7 +46,7 @@ let / var
 assignment
 i64
 bool
-string
+[]const u8
 void
 arithmetic / comparison
 if / else
@@ -255,7 +255,7 @@ fn bad_add(a: i64, b: i64) -> i64 {
 早期 return が必要な場合は `return` を書きます。
 
 ```kizu
-fn log(message: string) -> void {
+fn log(message: []const u8) -> void {
     print(message)
 }
 ```
@@ -264,7 +264,7 @@ fn log(message: string) -> void {
 
 ```kizu
 struct User {
-    name: string
+    name: []const u8
     age: i64
 }
 ```
@@ -302,7 +302,7 @@ tag だけの値が必要な場合は `enum` を使います。
 union Shape {
     Point
     Circle(i64)
-    Label(string)
+    Label([]const u8)
 }
 ```
 
@@ -375,12 +375,14 @@ v0.1 の基本型:
 
 ```text
 bool
-string
 void
 ```
 
 `i64` は整数 literal のデフォルト型です。
 Kizu は `int` のような幅が曖昧な整数型を導入しません。
+
+文字列 literal の型は `[]const u8` です。
+`string` primitive は導入しません。
 
 `void` は値を返さない関数の戻り値です。
 Kizu v0.1 では `Unit` という別名は導入しません。
@@ -457,7 +459,7 @@ numeric type -> numeric type
 safe code で許可しない cast:
 
 ```text
-string -> numeric
+[]const u8 -> numeric
 bool -> numeric
 numeric -> pointer
 pointer -> numeric
@@ -507,7 +509,6 @@ f64
 copy できない型:
 
 ```text
-string
 array
 map
 box
@@ -523,7 +524,7 @@ non-copy field を含む struct
 borrow は一時的に値を参照するための仕組みです。
 
 ```kizu
-fn show(s: borrow string) {
+fn show(s: borrow []const u8) {
     print(s)
 }
 ```
@@ -568,7 +569,7 @@ error は値として扱います。
 
 v0.1 では Zig に近い `!T` を導入します。
 `!T` は「成功時は `T`、失敗時は error」を表します。
-error payload は標準の `string` message として扱います。
+error payload は標準の `[]const u8` message として扱います。
 
 成功時は通常の `T` をそのまま `return` します。
 error 値は `error(message)` で作ります。
@@ -599,7 +600,7 @@ fn main() -> !i64 {
 * `try` の operand は `!T` でなければならない
 * `!T` 関数では `T` を返すと成功値として扱う
 * `error(message)` は `!T` を返す関数内でだけ使える
-* `error(message)` の message は `string`
+* `error(message)` の message は `[]const u8`
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない
 
@@ -827,11 +828,11 @@ std.slice
 std.array
 ```
 
-`string` は v0.1 では簡易 runtime string value として扱います。
-将来は `slice<const u8>` を低レベル表現の土台にします。
+文字列 literal は v0.1 では `[]const u8` として扱います。
+owned string は primitive ではなく、将来 `std.string` で扱います。
 
-C ABI へ `string` を暗黙に渡してはいけません。
-C へ渡す場合は、将来 `std.string.as_bytes` や `std.string.as_c_string` のような明示 API を使います。
+C ABI へ `std.string` を暗黙に渡してはいけません。
+C へ渡す場合は、将来 `std.string.as_c_string` のような明示 API を使います。
 
 v0.1 では collection runtime API を実装しません。
 collection は次の順で検討します。
@@ -852,7 +853,7 @@ Kizu v0.1 では `async fn` / `await` syntax は実装しません。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
 
 ```kizu
-fn read_config(io: Io, path: string) -> !string {
+fn read_config(io: Io, path: []const u8) -> ![]const u8 {
     return fs.read_to_string(io, path)
 }
 ```
@@ -982,7 +983,7 @@ kizu/
 ```text
 identifier
 integer literal
-string literal
+[]const u8 literal
 keyword
 operator
 punctuation

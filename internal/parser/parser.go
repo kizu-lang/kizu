@@ -725,6 +725,17 @@ func (p *Parser) parseTypeName() string {
 		}
 		return "!" + inner
 	}
+	if p.cur.Type == token.LBracket {
+		if !p.expectPeek(token.RBracket) {
+			return ""
+		}
+		p.nextToken()
+		arg := p.parseTypeArg()
+		if arg == "" {
+			return ""
+		}
+		return "[]" + arg
+	}
 	nullable := false
 	if p.cur.Type == token.Question {
 		nullable = true

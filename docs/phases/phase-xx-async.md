@@ -37,7 +37,7 @@ Kizu v0 では async を実装しない。
 ## 例
 
 ```kizu
-fn read_config(io: Io, path: string) -> !string {
+fn read_config(io: Io, path: []const u8) -> ![]const u8 {
     return fs.read_to_string(io, path)
 }
 ```

@@ -333,7 +333,7 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	case *ast.IntExpr:
 		return "i64", nil
 	case *ast.StringExpr:
-		return "string", nil
+		return "[]const u8", nil
 	case *ast.BoolExpr:
 		return "bool", nil
 	case *ast.ComptimeExpr:
@@ -907,7 +907,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 	switch typeName {
 	case "bool", "void", "Io",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-		"usize", "isize", "f32", "f64":
+		"usize", "isize", "f32", "f64", "[]const u8":
 		return true
 	default:
 		return false

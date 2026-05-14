@@ -38,7 +38,7 @@ declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 ```
 
-`string` は `ptr` と length の組を print ABI に渡す。
+`[]const u8` は `ptr` と length の組を print ABI に渡す。
 整数 literal は `i64` として lower する。
 
 struct / arena / handle は Phase 9 では LLVM の具体 layout へ lower しない。

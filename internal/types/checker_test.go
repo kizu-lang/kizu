@@ -60,14 +60,14 @@ fn main() { print(add(1)) }`,
 			name: "arg type",
 			source: `fn take(a: i64) -> i64 { return a }
 fn main() { print(take("no")) }`,
-			want: "arg 1 of `take` expects i64, got string",
+			want: "arg 1 of `take` expects i64, got []const u8",
 		},
 		{
 			name: "return type",
 			source: `fn bad() -> i64 {
     return "no"
 }`,
-			want: "return expects i64, got string",
+			want: "return expects i64, got []const u8",
 		},
 	}
 	runErrorCases(t, cases)
@@ -170,7 +170,7 @@ fn main() {}`
 // TestCheckAcceptsStructDeclarations checks Phase 5 struct declarations.
 func TestCheckAcceptsStructDeclarations(t *testing.T) {
 	source := `struct User {
-    name: string
+    name: []const u8
     age: i64
 }
 fn take(user: User) {}
@@ -257,7 +257,7 @@ func TestCheckAcceptsTaggedUnionMatch(t *testing.T) {
 	source := `union Shape {
     Point
     Circle(i64)
-    Label(string)
+    Label([]const u8)
 }
 fn describe(shape: borrow Shape) -> void {
     match shape {
@@ -288,7 +288,7 @@ fn main() {
     let shape = Shape.Circle("large")
     print(shape)
 }`,
-			want: "union variant `Shape.Circle` expects i64, got string",
+			want: "union variant `Shape.Circle` expects i64, got []const u8",
 		},
 		{
 			name: "exhaustiveness",
@@ -360,7 +360,7 @@ fn main() {
 // TestCheckAcceptsArenaHandle checks Phase 6 arena and handle types.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
-    name: string
+    name: []const u8
 }
 fn main() {
     let users = arena<User>()
@@ -500,7 +500,7 @@ func TestCheckRejectsCastErrors(t *testing.T) {
     let x = cast<i32>("no")
     print(x)
 }`,
-			want: "cannot cast string to i32",
+			want: "cannot cast []const u8 to i32",
 		},
 		{
 			name: "bool is not numeric",
@@ -571,7 +571,7 @@ fn main() {
 			source: `fn main() -> !i64 {
     return error(1)
 }`,
-			want: "`error` expects string",
+			want: "`error` expects []const u8",
 		},
 	}
 	runErrorCases(t, cases)

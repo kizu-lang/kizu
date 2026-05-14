@@ -40,7 +40,7 @@ just wasi-smoke
 
 - `i64` は WebAssembly `i64`
 - `bool` は `i32`
-- `string` は linear memory 上の data segment
+- `[]const u8` は linear memory 上の data segment
 - function call
 - `if`
 - `while`

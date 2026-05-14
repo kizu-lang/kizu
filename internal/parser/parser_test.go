@@ -72,7 +72,7 @@ func TestParseIfAndWhile(t *testing.T) {
 // TestParseStructDecl checks top-level struct field parsing.
 func TestParseStructDecl(t *testing.T) {
 	input := `struct User {
-    name: string
+    name: []const u8
     age: i64
 }
 fn main() {}`
@@ -82,7 +82,7 @@ fn main() {}`
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `struct User { name: string; age: i64 }
+	want := `struct User { name: []const u8; age: i64 }
 fn main() {  }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -117,7 +117,7 @@ func TestParseUnionDecl(t *testing.T) {
 	input := `union Shape {
     Point
     Circle(i64)
-    Label(string)
+    Label([]const u8)
 }
 fn main() {
     let shape = Shape.Circle(10)
@@ -132,7 +132,7 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `union Shape { Point; Circle(i64); Label(string) }
+	want := `union Shape { Point; Circle(i64); Label([]const u8) }
 fn main() { let shape = Shape.Circle(10); match shape { Point => print("point"); ` +
 		`Circle(radius) => print(radius); Label(text) => print(text) } }`
 	if got := program.String(); got != want {
@@ -171,7 +171,7 @@ fn main() { let color = Color.Red; match color { Red => print("red"); ` +
 // TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
 func TestParseArenaAndStructLiteral(t *testing.T) {
 	input := `struct User {
-    name: string
+    name: []const u8
 }
 fn main() {
     let users = arena<User>()
@@ -183,7 +183,7 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `struct User { name: string }
+	want := `struct User { name: []const u8 }
 fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice" }); ` +
 		`print(users.get(alice).name) }`
 	if got := program.String(); got != want {
@@ -279,7 +279,7 @@ func TestParseTry(t *testing.T) {
 
 // TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
 func TestParseRejectsExplicitLifetime(t *testing.T) {
-	input := `fn show(s: borrow 'a string) {}`
+	input := `fn show(s: borrow 'a []const u8) {}`
 	p := New(lexer.New(input))
 	_ = p.ParseProgram()
 	if len(p.Errors()) == 0 {

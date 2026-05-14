@@ -159,7 +159,7 @@ func typeNegativeCases() []conformanceErrorCase {
 			name:    "invalid cast",
 			command: "check",
 			path:    "../../examples/negative/invalid_cast.kizu",
-			want:    "cannot cast string to i32",
+			want:    "cannot cast []const u8 to i32",
 		},
 		{
 			name:    "non exhaustive match",
@@ -219,7 +219,7 @@ func abstractionNegativeCases() []conformanceErrorCase {
 			name:    "task move",
 			command: "check",
 			path:    "../../examples/negative/task_move.kizu",
-			want:    "moved value `name` was used",
+			want:    "moved value `config` was used",
 		},
 		{
 			name:    "task borrow capture",

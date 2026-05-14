@@ -35,6 +35,6 @@ fn main() -> !i64 {
 
 - Kizu の表層構文から `Result` / `result<T>` / `ok(value)` を外す
 - `try` は `!T` のみを unwrap / propagate する
-- error payload は v0.1 では `string` message に固定する
+- error payload は v0.1 では `[]const u8` message に固定する
 - full generics なしでエラー処理を実装できる
 - 将来、error set や stdlib error 型を追加する余地は残す

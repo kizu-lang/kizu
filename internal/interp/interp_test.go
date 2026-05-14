@@ -63,7 +63,7 @@ func TestRunControlFlow(t *testing.T) {
 // TestRunArenaHandle checks Phase 6 arena add/get and field access.
 func TestRunArenaHandle(t *testing.T) {
 	got := runSource(t, `struct User {
-    name: string
+    name: []const u8
 }
 fn main() {
     let users = arena<User>()
@@ -120,7 +120,7 @@ func TestRunTaggedUnionMatch(t *testing.T) {
 	got := runSource(t, `union Shape {
     Point
     Circle(i64)
-    Label(string)
+    Label([]const u8)
 }
 fn main() {
     let first = Shape.Circle(10)

@@ -11,31 +11,31 @@ import (
 type Type string
 
 const (
-	typeBool   Type = "bool"
-	typeI64    Type = "i64"
-	typeString Type = "string"
-	typeSelf   Type = "Self"
-	typeVoid   Type = "void"
+	typeBool       Type = "bool"
+	typeI64        Type = "i64"
+	typeByteString Type = "[]const u8"
+	typeSelf       Type = "Self"
+	typeVoid       Type = "void"
 )
 
 var knownTypes = map[Type]bool{
-	typeBool:    true,
-	typeI64:     true,
-	typeString:  true,
-	typeVoid:    true,
-	"i8":        true,
-	"i16":       true,
-	"i32":       true,
-	"u8":        true,
-	"u16":       true,
-	"u32":       true,
-	"u64":       true,
-	"usize":     true,
-	"isize":     true,
-	"f32":       true,
-	"f64":       true,
-	"Io":        true,
-	"TaskGroup": true,
+	typeBool:       true,
+	typeI64:        true,
+	typeByteString: true,
+	typeVoid:       true,
+	"i8":           true,
+	"i16":          true,
+	"i32":          true,
+	"u8":           true,
+	"u16":          true,
+	"u32":          true,
+	"u64":          true,
+	"usize":        true,
+	"isize":        true,
+	"f32":          true,
+	"f64":          true,
+	"Io":           true,
+	"TaskGroup":    true,
 }
 
 var numericTypes = map[Type]bool{
@@ -411,6 +411,9 @@ func (c *Checker) parseType(name string) (Type, error) {
 	if strings.HasPrefix(name, "!") {
 		return c.parseErrorUnionType(name)
 	}
+	if strings.HasPrefix(name, "[]") {
+		return c.parseSliceType(name)
+	}
 	if strings.HasPrefix(name, "?") {
 		return c.parseNullableType(name)
 	}
@@ -426,6 +429,14 @@ func (c *Checker) parseType(name string) (Type, error) {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
+}
+
+// parseSliceType validates v0.1 byte slice spellings.
+func (c *Checker) parseSliceType(name string) (Type, error) {
+	if name != string(typeByteString) {
+		return "", fmt.Errorf("type error: unknown slice type `%s`", name)
+	}
+	return Type(name), nil
 }
 
 // parseErrorUnionType validates Zig-style !T error union types.
@@ -771,7 +782,7 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 	case *ast.IntExpr:
 		return typeI64, nil
 	case *ast.StringExpr:
-		return typeString, nil
+		return typeByteString, nil
 	case *ast.BoolExpr:
 		return typeBool, nil
 	case *ast.ComptimeExpr:
@@ -954,8 +965,8 @@ func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe bool) (T
 	if err != nil {
 		return "", err
 	}
-	if got != typeString {
-		return "", fmt.Errorf("type error: `error` expects string, got %s", got)
+	if got != typeByteString {
+		return "", fmt.Errorf("type error: `error` expects []const u8, got %s", got)
 	}
 	if _, ok := errorUnionElement(c.currentReturn); !ok {
 		return "", fmt.Errorf("type error: `error` requires function to return !T")

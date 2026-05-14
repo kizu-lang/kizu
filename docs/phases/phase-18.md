@@ -10,7 +10,7 @@ Kizu のエラー処理を exception ではなく値として扱う。
 
 - v0.1 では `!T` を実装する
 - `Result<T, E>` は採用せず、Zig に近い `!T` を使う
-- error payload は標準の `string` message とする
+- error payload は標準の `[]const u8` message とする
 - `option<T>` は型名として予約し、runtime helper は後続 phase に回す
 - `try` は `!T` を返す関数内でのみ使える
 

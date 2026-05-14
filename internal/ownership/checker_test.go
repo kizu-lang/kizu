@@ -33,29 +33,32 @@ func TestCheckRejectsMoveErrors(t *testing.T) {
 	}{
 		{
 			name: "assignment move",
-			source: `fn main() {
-    let a = "hello"
+			source: `struct Name { value: []const u8 }
+fn main() {
+    let a = Name { value: "hello" }
     let b = a
-    print(a)
-    print(b)
+    print(a.value)
+    print(b.value)
 }`,
 			want: "moved value `a` was used",
 		},
 		{
 			name: "function argument move",
-			source: `fn take(s: string) { print(s) }
+			source: `struct Name { value: []const u8 }
+fn take(name: Name) { print(name.value) }
 fn main() {
-    let name = "alice"
+    let name = Name { value: "alice" }
     take(name)
-    print(name)
+    print(name.value)
 }`,
 			want: "moved value `name` was used",
 		},
 		{
 			name: "double move",
-			source: `fn take(s: string) { print(s) }
+			source: `struct Name { value: []const u8 }
+fn take(name: Name) { print(name.value) }
 fn main() {
-    let name = "alice"
+    let name = Name { value: "alice" }
     take(name)
     take(name)
 }`,
@@ -67,7 +70,7 @@ fn main() {
 
 // TestCheckBorrowArgumentDoesNotMove checks borrow parameters preserve ownership.
 func TestCheckBorrowArgumentDoesNotMove(t *testing.T) {
-	source := `fn show(s: borrow string) { print(s) }
+	source := `fn show(s: borrow []const u8) { print(s) }
 fn main() {
     let name = "alice"
     show(name)
@@ -87,14 +90,14 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 	}{
 		{
 			name: "return borrowed parameter",
-			source: `fn bad(s: borrow string) -> string {
+			source: `fn bad(s: borrow []const u8) -> []const u8 {
     return s
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
 		{
 			name: "store borrowed parameter in local",
-			source: `fn bad(s: borrow string) {
+			source: `fn bad(s: borrow []const u8) {
     let alias = s
     print(alias)
 }`,
@@ -102,8 +105,8 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 		},
 		{
 			name: "pass borrowed parameter to owner",
-			source: `fn take(s: string) { print(s) }
-fn bad(s: borrow string) {
+			source: `fn take(s: []const u8) { print(s) }
+fn bad(s: borrow []const u8) {
     take(s)
 }`,
 			want: "borrowed value `s` cannot escape",
@@ -111,7 +114,7 @@ fn bad(s: borrow string) {
 		{
 			name: "borrow field",
 			source: `struct Bad {
-    value: borrow string
+    value: borrow []const u8
 }
 fn main() {}`,
 			want: "struct field `Bad.value` cannot store borrow",
@@ -122,12 +125,13 @@ fn main() {}`,
 
 // TestCheckRejectsMoveWhileBorrowed checks overlapping borrow and move in a call.
 func TestCheckRejectsMoveWhileBorrowed(t *testing.T) {
-	source := `fn use(a: borrow string, b: string) {
-    print(a)
-    print(b)
+	source := `struct Name { value: []const u8 }
+fn use(a: borrow Name, b: Name) {
+    print(a.value)
+    print(b.value)
 }
 fn main() {
-    let name = "alice"
+    let name = Name { value: "alice" }
     use(name, name)
 }`
 	err := checkSource(source)
@@ -142,7 +146,7 @@ fn main() {
 // TestCheckAcceptsArenaHandle checks arena handles with matching provenance.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
-    name: string
+    name: []const u8
 }
 fn main() {
     let users = arena<User>()
@@ -163,7 +167,7 @@ func TestCheckRejectsArenaHandleErrors(t *testing.T) {
 	}{
 		{
 			name: "wrong arena",
-			source: `struct User { name: string }
+			source: `struct User { name: []const u8 }
 fn main() {
     let left = arena<User>()
     let right = arena<User>()
@@ -174,7 +178,7 @@ fn main() {
 		},
 		{
 			name: "returned handle",
-			source: `struct User { name: string }
+			source: `struct User { name: []const u8 }
 fn make() -> handle<User> {
     let users = arena<User>()
     let alice = users.add(User { name: "alice" })
@@ -188,11 +192,12 @@ fn make() -> handle<User> {
 
 // TestCheckBranchMoveMarksOuterValueMoved checks possible moves escape branches.
 func TestCheckBranchMoveMarksOuterValueMoved(t *testing.T) {
-	source := `fn take(s: string) { print(s) }
+	source := `struct Name { value: []const u8 }
+fn take(name: Name) { print(name.value) }
 fn main() {
-    let name = "alice"
+    let name = Name { value: "alice" }
     if true { take(name) }
-    print(name)
+    print(name.value)
 }`
 	err := checkSource(source)
 	if err == nil {
@@ -212,17 +217,18 @@ func TestCheckUnsafeDoesNotDisableMoveAndBorrowRules(t *testing.T) {
 	}{
 		{
 			name: "moved value in unsafe block",
-			source: `fn take(s: string) { print(s) }
+			source: `struct Name { value: []const u8 }
+fn take(name: Name) { print(name.value) }
 fn main() {
-    let name = "alice"
+    let name = Name { value: "alice" }
     take(name)
-    unsafe { print(name) }
+    unsafe { print(name.value) }
 }`,
 			want: "moved value `name` was used",
 		},
 		{
 			name: "borrow escape in unsafe function",
-			source: `unsafe fn bad(s: borrow string) -> string {
+			source: `unsafe fn bad(s: borrow []const u8) -> []const u8 {
     return s
 }`,
 			want: "borrowed value `s` cannot escape",
@@ -230,7 +236,7 @@ fn main() {
 		{
 			name: "borrow field in unsafe-adjacent code",
 			source: `struct Bad {
-    value: borrow string
+    value: borrow []const u8
 }
 fn main() { unsafe { print(1) } }`,
 			want: "struct field `Bad.value` cannot store borrow",

@@ -14,7 +14,6 @@ v0 の基本型は次にする。
 ```text
 i64
 bool
-string
 void
 ```
 
@@ -32,5 +31,5 @@ f32 f64
 
 - examples と parser tests は小文字型を使う
 - `void` は戻り値省略時の型として扱う
-- `string` は v0 の組み込み文字列型として扱う
+- string literal は `[]const u8` として扱い、`string` primitive は採用しない
 - `Int` / `String` / `Unit` は採用しない

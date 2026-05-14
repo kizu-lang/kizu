@@ -67,10 +67,10 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 		e.values[instr.Result.Name] = valueInfo{typ: "i64", expr: "(i64.const " + instr.Immediate + ")"}
 	case "bool":
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", expr: wasmBool(instr.Immediate)}
-	case "string":
+	case "[]const u8":
 		ref := e.strings[instr.Immediate]
 		e.values[instr.Result.Name] = valueInfo{
-			typ: "string", expr: fmt.Sprintf("(i32.const %d)", ref.offset), length: ref.length,
+			typ: "[]const u8", expr: fmt.Sprintf("(i32.const %d)", ref.offset), length: ref.length,
 		}
 	default:
 		return fmt.Errorf("wasm error: unsupported const type `%s`", instr.Result.Type)
@@ -127,7 +127,7 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	}
 	value := e.value(args[0])
 	switch args[0].Type {
-	case "string":
+	case "[]const u8":
 		fmt.Fprintf(&e.out, "            (call $__write_line %s (i32.const %d))\n",
 			value.expr, value.length)
 	case "i64":

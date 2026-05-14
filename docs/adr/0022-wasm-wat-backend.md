@@ -29,7 +29,7 @@ kizu build --target wasm32-wasi <file>
 - `print` は stdout に 1 行出力する
 - `i64` は WebAssembly `i64` として扱う
 - `bool` は `i32` として扱う
-- `string` は linear memory の data segment として扱う
+- `[]const u8` は linear memory の data segment として扱う
 
 Phase 11 の target subset は Phase 2 examples に必要な範囲に限定する。
 

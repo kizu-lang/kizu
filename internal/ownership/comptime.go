@@ -103,7 +103,7 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 	case *ast.IntExpr:
 		return "i64", nil
 	case *ast.StringExpr:
-		return "string", nil
+		return "[]const u8", nil
 	case *ast.BoolExpr:
 		return "bool", nil
 	case *ast.PrefixExpr:
