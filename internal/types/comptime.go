@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"tiny-safe/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ast"
 )
 
 type comptimeValue struct {

@@ -3,7 +3,7 @@ package ownership
 import (
 	"fmt"
 
-	"tiny-safe/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ast"
 )
 
 // Checker validates ownership and move rules for a parsed program.

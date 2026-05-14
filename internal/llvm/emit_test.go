@@ -4,11 +4,11 @@ import (
 	"errors"
 	"testing"
 
-	"tiny-safe/internal/ir"
-	"tiny-safe/internal/lexer"
-	"tiny-safe/internal/ownership"
-	"tiny-safe/internal/parser"
-	"tiny-safe/internal/types"
+	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/ownership"
+	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/types"
 )
 
 // TestEmitSnapshots checks stable LLVM IR generation for phase 2 examples.

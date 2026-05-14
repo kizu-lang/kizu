@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"tiny-safe/internal/ir"
+	"github.com/kizu-lang/kizu/internal/ir"
 )
 
 // writeBlock writes a dispatch arm for one IR block.

@@ -5,17 +5,17 @@ import (
 	"os"
 	"strings"
 
-	"tiny-safe/internal/ast"
-	"tiny-safe/internal/buildcache"
-	"tiny-safe/internal/cimport"
-	"tiny-safe/internal/interp"
-	"tiny-safe/internal/ir"
-	"tiny-safe/internal/lexer"
-	"tiny-safe/internal/llvm"
-	"tiny-safe/internal/ownership"
-	"tiny-safe/internal/parser"
-	"tiny-safe/internal/types"
-	"tiny-safe/internal/wasm"
+	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/buildcache"
+	"github.com/kizu-lang/kizu/internal/cimport"
+	"github.com/kizu-lang/kizu/internal/interp"
+	"github.com/kizu-lang/kizu/internal/ir"
+	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/llvm"
+	"github.com/kizu-lang/kizu/internal/ownership"
+	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/types"
+	"github.com/kizu-lang/kizu/internal/wasm"
 )
 
 // main dispatches the kizu command line interface.

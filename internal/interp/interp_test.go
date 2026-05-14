@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"tiny-safe/internal/lexer"
-	"tiny-safe/internal/parser"
+	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/parser"
 )
 
 // TestRunHello checks the print builtin on a minimal program.

@@ -1,6 +1,6 @@
 package lexer
 
-import "tiny-safe/internal/token"
+import "github.com/kizu-lang/kizu/internal/token"
 
 // Lexer scans Kizu source text into tokens.
 type Lexer struct {

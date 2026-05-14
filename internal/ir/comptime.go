@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"tiny-safe/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ast"
 )
 
 // lowerComptimeIfStmt lowers only the branch selected during compilation.

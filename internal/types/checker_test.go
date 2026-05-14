@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"tiny-safe/internal/lexer"
-	"tiny-safe/internal/parser"
+	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/parser"
 )
 
 // TestCheckValidPhase2Programs checks programs that the interpreter can run.

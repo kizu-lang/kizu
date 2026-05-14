@@ -3,7 +3,7 @@ package ir
 import (
 	"fmt"
 
-	"tiny-safe/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ast"
 )
 
 // Lower converts a checked Kizu AST into typed SSA IR.

@@ -3,7 +3,7 @@ package parser
 import (
 	"testing"
 
-	"tiny-safe/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/lexer"
 )
 
 // TestParseHello checks that a minimal program parses cleanly.

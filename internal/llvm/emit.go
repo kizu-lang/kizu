@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"tiny-safe/internal/ir"
+	"github.com/kizu-lang/kizu/internal/ir"
 )
 
 // Emit formats a typed SSA IR module as LLVM IR.

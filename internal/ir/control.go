@@ -3,7 +3,7 @@ package ir
 import (
 	"fmt"
 
-	"tiny-safe/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ast"
 )
 
 // lowerIfStmt lowers if/else into branches and a merge block.

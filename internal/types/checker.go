@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"tiny-safe/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ast"
 )
 
 // Type is the static type name used by the v0 checker.

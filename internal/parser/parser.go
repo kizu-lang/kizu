@@ -3,9 +3,9 @@ package parser
 import (
 	"fmt"
 
-	"tiny-safe/internal/ast"
-	"tiny-safe/internal/lexer"
-	"tiny-safe/internal/token"
+	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/token"
 )
 
 // Parser consumes tokens and builds a Kizu AST.

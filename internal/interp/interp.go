@@ -5,7 +5,7 @@ import (
 	"io"
 	"strconv"
 
-	"tiny-safe/internal/ast"
+	"github.com/kizu-lang/kizu/internal/ast"
 )
 
 // Interpreter executes a parsed Kizu program.

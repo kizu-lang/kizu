@@ -3,7 +3,7 @@ package lexer
 import (
 	"testing"
 
-	"tiny-safe/internal/token"
+	"github.com/kizu-lang/kizu/internal/token"
 )
 
 // TestNextToken checks the lexer token stream for representative syntax.
