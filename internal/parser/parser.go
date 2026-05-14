@@ -410,16 +410,7 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 func (p *Parser) parsePrefixExpression() ast.Expression {
 	switch p.cur.Type {
 	case token.Ident:
-		if p.cur.Literal == "cast" && p.peek.Type == token.LT {
-			return p.parseCastExpr()
-		}
-		if p.cur.Literal == "arena" && p.peek.Type == token.LT {
-			return p.parseArenaNewExpr()
-		}
-		if p.peek.Type == token.LBrace && startsUpper(p.cur.Literal) {
-			return p.parseStructLiteralExpr(p.cur.Literal)
-		}
-		return &ast.IdentExpr{Name: p.cur.Literal}
+		return p.parseIdentPrefixExpression()
 	case token.Int:
 		return &ast.IntExpr{Value: p.cur.Literal}
 	case token.String:
@@ -431,6 +422,9 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	case token.Comptime:
 		p.nextToken()
 		return &ast.ComptimeExpr{Expr: p.parseExpression(lowest)}
+	case token.Try:
+		p.nextToken()
+		return &ast.TryExpr{Value: p.parseExpression(prefix)}
 	case token.Bang, token.Minus:
 		op := p.cur.Literal
 		p.nextToken()
@@ -444,6 +438,20 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		p.errorf("expected expression, got %s", p.cur.Type)
 		return &ast.IdentExpr{Name: "<error>"}
 	}
+}
+
+// parseIdentPrefixExpression parses identifiers and identifier-led special forms.
+func (p *Parser) parseIdentPrefixExpression() ast.Expression {
+	if p.cur.Literal == "cast" && p.peek.Type == token.LT {
+		return p.parseCastExpr()
+	}
+	if p.cur.Literal == "arena" && p.peek.Type == token.LT {
+		return p.parseArenaNewExpr()
+	}
+	if p.peek.Type == token.LBrace && startsUpper(p.cur.Literal) {
+		return p.parseStructLiteralExpr(p.cur.Literal)
+	}
+	return &ast.IdentExpr{Name: p.cur.Literal}
 }
 
 // parseCastExpr parses cast<T>(value).

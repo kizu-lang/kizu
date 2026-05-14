@@ -94,6 +94,37 @@ fn main() {
 	}
 }
 
+// TestRunResultTry checks minimal result<T> propagation at runtime.
+func TestRunResultTry(t *testing.T) {
+	got := runSource(t, `fn parse() -> result<int> {
+    return ok(1)
+}
+fn main() -> result<int> {
+    let value = try parse()
+    print(value)
+    return ok(value + 1)
+}`)
+	want := "1\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestRunResultTryPropagatesError checks try returns error results without printing.
+func TestRunResultTryPropagatesError(t *testing.T) {
+	got := runSource(t, `fn parse() -> result<int> {
+    return error("bad")
+}
+fn main() -> result<int> {
+    let value = try parse()
+    print(value)
+    return ok(value)
+}`)
+	if got != "" {
+		t.Fatalf("got %q, want empty output", got)
+	}
+}
+
 // TestRuntimeErrorChecksMutableAssignment checks a short readable runtime error.
 func TestRuntimeErrorChecksMutableAssignment(t *testing.T) {
 	_, err := parseAndRun(`fn main() {

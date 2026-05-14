@@ -168,6 +168,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerCallExpr(e)
 	case *ast.CastExpr:
 		return l.lowerCastExpr(e)
+	case *ast.TryExpr:
+		return l.lowerTryExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
 	case *ast.FieldExpr:
@@ -225,11 +227,26 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
+	if name.Name == "ok" {
+		return l.emit("result.ok", "result<"+args[0].Type+">", args, ""), nil
+	}
+	if name.Name == "error" {
+		return l.emit("result.error", l.current.Return, args, ""), nil
+	}
 	ret := "void"
 	if sig, ok := l.signatures[name.Name]; ok {
 		ret = sig.Return
 	}
 	return l.emit("call."+name.Name, ret, args, ""), nil
+}
+
+// lowerTryExpr lowers result propagation as an explicit IR instruction.
+func (l *lowerer) lowerTryExpr(expr *ast.TryExpr) (Value, error) {
+	value, err := l.lowerExpr(expr.Value)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("result.try", resultElementType(value.Type), []Value{value}, ""), nil
 }
 
 // lowerMethodCallExpr lowers arena method calls.

@@ -405,6 +405,19 @@ func (e *CastExpr) String() string {
 	return fmt.Sprintf("cast<%s>(%s)", e.TargetType, e.Value.String())
 }
 
+// TryExpr unwraps a result<T> or returns the error from the current function.
+type TryExpr struct {
+	Value Expression
+}
+
+// expressionNode marks TryExpr as an expression node.
+func (*TryExpr) expressionNode() {}
+
+// String returns a compact debug representation of the try expression.
+func (e *TryExpr) String() string {
+	return "try " + e.Value.String()
+}
+
 // ArenaNewExpr represents arena<T>() construction.
 type ArenaNewExpr struct {
 	TypeName string

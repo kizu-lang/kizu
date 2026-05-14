@@ -36,6 +36,7 @@ Kizu は Go 製の初期プロトタイプです。
 - extern function 宣言向けの限定的な C header import
 - opt-in の IR optimization pipeline
 - 低レベル型変換向けの明示 `cast<T>(value)`
+- 最小の `result<T>` と `try` error propagation
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 

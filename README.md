@@ -37,6 +37,7 @@ Implemented phases:
 - limited C header import for extern function declarations
 - opt-in IR optimization pipeline
 - explicit `cast<T>(value)` for low-level type conversions
+- minimal `result<T>` and `try` error propagation
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.

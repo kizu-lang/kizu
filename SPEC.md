@@ -390,9 +390,44 @@ print(users.get(alice).name)
 
 ## 11. エラー処理
 
-Kizu は将来的に `Option<T>` と `Result<T, E>` を持ちます。
+Kizu は exception を使いません。
+error は値として扱います。
 
-v0 では interpreter error だけでもよいです。
+v0.1 では full generics を実装しないため、まず `result<T>` を導入します。
+error payload は標準の `string` message として扱います。
+
+成功値は `ok(value)` で作ります。
+error 値は `error(message)` で作ります。
+
+```kizu
+fn parse() -> result<int> {
+    return ok(1)
+}
+
+fn fail() -> result<int> {
+    return error("bad")
+}
+```
+
+`try` は `result<T>` を unwrap します。
+error の場合は、現在の関数からその error result を返します。
+
+```kizu
+fn main() -> result<int> {
+    let value = try parse()
+    return ok(value + 1)
+}
+```
+
+ルール:
+
+* `try` は `result<T>` を返す関数内でだけ使える
+* `try` の operand は `result<T>` でなければならない
+* `ok(value)` は `result<T>` を作る
+* `error(message)` は `result<T>` を返す関数内でだけ使える
+* `error(message)` の message は `string`
+* exception / stack unwinding は使わない
+* `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない
 
 ## 12. unsafe / C ABI
 

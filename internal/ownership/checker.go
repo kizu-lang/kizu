@@ -259,6 +259,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.checkCallExpr(e, env)
 	case *ast.CastExpr:
 		return c.readCastExpr(e, env)
+	case *ast.TryExpr:
+		return c.readTryExpr(e, env)
 	case *ast.ArenaNewExpr:
 		return fmt.Sprintf("arena<%s>", e.TypeName), nil
 	case *ast.StructLiteralExpr:
@@ -333,6 +335,12 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if name.Name == "ptr_read" || name.Name == "ptr_write" {
 		return c.checkPointerBuiltin(expr, env)
 	}
+	if name.Name == "ok" {
+		return c.checkOkCall(expr, env)
+	}
+	if name.Name == "error" {
+		return c.checkErrorCall(expr, env)
+	}
 	fn, ok := c.functions[name.Name]
 	if !ok {
 		return "", fmt.Errorf("move error: undefined function `%s`", name.Name)
@@ -359,6 +367,42 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// checkOkCall moves the success value into a result<T>.
+func (c *Checker) checkOkCall(expr *ast.CallExpr, env *scope) (string, error) {
+	if len(expr.Args) != 1 {
+		return "", fmt.Errorf("move error: `ok` expects 1 arg, got %d", len(expr.Args))
+	}
+	got, err := c.moveExpr(expr.Args[0], env)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("result<%s>", got), nil
+}
+
+// checkErrorCall reads the error message and returns the current result shape.
+func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope) (string, error) {
+	if len(expr.Args) != 1 {
+		return "", fmt.Errorf("move error: `error` expects 1 arg, got %d", len(expr.Args))
+	}
+	if _, err := c.readExpr(expr.Args[0], env); err != nil {
+		return "", err
+	}
+	return "result<unknown>", nil
+}
+
+// readTryExpr reads a result<T> expression and returns T.
+func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
+	got, err := c.readExpr(expr.Value, env)
+	if err != nil {
+		return "", err
+	}
+	base, arg, ok := splitGenericType(got)
+	if !ok || base != "result" {
+		return "", fmt.Errorf("move error: try expects result<T>, got %s", got)
+	}
+	return arg, nil
 }
 
 // checkPointerBuiltin reads raw pointer builtin arguments without moving values.

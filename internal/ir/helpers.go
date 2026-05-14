@@ -85,3 +85,11 @@ func arenaElementType(arena string) string {
 	}
 	return strings.TrimSuffix(strings.TrimPrefix(arena, "arena<"), ">")
 }
+
+// resultElementType returns T for result<T>.
+func resultElementType(result string) string {
+	if !strings.HasPrefix(result, "result<") || !strings.HasSuffix(result, ">") {
+		return "unknown"
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(result, "result<"), ">")
+}

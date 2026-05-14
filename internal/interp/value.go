@@ -12,6 +12,7 @@ const (
 	kindStruct
 	kindArena
 	kindHandle
+	kindResult
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
@@ -23,6 +24,7 @@ type Value struct {
 	fields map[string]Value
 	arena  *Arena
 	handle Handle
+	result *Result
 }
 
 // Arena stores values and gives out opaque handles.
@@ -34,6 +36,13 @@ type Arena struct {
 type Handle struct {
 	arena *Arena
 	index int
+}
+
+// Result stores a success or error value for result<T>.
+type Result struct {
+	ok      bool
+	value   Value
+	message string
 }
 
 // String formats a value for the print builtin and test assertions.
@@ -56,6 +65,11 @@ func (v Value) String() string {
 		return "<arena>"
 	case kindHandle:
 		return "<handle>"
+	case kindResult:
+		if v.result.ok {
+			return "<ok>"
+		}
+		return "<error: " + v.result.message + ">"
 	default:
 		return "<invalid>"
 	}
@@ -94,4 +108,14 @@ func arenaValue() Value {
 // handleValue returns an opaque handle runtime value.
 func handleValue(arena *Arena, index int) Value {
 	return Value{kind: kindHandle, handle: Handle{arena: arena, index: index}}
+}
+
+// resultOkValue returns a successful result runtime value.
+func resultOkValue(value Value) Value {
+	return Value{kind: kindResult, result: &Result{ok: true, value: value}}
+}
+
+// resultErrorValue returns an error result runtime value.
+func resultErrorValue(message string) Value {
+	return Value{kind: kindResult, result: &Result{message: message}}
 }

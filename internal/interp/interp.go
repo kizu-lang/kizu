@@ -14,6 +14,15 @@ type Interpreter struct {
 	functions map[string]*ast.FunctionDecl
 }
 
+type trySignal struct {
+	value Value
+}
+
+// Error marks trySignal as an internal interpreter control signal.
+func (s trySignal) Error() string {
+	return "try signal"
+}
+
 // New creates an interpreter that writes builtin output to out.
 func New(out io.Writer) *Interpreter {
 	return &Interpreter{out: out, functions: map[string]*ast.FunctionDecl{}}
@@ -61,6 +70,9 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 func (i *Interpreter) evalBlock(block *ast.BlockStmt, env *Env) (Value, bool, error) {
 	for _, stmt := range block.Statements {
 		result, returned, err := i.evalStmt(stmt, env)
+		if signal, ok := err.(trySignal); ok {
+			return signal.value, true, nil
+		}
 		if err != nil || returned {
 			return result, returned, err
 		}
@@ -189,6 +201,8 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 		return i.evalCallExpr(e, env)
 	case *ast.CastExpr:
 		return i.evalExpr(e.Value, env)
+	case *ast.TryExpr:
+		return i.evalTryExpr(e, env)
 	case *ast.ArenaNewExpr:
 		return arenaValue(), nil
 	case *ast.StructLiteralExpr:
@@ -350,7 +364,28 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 	if name.Name == "print" {
 		return i.callPrint(args)
 	}
+	if name.Name == "ok" {
+		return callOk(args)
+	}
+	if name.Name == "error" {
+		return callError(args)
+	}
 	return i.callFunction(name.Name, args)
+}
+
+// evalTryExpr unwraps ok results or returns an error result from the current function.
+func (i *Interpreter) evalTryExpr(expr *ast.TryExpr, env *Env) (Value, error) {
+	value, err := i.evalExpr(expr.Value, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindResult {
+		return voidValue(), fmt.Errorf("runtime error: try expects result")
+	}
+	if value.result.ok {
+		return value.result.value, nil
+	}
+	return voidValue(), trySignal{value: value}
 }
 
 // evalStructLiteralExpr evaluates each field initializer into a struct value.
@@ -458,4 +493,20 @@ func (i *Interpreter) callPrint(args []Value) (Value, error) {
 		return voidValue(), err
 	}
 	return voidValue(), nil
+}
+
+// callOk constructs a successful result value.
+func callOk(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: ok expected 1 arg")
+	}
+	return resultOkValue(args[0]), nil
+}
+
+// callError constructs an error result value.
+func callError(args []Value) (Value, error) {
+	if len(args) != 1 || args[0].kind != kindString {
+		return voidValue(), fmt.Errorf("runtime error: error expected string")
+	}
+	return resultErrorValue(args[0].s), nil
 }

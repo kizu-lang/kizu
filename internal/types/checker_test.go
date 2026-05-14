@@ -337,6 +337,69 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 	runErrorCases(t, cases)
 }
 
+// TestCheckAcceptsResultTry checks minimal result<T> propagation.
+func TestCheckAcceptsResultTry(t *testing.T) {
+	source := `fn parse() -> result<int> {
+    return ok(1)
+}
+fn main() -> result<int> {
+    let value = try parse()
+    return ok(value + 1)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckAcceptsResultError checks explicit error value construction.
+func TestCheckAcceptsResultError(t *testing.T) {
+	source := `fn parse() -> result<int> {
+    return error("bad")
+}
+fn main() -> result<int> {
+    let value = try parse()
+    return ok(value)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsTryErrors checks readable result propagation errors.
+func TestCheckRejectsTryErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "non result function",
+			source: `fn parse() -> result<int> { return ok(1) }
+fn main() {
+    let x = try parse()
+    print(x)
+}`,
+			want: "try requires function to return result<T>",
+		},
+		{
+			name: "non result expression",
+			source: `fn main() -> result<int> {
+    let x = try 1
+    return ok(x)
+}`,
+			want: "try expects result<T>, got int",
+		},
+		{
+			name: "error message type",
+			source: `fn main() -> result<int> {
+    return error(1)
+}`,
+			want: "`error` expects string",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsUnsafeBoundaryErrors checks unsafe-only operations.
 func TestCheckRejectsUnsafeBoundaryErrors(t *testing.T) {
 	cases := []struct {

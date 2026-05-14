@@ -79,8 +79,9 @@ var integerTypes = map[Type]bool{
 
 // Checker validates type rules for a parsed program.
 type Checker struct {
-	functions map[string]*functionType
-	structs   map[string]*ast.StructDecl
+	functions     map[string]*functionType
+	structs       map[string]*ast.StructDecl
+	currentReturn Type
 }
 
 type functionType struct {
@@ -203,7 +204,7 @@ func (c *Checker) parseType(name string) (Type, error) {
 		if base == "ptr" {
 			return c.parsePointerType(name, arg)
 		}
-		if base != "arena" && base != "handle" {
+		if base != "arena" && base != "handle" && base != "result" && base != "option" {
 			return "", fmt.Errorf("type error: unknown generic type `%s`", base)
 		}
 		if _, err := c.parseType(arg); err != nil {
@@ -253,6 +254,9 @@ func (c *Checker) checkFunction(fn *functionType) error {
 			return err
 		}
 	}
+	previousReturn := c.currentReturn
+	c.currentReturn = fn.returnType
+	defer func() { c.currentReturn = previousReturn }()
 	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
 	if err != nil {
 		return err
@@ -413,6 +417,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 		return c.checkCallExpr(e, env, unsafe)
 	case *ast.CastExpr:
 		return c.checkCastExpr(e, env, unsafe)
+	case *ast.TryExpr:
+		return c.checkTryExpr(e, env, unsafe)
 	case *ast.ArenaNewExpr:
 		return c.checkArenaNewExpr(e)
 	case *ast.StructLiteralExpr:
@@ -518,6 +524,22 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe bool) (Ty
 	return "", fmt.Errorf("type error: cannot cast %s to %s", source, target)
 }
 
+// checkTryExpr validates result propagation and returns the success type.
+func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type, error) {
+	if _, ok := resultElement(c.currentReturn); !ok {
+		return "", fmt.Errorf("type error: try requires function to return result<T>")
+	}
+	source, err := c.checkExpr(expr.Value, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := resultElement(source)
+	if !ok {
+		return "", fmt.Errorf("type error: try expects result<T>, got %s", source)
+	}
+	return Type(elem), nil
+}
+
 // checkCallExpr validates builtin and user function calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
@@ -536,7 +558,43 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	if name.Name == "ptr_write" {
 		return c.checkPtrWrite(expr, env, unsafe)
 	}
+	if name.Name == "ok" {
+		return c.checkOkCall(expr, env, unsafe)
+	}
+	if name.Name == "error" {
+		return c.checkErrorCall(expr, env, unsafe)
+	}
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
+}
+
+// checkOkCall validates result success construction.
+func (c *Checker) checkOkCall(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
+	if len(expr.Args) != 1 {
+		return "", fmt.Errorf("type error: `ok` expects 1 arg, got %d", len(expr.Args))
+	}
+	got, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	return Type(fmt.Sprintf("result<%s>", got)), nil
+}
+
+// checkErrorCall validates result error construction.
+func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
+	if len(expr.Args) != 1 {
+		return "", fmt.Errorf("type error: `error` expects 1 arg, got %d", len(expr.Args))
+	}
+	got, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != typeString {
+		return "", fmt.Errorf("type error: `error` expects string, got %s", got)
+	}
+	if _, ok := resultElement(c.currentReturn); !ok {
+		return "", fmt.Errorf("type error: `error` requires function to return result<T>")
+	}
+	return c.currentReturn, nil
 }
 
 // checkUserCall validates a declared function call.
@@ -761,6 +819,15 @@ func pointerElement(typ Type) (string, bool) {
 func isPointerType(typ Type) bool {
 	_, ok := pointerElement(typ)
 	return ok
+}
+
+// resultElement extracts T from result<T>.
+func resultElement(typ Type) (string, bool) {
+	base, arg, ok := splitGenericType(string(typ))
+	if !ok || base != "result" {
+		return "", false
+	}
+	return arg, true
 }
 
 // checkPrintCall validates the print builtin.

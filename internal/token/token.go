@@ -55,6 +55,7 @@ const (
 	Unsafe   Type = "unsafe"
 	Extern   Type = "extern"
 	Comptime Type = "comptime"
+	Try      Type = "try"
 )
 
 type Token struct {
@@ -80,6 +81,7 @@ var keywords = map[string]Type{
 	"unsafe":   Unsafe,
 	"extern":   Extern,
 	"comptime": Comptime,
+	"try":      Try,
 }
 
 // LookupIdent returns the keyword token for ident or Ident for user names.

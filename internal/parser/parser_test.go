@@ -181,6 +181,23 @@ func TestParseCast(t *testing.T) {
 	}
 }
 
+// TestParseTry checks result propagation syntax.
+func TestParseTry(t *testing.T) {
+	input := `fn main() -> result<int> {
+    let x = try parse()
+    return ok(x)
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() -> result<int> { let x = try parse(); return ok(x) }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
 func TestParseRejectsExplicitLifetime(t *testing.T) {
 	input := `fn show(s: borrow 'a string) {}`
