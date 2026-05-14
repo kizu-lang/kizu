@@ -102,6 +102,18 @@ func ownershipNegativeCases() []conformanceErrorCase {
 			want:    "moved value `name` was used",
 		},
 		{
+			name:    "assignment move",
+			command: "check",
+			path:    "../../examples/negative/assignment_move.kizu",
+			want:    "moved value `a` was used",
+		},
+		{
+			name:    "double move",
+			command: "check",
+			path:    "../../examples/negative/double_move.kizu",
+			want:    "moved value `name` was used",
+		},
+		{
 			name:    "borrow escape",
 			command: "check",
 			path:    "../../examples/negative/borrow_escape.kizu",
@@ -114,10 +126,28 @@ func ownershipNegativeCases() []conformanceErrorCase {
 			want:    "struct field `Bad.value` cannot store borrow",
 		},
 		{
+			name:    "comptime borrow escape",
+			command: "check",
+			path:    "../../examples/negative/comptime_borrow_escape.kizu",
+			want:    "runtime value cannot be used",
+		},
+		{
+			name:    "arena add move",
+			command: "check",
+			path:    "../../examples/negative/arena_add_move.kizu",
+			want:    "moved value `user` was used",
+		},
+		{
 			name:    "arena get move",
 			command: "check",
 			path:    "../../examples/negative/arena_get_move.kizu",
 			want:    "arena.get returns a local borrow and cannot be moved",
+		},
+		{
+			name:    "arena wrong handle",
+			command: "check",
+			path:    "../../examples/negative/arena_wrong_handle.kizu",
+			want:    "handle `alice` does not belong to arena `right`",
 		},
 		{
 			name:    "immutable assignment",
@@ -180,10 +210,34 @@ func lowLevelNegativeCases() []conformanceErrorCase {
 			want:    "call to `source` requires unsafe block",
 		},
 		{
+			name:    "ptr read without unsafe",
+			command: "check",
+			path:    "../../examples/negative/ptr_read_without_unsafe.kizu",
+			want:    "ptr_read requires unsafe block",
+		},
+		{
 			name:    "nullable pointer read",
 			command: "check",
 			path:    "../../examples/negative/nullable_ptr_read.kizu",
 			want:    "ptr_read` expects non-null raw pointer",
+		},
+		{
+			name:    "handle as pointer",
+			command: "check",
+			path:    "../../examples/negative/handle_as_pointer.kizu",
+			want:    "cannot cast handle<User> to ptr<User>",
+		},
+		{
+			name:    "unsafe moved value",
+			command: "check",
+			path:    "../../examples/negative/unsafe_moved_value.kizu",
+			want:    "moved value `name` was used",
+		},
+		{
+			name:    "unsafe borrow escape",
+			command: "check",
+			path:    "../../examples/negative/unsafe_borrow_escape.kizu",
+			want:    "borrowed value `s` cannot escape",
 		},
 	}
 }

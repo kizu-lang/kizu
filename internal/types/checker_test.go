@@ -510,6 +510,17 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 }`,
 			want: "cannot cast bool to i32",
 		},
+		{
+			name: "handle is not pointer",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let users = arena<User>()
+    let alice = users.add(User { name: "alice" })
+    let p = cast<ptr<User>>(alice)
+    print(p)
+}`,
+			want: "cannot cast handle<User> to ptr<User>",
+		},
 	}
 	runErrorCases(t, cases)
 }

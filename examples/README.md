@@ -38,7 +38,7 @@ go test ./...
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
 | tagged `union` with payloads | `union.kizu` | binds payload values in `match` arms |
-| unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper example |
+| unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper; caller owns the unsafe obligation |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 | `contract`, `satisfy`, `borrow Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
@@ -49,9 +49,14 @@ go test ./...
 | Safety rule | Example | Expected diagnostic substring |
 | --- | --- | --- |
 | moved values cannot be reused | `negative/moved_value.kizu` | `moved value` |
+| assignment moves non-copy values | `negative/assignment_move.kizu` | `moved value` |
+| double move is rejected | `negative/double_move.kizu` | `moved value` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
+| runtime borrow cannot cross comptime | `negative/comptime_borrow_escape.kizu` | `runtime value cannot be used` |
+| `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
 | `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |
+| handles are tied to one arena | `negative/arena_wrong_handle.kizu` | `does not belong to arena` |
 | `let` bindings are immutable | `negative/immutable_assignment.kizu` | `cannot assign` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
@@ -59,7 +64,11 @@ go test ./...
 | `try` requires an error-union-returning function | `negative/invalid_try.kizu` | `try requires` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |
+| pointer reads require `unsafe` | `negative/ptr_read_without_unsafe.kizu` | `requires unsafe block` |
 | nullable raw pointers cannot be read directly | `negative/nullable_ptr_read.kizu` | `non-null raw pointer` |
+| handles are not raw pointers | `negative/handle_as_pointer.kizu` | `cannot cast handle` |
+| unsafe does not permit moved safe values | `negative/unsafe_moved_value.kizu` | `moved value` |
+| unsafe does not permit borrow escape | `negative/unsafe_borrow_escape.kizu` | `borrowed value` |
 | satisfy requires every contract method | `negative/missing_contract_method.kizu` | `missing method` |
 | `Dyn<Contract>` requires explicit satisfy | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
 | owned `Dyn<Contract>` is not v0.1 | `negative/owned_dyn.kizu` | `must be borrowed` |

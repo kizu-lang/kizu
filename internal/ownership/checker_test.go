@@ -186,6 +186,18 @@ fn make() -> handle<User> {
 }`,
 			want: "handle `alice` cannot outlive its arena",
 		},
+		{
+			name: "move after arena add",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let users = arena<User>()
+    let user = User { name: "alice" }
+    let alice = users.add(user)
+    print(user.name)
+    print(users.get(alice).name)
+}`,
+			want: "moved value `user` was used",
+		},
 	}
 	runErrorCases(t, cases)
 }
@@ -234,6 +246,16 @@ fn main() {
 			want: "borrowed value `s` cannot escape",
 		},
 		{
+			name: "borrow escape in unsafe block",
+			source: `fn bad(s: borrow []const u8) {
+    unsafe {
+        let alias = s
+        print(alias)
+    }
+}`,
+			want: "borrowed value `s` cannot escape",
+		},
+		{
 			name: "borrow field in unsafe-adjacent code",
 			source: `struct Bad {
     value: borrow []const u8
@@ -255,6 +277,21 @@ fn main() {
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsComptimeRuntimeBorrow checks runtime borrows cannot cross comptime.
+func TestCheckRejectsComptimeRuntimeBorrow(t *testing.T) {
+	source := `fn bad(s: borrow []const u8) -> []const u8 {
+    let alias = comptime s
+    return alias
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "runtime value cannot") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 
