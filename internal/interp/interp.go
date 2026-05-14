@@ -26,6 +26,16 @@ func (s trySignal) Error() string {
 	return "try signal"
 }
 
+type loopSignal struct {
+	kind  string
+	label string
+}
+
+// Error marks loopSignal as an internal interpreter control signal.
+func (s loopSignal) Error() string {
+	return s.kind + " signal"
+}
+
 // New creates an interpreter that writes builtin output to out.
 func New(out io.Writer) *Interpreter {
 	return &Interpreter{
@@ -191,6 +201,12 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		return i.evalIfStmt(s, env)
 	case *ast.WhileStmt:
 		return i.evalWhileStmt(s, env)
+	case *ast.ForStmt:
+		return i.evalForStmt(s, env)
+	case *ast.BreakStmt:
+		return voidValue(), false, loopSignal{kind: "break", label: s.Label}
+	case *ast.ContinueStmt:
+		return voidValue(), false, loopSignal{kind: "continue", label: s.Label}
 	case *ast.MatchStmt:
 		return i.evalMatchStmt(s, env)
 	case *ast.UnsafeStmt:
@@ -322,10 +338,66 @@ func (i *Interpreter) evalWhileStmt(stmt *ast.WhileStmt, env *Env) (Value, bool,
 			return voidValue(), false, nil
 		}
 		result, returned, err := i.evalBlock(stmt.Body, env.Child())
+		if signal, ok := err.(loopSignal); ok {
+			if handledLoopSignal(signal, stmt.Label) {
+				if signal.kind == "continue" {
+					continue
+				}
+				return voidValue(), false, nil
+			}
+		}
 		if err != nil || returned {
 			return result, returned, err
 		}
 	}
+}
+
+// evalForStmt executes a bounded i64 range loop.
+func (i *Interpreter) evalForStmt(stmt *ast.ForStmt, env *Env) (Value, bool, error) {
+	start, end, err := i.evalForBounds(stmt, env)
+	if err != nil {
+		return voidValue(), false, err
+	}
+	for idx := start; idx < end; idx++ {
+		child := env.Child()
+		if err := child.Define(stmt.Name, intValue(idx), false); err != nil {
+			return voidValue(), false, err
+		}
+		result, returned, err := i.evalBlock(stmt.Body, child)
+		if signal, ok := err.(loopSignal); ok {
+			if handledLoopSignal(signal, stmt.Label) {
+				if signal.kind == "continue" {
+					continue
+				}
+				return voidValue(), false, nil
+			}
+		}
+		if err != nil || returned {
+			return result, returned, err
+		}
+	}
+	return voidValue(), false, nil
+}
+
+// evalForBounds evaluates and validates for range bounds.
+func (i *Interpreter) evalForBounds(stmt *ast.ForStmt, env *Env) (int64, int64, error) {
+	start, err := i.evalExpr(stmt.Start, env)
+	if err != nil {
+		return 0, 0, err
+	}
+	end, err := i.evalExpr(stmt.End, env)
+	if err != nil {
+		return 0, 0, err
+	}
+	if start.kind != kindInt || end.kind != kindInt {
+		return 0, 0, fmt.Errorf("runtime error: for range expects integers")
+	}
+	return start.i, end.i, nil
+}
+
+// handledLoopSignal reports whether a loop consumes a break or continue signal.
+func handledLoopSignal(signal loopSignal, label string) bool {
+	return signal.label == "" || signal.label == label
 }
 
 // evalMatchStmt executes the matching enum or union tag arm.

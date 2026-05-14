@@ -324,6 +324,7 @@ func (s *IfStmt) String() string {
 
 // WhileStmt represents a loop guarded by a condition expression.
 type WhileStmt struct {
+	Label     string
 	Condition Expression
 	Body      *BlockStmt
 }
@@ -333,7 +334,65 @@ func (*WhileStmt) statementNode() {}
 
 // String returns a compact debug representation of the while statement.
 func (s *WhileStmt) String() string {
-	return fmt.Sprintf("while %s %s", s.Condition.String(), s.Body.String())
+	out := fmt.Sprintf("while %s %s", s.Condition.String(), s.Body.String())
+	if s.Label != "" {
+		return s.Label + ": " + out
+	}
+	return out
+}
+
+// ForStmt represents a bounded integer range loop.
+type ForStmt struct {
+	Label string
+	Name  string
+	Start Expression
+	End   Expression
+	Body  *BlockStmt
+}
+
+// statementNode marks ForStmt as a statement node.
+func (*ForStmt) statementNode() {}
+
+// String returns a compact debug representation of the for statement.
+func (s *ForStmt) String() string {
+	out := fmt.Sprintf("for %s..%s |%s| %s",
+		s.Start.String(), s.End.String(), s.Name, s.Body.String())
+	if s.Label != "" {
+		return s.Label + ": " + out
+	}
+	return out
+}
+
+// BreakStmt exits the nearest loop or a named enclosing loop.
+type BreakStmt struct {
+	Label string
+}
+
+// statementNode marks BreakStmt as a statement node.
+func (*BreakStmt) statementNode() {}
+
+// String returns a compact debug representation of break.
+func (s *BreakStmt) String() string {
+	if s.Label != "" {
+		return "break :" + s.Label
+	}
+	return "break"
+}
+
+// ContinueStmt skips to the next iteration of the nearest or named loop.
+type ContinueStmt struct {
+	Label string
+}
+
+// statementNode marks ContinueStmt as a statement node.
+func (*ContinueStmt) statementNode() {}
+
+// String returns a compact debug representation of continue.
+func (s *ContinueStmt) String() string {
+	if s.Label != "" {
+		return "continue :" + s.Label
+	}
+	return "continue"
 }
 
 // MatchStmt represents a simple enum tag match statement.

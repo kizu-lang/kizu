@@ -423,31 +423,64 @@ func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 
 // parseStatement parses a single statement.
 func (p *Parser) parseStatement() ast.Statement {
-	switch p.cur.Type {
-	case token.Let:
-		return p.parseLetStmt(false)
-	case token.Var:
-		return p.parseLetStmt(true)
-	case token.Return:
-		return p.parseReturnStmt()
-	case token.If:
-		return p.parseIfStmt()
-	case token.While:
-		return p.parseWhileStmt()
-	case token.Match:
-		return p.parseMatchStmt()
-	case token.Unsafe:
-		return p.parseUnsafeStmt()
-	case token.Comptime:
-		if p.peek.Type == token.If {
-			return p.parseComptimeIfStmt()
-		}
+	if stmt, ok := p.parseKeywordStatement(); ok {
+		return stmt
+	}
+	if p.cur.Type == token.Ident && p.peek.Type == token.Colon {
+		return p.parseLabeledStmt()
 	}
 	expr := p.parseExpression(lowest)
 	if p.peek.Type == token.Assign {
 		return p.parseAssignStmt(expr)
 	}
 	return &ast.ExprStmt{Expr: expr}
+}
+
+// parseKeywordStatement parses statements that start with reserved keywords.
+func (p *Parser) parseKeywordStatement() (ast.Statement, bool) {
+	switch p.cur.Type {
+	case token.Let:
+		return p.parseLetStmt(false), true
+	case token.Var:
+		return p.parseLetStmt(true), true
+	case token.Return:
+		return p.parseReturnStmt(), true
+	case token.If:
+		return p.parseIfStmt(), true
+	case token.While:
+		return p.parseWhileStmt(""), true
+	case token.For:
+		return p.parseForStmt(""), true
+	case token.Break:
+		return p.parseBreakStmt(), true
+	case token.Continue:
+		return p.parseContinueStmt(), true
+	case token.Match:
+		return p.parseMatchStmt(), true
+	case token.Unsafe:
+		return p.parseUnsafeStmt(), true
+	case token.Comptime:
+		if p.peek.Type == token.If {
+			return p.parseComptimeIfStmt(), true
+		}
+	}
+	return nil, false
+}
+
+// parseLabeledStmt parses a loop label followed by a loop statement.
+func (p *Parser) parseLabeledStmt() ast.Statement {
+	label := p.cur.Literal
+	p.nextToken()
+	p.nextToken()
+	switch p.cur.Type {
+	case token.While:
+		return p.parseWhileStmt(label)
+	case token.For:
+		return p.parseForStmt(label)
+	default:
+		p.errorf("label `%s` must be attached to while or for", label)
+		return &ast.ExprStmt{Expr: &ast.IdentExpr{Name: "<error>"}}
+	}
 }
 
 // parseComptimeIfStmt parses a comptime-selected if statement.
@@ -537,8 +570,8 @@ func (p *Parser) parseIfStmt() ast.Statement {
 }
 
 // parseWhileStmt parses a while loop statement.
-func (p *Parser) parseWhileStmt() ast.Statement {
-	stmt := &ast.WhileStmt{}
+func (p *Parser) parseWhileStmt(label string) ast.Statement {
+	stmt := &ast.WhileStmt{Label: label}
 	p.nextToken()
 	stmt.Condition = p.parseExpression(lowest)
 	if !p.expectPeek(token.LBrace) {
@@ -546,6 +579,49 @@ func (p *Parser) parseWhileStmt() ast.Statement {
 	}
 	stmt.Body = p.parseBlockStmt()
 	return stmt
+}
+
+// parseForStmt parses a bounded integer range loop.
+func (p *Parser) parseForStmt(label string) ast.Statement {
+	stmt := &ast.ForStmt{Label: label}
+	p.nextToken()
+	stmt.Start = p.parseExpression(lowest)
+	if !p.expectPeek(token.Range) {
+		return stmt
+	}
+	p.nextToken()
+	stmt.End = p.parseExpression(lowest)
+	if !p.expectPeek(token.Pipe) || !p.expectPeek(token.Ident) {
+		return stmt
+	}
+	stmt.Name = p.cur.Literal
+	if !p.expectPeek(token.Pipe) || !p.expectPeek(token.LBrace) {
+		return stmt
+	}
+	stmt.Body = p.parseBlockStmt()
+	return stmt
+}
+
+// parseBreakStmt parses break with an optional target label.
+func (p *Parser) parseBreakStmt() ast.Statement {
+	return &ast.BreakStmt{Label: p.parseOptionalBranchLabel()}
+}
+
+// parseContinueStmt parses continue with an optional target label.
+func (p *Parser) parseContinueStmt() ast.Statement {
+	return &ast.ContinueStmt{Label: p.parseOptionalBranchLabel()}
+}
+
+// parseOptionalBranchLabel parses Zig-style :label branch targets.
+func (p *Parser) parseOptionalBranchLabel() string {
+	if p.peek.Type != token.Colon {
+		return ""
+	}
+	p.nextToken()
+	if !p.expectPeek(token.Ident) {
+		return ""
+	}
+	return p.cur.Literal
 }
 
 // parseMatchStmt parses a simple enum tag match statement.

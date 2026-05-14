@@ -21,6 +21,13 @@ type lowerer struct {
 	env        map[string]Value
 	nextValue  int
 	nextBlock  int
+	loops      []loopContext
+}
+
+type loopContext struct {
+	label      string
+	breakTo    string
+	continueTo string
 }
 
 // newLowerer prepares lookup tables used during lowering.
@@ -88,6 +95,7 @@ func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
 	l.env = map[string]Value{}
 	l.nextValue = 0
 	l.nextBlock = 0
+	l.loops = nil
 	for _, param := range fn.Params {
 		value := Value{Name: "%" + param.Name, Type: param.TypeName}
 		l.current.Params = append(l.current.Params, value)
@@ -144,6 +152,12 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		return l.lowerIfStmt(s)
 	case *ast.WhileStmt:
 		return l.lowerWhileStmt(s)
+	case *ast.ForStmt:
+		return l.lowerForStmt(s)
+	case *ast.BreakStmt:
+		return l.lowerLoopBranch("break", s.Label)
+	case *ast.ContinueStmt:
+		return l.lowerLoopBranch("continue", s.Label)
 	case *ast.UnsafeStmt:
 		return l.lowerBlock(s.Body)
 	case *ast.ComptimeIfStmt:

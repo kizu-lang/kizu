@@ -30,10 +30,12 @@ const (
 	GTE      Type = ">="
 	Arrow    Type = "->"
 	Dot      Type = "."
+	Range    Type = ".."
 
 	Comma     Type = ","
 	Colon     Type = ":"
 	Semicolon Type = ";"
+	Pipe      Type = "|"
 
 	LParen   Type = "("
 	RParen   Type = ")"
@@ -49,6 +51,8 @@ const (
 	If       Type = "if"
 	Else     Type = "else"
 	While    Type = "while"
+	Break    Type = "break"
+	Continue Type = "continue"
 	Match    Type = "match"
 	Struct   Type = "struct"
 	Enum     Type = "enum"
@@ -81,6 +85,8 @@ var keywords = map[string]Type{
 	"if":       If,
 	"else":     Else,
 	"while":    While,
+	"break":    Break,
+	"continue": Continue,
 	"match":    Match,
 	"struct":   Struct,
 	"enum":     Enum,

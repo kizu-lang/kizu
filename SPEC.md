@@ -378,7 +378,40 @@ while i < 10 {
 }
 ```
 
-### 6.9 match
+Kizu v0.1 は `loop` keyword を採用しません。
+無限 loop は `while true` と書きます。
+
+```kizu
+while true {
+    break
+}
+```
+
+`break` と `continue` は loop 内だけで使えます。
+外側の loop を明示する場合は Zig 寄りの label を使います。
+
+```kizu
+outer: while i < 10 {
+    while j < 10 {
+        break :outer
+    }
+}
+```
+
+### 6.9 for
+
+v0.1 の `for` は、i64 の half-open range に限定します。
+終了値は含みません。
+
+```kizu
+for 0..3 |i| {
+    print(i)
+}
+```
+
+v0.1 では iterator protocol、collection iteration、`inline for` は扱いません。
+
+### 6.10 match
 
 v0.1 の `match` は、単純な enum value と tagged union value を分岐する用途に限定します。
 
@@ -396,6 +429,8 @@ fn main() {
 
 guard と多段 destructuring は v0.1 では扱いません。
 tagged union の payload binding だけを扱います。
+duplicate arm、unknown tag、non-exhaustive match は compile error です。
+wildcard pattern `_` は v0.1 では採用しません。
 
 ## 7. 型
 

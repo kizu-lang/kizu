@@ -13,6 +13,7 @@ type Checker struct {
 	enums     map[string]map[string]bool
 	unions    map[string]map[string]string
 	nextID    int
+	loopDepth int
 }
 
 type functionInfo struct {
@@ -161,6 +162,9 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		value.borrowedParam = fn.params[idx].borrow
 		env.define(value)
 	}
+	previousLoopDepth := c.loopDepth
+	c.loopDepth = 0
+	defer func() { c.loopDepth = previousLoopDepth }()
 	return c.checkBlock(fn.decl.Body, env)
 }
 
@@ -189,6 +193,12 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkIfStmt(s, env)
 	case *ast.WhileStmt:
 		return c.checkWhileStmt(s, env)
+	case *ast.ForStmt:
+		return c.checkForStmt(s, env)
+	case *ast.BreakStmt:
+		return c.checkLoopBranch(s.Label)
+	case *ast.ContinueStmt:
+		return c.checkLoopBranch(s.Label)
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env)
 	case *ast.UnsafeStmt:
@@ -286,10 +296,40 @@ func (c *Checker) checkWhileStmt(stmt *ast.WhileStmt, env *scope) error {
 		return err
 	}
 	body := env.clone()
+	c.loopDepth++
+	defer func() { c.loopDepth-- }()
 	if err := c.checkBlock(stmt.Body, body.child()); err != nil {
 		return err
 	}
 	env.mergeMovedFrom(body)
+	return nil
+}
+
+// checkForStmt treats moves in the body as possible after the loop.
+func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
+	if _, err := c.readExpr(stmt.Start, env); err != nil {
+		return err
+	}
+	if _, err := c.readExpr(stmt.End, env); err != nil {
+		return err
+	}
+	body := env.clone()
+	child := body.child()
+	child.define(c.newBinding(stmt.Name, "i64"))
+	c.loopDepth++
+	defer func() { c.loopDepth-- }()
+	if err := c.checkBlock(stmt.Body, child); err != nil {
+		return err
+	}
+	env.mergeMovedFrom(body)
+	return nil
+}
+
+// checkLoopBranch rejects branch statements outside loops during ownership-only tests.
+func (c *Checker) checkLoopBranch(label string) error {
+	if c.loopDepth == 0 {
+		return fmt.Errorf("move error: loop branch `%s` used outside loop", label)
+	}
 	return nil
 }
 

@@ -30,6 +30,10 @@ go test ./...
 | empty `return` in `void` function | `return.kizu` | exits early and prints `done` |
 | `if` / `else` | `if.kizu` | prints `adult` |
 | `while` | `while.kizu` | prints `0`, `1`, `2` |
+| `break` / `continue` | `break_continue.kizu` | controls a `while` loop |
+| labeled loop branch | `labeled_loop.kizu` | exits an outer loop explicitly |
+| bounded integer `for` | `for.kizu` | iterates an i64 half-open range |
+| infinite loop spelling | `infinite_loop.kizu` | uses `while true` plus `break` |
 | `struct` and field access | `struct.kizu` | prints `alice`, `30` |
 | mutable struct field assignment | `field_assignment.kizu` | updates fields on a `var` binding |
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
@@ -65,6 +69,10 @@ go test ./...
 | inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |
 | unknown handle provenance is rejected | `negative/arena_unknown_handle.kizu` | `unknown provenance` |
 | `let` bindings are immutable | `negative/immutable_assignment.kizu` | `cannot assign` |
+| `break` outside loops is rejected | `negative/break_outside_loop.kizu` | `outside loop` |
+| `continue` outside loops is rejected | `negative/continue_outside_loop.kizu` | `outside loop` |
+| unknown loop labels are rejected | `negative/unknown_loop_label.kizu` | `unknown loop label` |
+| labels only attach to loops | `negative/label_on_non_loop.kizu` | `must be attached` |
 | fields on `let` bindings are immutable | `negative/immutable_field_assignment.kizu` | `cannot assign field` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
@@ -85,3 +93,5 @@ go test ./...
 | tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
 | shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
+| duplicate match tags are rejected | `negative/match_duplicate_tag.kizu` | `duplicate match tag` |
+| unknown match tags are rejected | `negative/match_unknown_tag.kizu` | `unknown match tag` |

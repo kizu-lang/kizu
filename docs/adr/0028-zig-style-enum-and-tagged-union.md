@@ -40,6 +40,7 @@ union Shape {
 ## match
 
 v0.1 の `match` は simple enum value と tagged union value の分岐に限定する。
+Rust-style の広い pattern matching ではなく、Zig `switch` 寄りの tag dispatch として扱う。
 
 ```kizu
 match color {
@@ -50,7 +51,9 @@ match color {
 ```
 
 tagged union の payload binding は扱う。
-guard と多段 destructuring は v0.1 では扱わない。
+duplicate arm、unknown tag、non-exhaustive match は compile error とする。
+
+guard、多段 destructuring、wildcard pattern `_` は v0.1 では扱わない。
 
 ## 影響
 

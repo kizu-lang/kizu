@@ -369,6 +369,45 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckRejectsLoopControlErrors checks invalid loop control flow.
+func TestCheckRejectsLoopControlErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "break outside loop",
+			source: `fn main() -> void {
+    break
+}`,
+			want: "`break` used outside loop",
+		},
+		{
+			name: "continue outside loop",
+			source: `fn main() -> void {
+    continue
+}`,
+			want: "`continue` used outside loop",
+		},
+		{
+			name: "unknown label",
+			source: `fn main() -> void {
+    while true { break :missing }
+}`,
+			want: "unknown loop label `missing`",
+		},
+		{
+			name: "for bounds",
+			source: `fn main() -> void {
+    for true..3 |i| { print(i) }
+}`,
+			want: "for range expects i64 bounds",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsEnumMatchErrors checks simple enum match diagnostics.
 func TestCheckRejectsEnumMatchErrors(t *testing.T) {
 	cases := []struct {
@@ -390,7 +429,7 @@ fn main() {
     let color = Color.Red
     match color { Red => print("red") Blue => print("blue") }
 }`,
-			want: "unknown enum tag `Color.Blue`",
+			want: "unknown match tag `Color.Blue`",
 		},
 		{
 			name: "duplicate tag",

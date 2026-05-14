@@ -68,3 +68,44 @@ func TestNextToken(t *testing.T) {
 		}
 	}
 }
+
+// TestLoopControlTokens checks v0.1 loop-control syntax.
+func TestLoopControlTokens(t *testing.T) {
+	input := `for 0..3 |i| { continue }
+break :outer`
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.For, "for"},
+		{token.Int, "0"},
+		{token.Range, ".."},
+		{token.Int, "3"},
+		{token.Pipe, "|"},
+		{token.Ident, "i"},
+		{token.Pipe, "|"},
+		{token.LBrace, "{"},
+		{token.Continue, "continue"},
+		{token.RBrace, "}"},
+		{token.Break, "break"},
+		{token.Colon, ":"},
+		{token.Ident, "outer"},
+		{token.EOF, ""},
+	}
+	l := New(input)
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)", i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
+// TestLoopIsIdentifier documents that Kizu v0.1 has no loop keyword.
+func TestLoopIsIdentifier(t *testing.T) {
+	l := New("loop")
+	tok := l.NextToken()
+	if tok.Type != token.Ident || tok.Literal != "loop" {
+		t.Fatalf("got (%q, %q), want IDENT loop", tok.Type, tok.Literal)
+	}
+}

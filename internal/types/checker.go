@@ -86,6 +86,7 @@ type Checker struct {
 	impls         map[string]map[string]*functionType
 	satisfactions map[string]map[string]bool
 	currentReturn Type
+	loopLabels    []string
 }
 
 type enumType struct {
@@ -513,8 +514,13 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		}
 	}
 	previousReturn := c.currentReturn
+	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
-	defer func() { c.currentReturn = previousReturn }()
+	c.loopLabels = nil
+	defer func() {
+		c.currentReturn = previousReturn
+		c.loopLabels = previousLoops
+	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
 	if err != nil {
 		return err
@@ -580,6 +586,12 @@ func (c *Checker) checkStmt(
 		return c.checkIfStmt(s, env, wantReturn, unsafe)
 	case *ast.WhileStmt:
 		return c.checkWhileStmt(s, env, wantReturn, unsafe)
+	case *ast.ForStmt:
+		return c.checkForStmt(s, env, wantReturn, unsafe)
+	case *ast.BreakStmt:
+		return false, c.checkLoopBranch("break", s.Label)
+	case *ast.ContinueStmt:
+		return false, c.checkLoopBranch("continue", s.Label)
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env, wantReturn, unsafe)
 	case *ast.UnsafeStmt:
@@ -706,8 +718,84 @@ func (c *Checker) checkWhileStmt(
 	if cond != typeBool {
 		return false, fmt.Errorf("type error: while condition must be bool, got %s", cond)
 	}
+	leave, err := c.enterLoop(stmt.Label)
+	if err != nil {
+		return false, err
+	}
+	defer leave()
 	_, err = c.checkBlock(stmt.Body, env.child(), wantReturn, unsafe)
 	return false, err
+}
+
+// checkForStmt validates a bounded integer range loop.
+func (c *Checker) checkForStmt(
+	stmt *ast.ForStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe bool,
+) (bool, error) {
+	if err := c.checkForBounds(stmt, env, unsafe); err != nil {
+		return false, err
+	}
+	leave, err := c.enterLoop(stmt.Label)
+	if err != nil {
+		return false, err
+	}
+	defer leave()
+	child := env.child()
+	if err := child.define(stmt.Name, typeI64, false); err != nil {
+		return false, err
+	}
+	_, err = c.checkBlock(stmt.Body, child, wantReturn, unsafe)
+	return false, err
+}
+
+// checkForBounds validates the start and end expressions for a range loop.
+func (c *Checker) checkForBounds(stmt *ast.ForStmt, env *scope, unsafe bool) error {
+	start, err := c.checkExpr(stmt.Start, env, unsafe)
+	if err != nil {
+		return err
+	}
+	end, err := c.checkExpr(stmt.End, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if start != typeI64 || end != typeI64 {
+		return fmt.Errorf("type error: for range expects i64 bounds, got %s..%s", start, end)
+	}
+	return nil
+}
+
+// enterLoop records an active loop label for branch target validation.
+func (c *Checker) enterLoop(label string) (func(), error) {
+	if label != "" && c.hasLoopLabel(label) {
+		return nil, fmt.Errorf("type error: duplicate loop label `%s`", label)
+	}
+	c.loopLabels = append(c.loopLabels, label)
+	return func() {
+		c.loopLabels = c.loopLabels[:len(c.loopLabels)-1]
+	}, nil
+}
+
+// checkLoopBranch validates break and continue placement.
+func (c *Checker) checkLoopBranch(kind string, label string) error {
+	if len(c.loopLabels) == 0 {
+		return fmt.Errorf("type error: `%s` used outside loop", kind)
+	}
+	if label != "" && !c.hasLoopLabel(label) {
+		return fmt.Errorf("type error: unknown loop label `%s`", label)
+	}
+	return nil
+}
+
+// hasLoopLabel reports whether label names an active loop.
+func (c *Checker) hasLoopLabel(label string) bool {
+	for idx := len(c.loopLabels) - 1; idx >= 0; idx-- {
+		if c.loopLabels[idx] == label {
+			return true
+		}
+	}
+	return false
 }
 
 // checkMatchStmt validates exhaustive simple enum tag matches.
@@ -775,7 +863,7 @@ func (c *Checker) checkMatchArms(
 func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm) (string, error) {
 	if enumType != nil {
 		if !enumType.tags[arm.Tag] {
-			return "", fmt.Errorf("type error: unknown enum tag `%s.%s`", enumType.name, arm.Tag)
+			return "", fmt.Errorf("type error: unknown match tag `%s.%s`", enumType.name, arm.Tag)
 		}
 		if arm.Binding != "" {
 			return "", fmt.Errorf("type error: enum tag `%s.%s` has no payload",
@@ -785,7 +873,7 @@ func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm
 	}
 	payload, ok := unionType.variants[arm.Tag]
 	if !ok {
-		return "", fmt.Errorf("type error: unknown union variant `%s.%s`", unionType.name, arm.Tag)
+		return "", fmt.Errorf("type error: unknown match tag `%s.%s`", unionType.name, arm.Tag)
 	}
 	if payload == "" && arm.Binding != "" {
 		return "", fmt.Errorf("type error: union variant `%s.%s` has no payload",

@@ -82,6 +82,25 @@ func TestRunControlFlow(t *testing.T) {
 	}
 }
 
+// TestRunLoopControl checks break, continue, labels, and bounded for loops.
+func TestRunLoopControl(t *testing.T) {
+	got := runSource(t, `fn main() -> void {
+    var i = 0
+    outer: while true {
+        for 0..4 |j| {
+            if j == 1 { continue }
+            if i == 1 { break :outer }
+            print(i * 10 + j)
+        }
+        i = i + 1
+    }
+}`)
+	want := "0\n2\n3\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunArenaHandle checks Phase 6 arena add/get and field access.
 func TestRunArenaHandle(t *testing.T) {
 	got := runSource(t, `struct User {

@@ -53,3 +53,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0032: v0.1 はメモリ安全性監査を release gate にする](0032-v0-1-memory-safety-release-gate.md)
 - [ADR-0033: borrow syntax は &T / &mut T にする](0033-reference-borrow-syntax.md)
 - [ADR-0034: dereference と field assignment は Zig 寄りにする](0034-zig-style-deref-and-field-assignment.md)
+- [ADR-0035: v0.1 loop control は while / for / labeled branch に限定する](0035-v0-1-loop-control.md)

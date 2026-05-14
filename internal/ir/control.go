@@ -1,6 +1,10 @@
 package ir
 
-import "tiny-safe/internal/ast"
+import (
+	"fmt"
+
+	"tiny-safe/internal/ast"
+)
 
 // lowerIfStmt lowers if/else into branches and a merge block.
 func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
@@ -95,9 +99,11 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	}
 	header.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
 	l.block = body
+	l.pushLoop(stmt.Label, exit.Name, header.Name)
 	if err := l.lowerBlock(stmt.Body); err != nil {
 		return err
 	}
+	l.popLoop()
 	bodyEnd := l.block.Name
 	if l.block.Terminator.Op == "" {
 		l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
@@ -105,6 +111,104 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	l.finishLoopPhis(phis, bodyEnd)
 	l.block = exit
 	return nil
+}
+
+// lowerForStmt lowers a bounded i64 range loop.
+func (l *lowerer) lowerForStmt(stmt *ast.ForStmt) error {
+	start, err := l.lowerExpr(stmt.Start)
+	if err != nil {
+		return err
+	}
+	end, err := l.lowerExpr(stmt.End)
+	if err != nil {
+		return err
+	}
+	previous, hadPrevious := l.env[stmt.Name]
+	defer l.restoreLoopVar(stmt.Name, previous, hadPrevious)
+	preheader := l.block
+	header := l.newBlock(l.nextBlockName("for.header"))
+	body := l.newBlock(l.nextBlockName("for.body"))
+	step := l.newBlock(l.nextBlockName("for.step"))
+	exit := l.newBlock(l.nextBlockName("for.end"))
+	l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
+	l.block = header
+	index := l.createForIndexPhi(header, preheader.Name, start)
+	l.env[stmt.Name] = index.Result
+	cond := l.emit("binary.<", "bool", []Value{index.Result, end}, "")
+	header.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
+	l.block = body
+	l.pushLoop(stmt.Label, exit.Name, step.Name)
+	if err := l.lowerBlock(stmt.Body); err != nil {
+		return err
+	}
+	l.popLoop()
+	if l.block.Terminator.Op == "" {
+		l.block.Terminator = Terminator{Op: "jump", Target: step.Name}
+	}
+	l.block = step
+	one := l.emitConst("i64", "1")
+	next := l.emit("binary.+", "i64", []Value{index.Result, one}, "")
+	step.Terminator = Terminator{Op: "jump", Target: header.Name}
+	index.Incoming = append(index.Incoming, Incoming{Block: step.Name, Value: next})
+	l.block = exit
+	return nil
+}
+
+// createForIndexPhi creates the SSA loop variable for a for range.
+func (l *lowerer) createForIndexPhi(block *Block, incoming string, start Value) *Instr {
+	phi := &Instr{
+		Result:   l.next("i64"),
+		Op:       "phi",
+		Incoming: []Incoming{{Block: incoming, Value: start}},
+	}
+	block.Instrs = append(block.Instrs, phi)
+	return phi
+}
+
+// restoreLoopVar removes the scoped for variable after lowering the loop.
+func (l *lowerer) restoreLoopVar(name string, previous Value, hadPrevious bool) {
+	if hadPrevious {
+		l.env[name] = previous
+		return
+	}
+	delete(l.env, name)
+}
+
+// lowerLoopBranch lowers break and continue as jumps to loop blocks.
+func (l *lowerer) lowerLoopBranch(kind string, label string) error {
+	loop, ok := l.findLoop(label)
+	if !ok {
+		return fmt.Errorf("ir error: unknown loop label `%s`", label)
+	}
+	target := loop.breakTo
+	if kind == "continue" {
+		target = loop.continueTo
+	}
+	l.block.Terminator = Terminator{Op: "jump", Target: target}
+	return nil
+}
+
+// pushLoop records the current loop branch targets.
+func (l *lowerer) pushLoop(label string, breakTo string, continueTo string) {
+	l.loops = append(l.loops, loopContext{
+		label: label, breakTo: breakTo, continueTo: continueTo,
+	})
+}
+
+// popLoop removes the innermost loop branch target.
+func (l *lowerer) popLoop() {
+	l.loops = l.loops[:len(l.loops)-1]
+}
+
+// findLoop resolves an unlabeled or labeled loop branch target.
+func (l *lowerer) findLoop(label string) (loopContext, bool) {
+	for idx := len(l.loops) - 1; idx >= 0; idx-- {
+		loop := l.loops[idx]
+		if label == "" || loop.label == label {
+			return loop, true
+		}
+	}
+	return loopContext{}, false
 }
 
 // createLoopPhis creates header phi nodes for assigned loop variables.

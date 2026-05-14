@@ -18,7 +18,7 @@ var singleCharTokens = map[rune]token.Type{
 	'*': token.Asterisk,
 	'%': token.Percent,
 	'?': token.Question,
-	'.': token.Dot,
+	'|': token.Pipe,
 	',': token.Comma,
 	':': token.Colon,
 	';': token.Semicolon,
@@ -42,6 +42,7 @@ var compoundTokens = map[rune]compoundToken{
 	'!': {next: '=', compound: token.NotEq, single: token.Bang},
 	'<': {next: '=', compound: token.LTE, single: token.LT},
 	'>': {next: '=', compound: token.GTE, single: token.GT},
+	'.': {next: '.', compound: token.Range, single: token.Dot},
 }
 
 // New creates a lexer for input.

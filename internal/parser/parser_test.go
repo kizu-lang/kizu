@@ -86,6 +86,28 @@ func TestParseIfAndWhile(t *testing.T) {
 	}
 }
 
+// TestParseLoopControl checks for loops and labeled branches.
+func TestParseLoopControl(t *testing.T) {
+	input := `fn main() {
+    outer: while true {
+        for 0..3 |i| {
+            continue :outer
+        }
+        break
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	got := program.String()
+	want := `fn main() { outer: while true { for 0..3 |i| { continue :outer }; break } }`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseStructDecl checks top-level struct field parsing.
 func TestParseStructDecl(t *testing.T) {
 	input := `struct User {
