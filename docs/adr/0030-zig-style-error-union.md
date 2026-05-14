@@ -16,16 +16,16 @@ typed error propagation には `ErrorType!T` を使う。
 
 ```kizu
 fn parse() -> !i64 {
-    return 1
+    return 1;
 }
 
 fn fail() -> !i64 {
-    return error("bad")
+    return error("bad");
 }
 
 fn main() -> !i64 {
-    let value = try parse()
-    return value + 1
+    let value = try parse();
+    return value + 1;
 }
 ```
 

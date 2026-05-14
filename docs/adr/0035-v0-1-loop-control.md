@@ -25,7 +25,7 @@ v0.1 の loop control は次に限定します。
 
 ```kizu
 for 0..3 |i| {
-    print(i)
+    print(i);
 }
 ```
 
@@ -34,7 +34,7 @@ for 0..3 |i| {
 ```kizu
 outer: while i < 10 {
     while j < 10 {
-        break :outer
+        break :outer;
     }
 }
 ```

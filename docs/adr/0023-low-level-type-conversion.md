@@ -16,7 +16,7 @@ Kizu v0.1 は暗黙変換を追加しない。
 異なる numeric type の変換は `cast<T>(value)` で明示する。
 
 ```kizu
-let x = cast<i32>(1)
+let x = cast<i32>(1);
 ```
 
 safe code で許可する cast:

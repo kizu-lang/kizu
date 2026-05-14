@@ -1658,6 +1658,9 @@ func (c *Checker) checkTaskArgs(
 		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
 			return fmt.Errorf("type error: task cannot capture borrow parameter `%s`", name)
 		}
+		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
+			return err
+		}
 		got, err := c.checkExpr(arg, env, unsafe)
 		if err != nil {
 			return err
@@ -1718,6 +1721,9 @@ func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope, unsafe bo
 	for idx, arg := range spawnArgs {
 		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
 			return "", fmt.Errorf("type error: queue cannot capture borrow parameter `%s`", target.Name)
+		}
+		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
+			return "", err
 		}
 		got, err := c.checkExpr(arg, env, unsafe)
 		if err != nil {
@@ -2014,6 +2020,9 @@ func (c *Checker) checkAtomic(args []ast.Expression, env *scope, unsafe bool) (T
 func (c *Checker) checkMutex(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("type error: `std::sync::Mutex` expects 1 arg")
+	}
+	if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
+		return "", true, err
 	}
 	if _, err := c.checkExpr(args[0], env, unsafe); err != nil {
 		return "", true, err
@@ -2346,8 +2355,8 @@ func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe
 	if err != nil {
 		return err
 	}
-	if isPointerType(got) && !unsafe {
-		return fmt.Errorf("type error: raw pointer cannot cross concurrency boundary in safe code")
+	if isPointerType(got) {
+		return fmt.Errorf("type error: raw pointer cannot cross concurrency boundary")
 	}
 	return nil
 }

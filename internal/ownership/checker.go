@@ -1174,6 +1174,9 @@ func (c *Checker) checkTaskGroupMethod(
 		if fn.params[idx].borrow {
 			return "", fmt.Errorf("task error: task cannot capture borrow parameter `%s`", target.Name)
 		}
+		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
+			return "", err
+		}
 		if _, err := c.moveExpr(arg, env); err != nil {
 			return "", err
 		}
@@ -1242,6 +1245,9 @@ func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope) (string, 
 	for idx, arg := range spawnArgs {
 		if fn.params[idx].borrow {
 			return "", fmt.Errorf("task error: queue cannot capture borrow parameter `%s`", target.Name)
+		}
+		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
+			return "", err
 		}
 		if _, err := c.moveExpr(arg, env); err != nil {
 			return "", err
@@ -1875,8 +1881,15 @@ func (c *Checker) rejectConcurrencyBoundaryArg(arg ast.Expression, env *scope) e
 			return fmt.Errorf("thread error: borrow cannot cross concurrency boundary")
 		}
 		if exists && isRawPointerType(value.typeName) {
-			return fmt.Errorf("thread error: raw pointer cannot cross concurrency boundary in safe code")
+			return fmt.Errorf("thread error: raw pointer cannot cross concurrency boundary")
 		}
+	}
+	got, err := c.readExpr(arg, env.clone())
+	if err != nil {
+		return err
+	}
+	if isRawPointerType(got) {
+		return fmt.Errorf("thread error: raw pointer cannot cross concurrency boundary")
 	}
 	return nil
 }

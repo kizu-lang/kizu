@@ -95,7 +95,7 @@ contract satisfaction checks
 
 static / policy 機能は、v0.1 interpreter 上で完全な低レベル実行 semantics を約束しません。
 
-### 0.2 v0.1 の範囲外
+### 0.2 v0.1 に含めないもの
 
 次は v0.1 の完了条件に含めません。
 
@@ -250,8 +250,8 @@ Go
 ### 6.1 Hello world
 
 ```kizu
-fn main() {
-    print("hello, kizu")
+fn main() -> void {
+    print("hello, kizu");
 }
 ```
 
@@ -301,8 +301,8 @@ fn log(message: []const u8) -> void {
 
 ```kizu
 struct User {
-    name: []const u8
-    age: i64
+    name: []const u8;
+    age: i64;
 }
 ```
 
@@ -344,7 +344,7 @@ enum Color {
 値は `Color::Red` のように enum 型名で修飾して参照します。
 
 ```kizu
-let color = Color::Red
+let color = Color::Red;
 ```
 
 payload を持つ sum type は `enum` では扱いません。
@@ -357,9 +357,9 @@ tag だけの値が必要な場合は `enum` を使います。
 
 ```kizu
 union Shape {
-    Point
-    Circle(i64)
-    Label([]const u8)
+    Point;
+    Circle(i64);
+    Label([]const u8);
 }
 ```
 
@@ -367,17 +367,17 @@ payload を持つ variant は `Shape::Circle(10)` のように構築します。
 payload を持たない variant は `Shape::Point` のように参照します。
 
 ```kizu
-let a = Shape::Circle(10)
-let b = Shape::Point
+let a = Shape::Circle(10);
+let b = Shape::Point;
 ```
 
 `match` では payload binding を書けます。
 
 ```kizu
 match a {
-    Point => print("point")
-    Circle(radius) => print(radius)
-    Label(text) => print(text)
+    Point => print("point");
+    Circle(radius) => print(radius);
+    Label(text) => print(text);
 }
 ```
 
@@ -438,7 +438,7 @@ while true {
 ```kizu
 outer: while i < 10 {
     while j < 10 {
-        break :outer
+        break :outer;
     }
 }
 ```
@@ -450,7 +450,7 @@ v0.1 の `for` は、i64 の half-open range に限定します。
 
 ```kizu
 for 0..3 |i| {
-    print(i)
+    print(i);
 }
 ```
 
@@ -462,12 +462,12 @@ v0.1 の `match` は、単純な enum value と tagged union value を分岐す�
 
 ```kizu
 fn main() {
-    let color = Color::Red
+    let color = Color::Red;
 
     match color {
-        Red => print("red")
-        Green => print("green")
-        Blue => print("blue")
+        Red => print("red");
+        Green => print("green");
+        Blue => print("blue");
     }
 }
 ```
@@ -548,12 +548,12 @@ Kizu は暗黙の numeric promotion をしません。
 
 ```kizu
 fn take(x: i32) -> i32 {
-    return x
+    return x;
 }
 
 fn main() {
-    let x = cast<i32>(1)
-    print(take(x))
+    let x = cast<i32>(1);
+    print(take(x));
 }
 ```
 
@@ -578,8 +578,8 @@ raw pointer 間の cast は `unsafe` 内でのみ許可します。
 ```kizu
 fn write_as_mut(p: ptr<const u8>) {
     unsafe {
-        let q = cast<ptr<u8>>(p)
-        ptr_write(q, 1)
+        let q = cast<ptr<u8>>(p);
+        ptr_write(q, 1);
     }
 }
 ```
@@ -632,7 +632,7 @@ borrow は一時的に値を参照するための仕組みです。
 
 ```kizu
 fn show(s: &[]const u8) {
-    print(s)
+    print(s);
 }
 ```
 
@@ -658,7 +658,9 @@ borrow のルール:
 * v0.1 は `&user.name` のような one-level direct field borrow を許可する
 * field borrow 中でも disjoint field assignment は許可する
 * field borrow 中の owner 全体の move と同一 field assignment は禁止する
-* v0.1 は `&user.profile.name` と `&items[0]` のような nested / indexed borrow を拒否する
+* v0.1 は `&user.profile.name` のような nested field borrow を拒否する
+* v0.1 は indexed borrow syntax を実装しない。将来 `&items[0]` を追加する場合は、
+  専用の安全ルールと regression coverage を先に追加する
 
 明示 dereference は Zig に合わせて postfix の `.*` を使います。
 
@@ -705,8 +707,8 @@ assignment のルール:
 
 ```kizu
 fn main() -> void {
-    var user = User { name: "alice" }
-    user.name = "bob"
+    var user = User { name: "alice" };
+    user.name = "bob";
 }
 ```
 
@@ -715,9 +717,9 @@ fn main() -> void {
 Kizu は、長寿命の参照を複雑な lifetime で表さず、`arena<T>` と `handle<T>` で表します。
 
 ```kizu
-let users = arena<User>()
-let alice = users.add(User { name: "alice" })
-print(users.get(alice).name)
+let users = arena<User>();
+let alice = users.add(User { name: "alice" });
+print(users.get(alice).name);
 ```
 
 `arena<T>` は複数の `T` を所有します。
@@ -751,11 +753,11 @@ error 値は `error(message)` で作ります。
 
 ```kizu
 fn parse() -> !i64 {
-    return 1
+    return 1;
 }
 
 fn fail() -> !i64 {
-    return error("bad")
+    return error("bad");
 }
 ```
 
@@ -764,8 +766,8 @@ error の場合は、現在の関数からその error value を返します。
 
 ```kizu
 fn main() -> !i64 {
-    let value = try parse()
-    return value + 1
+    let value = try parse();
+    return value + 1;
 }
 ```
 
@@ -838,7 +840,7 @@ fn main() -> ConfigError!void {
 
 ```kizu
 unsafe {
-    ptr_write(p, 20)
+    ptr_write(p, 20);
 }
 ```
 
@@ -846,7 +848,7 @@ unsafe function も明示します。
 
 ```kizu
 unsafe fn raw_write(p: ptr<u8>, value: u8) -> void {
-    ptr_write(p, value)
+    ptr_write(p, value);
 }
 ```
 
@@ -1008,14 +1010,14 @@ Kizu の `comptime` は macro ではありません。
 v0.1 の最小構文:
 
 ```kizu
-let size = comptime 4 * 1024
+let size = comptime 4 * 1024;
 ```
 
 comptime parameter:
 
 ```kizu
 fn sized(comptime n: i64) -> i64 {
-    return n
+    return n;
 }
 ```
 
@@ -1023,9 +1025,9 @@ comptime branch:
 
 ```kizu
 comptime if 1 + 1 == 2 {
-    print(sized(comptime 8))
+    print(sized(comptime 8));
 } else {
-    print(0)
+    print(0);
 }
 ```
 
@@ -1039,11 +1041,17 @@ runtime local value は `comptime` expression から参照できません。
 
 Kizu は将来的に厚めの標準ライブラリを持ちます。
 
-v0 で必要なのはこれだけです。
+v0.1 の最小 builtin は `print` です。
 
 ```text
 print
 ```
+
+加えて、v0.1 は concurrency / async の安全境界を固めるために、
+`std::task`、`std::channel`、`std::thread`、`std::atomic`、`std::sync`
+の prototype API を interpreter builtin として持ちます。
+これらは full stdlib ではなく、memory-safety release gate の対象となる
+trusted std prototype です。
 
 stdlib module は lowercase namespace names にします。
 
@@ -1084,7 +1092,7 @@ v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せます。
 
 ```kizu
 fn read_config(io: Io, path: []const u8) -> ![]const u8 {
-    return fs.read_to_string(io, path)
+    return std::fs::read_to_string(io, path);
 }
 ```
 
@@ -1177,7 +1185,7 @@ method body は型のそばに置きます。
 ```kizu
 impl File {
     fn write(self: &File, bytes: &Bytes) -> !i64 {
-        return os.write(self.fd, bytes)
+        return os.write(self.fd, bytes);
     }
 }
 ```
@@ -1186,8 +1194,8 @@ impl File {
 
 ```kizu
 fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
-    let n = writer.write(bytes)
-    return void
+    let n = writer.write(bytes);
+    return void;
 }
 ```
 
@@ -1282,6 +1290,15 @@ binary expression
 struct declaration
 struct literal
 field access
+namespace access
+enum declaration
+union declaration
+match statement
+borrow expression
+arena type and constructor
+error union type
+comptime expression and statement
+contract / satisfy / dyn type
 ```
 
 ### Milestone 3: Interpreter
@@ -1298,6 +1315,12 @@ if
 while
 struct value
 field access
+enum and union values
+match
+arena / handle
+error union / try
+limited comptime
+std task / channel / thread prototypes
 ```
 
 ### Milestone 4: Type checker
@@ -1357,8 +1380,8 @@ C header から Kizu の extern 宣言を生成できるようにします。
 最初に `examples/hello.kizu` を通します。
 
 ```kizu
-fn main() {
-    print("hello, kizu")
+fn main() -> void {
+    print("hello, kizu");
 }
 ```
 

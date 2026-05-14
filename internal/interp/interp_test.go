@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
 )
@@ -242,6 +243,26 @@ func TestRuntimeErrorChecksMutableAssignment(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 	want := "runtime error: cannot assign to immutable binding `x`"
+	if err.Error() != want {
+		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+}
+
+// TestRuntimeRejectsInvalidArenaHandle fixes the arena handle runtime invariant.
+func TestRuntimeRejectsInvalidArenaHandle(t *testing.T) {
+	arena := &Arena{values: []Value{intValue(1)}}
+	env := NewEnv()
+	err := env.Define("bad", handleValue(arena, 1), false)
+	if err != nil {
+		t.Fatalf("define failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	_, err = New(&out).evalArenaGet(arena, []ast.Expression{&ast.IdentExpr{Name: "bad"}}, env)
+	if err == nil {
+		t.Fatalf("expected invalid handle error")
+	}
+	want := "runtime error: invalid arena handle"
 	if err.Error() != want {
 		t.Fatalf("got %q, want %q", err.Error(), want)
 	}

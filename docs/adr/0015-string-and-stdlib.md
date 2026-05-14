@@ -38,7 +38,8 @@ set<T>           hash set, later
 `std::string` と C ABI の間に暗黙変換は置かない。
 C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使う。
 
-stdlib module naming は lowercase dotted names にする。
+stdlib module naming は lowercase namespace names にし、namespace separator は
+ADR-0038 に従って `::` を使う。
 
 ```text
 std::string
@@ -51,8 +52,12 @@ std::slice
 std::array
 ```
 
-v0.1 の stdlib 実装は `print` だけでよい。
-ただし、今後の API は上の module 境界に寄せる。
+v0.1 の最小 builtin は `print` とする。
+加えて、concurrency / async の安全境界を固めるために、`std::task`、
+`std::channel`、`std::thread`、`std::atomic`、`std::sync` の prototype API を
+interpreter builtin として扱う。
+これらは full stdlib ではなく、memory-safety release gate の対象となる
+trusted std prototype とする。
 
 ## 影響
 
@@ -61,5 +66,5 @@ v0.1 の stdlib 実装は `print` だけでよい。
 - allocator を必要とする string 操作は標準ライブラリ側に寄せる
 - C ABI では `std::string` を暗黙に `ptr<const u8>` へ変換しない
 - collection は `array<T>` を先に検討し、`map` / `set` は後続 phase に回す
-- `Io` は将来 `std::io`、`Task` / `TaskGroup` は将来 `std::task` に寄せる
+- `Io` は将来 `std::io`、`Task` / `TaskGroup` は `std::task` 境界に寄せる
 - async runtime は stdlib API と分けて設計し、safe Kizu の ownership / borrow 制約を維持する

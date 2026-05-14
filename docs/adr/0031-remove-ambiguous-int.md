@@ -18,15 +18,15 @@ literal から幅付き型へ渡すときは `cast<T>(value)` を書く。
 
 ```kizu
 fn add(a: i64, b: i64) -> i64 {
-    return a + b
+    return a + b;
 }
 
 fn take_i32(x: i32) -> i32 {
-    return x
+    return x;
 }
 
 fn main() {
-    print(take_i32(cast<i32>(1)))
+    print(take_i32(cast<i32>(1)));
 }
 ```
 

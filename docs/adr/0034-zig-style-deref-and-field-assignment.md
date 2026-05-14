@@ -14,7 +14,7 @@ Kizu uses postfix `.*` for explicit dereference.
 
 ```kizu
 fn rename(user: &mut User) -> void {
-    user.*.name = "bob"
+    user.*.name = "bob";
 }
 ```
 
@@ -22,8 +22,8 @@ Kizu supports field assignment on mutable values.
 
 ```kizu
 fn main() -> void {
-    var user = User { name: "alice", age: 30 }
-    user.age = 31
+    var user = User { name: "alice", age: 30 };
+    user.age = 31;
 }
 ```
 

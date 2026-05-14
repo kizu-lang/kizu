@@ -29,7 +29,7 @@ method body は書けない。
 
 ```kizu
 contract Writer {
-    fn write(self: &Self, bytes: &Bytes) -> !i64
+    fn write(self: &Self, bytes: &Bytes) -> !i64;
 }
 ```
 
@@ -51,8 +51,8 @@ method body は `impl Type` に置く。
 
 ```kizu
 fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
-    let n = writer.write(bytes)
-    return void
+    let n = writer.write(bytes);
+    return void;
 }
 ```
 

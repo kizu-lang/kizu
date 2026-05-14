@@ -22,7 +22,7 @@ safe borrow / move / type の基本検査は継続する。
 
 ```kizu
 unsafe {
-    ptr_write(p, 20)
+    ptr_write(p, 20);
 }
 ```
 
