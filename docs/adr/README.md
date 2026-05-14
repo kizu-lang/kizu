@@ -44,3 +44,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0023: low-level type conversion は明示 cast に限定する](0023-low-level-type-conversion.md)
 - [ADR-0024: C ABI layout と native linking は明示指定に限定する](0024-c-abi-layout-and-linking.md)
 - [ADR-0025: async は Io / TaskGroup で明示する](0025-async-io-taskgroup-policy.md)
+- [ADR-0026: contract / satisfy / Dyn は明示的な抽象化として扱う](0026-contract-satisfy-dyn-policy.md)

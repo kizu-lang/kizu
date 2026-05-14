@@ -693,7 +693,56 @@ fn read_config(io: Io, path: string) -> result<string> {
 
 async runtime、event loop、networking stdlib は後続 phase で扱います。
 
-## 16. ビルドとキャッシュ
+## 16. contract / satisfy / Dyn 方針
+
+Kizu v0 では contract system を実装しません。
+
+将来抽象化を導入する場合は、Rust trait clone ではなく、次の3つに分けます。
+
+```text
+contract  型が満たすべき要求
+satisfy   型が contract を満たすことの明示宣言
+Dyn       runtime dynamic dispatch を見せる型
+```
+
+`contract` は required method signatures だけを書きます。
+method body は書けません。
+
+```kizu
+contract Writer {
+    fn write(self: borrow Self, bytes: borrow Bytes) -> result<int>
+}
+```
+
+`satisfy` は明示適合だけを表します。
+Go のような暗黙 interface 適合は採用しません。
+
+```kizu
+satisfy Writer for File
+```
+
+method body は型のそばに置きます。
+
+```kizu
+impl File {
+    fn write(self: borrow File, bytes: borrow Bytes) -> result<int> {
+        return os.write(self.fd, bytes)
+    }
+}
+```
+
+`Dyn<Contract>` は dynamic dispatch を型に見せます。
+
+```kizu
+fn save(writer: borrow Dyn<Writer>, bytes: borrow Bytes) -> result<void> {
+    let n = writer.write(bytes)
+    return ok(void)
+}
+```
+
+contract parser、generic bounds、vtable layout は後続 phase で扱います。
+
+## 17. ビルドとキャッシュ
 
 Kizu の toolchain は、キャッシュが無制限に肥大化しない設計にします。
 

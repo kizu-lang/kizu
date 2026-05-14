@@ -29,6 +29,7 @@
 | Phase 19 | 完了 | stdlib foundation | [phase-19.md](docs/phases/phase-19.md) |
 | Phase 20 | 完了 | developer CLI experience | [phase-20.md](docs/phases/phase-20.md) |
 | Phase XX | 完了 | async policy | [phase-xx-async.md](docs/phases/phase-xx-async.md) |
+| Phase XX | 完了 | contract / satisfy / Dyn policy | [phase-xx-contract.md](docs/phases/phase-xx-contract.md) |
 
 ## 横断フェーズ
 
