@@ -128,6 +128,10 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		l.env[s.Name] = value
 		return err
 	case *ast.ReturnStmt:
+		if s.Value == nil {
+			l.block.Terminator = Terminator{Op: "return", Value: Value{Name: "void", Type: "void"}}
+			return nil
+		}
 		value, err := l.lowerExpr(s.Value)
 		l.block.Terminator = Terminator{Op: "return", Value: value}
 		return err

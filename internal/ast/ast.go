@@ -209,6 +209,9 @@ func (*ReturnStmt) statementNode() {}
 
 // String returns a compact debug representation of the return statement.
 func (s *ReturnStmt) String() string {
+	if s.Value == nil {
+		return "return"
+	}
 	return "return " + s.Value.String()
 }
 

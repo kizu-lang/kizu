@@ -26,6 +26,7 @@ func TestV01PositiveExamples(t *testing.T) {
 		{name: "variables", path: "../../examples/variables.kizu", out: "alice\n31\n"},
 		{name: "arithmetic", path: "../../examples/arithmetic.kizu", out: "7\n"},
 		{name: "functions", path: "../../examples/functions.kizu", out: "3\n"},
+		{name: "return", path: "../../examples/return.kizu", out: "done\n"},
 		{name: "if", path: "../../examples/if.kizu", out: "adult\n"},
 		{name: "while", path: "../../examples/while.kizu", out: "0\n1\n2\n"},
 		{name: "struct", path: "../../examples/struct.kizu", out: "alice\n30\n"},
@@ -106,6 +107,18 @@ func staticNegativeCases() []conformanceErrorCase {
 			command: "check",
 			path:    "../../examples/negative/invalid_field.kizu",
 			want:    "unknown field `User.age`",
+		},
+		{
+			name:    "empty return value",
+			command: "check",
+			path:    "../../examples/negative/empty_return_value.kizu",
+			want:    "return expects int, got void",
+		},
+		{
+			name:    "missing return",
+			command: "check",
+			path:    "../../examples/negative/missing_return.kizu",
+			want:    "function `bad` must return int",
 		},
 		{
 			name:    "invalid try",

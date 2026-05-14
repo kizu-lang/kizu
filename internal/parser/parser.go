@@ -357,6 +357,9 @@ func (p *Parser) parseAssignStmt() ast.Statement {
 // parseReturnStmt parses an explicit return statement.
 func (p *Parser) parseReturnStmt() ast.Statement {
 	stmt := &ast.ReturnStmt{}
+	if p.peek.Type == token.RBrace || p.peek.Type == token.EOF {
+		return stmt
+	}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
 	return stmt

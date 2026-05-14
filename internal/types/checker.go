@@ -378,6 +378,12 @@ func (c *Checker) checkReturnStmt(
 	want Type,
 	unsafe bool,
 ) (bool, error) {
+	if stmt.Value == nil {
+		if want != typeVoid {
+			return false, fmt.Errorf("type error: return expects %s, got void", want)
+		}
+		return true, nil
+	}
 	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err

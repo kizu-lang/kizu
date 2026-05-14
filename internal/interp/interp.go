@@ -105,6 +105,9 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 	case *ast.AssignStmt:
 		return i.evalAssignStmt(s, env)
 	case *ast.ReturnStmt:
+		if s.Value == nil {
+			return voidValue(), true, nil
+		}
 		value, err := i.evalExpr(s.Value, env)
 		return value, true, err
 	case *ast.ExprStmt:

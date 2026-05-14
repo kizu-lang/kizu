@@ -26,6 +26,7 @@ go test ./...
 | `let`, `var`, assignment | `variables.kizu` | updates mutable `age` |
 | integer arithmetic | `arithmetic.kizu` | prints `7` |
 | function call and explicit return type | `functions.kizu` | prints `3` |
+| empty `return` in `void` function | `return.kizu` | exits early and prints `done` |
 | `if` / `else` | `if.kizu` | prints `adult` |
 | `while` | `while.kizu` | prints `0`, `1`, `2` |
 | `struct` and field access | `struct.kizu` | prints `alice`, `30` |
@@ -46,6 +47,8 @@ go test ./...
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
 | `let` bindings are immutable | `negative/immutable_assignment.kizu` | `cannot assign` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
+| non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
+| non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
 | `try` requires a result-returning function | `negative/invalid_try.kizu` | `try requires` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |

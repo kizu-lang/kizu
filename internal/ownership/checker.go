@@ -172,6 +172,9 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 
 // checkReturnStmt rejects borrowed values before applying normal move rules.
 func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
+	if stmt.Value == nil {
+		return nil
+	}
 	if ident, ok := stmt.Value.(*ast.IdentExpr); ok {
 		value, exists := env.lookup(ident.Name)
 		if exists && value.borrowedParam {
