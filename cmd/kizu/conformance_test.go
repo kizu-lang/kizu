@@ -64,6 +64,9 @@ func TestV01NegativeExamples(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected command to fail\n%s", out)
 			}
+			if !strings.Contains(out, "error:") {
+				t.Fatalf("got %q, want readable error prefix", out)
+			}
 			if !strings.Contains(out, tt.want) {
 				t.Fatalf("got %q, want substring %q", out, tt.want)
 			}

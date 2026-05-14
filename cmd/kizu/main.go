@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"tiny-safe/internal/ast"
 	"tiny-safe/internal/buildcache"
@@ -24,9 +25,19 @@ func main() {
 		os.Exit(2)
 	}
 	if err := dispatch(os.Args[1], os.Args[2:]); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
+		printError(err)
 		os.Exit(1)
 	}
+}
+
+// printError writes a stable top-level CLI error prefix.
+func printError(err error) {
+	msg := err.Error()
+	if strings.HasPrefix(msg, "error:") {
+		_, _ = fmt.Fprintln(os.Stderr, msg)
+		return
+	}
+	_, _ = fmt.Fprintln(os.Stderr, "error: "+msg)
 }
 
 // dispatch runs one CLI command.
