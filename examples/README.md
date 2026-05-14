@@ -45,6 +45,7 @@ go test ./...
 | moved values cannot be reused | `negative/moved_value.kizu` | `moved value` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
+| `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |
 | `let` bindings are immutable | `negative/immutable_assignment.kizu` | `cannot assign` |
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |

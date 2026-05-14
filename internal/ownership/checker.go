@@ -329,6 +329,12 @@ func (c *Checker) readCastExpr(expr *ast.CastExpr, env *scope) (string, error) {
 func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
+		if c.isArenaGetExpr(expr) {
+			if _, err := c.readExpr(expr, env); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("arena error: arena.get returns a local borrow and cannot be moved")
+		}
 		if st, ok := expr.(*ast.StructLiteralExpr); ok {
 			return c.moveStructLiteralExpr(st, env)
 		}
@@ -668,6 +674,16 @@ func (c *Checker) arenaAddReceiver(expr ast.Expression, env *scope) *binding {
 	}
 	arena, _ := env.lookup(receiver.Name)
 	return arena
+}
+
+// isArenaGetExpr reports whether expr is an arena.get call.
+func (c *Checker) isArenaGetExpr(expr ast.Expression) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	return ok && field.Name == "get"
 }
 
 // readIdent resolves a variable reference without moving it.

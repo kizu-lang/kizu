@@ -91,6 +91,12 @@ func ownershipNegativeCases() []conformanceErrorCase {
 			want:    "struct field `Bad.value` cannot store borrow",
 		},
 		{
+			name:    "arena get move",
+			command: "check",
+			path:    "../../examples/negative/arena_get_move.kizu",
+			want:    "arena.get returns a local borrow and cannot be moved",
+		},
+		{
 			name:    "immutable assignment",
 			command: "run",
 			path:    "../../examples/negative/immutable_assignment.kizu",
