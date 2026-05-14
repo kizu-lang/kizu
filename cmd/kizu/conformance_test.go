@@ -52,6 +52,7 @@ func TestV01PositiveExamples(t *testing.T) {
 // TestV01CheckOnlyExamples checks examples that describe static boundaries.
 func TestV01CheckOnlyExamples(t *testing.T) {
 	runKizuOK(t, "check", "../../examples/unsafe_wrapper.kizu")
+	runKizuOK(t, "check", "../../examples/pointer_policy.kizu")
 }
 
 // TestV01NegativeExamples checks representative readable diagnostics.
@@ -144,6 +145,12 @@ func staticNegativeCases() []conformanceErrorCase {
 			command: "check",
 			path:    "../../examples/negative/unsafe_call.kizu",
 			want:    "call to `source` requires unsafe block",
+		},
+		{
+			name:    "nullable pointer read",
+			command: "check",
+			path:    "../../examples/negative/nullable_ptr_read.kizu",
+			want:    "ptr_read` expects non-null raw pointer",
 		},
 		{
 			name:    "non exhaustive match",

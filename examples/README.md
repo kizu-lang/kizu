@@ -38,6 +38,7 @@ go test ./...
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper example |
+| raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 
 ## Negative Examples
 
@@ -54,6 +55,7 @@ go test ./...
 | `try` requires a result-returning function | `negative/invalid_try.kizu` | `try requires` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |
+| nullable raw pointers cannot be read directly | `negative/nullable_ptr_read.kizu` | `non-null raw pointer` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
 
 ## v0.1 Features Still Tracked By Issues
