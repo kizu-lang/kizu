@@ -42,6 +42,9 @@ v0.1 の中心は以下です。
 active work は GitHub Issues を正として管理します。
 Markdown の phase TODO 文書は使いません。
 
+開発は branch / Pull Request ベースで進めます。
+`main` への直接 commit / push は行わないでください。
+
 ## リポジトリ構成
 
 次の構成を使ってください。
@@ -103,6 +106,43 @@ Go code comments は英語で書きます。
 package / command comment と、すべての function / method comment は必須です。
 コメントは処理の逐語説明ではなく、責務、前提、境界条件、失敗条件を説明してください。
 
+## Git ワークフロー
+
+`main` は常に merge 済みの安定状態として扱います。
+実装、仕様変更、ドキュメント更新は必ず topic branch で行い、Pull Request で review / merge します。
+
+基本手順:
+
+```sh
+git switch main
+git pull --ff-only
+git switch -c <type>/<short-name>
+```
+
+branch 名は次を基本にしてください。
+
+```text
+feat/<short-name>
+fix/<short-name>
+docs/<short-name>
+refactor/<short-name>
+test/<short-name>
+```
+
+作業後は次を実行します。
+
+```sh
+pre-commit run --all-files
+git status --short
+git commit -m "<message>"
+git push -u origin <branch>
+```
+
+Pull Request には、目的、主要変更、検証結果、対応 Issue を短く書いてください。
+PR が merge されるまで `main` へ直接 push してはいけません。
+
+repository 側でも GitHub branch protection を有効にし、少なくとも `main` への direct push を禁止してください。
+
 ## CLI
 
 必須コマンド:
@@ -142,8 +182,9 @@ Markdown の phase TODO 文書は削除済みであり、active TODO tracker で
 * 仕様や設計判断が変わる場合だけ `SPEC.md` または `docs/adr/` を更新する
 * 明示要件と成果物を突き合わせて完了監査する
 * `pre-commit run --all-files` を通す
-* 変更を commit する
-* 対応する Issue に結果をコメントし、完了したら close する
+* topic branch に変更を commit する
+* branch を push して Pull Request を作る
+* PR が merge されたら対応する Issue に結果をコメントし、完了したら close する
 
 commit message は、Issue 完了なら次の形を基本にします。
 
