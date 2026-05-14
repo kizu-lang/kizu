@@ -37,6 +37,8 @@ go test ./...
 | `struct` and field access | `struct.kizu` | prints `alice`, `30` |
 | mutable struct field assignment | `field_assignment.kizu` | updates fields on a `var` binding |
 | borrow parameter | `borrow.kizu` | borrow does not move the owner |
+| copy through borrow dereference | `borrow_deref_copy.kizu` | copies an `i64` through `.*` |
+| copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
 | mutable borrow parameter | `mutable_borrow.kizu` | `&mut` updates through explicit `.*` dereference |
 | `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
@@ -62,9 +64,12 @@ go test ./...
 | moved values cannot be reused | `negative/moved_value.kizu` | `moved value` |
 | assignment moves non-copy values | `negative/assignment_move.kizu` | `moved value` |
 | double move is rejected | `negative/double_move.kizu` | `moved value` |
+| borrowed non-copy values cannot be moved | `negative/move_while_borrowed.kizu` | `cannot be moved while borrowed` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
 | borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
+| non-copy values cannot move out of borrow deref | `negative/borrow_deref_move.kizu` | `cannot be moved out of borrow` |
 | mutable borrow conflicts are rejected | `negative/mut_borrow_conflict.kizu` | `mutably borrowed while borrowed` |
+| non-copy values cannot move out of mutable borrow deref | `negative/mut_borrow_deref_move.kizu` | `cannot be moved out of borrow` |
 | `&mut` requires mutable binding | `negative/mut_borrow_immutable.kizu` | `must be mutable` |
 | runtime borrow cannot cross comptime | `negative/comptime_borrow_escape.kizu` | `runtime value cannot be used` |
 | `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
@@ -100,6 +105,10 @@ go test ./...
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
 | queue cannot capture borrow params | `negative/queue_borrow_capture.kizu` | `queue cannot capture borrow` |
 | parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
+| parallel map workers must return slot values | `negative/parallel_map_wrong_worker.kizu` | `must return i64` |
+| partition initialization is copy-only | `negative/partition_mut_non_i64.kizu` | `partition init expects i64` |
+| partition slot access is bounds-checked | `negative/partition_index_out_of_bounds.kizu` | `out of bounds` |
+| parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |

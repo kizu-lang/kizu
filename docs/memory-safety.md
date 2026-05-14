@@ -153,10 +153,13 @@ memory-safety invariants to representative examples.
 | Invariant | Positive coverage | Negative coverage |
 | --- | --- | --- |
 | move after ownership transfer is rejected | `examples/functions.kizu` | `examples/move_error.kizu`, `examples/negative/moved_value.kizu`, `examples/negative/double_move.kizu` |
+| copy values can be reused after owner-like calls | `examples/copy_after_move.kizu` | |
 | assignment moves non-copy values | `examples/variables.kizu` | `examples/negative/assignment_move.kizu` |
 | borrow does not move owner | `examples/borrow.kizu` | `examples/negative/borrow_escape.kizu` |
+| non-copy value cannot move while borrowed | | `examples/negative/move_while_borrowed.kizu` |
 | borrow cannot be stored | | `examples/negative/borrow_field.kizu` |
-| non-copy value cannot move out of borrow deref | | `examples/negative/borrow_deref_move.kizu`, `examples/negative/mut_borrow_deref_move.kizu` |
+| copy value can be copied through borrow deref | `examples/borrow_deref_copy.kizu` | |
+| non-copy value cannot move out of borrow deref | `examples/borrow_deref_copy.kizu` | `examples/negative/borrow_deref_move.kizu`, `examples/negative/mut_borrow_deref_move.kizu` |
 | mutable borrow requires mutable binding | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_immutable.kizu` |
 | shared and mutable borrows cannot conflict | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_conflict.kizu` |
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
