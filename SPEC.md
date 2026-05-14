@@ -507,6 +507,50 @@ header import は build script ではありません。
 将来 build cache に統合する場合の cache key は、importer version、header path、header content hash、
 target ABI、import option を含めます。
 
+### 12.2 C ABI layout / linking 方針
+
+Kizu の通常 `struct` は C layout を約束しません。
+C ABI と共有する layout は、将来 `extern struct` または `repr(c)` 相当で明示します。
+
+検討する構文:
+
+```kizu
+extern struct Point {
+    x: i32
+    y: i32
+}
+```
+
+または:
+
+```kizu
+@repr("c")
+struct Point {
+    x: i32
+    y: i32
+}
+```
+
+link name / library 指定も暗黙にしません。
+将来必要になった場合は attribute として扱います。
+
+```kizu
+@link_name("puts")
+@link_lib("c")
+extern "c" fn c_puts(s: ptr<const u8>) -> i32
+```
+
+compiler runtime が使う symbol は `kizu_` prefix を予約します。
+
+```text
+kizu_print_string
+kizu_print_int
+kizu_print_bool
+```
+
+LLVM IR backend では、extern C call は将来 `declare` と `call` に lower します。
+actual native object / executable generation は別 phase で扱います。
+
 ## 13. comptime
 
 `comptime` は、限定的なコンパイル時評価です。
