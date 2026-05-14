@@ -44,6 +44,8 @@ go test ./...
 | `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
+| custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |
+| typed custom error propagation | `typed_error.kizu` | uses `ConfigError!i64` with `try` |
 | limited `comptime` | `comptime.kizu` | evaluates compile-time expressions |
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
@@ -53,7 +55,7 @@ go test ./...
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 | `contract`, `satisfy`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
-| owned message passing | `channel.kizu` | sends and receives owned values through `std.channel` |
+| owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
 | safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
@@ -96,6 +98,8 @@ go test ./...
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
 | `try` requires an error-union-returning function | `negative/invalid_try.kizu` | `try requires` |
+| typed errors must match across `try` | `negative/typed_error_mismatch.kizu` | `cannot propagate` |
+| `error(message)` cannot build typed errors | `negative/typed_error_untyped_constructor.kizu` | `cannot construct typed error` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |
 | pointer reads require `unsafe` | `negative/ptr_read_without_unsafe.kizu` | `requires unsafe block` |

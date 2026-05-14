@@ -152,7 +152,7 @@ func TestParseEnumDecl(t *testing.T) {
     Blue
 }
 fn main() {
-    print(Color.Red);
+    print(Color::Red);
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -161,7 +161,7 @@ fn main() {
 	}
 	got := program.String()
 	want := `enum Color { Red; Green; Blue }
-fn main() { print(Color.Red); }`
+fn main() { print(Color::Red); }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -175,7 +175,7 @@ func TestParseUnionDecl(t *testing.T) {
     Label([]const u8);
 }
 fn main() {
-    let shape = Shape.Circle(10);
+    let shape = Shape::Circle(10);
     match shape {
         Point => print("point");
         Circle(radius) => print(radius);
@@ -188,7 +188,7 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `union Shape { Point; Circle(i64); Label([]const u8) }
-fn main() { let shape = Shape.Circle(10); match shape { Point => print("point"); ` +
+fn main() { let shape = Shape::Circle(10); match shape { Point => print("point"); ` +
 		`Circle(radius) => print(radius); Label(text) => print(text); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -203,7 +203,7 @@ func TestParseMatchStmt(t *testing.T) {
     Blue
 }
 fn main() {
-    let color = Color.Red;
+    let color = Color::Red;
     match color {
         Red => print("red");
         Green => print("green");
@@ -216,7 +216,7 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `enum Color { Red; Green; Blue }
-fn main() { let color = Color.Red; match color { Red => print("red"); ` +
+fn main() { let color = Color::Red; match color { Red => print("red"); ` +
 		`Green => print("green"); Blue => print("blue"); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)

@@ -125,11 +125,11 @@ func TestRunEnumValueAccess(t *testing.T) {
     Blue
 }
 fn main() {
-    let color = Color.Green;
+    let color = Color::Green;
     print(color);
-    print(color == Color.Green);
+    print(color == Color::Green);
 }`)
-	want := "Color.Green\ntrue\n"
+	want := "Color::Green\ntrue\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -143,7 +143,7 @@ func TestRunEnumMatch(t *testing.T) {
     Blue
 }
 fn main() {
-    let color = Color.Blue;
+    let color = Color::Blue;
     match color {
         Red => print("red");
         Green => print("green");
@@ -164,11 +164,11 @@ func TestRunTaggedUnionMatch(t *testing.T) {
     Label([]const u8);
 }
 fn main() {
-    let first = Shape.Circle(10);
-    let second = Shape.Label("name");
+    let first = Shape::Circle(10);
+    let second = Shape::Label("name");
     describe(first);
     describe(second);
-    describe(Shape.Point);
+    describe(Shape::Point);
 }
 fn describe(shape: &Shape) -> void {
     match shape {

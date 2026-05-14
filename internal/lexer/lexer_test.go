@@ -13,7 +13,7 @@ func TestNextToken(t *testing.T) {
     var age = 30;
     update(&mut user);
     age = age + 1;
-    match Color.Red { Red => return age >= 20 ;}
+    match Color::Red { Red => return age >= 20 ;}
 }`
 
 	tests := []struct {
@@ -50,7 +50,7 @@ func TestNextToken(t *testing.T) {
 		{token.Semicolon, ";"},
 		{token.Match, "match"},
 		{token.Ident, "Color"},
-		{token.Dot, "."},
+		{token.DoubleColon, "::"},
 		{token.Ident, "Red"},
 		{token.LBrace, "{"},
 		{token.Ident, "Red"},

@@ -43,6 +43,7 @@ var compoundTokens = map[rune]compoundToken{
 	'<': {next: '=', compound: token.LTE, single: token.LT},
 	'>': {next: '=', compound: token.GTE, single: token.GT},
 	'.': {next: '.', compound: token.Range, single: token.Dot},
+	':': {next: ':', compound: token.DoubleColon, single: token.Colon},
 }
 
 // New creates a lexer for input.

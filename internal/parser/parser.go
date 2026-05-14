@@ -718,19 +718,20 @@ const (
 )
 
 var precedences = map[token.Type]int{
-	token.Eq:       equals,
-	token.NotEq:    equals,
-	token.LT:       lessGreater,
-	token.LTE:      lessGreater,
-	token.GT:       lessGreater,
-	token.GTE:      lessGreater,
-	token.Plus:     sum,
-	token.Minus:    sum,
-	token.Asterisk: product,
-	token.Slash:    product,
-	token.Percent:  product,
-	token.LParen:   call,
-	token.Dot:      field,
+	token.Eq:          equals,
+	token.NotEq:       equals,
+	token.LT:          lessGreater,
+	token.LTE:         lessGreater,
+	token.GT:          lessGreater,
+	token.GTE:         lessGreater,
+	token.Plus:        sum,
+	token.Minus:       sum,
+	token.Asterisk:    product,
+	token.Slash:       product,
+	token.Percent:     product,
+	token.LParen:      call,
+	token.Dot:         field,
+	token.DoubleColon: field,
 }
 
 // parseExpression parses an expression using Pratt parser precedence.
@@ -747,7 +748,10 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 			left = p.parseCallExpr(left)
 		case token.Dot:
 			p.nextToken()
-			left = p.parseFieldExpr(left)
+			left = p.parseFieldExpr(left, false)
+		case token.DoubleColon:
+			p.nextToken()
+			left = p.parseFieldExpr(left, true)
 		default:
 			return left
 		}
@@ -875,6 +879,15 @@ func (p *Parser) parseTypeName() string {
 		return ""
 	}
 	name := p.cur.Literal
+	if p.peek.Type == token.Bang {
+		p.nextToken()
+		p.nextToken()
+		success := p.parseTypeName()
+		if success == "" {
+			return ""
+		}
+		return name + "!" + success
+	}
 	if p.peek.Type != token.LT {
 		if nullable {
 			return "?" + name
@@ -997,12 +1010,12 @@ func (p *Parser) parseFieldValue() (ast.FieldValue, bool) {
 }
 
 // parseFieldExpr parses field access on an expression.
-func (p *Parser) parseFieldExpr(receiver ast.Expression) ast.Expression {
-	if p.peek.Type == token.Asterisk {
+func (p *Parser) parseFieldExpr(receiver ast.Expression, namespace bool) ast.Expression {
+	if !namespace && p.peek.Type == token.Asterisk {
 		p.nextToken()
 		return &ast.DerefExpr{Receiver: receiver}
 	}
-	expr := &ast.FieldExpr{Receiver: receiver}
+	expr := &ast.FieldExpr{Receiver: receiver, Namespace: namespace}
 	if !p.expectPeek(token.Ident) {
 		return expr
 	}

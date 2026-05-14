@@ -59,6 +59,7 @@ if / else
 while
 struct
 field access
+namespace access with ::
 simple enum
 enum value access
 match over simple enum values
@@ -72,7 +73,7 @@ arena<T> / handle<T>
 limited comptime
 Io capability
 Task / TaskGroup
-std.task structured API
+std::task structured API
 contract
 satisfy
 &Dyn<Contract>
@@ -305,7 +306,27 @@ struct User {
 }
 ```
 
-### 6.5 enum
+### 6.5 namespace access
+
+Kizu は型や名前空間に属する item lookup に `::` を使います。
+
+```kizu
+let color = Color::Red;
+let shape = Shape::Circle(10);
+let group = std::task::Group();
+```
+
+`.` は runtime value の field / method access だけに使います。
+
+```kizu
+print(user.name);
+let handle = users.add(user);
+```
+
+`Color.Red` や `Shape.Circle(10)` のような dot による enum / union lookup は
+compile error です。互換構文としては扱いません。
+
+### 6.6 enum
 
 Kizu の `enum` は Zig/C 寄りの tag enum です。
 Rust の payload enum / algebraic data type とは分けます。
@@ -320,16 +341,16 @@ enum Color {
 }
 ```
 
-値は `Color.Red` のように enum 型名で修飾して参照します。
+値は `Color::Red` のように enum 型名で修飾して参照します。
 
 ```kizu
-let color = Color.Red
+let color = Color::Red
 ```
 
 payload を持つ sum type は `enum` では扱いません。
 `union` として別機能で扱います。
 
-### 6.6 union
+### 6.7 union
 
 Kizu の `union` は payload を持てる tagged union です。
 tag だけの値が必要な場合は `enum` を使います。
@@ -342,12 +363,12 @@ union Shape {
 }
 ```
 
-payload を持つ variant は `Shape.Circle(10)` のように構築します。
-payload を持たない variant は `Shape.Point` のように参照します。
+payload を持つ variant は `Shape::Circle(10)` のように構築します。
+payload を持たない variant は `Shape::Point` のように参照します。
 
 ```kizu
-let a = Shape.Circle(10)
-let b = Shape.Point
+let a = Shape::Circle(10)
+let b = Shape::Point
 ```
 
 `match` では payload binding を書けます。
@@ -367,7 +388,7 @@ v0.1 の `union` は次に限定します。
 * destructuring は payload binding 1つだけ
 * `match` は exhaustive でなければならない
 
-### 6.7 if
+### 6.8 if
 
 Kizu v0.1 の `if` は statement と expression の両方で使えます。
 
@@ -393,7 +414,7 @@ let level = if age >= 20 {
 両 branch の value type は一致しなければなりません。
 branch 内で move された値は、`if` expression の外側でも moved として扱います。
 
-### 6.8 while
+### 6.9 while
 
 ```kizu
 while i < 10 {
@@ -422,7 +443,7 @@ outer: while i < 10 {
 }
 ```
 
-### 6.9 for
+### 6.10 for
 
 v0.1 の `for` は、i64 の half-open range に限定します。
 終了値は含みません。
@@ -435,13 +456,13 @@ for 0..3 |i| {
 
 v0.1 では iterator protocol、collection iteration、`inline for` は扱いません。
 
-### 6.10 match
+### 6.11 match
 
 v0.1 の `match` は、単純な enum value と tagged union value を分岐する用途に限定します。
 
 ```kizu
 fn main() {
-    let color = Color.Red
+    let color = Color::Red
 
     match color {
         Red => print("red")
@@ -688,6 +709,9 @@ error は値として扱います。
 v0.1 では Zig に近い `!T` を導入します。
 `!T` は「成功時は `T`、失敗時は error」を表します。
 error payload は標準の `[]const u8` message として扱います。
+domain 固有の custom error を型として扱いたい場合は、v0.1 では `union` と
+`match` を使います。
+typed error として伝播したい場合は `ErrorType!T` を使います。
 
 成功時は通常の `T` をそのまま `return` します。
 error 値は `error(message)` で作ります。
@@ -712,12 +736,65 @@ fn main() -> !i64 {
 }
 ```
 
+custom error type を明示的に扱う例:
+
+```kizu
+union ConfigError {
+    NotFound([]const u8);
+    InvalidPort(i64);
+}
+
+union ConfigRead {
+    Ok(i64);
+    Err(ConfigError);
+}
+
+fn main() -> void {
+    let result = ConfigRead::Err(ConfigError::NotFound("config.kizu"));
+
+    match result {
+        Ok(port) => print(port);
+        Err(err) => match err {
+            NotFound(path) => print(path);
+            InvalidPort(port) => print(port);
+        }
+    }
+}
+```
+
+typed error を `try` で伝播する例:
+
+```kizu
+union ConfigError {
+    NotFound([]const u8);
+    InvalidPort(i64);
+}
+
+fn read_port(ok: bool) -> ConfigError!i64 {
+    if ok {
+        return 8080;
+    }
+
+    return ConfigError::NotFound("config.kizu");
+}
+
+fn main() -> ConfigError!void {
+    let port = try read_port(true);
+    print(port);
+    return void;
+}
+```
+
 ルール:
 
 * `try` は `!T` を返す関数内でだけ使える
 * `try` の operand は `!T` でなければならない
+* `ErrorType!T` は typed error union を表す
+* `ErrorType!T` では `ErrorType` または `T` を返せる
+* `try` は同じ `ErrorType` の error union だけを伝播できる
 * `!T` 関数では `T` を返すと成功値として扱う
 * `error(message)` は `!T` を返す関数内でだけ使える
+* `error(message)` は typed error union では使えない
 * `error(message)` の message は `[]const u8`
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない
@@ -935,22 +1012,22 @@ v0 で必要なのはこれだけです。
 print
 ```
 
-stdlib module は lowercase dotted names にします。
+stdlib module は lowercase namespace names にします。
 
 ```text
-std.string
-std.io
-std.fs
-std.mem
-std.slice
-std.array
+std::string
+std::io
+std::fs
+std::mem
+std::slice
+std::array
 ```
 
 文字列 literal は v0.1 では `[]const u8` として扱います。
-owned string は primitive ではなく、将来 `std.string` で扱います。
+owned string は primitive ではなく、将来 `std::string` で扱います。
 
-C ABI へ `std.string` を暗黙に渡してはいけません。
-C へ渡す場合は、将来 `std.string.as_c_string` のような明示 API を使います。
+C ABI へ `std::string` を暗黙に渡してはいけません。
+C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使います。
 
 v0.1 では collection runtime API を実装しません。
 collection は次の順で検討します。
@@ -970,7 +1047,7 @@ Kizu v0.1 では `async fn` / `await` syntax は実装しません。
 ただし、I/O と並行処理の境界は v0.1 から実装対象にします。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
 `Io` / `Task` / `TaskGroup` は v0.1 では interpreter builtin から始めますが、
-v0.1 のうちに `std.io` と `std.task` の API 境界へ寄せます。
+v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せます。
 
 ```kizu
 fn read_config(io: Io, path: []const u8) -> ![]const u8 {
@@ -990,8 +1067,8 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 * task は `TaskGroup` の structured scope を越えて escape できない
 * safe Kizu では task 間で mutable state を暗黙共有できない
 * channel に送れる値は owned value または copy value に限定する
-* data parallelism は `std.task.parallel_for` のような structured API に閉じ込める
-* shared mutable state は `std.sync` / `std.atomic` の明示型だけで扱う
+* data parallelism は `std::task::parallel_for` のような structured API に閉じ込める
+* shared mutable state は `std::sync` / `std::atomic` の明示型だけで扱う
 
 v0.1 の最初の `TaskGroup` は interpreter 上の structured task model として実装します。
 現在の `spawn` は OS thread や event loop を作らず、同期的に対象関数を評価して
@@ -1000,35 +1077,35 @@ v0.1 の最初の `TaskGroup` は interpreter 上の structured task model と�
 v0.1 で追加していく concurrency foundation:
 
 ```text
-std.task.Group          structured task scope
-std.task.Queue          deterministic deferred task queue
-std.task.parallel_for   safe data parallelism
-std.task.parallel_map   disjoint partition output
-std.channel.Channel<T>  owned message passing
+std::task::Group          structured task scope
+std::task::Queue          deterministic deferred task queue
+std::task::parallel_for   safe data parallelism
+std::task::parallel_map   disjoint partition output
+std::channel::Channel<T>  owned message passing
 ```
 
-`std.channel.Channel<T>` is owned message passing:
+`std::channel::Channel<T>` is owned message passing:
 
 * `send(value)` moves non-copy values into the channel
 * `recv()` returns an owned value
 * borrow values and raw pointers cannot cross the channel boundary in safe Kizu
 * v0.1 does not include `select`
 
-`std.task.parallel_for` is safe data parallelism:
+`std::task::parallel_for` is safe data parallelism:
 
 * v0.1 workers are `fn(i: i64) -> void` or `fn(i: i64) -> !void`
-* `std.task.partition_mut(init: i64, count: i64)` creates disjoint `i64` output slots
+* `std::task::partition_mut(init: i64, count: i64)` creates disjoint `i64` output slots
 * `partition.at(i)` reads or writes one checked slot
-* `std.task.parallel_map(io, partition, start, end, worker)` writes `worker(i)` to slot `i`
-* `std.task.LocalBuffer` is the trusted boundary for worker-local scratch
+* `std::task::parallel_map(io, partition, start, end, worker)` writes `worker(i)` to slot `i`
+* `std::task::LocalBuffer` is the trusted boundary for worker-local scratch
 * first error propagation uses the existing `!void` / `try` model
 * the interpreter may execute workers sequentially while preserving the API contract
 
 Low-level concurrency boundary:
 
-* `std.thread.scoped` is scoped and joined by construction
-* `std.atomic.Atomic` is v0.1 seq_cst-only
-* `std.sync.Mutex` is the explicit shared-mutable-state wrapper
+* `std::thread::scoped` is scoped and joined by construction
+* `std::atomic::Atomic` is v0.1 seq_cst-only
+* `std::sync::Mutex` is the explicit shared-mutable-state wrapper
 * raw pointers cannot cross thread/task/channel boundaries in safe Kizu
 
 OS thread、event loop、networking runtime、atomic ordering の詳細 API は、

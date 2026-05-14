@@ -12,7 +12,7 @@ Kizu は Zig 寄りの低レベル言語を目指すため、tag だけの enum 
 Kizu の `enum` は Zig/C 寄りの tag enum とする。
 
 v0.1 の `enum` は payload を持たない。
-値は enum 型に属する named tag であり、`Color.Red` のように参照する。
+値は enum 型に属する named tag であり、`Color::Red` のように参照する。
 
 ```kizu
 enum Color {
@@ -22,7 +22,7 @@ enum Color {
 }
 
 fn main() {
-    let color = Color.Red
+    let color = Color::Red
 }
 ```
 

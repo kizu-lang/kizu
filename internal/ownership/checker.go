@@ -345,7 +345,7 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	}
 	for _, arm := range stmt.Arms {
 		if !tags[arm.Tag] {
-			return fmt.Errorf("move error: unknown match tag `%s.%s`", valueType, arm.Tag)
+			return fmt.Errorf("move error: unknown match tag `%s::%s`", valueType, arm.Tag)
 		}
 		armEnv := env.clone()
 		child := armEnv.child()
@@ -630,7 +630,7 @@ func (c *Checker) checkFieldCallExpr(
 	return c.checkMethodCallExpr(field, args, env)
 }
 
-// checkQualifiedBuiltin validates ownership for std.* prototype calls.
+// checkQualifiedBuiltin validates ownership for std:: namespace prototype calls.
 func (c *Checker) checkQualifiedBuiltin(
 	field *ast.FieldExpr,
 	args []ast.Expression,
@@ -761,24 +761,17 @@ func (c *Checker) moveStructLiteralExpr(expr *ast.StructLiteralExpr, env *scope)
 
 // readFieldExpr reads a field without moving the receiver.
 func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error) {
+	if expr.Namespace {
+		return c.readNamespaceExpr(expr)
+	}
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
-		if tags, exists := c.enums[ident.Name]; exists {
-			if !tags[expr.Name] {
-				return "", fmt.Errorf("move error: unknown enum tag `%s.%s`", ident.Name, expr.Name)
-			}
-			return ident.Name, nil
+		if _, exists := c.enums[ident.Name]; exists {
+			return "", fmt.Errorf("move error: enum tag `%s.%s` must use `::`",
+				ident.Name, expr.Name)
 		}
-		if variants, exists := c.unions[ident.Name]; exists {
-			payload, ok := variants[expr.Name]
-			if !ok {
-				return "", fmt.Errorf("move error: unknown union variant `%s.%s`",
-					ident.Name, expr.Name)
-			}
-			if payload != "" {
-				return "", fmt.Errorf("move error: union variant `%s.%s` expects payload",
-					ident.Name, expr.Name)
-			}
-			return ident.Name, nil
+		if _, exists := c.unions[ident.Name]; exists {
+			return "", fmt.Errorf("move error: union variant `%s.%s` must use `::`",
+				ident.Name, expr.Name)
 		}
 	}
 	receiverType, err := c.readExpr(expr.Receiver, env)
@@ -791,6 +784,33 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 		}
 	}
 	return receiverType, nil
+}
+
+// readNamespaceExpr reads enum or payload-free union namespace lookup.
+func (c *Checker) readNamespaceExpr(expr *ast.FieldExpr) (string, error) {
+	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return "", fmt.Errorf("move error: invalid namespace lookup `%s`", expr.String())
+	}
+	if tags, exists := c.enums[ident.Name]; exists {
+		if !tags[expr.Name] {
+			return "", fmt.Errorf("move error: unknown enum tag `%s::%s`", ident.Name, expr.Name)
+		}
+		return ident.Name, nil
+	}
+	if variants, exists := c.unions[ident.Name]; exists {
+		payload, ok := variants[expr.Name]
+		if !ok {
+			return "", fmt.Errorf("move error: unknown union variant `%s::%s`",
+				ident.Name, expr.Name)
+		}
+		if payload != "" {
+			return "", fmt.Errorf("move error: union variant `%s::%s` expects payload",
+				ident.Name, expr.Name)
+		}
+		return ident.Name, nil
+	}
+	return "", fmt.Errorf("move error: unknown namespace `%s`", ident.Name)
 }
 
 // moveFieldExpr rejects partial moves from borrowed or aggregate values.
@@ -877,6 +897,19 @@ func (c *Checker) checkUnionConstructor(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	if !field.Namespace {
+		if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
+			if _, exists := c.enums[ident.Name]; exists {
+				return "", true, fmt.Errorf("move error: enum tag `%s.%s` must use `::`",
+					ident.Name, field.Name)
+			}
+			if _, exists := c.unions[ident.Name]; exists {
+				return "", true, fmt.Errorf("move error: union variant `%s.%s` must use `::`",
+					ident.Name, field.Name)
+			}
+		}
+		return "", false, nil
+	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
 		return "", false, nil
@@ -887,15 +920,15 @@ func (c *Checker) checkUnionConstructor(
 	}
 	payload, exists := variants[field.Name]
 	if !exists {
-		return "", true, fmt.Errorf("move error: unknown union variant `%s.%s`",
+		return "", true, fmt.Errorf("move error: unknown union variant `%s::%s`",
 			ident.Name, field.Name)
 	}
 	if payload == "" {
-		return "", true, fmt.Errorf("move error: union variant `%s.%s` expects 0 args",
+		return "", true, fmt.Errorf("move error: union variant `%s::%s` expects 0 args",
 			ident.Name, field.Name)
 	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("move error: union variant `%s.%s` expects 1 arg, got %d",
+		return "", true, fmt.Errorf("move error: union variant `%s::%s` expects 1 arg, got %d",
 			ident.Name, field.Name, len(args))
 	}
 	if _, err := c.moveExpr(args[0], env); err != nil {
@@ -1437,10 +1470,21 @@ func readIdent(name string, env *scope) (string, error) {
 
 // errorUnionElement extracts T from !T.
 func errorUnionElement(typeName string) (string, bool) {
-	if len(typeName) <= 1 || typeName[0] != '!' {
-		return "", false
+	_, success, ok := errorUnionParts(typeName)
+	return success, ok
+}
+
+// errorUnionParts extracts error and success types from !T or Error!T.
+func errorUnionParts(typeName string) (string, string, bool) {
+	if len(typeName) > 1 && typeName[0] == '!' {
+		return "", typeName[1:], true
 	}
-	return typeName[1:], true
+	for idx, ch := range typeName {
+		if ch == '!' && idx > 0 && idx < len(typeName)-1 {
+			return typeName[:idx], typeName[idx+1:], true
+		}
+	}
+	return "", "", false
 }
 
 // returnTypeName returns void for functions without an explicit return type.
@@ -1490,7 +1534,7 @@ func checkNoArgOwnershipCall(name string, args []ast.Expression) (string, error)
 // checkPartitionMut validates ownership for disjoint partition construction.
 func (c *Checker) checkPartitionMut(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("parallel error: `std.task.partition_mut` expects 2 args")
+		return "", true, fmt.Errorf("parallel error: `std::task::partition_mut` expects 2 args")
 	}
 	init, err := c.readExpr(args[0], env)
 	if err != nil {
@@ -1508,7 +1552,7 @@ func (c *Checker) checkPartitionMut(args []ast.Expression, env *scope) (string, 
 // checkLocalBuffer validates ownership for worker-local scratch construction.
 func (c *Checker) checkLocalBuffer(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("parallel error: `std.task.LocalBuffer` expects 2 args")
+		return "", true, fmt.Errorf("parallel error: `std::task::LocalBuffer` expects 2 args")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", true, err
@@ -1522,7 +1566,7 @@ func (c *Checker) checkLocalBuffer(args []ast.Expression, env *scope) (string, b
 // checkParallelFor validates ownership for a safe data-parallel call.
 func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 4 {
-		return "", true, fmt.Errorf("parallel error: `std.task.parallel_for` expects 4 args")
+		return "", true, fmt.Errorf("parallel error: `std::task::parallel_for` expects 4 args")
 	}
 	for idx := 0; idx < 3; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
@@ -1531,7 +1575,7 @@ func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, b
 	}
 	target, ok := args[3].(*ast.IdentExpr)
 	if !ok {
-		return "", true, fmt.Errorf("parallel error: `std.task.parallel_for` expects function name")
+		return "", true, fmt.Errorf("parallel error: `std::task::parallel_for` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
@@ -1543,7 +1587,7 @@ func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, b
 // checkParallelMap validates ownership for disjoint partition output.
 func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 5 {
-		return "", true, fmt.Errorf("parallel error: `std.task.parallel_map` expects 5 args")
+		return "", true, fmt.Errorf("parallel error: `std::task::parallel_map` expects 5 args")
 	}
 	for idx := 0; idx < 4; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
@@ -1552,7 +1596,7 @@ func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, b
 	}
 	target, ok := args[4].(*ast.IdentExpr)
 	if !ok {
-		return "", true, fmt.Errorf("parallel error: `std.task.parallel_map` expects function name")
+		return "", true, fmt.Errorf("parallel error: `std::task::parallel_map` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
@@ -1564,14 +1608,14 @@ func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, b
 // checkThreadScoped validates explicit thread boundary ownership effects.
 func (c *Checker) checkThreadScoped(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) < 2 {
-		return "", true, fmt.Errorf("thread error: `std.thread.scoped` expects io and function")
+		return "", true, fmt.Errorf("thread error: `std::thread::scoped` expects io and function")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", true, err
 	}
 	target, ok := args[1].(*ast.IdentExpr)
 	if !ok {
-		return "", true, fmt.Errorf("thread error: `std.thread.scoped` expects function name")
+		return "", true, fmt.Errorf("thread error: `std::thread::scoped` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
@@ -1598,7 +1642,7 @@ func (c *Checker) checkThreadScoped(args []ast.Expression, env *scope) (string, 
 // checkAtomic validates ownership for an integer atomic constructor.
 func (c *Checker) checkAtomic(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("atomic error: `std.atomic.Atomic` expects 1 arg")
+		return "", true, fmt.Errorf("atomic error: `std::atomic::Atomic` expects 1 arg")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", true, err
@@ -1609,7 +1653,7 @@ func (c *Checker) checkAtomic(args []ast.Expression, env *scope) (string, bool, 
 // checkMutex validates ownership for a synchronized wrapper constructor.
 func (c *Checker) checkMutex(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("sync error: `std.sync.Mutex` expects 1 arg")
+		return "", true, fmt.Errorf("sync error: `std::sync::Mutex` expects 1 arg")
 	}
 	if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
 		return "", true, err
@@ -1634,12 +1678,15 @@ func (c *Checker) rejectConcurrencyBoundaryArg(arg ast.Expression, env *scope) e
 	return nil
 }
 
-// qualifiedName renders a dotted identifier chain such as std.task.Group.
+// qualifiedName renders a namespace chain as an internal key such as std::task::Group.
 func qualifiedName(expr ast.Expression) (string, bool) {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		return e.Name, true
 	case *ast.FieldExpr:
+		if !e.Namespace {
+			return "", false
+		}
 		left, ok := qualifiedName(e.Receiver)
 		if !ok {
 			return "", false

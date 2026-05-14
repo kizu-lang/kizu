@@ -675,8 +675,9 @@ func (v FieldValue) String() string {
 
 // FieldExpr represents field access on a receiver expression.
 type FieldExpr struct {
-	Receiver Expression
-	Name     string
+	Receiver  Expression
+	Name      string
+	Namespace bool
 }
 
 // expressionNode marks FieldExpr as an expression node.
@@ -684,6 +685,9 @@ func (*FieldExpr) expressionNode() {}
 
 // String returns a compact debug representation of the field access.
 func (e *FieldExpr) String() string {
+	if e.Namespace {
+		return e.Receiver.String() + "::" + e.Name
+	}
 	return e.Receiver.String() + "." + e.Name
 }
 

@@ -189,7 +189,7 @@ func TestCheckAcceptsEnumDeclarations(t *testing.T) {
 }
 fn take(color: Color) -> Color { return color ;}
 fn main() {
-    let red = Color.Red;
+    let red = Color::Red;
     print(take(red));
 }`
 	if err := checkSource(source); err != nil {
@@ -215,18 +215,18 @@ fn main() {}`,
 			name: "duplicate tag",
 			source: `enum Color { Red Red }
 fn main() {}`,
-			want: "duplicate enum tag `Color.Red`",
+			want: "duplicate enum tag `Color::Red`",
 		},
 		{
 			name: "unknown tag",
 			source: `enum Color { Red }
-fn main() { print(Color.Blue); }`,
-			want: "unknown enum tag `Color.Blue`",
+fn main() { print(Color::Blue); }`,
+			want: "unknown enum tag `Color::Blue`",
 		},
 		{
 			name:   "unknown enum namespace",
-			source: `fn main() { print(Color.Red); }`,
-			want:   "undefined variable `Color`",
+			source: `fn main() { print(Color::Red); }`,
+			want:   "unknown namespace `Color`",
 		},
 	}
 	runErrorCases(t, cases)
@@ -240,7 +240,7 @@ func TestCheckAcceptsEnumMatch(t *testing.T) {
     Blue
 }
 fn main() {
-    let color = Color.Green;
+    let color = Color::Green;
     match color {
         Red => print("red");
         Green => print("green");
@@ -267,7 +267,7 @@ fn describe(shape: &Shape) -> void {
     }
 }
 fn main() {
-    describe(Shape.Circle(10));
+    describe(Shape::Circle(10));
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -342,16 +342,16 @@ func TestCheckRejectsTaggedUnionErrors(t *testing.T) {
 			name: "constructor type",
 			source: `union Shape { Circle(i64); }
 fn main() {
-    let shape = Shape.Circle("large");
+    let shape = Shape::Circle("large");
     print(shape);
 }`,
-			want: "union variant `Shape.Circle` expects i64, got []const u8",
+			want: "union variant `Shape::Circle` expects i64, got []const u8",
 		},
 		{
 			name: "exhaustiveness",
 			source: `union Shape { Point Circle(i64); }
 fn main() {
-    let shape = Shape.Point;
+    let shape = Shape::Point;
     match shape { Point => print("point"); }
 }`,
 			want: "match on `Shape` is not exhaustive",
@@ -360,10 +360,10 @@ fn main() {
 			name: "payload on empty variant",
 			source: `union Shape { Point }
 fn main() {
-    let shape = Shape.Point;
+    let shape = Shape::Point;
     match shape { Point(x) => print(x); }
 }`,
-			want: "union variant `Shape.Point` has no payload",
+			want: "union variant `Shape::Point` has no payload",
 		},
 	}
 	runErrorCases(t, cases)
@@ -426,25 +426,25 @@ func TestCheckRejectsEnumMatchErrors(t *testing.T) {
 			name: "unknown tag",
 			source: `enum Color { Red Green }
 fn main() {
-    let color = Color.Red;
+    let color = Color::Red;
     match color { Red => print("red"); Blue => print("blue"); }
 }`,
-			want: "unknown match tag `Color.Blue`",
+			want: "unknown match tag `Color::Blue`",
 		},
 		{
 			name: "duplicate tag",
 			source: `enum Color { Red Green }
 fn main() {
-    let color = Color.Red;
+    let color = Color::Red;
     match color { Red => print("red"); Red => print("again"); Green => print("green"); }
 }`,
-			want: "duplicate match tag `Color.Red`",
+			want: "duplicate match tag `Color::Red`",
 		},
 		{
 			name: "not exhaustive",
 			source: `enum Color { Red Green }
 fn main() {
-    let color = Color.Red;
+    let color = Color::Red;
     match color { Red => print("red"); }
 }`,
 			want: "match on `Color` is not exhaustive",

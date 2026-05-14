@@ -117,9 +117,21 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 	}
 	result, returned, err := i.evalBlock(fn.Body, env)
 	if err != nil || returned {
-		return result, err
+		return wrapTypedErrorReturn(fn.ReturnType, result), err
 	}
 	return voidValue(), nil
+}
+
+// wrapTypedErrorReturn converts Error!T error payloads into propagated errors.
+func wrapTypedErrorReturn(returnType string, value Value) Value {
+	errorType, _, ok := errorUnionParts(returnType)
+	if !ok || errorType == "" || value.kind != kindUnion {
+		return value
+	}
+	if value.union.typeName != errorType {
+		return value
+	}
+	return typedErrorUnionValue(value)
 }
 
 // callFunctionExpr invokes a function and preserves local borrow aliases.
@@ -462,7 +474,7 @@ func bindUnionPayload(value Value, arm ast.MatchArm, env *Env) error {
 		return nil
 	}
 	if value.union.payload == nil {
-		return fmt.Errorf("runtime error: union variant `%s.%s` has no payload",
+		return fmt.Errorf("runtime error: union variant `%s::%s` has no payload",
 			value.union.typeName, value.union.tag)
 	}
 	return env.Define(arm.Binding, *value.union.payload, false)
@@ -745,7 +757,7 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 	return i.callFunction(name.Name, args)
 }
 
-// evalQualifiedBuiltin evaluates std.* prototype calls without a module system.
+// evalQualifiedBuiltin evaluates std:: namespace prototype calls without a module system.
 func (i *Interpreter) evalQualifiedBuiltin(
 	field *ast.FieldExpr,
 	args []ast.Expression,
@@ -815,25 +827,17 @@ func (i *Interpreter) evalStructLiteralExpr(expr *ast.StructLiteralExpr, env *En
 
 // evalFieldExpr reads a field from a struct value.
 func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error) {
+	if expr.Namespace {
+		return i.evalNamespaceExpr(expr)
+	}
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
-		if tags, exists := i.enums[ident.Name]; exists {
-			if !tags[expr.Name] {
-				return voidValue(), fmt.Errorf("runtime error: unknown enum tag `%s.%s`",
-					ident.Name, expr.Name)
-			}
-			return enumValue(ident.Name, expr.Name), nil
+		if _, exists := i.enums[ident.Name]; exists {
+			return voidValue(), fmt.Errorf("runtime error: enum tag `%s.%s` must use `::`",
+				ident.Name, expr.Name)
 		}
-		if variants, exists := i.unions[ident.Name]; exists {
-			payload, ok := variants[expr.Name]
-			if !ok {
-				return voidValue(), fmt.Errorf("runtime error: unknown union variant `%s.%s`",
-					ident.Name, expr.Name)
-			}
-			if payload != "" {
-				return voidValue(), fmt.Errorf("runtime error: union variant `%s.%s` expects payload",
-					ident.Name, expr.Name)
-			}
-			return unionValue(ident.Name, expr.Name, nil), nil
+		if _, exists := i.unions[ident.Name]; exists {
+			return voidValue(), fmt.Errorf("runtime error: union variant `%s.%s` must use `::`",
+				ident.Name, expr.Name)
 		}
 	}
 	receiver, err := i.evalExpr(expr.Receiver, env)
@@ -851,6 +855,34 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", expr.Name)
 	}
 	return value, nil
+}
+
+// evalNamespaceExpr evaluates enum and payload-free union namespace lookup.
+func (i *Interpreter) evalNamespaceExpr(expr *ast.FieldExpr) (Value, error) {
+	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: invalid namespace lookup `%s`", expr.String())
+	}
+	if tags, exists := i.enums[ident.Name]; exists {
+		if !tags[expr.Name] {
+			return voidValue(), fmt.Errorf("runtime error: unknown enum tag `%s::%s`",
+				ident.Name, expr.Name)
+		}
+		return enumValue(ident.Name, expr.Name), nil
+	}
+	if variants, exists := i.unions[ident.Name]; exists {
+		payload, exists := variants[expr.Name]
+		if !exists {
+			return voidValue(), fmt.Errorf("runtime error: unknown union variant `%s::%s`",
+				ident.Name, expr.Name)
+		}
+		if payload != "" {
+			return voidValue(), fmt.Errorf("runtime error: union variant `%s::%s` expects payload",
+				ident.Name, expr.Name)
+		}
+		return unionValue(ident.Name, expr.Name, nil), nil
+	}
+	return voidValue(), fmt.Errorf("runtime error: unknown namespace `%s`", ident.Name)
 }
 
 // evalDerefExpr reads the value behind a local borrow reference.
@@ -871,6 +903,19 @@ func (i *Interpreter) evalUnionConstructor(
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
+	if !field.Namespace {
+		if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
+			if _, exists := i.enums[ident.Name]; exists {
+				return voidValue(), true, fmt.Errorf("runtime error: enum tag `%s.%s` must use `::`",
+					ident.Name, field.Name)
+			}
+			if _, exists := i.unions[ident.Name]; exists {
+				return voidValue(), true, fmt.Errorf("runtime error: union variant `%s.%s` must use `::`",
+					ident.Name, field.Name)
+			}
+		}
+		return voidValue(), false, nil
+	}
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
 		return voidValue(), false, nil
@@ -881,15 +926,15 @@ func (i *Interpreter) evalUnionConstructor(
 	}
 	payloadType, exists := variants[field.Name]
 	if !exists {
-		return voidValue(), true, fmt.Errorf("runtime error: unknown union variant `%s.%s`",
+		return voidValue(), true, fmt.Errorf("runtime error: unknown union variant `%s::%s`",
 			ident.Name, field.Name)
 	}
 	if payloadType == "" {
-		return voidValue(), true, fmt.Errorf("runtime error: union variant `%s.%s` expects 0 args",
+		return voidValue(), true, fmt.Errorf("runtime error: union variant `%s::%s` expects 0 args",
 			ident.Name, field.Name)
 	}
 	if len(args) != 1 {
-		return voidValue(), true, fmt.Errorf("runtime error: union variant `%s.%s` expects 1 arg",
+		return voidValue(), true, fmt.Errorf("runtime error: union variant `%s::%s` expects 1 arg",
 			ident.Name, field.Name)
 	}
 	payload, err := i.evalExpr(args[0], env)
@@ -1013,7 +1058,7 @@ func (i *Interpreter) evalQueueDrain(queue Value, args []ast.Expression) (Value,
 // evalPartitionMut constructs v0.1 disjoint output slots.
 func (i *Interpreter) evalPartitionMut(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 2 {
-		return voidValue(), fmt.Errorf("runtime error: std.task.partition_mut expects 2 args")
+		return voidValue(), fmt.Errorf("runtime error: std::task::partition_mut expects 2 args")
 	}
 	init, err := i.evalExpr(args[0], env)
 	if err != nil {
@@ -1032,7 +1077,7 @@ func (i *Interpreter) evalPartitionMut(args []ast.Expression, env *Env) (Value, 
 // evalLocalBuffer constructs worker-local scratch slots.
 func (i *Interpreter) evalLocalBuffer(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 2 {
-		return voidValue(), fmt.Errorf("runtime error: std.task.LocalBuffer expects 2 args")
+		return voidValue(), fmt.Errorf("runtime error: std::task::LocalBuffer expects 2 args")
 	}
 	count, err := i.evalExpr(args[0], env)
 	if err != nil {
@@ -1051,7 +1096,7 @@ func (i *Interpreter) evalLocalBuffer(args []ast.Expression, env *Env) (Value, e
 // evalParallelFor runs worker(i) sequentially in the v0.1 interpreter.
 func (i *Interpreter) evalParallelFor(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 4 {
-		return voidValue(), fmt.Errorf("runtime error: std.task.parallel_for expects 4 args")
+		return voidValue(), fmt.Errorf("runtime error: std::task::parallel_for expects 4 args")
 	}
 	if _, err := i.evalExpr(args[0], env); err != nil {
 		return voidValue(), err
@@ -1075,7 +1120,7 @@ func (i *Interpreter) evalParallelFor(args []ast.Expression, env *Env) (Value, e
 // evalParallelMap writes worker(i) into partition slot i in the sequential model.
 func (i *Interpreter) evalParallelMap(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 5 {
-		return voidValue(), fmt.Errorf("runtime error: std.task.parallel_map expects 5 args")
+		return voidValue(), fmt.Errorf("runtime error: std::task::parallel_map expects 5 args")
 	}
 	if _, err := i.evalExpr(args[0], env); err != nil {
 		return voidValue(), err
@@ -1121,14 +1166,14 @@ func (i *Interpreter) fillPartition(
 // evalThreadScoped runs a function synchronously with an explicit thread boundary.
 func (i *Interpreter) evalThreadScoped(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) < 2 {
-		return voidValue(), fmt.Errorf("runtime error: std.thread.scoped expects io and function")
+		return voidValue(), fmt.Errorf("runtime error: std::thread::scoped expects io and function")
 	}
 	if _, err := i.evalExpr(args[0], env); err != nil {
 		return voidValue(), err
 	}
 	target, ok := args[1].(*ast.IdentExpr)
 	if !ok {
-		return voidValue(), fmt.Errorf("runtime error: std.thread.scoped expects function name")
+		return voidValue(), fmt.Errorf("runtime error: std::thread::scoped expects function name")
 	}
 	values, err := i.evalArgs(args[2:], env)
 	if err != nil {
@@ -1140,7 +1185,7 @@ func (i *Interpreter) evalThreadScoped(args []ast.Expression, env *Env) (Value, 
 // evalAtomic constructs a seq_cst integer atomic value.
 func (i *Interpreter) evalAtomic(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: std.atomic.Atomic expects 1 arg")
+		return voidValue(), fmt.Errorf("runtime error: std::atomic::Atomic expects 1 arg")
 	}
 	value, err := i.evalExpr(args[0], env)
 	if err != nil {
@@ -1155,7 +1200,7 @@ func (i *Interpreter) evalAtomic(args []ast.Expression, env *Env) (Value, error)
 // evalMutex constructs a synchronous protected value.
 func (i *Interpreter) evalMutex(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: std.sync.Mutex expects 1 arg")
+		return voidValue(), fmt.Errorf("runtime error: std::sync::Mutex expects 1 arg")
 	}
 	value, err := i.evalExpr(args[0], env)
 	if err != nil {
@@ -1447,6 +1492,19 @@ func callError(args []Value) (Value, error) {
 	return errorUnionValue(args[0].s), nil
 }
 
+// errorUnionParts extracts error and success types from !T or Error!T.
+func errorUnionParts(typeName string) (string, string, bool) {
+	if len(typeName) > 1 && typeName[0] == '!' {
+		return "", typeName[1:], true
+	}
+	for idx, ch := range typeName {
+		if ch == '!' && idx > 0 && idx < len(typeName)-1 {
+			return typeName[:idx], typeName[idx+1:], true
+		}
+	}
+	return "", "", false
+}
+
 // callIo constructs an explicit I/O capability value.
 func callIo(args []Value) (Value, error) {
 	if len(args) != 0 {
@@ -1463,36 +1521,39 @@ func callTaskGroup(args []Value) (Value, error) {
 	return taskGroupValue(), nil
 }
 
-// callTaskGroupFromExprs validates std.task.Group has no constructor args.
+// callTaskGroupFromExprs validates std::task::Group has no constructor args.
 func callTaskGroupFromExprs(args []ast.Expression) Value {
 	if len(args) != 0 {
-		return errorUnionValue("std.task.Group expected 0 args")
+		return errorUnionValue("std::task::Group expected 0 args")
 	}
 	return taskGroupValue()
 }
 
-// callChannelFromExprs validates std.channel.Channel has no constructor args.
+// callChannelFromExprs validates std::channel::Channel has no constructor args.
 func callChannelFromExprs(args []ast.Expression) Value {
 	if len(args) != 0 {
-		return errorUnionValue("std.channel.Channel expected 0 args")
+		return errorUnionValue("std::channel::Channel expected 0 args")
 	}
 	return channelValue()
 }
 
-// callQueueFromExprs validates std.task.Queue has no constructor args.
+// callQueueFromExprs validates std::task::Queue has no constructor args.
 func callQueueFromExprs(args []ast.Expression) Value {
 	if len(args) != 0 {
-		return errorUnionValue("std.task.Queue expected 0 args")
+		return errorUnionValue("std::task::Queue expected 0 args")
 	}
 	return queueValue()
 }
 
-// qualifiedName renders a dotted identifier chain such as std.task.Group.
+// qualifiedName renders a namespace chain as an internal key such as std::task::Group.
 func qualifiedName(expr ast.Expression) (string, bool) {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		return e.Name, true
 	case *ast.FieldExpr:
+		if !e.Namespace {
+			return "", false
+		}
 		left, ok := qualifiedName(e.Receiver)
 		if !ok {
 			return "", false

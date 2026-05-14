@@ -326,7 +326,7 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 	enum := &enumType{name: decl.Name, tags: map[string]bool{}}
 	for _, tag := range decl.Tags {
 		if enum.tags[tag] {
-			return fmt.Errorf("type error: duplicate enum tag `%s.%s`", decl.Name, tag)
+			return fmt.Errorf("type error: duplicate enum tag `%s::%s`", decl.Name, tag)
 		}
 		enum.tags[tag] = true
 	}
@@ -348,7 +348,7 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	union := &unionType{name: decl.Name, variants: map[string]string{}}
 	for _, variant := range decl.Variants {
 		if _, exists := union.variants[variant.Name]; exists {
-			return fmt.Errorf("type error: duplicate union variant `%s.%s`",
+			return fmt.Errorf("type error: duplicate union variant `%s::%s`",
 				decl.Name, variant.Name)
 		}
 		if variant.Payload != "" {
@@ -423,6 +423,15 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 func (c *Checker) parseType(name string) (Type, error) {
 	if strings.HasPrefix(name, "!") {
 		return c.parseErrorUnionType(name)
+	}
+	if errorType, successType, ok := typedErrorUnionParts(name); ok {
+		if _, err := c.parseType(errorType); err != nil {
+			return "", err
+		}
+		if _, err := c.parseType(successType); err != nil {
+			return "", err
+		}
+		return Type(name), nil
 	}
 	if strings.HasPrefix(name, "[]") {
 		return c.parseSliceType(name)
@@ -698,6 +707,11 @@ func (c *Checker) checkReturnStmt(
 	if elem, ok := errorUnionElement(want); ok && got == Type(elem) {
 		return true, nil
 	}
+	if errorType, elem, ok := errorUnionParts(want); ok {
+		if got == Type(elem) || got == Type(errorType) {
+			return true, nil
+		}
+	}
 	if got != want {
 		return false, fmt.Errorf("type error: return expects %s, got %s", want, got)
 	}
@@ -865,7 +879,7 @@ func (c *Checker) checkMatchArms(
 		}
 		typeName := matchTypeName(enumType, unionType)
 		if seen[arm.Tag] {
-			return false, fmt.Errorf("type error: duplicate match tag `%s.%s`", typeName, arm.Tag)
+			return false, fmt.Errorf("type error: duplicate match tag `%s::%s`", typeName, arm.Tag)
 		}
 		seen[arm.Tag] = true
 		armEnv := env.child()
@@ -891,20 +905,20 @@ func (c *Checker) checkMatchArms(
 func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm) (string, error) {
 	if enumType != nil {
 		if !enumType.tags[arm.Tag] {
-			return "", fmt.Errorf("type error: unknown match tag `%s.%s`", enumType.name, arm.Tag)
+			return "", fmt.Errorf("type error: unknown match tag `%s::%s`", enumType.name, arm.Tag)
 		}
 		if arm.Binding != "" {
-			return "", fmt.Errorf("type error: enum tag `%s.%s` has no payload",
+			return "", fmt.Errorf("type error: enum tag `%s::%s` has no payload",
 				enumType.name, arm.Tag)
 		}
 		return "", nil
 	}
 	payload, ok := unionType.variants[arm.Tag]
 	if !ok {
-		return "", fmt.Errorf("type error: unknown match tag `%s.%s`", unionType.name, arm.Tag)
+		return "", fmt.Errorf("type error: unknown match tag `%s::%s`", unionType.name, arm.Tag)
 	}
 	if payload == "" && arm.Binding != "" {
-		return "", fmt.Errorf("type error: union variant `%s.%s` has no payload",
+		return "", fmt.Errorf("type error: union variant `%s::%s` has no payload",
 			unionType.name, arm.Tag)
 	}
 	return payload, nil
@@ -1122,16 +1136,20 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe bool) (Ty
 
 // checkTryExpr validates error-union propagation and returns the success type.
 func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type, error) {
-	if _, ok := errorUnionElement(c.currentReturn); !ok {
+	if _, _, ok := errorUnionParts(c.currentReturn); !ok {
 		return "", fmt.Errorf("type error: try requires function to return !T")
 	}
 	source, err := c.checkExpr(expr.Value, env, unsafe)
 	if err != nil {
 		return "", err
 	}
-	elem, ok := errorUnionElement(source)
+	sourceError, elem, ok := errorUnionParts(source)
 	if !ok {
 		return "", fmt.Errorf("type error: try expects !T, got %s", source)
+	}
+	targetError, _, _ := errorUnionParts(c.currentReturn)
+	if sourceError != targetError {
+		return "", fmt.Errorf("type error: try cannot propagate %s from %s", sourceError, source)
 	}
 	return Type(elem), nil
 }
@@ -1172,7 +1190,7 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
 }
 
-// checkQualifiedBuiltin validates std.* prototype calls.
+// checkQualifiedBuiltin validates std:: namespace prototype calls.
 func (c *Checker) checkQualifiedBuiltin(
 	field *ast.FieldExpr,
 	args []ast.Expression,
@@ -1224,8 +1242,12 @@ func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe bool) (T
 	if got != typeByteString {
 		return "", fmt.Errorf("type error: `error` expects []const u8, got %s", got)
 	}
-	if _, ok := errorUnionElement(c.currentReturn); !ok {
+	errorType, _, ok := errorUnionParts(c.currentReturn)
+	if !ok {
 		return "", fmt.Errorf("type error: `error` requires function to return !T")
+	}
+	if errorType != "" {
+		return "", fmt.Errorf("type error: `error` cannot construct typed error %s", errorType)
 	}
 	return c.currentReturn, nil
 }
@@ -1284,21 +1306,32 @@ func (c *Checker) checkUnionConstructorCall(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
+	if !field.Namespace {
+		if enumType, ok := enumReceiver(field.Receiver, c.enums); ok {
+			return "", true, fmt.Errorf("type error: enum tag `%s.%s` must use `::`",
+				enumType.name, field.Name)
+		}
+		if unionType, ok := unionReceiver(field.Receiver, c.unions); ok {
+			return "", true, fmt.Errorf("type error: union variant `%s.%s` must use `::`",
+				unionType.name, field.Name)
+		}
+		return "", false, nil
+	}
 	unionType, ok := unionReceiver(field.Receiver, c.unions)
 	if !ok {
 		return "", false, nil
 	}
 	payload, exists := unionType.variants[field.Name]
 	if !exists {
-		return "", true, fmt.Errorf("type error: unknown union variant `%s.%s`",
+		return "", true, fmt.Errorf("type error: unknown union variant `%s::%s`",
 			unionType.name, field.Name)
 	}
 	if payload == "" {
-		return "", true, fmt.Errorf("type error: union variant `%s.%s` expects 0 args",
+		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects 0 args",
 			unionType.name, field.Name)
 	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: union variant `%s.%s` expects 1 arg, got %d",
+		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects 1 arg, got %d",
 			unionType.name, field.Name, len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
@@ -1306,7 +1339,7 @@ func (c *Checker) checkUnionConstructorCall(
 		return "", true, err
 	}
 	if got != Type(payload) {
-		return "", true, fmt.Errorf("type error: union variant `%s.%s` expects %s, got %s",
+		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects %s, got %s",
 			unionType.name, field.Name, payload, got)
 	}
 	return Type(unionType.name), true, nil
@@ -1357,23 +1390,16 @@ func (c *Checker) checkStructLiteralExpr(
 
 // checkFieldExpr returns the declared type of a struct field access.
 func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (Type, error) {
+	if expr.Namespace {
+		return c.checkNamespaceExpr(expr)
+	}
 	if enumType, ok := enumReceiver(expr.Receiver, c.enums); ok {
-		if !enumType.tags[expr.Name] {
-			return "", fmt.Errorf("type error: unknown enum tag `%s.%s`", enumType.name, expr.Name)
-		}
-		return Type(enumType.name), nil
+		return "", fmt.Errorf("type error: enum tag `%s.%s` must use `::`",
+			enumType.name, expr.Name)
 	}
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
-		payload, exists := unionType.variants[expr.Name]
-		if !exists {
-			return "", fmt.Errorf("type error: unknown union variant `%s.%s`",
-				unionType.name, expr.Name)
-		}
-		if payload != "" {
-			return "", fmt.Errorf("type error: union variant `%s.%s` expects payload",
-				unionType.name, expr.Name)
-		}
-		return Type(unionType.name), nil
+		return "", fmt.Errorf("type error: union variant `%s.%s` must use `::`",
+			unionType.name, expr.Name)
 	}
 	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
 	if err != nil {
@@ -1389,6 +1415,30 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 		}
 	}
 	return "", fmt.Errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+}
+
+// checkNamespaceExpr returns the type of enum or payload-free union namespace lookup.
+func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
+	if enumType, ok := enumReceiver(expr.Receiver, c.enums); ok {
+		if !enumType.tags[expr.Name] {
+			return "", fmt.Errorf("type error: unknown enum tag `%s::%s`",
+				enumType.name, expr.Name)
+		}
+		return Type(enumType.name), nil
+	}
+	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
+		payload, exists := unionType.variants[expr.Name]
+		if !exists {
+			return "", fmt.Errorf("type error: unknown union variant `%s::%s`",
+				unionType.name, expr.Name)
+		}
+		if payload != "" {
+			return "", fmt.Errorf("type error: union variant `%s::%s` expects payload",
+				unionType.name, expr.Name)
+		}
+		return Type(unionType.name), nil
+	}
+	return "", fmt.Errorf("type error: unknown namespace `%s`", expr.Receiver.String())
 }
 
 // checkDerefExpr returns the value type behind a local borrow parameter.
@@ -1783,7 +1833,7 @@ func (c *Checker) checkPartitionMut(
 	unsafe bool,
 ) (Type, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `std.task.partition_mut` expects 2 args")
+		return "", true, fmt.Errorf("type error: `std::task::partition_mut` expects 2 args")
 	}
 	init, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -1809,7 +1859,7 @@ func (c *Checker) checkLocalBuffer(
 	unsafe bool,
 ) (Type, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `std.task.LocalBuffer` expects 2 args")
+		return "", true, fmt.Errorf("type error: `std::task::LocalBuffer` expects 2 args")
 	}
 	count, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -1831,14 +1881,14 @@ func (c *Checker) checkParallelFor(
 	unsafe bool,
 ) (Type, bool, error) {
 	if len(args) != 4 {
-		return "", true, fmt.Errorf("type error: `std.task.parallel_for` expects 4 args")
+		return "", true, fmt.Errorf("type error: `std::task::parallel_for` expects 4 args")
 	}
-	if err := c.checkIoAndRange(args, env, unsafe, "std.task.parallel_for"); err != nil {
+	if err := c.checkIoAndRange(args, env, unsafe, "std::task::parallel_for"); err != nil {
 		return "", true, err
 	}
 	target, ok := args[3].(*ast.IdentExpr)
 	if !ok {
-		return "", true, fmt.Errorf("type error: `std.task.parallel_for` expects function name")
+		return "", true, fmt.Errorf("type error: `std::task::parallel_for` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
@@ -1858,14 +1908,14 @@ func (c *Checker) checkParallelMap(
 	unsafe bool,
 ) (Type, bool, error) {
 	if len(args) != 5 {
-		return "", true, fmt.Errorf("type error: `std.task.parallel_map` expects 5 args")
+		return "", true, fmt.Errorf("type error: `std::task::parallel_map` expects 5 args")
 	}
 	if err := c.checkIoAndPartitionRange(args, env, unsafe); err != nil {
 		return "", true, err
 	}
 	target, ok := args[4].(*ast.IdentExpr)
 	if !ok {
-		return "", true, fmt.Errorf("type error: `std.task.parallel_map` expects function name")
+		return "", true, fmt.Errorf("type error: `std::task::parallel_map` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
@@ -1887,18 +1937,18 @@ func (c *Checker) checkThreadScoped(
 	unsafe bool,
 ) (Type, bool, error) {
 	if len(args) < 2 {
-		return "", true, fmt.Errorf("type error: `std.thread.scoped` expects io and function")
+		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects io and function")
 	}
 	ioType, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if ioType != "Io" {
-		return "", true, fmt.Errorf("type error: `std.thread.scoped` expects Io, got %s", ioType)
+		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects Io, got %s", ioType)
 	}
 	target, ok := args[1].(*ast.IdentExpr)
 	if !ok {
-		return "", true, fmt.Errorf("type error: `std.thread.scoped` expects function name")
+		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
@@ -1910,14 +1960,14 @@ func (c *Checker) checkThreadScoped(
 // checkAtomic validates the v0.1 seq_cst integer atomic constructor.
 func (c *Checker) checkAtomic(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std.atomic.Atomic` expects 1 arg")
+		return "", true, fmt.Errorf("type error: `std::atomic::Atomic` expects 1 arg")
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if got != typeI64 {
-		return "", true, fmt.Errorf("type error: `std.atomic.Atomic` expects i64, got %s", got)
+		return "", true, fmt.Errorf("type error: `std::atomic::Atomic` expects i64, got %s", got)
 	}
 	return "Atomic", true, nil
 }
@@ -1925,7 +1975,7 @@ func (c *Checker) checkAtomic(args []ast.Expression, env *scope, unsafe bool) (T
 // checkMutex validates an explicit synchronized ownership wrapper.
 func (c *Checker) checkMutex(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std.sync.Mutex` expects 1 arg")
+		return "", true, fmt.Errorf("type error: `std::sync::Mutex` expects 1 arg")
 	}
 	if _, err := c.checkExpr(args[0], env, unsafe); err != nil {
 		return "", true, err
@@ -2154,14 +2204,14 @@ func (c *Checker) checkIoAndPartitionRange(
 		return err
 	}
 	if ioType != "Io" {
-		return fmt.Errorf("type error: `std.task.parallel_map` expects Io, got %s", ioType)
+		return fmt.Errorf("type error: `std::task::parallel_map` expects Io, got %s", ioType)
 	}
 	partitionType, err := c.checkExpr(args[1], env, unsafe)
 	if err != nil {
 		return err
 	}
 	if partitionType != "Partition" {
-		return fmt.Errorf("type error: `std.task.parallel_map` expects Partition, got %s",
+		return fmt.Errorf("type error: `std::task::parallel_map` expects Partition, got %s",
 			partitionType)
 	}
 	for idx := 2; idx <= 3; idx++ {
@@ -2170,7 +2220,7 @@ func (c *Checker) checkIoAndPartitionRange(
 			return err
 		}
 		if got != typeI64 {
-			return fmt.Errorf("type error: `std.task.parallel_map` range expects i64, got %s", got)
+			return fmt.Errorf("type error: `std::task::parallel_map` range expects i64, got %s", got)
 		}
 	}
 	return nil
@@ -2233,12 +2283,15 @@ func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe
 	return nil
 }
 
-// qualifiedName renders a dotted identifier chain such as std.task.Group.
+// qualifiedName renders a namespace chain as an internal key such as std::task::Group.
 func qualifiedName(expr ast.Expression) (string, bool) {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		return e.Name, true
 	case *ast.FieldExpr:
+		if !e.Namespace {
+			return "", false
+		}
 		left, ok := qualifiedName(e.Receiver)
 		if !ok {
 			return "", false
@@ -2286,13 +2339,28 @@ func methodMatches(typeName string, want *functionType, got *functionType) bool 
 	return true
 }
 
-// errorUnionElement extracts T from !T.
+// errorUnionElement extracts T from legacy !T.
 func errorUnionElement(typ Type) (string, bool) {
+	_, success, ok := errorUnionParts(typ)
+	return success, ok
+}
+
+// errorUnionParts extracts error and success types from !T or Error!T.
+func errorUnionParts(typ Type) (string, string, bool) {
 	name := string(typ)
-	if !strings.HasPrefix(name, "!") || len(name) == 1 {
-		return "", false
+	if strings.HasPrefix(name, "!") && len(name) > 1 {
+		return "", strings.TrimPrefix(name, "!"), true
 	}
-	return strings.TrimPrefix(name, "!"), true
+	return typedErrorUnionParts(name)
+}
+
+// typedErrorUnionParts extracts Error and T from Error!T.
+func typedErrorUnionParts(name string) (string, string, bool) {
+	idx := strings.Index(name, "!")
+	if idx <= 0 || idx == len(name)-1 {
+		return "", "", false
+	}
+	return name[:idx], name[idx+1:], true
 }
 
 // checkPrintCall validates the print builtin.

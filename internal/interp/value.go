@@ -66,6 +66,7 @@ type Handle struct {
 // ErrorUnion stores an error value for !T runtime propagation.
 type ErrorUnion struct {
 	message string
+	payload *Value
 }
 
 // Task stores the synchronous result of a spawned interpreter task.
@@ -79,7 +80,7 @@ type Queue struct {
 	jobs []QueuedJob
 }
 
-// QueuedJob stores a function call captured by std.task.Queue.enqueue.
+// QueuedJob stores a function call captured by a Queue value.
 type QueuedJob struct {
 	name string
 	args []Value
@@ -167,11 +168,14 @@ func (v Value) objectString() string {
 	case kindHandle:
 		return "<handle>"
 	case kindErrorUnion:
+		if v.errUnion.payload != nil {
+			return "<error: " + v.errUnion.payload.String() + ">"
+		}
 		return "<error: " + v.errUnion.message + ">"
 	case kindEnum:
-		return v.enum.typeName + "." + v.enum.tag
+		return v.enum.typeName + "::" + v.enum.tag
 	case kindUnion:
-		return v.union.typeName + "." + v.union.tag
+		return v.union.typeName + "::" + v.union.tag
 	default:
 		return v.capabilityString()
 	}
@@ -245,6 +249,11 @@ func handleValue(arena *Arena, index int) Value {
 // errorUnionValue returns an error-union error runtime value.
 func errorUnionValue(message string) Value {
 	return Value{kind: kindErrorUnion, errUnion: &ErrorUnion{message: message}}
+}
+
+// typedErrorUnionValue returns a typed error runtime value.
+func typedErrorUnionValue(payload Value) Value {
+	return Value{kind: kindErrorUnion, errUnion: &ErrorUnion{payload: &payload}}
 }
 
 // enumValue returns a tag enum runtime value.
