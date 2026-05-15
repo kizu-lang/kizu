@@ -515,6 +515,14 @@ func TestSelfHostAstNodeDumpOracle(t *testing.T) {
 		"examples/match.kizu",
 		"examples/union.kizu",
 		"examples/custom_error.kizu",
+		"examples/std_mem.kizu",
+		"examples/std_path.kizu",
+		"examples/std_array.kizu",
+		"examples/std_array_borrow.kizu",
+		"examples/std_array_token_list.kizu",
+		"examples/std_string.kizu",
+		"examples/std_map.kizu",
+		"examples/std_map_symbol_table.kizu",
 		"tests/conformance/modules/private_module_access/src/main.kizu",
 	}
 	for _, path := range cases {
@@ -539,6 +547,8 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/missing_semicolon.kizu",
 		"tests/conformance/modules/missing_import/src/main.kizu",
 		"examples/negative/std_mem_wrong_type.kizu",
+		"examples/negative/double_move.kizu",
+		"examples/negative/move_while_borrowed.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -904,6 +914,7 @@ func goDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	snapshots = append(snapshots, goParserDiagnosticSnapshots(t, path)...)
 	snapshots = append(snapshots, goModuleDiagnosticSnapshots(t, path)...)
 	snapshots = append(snapshots, goTypeDiagnosticSnapshots(t, path)...)
+	snapshots = append(snapshots, goOwnershipDiagnosticSnapshots(t, path)...)
 	return snapshots
 }
 
@@ -989,6 +1000,28 @@ func goTypeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	return []diagnosticSnapshot{diagnosticFromToken(message, tok, tok)}
 }
 
+// goOwnershipDiagnosticSnapshots returns ownership diagnostics in the self-host subset.
+func goOwnershipDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
+	t.Helper()
+	if !isOwnershipDiagnosticFixture(path) {
+		return nil
+	}
+	snapshot := goOwnershipSnapshot(t, path)
+	if snapshot.Status != "fail" {
+		t.Fatalf("expected ownership diagnostic for %s", path)
+	}
+	primary := tokenWithStart(t, path, snapshot.PrimaryStart)
+	related := tokenWithStart(t, path, snapshot.RelatedStart)
+	return []diagnosticSnapshot{diagnosticFromToken(snapshot.Message, primary, related)}
+}
+
+// isOwnershipDiagnosticFixture reports whether a path is in the diagnostic subset.
+func isOwnershipDiagnosticFixture(path string) bool {
+	slashPath := filepath.ToSlash(path)
+	return strings.Contains(slashPath, "double_move") ||
+		strings.Contains(slashPath, "move_while_borrowed")
+}
+
 // diagnosticFromToken constructs the shared diagnostic snapshot row.
 func diagnosticFromToken(
 	message string,
@@ -1004,6 +1037,18 @@ func diagnosticFromToken(
 		RelatedStart:  related.Start,
 		RelatedEnd:    related.End,
 	}
+}
+
+// tokenWithStart returns the token at one byte offset.
+func tokenWithStart(t *testing.T, path string, start int) token.Token {
+	t.Helper()
+	for _, tok := range goTokens(t, path) {
+		if tok.Start == start {
+			return tok
+		}
+	}
+	t.Fatalf("no token starts at %d in %s", start, path)
+	return token.Token{}
 }
 
 // missingSemicolonToken returns the token used for parser diagnostics.
