@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,9 +15,9 @@ import (
 )
 
 const (
-	fileInputKind    = "file"
-	packageInputKind = "package"
-	stdlibHash       = "builtin-std-v0.3"
+	fileInputKind      = "file"
+	packageInputKind   = "package"
+	fallbackStdlibHash = "builtin-std-v0.3"
 )
 
 // newInput hashes source content and cache-shaping inputs.
@@ -57,6 +58,10 @@ func newFileInput(path string, target string) (cacheInput, error) {
 		return cacheInput{}, err
 	}
 	sourceHash := hashBytes(data)
+	stdlibHash, err := currentStdlibHash()
+	if err != nil {
+		return cacheInput{}, err
+	}
 	key := hashStrings(Version, target, fileInputKind, abs, sourceHash, stdlibHash)
 	return cacheInput{
 		key: key, target: target, sourcePath: abs, sourceHash: sourceHash,
@@ -85,6 +90,10 @@ func newPackageInput(baseDir string, target string) (cacheInput, error) {
 	}
 	graphHash := moduleGraphHash(pkg)
 	interfaceHash := publicInterfaceHash(pkg)
+	stdlibHash, err := currentStdlibHash()
+	if err != nil {
+		return cacheInput{}, err
+	}
 	key := hashStrings(
 		Version, target, packageInputKind, manifestPath, manifestHash,
 		graphHash, sourceHash, interfaceHash, stdlibHash,
@@ -226,6 +235,79 @@ func explainChangedInput(previous Entry, input cacheInput) string {
 		return "cache miss: stdlib changed"
 	}
 	return "cache miss: build inputs changed"
+}
+
+// currentStdlibHash returns the hash of the checked-in std source skeleton.
+func currentStdlibHash() (string, error) {
+	root, ok, err := findStdRoot()
+	if err != nil || !ok {
+		return fallbackStdlibHash, err
+	}
+	files, err := stdlibFiles(root)
+	if err != nil {
+		return "", err
+	}
+	records := make([]string, 0, len(files))
+	for _, file := range files {
+		record, err := stdlibFileRecord(root, file)
+		if err != nil {
+			return "", err
+		}
+		records = append(records, record)
+	}
+	return hashStrings(records...), nil
+}
+
+// stdlibFileRecord returns a deterministic hash record for one std file.
+func stdlibFileRecord(root string, file string) (string, error) {
+	hash, err := hashFile(file)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, file)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel) + "=" + hash, nil
+}
+
+// findStdRoot walks upward from the current directory to locate std/kizu.toml.
+func findStdRoot() (string, bool, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false, err
+	}
+	for {
+		candidate := filepath.Join(dir, "std")
+		if _, err := os.Stat(filepath.Join(candidate, "kizu.toml")); err == nil {
+			return candidate, true, nil
+		} else if !os.IsNotExist(err) {
+			return "", false, err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false, nil
+		}
+		dir = parent
+	}
+}
+
+// stdlibFiles returns std manifest and Kizu source files in deterministic order.
+func stdlibFiles(root string) ([]string, error) {
+	files := []string{filepath.Join(root, "kizu.toml")}
+	sourceRoot := filepath.Join(root, "src")
+	err := filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".kizu" {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	sort.Strings(files)
+	return files, err
 }
 
 // hashFile returns the hex SHA-256 hash for one file.

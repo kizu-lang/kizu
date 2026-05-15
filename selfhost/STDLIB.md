@@ -26,3 +26,17 @@ stdlib gap that blocks compiler-shaped Kizu code.
 
 Missing APIs discovered here must be added to the corresponding issue instead
 of becoming local-only TODOs.
+
+## v0.3 Source Boundary
+
+The checked-in `std/` tree is the source skeleton for future Kizu-written
+wrappers. The self-host compiler should treat it as the public std surface while
+the Go implementation remains the runtime oracle for primitive host boundaries.
+
+The current frontend directly exercises the first skeleton modules:
+
+- `std::mem`
+- `std::path`
+- `std::io`
+- `std::process`
+- `std::testing`

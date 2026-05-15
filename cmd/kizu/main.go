@@ -155,7 +155,7 @@ func checkPackageTarget(path string) error {
 	if filepath.Base(path) == "kizu.toml" {
 		baseDir = filepath.Dir(path)
 	}
-	pkg, err := project.LoadPackage(baseDir)
+	pkg, err := loadPackageTarget(baseDir)
 	if err != nil {
 		return err
 	}
@@ -166,6 +166,14 @@ func checkPackageTarget(path string) error {
 	}
 	_, _ = fmt.Println("check: ok")
 	return nil
+}
+
+// loadPackageTarget loads user packages and the compiler-owned std package.
+func loadPackageTarget(baseDir string) (*project.Package, error) {
+	if filepath.Base(baseDir) == "std" {
+		return project.LoadStdPackage(baseDir)
+	}
+	return project.LoadPackage(baseDir)
 }
 
 // testFile runs a single Kizu test source and reports a minimal test result.

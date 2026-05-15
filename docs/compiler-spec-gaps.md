@@ -125,6 +125,10 @@ tests, and self-check/build.
   line/column origins for multi-file diagnostics.
 - Visibility diagnostics render a primary location and related declaration or
   field location.
+- `std/` source skeleton records the Kizu wrapper surface for `std::mem`,
+  `std::path`, `std::io`, `std::process`, and `std::testing`.
+- Build cache stdlib invalidation hashes the checked-in `std/` manifest and
+  Kizu source skeleton.
 - Module-aware build cache keys include manifest, module graph, source, public
   interface, target/backend/optimization, and stdlib hashes.
 - `why-rebuild` explains package input changes for manifest, module graph,

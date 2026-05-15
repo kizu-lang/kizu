@@ -70,32 +70,46 @@ behavior whenever possible.
 | `std::sync` | `Mutex<T>` | shared mutable state primitive and copy-value restrictions | trusted primitive; safe wrapper remains Kizu-facing |
 | `std::atomic` | `Atomic<T>` | atomic storage, seq_cst operations, supported type set | trusted primitive; ordering API should be designed before expanding |
 
-## Source Layout Target
+## Source Layout
 
-The eventual Kizu-written stdlib should live under `std/`:
+The Kizu-written stdlib skeleton lives under `std/`:
 
 ```text
 std/
   kizu.toml
+  README.md
   src/
+    mod.kizu
     mem.kizu
-    array.kizu
-    string.kizu
-    map.kizu
-    testing.kizu
-    fs.kizu
     path.kizu
     io.kizu
     process.kizu
-    task.kizu
-    channel.kizu
-    thread.kizu
-    sync.kizu
-    atomic.kizu
+    testing.kizu
 ```
 
 The compiler still reserves the root namespace `std`. User packages cannot be
-named `std`.
+named `std`. The compiler may load `std/kizu.toml` through the explicit
+compiler-owned std path; normal user manifest parsing still rejects the package
+name.
+
+The v0.3 std sources are declaration skeletons. They define the public wrapper
+surface and primitive ABI boundary, while runtime behavior remains in the
+current Go builtins. `std::mem` and `std::path` are the first pure-helper
+migration candidates because they do not need hidden runtime state.
+
+Current skeleton modules:
+
+- `std::mem`: allocator marker plus byte/slice helper primitive boundary
+- `std::path`: pure path helper primitive boundary
+- `std::io`: explicit `Io` capability constructors and host I/O boundary
+- `std::process`: explicit argv/env/exit boundary
+- `std::testing`: assertion helper boundary
+
+The skeleton is intentionally checkable:
+
+```sh
+go run ./cmd/kizu check std
+```
 
 ## Acceptance Rules For New Std APIs
 
