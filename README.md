@@ -20,8 +20,10 @@ code, and less likely to grow heavy CI and build caches.
 
 Kizu is an early prototype implemented in Go.
 
-The v0.1 target is an interpreter-first language core. The authoritative v0.1
-behavior is the Go interpreter plus `kizu check`.
+The v0.1 target is the interpreter-first language core. The current v0.2 work
+adds the minimal standard-library surface needed by the future self-host
+compiler. The authoritative behavior is still the Go interpreter plus
+`kizu check`.
 
 Implemented language-core pieces:
 
@@ -43,9 +45,14 @@ Implemented language-core pieces:
 - `std::task::parallel_for` and `std::task::parallel_map` safe data-parallel prototypes
 - scoped thread, `Atomic<T>`, and `Mutex<T>` boundary prototypes
 - `contract`, `satisfy`, and `&Dyn<Contract>`
+- minimal `std::mem`, `std::array::Array<T>`, `std::string::String`,
+  `std::map::Map<K, V>`, and `std::testing`
+- explicit-Io `std::fs`, `std::path`, `std::io`, and `std::process` helpers
+- `kizu test <file>` single-file test runner
 
 Experimental compiler and tooling pieces:
 
+- self-host compiler skeleton in `selfhost/`
 - typed SSA IR
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations
@@ -53,8 +60,12 @@ Experimental compiler and tooling pieces:
 - limited C header import for extern function declarations
 - opt-in IR optimization pipeline
 
-These experimental pieces are not v0.1 completion criteria yet. LLVM and WASM
-currently support more limited target subsets than the interpreter.
+These experimental pieces are not the language oracle yet. LLVM and WASM
+currently support more limited target subsets than the interpreter, and native
+executable generation is not implemented.
+
+There are no open v0.2 issues at the time of writing. Remaining work is tracked
+as v0.3 self-host and module-boundary implementation issues in GitHub Issues.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -85,9 +96,10 @@ Pass prototype process arguments with `--`:
 go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 ```
 
-See the [v0.1 examples catalog](examples/README.md) for runnable feature
+See the [examples catalog](examples/README.md) for runnable feature
 examples and negative safety-rule examples. The machine-readable conformance
-manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json).
+manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json); it is
+currently reused for both v0.1 language-core and v0.2 stdlib prototype coverage.
 The safe-code memory-safety contract is documented in
 [docs/memory-safety.md](docs/memory-safety.md).
 Open compiler specification gaps are tracked in
@@ -126,6 +138,7 @@ go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
 go run ./cmd/kizu fmt examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
+go run ./cmd/kizu test examples/std_testing.kizu
 go run ./cmd/kizu ir examples/hello.kizu
 go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
@@ -142,6 +155,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
 - `kizu fmt <file>` prints the current compact AST formatter output.
 - `kizu run <file>` executes the file with the interpreter.
+- `kizu test <file>` runs one checked Kizu source as a test file.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
@@ -150,14 +164,14 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu why-rebuild <file>` explains cache hit or rebuild reasons.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 
-`kizu test` and `kizu lint` are not implemented in v0.1.
+`kizu lint` is not implemented.
 
 ## Project Documents
 
 - [SPEC.md](SPEC.md): language specification
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
-- [examples](examples/README.md): v0.1 examples catalog
-- [tests/conformance](tests/conformance/README.md): reusable v0.1 test manifest
+- [examples](examples/README.md): examples catalog
+- [tests/conformance](tests/conformance/README.md): reusable conformance manifests
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy
 - [AGENTS.md](AGENTS.md): implementation guidance for Codex agents
