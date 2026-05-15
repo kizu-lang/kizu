@@ -82,6 +82,11 @@ smaller than a complete AST dump, but it is generated from the Go parser and the
 self-host parser stage for the same source and is the v0.3 bridge toward full
 AST oracle coverage.
 
+The semantic oracle currently compares a normalized symbol/diagnostic snapshot
+for selected positive sources and keeps selected memory-safety negative fixtures
+paired with the Go checker diagnostics. This is the v0.3 bridge for stages 3-5:
+diagnostics, type preconditions, and ownership preconditions.
+
 Current stdlib feedback is tracked in [`STDLIB.md`](STDLIB.md).
 
 ## Source Policy

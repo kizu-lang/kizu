@@ -131,6 +131,9 @@ tests, and self-check/build.
   Kizu source skeleton.
 - Self-host parser oracle compares normalized AST snapshots against the Go
   parser for representative parseable sources and module fixtures.
+- Self-host semantic oracle compares symbol/diagnostic snapshots for selected
+  positive fixtures and keeps memory-safety negative fixtures paired with Go
+  checker diagnostics.
 - Module-aware build cache keys include manifest, module graph, source, public
   interface, target/backend/optimization, and stdlib hashes.
 - `why-rebuild` explains package input changes for manifest, module graph,

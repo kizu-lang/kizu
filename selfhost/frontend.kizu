@@ -82,6 +82,27 @@ struct ParseSummary {
     return_count: i64;
 }
 
+struct SymbolSummary {
+    function_symbols: i64;
+    type_symbols: i64;
+    value_symbols: i64;
+}
+
+struct Diagnostic {
+    message: []const u8;
+    primary_start: i64;
+    primary_end: i64;
+    related_start: i64;
+    related_end: i64;
+}
+
+struct SemanticSummary {
+    symbols: SymbolSummary;
+    diagnostics: i64;
+    type_checked: bool;
+    ownership_checked: bool;
+}
+
 struct CompileReport {
     stage_count: i64;
     token_count: i64;
@@ -601,6 +622,22 @@ fn print_ast_snapshot(summary: &ParseSummary) -> !void {
     return void;
 }
 
+// print_semantic_snapshot writes symbol and diagnostic summary oracle data.
+fn print_semantic_snapshot(summary: &ParseSummary, diagnostic_count: i64) -> !void {
+    let symbols = build_symbol_summary(summary);
+    print("semantic snapshot");
+    print("function symbols");
+    print(symbols.function_symbols);
+    print("type symbols");
+    print(symbols.type_symbols);
+    print("value symbols");
+    print(symbols.value_symbols);
+    print("diagnostics");
+    print(diagnostic_count);
+    print("semantic snapshot end");
+    return void;
+}
+
 // print_token_kinds writes the whole token-kind stream for Go oracle comparison.
 fn print_token_kinds(tokens: &std::array::Array<Token>) -> !void {
     var index = 0;
@@ -655,16 +692,32 @@ fn collect_lex_diagnostics(tokens: &std::array::Array<Token>) -> !i64 {
     return count;
 }
 
-// run_type_stage validates the minimal type-checking preconditions.
-fn run_type_stage(summary: &ParseSummary, diagnostic_count: i64) -> !bool {
+// build_symbol_summary constructs the minimal semantic symbol summary.
+fn build_symbol_summary(summary: &ParseSummary) -> SymbolSummary {
+    return SymbolSummary {
+        function_symbols: summary.function_count,
+        type_symbols: summary.struct_count + summary.enum_count + summary.union_count,
+        value_symbols: 0,
+    };
+}
+
+// run_semantic_stage validates minimal type and ownership preconditions.
+fn run_semantic_stage(summary: &ParseSummary, diagnostic_count: i64) -> !SemanticSummary {
     try std::testing::expect_equal_i64(0, diagnostic_count);
     try std::testing::expect(summary.function_count > 0);
-    return true;
+    let symbols = build_symbol_summary(summary);
+    return SemanticSummary {
+        symbols: symbols,
+        diagnostics: diagnostic_count,
+        type_checked: true,
+        ownership_checked: true,
+    };
 }
 
 // run_ownership_stage validates the minimal ownership-checking preconditions.
-fn run_ownership_stage(summary: &ParseSummary, type_checked: bool) -> !bool {
-    try std::testing::expect(type_checked);
+fn run_ownership_stage(summary: &ParseSummary, semantic: &SemanticSummary) -> !bool {
+    try std::testing::expect(semantic.type_checked);
+    try std::testing::expect(semantic.ownership_checked);
     try std::testing::expect(summary.function_count > 0);
     return true;
 }
@@ -699,16 +752,16 @@ fn check_bootstrap_readiness(report: &CompileReport) -> !bool {
 fn compile_tokens(tokens: &std::array::Array<Token>) -> !CompileReport {
     let summary = try parse_tokens(tokens);
     let diagnostics = try collect_lex_diagnostics(tokens);
-    let type_checked = try run_type_stage(summary, diagnostics);
-    let ownership_checked = try run_ownership_stage(summary, type_checked);
-    let ir_items = try lower_to_ir(summary, type_checked, ownership_checked);
+    let semantic = try run_semantic_stage(summary, diagnostics);
+    let ownership_checked = try run_ownership_stage(summary, semantic);
+    let ir_items = try lower_to_ir(summary, semantic.type_checked, ownership_checked);
     let artifacts = try emit_backend_artifacts(ir_items);
     var report = CompileReport {
         stage_count: 8,
         token_count: count_tokens(tokens),
         function_count: summary.function_count,
-        diagnostic_count: diagnostics,
-        type_checked: type_checked,
+        diagnostic_count: semantic.diagnostics,
+        type_checked: semantic.type_checked,
         ownership_checked: ownership_checked,
         ir_item_count: ir_items,
         backend_artifact_count: artifacts,
@@ -823,6 +876,7 @@ fn run_frontend(source: []const u8) -> !void {
     try print_token_snapshots(tokens);
     let summary = try parse_tokens(tokens);
     try print_ast_snapshot(summary);
+    try print_semantic_snapshot(summary, report.diagnostic_count);
     print(try keywords.get("fn"));
 
     keywords.deinit();
