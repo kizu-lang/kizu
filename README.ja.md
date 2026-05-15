@@ -71,6 +71,12 @@ interpreter で実行します。
 go run ./cmd/kizu run examples/hello.kizu
 ```
 
+Kizu の test source は次のように実行します。
+
+```sh
+go run ./cmd/kizu test examples/std_testing.kizu
+```
+
 機能ごとの実行例と失敗すべき安全性ルールは
 [v0.1 examples catalog](examples/README.md) にまとめています。
 機械判定用の conformance manifest は

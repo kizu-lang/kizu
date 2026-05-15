@@ -1,0 +1,36 @@
+# ADR 0045: std::testing minimal API
+
+Status: 採用
+
+## Context
+
+v0.3 self-host compiler へ進むには、Kizu source 側で lexer、parser、
+checker component を小さくテストできる足場が必要になる。
+
+Go の test suite だけに依存すると、self-host compiler へ移行するときに
+同じ corpus と assertion pattern を再利用しにくい。
+
+## Decision
+
+v0.2 で `std::testing` の最小 API を prototype builtin として実装する。
+
+```text
+std::testing::expect(condition: bool) -> !void
+std::testing::expect_equal_i64(expected: i64, actual: i64) -> !void
+std::testing::expect_equal_bool(expected: bool, actual: bool) -> !void
+std::testing::expect_equal_bytes(expected: []const u8, actual: []const u8) -> !void
+std::testing::fail(message: []const u8) -> !void
+```
+
+Assertion failure は panic ではなく `!void` の error として返す。
+test source は `try` で失敗を伝播し、runner が readable な failure message を表示する。
+
+`kizu test <file>` は v0.2 では discovery なしの single-file runner とする。
+file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示する。
+
+## Consequences
+
+- self-host compiler component tests を Kizu source として書き始められる。
+- expected / actual の順序を固定できる。
+- generic equality、test discovery、location-aware diagnostics は後続に残す。
+- failure は通常の error-union 経路を通るため、例外や hidden runtime は不要。

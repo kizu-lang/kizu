@@ -893,22 +893,7 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
-	if typ, ok, err := checkIoBuiltin(name, args); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := c.checkFsBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := c.checkMemBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	if name == "std.string.String" {
-		return c.checkStringConstructor(args, env)
-	}
-	if typ, ok, err := c.checkTaskBuiltin(name, args, env); ok || err != nil {
+	if typ, ok, err := c.checkQualifiedStdBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
 	switch name {
@@ -919,6 +904,82 @@ func (c *Checker) checkQualifiedBuiltin(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkQualifiedStdBuiltin validates common std:: namespace ownership effects.
+func (c *Checker) checkQualifiedStdBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if typ, ok, err := c.checkMemBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkFsBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := checkIoBuiltin(name, args); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
+		return typ, ok, err
+	}
+	if name == "std.string.String" {
+		return c.checkStringConstructor(args, env)
+	}
+	if typ, ok, err := c.checkTaskBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkTestingBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	return "", false, nil
+}
+
+// checkTestingBuiltin reads assertion arguments without taking ownership.
+func (c *Checker) checkTestingBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.testing.expect":
+		return c.checkTestingArgs(name, args, env, "bool")
+	case "std.testing.expect_equal_i64":
+		return c.checkTestingArgs(name, args, env, "i64", "i64")
+	case "std.testing.expect_equal_bool":
+		return c.checkTestingArgs(name, args, env, "bool", "bool")
+	case "std.testing.expect_equal_bytes":
+		return c.checkTestingArgs(name, args, env, "[]const u8", "[]const u8")
+	case "std.testing.fail":
+		return c.checkTestingArgs(name, args, env, "[]const u8")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkTestingArgs validates assertion arguments without moving non-copy values.
+func (c *Checker) checkTestingArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	want ...string,
+) (string, bool, error) {
+	if len(args) != len(want) {
+		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
+			name, len(want), len(args))
+	}
+	for idx, arg := range args {
+		got, err := c.readExpr(arg, env)
+		if err != nil {
+			return "", true, err
+		}
+		if got != want[idx] {
+			return "", true, fmt.Errorf("move error: `%s` arg %d expects %s, got %s",
+				name, idx+1, want[idx], got)
+		}
+	}
+	return "!void", true, nil
 }
 
 // checkStringConstructor validates std::string::String(allocator) ownership.
