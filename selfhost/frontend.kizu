@@ -657,6 +657,8 @@ fn print_ast_detail_snapshot(tokens: &std::array::Array<Token>) -> !void {
         print("status");
         print("pass");
         try print_ast_struct_details(tokens);
+        try print_ast_enum_details(tokens);
+        try print_ast_union_details(tokens);
         try print_ast_function_details(tokens);
     }
     print("ast detail snapshot end");
@@ -757,6 +759,152 @@ fn struct_field_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const 
         return "[]const u8";
     }
     return token.literal;
+}
+
+// print_ast_enum_details writes per-enum parser rows.
+fn print_ast_enum_details(tokens: &std::array::Array<Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Enum {
+            try print_ast_enum_detail(tokens, index);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_ast_enum_detail writes one enum declaration shape.
+fn print_ast_enum_detail(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let name = try tokens.at(start + 1);
+
+    print("enum");
+    print(name.literal);
+    print("tags");
+    print(try tag_like_count(tokens, start));
+    try print_enum_tags(tokens, start);
+    return void;
+}
+
+// print_ast_union_details writes per-union parser rows.
+fn print_ast_union_details(tokens: &std::array::Array<Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Union {
+            try print_ast_union_detail(tokens, index);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_ast_union_detail writes one tagged union declaration shape.
+fn print_ast_union_detail(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let name = try tokens.at(start + 1);
+
+    print("union");
+    print(name.literal);
+    print("variants");
+    print(try tag_like_count(tokens, start));
+    try print_union_variants(tokens, start);
+    return void;
+}
+
+// tag_like_count counts enum tags or union variants in a declaration.
+fn tag_like_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::RBrace {
+                return count;
+            }
+        }
+        if token.kind == TokenKind::Ident {
+            if index > start + 1 {
+                count = count + 1;
+            }
+        }
+        index = try skip_payload_type(tokens, index);
+    }
+    return count;
+}
+
+// print_enum_tags writes enum tag names.
+fn print_enum_tags(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::RBrace {
+                return void;
+            }
+        }
+        if token.kind == TokenKind::Ident {
+            if index > start + 1 {
+                print("tag");
+                print(token.literal);
+            }
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_union_variants writes union variants and payload type names.
+fn print_union_variants(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::RBrace {
+                return void;
+            }
+        }
+        if token.kind == TokenKind::Ident {
+            if index > start + 1 {
+                print("variant");
+                print(token.literal);
+                print(try union_variant_payload(tokens, index));
+            }
+        }
+        index = try skip_payload_type(tokens, index);
+    }
+    return void;
+}
+
+// union_variant_payload returns a normalized payload or empty marker.
+fn union_variant_payload(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let next = try tokens.at(start + 1);
+
+    if next.kind == TokenKind::LParen {
+        return try struct_field_type(tokens, start + 2);
+    }
+    return "<none>";
+}
+
+// skip_payload_type advances over one parenthesized payload when present.
+fn skip_payload_type(tokens: &std::array::Array<Token>, index: i64) -> !i64 {
+    let next = try tokens.at(index + 1);
+
+    if next.kind == TokenKind::LParen {
+        var cursor = index + 2;
+        while cursor < tokens.len() {
+            let token = try tokens.at(cursor);
+            if token.kind == TokenKind::RParen {
+                return cursor + 1;
+            }
+            cursor = cursor + 1;
+        }
+    }
+    return index + 1;
 }
 
 // print_ast_function_details writes per-function parser rows.
@@ -1141,8 +1289,7 @@ fn first_param_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u
             return "";
         }
         if token.kind == TokenKind::Colon {
-            let next = try tokens.at(index + 1);
-            return next.literal;
+            return try parameter_type(tokens, index + 1);
         }
         index = index + 1;
     }
@@ -2013,13 +2160,36 @@ fn print_function_param_types(tokens: &std::array::Array<Token>, start: i64) -> 
             return void;
         }
         if token.kind == TokenKind::Colon {
-            let next = try tokens.at(index + 1);
             print("param");
-            print(next.literal);
+            print(try parameter_type(tokens, index + 1));
         }
         index = index + 1;
     }
     return void;
+}
+
+// parameter_type returns a normalized function parameter type.
+fn parameter_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let token = try tokens.at(start);
+
+    if token.kind == TokenKind::Amp {
+        let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::Mut {
+            return try parameter_type(tokens, start + 2);
+        }
+        return try parameter_type(tokens, start + 1);
+    }
+    if std::mem::equal_bytes(token.literal, "&") {
+        let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::Mut {
+            return try parameter_type(tokens, start + 2);
+        }
+        return try parameter_type(tokens, start + 1);
+    }
+    if token.kind == TokenKind::LBracket {
+        return "[]const u8";
+    }
+    return token.literal;
 }
 
 // function_terminator returns the normalized entry block terminator.
