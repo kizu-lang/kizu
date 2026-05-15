@@ -205,8 +205,49 @@ fn run_frontend(source: []const u8) -> !void {
     return void;
 }
 
-// main runs a deterministic skeleton smoke test.
+// source_path_from_process returns the input path passed to the prototype CLI.
+fn source_path_from_process() -> ![]const u8 {
+    if std::process::arg_count() > 0 {
+        return try std::process::arg(0);
+    }
+    return "selfhost/fixtures/simple.kizu";
+}
+
+// validate_source_path checks path helpers needed by compiler diagnostics.
+fn validate_source_path(source_path: []const u8) -> ![]const u8 {
+    let clean = std::path::clean(source_path);
+    let extension = std::path::extension(clean);
+    let basename = std::path::basename(clean);
+
+    try std::testing::expect_equal_bytes(".kizu", extension);
+    try std::testing::expect(std::mem::starts_with(basename, "simple"));
+    return clean;
+}
+
+// load_source reads one source file through the explicit-Io filesystem API.
+fn load_source(io: Io, source_path: []const u8) -> ![]const u8 {
+    try std::testing::expect(try std::fs::exists(io, source_path));
+    let metadata = try std::fs::metadata(io, source_path);
+    try std::testing::expect_equal_bool(false, metadata.is_dir);
+    return try std::fs::read_file(io, source_path);
+}
+
+// print_source_summary writes path diagnostics through explicit stdio.
+fn print_source_summary(io: Io, source_path: []const u8) -> !void {
+    try std::io::write_stdout(io, "source:");
+    print(std::path::basename(source_path));
+    print(std::path::dirname(source_path));
+    return void;
+}
+
+// main runs a deterministic file-backed skeleton smoke test.
 fn main() -> !void {
-    try run_frontend("fn main() { return void; }");
+    let io = std::io::blocking();
+    let source_path = try source_path_from_process();
+    let clean = try validate_source_path(source_path);
+    let source = try load_source(io, clean);
+
+    try print_source_summary(io, clean);
+    try run_frontend(source);
     return void;
 }

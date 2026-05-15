@@ -10,6 +10,7 @@ enough to write compiler-shaped Kizu code.
 
 ```sh
 kizu run selfhost/frontend.kizu
+kizu run selfhost/frontend.kizu -- selfhost/fixtures/simple.kizu
 ```
 
 The skeleton currently includes:
@@ -19,6 +20,21 @@ The skeleton currently includes:
 - token storage with `std::array::Array<T>`
 - diagnostic text construction with `std::string::String`
 - parser summary shape
+- source loading through `std::fs`
+- path decomposition through `std::path`
+- prototype CLI argument handling through `std::process`
+- explicit output through `std::io`
+- Kizu-native component assertions through `std::testing`
+
+The default smoke input is `selfhost/fixtures/simple.kizu`. Passing a path after
+`--` exercises the same runner path with explicit process arguments.
+
+## v0.3 Handoff
+
+The v0.2 standard-library bridge is complete when `tests/selfhost` can parse,
+check, and run the skeleton through the same APIs a future compiler frontend
+will need. #31 should build from this by replacing the parser summary with real
+lexer, parser, AST, diagnostics, and conformance comparison components.
 
 ## Conformance Reuse
 

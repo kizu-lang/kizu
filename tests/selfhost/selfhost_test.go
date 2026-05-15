@@ -46,10 +46,14 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		t.Fatalf("ownership check failed: %v", err)
 	}
 	var out bytes.Buffer
-	if err := interp.New(&out).Run(program); err != nil {
+	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
+	if err := interp.NewWithProcessArgs(&out, []string{fixture}).Run(program); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
-	if got, want := out.String(), "parsed functions\n1\nTokenKind::Fn\n"; got != want {
+	want := "source:simple.kizu\n" +
+		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
+		"parsed functions\n2\nTokenKind::Fn\n"
+	if got := out.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
