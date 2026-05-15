@@ -30,7 +30,7 @@ each row below.
 | resolver | Go module resolver tests and module conformance runner | Go-only | Kizu module graph resolver and graph snapshot equality |
 | diagnostics | Go multi-file diagnostics for visibility; selected self-host semantic counts | weak | Kizu diagnostic object with primary/related spans and equality tests |
 | type | Go type checker runs conformance; self-host has semantic summary | weak | Kizu type checker for selected language subset and pass/fail equality |
-| ownership | Go ownership checker runs conformance; selected negative fixtures pinned | weak | Kizu move/borrow checker with memory-safety fixture equality |
+| ownership | Go ownership checker runs conformance; self-host owned-call move snapshot covers selected borrow/moved-value fixtures | weak | full Kizu move/borrow checker with memory-safety diagnostic equality |
 | IR | self-host IR summary counts vs Go-derived counts | weak | compare normalized IR dump/function/block/instruction shape |
 | backend | Go LLVM/WASM smoke; self-host artifact count | weak | compare backend smoke status and selected output fingerprints |
 | cache | Go module-aware cache tests include std source hash | medium | self-host cache input contract or explicit Go-owned cache decision |
