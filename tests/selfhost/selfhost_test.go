@@ -417,6 +417,7 @@ func TestSelfHostModuleGraphOracle(t *testing.T) {
 func TestSelfHostAstDetailOracle(t *testing.T) {
 	cases := []string{
 		"examples/functions.kizu",
+		"examples/struct.kizu",
 		"examples/negative/missing_semicolon.kizu",
 	}
 	for _, path := range cases {
@@ -937,11 +938,21 @@ func goAstDetailSnapshot(t *testing.T, path string) []string {
 	}
 	lines := []string{"status", "pass"}
 	for _, decl := range program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok {
-			continue
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			lines = append(lines, astStructDetail(d)...)
+		case *ast.FunctionDecl:
+			lines = append(lines, astFunctionDetail(d)...)
 		}
-		lines = append(lines, astFunctionDetail(fn)...)
+	}
+	return lines
+}
+
+// astStructDetail returns parser facts for one struct declaration.
+func astStructDetail(decl *ast.StructDecl) []string {
+	lines := []string{"struct", decl.Name, "fields", strconv.Itoa(len(decl.Fields))}
+	for _, field := range decl.Fields {
+		lines = append(lines, "field", field.Name, field.TypeName)
 	}
 	return lines
 }
