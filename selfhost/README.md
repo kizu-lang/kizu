@@ -20,6 +20,8 @@ The skeleton currently includes:
 - token storage with `std::array::Array<T>`
 - diagnostic text construction with `std::string::String`
 - parser summary shape
+- compiler1-8 stage report covering lexer, parser, diagnostics, type, ownership,
+  IR, backend artifact, and bootstrap readiness
 - source loading through `std::fs`
 - path decomposition through `std::path`
 - prototype CLI argument handling through `std::process`
@@ -43,10 +45,27 @@ produce the same pass/fail behavior as the Go implementation before it can
 replace any production path.
 
 For now, Go tests parse, check, and run the skeleton source. They also compare
-the self-host parser summary for `selfhost/fixtures/simple.kizu` with the
-production Go lexer function-token count. Missing APIs found while growing this
-directory must be reflected back into the relevant v0.2 stdlib issue instead of
-becoming isolated TODOs here.
+the self-host parser summary and token count for `selfhost/fixtures/simple.kizu`
+with the production Go lexer. Missing APIs found while growing this directory
+must be reflected back into the relevant v0.2 stdlib issue instead of becoming
+isolated TODOs here.
+
+## Compiler Stage Harness
+
+`frontend.kizu` intentionally runs eight stages before it is a full compiler:
+
+1. lexer
+2. parser summary
+3. diagnostics
+4. type-check preconditions
+5. ownership-check preconditions
+6. IR item lowering summary
+7. backend artifact summary
+8. bootstrap readiness check
+
+Stages 4-8 are still skeletons. They are kept executable so v0.2 stdlib and
+language-core gaps are found before the self-host implementation replaces Go
+components.
 
 Current stdlib feedback is tracked in [`STDLIB.md`](STDLIB.md).
 

@@ -44,7 +44,11 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	got := runSelfHostFrontend(t, fixture)
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
-		"parsed functions\n2\nTokenKind::Fn\n"
+		"compiler stages\n8\n" +
+		"parsed functions\n2\n" +
+		"tokens\n19\n" +
+		"bootstrap ready\ntrue\n" +
+		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -55,6 +59,10 @@ func TestSelfHostFixtureComparedWithGoLexer(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
 	got := runSelfHostFrontend(t, fixture)
 	want := "parsed functions\n" + strconv.Itoa(countGoFunctionTokens(t, fixture)) + "\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got %q, want it to contain %q", got, want)
+	}
+	want = "tokens\n" + strconv.Itoa(countGoTokens(t, fixture)) + "\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got %q, want it to contain %q", got, want)
 	}
@@ -100,6 +108,20 @@ func countGoFunctionTokens(t *testing.T, path string) int {
 		if tok.Type == token.Function {
 			count++
 		}
+		if tok.Type == token.EOF {
+			return count
+		}
+	}
+}
+
+// countGoTokens counts every token with the production Go lexer, including EOF.
+func countGoTokens(t *testing.T, path string) int {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	count := 0
+	for {
+		tok := l.NextToken()
+		count++
 		if tok.Type == token.EOF {
 			return count
 		}
