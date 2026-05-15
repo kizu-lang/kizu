@@ -123,6 +123,7 @@ struct MoveCandidate {
     found: bool;
     value: []const u8;
     start: i64;
+    related_start: i64;
     end_index: i64;
 }
 
@@ -662,6 +663,131 @@ fn print_ast_detail_snapshot(tokens: &std::array::Array<Token>) -> !void {
         try print_ast_function_details(tokens);
     }
     print("ast detail snapshot end");
+    return void;
+}
+
+// print_ast_node_dump_snapshot writes a selected pre-order AST node dump.
+fn print_ast_node_dump_snapshot(tokens: &std::array::Array<Token>) -> !void {
+    var index = 0;
+
+    print("ast node dump snapshot");
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            try print_function_node_dump(tokens, index);
+        }
+        index = index + 1;
+    }
+    print("ast node dump snapshot end");
+    return void;
+}
+
+// print_function_node_dump writes the selected function AST node shape.
+fn print_function_node_dump(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let name = try tokens.at(start + 1);
+
+    print("FunctionDecl");
+    print(name.literal);
+    print("params");
+    print(try function_param_count(tokens, start + 3));
+    print("return");
+    print(try function_return_type(tokens, start + 2));
+    print("BlockStmt");
+    try print_function_body_node_dump(tokens, start);
+    return void;
+}
+
+// print_function_body_node_dump writes selected statement/expression node rows.
+fn print_function_body_node_dump(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = try function_body_start(tokens, start);
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return void;
+            }
+        }
+        try print_statement_or_expression_node(tokens, index);
+        index = index + 1;
+    }
+    return void;
+}
+
+// function_body_start returns the first token after a function body opening brace.
+fn function_body_start(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LBrace {
+            return index + 1;
+        }
+        index = index + 1;
+    }
+    return start;
+}
+
+// print_statement_or_expression_node writes one selected AST node row.
+fn print_statement_or_expression_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
+    let token = try tokens.at(index);
+    if token.kind == TokenKind::Return {
+        print("ReturnStmt");
+    }
+    if token.kind == TokenKind::Let {
+        try print_local_node(tokens, index, "LetStmt");
+    }
+    if token.kind == TokenKind::Var {
+        try print_local_node(tokens, index, "VarStmt");
+    }
+    if token.kind == TokenKind::Assign {
+        if !try assignment_belongs_to_local(tokens, index) {
+            print("AssignStmt");
+        }
+    }
+    try print_call_node(tokens, index);
+    print_binary_node(token.kind);
+    return void;
+}
+
+// print_local_node writes a local declaration row.
+fn print_local_node(tokens: &std::array::Array<Token>, index: i64, kind: []const u8) -> !void {
+    let name = try tokens.at(index + 1);
+    print(kind);
+    print(name.literal);
+    return void;
+}
+
+// print_call_node writes a direct call expression row.
+fn print_call_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
+    if index == 0 {
+        return void;
+    }
+    if index + 1 >= tokens.len() {
+        return void;
+    }
+    let token = try tokens.at(index);
+    let next = try tokens.at(index + 1);
+    let previous = try tokens.at(index - 1);
+
+    if token.kind == TokenKind::Ident {
+        if next.kind == TokenKind::LParen {
+            if previous.kind != TokenKind::Fn {
+                print("CallExpr");
+                print(token.literal);
+                print(try call_arg_count(tokens, index));
+            }
+        }
+    }
+    return void;
+}
+
+// print_binary_node writes a selected binary expression row.
+fn print_binary_node(kind: TokenKind) {
+    if is_binary_operator(kind) {
+        print("BinaryExpr");
+        print(kind);
+    }
     return void;
 }
 
@@ -1629,13 +1755,25 @@ fn call_arg_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
     }
     var index = start + 2;
     var count = 1;
+    var depth = 0;
 
     while index < tokens.len() {
         let token = try tokens.at(index);
-        if token.kind == TokenKind::Comma {
-            count = count + 1;
+        if token.kind == TokenKind::LParen {
+            depth = depth + 1;
         }
         if token.kind == TokenKind::RParen {
+            if depth == 0 {
+                return count;
+            }
+            depth = depth - 1;
+        }
+        if token.kind == TokenKind::Comma {
+            if depth == 0 {
+                count = count + 1;
+            }
+        }
+        if token.kind == TokenKind::LBrace {
             return count;
         }
         index = index + 1;
@@ -1703,6 +1841,14 @@ fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
                 }
             }
         }
+        let borrow_conflict = try call_borrow_move_conflict(tokens, index);
+        if borrow_conflict.found {
+            return borrow_move_error(
+                borrow_conflict.value,
+                borrow_conflict.start,
+                borrow_conflict.related_start
+            );
+        }
         let candidate = try call_move_candidate(tokens, index);
         if candidate.found {
             if moved_start >= 0 {
@@ -1742,6 +1888,62 @@ fn ownership_error(value: []const u8, primary: i64, related: i64) -> OwnershipSn
     };
 }
 
+// borrow_move_error constructs a borrow-while-move ownership result.
+fn borrow_move_error(value: []const u8, primary: i64, related: i64) -> OwnershipSnapshot {
+    return OwnershipSnapshot {
+        ok: false,
+        message: "borrow error: value cannot be moved while borrowed",
+        value: value,
+        primary_start: primary,
+        related_start: related,
+    };
+}
+
+// call_borrow_move_conflict detects one call that borrows then moves the same value.
+fn call_borrow_move_conflict(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    let call_start = try is_call_start(tokens, start);
+    if !call_start {
+        return no_move_candidate();
+    }
+    let callee = try tokens.at(start);
+    if !try function_first_param_borrowed(tokens, callee.literal) {
+        return no_move_candidate();
+    }
+    if !try function_second_param_owned(tokens, callee.literal) {
+        return no_move_candidate();
+    }
+    return try same_value_second_arg(tokens, start);
+}
+
+// same_value_second_arg reports whether arg one and two name the same identifier.
+fn same_value_second_arg(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    if start + 4 >= tokens.len() {
+        return no_move_candidate();
+    }
+    let first = try tokens.at(start + 2);
+    let comma = try tokens.at(start + 3);
+    let second = try tokens.at(start + 4);
+    if first.kind != TokenKind::Ident {
+        return no_move_candidate();
+    }
+    if comma.kind != TokenKind::Comma {
+        return no_move_candidate();
+    }
+    if second.kind != TokenKind::Ident {
+        return no_move_candidate();
+    }
+    if !std::mem::equal_bytes(first.literal, second.literal) {
+        return no_move_candidate();
+    }
+    return MoveCandidate {
+        found: true,
+        value: second.literal,
+        start: second.start,
+        related_start: first.start,
+        end_index: try call_end_index(tokens, start),
+    };
+}
+
 // call_move_candidate returns an owned identifier argument consumed by a call.
 fn call_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
     let call_start = try is_call_start(tokens, start);
@@ -1762,6 +1964,7 @@ fn call_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !MoveCa
         found: true,
         value: arg.literal,
         start: arg.start,
+        related_start: -1,
         end_index: try call_end_index(tokens, start),
     };
 }
@@ -1772,6 +1975,7 @@ fn no_move_candidate() -> MoveCandidate {
         found: false,
         value: "",
         start: -1,
+        related_start: -1,
         end_index: -1,
     };
 }
@@ -1825,6 +2029,82 @@ fn first_param_is_owned(tokens: &std::array::Array<Token>, start: i64) -> !bool 
         if token.kind == TokenKind::Colon {
             let next = try tokens.at(index + 1);
             return next.kind != TokenKind::Amp;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_first_param_borrowed reports whether a function's first arg is borrowed.
+fn function_first_param_borrowed(tokens: &std::array::Array<Token>, name: []const u8) -> !bool {
+    var index = 0;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        let fn_name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(fn_name.literal, name) {
+                return try first_param_is_borrowed(tokens, index + 3);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// first_param_is_borrowed parses the first parameter borrow mode.
+fn first_param_is_borrowed(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            return false;
+        }
+        if token.kind == TokenKind::Colon {
+            let next = try tokens.at(index + 1);
+            return next.kind == TokenKind::Amp;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_second_param_owned reports whether a function's second arg is owned.
+fn function_second_param_owned(tokens: &std::array::Array<Token>, name: []const u8) -> !bool {
+    var index = 0;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        let fn_name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(fn_name.literal, name) {
+                return try second_param_is_owned(tokens, index + 3);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// second_param_is_owned parses the second parameter ownership mode.
+fn second_param_is_owned(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+    var commas = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            return false;
+        }
+        if token.kind == TokenKind::Comma {
+            commas = commas + 1;
+        }
+        if commas == 1 {
+            if token.kind == TokenKind::Colon {
+                let next = try tokens.at(index + 1);
+                return next.kind != TokenKind::Amp;
+            }
         }
         index = index + 1;
     }
@@ -2745,6 +3025,7 @@ fn run_frontend(source: []const u8) -> !void {
     let summary = try parse_tokens(tokens);
     try print_ast_snapshot(summary);
     try print_ast_detail_snapshot(tokens);
+    try print_ast_node_dump_snapshot(tokens);
     try print_decl_snapshot(tokens);
     try print_module_graph_snapshot(tokens);
     try print_semantic_snapshot(summary, report.diagnostic_count);
