@@ -1,62 +1,125 @@
-# Compiler Specification Gaps
+# Compiler Specification Decisions
 
-This document tracks language and toolchain decisions that must be specified
-before the self-host compiler can replace the Go implementation.
+This document tracks compiler-facing language and toolchain decisions that are
+specified but still need implementation work before the self-host compiler can
+replace the Go implementation.
 
-## Required Before Practical Self-Host
+## Accepted Decisions
 
 ### Module Graph
 
-- Parse `kizu.toml`.
-- Resolve package root namespace from `[package].name`.
-- Resolve source modules from `[modules].root` and `[modules].paths`.
-- Reject cyclic imports.
-- Define duplicate module path errors.
-- Define missing module errors.
+Source: [ADR-0049](adr/0049-module-graph-name-resolution.md).
+
+- `kizu.toml` is the package root marker.
+- `[package].name` is the user package root namespace.
+- `[modules].root` defines the entry module.
+- `[modules].paths` defines source roots.
+- File paths map to module paths predictably.
+- Duplicate module paths, missing imports, and cyclic imports are errors.
 
 ### Name Resolution
 
-- Resolve local bindings before imported module names.
-- Resolve imported modules by their last path segment.
-- Reject ambiguous imported last segments.
-- Keep `std::...` available without user import.
-- Define whether imported modules can shadow local names. Recommended: no.
+Source: [ADR-0049](adr/0049-module-graph-name-resolution.md).
+
+Resolution order:
+
+1. local bindings
+2. current module top-level declarations
+3. imported module names by last segment
+4. built-in root namespace `std`
+5. error
+
+Rules:
+
+- imported modules are referenced by their last path segment
+- same-last-segment imports are rejected
+- local declarations may not shadow imported module names
+- user packages may not be named `std`
 
 ### Visibility
 
-- Enforce default-private top-level declarations.
-- Enforce default-private struct fields across module boundaries.
-- Reject private types in public function signatures.
-- Reject private struct fields in external construction.
-- Define public enum tag and union variant access.
+Source: [ADR-0050](adr/0050-visibility-diagnostics.md).
+
+- top-level declarations are private by default
+- struct fields are private by default
+- `pub` exposes top-level declarations and fields
+- public signatures may not expose private types
+- external modules may not construct or access private fields
+- public enum tags and union variants are visible when their type is public
 
 ### Diagnostics
 
-- Define source span model: file, byte offset, line, and column.
-- Define multi-file diagnostic rendering.
-- Define import-cycle diagnostic format.
-- Define private-item diagnostic format.
+Source: [ADR-0050](adr/0050-visibility-diagnostics.md).
+
+Spans carry:
+
+- file
+- byte start
+- byte end
+- line
+- column
+
+Multi-file diagnostics use one primary span plus related spans. Import cycles
+and private access errors must show the relevant module graph or definition
+site.
 
 ### Compiler Outputs
 
-- Define check-only output.
-- Define interpreter run output.
-- Define IR artifact output.
-- Define native, WASM, and C backend artifact naming.
-- Define generated artifact locations under `target/`.
+Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
+
+Artifact families live under:
+
+```text
+target/
+  check/
+  interp/
+  ir/
+  native/
+  wasm/
+  c/
+  cache/
+```
+
+`kizu check` does not create durable artifacts by default. IR, WASM, native, and
+C outputs are explicit build artifacts.
 
 ### Build Cache
 
-- Define cache key fields for manifest, module graph, source hashes, compiler
-  version, target, backend, and optimization mode.
-- Define no-op rebuild behavior.
-- Define cache size accounting and pruning behavior.
+Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
+
+Cache keys include compiler version, manifest hash, module graph hash, source
+hashes, public interface hash, target, backend, optimization mode, and stdlib
+version or hash.
+
+Required user-facing commands:
+
+- `kizu cache status`
+- `kizu cache prune`
+- `kizu why-rebuild`
 
 ### Bootstrap
 
-- Define the stage where the Kizu compiler can compile/check its own sources.
-- Define the Go compiler oracle comparison boundary.
-- Define which conformance tests must pass before switching production paths.
+Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
+
+The Go implementation remains the oracle until the Kizu compiler matches it for
+lexer, parser, diagnostics, type checking, ownership checking, IR, backend smoke
+tests, and self-check/build.
+
+## Implementation Work Still Needed
+
+- Add `pub` and `import` tokens.
+- Parse top-level import declarations.
+- Parse `pub` on top-level declarations and struct fields.
+- Parse `kizu.toml`.
+- Build the resolved module graph.
+- Add resolver phase between parser and type checker.
+- Add visibility checks.
+- Preserve byte spans and file IDs through compiler phases.
+- Render multi-file diagnostics.
+- Add artifact layout under `target/`.
+- Extend build cache keys with module graph and public interface hashes.
+- Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
+  IR, and backend outputs.
 
 ## Postponed
 

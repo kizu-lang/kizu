@@ -67,3 +67,6 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0046: std::fs / std::path minimal API](0046-std-fs-path-minimal-api.md)
 - [ADR-0047: std::io / std::process minimal API](0047-std-io-process-minimal-api.md)
 - [ADR-0048: module import and manifest policy](0048-module-import-manifest.md)
+- [ADR-0049: module graph and name resolution](0049-module-graph-name-resolution.md)
+- [ADR-0050: visibility and diagnostics](0050-visibility-diagnostics.md)
+- [ADR-0051: compiler outputs, build cache, and bootstrap criteria](0051-compiler-outputs-cache-bootstrap.md)

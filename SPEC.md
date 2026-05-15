@@ -222,6 +222,15 @@ paths = ["src"]
 たとえば `name = "app"` の package では、`src/lexer.kizu` を
 `app::lexer` として import します。
 
+module path は file path から決まります。
+
+```text
+src/main.kizu       -> app
+src/lexer.kizu      -> app::lexer
+src/parser/mod.kizu -> app::parser
+src/parser/ast.kizu -> app::parser::ast
+```
+
 ## 4. 設計概要
 
 Kizu の値は、基本的に1つの所有者を持ちます。
@@ -373,6 +382,18 @@ let tokens = try lexer::lex(source);
 ```
 
 `std::...` は標準ライブラリ namespace として import なしで使えます。
+user package に `std` という名前は使えません。
+
+name resolution order:
+
+1. local bindings
+2. current module top-level declarations
+3. imported module names by last segment
+4. built-in root namespace `std`
+5. error
+
+同じ last segment を持つ import は compile error です。
+local declaration が import module name を shadow することも compile error です。
 
 visibility は default private です。
 
@@ -404,6 +425,8 @@ fn lex_source(source: []const u8) -> !std::array::Array<Token> {
 * 外部 module に見せる top-level declaration には `pub` を付ける
 * struct field は default private
 * 外部 module に見せる field には `pub` を付ける
+* public API に private type を出してはいけない
+* 外部 module から private field を construct / access してはいけない
 * `pub` な enum の tag と `pub` な union の variant は外部から使える
 * `pub(crate)`、`pub(super)`、`protected` は v0.2/v0.3 では採用しない
 
@@ -1549,6 +1572,26 @@ kizu cache prune
 kizu why-rebuild
 kizu import-c-header
 ```
+
+生成物は `target/` 配下で output family ごとに分けます。
+
+```text
+target/
+  check/
+  interp/
+  ir/
+  native/
+  wasm/
+  c/
+  cache/
+```
+
+`kizu check` は durable artifact をデフォルトでは生成しません。
+IR、WASM、native、C 出力は明示的な build command でだけ生成します。
+
+build cache key には、compiler version、manifest hash、resolved module graph hash、
+source hash、public interface hash、target、backend、optimization mode、stdlib hash
+を含めます。
 
 `kizu test` と `kizu lint` は v0.1 では未実装です。
 
