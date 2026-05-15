@@ -99,6 +99,15 @@ type tokenSnapshot struct {
 	Column  int
 }
 
+type astSnapshot struct {
+	Functions int
+	Imports   int
+	Structs   int
+	Enums     int
+	Unions    int
+	Returns   int
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -134,6 +143,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	got := runSelfHostFrontend(t, fixture)
 	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
 	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
+	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
@@ -146,6 +156,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"token snapshots\n" +
 		snapshots +
 		"token snapshots end\n" +
+		"ast snapshot\n" +
+		astSnapshot +
+		"ast snapshot end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -202,6 +215,7 @@ func TestSelfHostReadsModuleFixture(t *testing.T) {
 		t.Fatalf("got %q, want it to contain %q", got, want)
 	}
 	assertTokenSnapshots(t, got, fixture)
+	assertAstSnapshot(t, got, fixture)
 }
 
 // TestSelfHostExampleLexerSnapshotsComparedWithGoLexer checks an examples subset.
@@ -209,6 +223,7 @@ func TestSelfHostExampleLexerSnapshotsComparedWithGoLexer(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "examples", "hello.kizu")
 	got := runSelfHostFrontend(t, fixture)
 	assertTokenSnapshots(t, got, fixture)
+	assertAstSnapshot(t, got, fixture)
 }
 
 // TestSelfHostReadsModuleConformanceManifest uses the shared module fixtures.
@@ -222,6 +237,7 @@ func TestSelfHostReadsModuleConformanceManifest(t *testing.T) {
 			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(tt.RootSource))
 			got := runSelfHostFrontend(t, fixture)
 			assertTokenSnapshots(t, got, fixture)
+			assertAstSnapshot(t, got, fixture)
 		})
 	}
 }
@@ -361,6 +377,82 @@ func formatTokenSnapshots(snapshots []tokenSnapshot) string {
 	return out.String()
 }
 
+// goAstSnapshot returns the normalized Go parser snapshot.
+func goAstSnapshot(t *testing.T, path string) astSnapshot {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	snapshot := astSnapshot{}
+	for _, decl := range program.Decls {
+		countDeclSnapshot(decl, &snapshot)
+	}
+	return snapshot
+}
+
+// countDeclSnapshot adds one top-level declaration to the snapshot.
+func countDeclSnapshot(decl ast.Decl, snapshot *astSnapshot) {
+	switch d := decl.(type) {
+	case *ast.ImportDecl:
+		snapshot.Imports++
+	case *ast.FunctionDecl:
+		snapshot.Functions++
+		countBlockSnapshot(d.Body, snapshot)
+	case *ast.StructDecl:
+		snapshot.Structs++
+	case *ast.EnumDecl:
+		snapshot.Enums++
+	case *ast.UnionDecl:
+		snapshot.Unions++
+	case *ast.ImplDecl:
+		for _, method := range d.Methods {
+			snapshot.Functions++
+			countBlockSnapshot(method.Body, snapshot)
+		}
+	}
+}
+
+// countBlockSnapshot adds return statements contained by a block.
+func countBlockSnapshot(block *ast.BlockStmt, snapshot *astSnapshot) {
+	if block == nil {
+		return
+	}
+	for _, stmt := range block.Statements {
+		countStatementSnapshot(stmt, snapshot)
+	}
+}
+
+// countStatementSnapshot adds nested return statements to the snapshot.
+func countStatementSnapshot(stmt ast.Statement, snapshot *astSnapshot) {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt:
+		snapshot.Returns++
+	case *ast.IfStmt:
+		countBlockSnapshot(s.Consequence, snapshot)
+		countBlockSnapshot(s.Alternative, snapshot)
+	case *ast.WhileStmt:
+		countBlockSnapshot(s.Body, snapshot)
+	case *ast.ForStmt:
+		countBlockSnapshot(s.Body, snapshot)
+	case *ast.UnsafeStmt:
+		countBlockSnapshot(s.Body, snapshot)
+	case *ast.ComptimeIfStmt:
+		countBlockSnapshot(s.Consequence, snapshot)
+		countBlockSnapshot(s.Alternative, snapshot)
+	}
+}
+
+// formatAstSnapshot formats snapshots exactly as frontend.kizu prints them.
+func formatAstSnapshot(snapshot astSnapshot) string {
+	lines := []string{
+		"functions", strconv.Itoa(snapshot.Functions),
+		"imports", strconv.Itoa(snapshot.Imports),
+		"structs", strconv.Itoa(snapshot.Structs),
+		"enums", strconv.Itoa(snapshot.Enums),
+		"unions", strconv.Itoa(snapshot.Unions),
+		"returns", strconv.Itoa(snapshot.Returns),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // extractSelfHostTokenKinds returns the token stream printed by frontend.kizu.
 func extractSelfHostTokenKinds(t *testing.T, output string) []string {
 	t.Helper()
@@ -389,6 +481,43 @@ func assertTokenSnapshots(t *testing.T, output string, fixture string) {
 	if !sameSnapshots(gotSnapshots, wantSnapshots) {
 		t.Fatalf("self-host token snapshots got %#v, want %#v", gotSnapshots, wantSnapshots)
 	}
+}
+
+// assertAstSnapshot compares the self-host parser snapshot against Go parser output.
+func assertAstSnapshot(t *testing.T, output string, fixture string) {
+	t.Helper()
+	got := extractSelfHostAstSnapshot(t, output)
+	want := formatAstSnapshot(goAstSnapshot(t, fixture))
+	if got != want {
+		t.Fatalf("self-host AST snapshot got %q, want %q", got, want)
+	}
+}
+
+// extractSelfHostAstSnapshot returns the AST snapshot printed by frontend.kizu.
+func extractSelfHostAstSnapshot(t *testing.T, output string) string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	for idx, line := range lines {
+		if line == "ast snapshot" {
+			return parseSelfHostAstSnapshot(t, lines[idx+1:])
+		}
+	}
+	t.Fatal("self-host AST snapshot markers were not found")
+	return ""
+}
+
+// parseSelfHostAstSnapshot parses lines until the AST snapshot end marker.
+func parseSelfHostAstSnapshot(t *testing.T, lines []string) string {
+	t.Helper()
+	out := []string{}
+	for _, line := range lines {
+		if line == "ast snapshot end" {
+			return strings.Join(out, "\n") + "\n"
+		}
+		out = append(out, line)
+	}
+	t.Fatal("self-host AST snapshot end marker was not found")
+	return ""
 }
 
 // extractSelfHostTokenSnapshots returns token snapshots printed by frontend.kizu.

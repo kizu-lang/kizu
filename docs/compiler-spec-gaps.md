@@ -129,6 +129,8 @@ tests, and self-check/build.
   `std::path`, `std::io`, `std::process`, and `std::testing`.
 - Build cache stdlib invalidation hashes the checked-in `std/` manifest and
   Kizu source skeleton.
+- Self-host parser oracle compares normalized AST snapshots against the Go
+  parser for representative parseable sources and module fixtures.
 - Module-aware build cache keys include manifest, module graph, source, public
   interface, target/backend/optimization, and stdlib hashes.
 - `why-rebuild` explains package input changes for manifest, module graph,
