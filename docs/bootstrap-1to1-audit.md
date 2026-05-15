@@ -32,7 +32,7 @@ each row below.
 | type | self-host return/call/std-mem type snapshots compare selected pass/fail cases vs Go checker | weak | broaden to full type environment and all checker diagnostic classes |
 | ownership | self-host owned-call move snapshot covers borrow, moved-value, and double-move fixtures vs Go checker | weak | full Kizu move/borrow checker with memory-safety diagnostic equality |
 | IR | self-host IR summary plus normalized function/block/opcode/terminator dump for selected pass/fail fixtures | weak | broaden to full instruction operand/value dump equality across conformance fixtures |
-| backend | Go LLVM/WASM smoke; self-host target/status/function/string/entry fingerprints | weak | broaden to output fingerprints for all backend-supported conformance fixtures |
+| backend | self-host target/status/function/string/entry plus selected LLVM/WASM output lines vs Go emitters | weak | broaden to full output fingerprints for all backend-supported conformance fixtures |
 | cache | Go module-aware cache tests include std source hash; self-host snapshot declares Go-owned cache switch contract | medium | keep Go-owned until Kizu owns filesystem, hashing, module graph, and artifact layout |
 
 ## Required Issues
