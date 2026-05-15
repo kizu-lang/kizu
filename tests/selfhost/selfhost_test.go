@@ -122,6 +122,16 @@ type irSnapshot struct {
 	BackendArtifacts int
 }
 
+type diagnosticSnapshot struct {
+	Message       string
+	PrimaryStart  int
+	PrimaryEnd    int
+	PrimaryLine   int
+	PrimaryColumn int
+	RelatedStart  int
+	RelatedEnd    int
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -292,6 +302,16 @@ func TestSelfHostModuleImportOracle(t *testing.T) {
 	}
 }
 
+// TestSelfHostDiagnosticObjectOracle compares structured lexer diagnostics.
+func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
+	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "illegal_token.kizu")
+	got := extractDiagnosticSnapshots(t, runSelfHostDiagnostics(t, fixture))
+	want := goLexerDiagnosticSnapshots(t, fixture)
+	if !sameDiagnosticSnapshots(got, want) {
+		t.Fatalf("self-host diagnostics got %#v, want %#v", got, want)
+	}
+}
+
 // TestSelfHostSemanticOracleCorpus checks selected semantic pass/fail cases.
 func TestSelfHostSemanticOracleCorpus(t *testing.T) {
 	positives := []string{
@@ -337,6 +357,18 @@ func TestSelfHostSourcePolicy(t *testing.T) {
 // runSelfHostFrontend executes the current Kizu frontend against one fixture.
 func runSelfHostFrontend(t *testing.T, fixture string) string {
 	t.Helper()
+	return runSelfHost(t, []string{fixture})
+}
+
+// runSelfHostDiagnostics executes the diagnostic-only frontend path.
+func runSelfHostDiagnostics(t *testing.T, fixture string) string {
+	t.Helper()
+	return runSelfHost(t, []string{fixture, "--diagnostics"})
+}
+
+// runSelfHost executes the current Kizu frontend with process arguments.
+func runSelfHost(t *testing.T, args []string) string {
+	t.Helper()
 	program := parseSelfHostSource(t, filepath.Join(repoRoot(t), "selfhost", "frontend.kizu"))
 	if err := types.New().Check(program); err != nil {
 		t.Fatalf("type check failed: %v", err)
@@ -345,7 +377,7 @@ func runSelfHostFrontend(t *testing.T, fixture string) string {
 		t.Fatalf("ownership check failed: %v", err)
 	}
 	var out bytes.Buffer
-	if err := interp.NewWithProcessArgs(&out, []string{fixture}).Run(program); err != nil {
+	if err := interp.NewWithProcessArgs(&out, args).Run(program); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
 	return out.String()
@@ -436,6 +468,30 @@ func goSelfHostTokenSnapshots(t *testing.T, path string) []tokenSnapshot {
 			Line:    tok.Line,
 			Column:  tok.Column,
 		})
+		if tok.Type == token.EOF {
+			return snapshots
+		}
+	}
+}
+
+// goLexerDiagnosticSnapshots returns structured diagnostics from Go lexer facts.
+func goLexerDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	snapshots := []diagnosticSnapshot{}
+	for {
+		tok := l.NextToken()
+		if tok.Type == token.Illegal {
+			snapshots = append(snapshots, diagnosticSnapshot{
+				Message:       "illegal token",
+				PrimaryStart:  tok.Start,
+				PrimaryEnd:    tok.End,
+				PrimaryLine:   tok.Line,
+				PrimaryColumn: tok.Column,
+				RelatedStart:  tok.Start,
+				RelatedEnd:    tok.End,
+			})
+		}
 		if tok.Type == token.EOF {
 			return snapshots
 		}
@@ -723,6 +779,32 @@ func assertIrSnapshot(t *testing.T, output string, fixture string) {
 	}
 }
 
+// extractDiagnosticSnapshots returns diagnostic records printed by frontend.kizu.
+func extractDiagnosticSnapshots(t *testing.T, output string) []diagnosticSnapshot {
+	t.Helper()
+	snapshot := extractMarkedSnapshot(t, output, "diagnostic snapshot", "diagnostic snapshot end")
+	lines := strings.Split(strings.TrimSuffix(snapshot, "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	if len(lines)%7 != 0 {
+		t.Fatalf("diagnostic snapshot has incomplete records: %q", snapshot)
+	}
+	diagnostics := []diagnosticSnapshot{}
+	for idx := 0; idx < len(lines); idx += 7 {
+		diagnostics = append(diagnostics, diagnosticSnapshot{
+			Message:       lines[idx],
+			PrimaryStart:  atoi(t, lines[idx+1]),
+			PrimaryEnd:    atoi(t, lines[idx+2]),
+			PrimaryLine:   atoi(t, lines[idx+3]),
+			PrimaryColumn: atoi(t, lines[idx+4]),
+			RelatedStart:  atoi(t, lines[idx+5]),
+			RelatedEnd:    atoi(t, lines[idx+6]),
+		})
+	}
+	return diagnostics
+}
+
 // extractSelfHostAstSnapshot returns the AST snapshot printed by frontend.kizu.
 func extractSelfHostAstSnapshot(t *testing.T, output string) string {
 	t.Helper()
@@ -827,6 +909,19 @@ func same(left []string, right []string) bool {
 
 // sameSnapshots reports whether two token snapshot slices are identical.
 func sameSnapshots(left []tokenSnapshot, right []tokenSnapshot) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for idx := range left {
+		if left[idx] != right[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+// sameDiagnosticSnapshots reports whether two diagnostic snapshots are identical.
+func sameDiagnosticSnapshots(left []diagnosticSnapshot, right []diagnosticSnapshot) bool {
 	if len(left) != len(right) {
 		return false
 	}
