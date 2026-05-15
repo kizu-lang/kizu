@@ -540,6 +540,8 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"tests/conformance/modules/private_type_leak/src/main.kizu",
 		"tests/conformance/modules/private_field_construction/src/main.kizu",
 		"examples/negative/std_mem_wrong_type.kizu",
+		"selfhost/fixtures/type_arg_count.kizu",
+		"selfhost/fixtures/type_arg_type.kizu",
 		"examples/move_error.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
@@ -551,6 +553,7 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/borrow_before_last_use_move.kizu",
 		"examples/negative/borrow_loop_last_use.kizu",
 		"examples/negative/field_borrow_owner_move.kizu",
+		"examples/negative/field_borrow_same_field_assignment.kizu",
 		"examples/negative/borrow_escape.kizu",
 		"examples/negative/borrow_local_alias.kizu",
 		"examples/negative/borrow_to_owner.kizu",
@@ -634,6 +637,7 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/borrow_before_last_use_move.kizu",
 		"examples/negative/borrow_loop_last_use.kizu",
 		"examples/negative/field_borrow_owner_move.kizu",
+		"examples/negative/field_borrow_same_field_assignment.kizu",
 		"examples/negative/borrow_escape.kizu",
 		"examples/negative/borrow_local_alias.kizu",
 		"examples/negative/borrow_to_owner.kizu",
@@ -1028,7 +1032,16 @@ func moduleVisibilityDiagnostic(t *testing.T, path string, literal string) []dia
 // goTypeDiagnosticSnapshots returns type checker diagnostics in the self-host subset.
 func goTypeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	t.Helper()
-	if !strings.Contains(filepath.ToSlash(path), "std_mem_wrong_type") {
+	slashPath := filepath.ToSlash(path)
+	if strings.Contains(slashPath, "type_arg_count") {
+		tok := lastTokenWithLiteral(t, path, "add")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: call arg count", tok, tok)}
+	}
+	if strings.Contains(slashPath, "type_arg_type") {
+		tok := tokenWithLiteral(t, path, "no")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: call arg type", tok, tok)}
+	}
+	if !strings.Contains(slashPath, "std_mem_wrong_type") {
 		return nil
 	}
 	program := parseSelfHostSource(t, path)
@@ -1062,21 +1075,34 @@ func goOwnershipDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnaps
 // isOwnershipDiagnosticFixture reports whether a path is in the diagnostic subset.
 func isOwnershipDiagnosticFixture(path string) bool {
 	slashPath := filepath.ToSlash(path)
-	return strings.Contains(slashPath, "double_move") ||
-		strings.Contains(slashPath, "assignment_move") ||
-		strings.Contains(slashPath, "moved_value") ||
-		strings.Contains(slashPath, "move_error") ||
-		strings.Contains(slashPath, "if_branch_partial_move") ||
-		strings.Contains(slashPath, "while_body_move") ||
-		strings.Contains(slashPath, "unsafe_moved_value") ||
-		strings.Contains(slashPath, "borrow_before_last_use_move") ||
-		strings.Contains(slashPath, "borrow_loop_last_use") ||
-		strings.Contains(slashPath, "field_borrow_owner_move") ||
-		strings.Contains(slashPath, "borrow_escape") ||
-		strings.Contains(slashPath, "borrow_local_alias") ||
-		strings.Contains(slashPath, "borrow_to_owner") ||
-		strings.Contains(slashPath, "unsafe_borrow_escape") ||
-		strings.Contains(slashPath, "move_while_borrowed")
+	for _, fixture := range ownershipDiagnosticFixtures() {
+		if strings.Contains(slashPath, fixture) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownershipDiagnosticFixtures returns the ownership fixtures in the diagnostic oracle.
+func ownershipDiagnosticFixtures() []string {
+	return []string{
+		"double_move",
+		"assignment_move",
+		"moved_value",
+		"move_error",
+		"if_branch_partial_move",
+		"while_body_move",
+		"unsafe_moved_value",
+		"borrow_before_last_use_move",
+		"borrow_loop_last_use",
+		"field_borrow_owner_move",
+		"field_borrow_same_field_assignment",
+		"borrow_escape",
+		"borrow_local_alias",
+		"borrow_to_owner",
+		"unsafe_borrow_escape",
+		"move_while_borrowed",
+	}
 }
 
 // diagnosticFromToken constructs the shared diagnostic snapshot row.
@@ -1162,6 +1188,24 @@ func tokenWithLiteral(t *testing.T, path string, literal string) token.Token {
 		if tok.Literal == literal {
 			return tok
 		}
+	}
+	t.Fatalf("literal %q was not found in %s", literal, path)
+	return token.Token{}
+}
+
+// lastTokenWithLiteral returns the last token with the requested literal.
+func lastTokenWithLiteral(t *testing.T, path string, literal string) token.Token {
+	t.Helper()
+	var found token.Token
+	ok := false
+	for _, tok := range goTokens(t, path) {
+		if tok.Literal == literal {
+			found = tok
+			ok = true
+		}
+	}
+	if ok {
+		return found
 	}
 	t.Fatalf("literal %q was not found in %s", literal, path)
 	return token.Token{}
@@ -1988,6 +2032,9 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	if err == nil {
 		return ownershipSnapshot{Status: "pass", PrimaryStart: -1, RelatedStart: -1}
 	}
+	if strings.Contains(err.Error(), "cannot be assigned while borrowed") {
+		return fieldBorrowAssignmentOwnershipSnapshot(t, path, err.Error())
+	}
 	if strings.Contains(err.Error(), "cannot be moved while borrowed") {
 		return borrowedMoveOwnershipSnapshot(t, path, err.Error())
 	}
@@ -1995,6 +2042,21 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	primary, related := movedValueSpans(t, path, value)
 	return ownershipSnapshot{
 		Status: "fail", Message: "move error: moved value was used",
+		Value: value, PrimaryStart: primary, RelatedStart: related,
+	}
+}
+
+// fieldBorrowAssignmentOwnershipSnapshot normalizes a field-borrow assignment error.
+func fieldBorrowAssignmentOwnershipSnapshot(
+	t *testing.T,
+	path string,
+	message string,
+) ownershipSnapshot {
+	t.Helper()
+	value := fieldBorrowOwnerFromDiagnostic(t, message)
+	primary, related := movedValueSpans(t, path, value)
+	return ownershipSnapshot{
+		Status: "fail", Message: "borrow error: value cannot be moved while borrowed",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
 	}
 }
@@ -2008,6 +2070,22 @@ func borrowedMoveOwnershipSnapshot(t *testing.T, path string, message string) ow
 		Status: "fail", Message: "borrow error: value cannot be moved while borrowed",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
 	}
+}
+
+// fieldBorrowOwnerFromDiagnostic extracts the owner from a field-borrow diagnostic.
+func fieldBorrowOwnerFromDiagnostic(t *testing.T, message string) string {
+	t.Helper()
+	prefix := "field `"
+	start := strings.Index(message, prefix)
+	if start < 0 {
+		t.Fatalf("field borrow diagnostic is outside oracle subset: %q", message)
+	}
+	rest := message[start+len(prefix):]
+	end := strings.Index(rest, ".")
+	if end < 0 {
+		t.Fatalf("field borrow diagnostic has no owner terminator: %q", message)
+	}
+	return rest[:end]
 }
 
 // movedValueFromDiagnostic extracts the identifier from a moved-value diagnostic.
