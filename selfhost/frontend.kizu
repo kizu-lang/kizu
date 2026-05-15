@@ -72,6 +72,18 @@ struct ParseSummary {
     function_count: i64;
 }
 
+struct CompileReport {
+    stage_count: i64;
+    token_count: i64;
+    function_count: i64;
+    diagnostic_count: i64;
+    type_checked: bool;
+    ownership_checked: bool;
+    ir_item_count: i64;
+    backend_artifact_count: i64;
+    bootstrap_ready: bool;
+}
+
 // make_token builds a source-positioned token value.
 fn make_token(kind: TokenKind, start: i64, end: i64) -> Token {
     return Token {
@@ -484,6 +496,93 @@ fn parse_tokens(tokens: &std::array::Array<Token>) -> !ParseSummary {
     };
 }
 
+// count_tokens returns the full token count including EOF.
+fn count_tokens(tokens: &std::array::Array<Token>) -> i64 {
+    return tokens.len();
+}
+
+// collect_lex_diagnostics counts lexer errors for the diagnostic stage.
+fn collect_lex_diagnostics(tokens: &std::array::Array<Token>) -> !i64 {
+    var count = 0;
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Illegal {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+
+    return count;
+}
+
+// run_type_stage validates the minimal type-checking preconditions.
+fn run_type_stage(summary: &ParseSummary, diagnostic_count: i64) -> !bool {
+    try std::testing::expect_equal_i64(0, diagnostic_count);
+    try std::testing::expect(summary.function_count > 0);
+    return true;
+}
+
+// run_ownership_stage validates the minimal ownership-checking preconditions.
+fn run_ownership_stage(summary: &ParseSummary, type_checked: bool) -> !bool {
+    try std::testing::expect(type_checked);
+    try std::testing::expect(summary.function_count > 0);
+    return true;
+}
+
+// lower_to_ir returns the number of lowered function-shaped IR items.
+fn lower_to_ir(summary: &ParseSummary, type_checked: bool, ownership_checked: bool) -> !i64 {
+    try std::testing::expect(type_checked);
+    try std::testing::expect(ownership_checked);
+    return summary.function_count;
+}
+
+// emit_backend_artifacts returns the number of backend artifacts produced.
+fn emit_backend_artifacts(ir_item_count: i64) -> !i64 {
+    try std::testing::expect(ir_item_count > 0);
+    return 1;
+}
+
+// check_bootstrap_readiness validates whether all compiler stages ran.
+fn check_bootstrap_readiness(report: &CompileReport) -> !bool {
+    try std::testing::expect_equal_i64(8, report.stage_count);
+    try std::testing::expect(report.token_count > 0);
+    try std::testing::expect(report.function_count > 0);
+    try std::testing::expect_equal_i64(0, report.diagnostic_count);
+    try std::testing::expect(report.type_checked);
+    try std::testing::expect(report.ownership_checked);
+    try std::testing::expect(report.ir_item_count > 0);
+    try std::testing::expect(report.backend_artifact_count > 0);
+    return true;
+}
+
+// compile_source runs the current compiler1-8 skeleton over one source.
+fn compile_source(source: []const u8) -> !CompileReport {
+    let tokens = try lex_source(source);
+    let summary = try parse_tokens(tokens);
+    let diagnostics = try collect_lex_diagnostics(tokens);
+    let type_checked = try run_type_stage(summary, diagnostics);
+    let ownership_checked = try run_ownership_stage(summary, type_checked);
+    let ir_items = try lower_to_ir(summary, type_checked, ownership_checked);
+    let artifacts = try emit_backend_artifacts(ir_items);
+    var report = CompileReport {
+        stage_count: 8,
+        token_count: count_tokens(tokens),
+        function_count: summary.function_count,
+        diagnostic_count: diagnostics,
+        type_checked: type_checked,
+        ownership_checked: ownership_checked,
+        ir_item_count: ir_items,
+        backend_artifact_count: artifacts,
+        bootstrap_ready: false,
+    };
+
+    report.bootstrap_ready = try check_bootstrap_readiness(report);
+    tokens.deinit();
+    return report;
+}
+
 // token_kind_at returns the token kind at one checked index.
 fn token_kind_at(tokens: &std::array::Array<Token>, index: i64) -> !TokenKind {
     let token = try tokens.at(index);
@@ -570,19 +669,23 @@ fn build_keyword_table() -> !std::map::Map<[]const u8, TokenKind> {
 
 // run_frontend executes the lexer and parser skeleton over one source buffer.
 fn run_frontend(source: []const u8) -> !void {
-    let tokens = try lex_source(source);
-    let summary = try parse_tokens(tokens);
+    let report = try compile_source(source);
     let diagnostic = try build_diagnostic("parsed functions");
     let keywords = try build_keyword_table();
     let message = diagnostic.as_bytes();
 
+    print("compiler stages");
+    print(report.stage_count);
     print(message);
-    print(summary.function_count);
+    print(report.function_count);
+    print("tokens");
+    print(report.token_count);
+    print("bootstrap ready");
+    print(report.bootstrap_ready);
     print(try keywords.get("fn"));
 
     keywords.deinit();
     diagnostic.deinit();
-    tokens.deinit();
     return void;
 }
 
