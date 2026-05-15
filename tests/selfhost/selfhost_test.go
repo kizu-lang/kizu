@@ -49,7 +49,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	if err := interp.New(&out).Run(program); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
-	if got, want := out.String(), "parsed functions\n1\n"; got != want {
+	if got, want := out.String(), "parsed functions\n1\nTokenKind::Fn\n"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }

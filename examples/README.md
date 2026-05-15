@@ -68,6 +68,8 @@ go test ./...
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes and exposes local byte views |
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
+| owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]const u8, i64>` |
+| symbol table map shape | `std_map_symbol_table.kizu` | maps byte keys to copy enum values |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -192,6 +194,12 @@ go test ./...
 | shared string borrows cannot deinit | `negative/std_string_deinit_through_shared_borrow.kizu` | `requires owned String receiver` |
 | mutable string borrows cannot deinit | `negative/std_string_deinit_through_mut_borrow.kizu` | `requires owned String receiver` |
 | shared string borrows cannot append | `negative/std_string_append_through_shared_borrow.kizu` | `requires mutable String receiver` |
+| map missing key is checked | `negative/std_map_get_missing.kizu` | `key not found` |
+| map construction requires explicit allocator | `negative/std_map_no_allocator.kizu` | `expects allocator` |
+| map values are copy-only in v0.2 | `negative/std_map_non_copy_value.kizu` | `value type must be copy` |
+| map keys are `[]const u8` in v0.2 | `negative/std_map_wrong_key_type.kizu` | `key type must be []const u8` |
+| map insert value type must match `V` | `negative/std_map_wrong_insert_type.kizu` | `Map.insert` |
+| maps cannot be used after `deinit` | `negative/std_map_use_after_deinit.kizu` | `moved value` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |

@@ -92,6 +92,27 @@ string.deinit() -> void
 append / clear は `&mut String` から呼べますが、deinit は owned local receiver 限定です。
 UTF-8 validation、C ABI 変換、raw pointer exposure は v0.2 では実装しません。
 
+## `std::map::Map<K, V>`
+
+v0.2 の `Map` prototype:
+
+```text
+std::map::Map<[]const u8, V>(allocator: Allocator) -> std::map::Map<[]const u8, V>
+map.insert(key: []const u8, value: V) -> !void
+map.get(key: []const u8) -> !V
+map.contains(key: []const u8) -> bool
+map.len() -> i64
+map.deinit() -> void
+```
+
+`Map` は self-host compiler の symbol table / scope / keyword table 用です。
+v0.2 では key は `[]const u8` 限定、value は copy type 限定です。
+`insert` は key bytes と copy value を owned map に保存し、source key を move しません。
+missing key は `!V` error として扱います。
+iteration、deletion、non-copy value は後続です。
+`Map` は owned collection なので explicit allocator と explicit `deinit` が必要であり、
+task/thread/channel boundary は v0.2 では越えません。
+
 ## Self-Host Skeleton Rule
 
 各 v0.2 stdlib API について、self-host compiler がどう使うかを記録します。

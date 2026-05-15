@@ -547,6 +547,9 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if _, err := c.parseType(args[1]); err != nil {
 		return "", err
 	}
+	if !c.isCopyType(Type(args[1])) {
+		return "", fmt.Errorf("type error: std::map::Map value type must be copy in v0.2")
+	}
 	return Type(name), nil
 }
 
@@ -1415,6 +1418,8 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return "", true, fmt.Errorf("type error: `std::io::evented` is not implemented in v0.1")
 	case "std.array.Array":
 		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
+	case "std.map.Map":
+		return "", true, fmt.Errorf("type error: use `std::map::Map<K, V>(allocator)`")
 	case "std.string.String":
 		return c.checkStringConstructor(args, env, unsafe)
 	case "std.channel.Channel":
@@ -1723,6 +1728,8 @@ func (c *Checker) rejectArrayStorageGeneric(typ Type, seen map[Type]bool) error 
 		return fmt.Errorf("type error: Array element cannot be handle in v0.2")
 	case "std::array::Array":
 		return fmt.Errorf("type error: Array element cannot be nested array in v0.2")
+	case "std::map::Map":
+		return fmt.Errorf("type error: Array element cannot be std::map::Map in v0.2")
 	case "Task", "Channel", "Mutex", "Atomic", "Dyn":
 		return fmt.Errorf("type error: Array element cannot be %s in v0.2", base)
 	case "option":
@@ -1800,20 +1807,39 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if !ok {
 		return "", fmt.Errorf("type error: unsupported type application `%s`", expr.String())
 	}
-	arg, err := c.parseType(expr.TypeArg)
-	if err != nil {
-		return "", err
-	}
 	switch name {
 	case "std.array.Array":
+		arg, err := c.parseType(expr.TypeArg)
+		if err != nil {
+			return "", err
+		}
 		typ, _, err := c.checkArrayConstructor(arg, args, env, unsafe)
 		return typ, err
+	case "std.map.Map":
+		mapArgs, err := c.checkedMapArgs(expr.TypeArg)
+		if err != nil {
+			return "", err
+		}
+		typ, _, err := c.checkMapConstructor(Type(mapArgs[1]), args, env, unsafe)
+		return typ, err
 	case "std.channel.Channel":
+		arg, err := c.parseType(expr.TypeArg)
+		if err != nil {
+			return "", err
+		}
 		return checkNoArgConstructor(name, args, Type(fmt.Sprintf("Channel<%s>", arg)))
 	case "std.atomic.Atomic":
+		arg, err := c.parseType(expr.TypeArg)
+		if err != nil {
+			return "", err
+		}
 		typ, _, err := c.checkAtomic(arg, args, env, unsafe)
 		return typ, err
 	case "std.sync.Mutex":
+		arg, err := c.parseType(expr.TypeArg)
+		if err != nil {
+			return "", err
+		}
 		typ, _, err := c.checkMutex(arg, args, env, unsafe)
 		return typ, err
 	default:
@@ -2098,26 +2124,67 @@ func (c *Checker) checkMethodCallExpr(
 	if err != nil {
 		return "", err
 	}
-	if contractName, ok := dynContract(receiver); ok {
-		return c.checkDynMethodCall(contractName, field.Name, args, env, unsafe)
-	}
-	if receiver == "TaskGroup" {
-		return c.checkTaskGroupMethod(field.Name, args, env, unsafe)
-	}
-	if elem, ok := taskElement(receiver); ok {
-		return checkTaskMethod(field.Name, elem, args)
-	}
-	typ, ok, err := c.checkConcurrencyMethod(receiver, field.Name, args, env, unsafe)
+	typ, ok, err := c.checkKnownReceiverMethod(field, receiver, args, env, unsafe)
 	if ok || err != nil {
 		return typ, err
 	}
+	return c.checkArenaOrImplMethod(field, receiver, args, env, unsafe)
+}
+
+// checkKnownReceiverMethod validates non-arena builtin receiver families.
+func (c *Checker) checkKnownReceiverMethod(
+	field *ast.FieldExpr,
+	receiver Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if contractName, ok := dynContract(receiver); ok {
+		typ, err := c.checkDynMethodCall(contractName, field.Name, args, env, unsafe)
+		return typ, true, err
+	}
+	if receiver == "TaskGroup" {
+		typ, err := c.checkTaskGroupMethod(field.Name, args, env, unsafe)
+		return typ, true, err
+	}
+	if elem, ok := taskElement(receiver); ok {
+		typ, err := checkTaskMethod(field.Name, elem, args)
+		return typ, true, err
+	}
+	if typ, ok, err := c.checkConcurrencyMethod(
+		receiver,
+		field.Name,
+		args,
+		env,
+		unsafe,
+	); ok || err != nil {
+		return typ, ok, err
+	}
 	base, arg, ok := splitGenericType(string(receiver))
 	if ok && base == "std::array::Array" {
-		return c.checkArrayReceiverMethod(field, Type(arg), args, env, unsafe)
+		typ, err := c.checkArrayReceiverMethod(field, Type(arg), args, env, unsafe)
+		return typ, true, err
+	}
+	if ok && base == "std::map::Map" {
+		typ, err := c.checkMapReceiverMethod(field, arg, args, env, unsafe)
+		return typ, true, err
 	}
 	if receiver == "std::string::String" {
-		return c.checkStringReceiverMethod(field, args, env, unsafe)
+		typ, err := c.checkStringReceiverMethod(field, args, env, unsafe)
+		return typ, true, err
 	}
+	return "", false, nil
+}
+
+// checkArenaOrImplMethod validates arena methods or user-defined impl methods.
+func (c *Checker) checkArenaOrImplMethod(
+	field *ast.FieldExpr,
+	receiver Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	base, arg, ok := splitGenericType(string(receiver))
 	if !ok || base != "arena" {
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
@@ -2255,6 +2322,21 @@ func (c *Checker) checkArrayReceiverMethod(
 	return c.checkArrayMethod(elem, field.Name, args, env, unsafe)
 }
 
+// checkMapReceiverMethod validates receiver-sensitive Map<K, V> methods.
+func (c *Checker) checkMapReceiverMethod(
+	field *ast.FieldExpr,
+	arg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	mapArgs, err := c.checkedMapArgs(arg)
+	if err != nil {
+		return "", err
+	}
+	return c.checkMapMethod(Type(mapArgs[1]), field.Name, args, env, unsafe)
+}
+
 // checkConcurrencyMethod validates std concurrency prototype instance methods.
 func (c *Checker) checkConcurrencyMethod(
 	receiver Type,
@@ -2384,6 +2466,119 @@ func (c *Checker) checkArraySet(
 		return "", fmt.Errorf("type error: `Array.set` expects %s value, got %s", elem, got)
 	}
 	return "!void", nil
+}
+
+// checkMapConstructor validates std::map::Map<[]const u8, V>(allocator).
+func (c *Checker) checkMapConstructor(
+	valueType Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `std::map::Map` expects allocator")
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "Allocator" {
+		return "", true, fmt.Errorf("type error: `std::map::Map` expects Allocator, got %s", got)
+	}
+	return Type(fmt.Sprintf("std::map::Map<[]const u8, %s>", valueType)), true, nil
+}
+
+// checkMapMethod validates owned Map<[]const u8, V> prototype methods.
+func (c *Checker) checkMapMethod(
+	valueType Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch name {
+	case "insert":
+		return c.checkMapInsert(valueType, args, env, unsafe)
+	case "get":
+		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return Type("!" + string(valueType)), nil
+	case "contains":
+		if err := c.checkMapKeyArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return typeBool, nil
+	case "len":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Map.len` expects 0 args, got %d", len(args))
+		}
+		return typeI64, nil
+	case "deinit":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Map.deinit` expects 0 args, got %d", len(args))
+		}
+		return typeVoid, nil
+	default:
+		return "", fmt.Errorf("type error: Map has no method `%s`", name)
+	}
+}
+
+// checkMapInsert validates copy-only Map.insert arguments.
+func (c *Checker) checkMapInsert(
+	valueType Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if len(args) != 2 {
+		return "", fmt.Errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
+	}
+	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
+		return "", err
+	} else if got != typeByteString {
+		return "", fmt.Errorf("type error: `Map.insert` expects []const u8 key, got %s", got)
+	}
+	got, err := c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != valueType {
+		return "", fmt.Errorf("type error: `Map.insert` expects %s value, got %s", valueType, got)
+	}
+	return "!void", nil
+}
+
+// checkMapKeyArg validates one []const u8 lookup key.
+func (c *Checker) checkMapKeyArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != 1 {
+		return fmt.Errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeByteString {
+		return fmt.Errorf("type error: `Map.%s` expects []const u8 key, got %s", name, got)
+	}
+	return nil
+}
+
+// checkedMapArgs validates and returns the two Map type arguments.
+func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
+	args, ok := splitGenericArgs(arg)
+	if !ok || len(args) != 2 {
+		return nil, fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+	}
+	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
+		return nil, err
+	}
+	return args, nil
 }
 
 // checkTaskGroupMethod validates structured task spawning.
@@ -3231,6 +3426,8 @@ func (c *Checker) rejectThreadBoundaryGeneric(typ Type, seen map[Type]bool) erro
 		return fmt.Errorf("type error: arena cannot cross concurrency boundary")
 	case "std::array::Array":
 		return fmt.Errorf("type error: Array cannot cross concurrency boundary in v0.2")
+	case "std::map::Map":
+		return fmt.Errorf("type error: Map cannot cross concurrency boundary in v0.2")
 	case "handle":
 		return fmt.Errorf("type error: handle cannot cross concurrency boundary")
 	case "Dyn":
