@@ -66,8 +66,11 @@ enum TokenKind {
 
 struct Token {
     kind: TokenKind;
+    literal: []const u8;
     start: i64;
     end: i64;
+    line: i64;
+    column: i64;
 }
 
 struct ParseSummary {
@@ -86,12 +89,56 @@ struct CompileReport {
     bootstrap_ready: bool;
 }
 
+// token_literal returns the Go-compatible literal spelling for one token.
+fn token_literal(source: []const u8, kind: TokenKind, start: i64, end: i64) -> ![]const u8 {
+    if kind == TokenKind::Eof {
+        return "";
+    }
+    if kind == TokenKind::String {
+        return try std::mem::slice(source, start + 1, end - 1);
+    }
+    return try std::mem::slice(source, start, end);
+}
+
+// token_line returns the one-based source line for a byte offset.
+fn token_line(source: []const u8, start: i64) -> !i64 {
+    var line = 1;
+    var index = 0;
+    while index < start {
+        let byte = try std::mem::byte_at(source, index);
+        if byte == cast<u8>(10) {
+            line = line + 1;
+        }
+        index = index + 1;
+    }
+    return line;
+}
+
+// token_column returns the one-based source column for a byte offset.
+fn token_column(source: []const u8, start: i64) -> !i64 {
+    var column = 1;
+    var index = 0;
+    while index < start {
+        let byte = try std::mem::byte_at(source, index);
+        if byte == cast<u8>(10) {
+            column = 1;
+        } else {
+            column = column + 1;
+        }
+        index = index + 1;
+    }
+    return column;
+}
+
 // make_token builds a source-positioned token value.
-fn make_token(kind: TokenKind, start: i64, end: i64) -> Token {
+fn make_token(source: []const u8, kind: TokenKind, start: i64, end: i64) -> !Token {
     return Token {
         kind: kind,
+        literal: try token_literal(source, kind, start, end),
         start: start,
         end: end,
+        line: try token_line(source, start),
+        column: try token_column(source, start),
     };
 }
 
@@ -384,7 +431,7 @@ fn lex_identifier(source: []const u8, tokens: &mut std::array::Array<Token>, sta
         }
     }
     let text = try std::mem::slice(source, start, end);
-    try tokens.append(make_token(keyword_kind(text), start, end));
+    try tokens.append(try make_token(source, keyword_kind(text), start, end));
     return end;
 }
 
@@ -400,7 +447,7 @@ fn lex_number(source: []const u8, tokens: &mut std::array::Array<Token>, start: 
             break;
         }
     }
-    try tokens.append(make_token(TokenKind::Number, start, end));
+    try tokens.append(try make_token(source, TokenKind::Number, start, end));
     return end;
 }
 
@@ -412,11 +459,11 @@ fn lex_string(source: []const u8, tokens: &mut std::array::Array<Token>, start: 
         let byte = try std::mem::byte_at(source, end);
         end = end + 1;
         if byte == cast<u8>(34) {
-            try tokens.append(make_token(TokenKind::String, start, end));
+            try tokens.append(try make_token(source, TokenKind::String, start, end));
             return end;
         }
     }
-    try tokens.append(make_token(TokenKind::Illegal, start, end));
+    try tokens.append(try make_token(source, TokenKind::Illegal, start, end));
     return end;
 }
 
@@ -446,11 +493,12 @@ fn lex_symbol(source: []const u8, tokens: &mut std::array::Array<Token>, start: 
             }
         }
         if has_compound_kind(first, second) {
-            try tokens.append(make_token(two_char_kind(first, second), start, start + 2));
+            let kind = two_char_kind(first, second);
+            try tokens.append(try make_token(source, kind, start, start + 2));
             return start + 2;
         }
     }
-    try tokens.append(make_token(single_char_kind(first), start, start + 1));
+    try tokens.append(try make_token(source, single_char_kind(first), start, start + 1));
     return start + 1;
 }
 
@@ -482,7 +530,7 @@ fn lex_source(source: []const u8) -> !std::array::Array<Token> {
         }
     }
 
-    try tokens.append(make_token(TokenKind::Eof, length, length));
+    try tokens.append(try make_token(source, TokenKind::Eof, length, length));
     return tokens;
 }
 
@@ -515,6 +563,25 @@ fn print_token_kinds(tokens: &std::array::Array<Token>) -> !void {
         index = index + 1;
     }
     print("token stream end");
+    return void;
+}
+
+// print_token_snapshots writes token data used by the self-host lexer oracle.
+fn print_token_snapshots(tokens: &std::array::Array<Token>) -> !void {
+    var index = 0;
+
+    print("token snapshots");
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        print(token.kind);
+        print(token.literal);
+        print(token.start);
+        print(token.end);
+        print(token.line);
+        print(token.column);
+        index = index + 1;
+    }
+    print("token snapshots end");
     return void;
 }
 
@@ -704,6 +771,7 @@ fn run_frontend(source: []const u8) -> !void {
     print("bootstrap ready");
     print(report.bootstrap_ready);
     try print_token_kinds(tokens);
+    try print_token_snapshots(tokens);
     print(try keywords.get("fn"));
 
     keywords.deinit();

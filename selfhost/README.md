@@ -69,6 +69,13 @@ Stages 4-8 are still skeletons. They are kept executable so v0.2 stdlib and
 language-core gaps are found before the self-host implementation replaces Go
 components.
 
+## Lexer Oracle
+
+The self-host lexer oracle compares token kind, literal spelling, byte start,
+byte end, line, and column against the Go lexer. Byte spans are zero-based and
+end-exclusive. Line and column are one-based. String token literals exclude the
+surrounding quotes so they match the Go `token.Token.Literal` field.
+
 Current stdlib feedback is tracked in [`STDLIB.md`](STDLIB.md).
 
 ## Source Policy

@@ -57,7 +57,7 @@ func New(input string) *Lexer {
 func (l *Lexer) NextToken() token.Token {
 	l.skipWhitespace()
 
-	tok := token.Token{Line: l.line, Column: l.column}
+	tok := token.Token{Start: l.position, Line: l.line, Column: l.column}
 
 	switch l.ch {
 	case '/':
@@ -75,10 +75,12 @@ func (l *Lexer) NextToken() token.Token {
 	case '"':
 		tok.Type = token.String
 		tok.Literal = l.readString()
+		tok.End = l.position
 		return tok
 	case 0:
 		tok.Type = token.EOF
 		tok.Literal = ""
+		tok.End = l.position
 	default:
 		if spec, ok := compoundTokens[l.ch]; ok {
 			tok = l.readCompoundToken(spec)
@@ -91,11 +93,13 @@ func (l *Lexer) NextToken() token.Token {
 		if isLetter(l.ch) {
 			tok.Literal = l.readIdentifier()
 			tok.Type = token.LookupIdent(tok.Literal)
+			tok.End = l.position
 			return tok
 		}
 		if isDigit(l.ch) {
 			tok.Type = token.Int
 			tok.Literal = l.readNumber()
+			tok.End = l.position
 			return tok
 		}
 		tok = l.oneCharToken(token.Illegal)
@@ -115,16 +119,31 @@ func (l *Lexer) readCompoundToken(spec compoundToken) token.Token {
 
 // oneCharToken returns a token for the current rune.
 func (l *Lexer) oneCharToken(t token.Type) token.Token {
-	return token.Token{Type: t, Literal: string(l.ch), Line: l.line, Column: l.column}
+	return token.Token{
+		Type:    t,
+		Literal: string(l.ch),
+		Start:   l.position,
+		End:     l.position + 1,
+		Line:    l.line,
+		Column:  l.column,
+	}
 }
 
 // twoCharToken returns a token spanning the current rune and the next rune.
 func (l *Lexer) twoCharToken(t token.Type) token.Token {
 	ch := l.ch
+	start := l.position
 	line := l.line
 	column := l.column
 	l.readChar()
-	return token.Token{Type: t, Literal: string([]rune{ch, l.ch}), Line: line, Column: column}
+	return token.Token{
+		Type:    t,
+		Literal: string([]rune{ch, l.ch}),
+		Start:   start,
+		End:     l.position + 1,
+		Line:    line,
+		Column:  column,
+	}
 }
 
 // readChar advances the lexer by one rune.
