@@ -864,6 +864,19 @@ fn call_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const 
 
 // method_display_name returns selected receiver.method spellings.
 fn method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
+    let core = core_method_display_name(receiver, method);
+    if !std::mem::equal_bytes(core, method) {
+        return core;
+    }
+    let stdlib = stdlib_method_display_name(receiver, method);
+    if !std::mem::equal_bytes(stdlib, method) {
+        return stdlib;
+    }
+    return concurrency_method_display_name(receiver, method);
+}
+
+// core_method_display_name returns selected core method spellings.
+fn core_method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
     if std::mem::equal_bytes(receiver, "users") {
         if std::mem::equal_bytes(method, "add") {
             return "users.add";
@@ -872,6 +885,11 @@ fn method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
             return "users.get";
         }
     }
+    return method;
+}
+
+// stdlib_method_display_name returns selected stdlib receiver method spellings.
+fn stdlib_method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
     if std::mem::equal_bytes(receiver, "values") {
         if std::mem::equal_bytes(method, "len") {
             return "values.len";
@@ -927,6 +945,53 @@ fn method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
     return method;
 }
 
+// concurrency_method_display_name returns selected concurrency method spellings.
+fn concurrency_method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(receiver, "stop") {
+        if std::mem::equal_bytes(method, "load") {
+            return "stop.load";
+        }
+        if std::mem::equal_bytes(method, "store") {
+            return "stop.store";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "ch") {
+        if std::mem::equal_bytes(method, "send") {
+            return "ch.send";
+        }
+        if std::mem::equal_bytes(method, "close") {
+            return "ch.close";
+        }
+        if std::mem::equal_bytes(method, "recv") {
+            return "ch.recv";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "group") {
+        if std::mem::equal_bytes(method, "spawn") {
+            return "group.spawn";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "task") {
+        if std::mem::equal_bytes(method, "cancel") {
+            return "task.cancel";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "atomic") {
+        if std::mem::equal_bytes(method, "load") {
+            return "atomic.load";
+        }
+        if std::mem::equal_bytes(method, "store") {
+            return "atomic.store";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "locked") {
+        if std::mem::equal_bytes(method, "get") {
+            return "locked.get";
+        }
+    }
+    return method;
+}
+
 // namespace_display_name returns selected namespace-qualified callees.
 fn namespace_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
     let callee = try tokens.at(index);
@@ -935,6 +1000,9 @@ fn namespace_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]c
     if std::mem::equal_bytes(module, "io") {
         if std::mem::equal_bytes(callee.literal, "blocking") {
             return "std::io::blocking";
+        }
+        if std::mem::equal_bytes(callee.literal, "threaded") {
+            return "std::io::threaded";
         }
     }
     if std::mem::equal_bytes(module, "fs") {
@@ -951,6 +1019,16 @@ fn namespace_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]c
     if std::mem::equal_bytes(module, "string") {
         if std::mem::equal_bytes(callee.literal, "String") {
             return "std::string::String";
+        }
+    }
+    if std::mem::equal_bytes(module, "task") {
+        if std::mem::equal_bytes(callee.literal, "Group") {
+            return "std::task::Group";
+        }
+    }
+    if std::mem::equal_bytes(module, "thread") {
+        if std::mem::equal_bytes(callee.literal, "scoped") {
+            return "std::thread::scoped";
         }
     }
     if std::mem::equal_bytes(module, "lexer") {
@@ -1076,6 +1154,21 @@ fn type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]
             return try map_type_apply_display_name(tokens, index);
         }
     }
+    if std::mem::equal_bytes(module, "atomic") {
+        if std::mem::equal_bytes(token.literal, "Atomic") {
+            return try atomic_type_apply_display_name(tokens, index);
+        }
+    }
+    if std::mem::equal_bytes(module, "channel") {
+        if std::mem::equal_bytes(token.literal, "Channel") {
+            return try channel_type_apply_display_name(tokens, index);
+        }
+    }
+    if std::mem::equal_bytes(module, "sync") {
+        if std::mem::equal_bytes(token.literal, "Mutex") {
+            return "std::sync::Mutex<i64>";
+        }
+    }
     return "";
 }
 
@@ -1101,6 +1194,22 @@ fn map_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) ->
         return "std::map::Map<[]const u8, SymbolKind>";
     }
     return "std::map::Map<[]const u8, i64>";
+}
+
+// atomic_type_apply_display_name returns selected std::atomic constructors.
+fn atomic_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    if try type_apply_contains(tokens, index, "bool") {
+        return "std::atomic::Atomic<bool>";
+    }
+    return "std::atomic::Atomic<i64>";
+}
+
+// channel_type_apply_display_name returns selected std::channel constructors.
+fn channel_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    if try type_apply_contains(tokens, index, "u8") {
+        return "std::channel::Channel<[]const u8>";
+    }
+    return "std::channel::Channel<i64>";
 }
 
 // type_apply_contains reports whether a type argument token appears before `>`.
@@ -2006,6 +2115,37 @@ fn infer_local_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u
         let next = try tokens.at(start + 1);
         if next.kind == TokenKind::LBrace {
             return token.literal;
+        }
+        if next.kind == TokenKind::DoubleColon {
+            return try qualified_call_type(tokens, start);
+        }
+    }
+    return "unknown";
+}
+
+// qualified_call_type returns selected stdlib constructor and factory types.
+fn qualified_call_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let module = try namespace_module_name(tokens, start + 4);
+    let callee = try tokens.at(start + 4);
+
+    if std::mem::equal_bytes(module, "mem") {
+        if std::mem::equal_bytes(callee.literal, "page_allocator") {
+            return "std::mem::Allocator";
+        }
+    }
+    if std::mem::equal_bytes(module, "string") {
+        if std::mem::equal_bytes(callee.literal, "String") {
+            return "std::string::String";
+        }
+    }
+    if std::mem::equal_bytes(module, "array") {
+        if std::mem::equal_bytes(callee.literal, "Array") {
+            return try array_type_apply_display_name(tokens, start + 4);
+        }
+    }
+    if std::mem::equal_bytes(module, "map") {
+        if std::mem::equal_bytes(callee.literal, "Map") {
+            return try map_type_apply_display_name(tokens, start + 4);
         }
     }
     return "unknown";

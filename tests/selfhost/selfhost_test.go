@@ -523,6 +523,12 @@ func TestSelfHostAstNodeDumpOracle(t *testing.T) {
 		"examples/std_string.kizu",
 		"examples/std_map.kizu",
 		"examples/std_map_symbol_table.kizu",
+		"examples/atomic_flag.kizu",
+		"examples/channel.kizu",
+		"examples/channel_string.kizu",
+		"examples/task_group.kizu",
+		"examples/task_cancel.kizu",
+		"examples/thread_boundary.kizu",
 		"tests/conformance/modules/private_module_access/src/main.kizu",
 	}
 	for _, path := range cases {
@@ -576,13 +582,21 @@ func TestSelfHostTypeSubsetOracle(t *testing.T) {
 
 // TestSelfHostTypeEnvironmentOracle compares selected local binding types.
 func TestSelfHostTypeEnvironmentOracle(t *testing.T) {
-	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "type_env.kizu")
-	got := extractMarkedSnapshot(
-		t, runSelfHostFrontend(t, fixture), "type env snapshot", "type env snapshot end",
-	)
-	want := formatTypeEnvSnapshot(goLocalTypeEnvSnapshot(t, fixture))
-	if got != want {
-		t.Fatalf("self-host type env snapshot got %q, want %q", got, want)
+	cases := []string{
+		"selfhost/fixtures/type_env.kizu",
+		"selfhost/fixtures/type_env_stdlib.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, fixture), "type env snapshot", "type env snapshot end",
+			)
+			want := formatTypeEnvSnapshot(goLocalTypeEnvSnapshot(t, fixture))
+			if got != want {
+				t.Fatalf("self-host type env snapshot got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -1848,6 +1862,25 @@ func goLocalInitializerType(t *testing.T, expr ast.Expression) string {
 		return "bool"
 	case *ast.StructLiteralExpr:
 		return value.TypeName
+	case *ast.CallExpr:
+		return goCallInitializerType(value)
+	default:
+		return "unknown"
+	}
+}
+
+// goCallInitializerType infers selected stdlib call initializer types.
+func goCallInitializerType(call *ast.CallExpr) string {
+	name := call.Callee.String()
+	switch name {
+	case "std::mem::page_allocator":
+		return "std::mem::Allocator"
+	case "std::string::String":
+		return "std::string::String"
+	case "std::array::Array<i64>":
+		return "std::array::Array<i64>"
+	case "std::map::Map<[]const u8, i64>":
+		return "std::map::Map<[]const u8, i64>"
 	default:
 		return "unknown"
 	}
