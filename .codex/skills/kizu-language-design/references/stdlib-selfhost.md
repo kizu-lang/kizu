@@ -50,6 +50,29 @@ let tokens = std::array::Array<Token>(allocator);
 - owned collection は明示的な cleanup / `deinit` を要求する。
 - allocator の詳細が safe Kizu に raw pointer safety hazard として漏れてはいけない。
 
+v0.2 の `Array<T>` prototype:
+
+```text
+std::mem::page_allocator() -> Allocator
+std::array::Array<T>(allocator) -> std::array::Array<T>
+array.append(value) -> !void
+array.len() -> i64
+array.capacity() -> i64
+array.get(index) -> !T
+array.at(index) -> !&T
+array.at_mut(index) -> !&mut T
+array.set(index, value) -> !void
+array.deinit() -> void
+```
+
+`get` は v0.2 では copy element 限定です。non-copy token / AST node は
+`at` / `at_mut` の local borrow view で扱います。
+element borrow 中は `append`、`set`、`deinit` を拒否します。
+mutable element borrow 中は array 全体の read も拒否します。
+Array element は v0.2 では raw pointer、arena、handle、nested array、concurrency
+capability type を拒否します。この拒否は struct field と union payload の中まで
+再帰的に適用します。
+
 ## Self-Host Skeleton Rule
 
 各 v0.2 stdlib API について、self-host compiler がどう使うかを記録します。

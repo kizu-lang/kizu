@@ -16,6 +16,7 @@ const (
 	kindEnum
 	kindUnion
 	kindIo
+	kindAllocator
 	kindTaskGroup
 	kindTask
 	kindQueue
@@ -25,6 +26,7 @@ const (
 	kindLocalBuffer
 	kindAtomic
 	kindMutex
+	kindArray
 	kindRef
 )
 
@@ -50,6 +52,7 @@ type Value struct {
 	localBuf  LocalBuffer
 	atomic    *Atomic
 	mutex     *Mutex
+	array     *Array
 	ref       *binding
 }
 
@@ -62,6 +65,12 @@ type Arena struct {
 type Handle struct {
 	arena *Arena
 	index int
+}
+
+// Array stores owned contiguous values for the v0.2 std::array prototype.
+type Array struct {
+	values []Value
+	deinit bool
 }
 
 // ErrorUnion stores an error value for !T runtime propagation.
@@ -208,6 +217,8 @@ func (v Value) capabilityString() string {
 	switch v.kind {
 	case kindIo:
 		return "<io:" + v.typeName + ">"
+	case kindAllocator:
+		return "<allocator:" + v.typeName + ">"
 	case kindTaskGroup:
 		return "<taskgroup>"
 	case kindTask:
@@ -226,6 +237,8 @@ func (v Value) capabilityString() string {
 		return "<atomic>"
 	case kindMutex:
 		return "<mutex>"
+	case kindArray:
+		return "<array>"
 	case kindRef:
 		return v.ref.value.String()
 	default:
@@ -291,6 +304,16 @@ func unionValue(typeName string, tag string, payload *Value) Value {
 // ioValue returns an explicit I/O capability value.
 func ioValue(mode string) Value {
 	return Value{kind: kindIo, typeName: mode}
+}
+
+// allocatorValue returns an explicit allocator capability value.
+func allocatorValue(name string) Value {
+	return Value{kind: kindAllocator, typeName: name}
+}
+
+// arrayValue returns an empty owned array value.
+func arrayValue(typeName string) Value {
+	return Value{kind: kindArray, typeName: typeName, array: &Array{}}
 }
 
 // taskGroupValue returns a structured task group value.
