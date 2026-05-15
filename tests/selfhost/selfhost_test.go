@@ -548,6 +548,13 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/while_body_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
 		"examples/negative/unsafe_moved_value.kizu",
+		"examples/negative/borrow_before_last_use_move.kizu",
+		"examples/negative/borrow_loop_last_use.kizu",
+		"examples/negative/field_borrow_owner_move.kizu",
+		"examples/negative/borrow_escape.kizu",
+		"examples/negative/borrow_local_alias.kizu",
+		"examples/negative/borrow_to_owner.kizu",
+		"examples/negative/unsafe_borrow_escape.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
