@@ -62,6 +62,10 @@ go test ./...
 | task cancellation cleanup | `task_cancel.kizu` | waits for a threaded task and discards its result |
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
 | task-based file read | `fs_task.kizu` | reads a fixture from a spawned task |
+| pure path helpers | `std_path.kizu` | joins, cleans, and decomposes slash-separated paths |
+| explicit-Io fs helpers | `std_fs_path.kizu` | checks existence, metadata, create_dir, and remove_dir |
+| stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
+| stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | self-host token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
@@ -158,6 +162,10 @@ go test ./...
 | missing file returns `!T` error | `negative/fs_read_missing.kizu` | `no such file` |
 | file write bytes must be `[]const u8` | `negative/fs_write_wrong_bytes.kizu` | `bytes` |
 | failing Io returns deterministic error | `negative/fs_failing_io.kizu` | `io runtime is failing` |
+| path helpers require byte paths | `negative/std_path_wrong_type.kizu` | `expects []const u8` |
+| fs helpers require Io | `negative/std_fs_exists_without_io.kizu` | `expects Io` |
+| stdio helpers surface failing Io | `negative/std_io_failing_write.kizu` | `io runtime is failing` |
+| process arg access is bounds-checked | `negative/std_process_arg_bounds.kizu` | `process arg index out of bounds` |
 | byte-slice helper args must be `[]const u8` | `negative/std_mem_wrong_type.kizu` | `expects []const u8` |
 | checked byte slices reject invalid ranges | `negative/std_mem_slice_out_of_bounds.kizu` | `range out of bounds` |
 | checked byte access rejects invalid indexes | `negative/std_mem_byte_at_out_of_bounds.kizu` | `index out of bounds` |

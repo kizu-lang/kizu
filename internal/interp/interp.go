@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,12 +14,13 @@ import (
 
 // Interpreter executes a parsed Kizu program.
 type Interpreter struct {
-	out       io.Writer
-	outMu     sync.Mutex
-	functions map[string]*ast.FunctionDecl
-	impls     map[string]map[string]*ast.FunctionDecl
-	enums     map[string]map[string]bool
-	unions    map[string]map[string]string
+	out         io.Writer
+	outMu       sync.Mutex
+	functions   map[string]*ast.FunctionDecl
+	impls       map[string]map[string]*ast.FunctionDecl
+	enums       map[string]map[string]bool
+	unions      map[string]map[string]string
+	processArgs []string
 }
 
 type trySignal struct {
@@ -42,12 +44,18 @@ func (s loopSignal) Error() string {
 
 // New creates an interpreter that writes builtin output to out.
 func New(out io.Writer) *Interpreter {
+	return NewWithProcessArgs(out, nil)
+}
+
+// NewWithProcessArgs creates an interpreter with explicit process arguments.
+func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 	return &Interpreter{
-		out:       out,
-		functions: map[string]*ast.FunctionDecl{},
-		impls:     map[string]map[string]*ast.FunctionDecl{},
-		enums:     map[string]map[string]bool{},
-		unions:    map[string]map[string]string{},
+		out:         out,
+		functions:   map[string]*ast.FunctionDecl{},
+		impls:       map[string]map[string]*ast.FunctionDecl{},
+		enums:       map[string]map[string]bool{},
+		unions:      map[string]map[string]string{},
+		processArgs: append([]string{}, args...),
 	}
 }
 
@@ -846,15 +854,45 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	if !ok {
 		return voidValue(), false, nil
 	}
+	if value, ok, err := i.evalQualifiedCoreBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
+	return i.evalQualifiedRuntimeBuiltin(name, args, env)
+}
+
+// evalQualifiedCoreBuiltin evaluates pure, fs, I/O, and process std calls.
+func (i *Interpreter) evalQualifiedCoreBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
 	if value, ok := evalIoBuiltin(name, args); ok {
 		return value, true, nil
 	}
 	if value, ok, err := i.evalFsBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
+	if value, ok, err := i.evalPathBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
 	if value, ok, err := i.evalMemBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
+	if value, ok, err := i.evalIoHelperBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
+	if value, ok, err := i.evalProcessBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
+	return voidValue(), false, nil
+}
+
+// evalQualifiedRuntimeBuiltin evaluates constructors, tasks, tests, and misc calls.
+func (i *Interpreter) evalQualifiedRuntimeBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
 	if value, ok, err := i.evalStringConstructor(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
@@ -1213,6 +1251,91 @@ func (i *Interpreter) evalFsBuiltin(
 	case "std.fs.write_file":
 		value, err := i.evalFsWriteFile(args, env)
 		return value, true, err
+	case "std.fs.exists":
+		value, err := i.evalFsExists(args, env)
+		return value, true, err
+	case "std.fs.metadata":
+		value, err := i.evalFsMetadata(args, env)
+		return value, true, err
+	case "std.fs.create_dir":
+		value, err := i.evalFsCreateDir(args, env)
+		return value, true, err
+	case "std.fs.remove_dir":
+		value, err := i.evalFsRemoveDir(args, env)
+		return value, true, err
+	case "std.fs.remove_file":
+		value, err := i.evalFsRemoveFile(args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalPathBuiltin evaluates pure std::path helpers.
+func (i *Interpreter) evalPathBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "std.path.join":
+		value, err := i.evalPathJoin(args, env)
+		return value, true, err
+	case "std.path.clean":
+		return i.evalPathUnary(name, args, env, path.Clean)
+	case "std.path.basename":
+		return i.evalPathUnary(name, args, env, path.Base)
+	case "std.path.dirname":
+		return i.evalPathUnary(name, args, env, path.Dir)
+	case "std.path.extension":
+		return i.evalPathUnary(name, args, env, path.Ext)
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalIoHelperBuiltin evaluates explicit-Io stdio helpers.
+func (i *Interpreter) evalIoHelperBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "std.io.write_stdout":
+		value, err := i.evalIoWrite(args, env, i.out)
+		return value, true, err
+	case "std.io.write_stderr":
+		value, err := i.evalIoWrite(args, env, os.Stderr)
+		return value, true, err
+	case "std.io.read_stdin":
+		value, err := i.evalIoReadStdin(args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalProcessBuiltin evaluates minimal process helpers.
+func (i *Interpreter) evalProcessBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "std.process.arg_count":
+		if len(args) != 0 {
+			return voidValue(), true, fmt.Errorf("runtime error: std::process::arg_count expects 0 args")
+		}
+		return intValue(int64(len(i.processArgs))), true, nil
+	case "std.process.arg":
+		value, err := i.evalProcessArg(args, env)
+		return value, true, err
+	case "std.process.env":
+		value, err := i.evalProcessEnv(args, env)
+		return value, true, err
+	case "std.process.exit_code":
+		value, err := i.evalProcessExitCode(args, env)
+		return value, true, err
 	default:
 		return voidValue(), false, nil
 	}
@@ -1291,12 +1414,267 @@ func (i *Interpreter) evalFsWriteFile(args []ast.Expression, env *Env) (Value, e
 	return voidValue(), nil
 }
 
+// evalFsExists reports whether a path exists using an explicit Io capability.
+func (i *Interpreter) evalFsExists(args []ast.Expression, env *Env) (Value, error) {
+	ioValue, target, err := i.evalFsIoPath(args, env, "std::fs::exists")
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	_, statErr := os.Stat(target)
+	if statErr == nil {
+		return boolValue(true), nil
+	}
+	if os.IsNotExist(statErr) {
+		return boolValue(false), nil
+	}
+	return errorUnionValue(statErr.Error()), nil
+}
+
+// evalFsMetadata returns minimal metadata for a filesystem path.
+func (i *Interpreter) evalFsMetadata(args []ast.Expression, env *Env) (Value, error) {
+	ioValue, target, err := i.evalFsIoPath(args, env, "std::fs::metadata")
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return structValue("std::fs::Metadata", map[string]Value{
+		"size":   intValue(info.Size()),
+		"is_dir": boolValue(info.IsDir()),
+	}), nil
+}
+
+// evalFsCreateDir creates a directory and reports I/O failures as !void errors.
+func (i *Interpreter) evalFsCreateDir(args []ast.Expression, env *Env) (Value, error) {
+	ioValue, target, err := i.evalFsIoPath(args, env, "std::fs::create_dir")
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	if err := os.Mkdir(target, 0o755); err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return voidValue(), nil
+}
+
+// evalFsRemoveDir removes one empty directory.
+func (i *Interpreter) evalFsRemoveDir(args []ast.Expression, env *Env) (Value, error) {
+	return i.evalFsRemove(args, env, "std::fs::remove_dir")
+}
+
+// evalFsRemoveFile removes one file.
+func (i *Interpreter) evalFsRemoveFile(args []ast.Expression, env *Env) (Value, error) {
+	return i.evalFsRemove(args, env, "std::fs::remove_file")
+}
+
+// evalFsRemove removes a filesystem path using an explicit Io capability.
+func (i *Interpreter) evalFsRemove(args []ast.Expression, env *Env, name string) (Value, error) {
+	ioValue, target, err := i.evalFsIoPath(args, env, name)
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	if err := os.Remove(target); err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return voidValue(), nil
+}
+
+// evalPathJoin joins two slash-separated path fragments.
+func (i *Interpreter) evalPathJoin(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 2 {
+		return voidValue(), fmt.Errorf("runtime error: std::path::join expects 2 args")
+	}
+	left, err := i.evalPathArg(args[0], env, "std::path::join")
+	if err != nil {
+		return voidValue(), err
+	}
+	right, err := i.evalPathArg(args[1], env, "std::path::join")
+	if err != nil {
+		return voidValue(), err
+	}
+	return stringValue(path.Join(left, right)), nil
+}
+
+// evalPathUnary evaluates one-argument path helpers.
+func (i *Interpreter) evalPathUnary(
+	name string,
+	args []ast.Expression,
+	env *Env,
+	fn func(string) string,
+) (Value, bool, error) {
+	if len(args) != 1 {
+		return voidValue(), true, fmt.Errorf("runtime error: %s expects 1 arg", name)
+	}
+	value, err := i.evalPathArg(args[0], env, name)
+	if err != nil {
+		return voidValue(), true, err
+	}
+	return stringValue(fn(value)), true, nil
+}
+
+// evalPathArg evaluates one []const u8 path helper argument.
+func (i *Interpreter) evalPathArg(expr ast.Expression, env *Env, name string) (string, error) {
+	value, err := i.evalExpr(expr, env)
+	if err != nil {
+		return "", err
+	}
+	if value.kind != kindString {
+		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
+	}
+	return value.s, nil
+}
+
+// evalIoWrite writes bytes to stdout or stderr through an explicit Io capability.
+func (i *Interpreter) evalIoWrite(
+	args []ast.Expression,
+	env *Env,
+	out io.Writer,
+) (Value, error) {
+	if len(args) != 2 {
+		return errorUnionValue("std::io write expected io and bytes"), nil
+	}
+	ioValue, bytes, err := i.evalIoBytes(args, env, "std::io write")
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	_, err = fmt.Fprint(out, bytes)
+	if err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return voidValue(), nil
+}
+
+// evalIoReadStdin reads all stdin through an explicit Io capability.
+func (i *Interpreter) evalIoReadStdin(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return errorUnionValue("std::io::read_stdin expected io"), nil
+	}
+	ioValue, err := i.evalIoArg(args[0], env, "std::io::read_stdin")
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return stringValue(string(data)), nil
+}
+
+// evalIoBytes evaluates common Io plus byte-slice arguments.
+func (i *Interpreter) evalIoBytes(
+	args []ast.Expression,
+	env *Env,
+	name string,
+) (Value, string, error) {
+	ioValue, err := i.evalIoArg(args[0], env, name)
+	if err != nil {
+		return voidValue(), "", err
+	}
+	bytes, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), "", err
+	}
+	if bytes.kind != kindString {
+		return voidValue(), "", fmt.Errorf("runtime error: %s expects []const u8 bytes", name)
+	}
+	return ioValue, bytes.s, nil
+}
+
+// evalIoArg evaluates and checks one explicit Io argument.
+func (i *Interpreter) evalIoArg(expr ast.Expression, env *Env, name string) (Value, error) {
+	ioValue, err := i.evalExpr(expr, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if ioValue.kind != kindIo {
+		return voidValue(), fmt.Errorf("runtime error: %s expects Io", name)
+	}
+	return ioValue, nil
+}
+
+// evalProcessArg reads one process argument supplied by the runner.
+func (i *Interpreter) evalProcessArg(args []ast.Expression, env *Env) (Value, error) {
+	index, err := i.evalProcessIndex("std::process::arg", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= len(i.processArgs) {
+		return errorUnionValue("process arg index out of bounds"), nil
+	}
+	return stringValue(i.processArgs[index]), nil
+}
+
+// evalProcessEnv reads one environment variable by name.
+func (i *Interpreter) evalProcessEnv(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return errorUnionValue("std::process::env expected name"), nil
+	}
+	name, err := i.evalPathArg(args[0], env, "std::process::env")
+	if err != nil {
+		return voidValue(), err
+	}
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return errorUnionValue("environment variable not found"), nil
+	}
+	return stringValue(value), nil
+}
+
+// evalProcessExitCode validates and returns a process exit code value.
+func (i *Interpreter) evalProcessExitCode(args []ast.Expression, env *Env) (Value, error) {
+	index, err := i.evalProcessIndex("std::process::exit_code", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index > 255 {
+		return voidValue(), fmt.Errorf("runtime error: exit code must be between 0 and 255")
+	}
+	return intValue(int64(index)), nil
+}
+
+// evalProcessIndex evaluates one i64 process helper argument.
+func (i *Interpreter) evalProcessIndex(name string, args []ast.Expression, env *Env) (int, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("runtime error: %s expects i64", name)
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return 0, err
+	}
+	if value.kind != kindInt {
+		return 0, fmt.Errorf("runtime error: %s expects i64", name)
+	}
+	return int(value.i), nil
+}
+
 // evalFsIoPath evaluates the common Io and path arguments for std::fs calls.
 func (i *Interpreter) evalFsIoPath(
 	args []ast.Expression,
 	env *Env,
 	name string,
 ) (Value, string, error) {
+	if len(args) < 2 {
+		return voidValue(), "", fmt.Errorf("runtime error: %s expects io and path", name)
+	}
 	ioValue, err := i.evalExpr(args[0], env)
 	if err != nil {
 		return voidValue(), "", err

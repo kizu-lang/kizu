@@ -893,6 +893,18 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
+	if typ, ok, err := c.checkQualifiedStdCoreBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	return c.checkQualifiedStdRuntimeBuiltin(name, args, env)
+}
+
+// checkQualifiedStdCoreBuiltin validates pure, fs, I/O, and process std calls.
+func (c *Checker) checkQualifiedStdCoreBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
 	if typ, ok, err := c.checkQualifiedStdBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
@@ -906,19 +918,19 @@ func (c *Checker) checkQualifiedBuiltin(
 	}
 }
 
-// checkQualifiedStdBuiltin validates common std:: namespace ownership effects.
-func (c *Checker) checkQualifiedStdBuiltin(
+// checkQualifiedStdRuntimeBuiltin validates std constructors and runtime helpers.
+func (c *Checker) checkQualifiedStdRuntimeBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if typ, ok, err := c.checkMemBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
-	if typ, ok, err := c.checkFsBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
 	if typ, ok, err := checkIoBuiltin(name, args); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkIoWriteBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkProcessBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
 	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
@@ -934,6 +946,21 @@ func (c *Checker) checkQualifiedStdBuiltin(
 		return typ, ok, err
 	}
 	return "", false, nil
+}
+
+// checkQualifiedStdBuiltin validates fs, path, and mem ownership effects.
+func (c *Checker) checkQualifiedStdBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if typ, ok, err := c.checkMemBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkFsBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	return c.checkPathBuiltin(name, args, env)
 }
 
 // checkTestingBuiltin reads assertion arguments without taking ownership.
@@ -1112,9 +1139,169 @@ func (c *Checker) checkFsBuiltin(
 		return c.checkFsReadFile(args, env)
 	case "std.fs.write_file":
 		return c.checkFsWriteFile(args, env)
+	case "std.fs.exists":
+		return c.checkFsPathOnly("std::fs::exists", args, env, "!bool")
+	case "std.fs.metadata":
+		return c.checkFsPathOnly("std::fs::metadata", args, env, "!std::fs::Metadata")
+	case "std.fs.create_dir", "std.fs.remove_dir", "std.fs.remove_file":
+		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "!void")
 	default:
 		return "", false, nil
 	}
+}
+
+// checkPathBuiltin reads pure std::path arguments without moving them.
+func (c *Checker) checkPathBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.path.join":
+		return c.checkPathArgs(name, args, env, 2)
+	case "std.path.clean", "std.path.basename", "std.path.dirname", "std.path.extension":
+		return c.checkPathArgs(name, args, env, 1)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkPathArgs validates []const u8 path helper arguments.
+func (c *Checker) checkPathArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	want int,
+) (string, bool, error) {
+	if len(args) != want {
+		return "", true, fmt.Errorf("move error: `%s` expects %d []const u8 args", name, want)
+	}
+	for idx, arg := range args {
+		got, err := c.readExpr(arg, env)
+		if err != nil {
+			return "", true, err
+		}
+		if got != "[]const u8" {
+			return "", true, fmt.Errorf("move error: `%s` arg %d expects []const u8, got %s",
+				name, idx+1, got)
+		}
+	}
+	return "[]const u8", true, nil
+}
+
+// checkIoWriteBuiltin validates explicit-Io stdio helpers.
+func (c *Checker) checkIoWriteBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.io.write_stdout", "std.io.write_stderr":
+		return c.checkIoBytesCall(name, args, env)
+	case "std.io.read_stdin":
+		return c.checkIoOnlyCall(name, args, env, "![]const u8")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkIoBytesCall validates an Io plus bytes call without moving bytes.
+func (c *Checker) checkIoBytesCall(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if len(args) != 2 {
+		return "", true, fmt.Errorf("move error: `%s` expects io and bytes", name)
+	}
+	if err := c.checkIoArg(args[0], env, name); err != nil {
+		return "", true, err
+	}
+	got, err := c.readExpr(args[1], env)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "[]const u8" {
+		return "", true, fmt.Errorf("move error: `%s` expects []const u8 bytes, got %s", name, got)
+	}
+	return "!void", true, nil
+}
+
+// checkIoOnlyCall validates a call that only takes Io.
+func (c *Checker) checkIoOnlyCall(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	result string,
+) (string, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("move error: `%s` expects io", name)
+	}
+	if err := c.checkIoArg(args[0], env, name); err != nil {
+		return "", true, err
+	}
+	return result, true, nil
+}
+
+// checkProcessBuiltin validates minimal process helpers.
+func (c *Checker) checkProcessBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.process.arg_count":
+		_, err := checkNoArgOwnershipCall(name, args)
+		return "i64", true, err
+	case "std.process.arg":
+		return c.checkProcessI64Arg(name, args, env, "![]const u8")
+	case "std.process.env":
+		return c.checkProcessBytesArg(name, args, env, "![]const u8")
+	case "std.process.exit_code":
+		return c.checkProcessI64Arg(name, args, env, "i64")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkProcessI64Arg validates one i64 process argument.
+func (c *Checker) checkProcessI64Arg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	result string,
+) (string, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("move error: `%s` expects i64", name)
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "i64" {
+		return "", true, fmt.Errorf("move error: `%s` expects i64, got %s", name, got)
+	}
+	return result, true, nil
+}
+
+// checkProcessBytesArg validates one []const u8 process argument.
+func (c *Checker) checkProcessBytesArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	result string,
+) (string, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("move error: `%s` expects []const u8", name)
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "[]const u8" {
+		return "", true, fmt.Errorf("move error: `%s` expects []const u8, got %s", name, got)
+	}
+	return result, true, nil
 }
 
 // checkTaskBuiltin validates ownership for task and data-parallel std calls.
@@ -1201,6 +1388,29 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 		}
 	}
 	return "!void", true, nil
+}
+
+// checkFsPathOnly validates common std::fs Io and path arguments.
+func (c *Checker) checkFsPathOnly(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	result string,
+) (string, bool, error) {
+	if len(args) != 2 {
+		return "", true, fmt.Errorf("move error: `%s` expects io and path", name)
+	}
+	if err := c.checkIoArg(args[0], env, name); err != nil {
+		return "", true, err
+	}
+	path, err := c.readExpr(args[1], env)
+	if err != nil {
+		return "", true, err
+	}
+	if path != "[]const u8" {
+		return "", true, fmt.Errorf("move error: `%s` expects []const u8 path, got %s", name, path)
+	}
+	return result, true, nil
 }
 
 // checkArrayConstructor validates std::array::Array<T>(allocator) ownership.
@@ -1500,6 +1710,14 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	if fields := c.structs[receiverType]; fields != nil {
 		if typ, ok := fields[expr.Name]; ok {
 			return typ, nil
+		}
+	}
+	if receiverType == "std::fs::Metadata" {
+		switch expr.Name {
+		case "size":
+			return "i64", nil
+		case "is_dir":
+			return "bool", nil
 		}
 	}
 	return receiverType, nil
@@ -2740,7 +2958,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	switch typeName {
-	case "bool", "void", "Io", "Allocator",
+	case "bool", "void", "Io", "Allocator", "std::fs::Metadata",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64", "[]const u8":
 		return true

@@ -39,6 +39,10 @@ kizu-fmt file="examples/hello.kizu":
 run file="examples/hello.kizu":
     go run ./cmd/kizu run {{file}}
 
+# Run a Kizu file with one prototype process argument.
+run-arg file="examples/std_io_process.kizu" arg="input.kizu":
+    KIZU_TEST_ENV=env-ok go run ./cmd/kizu run {{file}} -- {{arg}}
+
 # Run a single Kizu test source.
 kizu-test file="examples/std_testing.kizu":
     go run ./cmd/kizu test {{file}}
