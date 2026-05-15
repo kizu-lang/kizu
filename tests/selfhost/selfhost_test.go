@@ -202,6 +202,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
 	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
+	astDetailSnapshot := formatAstDetailSnapshot(goAstDetailSnapshot(t, fixture))
 	declSnapshot := formatDeclSnapshot(goDeclSnapshot(t, fixture))
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
@@ -225,6 +226,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"ast snapshot\n" +
 		astSnapshot +
 		"ast snapshot end\n" +
+		"ast detail snapshot\n" +
+		astDetailSnapshot +
+		"ast detail snapshot end\n" +
 		"decl snapshot\n" +
 		declSnapshot +
 		"decl snapshot end\n" +
@@ -353,6 +357,26 @@ func TestSelfHostModuleImportOracle(t *testing.T) {
 	want := goRootImportPaths(t, root)
 	if !same(got, want) {
 		t.Fatalf("self-host module imports got %v, want %v", got, want)
+	}
+}
+
+// TestSelfHostAstDetailOracle compares function parser details and a parse failure.
+func TestSelfHostAstDetailOracle(t *testing.T) {
+	cases := []string{
+		"examples/functions.kizu",
+		"examples/negative/missing_semicolon.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, fixture), "ast detail snapshot", "ast detail snapshot end",
+			)
+			want := formatAstDetailSnapshot(goAstDetailSnapshot(t, fixture))
+			if got != want {
+				t.Fatalf("self-host AST detail snapshot got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -725,6 +749,71 @@ func formatAstSnapshot(snapshot astSnapshot) string {
 		"unions", strconv.Itoa(snapshot.Unions),
 		"returns", strconv.Itoa(snapshot.Returns),
 	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// goAstDetailSnapshot returns a normalized parser detail snapshot.
+func goAstDetailSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	p := parser.New(l)
+	program := p.ParseProgram()
+	if len(p.Errors()) > 0 {
+		return []string{"status", "fail", "message", normalizeParseError(p.Errors())}
+	}
+	lines := []string{"status", "pass"}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok {
+			continue
+		}
+		lines = append(lines, astFunctionDetail(fn)...)
+	}
+	return lines
+}
+
+// astFunctionDetail returns parser facts for one function declaration.
+func astFunctionDetail(fn *ast.FunctionDecl) []string {
+	lines := []string{
+		"fn", fn.Name,
+		"params", strconv.Itoa(len(fn.Params)),
+	}
+	for _, param := range fn.Params {
+		lines = append(lines, "param", param.TypeName)
+	}
+	lines = append(lines,
+		"return", normalizeReturnType(fn.ReturnType),
+		"returns", strconv.Itoa(countReturnsInBlock(fn.Body)),
+	)
+	return lines
+}
+
+// normalizeParseError maps parser diagnostics into the self-host subset.
+func normalizeParseError(errors []string) string {
+	for _, item := range errors {
+		if strings.Contains(item, "expected `;`") {
+			return "parser error: missing semicolon"
+		}
+	}
+	return "parser error"
+}
+
+// countReturnsInBlock counts return statements in one parser block.
+func countReturnsInBlock(block *ast.BlockStmt) int {
+	if block == nil {
+		return 0
+	}
+	count := 0
+	for _, stmt := range block.Statements {
+		if _, ok := stmt.(*ast.ReturnStmt); ok {
+			count++
+		}
+	}
+	return count
+}
+
+// formatAstDetailSnapshot formats parser detail rows.
+func formatAstDetailSnapshot(lines []string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
