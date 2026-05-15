@@ -1259,27 +1259,20 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
+	if typ, ok, err := c.checkFsBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
 	switch name {
 	case "std.io.blocking", "std.io.threaded", "std.io.failing":
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
 	case "std.io.evented":
 		return "", true, fmt.Errorf("type error: `std::io::evented` is not implemented in v0.1")
-	case "std.task.Group":
-		return c.checkTaskGroup(args, env, unsafe)
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
-	case "std.task.Queue":
-		typ, err := checkNoArgConstructor(name, args, "Queue")
-		return typ, true, err
-	case "std.task.partition_mut":
-		return c.checkPartitionMut(args, env, unsafe)
-	case "std.task.LocalBuffer":
-		return c.checkLocalBuffer(args, env, unsafe)
-	case "std.task.parallel_for":
-		return c.checkParallelFor(args, env, unsafe)
-	case "std.task.parallel_map":
-		return c.checkParallelMap(args, env, unsafe)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env, unsafe)
 	case "std.atomic.Atomic":
@@ -1291,6 +1284,109 @@ func (c *Checker) checkQualifiedBuiltin(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkFsBuiltin validates std::fs calls with explicit Io.
+func (c *Checker) checkFsBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.fs.read_file":
+		return c.checkFsReadFile(args, env, unsafe)
+	case "std.fs.write_file":
+		return c.checkFsWriteFile(args, env, unsafe)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkTaskBuiltin validates structured task and data-parallel std calls.
+func (c *Checker) checkTaskBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.task.Group":
+		return c.checkTaskGroup(args, env, unsafe)
+	case "std.task.Queue":
+		typ, err := checkNoArgConstructor(name, args, "Queue")
+		return typ, true, err
+	case "std.task.partition_mut":
+		return c.checkPartitionMut(args, env, unsafe)
+	case "std.task.LocalBuffer":
+		return c.checkLocalBuffer(args, env, unsafe)
+	case "std.task.parallel_for":
+		return c.checkParallelFor(args, env, unsafe)
+	case "std.task.parallel_map":
+		return c.checkParallelMap(args, env, unsafe)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkFsReadFile validates std::fs::read_file.
+func (c *Checker) checkFsReadFile(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 2 {
+		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects io and path")
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, "std::fs::read_file"); err != nil {
+		return "", true, err
+	}
+	path, err := c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if path != typeByteString {
+		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects []const u8 path, got %s",
+			path)
+	}
+	return "![]const u8", true, nil
+}
+
+// checkFsWriteFile validates std::fs::write_file.
+func (c *Checker) checkFsWriteFile(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 3 {
+		return "", true, fmt.Errorf("type error: `std::fs::write_file` expects io, path, and bytes")
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, "std::fs::write_file"); err != nil {
+		return "", true, err
+	}
+	for idx, label := range []string{"path", "bytes"} {
+		got, err := c.checkExpr(args[idx+1], env, unsafe)
+		if err != nil {
+			return "", true, err
+		}
+		if got != typeByteString {
+			return "", true, fmt.Errorf(
+				"type error: `std::fs::write_file` expects []const u8 %s, got %s", label, got)
+		}
+	}
+	return "!void", true, nil
+}
+
+// checkIoArg validates an explicit Io argument for a std call.
+func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe bool, name string) error {
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != "Io" {
+		return fmt.Errorf("type error: `%s` expects Io, got %s", name, got)
+	}
+	return nil
 }
 
 // checkTypeApplyCallExpr validates typed std constructor calls.
@@ -2480,8 +2576,111 @@ func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe
 	if err != nil {
 		return err
 	}
-	if isPointerType(got) {
+	return c.rejectThreadBoundaryType(got, map[Type]bool{})
+}
+
+// rejectThreadBoundaryType rejects types that cannot cross safe concurrency boundaries.
+func (c *Checker) rejectThreadBoundaryType(typ Type, seen map[Type]bool) error {
+	if isPointerType(typ) {
 		return fmt.Errorf("type error: raw pointer cannot cross concurrency boundary")
+	}
+	if seen[typ] {
+		return nil
+	}
+	seen[typ] = true
+	if err := c.rejectThreadBoundaryGeneric(typ, seen); err != nil {
+		return err
+	}
+	if err := c.rejectThreadBoundaryStruct(typ, seen); err != nil {
+		return err
+	}
+	return c.rejectThreadBoundaryUnion(typ, seen)
+}
+
+// rejectThreadBoundaryGeneric applies boundary rules to generic-like type spellings.
+func (c *Checker) rejectThreadBoundaryGeneric(typ Type, seen map[Type]bool) error {
+	base, arg, ok := splitGenericType(string(typ))
+	if !ok {
+		return nil
+	}
+	switch base {
+	case "arena":
+		return fmt.Errorf("type error: arena cannot cross concurrency boundary")
+	case "handle":
+		return fmt.Errorf("type error: handle cannot cross concurrency boundary")
+	case "Dyn":
+		return fmt.Errorf("type error: Dyn cannot cross concurrency boundary")
+	case "Mutex":
+		return fmt.Errorf("type error: Mutex cannot cross concurrency boundary in v0.1")
+	case "Task":
+		return fmt.Errorf("type error: Task cannot cross concurrency boundary")
+	case "Channel", "option":
+		return c.rejectThreadBoundaryNamedArg(arg, seen)
+	case "Atomic":
+		return c.rejectThreadBoundaryAtomic(arg, seen)
+	default:
+		return nil
+	}
+}
+
+// rejectThreadBoundaryNamedArg parses and checks a nested generic argument.
+func (c *Checker) rejectThreadBoundaryNamedArg(name string, seen map[Type]bool) error {
+	typ, err := c.parseType(name)
+	if err != nil {
+		return err
+	}
+	return c.rejectThreadBoundaryType(typ, seen)
+}
+
+// rejectThreadBoundaryAtomic checks Atomic<T> boundary eligibility.
+func (c *Checker) rejectThreadBoundaryAtomic(name string, seen map[Type]bool) error {
+	typ, err := c.parseType(name)
+	if err != nil {
+		return err
+	}
+	if !isAtomicSupportedType(typ) {
+		return fmt.Errorf("type error: Atomic<%s> cannot cross concurrency boundary in v0.1", typ)
+	}
+	return c.rejectThreadBoundaryType(typ, seen)
+}
+
+// rejectThreadBoundaryStruct checks all struct fields recursively.
+func (c *Checker) rejectThreadBoundaryStruct(typ Type, seen map[Type]bool) error {
+	decl := c.structs[string(typ)]
+	if decl == nil {
+		return nil
+	}
+	for _, field := range decl.Fields {
+		fieldType, err := c.parseType(field.TypeName)
+		if err != nil {
+			return err
+		}
+		if err := c.rejectThreadBoundaryType(fieldType, seen); err != nil {
+			return fmt.Errorf("type error: struct `%s.%s` cannot cross concurrency boundary: %w",
+				typ, field.Name, err)
+		}
+	}
+	return nil
+}
+
+// rejectThreadBoundaryUnion checks all union payloads recursively.
+func (c *Checker) rejectThreadBoundaryUnion(typ Type, seen map[Type]bool) error {
+	union := c.unions[string(typ)]
+	if union == nil {
+		return nil
+	}
+	for variant, payload := range union.variants {
+		if payload == "" {
+			continue
+		}
+		payloadType, err := c.parseType(payload)
+		if err != nil {
+			return err
+		}
+		if err := c.rejectThreadBoundaryType(payloadType, seen); err != nil {
+			return fmt.Errorf("type error: union `%s::%s` cannot cross concurrency boundary: %w",
+				typ, variant, err)
+		}
 	}
 	return nil
 }

@@ -64,13 +64,13 @@ func runConformanceCase(t *testing.T, tt conformanceCase) {
 	t.Helper()
 	switch tt.Mode {
 	case "run":
-		runKizuOK(t, "check", "../../"+tt.Path)
-		out := runKizuOK(t, "run", "../../"+tt.Path)
+		runKizuOK(t, "check", tt.Path)
+		out := runKizuOK(t, "run", tt.Path)
 		if out != tt.Stdout {
 			t.Fatalf("got %q, want %q", out, tt.Stdout)
 		}
 	case "check":
-		runKizuOK(t, "check", "../../"+tt.Path)
+		runKizuOK(t, "check", tt.Path)
 	case "error":
 		runConformanceErrorCase(t, tt)
 	default:
@@ -85,7 +85,7 @@ func runConformanceErrorCase(t *testing.T, tt conformanceCase) {
 	if command == "" {
 		command = "check"
 	}
-	out, err := runKizu(command, "../../"+tt.Path)
+	out, err := runKizu(command, tt.Path)
 	if err == nil {
 		t.Fatalf("expected command to fail\n%s", out)
 	}
@@ -195,10 +195,11 @@ func runKizuOK(t *testing.T, args ...string) string {
 	return out
 }
 
-// runKizu runs the Kizu CLI from the cmd/kizu package directory.
+// runKizu runs the Kizu CLI from the repository root.
 func runKizu(args ...string) (string, error) {
-	cmdArgs := append([]string{"run", "."}, args...)
+	cmdArgs := append([]string{"run", "./cmd/kizu"}, args...)
 	cmd := exec.Command("go", cmdArgs...)
+	cmd.Dir = "../.."
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

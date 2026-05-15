@@ -60,6 +60,8 @@ go test ./...
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 | selectable `Io` implementations | `io_runtime.kizu` | uses blocking, threaded, and failing Io constructors |
 | task cancellation cleanup | `task_cancel.kizu` | waits for a threaded task and discards its result |
+| explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
+| task-based file read | `fs_task.kizu` | reads a fixture from a spawned task |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -129,12 +131,23 @@ go test ./...
 | task args move non-copy values | `negative/task_move.kizu` | `moved value` |
 | tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
 | tasks cannot capture safe raw pointers | `negative/task_spawn_pointer.kizu` | `raw pointer` |
+| tasks cannot capture handles | `negative/task_spawn_handle.kizu` | `handle` |
+| tasks cannot capture arenas | `negative/task_spawn_arena.kizu` | `arena` |
+| tasks cannot capture mutex values | `negative/task_spawn_mutex.kizu` | `Mutex` |
+| tasks cannot capture structs containing raw pointers | `negative/task_spawn_struct_pointer.kizu` | `struct` |
 | spawned functions require owned Io | `negative/task_spawn_borrowed_io.kizu` | `owned Io` |
 | spawned functions reject mutable Io borrow | `negative/task_spawn_mut_borrowed_io.kizu` | `owned Io` |
+| task body errors propagate through `await` | `negative/task_await_error.kizu` | `channel is empty` |
+| canceled tasks cannot be awaited | `negative/task_await_after_cancel.kizu` | `already completed` |
+| awaited tasks cannot be canceled | `negative/task_cancel_after_await.kizu` | `already completed` |
 | bare `Io()` constructor is rejected | `negative/io_builtin_constructor.kizu` | `std::io::blocking` |
 | evented Io is not implemented in v0.1 | `negative/io_evented_unimplemented.kizu` | `not implemented` |
 | task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |
 | old spawn Io argument is rejected | `negative/task_spawn_old_io_arg.kizu` | `function name` |
+| file read requires Io | `negative/fs_read_without_io.kizu` | `expects Io` |
+| missing file returns `!T` error | `negative/fs_read_missing.kizu` | `no such file` |
+| file write bytes must be `[]const u8` | `negative/fs_write_wrong_bytes.kizu` | `bytes` |
+| failing Io returns deterministic error | `negative/fs_failing_io.kizu` | `io runtime is failing` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
@@ -146,10 +159,13 @@ go test ./...
 | parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
 | parallel map workers must return slot values | `negative/parallel_map_wrong_worker.kizu` | `must return i64` |
 | partition initialization is copy-only | `negative/partition_mut_non_i64.kizu` | `partition init expects i64` |
+| parallel worker errors propagate | `negative/parallel_for_error.kizu` | `parallel failed` |
 | partition slot access is bounds-checked | `negative/partition_index_out_of_bounds.kizu` | `out of bounds` |
 | parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
+| local buffer access is bounds-checked | `negative/local_buffer_out_of_bounds.kizu` | `out of bounds` |
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |
+| scoped thread cannot capture mutex values | `negative/thread_scoped_mutex.kizu` | `Mutex` |
 | atomic store must match `T` | `negative/atomic_store_wrong_type.kizu` | `atomic.store` |
 | old atomic name is rejected | `negative/atomic_old_name.kizu` | `Atomic<i64>` |
 | atomic constructor requires `T` | `negative/atomic_untyped_constructor.kizu` | `Atomic<T>` |

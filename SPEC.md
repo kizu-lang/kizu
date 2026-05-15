@@ -1100,7 +1100,7 @@ ownership / borrow rule を維持できる必要があります。
 
 ```kizu
 fn read_config(io: Io, path: []const u8) -> ![]const u8 {
-    return std::fs::read_to_string(io, path);
+    return std::fs::read_file(io, path);
 }
 ```
 
@@ -1139,6 +1139,8 @@ std::thread::scoped       scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
 std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
+std::fs::read_file        explicit-Io file read returning ![]const u8
+std::fs::write_file       explicit-Io file write returning !void
 ```
 
 v0.1 の `std::io` implementation:
@@ -1187,7 +1189,20 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `task.await()` は `T` または `!T` を返す
 * `task.cancel()` は `void` を返す
 * task は scope を抜ける前に await または cancel されなければならない
+* `await()` は task body の error を呼び出し側へ伝播する
+* `cancel()` は v0.1 では cooperative cancellation ではない
+* `cancel()` は task の完了を待ち、結果または error を破棄する
+* `await()` 後の `cancel()` と `cancel()` 後の `await()` はエラー
 * `threaded` runtime の `cancel()` は v0.1 では実行中 task の完了を待って結果を破棄する
+
+`std::fs`:
+
+* `std::fs::read_file(io, path)` は `![]const u8` を返す
+* `std::fs::write_file(io, path, bytes)` は `!void` を返す
+* `path` と `bytes` は `[]const u8`
+* I/O failure は `!T` error として返す
+* hidden global runtime や暗黙 blocking I/O は使わない
+* `std::io::failing()` は deterministic failing I/O として、テストで I/O error path を確認する
 
 `std::channel::Channel<T>` is owned message passing:
 
@@ -1208,6 +1223,10 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `std::task::LocalBuffer` is the trusted boundary for worker-local scratch
 * first error propagation uses the existing `!void` / `try` model
 * the interpreter may execute workers sequentially while preserving the API contract
+* v0.1 の `parallel_for` は range 専用で、collection iteration には接続しない
+* v0.1 の `parallel_map` output は `Partition` に限定する
+* mutable slice / array との接続は `std.mem` と `array<T>` の仕様後に設計する
+* 詳細は ADR-0040 に従う
 
 Low-level concurrency boundary:
 
@@ -1225,8 +1244,13 @@ Send 相当ルール:
 
 * Rust の `Send` trait は採用しない
 * v0.1 では concurrency boundary を越えられる型を checker rule として明示する
-* copy primitive と owned value は boundary を越えられる
+* copy primitive、enum、safe field だけを持つ owned struct / union は boundary を越えられる
+* `Atomic<T>` は `T` が v0.1 atomic 対応型なら boundary を越えられる
+* `Channel<T>` は `T` が boundary-safe な場合だけ boundary を越えられる
 * local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない
+* raw pointer を field / payload に含む struct / union も boundary を越えられない
+* `arena<T>` / `handle<T>` / `Dyn<Contract>` / `Mutex<T>` / `Task<T>` は
+  v0.1 では boundary を越えられない
 * arena / handle の thread-safe sharing は v0.1 では扱わない
 
 OS thread、event loop、networking runtime、atomic ordering の詳細 API は、

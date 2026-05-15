@@ -3,6 +3,7 @@ package interp
 import (
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"sync"
 
@@ -68,8 +69,25 @@ func (i *Interpreter) Run(program *ast.Program) error {
 			continue
 		}
 	}
-	_, err := i.callFunction("main", nil)
-	return err
+	value, err := i.callFunction("main", nil)
+	if err != nil {
+		return err
+	}
+	if value.kind == kindErrorUnion {
+		return fmt.Errorf("runtime error: %s", errorUnionMessage(value))
+	}
+	return nil
+}
+
+// errorUnionMessage extracts a readable message from an unhandled !T value.
+func errorUnionMessage(value Value) string {
+	if value.errUnion == nil {
+		return "error"
+	}
+	if value.errUnion.payload != nil {
+		return value.errUnion.payload.String()
+	}
+	return value.errUnion.message
 }
 
 // registerImpl records concrete methods for runtime dispatch.
@@ -825,12 +843,57 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	if value, ok := evalIoBuiltin(name, args); ok {
 		return value, true, nil
 	}
+	if value, ok, err := i.evalFsBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
+	if value, ok, err := i.evalTaskBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
+	switch name {
+	case "std.channel.Channel":
+		return errorUnionValue("use std::channel::Channel<T>()"), true, nil
+	case "std.thread.scoped":
+		value, err := i.evalThreadScoped(args, env)
+		return value, true, err
+	case "std.atomic.Atomic":
+		return errorUnionValue("use std::atomic::Atomic<T>(value)"), true, nil
+	case "std.atomic.AtomicI64":
+		return errorUnionValue("use std::atomic::Atomic<i64>(value)"), true, nil
+	case "std.sync.Mutex":
+		return errorUnionValue("use std::sync::Mutex<T>(value)"), true, nil
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalFsBuiltin evaluates std::fs functions with explicit Io.
+func (i *Interpreter) evalFsBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "std.fs.read_file":
+		value, err := i.evalFsReadFile(args, env)
+		return value, true, err
+	case "std.fs.write_file":
+		value, err := i.evalFsWriteFile(args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalTaskBuiltin evaluates structured task and data-parallel std functions.
+func (i *Interpreter) evalTaskBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
 	switch name {
 	case "std.task.Group":
 		value, err := i.evalTaskGroup(args, env)
 		return value, true, err
-	case "std.channel.Channel":
-		return errorUnionValue("use std::channel::Channel<T>()"), true, nil
 	case "std.task.Queue":
 		return callQueueFromExprs(args), true, nil
 	case "std.task.partition_mut":
@@ -845,18 +908,84 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	case "std.task.parallel_map":
 		value, err := i.evalParallelMap(args, env)
 		return value, true, err
-	case "std.thread.scoped":
-		value, err := i.evalThreadScoped(args, env)
-		return value, true, err
-	case "std.atomic.Atomic":
-		return errorUnionValue("use std::atomic::Atomic<T>(value)"), true, nil
-	case "std.atomic.AtomicI64":
-		return errorUnionValue("use std::atomic::Atomic<i64>(value)"), true, nil
-	case "std.sync.Mutex":
-		return errorUnionValue("use std::sync::Mutex<T>(value)"), true, nil
 	default:
 		return voidValue(), false, nil
 	}
+}
+
+// evalFsReadFile reads a file using an explicit Io capability.
+func (i *Interpreter) evalFsReadFile(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 2 {
+		return errorUnionValue("std::fs::read_file expected io and path"), nil
+	}
+	ioValue, path, err := i.evalFsIoPath(args, env, "std::fs::read_file")
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return stringValue(string(data)), nil
+}
+
+// evalFsWriteFile writes a file using an explicit Io capability.
+func (i *Interpreter) evalFsWriteFile(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 3 {
+		return errorUnionValue("std::fs::write_file expected io, path, and bytes"), nil
+	}
+	ioValue, path, err := i.evalFsIoPath(args, env, "std::fs::write_file")
+	if err != nil {
+		return voidValue(), err
+	}
+	bytes, err := i.evalExpr(args[2], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if bytes.kind != kindString {
+		return errorUnionValue("std::fs::write_file expected []const u8 bytes"), nil
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	if err := os.WriteFile(path, []byte(bytes.s), 0o644); err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	return voidValue(), nil
+}
+
+// evalFsIoPath evaluates the common Io and path arguments for std::fs calls.
+func (i *Interpreter) evalFsIoPath(
+	args []ast.Expression,
+	env *Env,
+	name string,
+) (Value, string, error) {
+	ioValue, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), "", err
+	}
+	if ioValue.kind != kindIo {
+		return voidValue(), "", fmt.Errorf("runtime error: %s expects Io", name)
+	}
+	path, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), "", err
+	}
+	if path.kind != kindString {
+		return voidValue(), "", fmt.Errorf("runtime error: %s expects []const u8 path", name)
+	}
+	return ioValue, path.s, nil
+}
+
+// failingIoError converts deterministic failing Io into a runtime error-union value.
+func failingIoError(ioValue Value) (Value, bool) {
+	if ioValue.typeName != "failing" {
+		return voidValue(), false
+	}
+	return errorUnionValue("io runtime is failing"), true
 }
 
 // evalIoBuiltin evaluates std::io constructor calls.
@@ -1207,8 +1336,12 @@ func (i *Interpreter) evalParallelFor(args []ast.Expression, env *Env) (Value, e
 		return voidValue(), fmt.Errorf("runtime error: parallel_for expects function name")
 	}
 	for idx := start; idx < end; idx++ {
-		if _, err := i.callFunction(target.Name, []Value{intValue(idx)}); err != nil {
+		value, err := i.callFunction(target.Name, []Value{intValue(idx)})
+		if err != nil {
 			return voidValue(), err
+		}
+		if value.kind == kindErrorUnion {
+			return value, nil
 		}
 	}
 	return voidValue(), nil
@@ -1387,12 +1520,24 @@ func evalTaskMethod(task Value, name string, args []ast.Expression) (Value, erro
 	}
 	switch name {
 	case "await":
+		if task.task.state == taskCanceled {
+			return voidValue(), fmt.Errorf("runtime error: task was canceled")
+		}
+		if task.task.state == taskAwaited {
+			return voidValue(), fmt.Errorf("runtime error: task was already awaited")
+		}
 		value, err := finishTask(task.task)
-		task.task.done = true
+		task.task.state = taskAwaited
 		return value, err
 	case "cancel":
+		if task.task.state == taskCanceled {
+			return voidValue(), fmt.Errorf("runtime error: task was already canceled")
+		}
+		if task.task.state == taskAwaited {
+			return voidValue(), fmt.Errorf("runtime error: task was already awaited")
+		}
 		waitTask(task.task)
-		task.task.done = true
+		task.task.state = taskCanceled
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Task has no method `%s`", name)
@@ -1407,7 +1552,7 @@ func finishTask(task *Task) (Value, error) {
 
 // waitTask waits for a running task and stores its result.
 func waitTask(task *Task) {
-	if task.result != nil && !task.done {
+	if task.result != nil && task.state == taskOpen {
 		result := <-task.result
 		task.value = result.value
 		task.err = result.err
