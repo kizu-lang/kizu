@@ -437,26 +437,10 @@ func TestSelfHostModuleImportOracle(t *testing.T) {
 
 // TestSelfHostModuleGraphOracle compares package root graph facts and a failure.
 func TestSelfHostModuleGraphOracle(t *testing.T) {
-	cases := []struct {
-		name   string
-		root   string
-		source string
-	}{
-		{
-			name:   "basic",
-			root:   "tests/conformance/modules/basic",
-			source: "tests/conformance/modules/basic/src/main.kizu",
-		},
-		{
-			name:   "missing_import",
-			root:   "tests/conformance/modules/missing_import",
-			source: "tests/conformance/modules/missing_import/src/main.kizu",
-		},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			root := filepath.Join(repoRoot(t), filepath.FromSlash(tt.root))
-			source := filepath.Join(repoRoot(t), filepath.FromSlash(tt.source))
+	for _, item := range loadModuleConformanceManifest(t).Cases {
+		t.Run(item.Name, func(t *testing.T) {
+			root := filepath.Join(repoRoot(t), filepath.FromSlash(item.Path))
+			source := filepath.Join(repoRoot(t), filepath.FromSlash(item.RootSource))
 			got := extractMarkedSnapshot(
 				t, runSelfHostFrontend(t, source),
 				"module graph snapshot", "module graph snapshot end",
