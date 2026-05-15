@@ -47,6 +47,19 @@ func TestRunCommandArenaExample(t *testing.T) {
 	}
 }
 
+// TestCheckCommandPackageFixture checks manifest-based multi-file package checks.
+func TestCheckCommandPackageFixture(t *testing.T) {
+	source := filepath.Join("..", "..", "tests", "conformance", "modules", "basic")
+	cmd := exec.Command("go", "run", ".", "check", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if string(out) != "check: ok\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
 func TestIRCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "ir", "../../examples/hello.kizu")

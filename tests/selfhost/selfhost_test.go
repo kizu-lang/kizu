@@ -157,6 +157,21 @@ func TestSelfHostRichLexerStreamComparedWithGoLexer(t *testing.T) {
 	}
 }
 
+// TestSelfHostReadsModuleFixture checks self-host can read the module fixture.
+func TestSelfHostReadsModuleFixture(t *testing.T) {
+	fixture := filepath.Join(
+		repoRoot(t), "tests", "conformance", "modules", "basic", "src", "main.kizu",
+	)
+	got := runSelfHostFrontend(t, fixture)
+	if !strings.Contains(got, "source:main.kizu\n") {
+		t.Fatalf("got %q", got)
+	}
+	want := "tokens\n" + strconv.Itoa(countGoTokens(t, fixture)) + "\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got %q, want it to contain %q", got, want)
+	}
+}
+
 // TestSelfHostSourcePolicy enforces lightweight compiler-code style rules.
 func TestSelfHostSourcePolicy(t *testing.T) {
 	for _, path := range selfHostSources(t) {
