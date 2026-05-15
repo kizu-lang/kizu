@@ -4,7 +4,49 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/parser"
 )
+
+// TestModuleConformanceFixture resolves and parses the basic multi-file fixture.
+func TestModuleConformanceFixture(t *testing.T) {
+	root := filepath.Join("..", "..", "tests", "conformance", "modules", "basic")
+	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ParseManifest(string(source))
+	if err != nil {
+		t.Fatalf("parse manifest failed: %v", err)
+	}
+	graph, err := ResolveModules(root, manifest)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	got := modulePaths(graph.Modules)
+	want := []string{"app", "app::lexer", "app::parser::ast"}
+	if !sameStrings(got, want) {
+		t.Fatalf("got modules %#v, want %#v", got, want)
+	}
+	for _, module := range graph.Modules {
+		parseConformanceModule(t, module)
+	}
+}
+
+// parseConformanceModule checks that one fixture source is valid Kizu syntax.
+func parseConformanceModule(t *testing.T, module Module) {
+	t.Helper()
+	source, err := os.ReadFile(module.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := parser.New(lexer.New(string(source)))
+	p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors in %s: %v", module.Path, p.Errors())
+	}
+}
 
 // TestResolveModules maps source files to package module paths.
 func TestResolveModules(t *testing.T) {

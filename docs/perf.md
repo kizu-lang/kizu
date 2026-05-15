@@ -94,9 +94,26 @@ kizu why-rebuild <file>
 - `cache status` で状態を見られる
 - `cache prune` で削除できる
 - `why-rebuild` で再ビルド理由を見られる
+- module-aware cache key は、compiler version、manifest hash、module graph
+  hash、source hash、public interface hash、target、backend、optimization
+  mode、stdlib hash を含む
+- `why-rebuild` は manifest、module graph、source、public interface、stdlib、
+  target/backend/optimization のどれが変化したかを説明する
 - debug artifact は明示 opt-in にする
 - build script と proc macro による隠れた依存は作らない
 - CI の必須 path に巨大 artifact 生成や無制限 cache population を入れない
 - cache / artifact の新規種類を追加する場合は、cache key、保存条件、prune 条件、
   status 表示、測定 command を同じ変更で定義する
 - no-op rebuild と single-file edit rebuild が不必要に重くならないことを確認する
+
+## module graph 測定
+
+module/import 実装後は、少なくとも `tests/conformance/modules/basic` を使って次を測る。
+
+- manifest と source が変わらない no-op check
+- private 実装だけを変えた single-file edit check
+- public interface を変えた single-file edit check
+- import graph を変えた manifest/module edit check
+
+public interface が変わらない編集では、依存 module の再処理範囲が説明可能でなければならない。
+public interface が変わる編集では、依存 module が再検査対象になる理由を `why-rebuild` で説明する。
