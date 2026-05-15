@@ -157,6 +157,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
 	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
+	declSnapshot := formatDeclSnapshot(goDeclSnapshot(t, fixture))
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
 	want := "source:simple.kizu\n" +
@@ -174,6 +175,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"ast snapshot\n" +
 		astSnapshot +
 		"ast snapshot end\n" +
+		"decl snapshot\n" +
+		declSnapshot +
+		"decl snapshot end\n" +
 		"semantic snapshot\n" +
 		semanticSnapshot +
 		"semantic snapshot end\n" +
@@ -205,6 +209,7 @@ func TestSelfHostFixtureComparedWithGoLexer(t *testing.T) {
 	}
 	assertTokenSnapshots(t, got, fixture)
 	assertAstSnapshot(t, got, fixture)
+	assertDeclSnapshot(t, got, fixture)
 	assertSemanticSnapshot(t, got, fixture)
 }
 
@@ -239,6 +244,7 @@ func TestSelfHostReadsModuleFixture(t *testing.T) {
 	}
 	assertTokenSnapshots(t, got, fixture)
 	assertAstSnapshot(t, got, fixture)
+	assertDeclSnapshot(t, got, fixture)
 	assertSemanticSnapshot(t, got, fixture)
 	assertIrSnapshot(t, got, fixture)
 }
@@ -249,6 +255,7 @@ func TestSelfHostExampleLexerSnapshotsComparedWithGoLexer(t *testing.T) {
 	got := runSelfHostFrontend(t, fixture)
 	assertTokenSnapshots(t, got, fixture)
 	assertAstSnapshot(t, got, fixture)
+	assertDeclSnapshot(t, got, fixture)
 	assertIrSnapshot(t, got, fixture)
 }
 
@@ -264,6 +271,7 @@ func TestSelfHostReadsModuleConformanceManifest(t *testing.T) {
 			got := runSelfHostFrontend(t, fixture)
 			assertTokenSnapshots(t, got, fixture)
 			assertAstSnapshot(t, got, fixture)
+			assertDeclSnapshot(t, got, fixture)
 			assertSemanticSnapshot(t, got, fixture)
 			assertIrSnapshot(t, got, fixture)
 		})
@@ -510,6 +518,44 @@ func formatAstSnapshot(snapshot astSnapshot) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// goDeclSnapshot returns the top-level declaration sequence from the Go AST.
+func goDeclSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	lines := []string{}
+	for _, decl := range program.Decls {
+		lines = appendDeclSnapshot(lines, decl)
+	}
+	return lines
+}
+
+// appendDeclSnapshot appends one top-level declaration to a snapshot.
+func appendDeclSnapshot(lines []string, decl ast.Decl) []string {
+	switch d := decl.(type) {
+	case *ast.ImportDecl:
+		lines = append(lines, "import")
+		lines = append(lines, d.Path...)
+		return append(lines, "import end")
+	case *ast.FunctionDecl:
+		return append(lines, "TokenKind::Fn", d.Name)
+	case *ast.StructDecl:
+		return append(lines, "TokenKind::Struct", d.Name)
+	case *ast.EnumDecl:
+		return append(lines, "TokenKind::Enum", d.Name)
+	case *ast.UnionDecl:
+		return append(lines, "TokenKind::Union", d.Name)
+	case *ast.ContractDecl:
+		return append(lines, "TokenKind::Contract", d.Name)
+	default:
+		return lines
+	}
+}
+
+// formatDeclSnapshot formats declaration snapshots as frontend.kizu prints them.
+func formatDeclSnapshot(lines []string) string {
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // goSemanticSnapshot returns the normalized Go semantic snapshot.
 func goSemanticSnapshot(t *testing.T, path string) semanticSnapshot {
 	t.Helper()
@@ -591,6 +637,16 @@ func assertAstSnapshot(t *testing.T, output string, fixture string) {
 	want := formatAstSnapshot(goAstSnapshot(t, fixture))
 	if got != want {
 		t.Fatalf("self-host AST snapshot got %q, want %q", got, want)
+	}
+}
+
+// assertDeclSnapshot compares top-level declaration order with the Go parser.
+func assertDeclSnapshot(t *testing.T, output string, fixture string) {
+	t.Helper()
+	got := extractMarkedSnapshot(t, output, "decl snapshot", "decl snapshot end")
+	want := formatDeclSnapshot(goDeclSnapshot(t, fixture))
+	if got != want {
+		t.Fatalf("self-host declaration snapshot got %q, want %q", got, want)
 	}
 }
 
