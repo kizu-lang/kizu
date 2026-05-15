@@ -1619,7 +1619,8 @@ build cache key には、compiler version、manifest hash、resolved module grap
 source hash、public interface hash、target、backend、optimization mode、stdlib hash
 を含めます。
 
-`kizu test` と `kizu lint` は v0.1 では未実装です。
+`kizu test` は v0.2 では discovery なしの single-file runner として実装済みです。
+`kizu lint` は未実装です。
 
 ## 18. v0.1 実装構成
 
