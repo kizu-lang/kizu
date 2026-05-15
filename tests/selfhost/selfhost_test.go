@@ -489,6 +489,7 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 	cases := []string{
 		"examples/borrow.kizu",
 		"examples/negative/moved_value.kizu",
+		"examples/negative/double_move.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
