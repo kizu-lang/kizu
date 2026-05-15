@@ -2330,11 +2330,29 @@ func (c *Checker) checkMapReceiverMethod(
 	env *scope,
 	unsafe bool,
 ) (Type, error) {
+	if err := checkMapReceiverBorrow(field, env); err != nil {
+		return "", err
+	}
 	mapArgs, err := c.checkedMapArgs(arg)
 	if err != nil {
 		return "", err
 	}
 	return c.checkMapMethod(Type(mapArgs[1]), field.Name, args, env, unsafe)
+}
+
+// checkMapReceiverBorrow rejects Map methods whose receiver cannot be tracked safely.
+func checkMapReceiverBorrow(field *ast.FieldExpr, env *scope) error {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	if field.Name == "deinit" && env.isBorrowed(ident.Name) {
+		return fmt.Errorf("type error: `Map.deinit` requires owned Map receiver")
+	}
+	if field.Name == "insert" && env.isBorrowed(ident.Name) && !env.isMutBorrowed(ident.Name) {
+		return fmt.Errorf("type error: `Map.insert` requires mutable Map receiver")
+	}
+	return nil
 }
 
 // checkConcurrencyMethod validates std concurrency prototype instance methods.

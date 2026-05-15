@@ -1640,6 +1640,9 @@ func (c *Checker) checkMethodCallExpr(
 		return c.checkArrayMethod(arena, elem, field.Name, args, env)
 	}
 	if ok && base == "std::map::Map" {
+		if err := checkMapReceiverBorrow(arena, field.Name); err != nil {
+			return "", err
+		}
 		return c.checkMapMethod(arena, elem, field.Name, args, env)
 	}
 	if !ok || base != "arena" {
@@ -1668,6 +1671,9 @@ func (c *Checker) checkNonArenaMethod(
 		}
 		return c.checkStringMethod(value, name, args, env)
 	}
+	if err := checkMapReceiverBorrow(value, name); err != nil {
+		return "", err
+	}
 	if value.typeName == "TaskGroup" {
 		return c.checkTaskGroupMethod(name, args, env)
 	}
@@ -1688,6 +1694,21 @@ func checkStringReceiverBorrow(value *binding, name string) error {
 	}
 	if isStringMutatingMethod(name) && value.borrowedParam && !value.mutBorrow {
 		return fmt.Errorf("string error: `String.%s` requires mutable String receiver", name)
+	}
+	return nil
+}
+
+// checkMapReceiverBorrow rejects Map methods whose receiver cannot be tracked safely.
+func checkMapReceiverBorrow(value *binding, name string) error {
+	base, _, ok := splitGenericType(value.typeName)
+	if !ok || base != "std::map::Map" {
+		return nil
+	}
+	if name == "deinit" && value.borrowedParam {
+		return fmt.Errorf("map error: `Map.deinit` requires owned Map receiver")
+	}
+	if name == "insert" && value.borrowedParam && !value.mutBorrow {
+		return fmt.Errorf("map error: `Map.insert` requires mutable Map receiver")
 	}
 	return nil
 }
