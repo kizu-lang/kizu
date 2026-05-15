@@ -52,6 +52,8 @@ let text = task.await();
 spawn された task は await または cancel されなければならない。
 TaskGroup を抜ける前に、全 task は完了または cancel される。
 task は `TaskGroup` の structured scope を越えて escape できない。
+`await` は task body の error を伝播する。
+`cancel` は v0.1 では task の完了を待ち、結果または error を破棄する。
 
 v0.1 で目指す標準 API 境界:
 
@@ -66,6 +68,8 @@ std::thread::scoped       scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
 std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
+std::fs::read_file        explicit-Io file read returning ![]const u8
+std::fs::write_file       explicit-Io file write returning !void
 ```
 
 `std::thread::scoped`、`std::atomic::Atomic<T>`、`std::sync::Mutex<T>` は必要だが、
@@ -77,10 +81,17 @@ value を move し、`recv()` は owned value を返す。borrow と raw pointer
 では channel boundary を越えられない。
 v0.1 では empty receive は runtime error とし、blocking semantics と `select` は採用しない。
 
+`std::fs` は hidden global runtime を持たない。I/O API は必ず `Io` capability を
+受け取り、失敗は `!T` error として返す。v0.1 の最小 API は
+`std::fs::read_file(io, path)` と `std::fs::write_file(io, path, bytes)` だけにする。
+blocking / threaded の違いは呼び出し側が選んだ `Io` と `TaskGroup` で表す。
+
 `std::task::parallel_for` は data-parallel API とする。disjoint output は
 `std::task::partition_mut(init: i64, count: i64)` と
 `std::task::parallel_map(io, partition, start, end, worker)` に閉じ込める。
 worker-local scratch は `std::task::LocalBuffer` のような trusted std API に閉じ込める。
+collection / mutable slice への直接接続は v0.1 では行わず、ADR-0040 に従って
+`std.mem` と `array<T>` の仕様後に設計する。
 v0.1 interpreter は逐次実行でもよいが、API と checker rule は実並行 runtime でも
 維持できる形にする。
 
@@ -95,8 +106,13 @@ memory order を細かく選ぶ API は、safe structured API が固まった後
 
 Rust の `Send` trait は採用しない。
 v0.1 では boundary を越えられる型を checker rule として明示する。
-copy primitive と owned value は boundary を越えられる。
+copy primitive、enum、safe field だけを持つ owned struct / union は boundary を越えられる。
+`Atomic<T>` は v0.1 atomic 対応型なら boundary を越えられる。
+`Channel<T>` は `T` が boundary-safe な場合だけ boundary を越えられる。
 local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない。
+raw pointer を field / payload に含む struct / union も boundary を越えられない。
+`arena<T>` / `handle<T>` / `Dyn<Contract>` / `Mutex<T>` / `Task<T>` は
+v0.1 では boundary を越えられない。
 arena / handle の thread-safe sharing は v0.1 では扱わない。
 
 ## Borrow boundary

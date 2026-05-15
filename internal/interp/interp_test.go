@@ -3,6 +3,9 @@ package interp
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -220,7 +223,7 @@ fn main() -> !i64 {
 
 // TestRunErrorUnionTryPropagatesError checks try returns error-union errors without printing.
 func TestRunErrorUnionTryPropagatesError(t *testing.T) {
-	got := runSource(t, `fn parse() -> !i64 {
+	got, err := parseAndRun(`fn parse() -> !i64 {
     return error("bad");
 }
 fn main() -> !i64 {
@@ -228,6 +231,9 @@ fn main() -> !i64 {
     print(value);
     return value;
 }`)
+	if err == nil || err.Error() != "runtime error: bad" {
+		t.Fatalf("got err %v", err)
+	}
 	if got != "" {
 		t.Fatalf("got %q, want empty output", got)
 	}
@@ -265,6 +271,29 @@ func TestRuntimeRejectsInvalidArenaHandle(t *testing.T) {
 	want := "runtime error: invalid arena handle"
 	if err.Error() != want {
 		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+}
+
+// TestRunFsWriteAndRead checks the minimal std::fs API against a temp file.
+func TestRunFsWriteAndRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "note.txt")
+	source := strings.ReplaceAll(`fn main() -> !void {
+    let io = std::io::blocking();
+    try std::fs::write_file(io, "__PATH__", "hello fs");
+    let text = try std::fs::read_file(io, "__PATH__");
+    print(text);
+    return void;
+}`, "__PATH__", path)
+	got := runSource(t, source)
+	if got != "hello fs\n" {
+		t.Fatalf("got %q", got)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != "hello fs" {
+		t.Fatalf("written %q", string(written))
 	}
 }
 

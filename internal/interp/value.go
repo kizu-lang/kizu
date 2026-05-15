@@ -81,11 +81,19 @@ type TaskResult struct {
 	err   error
 }
 
+type taskState int
+
+const (
+	taskOpen taskState = iota
+	taskAwaited
+	taskCanceled
+)
+
 // Task stores the result of a spawned interpreter task.
 type Task struct {
 	value  Value
 	err    error
-	done   bool
+	state  taskState
 	result <-chan TaskResult
 }
 

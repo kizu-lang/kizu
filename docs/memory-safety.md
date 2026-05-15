@@ -124,6 +124,8 @@ policy.
 - The v0.1 interpreter may execute task, queue, thread, and data-parallel APIs
   synchronously.
 - Tasks must be awaited or canceled.
+- `await` propagates task body errors.
+- `cancel` waits for task completion in v0.1 and discards the result or error.
 - Task, queue, channel, and thread boundaries cannot capture or transport local
   borrows.
 - Raw pointers cannot cross concurrency boundaries in safe Kizu.
@@ -138,14 +140,28 @@ policy.
 - `Atomic<T>` supports `bool` and `i64` in v0.1.
 - Kizu does not adopt Rust `Send`; boundary-crossing types are explicit checker
   rules.
-- Copy primitives and owned values may cross concurrency boundaries.
+- Copy primitives, enums, and owned structs/unions whose fields are all
+  boundary-safe may cross concurrency boundaries.
+- `Atomic<T>` may cross boundaries only when `T` is supported by v0.1 atomics.
+- `Channel<T>` may cross boundaries only when `T` is boundary-safe.
 - Local borrows, mutable borrows, and raw pointers may not cross safe Kizu
   concurrency boundaries.
+- Structs and unions containing raw pointer fields or payloads may not cross
+  concurrency boundaries.
+- `arena<T>`, `handle<T>`, `Dyn<Contract>`, `Mutex<T>`, and `Task<T>` may not
+  cross concurrency boundaries in v0.1.
 - Arena / handle thread-safe sharing is not part of v0.1.
 - `std::task::partition_mut(init, count)` creates checked disjoint output slots.
 - `partition.at(i)` bounds-checks slot access.
 - `std::task::parallel_map(io, partition, start, end, worker)` writes only into the
   checked slot range.
+- v0.1 data parallelism is range and `Partition` based; it does not write
+  directly into user collections or mutable slices.
+- `parallel_for` propagates the first worker `!void` error through `try`.
+- `std::fs` APIs require explicit `Io`; I/O errors are returned as `!T` values
+  and can be propagated through `try`.
+- Task-based file I/O uses the same `TaskGroup` ownership and boundary rules as
+  any other spawned function.
 
 These language runtime boundaries are separate from GitHub Actions or CI event
 boundaries. For example, `pull_request_target` is a repository automation
@@ -214,12 +230,13 @@ memory-safety invariants to representative examples.
 | unsafe does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |
 | runtime borrow cannot cross comptime | `examples/comptime.kizu` | `examples/negative/comptime_borrow_escape.kizu` |
-| task ownership is structured | `examples/task_group.kizu` | `examples/negative/unawaited_task.kizu`, `examples/negative/task_move.kizu`, `examples/negative/task_borrow_capture.kizu`, `examples/negative/task_spawn_pointer.kizu` |
+| task ownership is structured | `examples/task_group.kizu`, `examples/task_cancel.kizu` | `examples/negative/unawaited_task.kizu`, `examples/negative/task_move.kizu`, `examples/negative/task_borrow_capture.kizu`, `examples/negative/task_spawn_pointer.kizu`, `examples/negative/task_spawn_handle.kizu`, `examples/negative/task_spawn_arena.kizu`, `examples/negative/task_spawn_mutex.kizu`, `examples/negative/task_spawn_struct_pointer.kizu`, `examples/negative/task_await_error.kizu`, `examples/negative/task_await_after_cancel.kizu`, `examples/negative/task_cancel_after_await.kizu` |
+| file I/O uses explicit Io and `!T` errors | `examples/fs_read.kizu`, `examples/fs_task.kizu` | `examples/negative/fs_read_missing.kizu`, `examples/negative/fs_read_without_io.kizu`, `examples/negative/fs_write_wrong_bytes.kizu`, `examples/negative/fs_failing_io.kizu` |
 | channel sends owned values | `examples/channel.kizu`, `examples/channel_string.kizu` | `examples/negative/channel_send_move.kizu`, `examples/negative/channel_send_borrow.kizu`, `examples/negative/channel_send_pointer.kizu`, `examples/negative/channel_empty_recv.kizu`, `examples/negative/channel_send_wrong_type.kizu`, `examples/negative/channel_untyped_constructor.kizu` |
 | queued work cannot capture borrows or raw pointers | `examples/task_queue.kizu` | `examples/negative/queue_borrow_capture.kizu`, `examples/negative/queue_enqueue_pointer.kizu` |
-| structured data parallelism uses disjoint output | `examples/parallel_for.kizu` | `examples/negative/parallel_shared_mutable.kizu`, `examples/negative/parallel_map_wrong_worker.kizu`, `examples/negative/partition_mut_non_i64.kizu` |
-| partition bounds are checked | `examples/parallel_for.kizu` | `examples/negative/partition_index_out_of_bounds.kizu`, `examples/negative/parallel_map_out_of_bounds.kizu` |
-| scoped thread boundary rejects borrows and raw pointers | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu` |
+| structured data parallelism uses disjoint output | `examples/parallel_for.kizu` | `examples/negative/parallel_shared_mutable.kizu`, `examples/negative/parallel_map_wrong_worker.kizu`, `examples/negative/partition_mut_non_i64.kizu`, `examples/negative/parallel_for_error.kizu` |
+| partition and local buffer bounds are checked | `examples/parallel_for.kizu` | `examples/negative/partition_index_out_of_bounds.kizu`, `examples/negative/parallel_map_out_of_bounds.kizu`, `examples/negative/local_buffer_out_of_bounds.kizu` |
+| scoped thread boundary rejects unsafe boundary values | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu`, `examples/negative/thread_scoped_mutex.kizu` |
 | `Atomic<T>` is bool/i64-only and seq_cst-only | `examples/thread_boundary.kizu`, `examples/atomic_flag.kizu` | `examples/negative/atomic_store_wrong_type.kizu`, `examples/negative/atomic_old_name.kizu`, `examples/negative/atomic_untyped_constructor.kizu`, `examples/negative/atomic_unsupported_type.kizu` |
 | `Mutex<T>` rejects raw pointer and non-copy/non-matching payloads | `examples/thread_boundary.kizu` | `examples/negative/mutex_pointer.kizu`, `examples/negative/mutex_wrong_type.kizu`, `examples/negative/mutex_non_copy.kizu`, `examples/negative/mutex_untyped_constructor.kizu` |
 
