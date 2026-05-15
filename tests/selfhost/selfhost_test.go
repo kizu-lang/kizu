@@ -230,10 +230,27 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 // selfHostFrontendSmokeOutput returns the expected full skeleton output.
 func selfHostFrontendSmokeOutput(t *testing.T, fixture string) string {
 	t.Helper()
+	return selfHostFrontendSmokeHeader(fixture) + selfHostFrontendSmokeSnapshots(t, fixture)
+}
+
+// selfHostFrontendSmokeHeader returns source and compiler summary rows.
+func selfHostFrontendSmokeHeader(fixture string) string {
+	return "source:simple.kizu\n" +
+		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
+		"compiler stages\n8\n" +
+		"parsed functions\n2\n" +
+		"tokens\n19\n" +
+		"bootstrap ready\ntrue\n"
+}
+
+// selfHostFrontendSmokeSnapshots returns all phase snapshot rows.
+func selfHostFrontendSmokeSnapshots(t *testing.T, fixture string) string {
+	t.Helper()
 	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
 	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
 	astDetailSnapshot := formatAstDetailSnapshot(goAstDetailSnapshot(t, fixture))
+	astNodeDumpSnapshot := formatAstNodeDumpSnapshot(goAstNodeDumpSnapshot(t, fixture))
 	declSnapshot := formatDeclSnapshot(goDeclSnapshot(t, fixture))
 	moduleSnapshot := formatModuleGraphSnapshot(singleFileModuleGraphSnapshot())
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
@@ -245,13 +262,7 @@ func selfHostFrontendSmokeOutput(t *testing.T, fixture string) string {
 	irDumpSnapshot := formatIrDumpSnapshot(goIrDumpSnapshot(t, fixture))
 	backendSnapshot := formatBackendFingerprints(goBackendFingerprints(t, fixture))
 	cacheSnapshot := formatCacheContractSnapshot()
-	want := "source:simple.kizu\n" +
-		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
-		"compiler stages\n8\n" +
-		"parsed functions\n2\n" +
-		"tokens\n19\n" +
-		"bootstrap ready\ntrue\n" +
-		"token stream\n" +
+	return "token stream\n" +
 		tokenStream + "\n" +
 		"token stream end\n" +
 		"token snapshots\n" +
@@ -263,6 +274,9 @@ func selfHostFrontendSmokeOutput(t *testing.T, fixture string) string {
 		"ast detail snapshot\n" +
 		astDetailSnapshot +
 		"ast detail snapshot end\n" +
+		"ast node dump snapshot\n" +
+		astNodeDumpSnapshot +
+		"ast node dump snapshot end\n" +
 		"decl snapshot\n" +
 		declSnapshot +
 		"decl snapshot end\n" +
@@ -297,7 +311,6 @@ func selfHostFrontendSmokeOutput(t *testing.T, fixture string) string {
 		cacheSnapshot +
 		"cache contract snapshot end\n" +
 		"TokenKind::Fn\n"
-	return want
 }
 
 // TestSelfHostFixtureComparedWithGoLexer checks the first Go/self-host bridge.
@@ -474,6 +487,29 @@ func TestSelfHostAstDetailOracle(t *testing.T) {
 	}
 }
 
+// TestSelfHostAstNodeDumpOracle compares a selected AST node dump.
+func TestSelfHostAstNodeDumpOracle(t *testing.T) {
+	cases := []string{
+		"selfhost/fixtures/simple.kizu",
+		"examples/functions.kizu",
+		"examples/variables.kizu",
+		"examples/arithmetic.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, fixture),
+				"ast node dump snapshot", "ast node dump snapshot end",
+			)
+			want := formatAstNodeDumpSnapshot(goAstNodeDumpSnapshot(t, fixture))
+			if got != want {
+				t.Fatalf("self-host AST node dump got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // TestSelfHostDiagnosticObjectOracle compares structured diagnostics.
 func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 	cases := []string{
@@ -547,6 +583,7 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/borrow.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
+		"examples/negative/move_while_borrowed.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -1394,6 +1431,115 @@ func formatAstDetailSnapshot(lines []string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// goAstNodeDumpSnapshot returns a selected pre-order AST node dump.
+func goAstNodeDumpSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	lines := []string{}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok {
+			continue
+		}
+		lines = append(lines, astFunctionNodeDump(fn)...)
+	}
+	return lines
+}
+
+// astFunctionNodeDump returns selected function node rows.
+func astFunctionNodeDump(fn *ast.FunctionDecl) []string {
+	lines := []string{
+		"FunctionDecl", fn.Name,
+		"params", strconv.Itoa(len(fn.Params)),
+		"return", normalizeReturnType(fn.ReturnType),
+		"BlockStmt",
+	}
+	return append(lines, astBlockNodeDump(fn.Body)...)
+}
+
+// astBlockNodeDump returns selected statement and expression node rows.
+func astBlockNodeDump(block *ast.BlockStmt) []string {
+	if block == nil {
+		return nil
+	}
+	lines := []string{}
+	for _, stmt := range block.Statements {
+		lines = append(lines, astStatementNodeDump(stmt)...)
+	}
+	return lines
+}
+
+// astStatementNodeDump returns selected statement node rows.
+func astStatementNodeDump(stmt ast.Statement) []string {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt:
+		return append([]string{"ReturnStmt"}, astExpressionNodeDump(s.Value)...)
+	case *ast.LetStmt:
+		kind := "LetStmt"
+		if s.Mutable {
+			kind = "VarStmt"
+		}
+		return append([]string{kind, s.Name}, astExpressionNodeDump(s.Value)...)
+	case *ast.AssignStmt:
+		return append([]string{"AssignStmt"}, astExpressionNodeDump(s.Value)...)
+	case *ast.ExprStmt:
+		return astExpressionNodeDump(s.Expr)
+	}
+	return nil
+}
+
+// astExpressionNodeDump returns selected expression node rows.
+func astExpressionNodeDump(expr ast.Expression) []string {
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		lines := []string{"BinaryExpr", tokenKindForOperator(e.Operator)}
+		lines = append(lines, astExpressionNodeDump(e.Left)...)
+		return append(lines, astExpressionNodeDump(e.Right)...)
+	case *ast.CallExpr:
+		lines := []string{"CallExpr", e.Callee.String(), strconv.Itoa(len(e.Args))}
+		for _, arg := range e.Args {
+			lines = append(lines, astExpressionNodeDump(arg)...)
+		}
+		return lines
+	}
+	return nil
+}
+
+// tokenKindForOperator returns the self-host token kind spelling for an operator.
+func tokenKindForOperator(operator string) string {
+	switch operator {
+	case "+":
+		return "TokenKind::Plus"
+	case "-":
+		return "TokenKind::Minus"
+	case "*":
+		return "TokenKind::Asterisk"
+	case "/":
+		return "TokenKind::Slash"
+	case "%":
+		return "TokenKind::Percent"
+	case "==":
+		return "TokenKind::Eq"
+	case "!=":
+		return "TokenKind::NotEq"
+	case "<":
+		return "TokenKind::LT"
+	case "<=":
+		return "TokenKind::LTE"
+	case ">":
+		return "TokenKind::GT"
+	case ">=":
+		return "TokenKind::GTE"
+	default:
+		return "TokenKind::Illegal"
+	}
+}
+
+// formatAstNodeDumpSnapshot formats AST node dump rows.
+func formatAstNodeDumpSnapshot(lines []string) string {
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // goDeclSnapshot returns the top-level declaration sequence from the Go AST.
 func goDeclSnapshot(t *testing.T, path string) []string {
 	t.Helper()
@@ -1660,10 +1806,24 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	if err == nil {
 		return ownershipSnapshot{Status: "pass", PrimaryStart: -1, RelatedStart: -1}
 	}
+	if strings.Contains(err.Error(), "cannot be moved while borrowed") {
+		return borrowedMoveOwnershipSnapshot(t, path, err.Error())
+	}
 	value := movedValueFromDiagnostic(t, err.Error())
 	primary, related := movedValueSpans(t, path, value)
 	return ownershipSnapshot{
 		Status: "fail", Message: "move error: moved value was used",
+		Value: value, PrimaryStart: primary, RelatedStart: related,
+	}
+}
+
+// borrowedMoveOwnershipSnapshot normalizes a borrow-while-move diagnostic.
+func borrowedMoveOwnershipSnapshot(t *testing.T, path string, message string) ownershipSnapshot {
+	t.Helper()
+	value := movedValueFromDiagnostic(t, message)
+	primary, related := movedValueSpans(t, path, value)
+	return ownershipSnapshot{
+		Status: "fail", Message: "borrow error: value cannot be moved while borrowed",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
 	}
 }
@@ -1673,6 +1833,10 @@ func movedValueFromDiagnostic(t *testing.T, message string) string {
 	t.Helper()
 	prefix := "moved value `"
 	start := strings.Index(message, prefix)
+	if start < 0 {
+		prefix = "value `"
+		start = strings.Index(message, prefix)
+	}
 	if start < 0 {
 		t.Fatalf("ownership diagnostic is outside oracle subset: %q", message)
 	}
