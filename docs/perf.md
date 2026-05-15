@@ -131,3 +131,16 @@ go test ./internal/buildcache -run TestPackageWhyRebuildExplainsGraphEdit
 
 `kizu why-rebuild <package>` は directory または `kizu.toml` を受け取り、cache entry
 が存在する場合は同じ module-aware key で hit/miss を説明する。
+
+## bootstrap / backend 測定
+
+self-host、backend、cache の切り替え条件は [`docs/bootstrap.md`](bootstrap.md) を正とする。
+
+v0.3 の backend smoke は Go 実装を oracle とし、次を明示的に測る。
+
+```sh
+go test ./tests/selfhost
+go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+just perf-cache-isolated
+```

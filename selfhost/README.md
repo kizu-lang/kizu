@@ -87,6 +87,10 @@ for selected positive sources and keeps selected memory-safety negative fixtures
 paired with the Go checker diagnostics. This is the v0.3 bridge for stages 3-5:
 diagnostics, type preconditions, and ownership preconditions.
 
+The IR/backend oracle currently compares normalized function, block, and backend
+artifact counts. The phase-by-phase 1:1 contract is documented in
+[`docs/bootstrap.md`](../docs/bootstrap.md).
+
 Current stdlib feedback is tracked in [`STDLIB.md`](STDLIB.md).
 
 ## Source Policy

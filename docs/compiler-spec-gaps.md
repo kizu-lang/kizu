@@ -100,6 +100,7 @@ Required user-facing commands:
 ### Bootstrap
 
 Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
+Operational contract: [docs/bootstrap.md](bootstrap.md).
 
 The Go implementation remains the oracle until the Kizu compiler matches it for
 lexer, parser, diagnostics, type checking, ownership checking, IR, backend smoke
@@ -108,8 +109,7 @@ tests, and self-check/build.
 ## Implementation Work Still Needed
 
 - Connect explicit build outputs to a package artifact layout under `target/`: #100.
-- Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
-  IR, backend outputs, and module fixtures: #91.
+- Expand self-host snapshots from normalized summaries to full phase outputs: #31.
 
 ## Implemented Groundwork
 
