@@ -17,7 +17,8 @@ Kizu では構文の混在を避け、読み手が式の意味を見た目で区
 ```kizu
 let color = Color::Red;
 let shape = Shape::Circle(10);
-let group = std::task::Group();
+let io = std::io::blocking();
+let group = std::task::Group(io);
 ```
 
 runtime value の field / method access は `.` を使う。

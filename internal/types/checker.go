@@ -1240,10 +1240,10 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 		return c.checkErrorCall(expr, env, unsafe)
 	}
 	if name.Name == "Io" {
-		return checkNoArgConstructor("Io", expr.Args, "Io")
+		return "", fmt.Errorf("type error: use `std::io::blocking()`")
 	}
 	if name.Name == "TaskGroup" {
-		return checkNoArgConstructor("TaskGroup", expr.Args, "TaskGroup")
+		return "", fmt.Errorf("type error: use `std::task::Group(io)`")
 	}
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
 }
@@ -1260,9 +1260,13 @@ func (c *Checker) checkQualifiedBuiltin(
 		return "", false, nil
 	}
 	switch name {
-	case "std.task.Group":
-		typ, err := checkNoArgConstructor(name, args, "TaskGroup")
+	case "std.io.blocking", "std.io.threaded", "std.io.failing":
+		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
+	case "std.io.evented":
+		return "", true, fmt.Errorf("type error: `std::io::evented` is not implemented in v0.1")
+	case "std.task.Group":
+		return c.checkTaskGroup(args, env, unsafe)
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
 	case "std.task.Queue":
@@ -1673,44 +1677,65 @@ func (c *Checker) checkTaskGroupMethod(
 	if name != "spawn" {
 		return "", fmt.Errorf("type error: TaskGroup has no method `%s`", name)
 	}
-	if len(args) < 2 {
-		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects io, function, and args")
+	if len(args) < 1 {
+		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects function and args")
 	}
-	ioType, err := c.checkExpr(args[0], env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	if ioType != "Io" {
-		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects Io, got %s", ioType)
-	}
-	target, ok := args[1].(*ast.IdentExpr)
+	target, ok := args[0].(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
+		if _, ok := env.lookup(target.Name); ok {
+			return "", fmt.Errorf("type error: `TaskGroup.spawn` expects function name")
+		}
 		return "", fmt.Errorf("type error: undefined function `%s`", target.Name)
 	}
-	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
-	if err := c.checkTaskArgs(target.Name, fn, spawnArgs, env, unsafe); err != nil {
+	if err := c.checkSpawnArgs(target.Name, fn, args[1:], env, unsafe); err != nil {
 		return "", err
 	}
 	return Type(fmt.Sprintf("Task<%s>", fn.returnType)), nil
 }
 
-// checkTaskArgs validates spawned function arguments.
-func (c *Checker) checkTaskArgs(
+// checkTaskGroup validates a task group bound to one Io implementation.
+func (c *Checker) checkTaskGroup(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `std::task::Group` expects io")
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "Io" {
+		return "", true, fmt.Errorf("type error: `std::task::Group` expects Io, got %s", got)
+	}
+	return "TaskGroup", true, nil
+}
+
+// checkSpawnArgs validates spawned function arguments after the implicit Io.
+func (c *Checker) checkSpawnArgs(
 	name string,
 	fn *functionType,
 	args []ast.Expression,
 	env *scope,
 	unsafe bool,
 ) error {
-	if len(args) != len(fn.params) {
-		return fmt.Errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), len(args))
+	if len(fn.params) == 0 || fn.params[0] != "Io" ||
+		fn.borrowParams[0] || fn.mutBorrowParams[0] {
+		return fmt.Errorf("type error: spawned function `%s` must accept owned Io as first parameter",
+			name)
+	}
+	if len(args) != len(fn.params)-1 {
+		return fmt.Errorf("type error: `%s` expects %d args, got %d",
+			name, len(fn.params)-1, len(args))
 	}
 	for idx, arg := range args {
-		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
+		paramIdx := idx + 1
+		if fn.borrowParams[paramIdx] || fn.mutBorrowParams[paramIdx] {
 			return fmt.Errorf("type error: task cannot capture borrow parameter `%s`", name)
 		}
 		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
@@ -1720,9 +1745,9 @@ func (c *Checker) checkTaskArgs(
 		if err != nil {
 			return err
 		}
-		if got != fn.params[idx] {
+		if got != fn.params[paramIdx] {
 			return fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
-				idx+1, name, fn.params[idx], got)
+				idx+1, name, fn.params[paramIdx], got)
 		}
 	}
 	return nil

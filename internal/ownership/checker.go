@@ -743,13 +743,15 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
+	if typ, ok, err := checkIoBuiltin(name, args); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
+		return typ, ok, err
+	}
 	switch name {
 	case "std.task.Group":
-		_, err := checkNoArgOwnershipCall(name, args)
-		if err != nil {
-			return "", true, err
-		}
-		return "TaskGroup", true, nil
+		return c.checkTaskGroup(args, env)
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("move error: use `std::channel::Channel<T>()`")
 	case "std.task.Queue":
@@ -768,12 +770,36 @@ func (c *Checker) checkQualifiedBuiltin(
 		return c.checkParallelMap(args, env)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkConcurrencyConstructor rejects untyped concurrency constructors.
+func checkConcurrencyConstructor(name string) (string, bool, error) {
+	switch name {
 	case "std.atomic.Atomic":
 		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
 		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<i64>(value)`")
 	case "std.sync.Mutex":
 		return "", true, fmt.Errorf("move error: use `std::sync::Mutex<T>(value)`")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkIoBuiltin validates std::io constructor ownership effects.
+func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
+	switch name {
+	case "std.io.blocking", "std.io.threaded", "std.io.failing":
+		_, err := checkNoArgOwnershipCall(name, args)
+		if err != nil {
+			return "", true, err
+		}
+		return "Io", true, nil
+	case "std.io.evented":
+		return "", true, fmt.Errorf("move error: `std::io::evented` is not implemented in v0.1")
 	default:
 		return "", false, nil
 	}
@@ -823,9 +849,10 @@ func (c *Checker) checkBuiltinCall(
 	case "error":
 		result, err := c.checkErrorCall(expr, env)
 		return result, true, err
-	case "Io", "TaskGroup":
-		result, err := checkNoArgOwnershipCall(name, expr.Args)
-		return result, true, err
+	case "Io":
+		return "", true, fmt.Errorf("move error: use `std::io::blocking()`")
+	case "TaskGroup":
+		return "", true, fmt.Errorf("move error: use `std::task::Group(io)`")
 	default:
 		return "", false, nil
 	}
@@ -1185,27 +1212,33 @@ func (c *Checker) checkTaskGroupMethod(
 	if name != "spawn" {
 		return "", fmt.Errorf("task error: TaskGroup has no method `%s`", name)
 	}
-	if len(args) < 2 {
-		return "", fmt.Errorf("task error: `TaskGroup.spawn` expects io, function, and args")
+	if len(args) < 1 {
+		return "", fmt.Errorf("task error: `TaskGroup.spawn` expects function and args")
 	}
-	if _, err := c.readExpr(args[0], env); err != nil {
-		return "", err
-	}
-	target, ok := args[1].(*ast.IdentExpr)
+	target, ok := args[0].(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("task error: `TaskGroup.spawn` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
+		if _, ok := env.lookup(target.Name); ok {
+			return "", fmt.Errorf("task error: `TaskGroup.spawn` expects function name")
+		}
 		return "", fmt.Errorf("task error: undefined function `%s`", target.Name)
 	}
-	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
-	if len(spawnArgs) != len(fn.params) {
+	spawnArgs := args[1:]
+	if len(fn.params) == 0 || fn.params[0].typeName != "Io" ||
+		fn.params[0].borrow || fn.params[0].mutBorrow {
+		return "", fmt.Errorf("task error: spawned function `%s` must accept owned Io as first parameter",
+			target.Name)
+	}
+	if len(spawnArgs) != len(fn.params)-1 {
 		return "", fmt.Errorf("task error: `%s` expects %d args, got %d",
-			target.Name, len(fn.params), len(spawnArgs))
+			target.Name, len(fn.params)-1, len(spawnArgs))
 	}
 	for idx, arg := range spawnArgs {
-		if fn.params[idx].borrow {
+		paramIdx := idx + 1
+		if fn.params[paramIdx].borrow {
 			return "", fmt.Errorf("task error: task cannot capture borrow parameter `%s`", target.Name)
 		}
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
@@ -1216,6 +1249,21 @@ func (c *Checker) checkTaskGroupMethod(
 		}
 	}
 	return fmt.Sprintf("Task<%s>", returnTypeName(fn)), nil
+}
+
+// checkTaskGroup validates a task group bound to one Io implementation.
+func (c *Checker) checkTaskGroup(args []ast.Expression, env *scope) (string, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("task error: `std::task::Group` expects io")
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "Io" {
+		return "", true, fmt.Errorf("task error: `std::task::Group` expects Io, got %s", got)
+	}
+	return "TaskGroup", true, nil
 }
 
 // checkTaskMethod marks task completion for await/cancel.

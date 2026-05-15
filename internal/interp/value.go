@@ -41,6 +41,7 @@ type Value struct {
 	errUnion  *ErrorUnion
 	enum      Enum
 	union     Union
+	taskGroup *TaskGroup
 	task      *Task
 	queue     *Queue
 	channel   *Channel
@@ -69,10 +70,23 @@ type ErrorUnion struct {
 	payload *Value
 }
 
-// Task stores the synchronous result of a spawned interpreter task.
-type Task struct {
+// TaskGroup owns one structured task scope and its I/O runtime mode.
+type TaskGroup struct {
+	io Value
+}
+
+// TaskResult stores the result produced by a running task.
+type TaskResult struct {
 	value Value
-	done  bool
+	err   error
+}
+
+// Task stores the result of a spawned interpreter task.
+type Task struct {
+	value  Value
+	err    error
+	done   bool
+	result <-chan TaskResult
 }
 
 // Queue stores deterministic deferred jobs for the v0.1 task API.
@@ -185,7 +199,7 @@ func (v Value) objectString() string {
 func (v Value) capabilityString() string {
 	switch v.kind {
 	case kindIo:
-		return "<io>"
+		return "<io:" + v.typeName + ">"
 	case kindTaskGroup:
 		return "<taskgroup>"
 	case kindTask:
@@ -267,18 +281,23 @@ func unionValue(typeName string, tag string, payload *Value) Value {
 }
 
 // ioValue returns an explicit I/O capability value.
-func ioValue() Value {
-	return Value{kind: kindIo}
+func ioValue(mode string) Value {
+	return Value{kind: kindIo, typeName: mode}
 }
 
 // taskGroupValue returns a structured task group value.
-func taskGroupValue() Value {
-	return Value{kind: kindTaskGroup}
+func taskGroupValue(io Value) Value {
+	return Value{kind: kindTaskGroup, taskGroup: &TaskGroup{io: io}}
 }
 
-// taskValue returns a completed synchronous task value.
-func taskValue(value Value) Value {
-	return Value{kind: kindTask, task: &Task{value: value}}
+// completedTaskValue returns a completed task value.
+func completedTaskValue(value Value, err error) Value {
+	return Value{kind: kindTask, task: &Task{value: value, err: err}}
+}
+
+// runningTaskValue returns a task value backed by a running goroutine.
+func runningTaskValue(result <-chan TaskResult) Value {
+	return Value{kind: kindTask, task: &Task{result: result}}
 }
 
 // queueValue returns an empty deterministic task queue.

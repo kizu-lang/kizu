@@ -38,9 +38,9 @@ let io = std::io::uring();  // Linux
 let io = std::io::kqueue(); // BSD / macOS
 ```
 
-v0.1 interpreter は `Io()` builtin と同期実行でよい。
-ただし API と checker rule は、将来 `std::io` implementation を選択できる runtime に
-置き換えても維持できる形にする。
+v0.1 interpreter は `std::io::blocking()`、`std::io::threaded()`、
+`std::io::failing()` を実装する。
+ただし `evented` / platform backend は後続で扱う。
 
 ## Safe Boundary
 
@@ -60,24 +60,24 @@ Kizu は低レベル制御を残しつつ、safe code の memory safety を優�
 
 ## Runtime Implementation Candidates
 
-`std::io` は将来、少なくとも次の implementation を持つ。
+`std::io` は v0.1 で次の implementation を持つ。
 
 ```text
 std::io::blocking()  simple blocking I/O
 std::io::threaded()  thread-backed I/O and task execution
-std::io::evented()   event-loop or stackful coroutine backed I/O
 std::io::failing()   test implementation that supports no external I/O
 ```
 
-platform backend は optional とする。
+evented / platform backend は optional とする。
 
 ```text
+std::io::evented()   event-loop or stackful coroutine backed I/O
 std::io::uring()     Linux io_uring backend
 std::io::kqueue()    kqueue backend
 std::io::dispatch()  platform dispatch backend
 ```
 
-v0.1 ではこれらを実装しない。
+v0.1 では `evented` / platform backend は実装しない。
 v0.1 で固定するのは API shape と memory-safety contract である。
 
 ## Task API Direction
@@ -96,16 +96,8 @@ let task = group.spawn(load, "config.toml");
 `io.async(...)` のように `Io` から detached-looking task を直接作る API は採用しない。
 task creation は `TaskGroup` を通す。
 
-v0.1 の既存 API:
-
-```kizu
-let io = Io();
-let group = std::task::Group();
-let task = group.spawn(io, load, "config.toml");
-```
-
-これは interpreter-first prototype として維持する。
-stdlib 化するときに `std::io` / `std::task` の境界へ移す。
+v0.1 はこの API を実装する。
+旧 `Io()` / `std::task::Group()` / `group.spawn(io, ...)` 形式は採用しない。
 
 ## Cancellation
 
