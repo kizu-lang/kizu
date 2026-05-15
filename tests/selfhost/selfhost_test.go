@@ -540,9 +540,14 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"tests/conformance/modules/private_type_leak/src/main.kizu",
 		"tests/conformance/modules/private_field_construction/src/main.kizu",
 		"examples/negative/std_mem_wrong_type.kizu",
+		"examples/move_error.kizu",
+		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
 		"examples/negative/assignment_move.kizu",
+		"examples/negative/if_branch_partial_move.kizu",
+		"examples/negative/while_body_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
+		"examples/negative/unsafe_moved_value.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -1045,6 +1050,11 @@ func isOwnershipDiagnosticFixture(path string) bool {
 	slashPath := filepath.ToSlash(path)
 	return strings.Contains(slashPath, "double_move") ||
 		strings.Contains(slashPath, "assignment_move") ||
+		strings.Contains(slashPath, "moved_value") ||
+		strings.Contains(slashPath, "move_error") ||
+		strings.Contains(slashPath, "if_branch_partial_move") ||
+		strings.Contains(slashPath, "while_body_move") ||
+		strings.Contains(slashPath, "unsafe_moved_value") ||
 		strings.Contains(slashPath, "move_while_borrowed")
 }
 
