@@ -19,27 +19,28 @@ const (
 )
 
 var knownTypes = map[Type]bool{
-	typeBool:       true,
-	typeI64:        true,
-	typeByteString: true,
-	typeVoid:       true,
-	"i8":           true,
-	"i16":          true,
-	"i32":          true,
-	"u8":           true,
-	"u16":          true,
-	"u32":          true,
-	"u64":          true,
-	"usize":        true,
-	"isize":        true,
-	"f32":          true,
-	"f64":          true,
-	"Io":           true,
-	"Allocator":    true,
-	"TaskGroup":    true,
-	"Queue":        true,
-	"Partition":    true,
-	"LocalBuffer":  true,
+	typeBool:              true,
+	typeI64:               true,
+	typeByteString:        true,
+	typeVoid:              true,
+	"i8":                  true,
+	"i16":                 true,
+	"i32":                 true,
+	"u8":                  true,
+	"u16":                 true,
+	"u32":                 true,
+	"u64":                 true,
+	"usize":               true,
+	"isize":               true,
+	"f32":                 true,
+	"f64":                 true,
+	"Io":                  true,
+	"Allocator":           true,
+	"std::string::String": true,
+	"TaskGroup":           true,
+	"Queue":               true,
+	"Partition":           true,
+	"LocalBuffer":         true,
 }
 
 var numericTypes = map[Type]bool{
@@ -650,11 +651,45 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool
 		}
 		return false, env.defineParam(stmt.Name, typ, true, mutable)
 	}
+	if ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe); ok || err != nil {
+		if err != nil {
+			return false, err
+		}
+		return false, env.defineParam(stmt.Name, typeByteString, true, false)
+	}
 	typ, err = c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
 	}
 	return false, env.define(stmt.Name, typ, stmt.Mutable)
+}
+
+// checkStringViewInitializer recognizes string.as_bytes() local byte views.
+func (c *Checker) checkStringViewInitializer(
+	expr ast.Expression,
+	env *scope,
+	unsafe bool,
+) (bool, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false, nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "as_bytes" {
+		return false, nil
+	}
+	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
+	if err != nil {
+		return true, err
+	}
+	if receiver != "std::string::String" {
+		return true, fmt.Errorf("type error: `String.as_bytes` expects String receiver")
+	}
+	if len(call.Args) != 0 {
+		return true, fmt.Errorf("type error: `String.as_bytes` expects 0 args, got %d",
+			len(call.Args))
+	}
+	return true, nil
 }
 
 // checkArrayBorrowInitializer recognizes try array.at/at_mut(index) local borrows.
@@ -1333,6 +1368,8 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return "", true, fmt.Errorf("type error: `std::io::evented` is not implemented in v0.1")
 	case "std.array.Array":
 		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
+	case "std.string.String":
+		return c.checkStringConstructor(args, env, unsafe)
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
 	case "std.thread.scoped":
@@ -1346,6 +1383,26 @@ func (c *Checker) checkStdConstructorBuiltin(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkStringConstructor validates std::string::String(allocator).
+func (c *Checker) checkStringConstructor(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `std::string::String` expects allocator")
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "Allocator" {
+		return "", true, fmt.Errorf("type error: `std::string::String` expects Allocator, got %s",
+			got)
+	}
+	return "std::string::String", true, nil
 }
 
 // checkMemBuiltin validates allocation-free std::mem byte-slice helpers.
@@ -2011,6 +2068,9 @@ func (c *Checker) checkMethodCallExpr(
 	if ok && base == "std::array::Array" {
 		return c.checkArrayReceiverMethod(field, Type(arg), args, env, unsafe)
 	}
+	if receiver == "std::string::String" {
+		return c.checkStringReceiverMethod(field, args, env, unsafe)
+	}
 	if !ok || base != "arena" {
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
@@ -2026,6 +2086,110 @@ func (c *Checker) checkMethodCallExpr(
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkStringReceiverMethod validates receiver-sensitive String methods.
+func (c *Checker) checkStringReceiverMethod(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if field.Name == "deinit" && ok && env.isBorrowed(ident.Name) {
+		return "", fmt.Errorf("type error: `String.deinit` requires owned String receiver")
+	}
+	if isStringMutatingMethod(field.Name) && ok &&
+		env.isBorrowed(ident.Name) && !env.isMutBorrowed(ident.Name) {
+		return "", fmt.Errorf("type error: `String.%s` requires mutable String receiver", field.Name)
+	}
+	return c.checkStringMethod(field.Name, args, env, unsafe)
+}
+
+// checkStringMethod validates owned String prototype methods.
+func (c *Checker) checkStringMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch name {
+	case "append_bytes":
+		if err := c.checkStringBytesArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!void", nil
+	case "append_byte":
+		if err := c.checkStringByteArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!void", nil
+	case "len":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `String.len` expects 0 args, got %d", len(args))
+		}
+		return typeI64, nil
+	case "as_bytes":
+		return "", fmt.Errorf(
+			"type error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
+	case "clear", "deinit":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
+		}
+		return typeVoid, nil
+	default:
+		return "", fmt.Errorf("type error: String has no method `%s`", name)
+	}
+}
+
+// isStringMutatingMethod reports whether a String method can change owned storage.
+func isStringMutatingMethod(name string) bool {
+	switch name {
+	case "append_bytes", "append_byte", "clear", "deinit":
+		return true
+	default:
+		return false
+	}
+}
+
+// checkStringBytesArg validates a []const u8 String method argument.
+func (c *Checker) checkStringBytesArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != 1 {
+		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeByteString {
+		return fmt.Errorf("type error: `String.%s` expects []const u8, got %s", name, got)
+	}
+	return nil
+}
+
+// checkStringByteArg validates a u8 String method argument.
+func (c *Checker) checkStringByteArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != 1 {
+		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != "u8" {
+		return fmt.Errorf("type error: `String.%s` expects u8, got %s", name, got)
+	}
+	return nil
 }
 
 // checkArrayReceiverMethod validates receiver-sensitive Array<T> methods.

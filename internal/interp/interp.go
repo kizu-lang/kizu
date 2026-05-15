@@ -855,9 +855,21 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	if value, ok, err := i.evalMemBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
+	if value, ok, err := i.evalStringConstructor(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
 	if value, ok, err := i.evalTaskBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
+	return i.evalMiscQualifiedBuiltin(name, args, env)
+}
+
+// evalMiscQualifiedBuiltin evaluates remaining qualified std constructor stubs.
+func (i *Interpreter) evalMiscQualifiedBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
 	switch name {
 	case "std.channel.Channel":
 		return errorUnionValue("use std::channel::Channel<T>()"), true, nil
@@ -1438,6 +1450,8 @@ func (i *Interpreter) evalNonArenaMethod(
 		return i.evalMutexMethod(receiver, name, args, env)
 	case kindArray:
 		return i.evalArrayMethod(receiver, name, args, env)
+	case kindOwnedString:
+		return i.evalStringMethod(receiver, name, args, env)
 	case kindStruct:
 		return i.evalImplMethod(receiver, name, args, env)
 	default:
@@ -1892,6 +1906,99 @@ func (i *Interpreter) evalLocalBufferMethod(
 		return voidValue(), fmt.Errorf("runtime error: LocalBuffer index out of bounds")
 	}
 	return buffer.localBuf.values[int(index.i)], nil
+}
+
+// evalStringConstructor creates an owned String with an explicit allocator.
+func (i *Interpreter) evalStringConstructor(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	if name != "std.string.String" {
+		return voidValue(), false, nil
+	}
+	if len(args) != 1 {
+		return voidValue(), true, fmt.Errorf("runtime error: std::string::String expects allocator")
+	}
+	allocator, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), true, err
+	}
+	if allocator.kind != kindAllocator {
+		return voidValue(), true, fmt.Errorf("runtime error: std::string::String expects Allocator")
+	}
+	return ownedStringValue(), true, nil
+}
+
+// evalStringMethod executes owned String prototype operations.
+func (i *Interpreter) evalStringMethod(
+	str Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if str.ownedStr.deinit {
+		return voidValue(), fmt.Errorf("runtime error: String was deinitialized")
+	}
+	switch name {
+	case "append_bytes":
+		return i.evalStringAppendBytes(str, args, env)
+	case "append_byte":
+		return i.evalStringAppendByte(str, args, env)
+	case "len":
+		return intValue(int64(len(str.ownedStr.bytes))), requireNoArgs("String.len", args)
+	case "as_bytes":
+		return stringValue(str.ownedStr.bytes), requireNoArgs("String.as_bytes", args)
+	case "clear":
+		str.ownedStr.bytes = ""
+		return voidValue(), requireNoArgs("String.clear", args)
+	case "deinit":
+		str.ownedStr.bytes = ""
+		str.ownedStr.deinit = true
+		return voidValue(), requireNoArgs("String.deinit", args)
+	default:
+		return voidValue(), fmt.Errorf("runtime error: String has no method `%s`", name)
+	}
+}
+
+// evalStringAppendBytes appends a read-only byte slice into an owned String.
+func (i *Interpreter) evalStringAppendBytes(
+	str Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: String.append_bytes expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindString {
+		return errorUnionValue("String.append_bytes expects []const u8"), nil
+	}
+	str.ownedStr.bytes += value.s
+	return voidValue(), nil
+}
+
+// evalStringAppendByte appends one byte value into an owned String.
+func (i *Interpreter) evalStringAppendByte(
+	str Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: String.append_byte expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindInt || value.i < 0 || value.i > 255 {
+		return errorUnionValue("String.append_byte expects u8"), nil
+	}
+	str.ownedStr.bytes += string(byte(value.i))
+	return voidValue(), nil
 }
 
 // evalArrayMethod executes owned Array<T> prototype operations.

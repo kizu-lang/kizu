@@ -27,6 +27,7 @@ const (
 	kindAtomic
 	kindMutex
 	kindArray
+	kindOwnedString
 	kindRef
 )
 
@@ -53,6 +54,7 @@ type Value struct {
 	atomic    *Atomic
 	mutex     *Mutex
 	array     *Array
+	ownedStr  *OwnedString
 	ref       *binding
 }
 
@@ -70,6 +72,12 @@ type Handle struct {
 // Array stores owned contiguous values for the v0.2 std::array prototype.
 type Array struct {
 	values []Value
+	deinit bool
+}
+
+// OwnedString stores owned bytes for the v0.2 std::string prototype.
+type OwnedString struct {
+	bytes  string
 	deinit bool
 }
 
@@ -239,6 +247,8 @@ func (v Value) capabilityString() string {
 		return "<mutex>"
 	case kindArray:
 		return "<array>"
+	case kindOwnedString:
+		return v.ownedStr.bytes
 	case kindRef:
 		return v.ref.value.String()
 	default:
@@ -314,6 +324,11 @@ func allocatorValue(name string) Value {
 // arrayValue returns an empty owned array value.
 func arrayValue(typeName string) Value {
 	return Value{kind: kindArray, typeName: typeName, array: &Array{}}
+}
+
+// ownedStringValue returns an empty owned string value.
+func ownedStringValue() Value {
+	return Value{kind: kindOwnedString, typeName: "std::string::String", ownedStr: &OwnedString{}}
 }
 
 // taskGroupValue returns a structured task group value.
