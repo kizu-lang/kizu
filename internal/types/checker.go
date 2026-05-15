@@ -117,13 +117,15 @@ type Checker struct {
 }
 
 type enumType struct {
-	name string
-	tags map[string]bool
+	name   string
+	tags   map[string]bool
+	public bool
 }
 
 type unionType struct {
 	name     string
 	variants map[string]string
+	public   bool
 }
 
 type functionType struct {
@@ -141,6 +143,7 @@ type functionType struct {
 type contractType struct {
 	name    string
 	methods map[string]*functionType
+	public  bool
 }
 
 type scope struct {
@@ -167,6 +170,9 @@ func New() *Checker {
 // Check validates the program and returns the first type error.
 func (c *Checker) Check(program *ast.Program) error {
 	if err := c.collectFunctions(program); err != nil {
+		return err
+	}
+	if err := c.checkPublicAPI(program); err != nil {
 		return err
 	}
 	for _, decl := range program.Decls {
@@ -221,10 +227,103 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 			}
 		case *ast.SatisfyDecl:
 			continue
+		case *ast.ImportDecl:
+			continue
 		case *ast.FunctionDecl:
 			continue
 		default:
 			return fmt.Errorf("type error: unsupported declaration %T", decl)
+		}
+	}
+	return nil
+}
+
+// checkPublicAPI rejects private types exposed through public declarations.
+func (c *Checker) checkPublicAPI(program *ast.Program) error {
+	for _, decl := range program.Decls {
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			if err := c.checkPublicFunctionSignature(d.Public, d.Name, d.Params, d.ReturnType); err != nil {
+				return err
+			}
+		case *ast.StructDecl:
+			if err := c.checkPublicStructFields(d); err != nil {
+				return err
+			}
+		case *ast.UnionDecl:
+			if err := c.checkPublicUnionVariants(d); err != nil {
+				return err
+			}
+		case *ast.ContractDecl:
+			if err := c.checkPublicContract(d); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkPublicFunctionSignature validates the public boundary of one function.
+func (c *Checker) checkPublicFunctionSignature(
+	public bool,
+	name string,
+	params []ast.Param,
+	returnType string,
+) error {
+	if !public {
+		return nil
+	}
+	for _, param := range params {
+		if err := c.rejectPrivateType(param.TypeName, "function `"+name+"` parameter"); err != nil {
+			return err
+		}
+	}
+	if returnType == "" {
+		return nil
+	}
+	return c.rejectPrivateType(returnType, "function `"+name+"` return type")
+}
+
+// checkPublicStructFields validates public fields on one struct.
+func (c *Checker) checkPublicStructFields(decl *ast.StructDecl) error {
+	for _, field := range decl.Fields {
+		if !field.Public {
+			continue
+		}
+		context := "field `" + decl.Name + "." + field.Name + "`"
+		if err := c.rejectPrivateType(field.TypeName, context); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkPublicUnionVariants validates payloads exposed by public union variants.
+func (c *Checker) checkPublicUnionVariants(decl *ast.UnionDecl) error {
+	if !decl.Public {
+		return nil
+	}
+	for _, variant := range decl.Variants {
+		if variant.Payload == "" {
+			continue
+		}
+		context := "union variant `" + decl.Name + "::" + variant.Name + "`"
+		if err := c.rejectPrivateType(variant.Payload, context); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkPublicContract validates method signatures exposed by one contract.
+func (c *Checker) checkPublicContract(decl *ast.ContractDecl) error {
+	if !decl.Public {
+		return nil
+	}
+	for _, method := range decl.Methods {
+		if err := c.checkPublicFunctionSignature(true, method.Name, method.Params,
+			method.ReturnType); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -279,7 +378,7 @@ func (c *Checker) collectContract(decl *ast.ContractDecl) error {
 		}
 		methods[method.Name] = fnType
 	}
-	c.contracts[decl.Name] = &contractType{name: decl.Name, methods: methods}
+	c.contracts[decl.Name] = &contractType{name: decl.Name, methods: methods, public: decl.Public}
 	return nil
 }
 
@@ -344,7 +443,7 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 	if _, exists := c.unions[decl.Name]; exists {
 		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
-	enum := &enumType{name: decl.Name, tags: map[string]bool{}}
+	enum := &enumType{name: decl.Name, tags: map[string]bool{}, public: decl.Public}
 	for _, tag := range decl.Tags {
 		if enum.tags[tag] {
 			return fmt.Errorf("type error: duplicate enum tag `%s::%s`", decl.Name, tag)
@@ -366,7 +465,7 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	if _, exists := c.enums[decl.Name]; exists {
 		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
-	union := &unionType{name: decl.Name, variants: map[string]string{}}
+	union := &unionType{name: decl.Name, variants: map[string]string{}, public: decl.Public}
 	for _, variant := range decl.Variants {
 		if _, exists := union.variants[variant.Name]; exists {
 			return fmt.Errorf("type error: duplicate union variant `%s::%s`",
@@ -588,6 +687,82 @@ func (c *Checker) parsePointerType(name string, arg string) (Type, error) {
 		return "", err
 	}
 	return Type(name), nil
+}
+
+// rejectPrivateType reports an error when typeName exposes a private declaration.
+func (c *Checker) rejectPrivateType(typeName string, context string) error {
+	for _, name := range referencedTypeNames(typeName) {
+		if !c.isUserDeclaredType(name) {
+			continue
+		}
+		if c.isPublicType(name) {
+			continue
+		}
+		return fmt.Errorf("type error: public %s exposes private type `%s`", context, name)
+	}
+	return nil
+}
+
+// referencedTypeNames returns source type names used inside one type spelling.
+func referencedTypeNames(typeName string) []string {
+	typeName = strings.TrimPrefix(typeName, "!")
+	if errorType, successType, ok := typedErrorUnionParts(typeName); ok {
+		return append(referencedTypeNames(errorType), referencedTypeNames(successType)...)
+	}
+	typeName = strings.TrimPrefix(typeName, "?")
+	typeName = strings.TrimPrefix(typeName, "[]")
+	typeName = strings.TrimPrefix(typeName, "const ")
+	if base, arg, ok := splitGenericType(typeName); ok {
+		names := []string{base}
+		for _, part := range splitPublicTypeArgs(arg) {
+			names = append(names, referencedTypeNames(part)...)
+		}
+		return names
+	}
+	return []string{typeName}
+}
+
+// splitPublicTypeArgs splits a generic argument list for public API checks.
+func splitPublicTypeArgs(args string) []string {
+	parts, ok := splitGenericArgs(args)
+	if ok {
+		return parts
+	}
+	return []string{args}
+}
+
+// isUserDeclaredType reports whether name is declared by the current program.
+func (c *Checker) isUserDeclaredType(name string) bool {
+	if c.structs[name] != nil {
+		return true
+	}
+	if c.enums[name] != nil {
+		return true
+	}
+	if c.unions[name] != nil {
+		return true
+	}
+	if c.contracts[name] != nil {
+		return true
+	}
+	return false
+}
+
+// isPublicType reports whether name is externally visible.
+func (c *Checker) isPublicType(name string) bool {
+	if decl := c.structs[name]; decl != nil {
+		return decl.Public
+	}
+	if enum := c.enums[name]; enum != nil {
+		return enum.public
+	}
+	if union := c.unions[name]; union != nil {
+		return union.public
+	}
+	if contract := c.contracts[name]; contract != nil {
+		return contract.public
+	}
+	return false
 }
 
 // checkFunction validates one function body against its signature.

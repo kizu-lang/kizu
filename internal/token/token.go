@@ -46,6 +46,8 @@ const (
 	RBracket Type = "]"
 
 	Function Type = "fn"
+	Import   Type = "import"
+	Public   Type = "pub"
 	Let      Type = "let"
 	Var      Type = "var"
 	Return   Type = "return"
@@ -80,6 +82,8 @@ type Token struct {
 
 var keywords = map[string]Type{
 	"fn":       Function,
+	"import":   Import,
+	"pub":      Public,
 	"let":      Let,
 	"var":      Var,
 	"return":   Return,

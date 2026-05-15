@@ -35,6 +35,12 @@ func (p *Parser) ParseProgram() *ast.Program {
 	program := &ast.Program{}
 	for p.cur.Type != token.EOF {
 		switch p.cur.Type {
+		case token.Import:
+			program.Decls = append(program.Decls, p.parseImportDecl())
+			p.nextToken()
+		case token.Public:
+			program.Decls = append(program.Decls, p.parsePublicDecl())
+			p.nextToken()
 		case token.Function:
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
@@ -68,6 +74,71 @@ func (p *Parser) ParseProgram() *ast.Program {
 		}
 	}
 	return program
+}
+
+// parseImportDecl parses an explicit top-level module import.
+func (p *Parser) parseImportDecl() ast.Decl {
+	decl := &ast.ImportDecl{}
+	if !p.expectPeek(token.Ident) {
+		return decl
+	}
+	decl.Path = append(decl.Path, p.cur.Literal)
+	for p.peek.Type == token.DoubleColon {
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return decl
+		}
+		decl.Path = append(decl.Path, p.cur.Literal)
+	}
+	p.expectStatementTerminator("import declaration")
+	return decl
+}
+
+// parsePublicDecl parses public top-level declarations.
+func (p *Parser) parsePublicDecl() ast.Decl {
+	p.nextToken()
+	decl := p.parseTopLevelDecl()
+	setPublicDecl(decl)
+	return decl
+}
+
+// parseTopLevelDecl parses one declaration whose starting token is current.
+func (p *Parser) parseTopLevelDecl() ast.Decl {
+	switch p.cur.Type {
+	case token.Function:
+		return p.parseFunctionDecl()
+	case token.Unsafe:
+		return p.parseUnsafeDecl()
+	case token.Extern:
+		return p.parseExternDecl(false)
+	case token.Struct:
+		return p.parseStructDecl()
+	case token.Enum:
+		return p.parseEnumDecl()
+	case token.Union:
+		return p.parseUnionDecl()
+	case token.Contract:
+		return p.parseContractDecl()
+	default:
+		p.errorf("expected public declaration, got %s", p.cur.Type)
+		return &ast.FunctionDecl{Public: true}
+	}
+}
+
+// setPublicDecl marks declarations that support public visibility.
+func setPublicDecl(decl ast.Decl) {
+	switch d := decl.(type) {
+	case *ast.FunctionDecl:
+		d.Public = true
+	case *ast.StructDecl:
+		d.Public = true
+	case *ast.EnumDecl:
+		d.Public = true
+	case *ast.UnionDecl:
+		d.Public = true
+	case *ast.ContractDecl:
+		d.Public = true
+	}
 }
 
 // parseUnsafeDecl parses unsafe top-level declarations.
@@ -257,6 +328,10 @@ func (p *Parser) parseStructFields() []ast.Field {
 // parseStructField parses one struct field declaration.
 func (p *Parser) parseStructField() (ast.Field, bool) {
 	field := ast.Field{}
+	if p.cur.Type == token.Public {
+		field.Public = true
+		p.nextToken()
+	}
 	if p.cur.Type != token.Ident {
 		p.errorf("expected field name, got %s", p.cur.Type)
 		return field, false

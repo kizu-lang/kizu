@@ -107,19 +107,24 @@ tests, and self-check/build.
 
 ## Implementation Work Still Needed
 
-- Add `pub` and `import` tokens.
-- Parse top-level import declarations.
-- Parse `pub` on top-level declarations and struct fields.
-- Parse `kizu.toml`.
-- Build the resolved module graph.
+- Connect parsed imports to multi-file checking.
 - Add resolver phase between parser and type checker.
-- Add visibility checks.
+- Enforce visibility across module boundaries.
 - Preserve byte spans and file IDs through compiler phases.
 - Render multi-file diagnostics.
 - Add artifact layout under `target/`.
 - Extend build cache keys with module graph and public interface hashes.
 - Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
   IR, and backend outputs.
+
+## Implemented Groundwork
+
+- `pub` and `import` tokens.
+- Top-level import parsing.
+- `pub` parsing on top-level declarations and struct fields.
+- Minimal `kizu.toml` parsing for `[package]` and `[modules]`.
+- File path to module path graph resolution.
+- Single-program public API checks for private type leaks.
 
 ## Postponed
 
