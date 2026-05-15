@@ -27,6 +27,7 @@ import (
 const maxLineWidth = 100
 const maxFunctionLines = 70
 const maxFunctionStatements = 45
+const conformanceManifestGlob = "tests/conformance/v0_*.json"
 const moduleConformanceManifest = "tests/conformance/modules/v0_3.json"
 
 // selfHostKindByGoToken maps production Go lexer tokens to self-host enum output.
@@ -180,6 +181,16 @@ type moduleGraphSnapshot struct {
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
+}
+
+type conformanceManifestData struct {
+	Version string            `json:"version"`
+	Cases   []conformanceCase `json:"cases"`
+}
+
+type conformanceCase struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type moduleConformanceCase struct {
@@ -347,6 +358,16 @@ func TestSelfHostExampleLexerSnapshotsComparedWithGoLexer(t *testing.T) {
 	assertIrSnapshot(t, got, fixture)
 }
 
+// TestSelfHostConformanceLexerSnapshotsComparedWithGoLexer checks all manifests.
+func TestSelfHostConformanceLexerSnapshotsComparedWithGoLexer(t *testing.T) {
+	for _, fixture := range selfHostConformanceSources(t) {
+		t.Run(filepath.ToSlash(fixture), func(t *testing.T) {
+			got := runSelfHostFrontend(t, fixture)
+			assertTokenSnapshots(t, got, fixture)
+		})
+	}
+}
+
 // TestSelfHostReadsModuleConformanceManifest uses the shared module fixtures.
 func TestSelfHostReadsModuleConformanceManifest(t *testing.T) {
 	manifest := loadModuleConformanceManifest(t)
@@ -418,6 +439,8 @@ func TestSelfHostAstDetailOracle(t *testing.T) {
 	cases := []string{
 		"examples/functions.kizu",
 		"examples/struct.kizu",
+		"examples/enum.kizu",
+		"examples/union.kizu",
 		"examples/negative/missing_semicolon.kizu",
 	}
 	for _, path := range cases {
@@ -651,6 +674,63 @@ func loadModuleConformanceManifest(t *testing.T) moduleConformanceManifestData {
 		t.Fatalf("unexpected module conformance version %q", manifest.Version)
 	}
 	return manifest
+}
+
+// selfHostConformanceSources returns every source path from reusable manifests.
+func selfHostConformanceSources(t *testing.T) []string {
+	t.Helper()
+	paths := map[string]bool{}
+	for _, manifest := range loadConformanceManifests(t) {
+		for _, item := range manifest.Cases {
+			paths[filepath.Join(repoRoot(t), filepath.FromSlash(item.Path))] = true
+		}
+	}
+	for _, item := range loadModuleConformanceManifest(t).Cases {
+		paths[filepath.Join(repoRoot(t), filepath.FromSlash(item.RootSource))] = true
+	}
+	return sortedMapKeys(paths)
+}
+
+// loadConformanceManifests reads reusable non-module conformance manifests.
+func loadConformanceManifests(t *testing.T) []conformanceManifestData {
+	t.Helper()
+	glob := filepath.Join(repoRoot(t), filepath.FromSlash(conformanceManifestGlob))
+	paths, err := filepath.Glob(glob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no conformance manifests found")
+	}
+	manifests := make([]conformanceManifestData, 0, len(paths))
+	for _, path := range paths {
+		manifests = append(manifests, loadConformanceManifest(t, path))
+	}
+	return manifests
+}
+
+// loadConformanceManifest reads one reusable non-module manifest.
+func loadConformanceManifest(t *testing.T, path string) conformanceManifestData {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest conformanceManifestData
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+// sortedMapKeys returns map keys in stable order.
+func sortedMapKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // countGoFunctionTokens counts function tokens with the production Go lexer.
@@ -941,6 +1021,10 @@ func goAstDetailSnapshot(t *testing.T, path string) []string {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
 			lines = append(lines, astStructDetail(d)...)
+		case *ast.EnumDecl:
+			lines = append(lines, astEnumDetail(d)...)
+		case *ast.UnionDecl:
+			lines = append(lines, astUnionDetail(d)...)
 		case *ast.FunctionDecl:
 			lines = append(lines, astFunctionDetail(d)...)
 		}
@@ -953,6 +1037,28 @@ func astStructDetail(decl *ast.StructDecl) []string {
 	lines := []string{"struct", decl.Name, "fields", strconv.Itoa(len(decl.Fields))}
 	for _, field := range decl.Fields {
 		lines = append(lines, "field", field.Name, field.TypeName)
+	}
+	return lines
+}
+
+// astEnumDetail returns parser facts for one enum declaration.
+func astEnumDetail(decl *ast.EnumDecl) []string {
+	lines := []string{"enum", decl.Name, "tags", strconv.Itoa(len(decl.Tags))}
+	for _, tag := range decl.Tags {
+		lines = append(lines, "tag", tag)
+	}
+	return lines
+}
+
+// astUnionDetail returns parser facts for one union declaration.
+func astUnionDetail(decl *ast.UnionDecl) []string {
+	lines := []string{"union", decl.Name, "variants", strconv.Itoa(len(decl.Variants))}
+	for _, variant := range decl.Variants {
+		payload := variant.Payload
+		if payload == "" {
+			payload = "<none>"
+		}
+		lines = append(lines, "variant", variant.Name, payload)
 	}
 	return lines
 }
