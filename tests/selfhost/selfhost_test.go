@@ -463,6 +463,7 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"selfhost/fixtures/illegal_token.kizu",
 		"examples/negative/missing_semicolon.kizu",
 		"tests/conformance/modules/missing_import/src/main.kizu",
+		"examples/negative/std_mem_wrong_type.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -812,6 +813,7 @@ func goDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	snapshots := goLexerDiagnosticSnapshots(t, path)
 	snapshots = append(snapshots, goParserDiagnosticSnapshots(t, path)...)
 	snapshots = append(snapshots, goModuleDiagnosticSnapshots(t, path)...)
+	snapshots = append(snapshots, goTypeDiagnosticSnapshots(t, path)...)
 	return snapshots
 }
 
@@ -878,6 +880,42 @@ func goModuleDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot
 	}}
 }
 
+// goTypeDiagnosticSnapshots returns type checker diagnostics in the self-host subset.
+func goTypeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
+	t.Helper()
+	if !strings.Contains(filepath.ToSlash(path), "std_mem_wrong_type") {
+		return nil
+	}
+	program := parseSelfHostSource(t, path)
+	err := types.New().Check(program)
+	if err == nil {
+		t.Fatalf("expected type diagnostic for %s", path)
+	}
+	message := normalizeTypeError(err.Error())
+	if message != "type error: `std::mem::equal_bytes` arg 2 expects []const u8" {
+		t.Fatalf("type diagnostic is outside oracle subset: %q", message)
+	}
+	tok := equalBytesWrongArgumentToken(t, path)
+	return []diagnosticSnapshot{diagnosticFromToken(message, tok, tok)}
+}
+
+// diagnosticFromToken constructs the shared diagnostic snapshot row.
+func diagnosticFromToken(
+	message string,
+	primary token.Token,
+	related token.Token,
+) diagnosticSnapshot {
+	return diagnosticSnapshot{
+		Message:       message,
+		PrimaryStart:  primary.Start,
+		PrimaryEnd:    primary.End,
+		PrimaryLine:   primary.Line,
+		PrimaryColumn: primary.Column,
+		RelatedStart:  related.Start,
+		RelatedEnd:    related.End,
+	}
+}
+
 // missingSemicolonToken returns the token used for parser diagnostics.
 func missingSemicolonToken(t *testing.T, path string) token.Token {
 	t.Helper()
@@ -888,6 +926,40 @@ func missingSemicolonToken(t *testing.T, path string) token.Token {
 		}
 	}
 	t.Fatalf("missing semicolon token was not found in %s", path)
+	return token.Token{}
+}
+
+// equalBytesWrongArgumentToken returns the selected std::mem type diagnostic token.
+func equalBytesWrongArgumentToken(t *testing.T, path string) token.Token {
+	t.Helper()
+	tokens := goTokens(t, path)
+	for index, tok := range tokens {
+		if tok.Literal != "equal_bytes" {
+			continue
+		}
+		return secondArgumentToken(t, path, tokens, index)
+	}
+	t.Fatalf("equal_bytes call was not found in %s", path)
+	return token.Token{}
+}
+
+// secondArgumentToken returns the token after the first comma in one call.
+func secondArgumentToken(
+	t *testing.T,
+	path string,
+	tokens []token.Token,
+	start int,
+) token.Token {
+	t.Helper()
+	for index := start; index < len(tokens); index++ {
+		if tokens[index].Type == token.Comma {
+			return tokens[index+1]
+		}
+		if tokens[index].Type == token.RParen {
+			break
+		}
+	}
+	t.Fatalf("second argument token was not found in %s", path)
 	return token.Token{}
 }
 

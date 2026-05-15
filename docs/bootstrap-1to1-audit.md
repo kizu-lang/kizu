@@ -28,7 +28,7 @@ each row below.
 | lexer | `tests/selfhost` compares token kind, literal, byte span, line, column for all conformance manifest sources | strong | none |
 | parser | self-host AST counts, declaration order, function, struct, enum, and union detail snapshots vs Go parser | weak | full AST node model and dump equality across all parseable conformance fixtures |
 | resolver | self-host root module graph/import snapshot vs Go resolver for selected pass/fail packages | weak | full Kizu module graph resolver and graph snapshot equality |
-| diagnostics | self-host diagnostic objects cover lexer, parser, and resolver subset spans vs Go facts | weak | broaden to checker diagnostics and all conformance failure classes |
+| diagnostics | self-host diagnostic objects cover lexer, parser, resolver, type, and ownership subset spans vs Go facts | weak | broaden to all checker diagnostics and all conformance failure classes |
 | type | self-host return/call/std-mem type snapshots compare selected pass/fail cases vs Go checker | weak | broaden to full type environment and all checker diagnostic classes |
 | ownership | self-host owned-call move snapshot covers borrow, moved-value, and double-move fixtures vs Go checker | weak | full Kizu move/borrow checker with memory-safety diagnostic equality |
 | IR | self-host IR summary plus normalized function/block/opcode/terminator dump for selected pass/fail fixtures | weak | broaden to full instruction operand/value dump equality across conformance fixtures |
