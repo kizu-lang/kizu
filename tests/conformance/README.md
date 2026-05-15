@@ -1,10 +1,11 @@
 # Kizu Conformance Tests
 
-`v0_1.json` is the reusable conformance manifest for Kizu v0.1.
+`v0_1.json` is the reusable conformance manifest that started as the Kizu v0.1
+language-core suite and now also carries v0.2 stdlib prototype coverage.
 
 The current Go implementation reads this manifest from `cmd/kizu/conformance_test.go`.
-A future self-host compiler should run the same manifest and produce the same pass/fail
-results before replacing the Go implementation.
+A future self-host compiler should run the same manifest and produce the same
+pass/fail results before replacing the Go implementation.
 
 ## Case Modes
 

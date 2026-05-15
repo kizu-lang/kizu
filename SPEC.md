@@ -1,4 +1,4 @@
-# Kizu 言語仕様 v0.1
+# Kizu 言語仕様 v0.2 prototype
 
 Kizu は、明示的で、シンプルで、メモリ安全なプログラミング言語です。
 
@@ -21,7 +21,7 @@ Kizu のメモリ安全性保証は safe Kizu に対して行います。
 safe Kizu の詳細な安全契約と regression coverage は
 [`docs/memory-safety.md`](docs/memory-safety.md) を正とします。
 
-## 0. v0.1 の範囲
+## 0. v0.1 / v0.2 の範囲
 
 Kizu v0.1 は、Go 製 interpreter による language core release とします。
 
@@ -37,6 +37,10 @@ full stdlib、Rust 同等以上の runtime performance guarantee は含めませ
 ただし、マルチスレッドと async は Kizu の重要な言語特性として扱い、
 v0.1 では safe structured concurrency の仕様、checker ルール、interpreter 上の
 最小 runtime model を完成対象に含めます。
+
+Kizu v0.2 は、将来の self-host compiler を進めるための最小 stdlib prototype とします。
+v0.2 の正も Go 製 interpreter と `kizu check` です。native executable generation、
+package manager、full stdlib、self-host compiler completion は v0.2 の完了条件に含めません。
 
 ### 0.1 v0.1 に含めるもの
 
@@ -95,9 +99,31 @@ contract satisfaction checks
 
 static / policy 機能は、v0.1 interpreter 上で完全な低レベル実行 semantics を約束しません。
 
-### 0.2 v0.1 に含めないもの
+### 0.2 v0.2 に含めるもの
 
-次は v0.1 の完了条件に含めません。
+v0.2 に含める stdlib / tooling prototype:
+
+```text
+std::mem read-only byte helpers
+std::array::Array<T>
+std::string::String
+std::map::Map<[]const u8, V>
+std::testing
+std::fs
+std::path
+std::io
+std::process
+kizu test <file>
+self-host compiler skeleton
+module/import syntax and manifest groundwork
+```
+
+v0.2 の stdlib は self-host compiler を進めるための最小 subset です。
+general-purpose production stdlib ではありません。
+
+### 0.3 v0.1 / v0.2 に含めないもの
+
+次は v0.1 / v0.2 の完了条件に含めません。
 
 ```text
 full generics
@@ -107,10 +133,8 @@ float literals and float runtime arithmetic
 overflow / truncation behavior for every numeric cast
 raw pointer runtime operations
 actual extern C call execution
-array / map / set / slice runtime API
 option<T> runtime helper
 full stdlib
-kizu test
 kizu lint
 native executable generation
 self-hosting compiler
@@ -119,7 +143,7 @@ OS thread / event loop / networking runtime
 Rust 同等以上の runtime performance guarantee
 ```
 
-### 0.3 v0.1 メモリ安全 release gate
+### 0.4 v0.1 / v0.2 メモリ安全 release gate
 
 Kizu v0.1 は、safe Kizu のメモリ安全性を release blocker として扱います。
 
@@ -1550,17 +1574,19 @@ owned dynamic object、generic bounds、最適化された vtable layout は後�
 
 Kizu の toolchain は、キャッシュが無制限に肥大化しない設計にします。
 
-v0.1 の正として扱うコマンド:
+v0.1 / v0.2 の正として扱うコマンド:
 
 ```text
 kizu parse
 kizu check
 kizu run
 kizu fmt
+kizu test
 ```
 
 `kizu fmt` は現時点では compact AST formatter output です。
 完全な source-preserving formatter ではありません。
+`kizu test` は v0.2 では discovery なしの single-file runner です。
 
 experimental tooling:
 

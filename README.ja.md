@@ -20,7 +20,8 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 Kizu は Go 製の初期プロトタイプです。
 
 v0.1 の対象は interpreter-first の language core です。
-v0.1 の正は Go 製 interpreter と `kizu check` です。
+現在の v0.2 作業では、将来の self-host compiler に必要な最小 stdlib surface を追加しています。
+正となる挙動は引き続き Go 製 interpreter と `kizu check` です。
 
 実装済み language core:
 
@@ -42,9 +43,14 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 - `std::task::parallel_for` / `std::task::parallel_map` safe data-parallel prototype
 - scoped thread、`Atomic<T>`、`Mutex<T>` boundary prototype
 - `contract`、`satisfy`、`&Dyn<Contract>`
+- 最小の `std::mem`、`std::array::Array<T>`、`std::string::String`、
+  `std::map::Map<K, V>`、`std::testing`
+- explicit-Io の `std::fs`、`std::path`、`std::io`、`std::process` helper
+- `kizu test <file>` single-file test runner
 
 実験的な compiler / tooling:
 
+- `selfhost/` の self-host compiler skeleton
 - typed SSA IR
 - LLVM IR text backend
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
@@ -52,8 +58,11 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 - extern function 宣言向けの限定的な C header import
 - opt-in の IR optimization pipeline
 
-これらは将来の compiler work の土台ですが、まだ v0.1 completion criteria ではありません。
-LLVM と WASM は interpreter より限定された subset だけを扱います。
+これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
+LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
+
+現時点で open な v0.2 Issue はありません。残作業は GitHub Issues 上の v0.3 self-host /
+module-boundary 実装 Issue として管理しています。
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -84,9 +93,10 @@ go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
 ```
 
 機能ごとの実行例と失敗すべき安全性ルールは
-[v0.1 examples catalog](examples/README.md) にまとめています。
+[examples catalog](examples/README.md) にまとめています。
 機械判定用の conformance manifest は
-[tests/conformance/v0_1.json](tests/conformance/v0_1.json) です。
+[tests/conformance/v0_1.json](tests/conformance/v0_1.json) です。現在は v0.1 language-core と
+v0.2 stdlib prototype coverage の両方に再利用しています。
 safe code のメモリ安全契約は
 [docs/memory-safety.md](docs/memory-safety.md) に明文化しています。
 
@@ -123,6 +133,7 @@ go run ./cmd/kizu parse examples/hello.kizu
 go run ./cmd/kizu check examples/hello.kizu
 go run ./cmd/kizu fmt examples/hello.kizu
 go run ./cmd/kizu run examples/hello.kizu
+go run ./cmd/kizu test examples/std_testing.kizu
 go run ./cmd/kizu ir examples/hello.kizu
 go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
@@ -139,6 +150,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu check <file>` は type / ownership / move / borrow / arena check を実行します。
 - `kizu fmt <file>` は現在の compact AST formatter output を出力します。
 - `kizu run <file>` は interpreter で実行します。
+- `kizu test <file>` は check 済みの Kizu source を単一 test file として実行します。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
 - `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
@@ -147,14 +159,14 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
 - `kizu import-c-header <file>` は対応する C prototype を Kizu extern に変換します。
 
-`kizu test` と `kizu lint` は v0.1 では未実装です。
+`kizu lint` は未実装です。
 
 ## プロジェクト文書
 
 - [SPEC.md](SPEC.md): 言語仕様
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
-- [examples](examples/README.md): v0.1 examples catalog
-- [tests/conformance](tests/conformance/README.md): reusable v0.1 test manifest
+- [examples](examples/README.md): examples catalog
+- [tests/conformance](tests/conformance/README.md): reusable conformance manifests
 - [docs/adr](docs/adr): Architecture Decision Record
 - [docs/perf.md](docs/perf.md): build/cache performance policy
 - [AGENTS.md](AGENTS.md): Codex agent 向け実装方針

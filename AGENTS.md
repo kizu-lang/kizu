@@ -4,7 +4,8 @@
 
 ## プロジェクト目標
 
-Kizu v0.1 を Go 製の interpreter-first language core として実装します。
+Kizu v0.1 は Go 製の interpreter-first language core です。
+現在は v0.2 stdlib prototype と v0.3 self-host compiler preparation を進めます。
 
 Kizu は Rust clone ではありません。
 
@@ -39,6 +40,16 @@ v0.1 の中心は以下です。
 7. borrow checker
 8. Arena / Handle
 
+v0.2 の中心は、self-host compiler に必要な最小 stdlib と tooling です。
+
+- `std::mem`
+- `std::array::Array<T>`
+- `std::string::String`
+- `std::map::Map<K, V>`
+- `std::testing`
+- explicit-Io `std::fs` / `std::path` / `std::io` / `std::process`
+- `kizu test <file>`
+
 active work は GitHub Issues を正として管理します。
 Markdown の phase TODO 文書は使いません。
 
@@ -72,8 +83,8 @@ tests
 * parser と AST は読みやすく保つ
 * 各 milestone にテストを追加する
 * v0 では generics を本格実装しない
-* async は実装しない
-* native code generation は実装しない
+* `async fn` / `await` syntax は実装しない
+* native executable generation は実装しない
 * macro は実装しない
 * package manager はまだ実装しない
 * `SPEC.md` と矛盾する構文や機能を勝手に追加しない
@@ -164,8 +175,7 @@ kizu check <file>
 将来追加してよいコマンド:
 
 ```sh
-kizu fmt <file>
-kizu test
+kizu lint
 ```
 
 ## 完了条件
