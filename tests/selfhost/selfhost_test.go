@@ -170,6 +170,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
 	declSnapshot := formatDeclSnapshot(goDeclSnapshot(t, fixture))
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
+	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
@@ -192,6 +193,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"semantic snapshot\n" +
 		semanticSnapshot +
 		"semantic snapshot end\n" +
+		"type snapshot\n" +
+		typeSnapshot +
+		"type snapshot end\n" +
 		"ir snapshot\n" +
 		irSnapshot +
 		"ir snapshot end\n" +
@@ -309,6 +313,18 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 	want := goLexerDiagnosticSnapshots(t, fixture)
 	if !sameDiagnosticSnapshots(got, want) {
 		t.Fatalf("self-host diagnostics got %#v, want %#v", got, want)
+	}
+}
+
+// TestSelfHostTypeSubsetOracle compares function return types for a small subset.
+func TestSelfHostTypeSubsetOracle(t *testing.T) {
+	fixture := filepath.Join(repoRoot(t), "examples", "functions.kizu")
+	got := extractMarkedSnapshot(
+		t, runSelfHostFrontend(t, fixture), "type snapshot", "type snapshot end",
+	)
+	want := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
+	if got != want {
+		t.Fatalf("self-host type snapshot got %q, want %q", got, want)
 	}
 }
 
@@ -675,6 +691,34 @@ func goSemanticSnapshot(t *testing.T, path string) semanticSnapshot {
 		ValueSymbols:    0,
 		Diagnostics:     0,
 	}
+}
+
+// goFunctionReturnTypes returns function names and normalized return types.
+func goFunctionReturnTypes(t *testing.T, path string) []string {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	lines := []string{}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok {
+			continue
+		}
+		lines = append(lines, fn.Name, normalizeReturnType(fn.ReturnType))
+	}
+	return lines
+}
+
+// normalizeReturnType maps omitted returns to Kizu void.
+func normalizeReturnType(returnType string) string {
+	if returnType == "" {
+		return "void"
+	}
+	return returnType
+}
+
+// formatTypeSnapshot formats function type snapshots as frontend.kizu prints them.
+func formatTypeSnapshot(lines []string) string {
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // formatSemanticSnapshot formats semantic snapshots as frontend.kizu prints them.
