@@ -69,7 +69,7 @@ Cache behavior:
 Self-host switch criteria:
 
 1. Kizu lexer token stream equals the Go lexer oracle.
-2. Kizu parser AST summary equals the Go parser oracle.
+2. Kizu parser AST snapshot equals the Go parser oracle.
 3. Kizu diagnostics equal the Go diagnostics oracle for covered cases.
 4. Kizu type checker equals the Go type checker oracle.
 5. Kizu ownership checker equals the Go ownership checker oracle.
@@ -87,6 +87,9 @@ Before any production path switches from Go to Kizu, these must pass:
 - zero unexplained Go/Kizu oracle diffs
 
 Any allowed oracle diff must be documented in an ADR before it is accepted.
+
+The operational 1:1 phase contract is maintained in
+[`docs/bootstrap.md`](../bootstrap.md).
 
 ## Consequences
 

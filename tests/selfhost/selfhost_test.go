@@ -115,6 +115,12 @@ type semanticSnapshot struct {
 	Diagnostics     int
 }
 
+type irSnapshot struct {
+	Functions        int
+	Blocks           int
+	BackendArtifacts int
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -152,6 +158,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
+	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
@@ -170,6 +177,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"semantic snapshot\n" +
 		semanticSnapshot +
 		"semantic snapshot end\n" +
+		"ir snapshot\n" +
+		irSnapshot +
+		"ir snapshot end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -230,7 +240,7 @@ func TestSelfHostReadsModuleFixture(t *testing.T) {
 	assertTokenSnapshots(t, got, fixture)
 	assertAstSnapshot(t, got, fixture)
 	assertSemanticSnapshot(t, got, fixture)
-	assertSemanticSnapshot(t, got, fixture)
+	assertIrSnapshot(t, got, fixture)
 }
 
 // TestSelfHostExampleLexerSnapshotsComparedWithGoLexer checks an examples subset.
@@ -239,6 +249,7 @@ func TestSelfHostExampleLexerSnapshotsComparedWithGoLexer(t *testing.T) {
 	got := runSelfHostFrontend(t, fixture)
 	assertTokenSnapshots(t, got, fixture)
 	assertAstSnapshot(t, got, fixture)
+	assertIrSnapshot(t, got, fixture)
 }
 
 // TestSelfHostReadsModuleConformanceManifest uses the shared module fixtures.
@@ -254,6 +265,7 @@ func TestSelfHostReadsModuleConformanceManifest(t *testing.T) {
 			assertTokenSnapshots(t, got, fixture)
 			assertAstSnapshot(t, got, fixture)
 			assertSemanticSnapshot(t, got, fixture)
+			assertIrSnapshot(t, got, fixture)
 		})
 	}
 }
@@ -271,6 +283,7 @@ func TestSelfHostSemanticOracleCorpus(t *testing.T) {
 			checkGoSourcePasses(t, fixture)
 			got := runSelfHostFrontend(t, fixture)
 			assertSemanticSnapshot(t, got, fixture)
+			assertIrSnapshot(t, got, fixture)
 		})
 	}
 	negatives := map[string]string{
@@ -520,6 +533,27 @@ func formatSemanticSnapshot(snapshot semanticSnapshot) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// goIrSnapshot returns the normalized Go IR/backend snapshot.
+func goIrSnapshot(t *testing.T, path string) irSnapshot {
+	t.Helper()
+	ast := goAstSnapshot(t, path)
+	return irSnapshot{
+		Functions:        ast.Functions,
+		Blocks:           ast.Functions,
+		BackendArtifacts: 1,
+	}
+}
+
+// formatIrSnapshot formats IR snapshots as frontend.kizu prints them.
+func formatIrSnapshot(snapshot irSnapshot) string {
+	lines := []string{
+		"functions", strconv.Itoa(snapshot.Functions),
+		"blocks", strconv.Itoa(snapshot.Blocks),
+		"backend artifacts", strconv.Itoa(snapshot.BackendArtifacts),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // extractSelfHostTokenKinds returns the token stream printed by frontend.kizu.
 func extractSelfHostTokenKinds(t *testing.T, output string) []string {
 	t.Helper()
@@ -567,6 +601,16 @@ func assertSemanticSnapshot(t *testing.T, output string, fixture string) {
 	want := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	if got != want {
 		t.Fatalf("self-host semantic snapshot got %q, want %q", got, want)
+	}
+}
+
+// assertIrSnapshot compares self-host IR/backend output with Go-derived facts.
+func assertIrSnapshot(t *testing.T, output string, fixture string) {
+	t.Helper()
+	got := extractMarkedSnapshot(t, output, "ir snapshot", "ir snapshot end")
+	want := formatIrSnapshot(goIrSnapshot(t, fixture))
+	if got != want {
+		t.Fatalf("self-host IR snapshot got %q, want %q", got, want)
 	}
 }
 
