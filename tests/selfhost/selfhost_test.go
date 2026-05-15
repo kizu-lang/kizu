@@ -132,6 +132,14 @@ type diagnosticSnapshot struct {
 	RelatedEnd    int
 }
 
+type ownershipSnapshot struct {
+	Status       string
+	Message      string
+	Value        string
+	PrimaryStart int
+	RelatedStart int
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -171,6 +179,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	declSnapshot := formatDeclSnapshot(goDeclSnapshot(t, fixture))
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
+	ownershipSnapshot := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
@@ -196,6 +205,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"type snapshot\n" +
 		typeSnapshot +
 		"type snapshot end\n" +
+		"ownership snapshot\n" +
+		ownershipSnapshot +
+		"ownership snapshot end\n" +
 		"ir snapshot\n" +
 		irSnapshot +
 		"ir snapshot end\n" +
@@ -325,6 +337,26 @@ func TestSelfHostTypeSubsetOracle(t *testing.T) {
 	want := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
 	if got != want {
 		t.Fatalf("self-host type snapshot got %q, want %q", got, want)
+	}
+}
+
+// TestSelfHostOwnershipMemoryOracle compares minimal move/borrow safety facts.
+func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
+	cases := []string{
+		"examples/borrow.kizu",
+		"examples/negative/moved_value.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, fixture), "ownership snapshot", "ownership snapshot end",
+			)
+			want := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
+			if got != want {
+				t.Fatalf("self-host ownership snapshot got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -718,6 +750,72 @@ func normalizeReturnType(returnType string) string {
 
 // formatTypeSnapshot formats function type snapshots as frontend.kizu prints them.
 func formatTypeSnapshot(lines []string) string {
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// goOwnershipSnapshot returns normalized Go ownership-checker facts.
+func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	if err := types.New().Check(program); err != nil {
+		t.Fatalf("type check failed before ownership oracle: %v", err)
+	}
+	err := ownership.New().Check(program)
+	if err == nil {
+		return ownershipSnapshot{Status: "pass", PrimaryStart: -1, RelatedStart: -1}
+	}
+	value := movedValueFromDiagnostic(t, err.Error())
+	primary, related := movedValueSpans(t, path, value)
+	return ownershipSnapshot{
+		Status: "fail", Message: "move error: moved value was used",
+		Value: value, PrimaryStart: primary, RelatedStart: related,
+	}
+}
+
+// movedValueFromDiagnostic extracts the identifier from a moved-value diagnostic.
+func movedValueFromDiagnostic(t *testing.T, message string) string {
+	t.Helper()
+	prefix := "moved value `"
+	start := strings.Index(message, prefix)
+	if start < 0 {
+		t.Fatalf("ownership diagnostic is outside oracle subset: %q", message)
+	}
+	rest := message[start+len(prefix):]
+	end := strings.Index(rest, "`")
+	if end < 0 {
+		t.Fatalf("ownership diagnostic has no moved value terminator: %q", message)
+	}
+	return rest[:end]
+}
+
+// movedValueSpans returns the move site and first later use for one identifier.
+func movedValueSpans(t *testing.T, path string, value string) (int, int) {
+	t.Helper()
+	tokens := goSelfHostTokenSnapshots(t, path)
+	positions := []int{}
+	for _, tok := range tokens {
+		if tok.Kind != "TokenKind::Ident" || tok.Literal != value {
+			continue
+		}
+		positions = append(positions, tok.Start)
+	}
+	if len(positions) < 2 {
+		t.Fatalf("could not find moved value spans for %q in %s", value, path)
+	}
+	return positions[len(positions)-1], positions[len(positions)-2]
+}
+
+// formatOwnershipSnapshot formats ownership facts as frontend.kizu prints them.
+func formatOwnershipSnapshot(snapshot ownershipSnapshot) string {
+	lines := []string{"status", snapshot.Status}
+	if snapshot.Status == "fail" {
+		lines = append(lines,
+			snapshot.Message,
+			snapshot.Value,
+			strconv.Itoa(snapshot.PrimaryStart),
+			strconv.Itoa(snapshot.RelatedStart),
+		)
+	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
