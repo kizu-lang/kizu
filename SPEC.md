@@ -1071,6 +1071,30 @@ owned string は primitive ではなく、将来 `std::string::String` で扱い
 C ABI へ `std::string::String` を暗黙に渡してはいけません。
 C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使います。
 
+v0.2 の `std::string::String` は、明示 allocator capability を受け取る
+owned byte buffer です。
+
+```text
+std::string::String(allocator: Allocator) -> std::string::String
+string.append_bytes(bytes: []const u8) -> !void
+string.append_byte(byte: u8) -> !void
+string.len() -> i64
+string.as_bytes() -> []const u8
+string.clear() -> void
+string.deinit() -> void
+```
+
+`string` primitive は追加しません。
+`std::string::String()` のような hidden default allocator は使いません。
+`append_bytes` は source の `[]const u8` を move せず、owned buffer に copy します。
+`as_bytes` は owned buffer への local read-only view です。
+`as_bytes` の戻り値は local binding に束縛する必要があります。
+view が生きている間は `append_bytes`、`append_byte`、`clear`、`deinit` を禁止します。
+`append_bytes`、`append_byte`、`clear` は owned local `String` または
+`&mut std::string::String` から呼べます。
+`deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
+v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure は実装しません。
+
 v0.1 では collection runtime API を実装しません。
 collection は次の順で検討します。
 

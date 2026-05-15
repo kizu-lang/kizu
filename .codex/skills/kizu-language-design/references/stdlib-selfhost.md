@@ -73,6 +73,25 @@ Array element は v0.2 では raw pointer、arena、handle、nested array、conc
 capability type を拒否します。この拒否は struct field と union payload の中まで
 再帰的に適用します。
 
+## `std::string::String`
+
+v0.2 の `String` prototype:
+
+```text
+std::string::String(allocator: Allocator) -> std::string::String
+string.append_bytes(bytes: []const u8) -> !void
+string.append_byte(byte: u8) -> !void
+string.len() -> i64
+string.as_bytes() -> []const u8
+string.clear() -> void
+string.deinit() -> void
+```
+
+`String` は owned byte buffer であり、primitive `string` ではありません。
+`as_bytes` は local view として扱い、view 中の append / clear / deinit を拒否します。
+append / clear は `&mut String` から呼べますが、deinit は owned local receiver 限定です。
+UTF-8 validation、C ABI 変換、raw pointer exposure は v0.2 では実装しません。
+
 ## Self-Host Skeleton Rule
 
 各 v0.2 stdlib API について、self-host compiler がどう使うかを記録します。

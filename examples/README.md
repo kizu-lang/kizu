@@ -66,6 +66,8 @@ go test ./...
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | self-host token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
+| owned string with explicit allocator | `std_string.kizu` | builds owned bytes and exposes local byte views |
+| owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -178,6 +180,18 @@ go test ./...
 | array elements reject handles through unions | `negative/std_array_union_handle_element.kizu` | `handle` |
 | array elements reject channels through structs | `negative/std_array_struct_channel_element.kizu` | `Channel` |
 | array elements reject atomics | `negative/std_array_atomic_element.kizu` | `Atomic` |
+| string construction requires explicit allocator | `negative/std_string_no_allocator.kizu` | `expects allocator` |
+| string append bytes requires `[]const u8` | `negative/std_string_wrong_append_type.kizu` | `expects []const u8` |
+| string append byte requires `u8` | `negative/std_string_append_byte_wrong_type.kizu` | `expects u8` |
+| strings cannot be used after `deinit` | `negative/std_string_use_after_deinit.kizu` | `moved value` |
+| string byte views block append | `negative/std_string_append_while_viewed.kizu` | `cannot run while string is borrowed` |
+| string byte views block clear | `negative/std_string_clear_while_viewed.kizu` | `cannot run while string is borrowed` |
+| string byte views block deinit | `negative/std_string_deinit_while_viewed.kizu` | `cannot run while string is borrowed` |
+| string byte views cannot escape through return | `negative/std_string_as_bytes_return_escape.kizu` | `String.as_bytes` must be bound |
+| string byte views cannot be used directly | `negative/std_string_as_bytes_direct_use.kizu` | `String.as_bytes` must be bound |
+| shared string borrows cannot deinit | `negative/std_string_deinit_through_shared_borrow.kizu` | `requires owned String receiver` |
+| mutable string borrows cannot deinit | `negative/std_string_deinit_through_mut_borrow.kizu` | `requires owned String receiver` |
+| shared string borrows cannot append | `negative/std_string_append_through_shared_borrow.kizu` | `requires mutable String receiver` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |

@@ -167,6 +167,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	for idx, param := range fn.decl.Params {
 		value := c.newBinding(param.Name, fn.params[idx].typeName)
 		value.borrowedParam = fn.params[idx].borrow
+		value.mutBorrow = fn.params[idx].mutBorrow
 		env.define(value)
 	}
 	previousLoopDepth := c.loopDepth
@@ -248,6 +249,9 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if target, elem, mutable, ok := c.arrayBorrowInitializer(stmt.Value, env); ok {
 		return c.checkArrayBorrowLetStmt(stmt, target, elem, mutable, env)
 	}
+	if target, ok := c.stringViewInitializer(stmt.Value, env); ok {
+		return c.checkStringViewLetStmt(stmt, target, env)
+	}
 	typeName, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
 		return err
@@ -257,6 +261,60 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	c.setArenaProvenance(value, stmt.Value, env)
 	env.define(value)
 	return nil
+}
+
+// checkStringViewLetStmt binds a local byte view and activates the String owner.
+func (c *Checker) checkStringViewLetStmt(stmt *ast.LetStmt, target *binding, env *scope) error {
+	if err := c.checkStringViewInitializerShape(stmt.Value); err != nil {
+		return err
+	}
+	if err := checkBorrowConflict(target, false); err != nil {
+		return err
+	}
+	c.activateBorrow(target, "", false)
+	value := c.newBinding(stmt.Name, "[]const u8")
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.borrowTarget = target
+	env.define(value)
+	return nil
+}
+
+// checkStringViewInitializerShape validates string.as_bytes() local view syntax.
+func (c *Checker) checkStringViewInitializerShape(expr ast.Expression) error {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return fmt.Errorf("string error: String view initializer must call String.as_bytes")
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "as_bytes" {
+		return fmt.Errorf("string error: String view initializer must call String.as_bytes")
+	}
+	if len(call.Args) != 0 {
+		return fmt.Errorf("string error: `String.as_bytes` expects 0 args, got %d", len(call.Args))
+	}
+	return nil
+}
+
+// stringViewInitializer recognizes string.as_bytes() local byte-view initializers.
+func (c *Checker) stringViewInitializer(expr ast.Expression, env *scope) (*binding, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, false
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "as_bytes" {
+		return nil, false
+	}
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	target, exists := env.lookup(ident.Name)
+	if !exists || target.moved || target.typeName != "std::string::String" {
+		return nil, false
+	}
+	return target, true
 }
 
 // checkArrayBorrowLetStmt binds an Array element borrow and activates the array owner.
@@ -846,6 +904,9 @@ func (c *Checker) checkQualifiedBuiltin(
 	if typ, ok, err := c.checkMemBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
+	if name == "std.string.String" {
+		return c.checkStringConstructor(args, env)
+	}
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
@@ -857,6 +918,22 @@ func (c *Checker) checkQualifiedBuiltin(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkStringConstructor validates std::string::String(allocator) ownership.
+func (c *Checker) checkStringConstructor(args []ast.Expression, env *scope) (string, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("move error: `std::string::String` expects allocator")
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "Allocator" {
+		return "", true, fmt.Errorf("move error: `std::string::String` expects Allocator, got %s",
+			got)
+	}
+	return "std::string::String", true, nil
 }
 
 // checkMemBuiltin validates ownership effects for allocation-free std::mem calls.
@@ -1533,17 +1610,7 @@ func (c *Checker) checkMethodCallExpr(
 		return c.checkArrayMethod(arena, elem, field.Name, args, env)
 	}
 	if !ok || base != "arena" {
-		if arena.typeName == "TaskGroup" {
-			return c.checkTaskGroupMethod(field.Name, args, env)
-		}
-		if elem, ok := taskElement(arena.typeName); ok {
-			return c.checkTaskMethod(arena, field.Name, elem, args)
-		}
-		typ, ok, err := c.checkConcurrencyMethod(arena.typeName, field.Name, args, env)
-		if ok || err != nil {
-			return typ, err
-		}
-		return c.checkPlainMethodArgs(args, env)
+		return c.checkNonArenaMethod(arena, field.Name, args, env)
 	}
 	switch field.Name {
 	case "add":
@@ -1553,6 +1620,139 @@ func (c *Checker) checkMethodCallExpr(
 	default:
 		return "", fmt.Errorf("arena error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkNonArenaMethod validates methods on non-arena owned values.
+func (c *Checker) checkNonArenaMethod(
+	value *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if value.typeName == "std::string::String" {
+		if err := checkStringReceiverBorrow(value, name); err != nil {
+			return "", err
+		}
+		return c.checkStringMethod(value, name, args, env)
+	}
+	if value.typeName == "TaskGroup" {
+		return c.checkTaskGroupMethod(name, args, env)
+	}
+	if elem, ok := taskElement(value.typeName); ok {
+		return c.checkTaskMethod(value, name, elem, args)
+	}
+	typ, ok, err := c.checkConcurrencyMethod(value.typeName, name, args, env)
+	if ok || err != nil {
+		return typ, err
+	}
+	return c.checkPlainMethodArgs(args, env)
+}
+
+// checkStringReceiverBorrow rejects String methods whose receiver cannot be tracked safely.
+func checkStringReceiverBorrow(value *binding, name string) error {
+	if name == "deinit" && value.borrowedParam {
+		return fmt.Errorf("string error: `String.deinit` requires owned String receiver")
+	}
+	if isStringMutatingMethod(name) && value.borrowedParam && !value.mutBorrow {
+		return fmt.Errorf("string error: `String.%s` requires mutable String receiver", name)
+	}
+	return nil
+}
+
+// checkStringMethod validates ownership effects for owned String methods.
+func (c *Checker) checkStringMethod(
+	str *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
+	case "append_bytes":
+		if str.hasAnyBorrow() {
+			return "", fmt.Errorf("string error: `String.append_bytes` cannot run while string is borrowed")
+		}
+		return c.checkStringBytesArg(name, args, env)
+	case "append_byte":
+		if str.hasAnyBorrow() {
+			return "", fmt.Errorf("string error: `String.append_byte` cannot run while string is borrowed")
+		}
+		return c.checkStringByteArg(name, args, env)
+	case "len":
+		if len(args) != 0 {
+			return "", fmt.Errorf("string error: `String.len` expects 0 args, got %d", len(args))
+		}
+		return "i64", nil
+	case "as_bytes":
+		return "", fmt.Errorf(
+			"string error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
+	case "clear":
+		if str.hasAnyBorrow() {
+			return "", fmt.Errorf("string error: `String.clear` cannot run while string is borrowed")
+		}
+		if len(args) != 0 {
+			return "", fmt.Errorf("string error: `String.clear` expects 0 args, got %d", len(args))
+		}
+		return "void", nil
+	case "deinit":
+		if str.hasAnyBorrow() {
+			return "", fmt.Errorf("string error: `String.deinit` cannot run while string is borrowed")
+		}
+		if len(args) != 0 {
+			return "", fmt.Errorf("string error: `String.deinit` expects 0 args, got %d", len(args))
+		}
+		str.moved = true
+		return "void", nil
+	default:
+		return "", fmt.Errorf("string error: String has no method `%s`", name)
+	}
+}
+
+// isStringMutatingMethod reports whether a String method can change owned storage.
+func isStringMutatingMethod(name string) bool {
+	switch name {
+	case "append_bytes", "append_byte", "clear", "deinit":
+		return true
+	default:
+		return false
+	}
+}
+
+// checkStringBytesArg validates append_bytes without moving the source slice.
+func (c *Checker) checkStringBytesArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "[]const u8" {
+		return "", fmt.Errorf("string error: `String.%s` expects []const u8, got %s", name, got)
+	}
+	return "!void", nil
+}
+
+// checkStringByteArg validates append_byte without moving the source value.
+func (c *Checker) checkStringByteArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "u8" {
+		return "", fmt.Errorf("string error: `String.%s` expects u8, got %s", name, got)
+	}
+	return "!void", nil
 }
 
 // checkConcurrencyMethod validates std concurrency prototype method moves.
