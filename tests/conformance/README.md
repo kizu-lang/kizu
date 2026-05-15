@@ -21,7 +21,11 @@ fall out of the self-host compiler test corpus.
 
 ## Module Fixtures
 
-`modules/basic` is the first reusable multi-file package fixture. The current Go
-tests resolve its `kizu.toml` module graph and parse every source file. Full
-multi-file import resolution, visibility checking, diagnostics, and self-host runner
-coverage are tracked by #88, #89, #90, and #91.
+`modules/v0_3.json` is the reusable module conformance manifest. The Go runner
+executes every case with `kizu check <path>`. The self-host runner reads the same
+manifest and executes pass-case root sources through the current frontend
+skeleton.
+
+`modules/basic` is the first positive multi-file package fixture. Negative
+fixtures, such as `modules/missing_import`, keep expected diagnostic substrings
+next to the fixture manifest.
