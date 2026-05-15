@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -894,7 +895,7 @@ func (p *Parser) parseTypeName() string {
 		p.errorf("expected type, got %s", p.cur.Type)
 		return ""
 	}
-	name := p.cur.Literal
+	name := p.parseTypeBaseName()
 	if p.peek.Type == token.Bang {
 		p.nextToken()
 		p.nextToken()
@@ -923,9 +924,25 @@ func (p *Parser) parseTypeName() string {
 	return out
 }
 
+// parseTypeBaseName parses an identifier or namespace-qualified type base.
+func (p *Parser) parseTypeBaseName() string {
+	parts := []string{p.cur.Literal}
+	for p.peek.Type == token.DoubleColon {
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return strings.Join(parts, "::")
+		}
+		parts = append(parts, p.cur.Literal)
+	}
+	return strings.Join(parts, "::")
+}
+
 // expectTypeClose consumes or accepts the closing generic angle bracket.
 func (p *Parser) expectTypeClose() bool {
 	if p.cur.Type == token.GT {
+		if p.peek.Type == token.GT {
+			p.nextToken()
+		}
 		return true
 	}
 	return p.expectPeek(token.GT)

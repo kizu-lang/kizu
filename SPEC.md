@@ -1099,6 +1099,34 @@ std::mem::trim_ascii(bytes: []const u8) -> []const u8
 allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
 mutable slice の仕様後に実装します。
 
+v0.2 の `std::array::Array<T>` は、明示 allocator capability を受け取る
+owned contiguous collection です。
+
+```text
+std::mem::page_allocator() -> Allocator
+std::array::Array<T>(allocator: Allocator) -> std::array::Array<T>
+array.append(value: T) -> !void
+array.len() -> i64
+array.capacity() -> i64
+array.get(index: i64) -> !T
+array.at(index: i64) -> !&T
+array.at_mut(index: i64) -> !&mut T
+array.set(index: i64, value: T) -> !void
+array.deinit() -> void
+```
+
+`std::array::Array<T>()` のような hidden default allocator は使いません。
+`array.get` は bounds check し、範囲外なら `!T` の error を返します。
+v0.2 の `get` は copy element 限定です。
+non-copy element は `at` / `at_mut` で local borrow として読み書きします。
+element borrow が生きている間は `append`、`set`、`deinit` を禁止します。
+mutable element borrow が生きている間は array 全体の read も禁止します。
+`deinit` 後の array 使用は safe Kizu では禁止します。
+v0.2 の `Array<T>` element には raw pointer、arena、handle、nested array、
+concurrency capability type を入れられません。この制限は struct field と union
+payload の中も再帰的に検査します。これらは lifetime、provenance、thread boundary
+の仕様を collection 向けに固めてから扱います。
+
 ## 15. concurrency / async 方針
 
 Kizu v0.1 では `async fn` / `await` syntax は実装しません。

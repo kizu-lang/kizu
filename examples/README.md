@@ -63,6 +63,9 @@ go test ./...
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
 | task-based file read | `fs_task.kizu` | reads a fixture from a spawned task |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
+| owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
+| self-host token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
+| array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -152,6 +155,29 @@ go test ./...
 | byte-slice helper args must be `[]const u8` | `negative/std_mem_wrong_type.kizu` | `expects []const u8` |
 | checked byte slices reject invalid ranges | `negative/std_mem_slice_out_of_bounds.kizu` | `range out of bounds` |
 | checked byte access rejects invalid indexes | `negative/std_mem_byte_at_out_of_bounds.kizu` | `index out of bounds` |
+| array access is bounds-checked | `negative/std_array_bounds.kizu` | `index out of bounds` |
+| array construction requires explicit allocator | `negative/std_array_no_allocator.kizu` | `expects allocator` |
+| arrays cannot be used after `deinit` | `negative/std_array_use_after_deinit.kizu` | `moved value` |
+| array append element type must match `T` | `negative/std_array_wrong_type.kizu` | `Array.append` |
+| array append moves non-copy values | `negative/std_array_append_moves.kizu` | `moved value` |
+| array get is copy-only in v0.2 | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
+| array elements cannot be raw pointers | `negative/std_array_raw_pointer_element.kizu` | `raw pointer` |
+| array elements cannot be handles | `negative/std_array_handle_element.kizu` | `handle` |
+| arrays cannot cross channel boundary | `negative/std_array_channel_send.kizu` | `Array cannot cross concurrency boundary` |
+| arrays cannot cross task boundary | `negative/std_array_task_spawn.kizu` | `Array cannot cross concurrency boundary` |
+| borrowed array blocks append | `negative/std_array_append_while_borrowed.kizu` | `cannot run while array is borrowed` |
+| borrowed array blocks deinit | `negative/std_array_deinit_while_borrowed.kizu` | `cannot run while array is borrowed` |
+| borrowed array blocks set | `negative/std_array_set_while_borrowed.kizu` | `cannot run while array is borrowed` |
+| mutable array borrow blocks reads | `negative/std_array_read_while_mut_borrowed.kizu` | `cannot read while mutably borrowed` |
+| mutable array borrow requires `var` | `negative/std_array_at_mut_immutable.kizu` | `requires mutable array binding` |
+| array element borrows cannot be passed as owned values | `negative/std_array_at_pass_to_owned_param.kizu` | `Array.at` must be bound |
+| array element borrows cannot escape through return | `negative/std_array_at_return_escape.kizu` | `Array.at` must be bound |
+| array borrow access is bounds-checked | `negative/std_array_at_out_of_bounds.kizu` | `index out of bounds` |
+| array elements reject nested arrays through structs | `negative/std_array_struct_nested_array_element.kizu` | `nested array` |
+| array elements reject raw pointers through structs | `negative/std_array_struct_raw_pointer_element.kizu` | `raw pointer` |
+| array elements reject handles through unions | `negative/std_array_union_handle_element.kizu` | `handle` |
+| array elements reject channels through structs | `negative/std_array_struct_channel_element.kizu` | `Channel` |
+| array elements reject atomics | `negative/std_array_atomic_element.kizu` | `Atomic` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |

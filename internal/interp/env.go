@@ -7,6 +7,8 @@ type binding struct {
 	mutable     bool
 	fieldParent *binding
 	fieldName   string
+	arrayParent *Array
+	arrayIndex  int
 }
 
 // Env stores lexical bindings for a function call or block execution.

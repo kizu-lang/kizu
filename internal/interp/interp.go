@@ -362,6 +362,11 @@ func assignRef(target Value, value Value) error {
 		target.ref.value = value
 		return nil
 	}
+	if target.ref.arrayParent != nil {
+		target.ref.arrayParent.values[target.ref.arrayIndex] = value
+		target.ref.value = value
+		return nil
+	}
 	target.ref.value = value
 	return nil
 }
@@ -877,6 +882,8 @@ func (i *Interpreter) evalMemBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
+	case "std.mem.page_allocator":
+		return callAllocatorFromExprs(args), true, nil
 	case "std.mem.len":
 		value, err := i.evalMemLen(args, env)
 		return value, true, err
@@ -1222,6 +1229,8 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 		return voidValue(), fmt.Errorf("runtime error: unsupported type application `%s`", expr.String())
 	}
 	switch name {
+	case "std.array.Array":
+		return i.evalArrayConstructor(expr.TypeArg, args, env)
 	case "std.channel.Channel":
 		return callChannelFromExprs(expr.TypeArg, args), nil
 	case "std.atomic.Atomic":
@@ -1391,34 +1400,7 @@ func (i *Interpreter) evalMethodCallExpr(
 		receiver = receiver.ref.value
 	}
 	if receiver.kind != kindArena {
-		if receiver.kind == kindTaskGroup {
-			return i.evalTaskGroupMethod(receiver, field.Name, args, env)
-		}
-		if receiver.kind == kindTask {
-			return evalTaskMethod(receiver, field.Name, args)
-		}
-		if receiver.kind == kindQueue {
-			return i.evalQueueMethod(receiver, field.Name, args, env)
-		}
-		if receiver.kind == kindChannel {
-			return i.evalChannelMethod(receiver, field.Name, args, env)
-		}
-		if receiver.kind == kindPartition {
-			return i.evalPartitionMethod(receiver, field.Name, args, env)
-		}
-		if receiver.kind == kindLocalBuffer {
-			return i.evalLocalBufferMethod(receiver, field.Name, args, env)
-		}
-		if receiver.kind == kindAtomic {
-			return i.evalAtomicMethod(receiver, field.Name, args, env)
-		}
-		if receiver.kind == kindMutex {
-			return i.evalMutexMethod(receiver, field.Name, args, env)
-		}
-		if receiver.kind == kindStruct {
-			return i.evalImplMethod(receiver, field.Name, args, env)
-		}
-		return voidValue(), fmt.Errorf("runtime error: method `%s` expects arena", field.Name)
+		return i.evalNonArenaMethod(receiver, field.Name, args, env)
 	}
 	switch field.Name {
 	case "add":
@@ -1427,6 +1409,39 @@ func (i *Interpreter) evalMethodCallExpr(
 		return i.evalArenaGet(receiver.arena, args, env)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
+	}
+}
+
+// evalNonArenaMethod dispatches methods for non-arena runtime values.
+func (i *Interpreter) evalNonArenaMethod(
+	receiver Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	switch receiver.kind {
+	case kindTaskGroup:
+		return i.evalTaskGroupMethod(receiver, name, args, env)
+	case kindTask:
+		return evalTaskMethod(receiver, name, args)
+	case kindQueue:
+		return i.evalQueueMethod(receiver, name, args, env)
+	case kindChannel:
+		return i.evalChannelMethod(receiver, name, args, env)
+	case kindPartition:
+		return i.evalPartitionMethod(receiver, name, args, env)
+	case kindLocalBuffer:
+		return i.evalLocalBufferMethod(receiver, name, args, env)
+	case kindAtomic:
+		return i.evalAtomicMethod(receiver, name, args, env)
+	case kindMutex:
+		return i.evalMutexMethod(receiver, name, args, env)
+	case kindArray:
+		return i.evalArrayMethod(receiver, name, args, env)
+	case kindStruct:
+		return i.evalImplMethod(receiver, name, args, env)
+	default:
+		return voidValue(), fmt.Errorf("runtime error: method `%s` expects arena", name)
 	}
 }
 
@@ -1642,14 +1657,41 @@ func isRuntimeAtomicSupportedType(typeName string) bool {
 	return typeName == "bool" || typeName == "i64"
 }
 
+// evalArrayConstructor creates an owned Array<T> with an explicit allocator.
+func (i *Interpreter) evalArrayConstructor(
+	typeArg string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std::array::Array<%s> expects allocator", typeArg)
+	}
+	allocator, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if allocator.kind != kindAllocator {
+		return voidValue(), fmt.Errorf("runtime error: std::array::Array<%s> expects Allocator", typeArg)
+	}
+	return arrayValue(typeArg), nil
+}
+
 // runtimeValueMatchesType checks primitive values used by typed runtime containers.
 func runtimeValueMatchesType(value Value, typeName string) bool {
 	switch typeName {
 	case "bool":
 		return value.kind == kindBool
-	case "i64":
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		return value.kind == kindInt
+	case "[]const u8":
+		return value.kind == kindString
 	default:
+		if value.kind == kindEnum {
+			return value.enum.typeName == typeName
+		}
+		if value.kind == kindStruct {
+			return value.typeName == typeName
+		}
 		return false
 	}
 }
@@ -1852,6 +1894,129 @@ func (i *Interpreter) evalLocalBufferMethod(
 	return buffer.localBuf.values[int(index.i)], nil
 }
 
+// evalArrayMethod executes owned Array<T> prototype operations.
+func (i *Interpreter) evalArrayMethod(
+	array Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if array.array.deinit {
+		return voidValue(), fmt.Errorf("runtime error: Array was deinitialized")
+	}
+	switch name {
+	case "append":
+		return i.evalArrayAppend(array, args, env)
+	case "len":
+		return intValue(int64(len(array.array.values))), requireNoArgs("Array.len", args)
+	case "capacity":
+		return intValue(int64(cap(array.array.values))), requireNoArgs("Array.capacity", args)
+	case "get":
+		return i.evalArrayGet(array, args, env)
+	case "at":
+		return i.evalArrayAt(array, args, env, false)
+	case "at_mut":
+		return i.evalArrayAt(array, args, env, true)
+	case "set":
+		return i.evalArraySet(array, args, env)
+	case "deinit":
+		array.array.values = nil
+		array.array.deinit = true
+		return voidValue(), requireNoArgs("Array.deinit", args)
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Array has no method `%s`", name)
+	}
+}
+
+// evalArrayAt returns a checked local borrow for one array element.
+func (i *Interpreter) evalArrayAt(
+	array Value,
+	args []ast.Expression,
+	env *Env,
+	mutable bool,
+) (Value, error) {
+	index, err := i.evalArrayIndex("Array.at", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= len(array.array.values) {
+		return errorUnionValue("Array.at index out of bounds"), nil
+	}
+	cell := &binding{
+		value:       array.array.values[index],
+		mutable:     mutable,
+		arrayParent: array.array,
+		arrayIndex:  index,
+	}
+	return refValue(cell), nil
+}
+
+// evalArraySet replaces one element after a bounds check.
+func (i *Interpreter) evalArraySet(array Value, args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 2 {
+		return voidValue(), fmt.Errorf("runtime error: Array.set expects 2 args")
+	}
+	index, err := i.evalArrayIndex("Array.set", args[:1], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= len(array.array.values) {
+		return errorUnionValue("Array.set index out of bounds"), nil
+	}
+	value, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if !runtimeValueMatchesType(value, array.typeName) {
+		return errorUnionValue("Array.set element type mismatch"), nil
+	}
+	array.array.values[index] = value
+	return voidValue(), nil
+}
+
+// evalArrayAppend appends one element and reports allocation failure as !void.
+func (i *Interpreter) evalArrayAppend(array Value, args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: Array.append expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if !runtimeValueMatchesType(value, array.typeName) {
+		return errorUnionValue("Array.append element type mismatch"), nil
+	}
+	array.array.values = append(array.array.values, value)
+	return voidValue(), nil
+}
+
+// evalArrayGet reads one copyable element by checked index.
+func (i *Interpreter) evalArrayGet(array Value, args []ast.Expression, env *Env) (Value, error) {
+	index, err := i.evalArrayIndex("Array.get", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= len(array.array.values) {
+		return errorUnionValue("Array.get index out of bounds"), nil
+	}
+	return array.array.values[index], nil
+}
+
+// evalArrayIndex evaluates one checked i64 index argument.
+func (i *Interpreter) evalArrayIndex(name string, args []ast.Expression, env *Env) (int, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("runtime error: %s expects 1 arg", name)
+	}
+	index, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return 0, err
+	}
+	if index.kind != kindInt {
+		return 0, fmt.Errorf("runtime error: %s expects i64 index", name)
+	}
+	return int(index.i), nil
+}
+
 // evalAtomicMethod executes seq_cst-only integer atomic operations.
 func (i *Interpreter) evalAtomicMethod(
 	atomic Value,
@@ -1982,6 +2147,14 @@ func (i *Interpreter) evalArgs(exprs []ast.Expression, env *Env) ([]Value, error
 	return args, nil
 }
 
+// requireNoArgs validates zero-argument runtime methods.
+func requireNoArgs(name string, args []ast.Expression) error {
+	if len(args) != 0 {
+		return fmt.Errorf("runtime error: %s expects 0 args", name)
+	}
+	return nil
+}
+
 // callPrint writes one value followed by a newline.
 func (i *Interpreter) callPrint(args []Value) (Value, error) {
 	if len(args) != 1 {
@@ -2038,6 +2211,14 @@ func callIoFromExprs(mode string, args []ast.Expression) Value {
 		return errorUnionValue("std::io::" + mode + " expected 0 args")
 	}
 	return ioValue(mode)
+}
+
+// callAllocatorFromExprs validates explicit allocator factory calls.
+func callAllocatorFromExprs(args []ast.Expression) Value {
+	if len(args) != 0 {
+		return errorUnionValue("std::mem::page_allocator expected 0 args")
+	}
+	return allocatorValue("page")
 }
 
 // callChannelFromExprs validates std::channel::Channel<T> has no constructor args.

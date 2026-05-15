@@ -34,6 +34,7 @@ type binding struct {
 	id               int
 	name             string
 	typeName         string
+	mutable          bool
 	moved            bool
 	borrowedParam    bool
 	localBorrow      bool
@@ -244,14 +245,104 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if borrow, ok := borrowPrefix(stmt.Value); ok {
 		return c.checkBorrowLetStmt(stmt, borrow, env)
 	}
+	if target, elem, mutable, ok := c.arrayBorrowInitializer(stmt.Value, env); ok {
+		return c.checkArrayBorrowLetStmt(stmt, target, elem, mutable, env)
+	}
 	typeName, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
 		return err
 	}
 	value := c.newBinding(stmt.Name, typeName)
+	value.mutable = stmt.Mutable
 	c.setArenaProvenance(value, stmt.Value, env)
 	env.define(value)
 	return nil
+}
+
+// checkArrayBorrowLetStmt binds an Array element borrow and activates the array owner.
+func (c *Checker) checkArrayBorrowLetStmt(
+	stmt *ast.LetStmt,
+	target *binding,
+	elem string,
+	mutable bool,
+	env *scope,
+) error {
+	if mutable && !target.mutable {
+		return fmt.Errorf("array error: `Array.at_mut` requires mutable array binding")
+	}
+	if err := c.checkArrayBorrowInitializerIndex(stmt.Value, env); err != nil {
+		return err
+	}
+	if err := checkBorrowConflict(target, mutable); err != nil {
+		return err
+	}
+	c.activateBorrow(target, "", mutable)
+	value := c.newBinding(stmt.Name, elem)
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.borrowTarget = target
+	value.mutBorrow = mutable
+	env.define(value)
+	return nil
+}
+
+// checkArrayBorrowInitializerIndex validates the checked index for Array.at/at_mut.
+func (c *Checker) checkArrayBorrowInitializerIndex(expr ast.Expression, env *scope) error {
+	tryExpr, ok := expr.(*ast.TryExpr)
+	if !ok {
+		return fmt.Errorf("array error: Array borrow initializer must use try")
+	}
+	call, ok := tryExpr.Value.(*ast.CallExpr)
+	if !ok {
+		return fmt.Errorf("array error: Array borrow initializer must call Array.at")
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || (field.Name != "at" && field.Name != "at_mut") {
+		return fmt.Errorf("array error: Array borrow initializer must call Array.at")
+	}
+	if len(call.Args) != 1 {
+		return fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d", field.Name, len(call.Args))
+	}
+	got, err := c.readExpr(call.Args[0], env)
+	if err != nil {
+		return err
+	}
+	if got != "i64" {
+		return fmt.Errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
+	}
+	return nil
+}
+
+// arrayBorrowInitializer recognizes try array.at/at_mut(index) local borrow initializers.
+func (c *Checker) arrayBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+) (*binding, string, bool, bool) {
+	tryExpr, ok := expr.(*ast.TryExpr)
+	if !ok {
+		return nil, "", false, false
+	}
+	call, ok := tryExpr.Value.(*ast.CallExpr)
+	if !ok {
+		return nil, "", false, false
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || (field.Name != "at" && field.Name != "at_mut") {
+		return nil, "", false, false
+	}
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil, "", false, false
+	}
+	array, exists := env.lookup(ident.Name)
+	if !exists || array.moved {
+		return nil, "", false, false
+	}
+	base, elem, ok := splitGenericType(array.typeName)
+	if !ok || base != "std::array::Array" {
+		return nil, "", false, false
+	}
+	return array, elem, field.Name == "at_mut", true
 }
 
 // checkBorrowLetStmt binds a local borrow and activates its owner until last use.
@@ -775,6 +866,12 @@ func (c *Checker) checkMemBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
+	case "std.mem.page_allocator":
+		_, err := checkNoArgOwnershipCall(name, args)
+		if err != nil {
+			return "", true, err
+		}
+		return "Allocator", true, nil
 	case "std.mem.len":
 		return c.checkMemByteArgs(name, args, env, 1, "i64")
 	case "std.mem.byte_at":
@@ -912,6 +1009,8 @@ func (c *Checker) checkTaskBuiltin(
 // checkConcurrencyConstructor rejects untyped concurrency constructors.
 func checkConcurrencyConstructor(name string) (string, bool, error) {
 	switch name {
+	case "std.array.Array":
+		return "", true, fmt.Errorf("move error: use `std::array::Array<T>(allocator)`")
 	case "std.atomic.Atomic":
 		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
@@ -963,6 +1062,104 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 	return "!void", true, nil
 }
 
+// checkArrayConstructor validates std::array::Array<T>(allocator) ownership.
+func (c *Checker) checkArrayConstructor(
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if err := c.rejectArrayElementType(elem); err != nil {
+		return "", err
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("move error: `std::array::Array<%s>` expects allocator", elem)
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", fmt.Errorf("move error: `std::array::Array<%s>` expects Allocator, got %s",
+			elem, got)
+	}
+	return fmt.Sprintf("std::array::Array<%s>", elem), nil
+}
+
+// rejectArrayElementType rejects element types with unresolved ownership hazards.
+func (c *Checker) rejectArrayElementType(elem string) error {
+	if err := c.rejectArrayStorageType(elem, map[string]bool{}); err != nil {
+		return fmt.Errorf("array error: Array element is not safe in v0.2: %w", err)
+	}
+	return nil
+}
+
+// rejectArrayStorageType rejects values whose lifetime rules are not Array-safe yet.
+func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) error {
+	if seen[typeName] {
+		return nil
+	}
+	seen[typeName] = true
+	if isRawPointerType(typeName) {
+		return fmt.Errorf("array error: Array element cannot be raw pointer in v0.2")
+	}
+	if err := c.rejectArrayStorageGeneric(typeName, seen); err != nil {
+		return err
+	}
+	if err := c.rejectArrayStorageStruct(typeName, seen); err != nil {
+		return err
+	}
+	return c.rejectArrayStorageUnion(typeName, seen)
+}
+
+// rejectArrayStorageGeneric applies Array-specific generic exclusions.
+func (c *Checker) rejectArrayStorageGeneric(typeName string, seen map[string]bool) error {
+	base, arg, ok := splitGenericType(typeName)
+	if !ok {
+		return nil
+	}
+	switch base {
+	case "arena":
+		return fmt.Errorf("array error: Array element cannot be arena in v0.2")
+	case "handle":
+		return fmt.Errorf("array error: Array element cannot be handle in v0.2")
+	case "std::array::Array":
+		return fmt.Errorf("array error: Array element cannot be nested array in v0.2")
+	case "Task", "Channel", "Mutex", "Atomic", "Dyn":
+		return fmt.Errorf("array error: Array element cannot be %s in v0.2", base)
+	case "option":
+		return c.rejectArrayStorageType(arg, seen)
+	default:
+		return nil
+	}
+}
+
+// rejectArrayStorageStruct checks struct fields recursively for Array storage.
+func (c *Checker) rejectArrayStorageStruct(typeName string, seen map[string]bool) error {
+	fields := c.structs[typeName]
+	for fieldName, fieldType := range fields {
+		if err := c.rejectArrayStorageType(fieldType, seen); err != nil {
+			return fmt.Errorf("array error: struct `%s.%s` cannot be Array element: %w",
+				typeName, fieldName, err)
+		}
+	}
+	return nil
+}
+
+// rejectArrayStorageUnion checks union payloads recursively for Array storage.
+func (c *Checker) rejectArrayStorageUnion(typeName string, seen map[string]bool) error {
+	variants := c.unions[typeName]
+	for variant, payload := range variants {
+		if payload == "" {
+			continue
+		}
+		if err := c.rejectArrayStorageType(payload, seen); err != nil {
+			return fmt.Errorf("array error: union `%s::%s` cannot be Array element: %w",
+				typeName, variant, err)
+		}
+	}
+	return nil
+}
+
 // checkIoArg reads and validates an explicit Io argument.
 func (c *Checker) checkIoArg(arg ast.Expression, env *scope, name string) error {
 	got, err := c.readExpr(arg, env)
@@ -1002,6 +1199,8 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return "", fmt.Errorf("move error: unsupported type application `%s`", expr.String())
 	}
 	switch name {
+	case "std.array.Array":
+		return c.checkArrayConstructor(expr.TypeArg, args, env)
 	case "std.channel.Channel":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
@@ -1329,7 +1528,10 @@ func (c *Checker) checkMethodCallExpr(
 	if arena.moved {
 		return "", fmt.Errorf("move error: moved value `%s` was used", receiver.Name)
 	}
-	base, _, ok := splitGenericType(arena.typeName)
+	base, elem, ok := splitGenericType(arena.typeName)
+	if ok && base == "std::array::Array" {
+		return c.checkArrayMethod(arena, elem, field.Name, args, env)
+	}
 	if !ok || base != "arena" {
 		if arena.typeName == "TaskGroup" {
 			return c.checkTaskGroupMethod(field.Name, args, env)
@@ -1587,6 +1789,127 @@ func (c *Checker) checkLocalBufferMethod(
 		return "", fmt.Errorf("parallel error: LocalBuffer has no method `%s`", name)
 	}
 	return c.checkOneI64Arg("LocalBuffer.get", args, env)
+}
+
+// checkArrayMethod validates ownership effects for owned Array<T> methods.
+func (c *Checker) checkArrayMethod(
+	array *binding,
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
+	case "append":
+		return c.checkArrayAppend(array, elem, args, env)
+	case "len", "capacity":
+		return c.checkArrayReadNoArgs(array, name, args)
+	case "get":
+		if array.activeMutBorrows > 0 {
+			return "", fmt.Errorf("array error: `Array.get` cannot read while mutably borrowed")
+		}
+		return c.checkArrayGet(elem, args, env)
+	case "at", "at_mut":
+		return "", fmt.Errorf("array error: `Array.%s` must be bound with `let name = try array.%s(...)`",
+			name, name)
+	case "set":
+		return c.checkArraySet(array, elem, args, env)
+	case "deinit":
+		if array.hasAnyBorrow() {
+			return "", fmt.Errorf("array error: `Array.deinit` cannot run while array is borrowed")
+		}
+		if len(args) != 0 {
+			return "", fmt.Errorf("array error: `Array.deinit` expects 0 args, got %d", len(args))
+		}
+		array.moved = true
+		return "void", nil
+	default:
+		return "", fmt.Errorf("array error: Array has no method `%s`", name)
+	}
+}
+
+// checkArrayAppend validates append mutation and element move.
+func (c *Checker) checkArrayAppend(
+	array *binding,
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if array.hasAnyBorrow() {
+		return "", fmt.Errorf("array error: `Array.append` cannot run while array is borrowed")
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("array error: `Array.append` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.moveExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != elem {
+		return "", fmt.Errorf("array error: `Array.append` expects %s, got %s", elem, got)
+	}
+	return "!void", nil
+}
+
+// checkArrayReadNoArgs validates len/capacity reads.
+func (c *Checker) checkArrayReadNoArgs(
+	array *binding,
+	name string,
+	args []ast.Expression,
+) (string, error) {
+	if array.activeMutBorrows > 0 {
+		return "", fmt.Errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
+	}
+	if len(args) != 0 {
+		return "", fmt.Errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
+	}
+	return "i64", nil
+}
+
+// checkArraySet validates checked element replacement.
+func (c *Checker) checkArraySet(
+	array *binding,
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if array.hasAnyBorrow() {
+		return "", fmt.Errorf("array error: `Array.set` cannot run while array is borrowed")
+	}
+	if len(args) != 2 {
+		return "", fmt.Errorf("array error: `Array.set` expects 2 args, got %d", len(args))
+	}
+	if got, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	} else if got != "i64" {
+		return "", fmt.Errorf("array error: `Array.set` expects i64 index, got %s", got)
+	}
+	got, err := c.moveExpr(args[1], env)
+	if err != nil {
+		return "", err
+	}
+	if got != elem {
+		return "", fmt.Errorf("array error: `Array.set` expects %s value, got %s", elem, got)
+	}
+	return "!void", nil
+}
+
+// checkArrayGet validates copy-only Array<T> reads in the v0.2 prototype.
+func (c *Checker) checkArrayGet(elem string, args []ast.Expression, env *scope) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("array error: `Array.get` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", fmt.Errorf("array error: `Array.get` expects i64 index, got %s", got)
+	}
+	if !c.isCopyType(elem) {
+		return "", fmt.Errorf("array error: `Array.get` requires copy element in v0.2")
+	}
+	return "!" + elem, nil
 }
 
 // checkAtomicMethod validates seq_cst-only integer atomic operations.
@@ -2004,7 +2327,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	switch typeName {
-	case "bool", "void", "Io",
+	case "bool", "void", "Io", "Allocator",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64", "[]const u8":
 		return true
@@ -2232,6 +2555,8 @@ func (c *Checker) rejectConcurrencyBoundaryGeneric(typeName string, seen map[str
 	switch base {
 	case "arena":
 		return fmt.Errorf("thread error: arena cannot cross concurrency boundary")
+	case "std::array::Array":
+		return fmt.Errorf("thread error: Array cannot cross concurrency boundary in v0.2")
 	case "handle":
 		return fmt.Errorf("thread error: handle cannot cross concurrency boundary")
 	case "Dyn":

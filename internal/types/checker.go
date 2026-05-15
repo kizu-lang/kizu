@@ -35,6 +35,7 @@ var knownTypes = map[Type]bool{
 	"f32":          true,
 	"f64":          true,
 	"Io":           true,
+	"Allocator":    true,
 	"TaskGroup":    true,
 	"Queue":        true,
 	"Partition":    true,
@@ -73,6 +74,7 @@ var copyTypes = map[Type]bool{
 	"f32":          true,
 	"f64":          true,
 	"Io":           true,
+	"Allocator":    true,
 }
 
 var signedNumericTypes = map[Type]bool{
@@ -500,7 +502,8 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 		}
 		return Type(name), nil
 	}
-	if base != "arena" && base != "handle" && base != "option" && base != "Task" &&
+	if base != "arena" && base != "handle" && base != "option" &&
+		base != "std::array::Array" && base != "Task" &&
 		base != "Channel" && base != "Mutex" && base != "Atomic" {
 		return "", fmt.Errorf("type error: unknown generic type `%s`", base)
 	}
@@ -640,11 +643,55 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool
 		}
 		return false, env.defineParam(stmt.Name, typ, true, mutable)
 	}
-	typ, err := c.checkExpr(stmt.Value, env, unsafe)
+	typ, mutable, ok, err := c.checkArrayBorrowInitializer(stmt.Value, env, unsafe)
+	if ok || err != nil {
+		if err != nil {
+			return false, err
+		}
+		return false, env.defineParam(stmt.Name, typ, true, mutable)
+	}
+	typ, err = c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
 	}
 	return false, env.define(stmt.Name, typ, stmt.Mutable)
+}
+
+// checkArrayBorrowInitializer recognizes try array.at/at_mut(index) local borrows.
+func (c *Checker) checkArrayBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, bool, error) {
+	tryExpr, ok := expr.(*ast.TryExpr)
+	if !ok {
+		return "", false, false, nil
+	}
+	call, ok := tryExpr.Value.(*ast.CallExpr)
+	if !ok {
+		return "", false, false, nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || (field.Name != "at" && field.Name != "at_mut") {
+		return "", false, false, nil
+	}
+	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
+	if err != nil {
+		return "", false, true, err
+	}
+	base, elem, ok := splitGenericType(string(receiver))
+	if !ok || base != "std::array::Array" {
+		return "", false, true, fmt.Errorf("type error: `Array.%s` expects Array receiver", field.Name)
+	}
+	if field.Name == "at_mut" {
+		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+			return "", false, true, fmt.Errorf("type error: `Array.at_mut` requires mutable array binding")
+		}
+	}
+	if err := c.checkArrayIndexArg(field.Name, call.Args, env, unsafe); err != nil {
+		return "", false, true, err
+	}
+	return Type(elem), field.Name == "at_mut", true, nil
 }
 
 // checkAssignStmt validates assignment to an existing binding.
@@ -1268,12 +1315,24 @@ func (c *Checker) checkQualifiedBuiltin(
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
+	return c.checkStdConstructorBuiltin(name, args, env, unsafe)
+}
+
+// checkStdConstructorBuiltin validates miscellaneous std constructor calls.
+func (c *Checker) checkStdConstructorBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
 	switch name {
 	case "std.io.blocking", "std.io.threaded", "std.io.failing":
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
 	case "std.io.evented":
 		return "", true, fmt.Errorf("type error: `std::io::evented` is not implemented in v0.1")
+	case "std.array.Array":
+		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
 	case "std.thread.scoped":
@@ -1297,6 +1356,9 @@ func (c *Checker) checkMemBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
+	case "std.mem.page_allocator":
+		typ, err := checkNoArgConstructor(name, args, "Allocator")
+		return typ, true, err
 	case "std.mem.len":
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeI64)
 	case "std.mem.byte_at":
@@ -1494,6 +1556,123 @@ func (c *Checker) checkFsWriteFile(
 	return "!void", true, nil
 }
 
+// checkArrayConstructor validates std::array::Array<T>(allocator).
+func (c *Checker) checkArrayConstructor(
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.rejectArrayElementType(elem); err != nil {
+		return "", true, err
+	}
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `std::array::Array<%s>` expects allocator", elem)
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "Allocator" {
+		return "", true, fmt.Errorf("type error: `std::array::Array<%s>` expects Allocator, got %s",
+			elem, got)
+	}
+	return Type(fmt.Sprintf("std::array::Array<%s>", elem)), true, nil
+}
+
+// rejectArrayElementType rejects element types that need unresolved lifetime rules.
+func (c *Checker) rejectArrayElementType(elem Type) error {
+	if err := c.rejectArrayStorageType(elem, map[Type]bool{}); err != nil {
+		return fmt.Errorf("type error: Array element is not safe in v0.2: %w", err)
+	}
+	return nil
+}
+
+// rejectArrayStorageType rejects values whose lifetime rules are not Array-safe yet.
+func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
+	if seen[typ] {
+		return nil
+	}
+	seen[typ] = true
+	if isPointerType(typ) {
+		return fmt.Errorf("type error: Array element cannot be raw pointer in v0.2")
+	}
+	if err := c.rejectArrayStorageGeneric(typ, seen); err != nil {
+		return err
+	}
+	if err := c.rejectArrayStorageStruct(typ, seen); err != nil {
+		return err
+	}
+	return c.rejectArrayStorageUnion(typ, seen)
+}
+
+// rejectArrayStorageGeneric applies Array-specific generic exclusions.
+func (c *Checker) rejectArrayStorageGeneric(typ Type, seen map[Type]bool) error {
+	base, arg, ok := splitGenericType(string(typ))
+	if !ok {
+		return nil
+	}
+	switch base {
+	case "arena":
+		return fmt.Errorf("type error: Array element cannot be arena in v0.2")
+	case "handle":
+		return fmt.Errorf("type error: Array element cannot be handle in v0.2")
+	case "std::array::Array":
+		return fmt.Errorf("type error: Array element cannot be nested array in v0.2")
+	case "Task", "Channel", "Mutex", "Atomic", "Dyn":
+		return fmt.Errorf("type error: Array element cannot be %s in v0.2", base)
+	case "option":
+		argType, err := c.parseType(arg)
+		if err != nil {
+			return err
+		}
+		return c.rejectArrayStorageType(argType, seen)
+	default:
+		return nil
+	}
+}
+
+// rejectArrayStorageStruct checks struct fields recursively for Array storage.
+func (c *Checker) rejectArrayStorageStruct(typ Type, seen map[Type]bool) error {
+	decl := c.structs[string(typ)]
+	if decl == nil {
+		return nil
+	}
+	for _, field := range decl.Fields {
+		fieldType, err := c.parseType(field.TypeName)
+		if err != nil {
+			return err
+		}
+		if err := c.rejectArrayStorageType(fieldType, seen); err != nil {
+			return fmt.Errorf("type error: struct `%s.%s` cannot be Array element: %w",
+				typ, field.Name, err)
+		}
+	}
+	return nil
+}
+
+// rejectArrayStorageUnion checks union payloads recursively for Array storage.
+func (c *Checker) rejectArrayStorageUnion(typ Type, seen map[Type]bool) error {
+	union := c.unions[string(typ)]
+	if union == nil {
+		return nil
+	}
+	for variant, payload := range union.variants {
+		if payload == "" {
+			continue
+		}
+		payloadType, err := c.parseType(payload)
+		if err != nil {
+			return err
+		}
+		if err := c.rejectArrayStorageType(payloadType, seen); err != nil {
+			return fmt.Errorf("type error: union `%s::%s` cannot be Array element: %w",
+				typ, variant, err)
+		}
+	}
+	return nil
+}
+
 // checkIoArg validates an explicit Io argument for a std call.
 func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe bool, name string) error {
 	got, err := c.checkExpr(arg, env, unsafe)
@@ -1522,6 +1701,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return "", err
 	}
 	switch name {
+	case "std.array.Array":
+		typ, _, err := c.checkArrayConstructor(arg, args, env, unsafe)
+		return typ, err
 	case "std.channel.Channel":
 		return checkNoArgConstructor(name, args, Type(fmt.Sprintf("Channel<%s>", arg)))
 	case "std.atomic.Atomic":
@@ -1826,6 +2008,9 @@ func (c *Checker) checkMethodCallExpr(
 		return typ, err
 	}
 	base, arg, ok := splitGenericType(string(receiver))
+	if ok && base == "std::array::Array" {
+		return c.checkArrayReceiverMethod(field, Type(arg), args, env, unsafe)
+	}
 	if !ok || base != "arena" {
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
@@ -1841,6 +2026,22 @@ func (c *Checker) checkMethodCallExpr(
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkArrayReceiverMethod validates receiver-sensitive Array<T> methods.
+func (c *Checker) checkArrayReceiverMethod(
+	field *ast.FieldExpr,
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if field.Name == "at_mut" {
+		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
+			return "", fmt.Errorf("type error: `Array.at_mut` requires mutable array binding")
+		}
+	}
+	return c.checkArrayMethod(elem, field.Name, args, env, unsafe)
 }
 
 // checkConcurrencyMethod validates std concurrency prototype instance methods.
@@ -1878,6 +2079,100 @@ func (c *Checker) checkConcurrencyMethod(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkArrayMethod validates owned Array<T> prototype methods.
+func (c *Checker) checkArrayMethod(
+	elem Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch name {
+	case "append":
+		if len(args) != 1 {
+			return "", fmt.Errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
+		}
+		got, err := c.checkExpr(args[0], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != elem {
+			return "", fmt.Errorf("type error: `Array.append` expects %s, got %s", elem, got)
+		}
+		return "!void", nil
+	case "len", "capacity":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
+		}
+		return typeI64, nil
+	case "get":
+		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		if !c.isCopyType(elem) {
+			return "", fmt.Errorf("type error: `Array.get` requires copy element in v0.2")
+		}
+		return Type("!" + string(elem)), nil
+	case "at", "at_mut":
+		return "", fmt.Errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
+			name, name)
+	case "set":
+		return c.checkArraySet(elem, args, env, unsafe)
+	case "deinit":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Array.deinit` expects 0 args, got %d", len(args))
+		}
+		return typeVoid, nil
+	default:
+		return "", fmt.Errorf("type error: Array has no method `%s`", name)
+	}
+}
+
+// checkArrayIndexArg validates one i64 index argument.
+func (c *Checker) checkArrayIndexArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != 1 {
+		return fmt.Errorf("type error: `Array.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeI64 {
+		return fmt.Errorf("type error: `Array.%s` expects i64 index, got %s", name, got)
+	}
+	return nil
+}
+
+// checkArraySet validates checked element replacement.
+func (c *Checker) checkArraySet(
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if len(args) != 2 {
+		return "", fmt.Errorf("type error: `Array.set` expects 2 args, got %d", len(args))
+	}
+	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
+		return "", err
+	} else if got != typeI64 {
+		return "", fmt.Errorf("type error: `Array.set` expects i64 index, got %s", got)
+	}
+	got, err := c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != elem {
+		return "", fmt.Errorf("type error: `Array.set` expects %s value, got %s", elem, got)
+	}
+	return "!void", nil
 }
 
 // checkTaskGroupMethod validates structured task spawning.
@@ -2723,6 +3018,8 @@ func (c *Checker) rejectThreadBoundaryGeneric(typ Type, seen map[Type]bool) erro
 	switch base {
 	case "arena":
 		return fmt.Errorf("type error: arena cannot cross concurrency boundary")
+	case "std::array::Array":
+		return fmt.Errorf("type error: Array cannot cross concurrency boundary in v0.2")
 	case "handle":
 		return fmt.Errorf("type error: handle cannot cross concurrency boundary")
 	case "Dyn":
