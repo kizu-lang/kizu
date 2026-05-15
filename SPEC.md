@@ -1133,7 +1133,7 @@ std::task::parallel_map   disjoint partition output
 std::channel::Channel<T>  owned message passing
 std::thread::scoped       scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
-std::atomic::AtomicI64    seq_cst-only atomic integer
+std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
 ```
 
@@ -1152,7 +1152,7 @@ let n = ch.recv();
 
 let result = std::thread::scoped(io, worker, 41);
 let lock = std::sync::Mutex<i64>(3);
-let atomic = std::atomic::AtomicI64(0);
+let atomic = std::atomic::Atomic<i64>(0);
 ```
 
 `Task<T>`:
@@ -1192,7 +1192,7 @@ Low-level concurrency boundary:
 * `std::sync::Mutex<T>` は explicit shared-mutable-state wrapper
 * v0.1 の `Mutex<T>` は copy value だけを受け取る
 * guard / lock mutation semantics と non-copy payload は後続で固める
-* `std::atomic::AtomicI64` は v0.1 seq_cst-only
+* `std::atomic::Atomic<T>` は v0.1 seq_cst-only。v0.1 の T は `bool` と `i64`
 * v0.1 では atomic ordering parameter を持たない
 * raw pointers cannot cross thread/task/channel/mutex boundaries in safe Kizu
 

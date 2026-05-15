@@ -60,6 +60,7 @@ go test ./...
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
+| atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
 | deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
 | safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
@@ -141,8 +142,10 @@ go test ./...
 | parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |
-| atomic store is i64-only | `negative/atomic_store_wrong_type.kizu` | `atomic.store` |
-| atomic constructor is `AtomicI64` | `negative/atomic_old_name.kizu` | `unknown namespace` |
+| atomic store must match `T` | `negative/atomic_store_wrong_type.kizu` | `atomic.store` |
+| old atomic name is rejected | `negative/atomic_old_name.kizu` | `Atomic<i64>` |
+| atomic constructor requires `T` | `negative/atomic_untyped_constructor.kizu` | `Atomic<T>` |
+| unsupported atomic payloads are rejected | `negative/atomic_unsupported_type.kizu` | `unsupported atomic type` |
 | mutex cannot wrap safe raw pointers | `negative/mutex_pointer.kizu` | `raw pointer` |
 | mutex constructor payload must match `T` | `negative/mutex_wrong_type.kizu` | `Mutex<i64>` |
 | mutex payload must be copy in v0.1 | `negative/mutex_non_copy.kizu` | `requires copy value` |

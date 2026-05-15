@@ -40,7 +40,7 @@ v0.1 の正は Go 製 interpreter と `kizu check` です。
 - `std::channel::Channel<T>` owned message passing
 - `std::task::Queue` deterministic deferred task queue
 - `std::task::parallel_for` / `std::task::parallel_map` safe data-parallel prototype
-- scoped thread、`AtomicI64`、`Mutex<T>` boundary prototype
+- scoped thread、`Atomic<T>`、`Mutex<T>` boundary prototype
 - `contract`、`satisfy`、`&Dyn<Contract>`
 
 実験的な compiler / tooling:

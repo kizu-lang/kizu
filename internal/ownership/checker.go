@@ -768,8 +768,10 @@ func (c *Checker) checkQualifiedBuiltin(
 		return c.checkParallelMap(args, env)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env)
+	case "std.atomic.Atomic":
+		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
-		return c.checkAtomic(args, env)
+		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<i64>(value)`")
 	case "std.sync.Mutex":
 		return "", true, fmt.Errorf("move error: use `std::sync::Mutex<T>(value)`")
 	default:
@@ -794,6 +796,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 			return "", err
 		}
 		return fmt.Sprintf("Channel<%s>", expr.TypeArg), nil
+	case "std.atomic.Atomic":
+		typ, _, err := c.checkAtomic(expr.TypeArg, args, env)
+		return typ, err
 	case "std.sync.Mutex":
 		typ, _, err := c.checkMutex(expr.TypeArg, args, env)
 		return typ, err
@@ -1151,6 +1156,9 @@ func (c *Checker) checkConcurrencyMethod(
 		case "Mutex":
 			typ, err := c.checkMutexMethod(arg, name, args, env)
 			return typ, true, err
+		case "Atomic":
+			typ, err := c.checkAtomicMethod(arg, name, args, env)
+			return typ, true, err
 		}
 	}
 	switch receiver {
@@ -1162,9 +1170,6 @@ func (c *Checker) checkConcurrencyMethod(
 		return typ, true, err
 	case "LocalBuffer":
 		typ, err := c.checkLocalBufferMethod(name, args, env)
-		return typ, true, err
-	case "AtomicI64":
-		typ, err := c.checkAtomicMethod(name, args, env)
 		return typ, true, err
 	default:
 		return "", false, nil
@@ -1349,6 +1354,7 @@ func (c *Checker) checkLocalBufferMethod(
 
 // checkAtomicMethod validates seq_cst-only integer atomic operations.
 func (c *Checker) checkAtomicMethod(
+	elem string,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -1358,10 +1364,19 @@ func (c *Checker) checkAtomicMethod(
 		if len(args) != 0 {
 			return "", fmt.Errorf("atomic error: `atomic.load` expects 0 args, got %d", len(args))
 		}
-		return "i64", nil
+		return elem, nil
 	case "store":
-		_, err := c.checkOneI64Arg("atomic.store", args, env)
-		return "void", err
+		if len(args) != 1 {
+			return "", fmt.Errorf("atomic error: `atomic.store` expects 1 arg, got %d", len(args))
+		}
+		got, err := c.readExpr(args[0], env)
+		if err != nil {
+			return "", err
+		}
+		if got != elem {
+			return "", fmt.Errorf("atomic error: `atomic.store` expects %s, got %s", elem, got)
+		}
+		return "void", nil
 	default:
 		return "", fmt.Errorf("atomic error: Atomic has no method `%s`", name)
 	}
@@ -1761,6 +1776,11 @@ func (c *Checker) isCopyType(typeName string) bool {
 	}
 }
 
+// isAtomicSupportedType reports whether Atomic<T> is available in v0.1.
+func isAtomicSupportedType(typeName string) bool {
+	return typeName == "bool" || typeName == "i64"
+}
+
 // isRawPointerType reports whether typeName is a raw pointer spelling.
 func isRawPointerType(typeName string) bool {
 	name := typeName
@@ -1887,19 +1907,27 @@ func (c *Checker) checkThreadScoped(args []ast.Expression, env *scope) (string, 
 	return returnTypeName(fn), true, nil
 }
 
-// checkAtomic validates ownership for an integer atomic constructor.
-func (c *Checker) checkAtomic(args []ast.Expression, env *scope) (string, bool, error) {
+// checkAtomic validates ownership for a seq_cst atomic constructor.
+func (c *Checker) checkAtomic(
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if !isAtomicSupportedType(elem) {
+		return "", true, fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", elem)
+	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("atomic error: `std::atomic::AtomicI64` expects 1 arg")
+		return "", true, fmt.Errorf("atomic error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", true, err
 	}
-	if got != "i64" {
-		return "", true, fmt.Errorf("atomic error: `std::atomic::AtomicI64` expects i64, got %s", got)
+	if got != elem {
+		return "", true, fmt.Errorf("atomic error: `std::atomic::Atomic<%s>` expects %s, got %s",
+			elem, elem, got)
 	}
-	return "AtomicI64", true, nil
+	return fmt.Sprintf("Atomic<%s>", elem), true, nil
 }
 
 // checkMutex validates ownership for a synchronized wrapper constructor.
