@@ -1084,11 +1084,18 @@ set<T>           後続 phase
 ## 15. concurrency / async 方針
 
 Kizu v0.1 では `async fn` / `await` syntax は実装しません。
+ただし、非同期・マルチスレッド周りの標準ライブラリ API 形状と
+safe Kizu の安全契約は v0.1 で固定します。
 
 ただし、I/O と並行処理の境界は v0.1 から実装対象にします。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
 `Io` / `Task` / `TaskGroup` は v0.1 では interpreter builtin から始めますが、
 v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せます。
+
+v0.1 で固定するのは API と checker rule です。
+実 OS thread、event loop、networking runtime、advanced atomic ordering は実装しません。
+interpreter は同期実行でもよいですが、将来の実並行 runtime でも同じ API と
+ownership / borrow rule を維持できる必要があります。
 
 ```kizu
 fn read_config(io: Io, path: []const u8) -> ![]const u8 {
@@ -1119,17 +1126,52 @@ v0.1 で追加していく concurrency foundation:
 
 ```text
 std::task::Group          structured task scope
+Task<T>                   awaited or canceled task result
 std::task::Queue          deterministic deferred task queue
 std::task::parallel_for   safe data parallelism
 std::task::parallel_map   disjoint partition output
 std::channel::Channel<T>  owned message passing
+std::thread::scoped       scoped thread boundary
+std::sync::Mutex<T>       explicit shared mutable state wrapper
+std::atomic::AtomicI64    seq_cst-only atomic integer
+Io                        explicit I/O capability
 ```
+
+v0.1 では次の API 形状を正とします。
+
+```kizu
+let io = Io();
+
+let group = std::task::Group();
+let task = group.spawn(io, load_config, "config.kizu");
+let value = try task.await();
+
+let ch = std::channel::Channel<i64>();
+ch.send(1);
+let n = ch.recv();
+
+let result = std::thread::scoped(io, worker, 41);
+let lock = std::sync::Mutex<i64>(3);
+let atomic = std::atomic::AtomicI64(0);
+```
+
+`Task<T>`:
+
+* `group.spawn(io, fn, args...)` は `Task<T>` を返す
+* `T` は spawn 対象関数の戻り値
+* `task.await()` は `T` または `!T` を返す
+* `task.cancel()` は `void` を返す
+* task は scope を抜ける前に await または cancel されなければならない
+* v0.1 interpreter の `spawn` は同期評価でもよい
 
 `std::channel::Channel<T>` is owned message passing:
 
 * `send(value)` moves non-copy values into the channel
-* `recv()` returns an owned value
+* `send(value)` requires `value: T`
+* `recv()` returns an owned `T`
 * borrow values and raw pointers cannot cross the channel boundary in safe Kizu
+* v0.1 では blocking semantics は定義しない
+* empty `recv()` は runtime error
 * v0.1 does not include `select`
 
 `std::task::parallel_for` is safe data parallelism:
@@ -1145,9 +1187,21 @@ std::channel::Channel<T>  owned message passing
 Low-level concurrency boundary:
 
 * `std::thread::scoped` is scoped and joined by construction
-* `std::atomic::Atomic` is v0.1 seq_cst-only
-* `std::sync::Mutex` is the explicit shared-mutable-state wrapper
-* raw pointers cannot cross thread/task/channel boundaries in safe Kizu
+* `std::thread::scoped(io, fn, args...)` は `fn(args...)` の結果を返す
+* v0.1 interpreter では OS thread を作らず同期評価してよい
+* `std::sync::Mutex<T>` は explicit shared-mutable-state wrapper
+* v0.1 の `Mutex<T>` は API 形状を固定し、guard / lock mutation semantics は後続で固める
+* `std::atomic::AtomicI64` は v0.1 seq_cst-only
+* v0.1 では atomic ordering parameter を持たない
+* raw pointers cannot cross thread/task/channel/mutex boundaries in safe Kizu
+
+Send 相当ルール:
+
+* Rust の `Send` trait は採用しない
+* v0.1 では concurrency boundary を越えられる型を checker rule として明示する
+* copy primitive と owned value は boundary を越えられる
+* local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない
+* arena / handle の thread-safe sharing は v0.1 では扱わない
 
 OS thread、event loop、networking runtime、atomic ordering の詳細 API は、
 safe structured API の後に追加します。

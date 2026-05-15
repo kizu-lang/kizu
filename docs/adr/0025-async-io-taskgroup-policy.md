@@ -21,6 +21,8 @@ v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せる。
 
 マルチスレッドと async は Kizu の重要な言語特性として扱う。
 v0.1 では低レベル thread API を直接中心にせず、safe structured concurrency を先に固める。
+ここで固めるのは標準ライブラリ API の形状と safe Kizu の checker rule であり、
+実 OS thread、event loop、networking runtime は後続で扱う。
 
 ## Io capability
 
@@ -53,19 +55,25 @@ v0.1 で目指す標準 API 境界:
 
 ```text
 std::task::Group          structured task scope
+Task<T>                   awaited or canceled task result
 std::task::Queue          deterministic deferred task queue
 std::task::parallel_for   safe data parallelism
 std::task::parallel_map   disjoint partition output
 std::channel::Channel<T>  owned message passing
+std::thread::scoped       scoped thread boundary
+std::sync::Mutex<T>       explicit shared mutable state wrapper
+std::atomic::AtomicI64    seq_cst-only atomic integer
+Io                        explicit I/O capability
 ```
 
-`std::thread::scoped`、`std::atomic::Atomic`、`std::sync::Mutex` は必要だが、
-v0.1 では safe structured API の
-実装基盤または実験的 API として扱う。ユーザーに最初から raw thread sharing を中心に書かせない。
+`std::thread::scoped`、`std::atomic::AtomicI64`、`std::sync::Mutex<T>` は必要だが、
+v0.1 では safe structured API の境界を固定するための API として扱う。
+ユーザーに raw thread sharing を中心に書かせない。
 
 `std::channel::Channel<T>` は owned message passing とする。`send(value)` は non-copy
 value を move し、`recv()` は owned value を返す。borrow と raw pointer は safe Kizu
 では channel boundary を越えられない。
+v0.1 では empty receive は runtime error とし、blocking semantics と `select` は採用しない。
 
 `std::task::parallel_for` は data-parallel API とする。disjoint output は
 `std::task::partition_mut(init: i64, count: i64)` と
@@ -74,8 +82,18 @@ worker-local scratch は `std::task::LocalBuffer` のような trusted std API �
 v0.1 interpreter は逐次実行でもよいが、API と checker rule は実並行 runtime でも
 維持できる形にする。
 
-`std::atomic::Atomic` は v0.1 では seq_cst-only とする。memory order を細かく選ぶ API は、
-safe structured API が固まった後に追加する。
+`std::sync::Mutex<T>` は explicit shared mutable state wrapper とする。
+v0.1 では API 形状を固定し、guard / lock mutation semantics は後続で固める。
+raw pointer は Mutex に入れられない。
+
+`std::atomic::AtomicI64` は v0.1 では seq_cst-only とする。
+memory order を細かく選ぶ API は、safe structured API が固まった後に追加する。
+
+Rust の `Send` trait は採用しない。
+v0.1 では boundary を越えられる型を checker rule として明示する。
+copy primitive と owned value は boundary を越えられる。
+local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない。
+arena / handle の thread-safe sharing は v0.1 では扱わない。
 
 ## Borrow boundary
 
@@ -98,7 +116,8 @@ print(name); // error: moved into task
 - cancellation と cleanup の境界を TaskGroup に寄せる
 - v0.1 は interpreter 上の structured task model を実装対象にする
 - v0.1 interpreter の `spawn` は同期評価であり、OS thread や event loop を作らない
-- v0.1 の目標に `std::task`、`std::channel`、safe data parallelism の最小 API を含める
+- v0.1 の目標に `std::task`、`std::channel`、`std::thread`、`std::sync`、
+  `std::atomic`、safe data parallelism の API 形状と安全契約を含める
 - 実並行 runtime を導入する場合も、owned/copy value だけを task 境界に渡す方針を維持する
 - 標準ライブラリ化するときは `std::io` と `std::task` の API に分ける
 - OS thread、event loop、networking runtime、atomic ordering の詳細 API は safe structured API の後に扱う
