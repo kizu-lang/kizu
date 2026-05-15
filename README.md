@@ -161,7 +161,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
-- `kizu why-rebuild <file>` explains cache hit or rebuild reasons.
+- `kizu why-rebuild <file|package>` explains cache hit or rebuild reasons.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 
 `kizu lint` is not implemented.

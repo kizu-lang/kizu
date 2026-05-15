@@ -72,7 +72,7 @@ kizu ir <file>
 kizu build <file>
 kizu cache status
 kizu cache prune
-kizu why-rebuild <file>
+kizu why-rebuild <file|package>
 ```
 
 ## 記録する値
@@ -117,3 +117,17 @@ module/import 実装後は、少なくとも `tests/conformance/modules/basic` �
 
 public interface が変わらない編集では、依存 module の再処理範囲が説明可能でなければならない。
 public interface が変わる編集では、依存 module が再検査対象になる理由を `why-rebuild` で説明する。
+
+現在の module-aware cache smoke は次で実行する。
+
+```sh
+go test ./internal/buildcache -run 'Package(Cache|Why)'
+go test ./internal/buildcache -run TestPackageCacheNoOpRebuild
+go test ./internal/buildcache -run TestPackageWhyRebuildExplainsPrivateEdit
+go test ./internal/buildcache -run TestPackageWhyRebuildExplainsPublicInterfaceEdit
+go test ./internal/buildcache -run TestPackageWhyRebuildExplainsManifestEdit
+go test ./internal/buildcache -run TestPackageWhyRebuildExplainsGraphEdit
+```
+
+`kizu why-rebuild <package>` は directory または `kizu.toml` を受け取り、cache entry
+が存在する場合は同じ module-aware key で hit/miss を説明する。

@@ -80,7 +80,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file|package>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
 }
 
@@ -369,7 +369,7 @@ func pruneCache(cache *buildcache.Cache) error {
 	return nil
 }
 
-// whyRebuildFile explains the cache state for a source file.
+// whyRebuildFile explains the cache state for a source file or package.
 func whyRebuildFile(path string) error {
 	cache, err := buildcache.New()
 	if err != nil {

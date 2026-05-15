@@ -83,7 +83,7 @@ cache-status:
 cache-prune:
     go run ./cmd/kizu cache prune
 
-# Explain whether a file would rebuild.
+# Explain whether a file or package would rebuild.
 why file="examples/hello.kizu":
     go run ./cmd/kizu why-rebuild {{file}}
 
