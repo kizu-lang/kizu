@@ -32,7 +32,7 @@ each row below.
 | type | Go type checker runs conformance; self-host has semantic summary | weak | Kizu type checker for selected language subset and pass/fail equality |
 | ownership | Go ownership checker runs conformance; self-host owned-call move snapshot covers selected borrow/moved-value fixtures | weak | full Kizu move/borrow checker with memory-safety diagnostic equality |
 | IR | self-host IR summary plus normalized function/block/terminator dump for selected pass/fail fixtures | weak | broaden to full instruction dump equality across conformance fixtures |
-| backend | Go LLVM/WASM smoke; self-host artifact count | weak | compare backend smoke status and selected output fingerprints |
+| backend | Go LLVM/WASM smoke; self-host target/status/function/string/entry fingerprints | weak | broaden to output fingerprints for all backend-supported conformance fixtures |
 | cache | Go module-aware cache tests include std source hash | medium | self-host cache input contract or explicit Go-owned cache decision |
 
 ## Required Issues
