@@ -18,6 +18,7 @@ Kizu v0.1 では `async fn` / `await` syntax は実装しない。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示する。
 `Io` / `Task` / `TaskGroup` は v0.1 では interpreter builtin から始めるが、
 v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せる。
+`Io` runtime の選択式 interface については ADR-0039 に従う。
 
 マルチスレッドと async は Kizu の重要な言語特性として扱う。
 v0.1 では低レベル thread API を直接中心にせず、safe structured concurrency を先に固める。
@@ -122,4 +123,5 @@ print(name); // error: moved into task
   `std::atomic`、safe data parallelism の API 形状と安全契約を含める
 - 実並行 runtime を導入する場合も、owned/copy value だけを task 境界に渡す方針を維持する
 - 標準ライブラリ化するときは `std::io` と `std::task` の API に分ける
+- hidden global runtime は持たず、`Io` implementation を明示的に渡す
 - OS thread、event loop、networking runtime、atomic ordering の詳細 API は safe structured API の後に扱う
