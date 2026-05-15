@@ -116,3 +116,33 @@ func TestLoopIsIdentifier(t *testing.T) {
 		t.Fatalf("got (%q, %q), want IDENT loop", tok.Type, tok.Literal)
 	}
 }
+
+// TestModuleVisibilityTokens checks import and public visibility keywords.
+func TestModuleVisibilityTokens(t *testing.T) {
+	input := `import app::lexer;
+pub struct Token {}`
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.Import, "import"},
+		{token.Ident, "app"},
+		{token.DoubleColon, "::"},
+		{token.Ident, "lexer"},
+		{token.Semicolon, ";"},
+		{token.Public, "pub"},
+		{token.Struct, "struct"},
+		{token.Ident, "Token"},
+		{token.LBrace, "{"},
+		{token.RBrace, "}"},
+		{token.EOF, ""},
+	}
+	l := New(input)
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)",
+				i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}

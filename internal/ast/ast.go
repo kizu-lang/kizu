@@ -28,6 +28,19 @@ type Program struct {
 	Decls []Decl
 }
 
+// ImportDecl represents one explicit top-level module import.
+type ImportDecl struct {
+	Path []string
+}
+
+// declNode marks ImportDecl as a declaration node.
+func (*ImportDecl) declNode() {}
+
+// String returns a compact debug representation of the import declaration.
+func (d *ImportDecl) String() string {
+	return "import " + strings.Join(d.Path, "::")
+}
+
 // Decl is implemented by top-level declarations.
 type Decl interface {
 	Node
@@ -54,6 +67,7 @@ type FunctionDecl struct {
 	Body       *BlockStmt
 	Unsafe     bool
 	ExternABI  string
+	Public     bool
 }
 
 // declNode marks FunctionDecl as a declaration node.
@@ -70,8 +84,11 @@ func (d *FunctionDecl) String() string {
 		ret = " -> " + d.ReturnType
 	}
 	prefix := ""
+	if d.Public {
+		prefix += "pub "
+	}
 	if d.Unsafe {
-		prefix = "unsafe "
+		prefix += "unsafe "
 	}
 	if d.ExternABI != "" {
 		return fmt.Sprintf("%sextern %q fn %s(%s)%s",
@@ -85,6 +102,7 @@ func (d *FunctionDecl) String() string {
 type StructDecl struct {
 	Name   string
 	Fields []Field
+	Public bool
 }
 
 // declNode marks StructDecl as a declaration node.
@@ -96,13 +114,18 @@ func (d *StructDecl) String() string {
 	for _, field := range d.Fields {
 		fields = append(fields, field.String())
 	}
-	return fmt.Sprintf("struct %s { %s }", d.Name, strings.Join(fields, "; "))
+	prefix := ""
+	if d.Public {
+		prefix = "pub "
+	}
+	return fmt.Sprintf("%sstruct %s { %s }", prefix, d.Name, strings.Join(fields, "; "))
 }
 
 // EnumDecl represents a Zig/C-style tag enum declaration.
 type EnumDecl struct {
-	Name string
-	Tags []string
+	Name   string
+	Tags   []string
+	Public bool
 }
 
 // declNode marks EnumDecl as a declaration node.
@@ -110,13 +133,18 @@ func (*EnumDecl) declNode() {}
 
 // String returns a compact debug representation of the enum declaration.
 func (d *EnumDecl) String() string {
-	return fmt.Sprintf("enum %s { %s }", d.Name, strings.Join(d.Tags, "; "))
+	prefix := ""
+	if d.Public {
+		prefix = "pub "
+	}
+	return fmt.Sprintf("%senum %s { %s }", prefix, d.Name, strings.Join(d.Tags, "; "))
 }
 
 // UnionDecl represents a tagged union declaration.
 type UnionDecl struct {
 	Name     string
 	Variants []UnionVariant
+	Public   bool
 }
 
 // declNode marks UnionDecl as a declaration node.
@@ -128,7 +156,11 @@ func (d *UnionDecl) String() string {
 	for _, variant := range d.Variants {
 		variants = append(variants, variant.String())
 	}
-	return fmt.Sprintf("union %s { %s }", d.Name, strings.Join(variants, "; "))
+	prefix := ""
+	if d.Public {
+		prefix = "pub "
+	}
+	return fmt.Sprintf("%sunion %s { %s }", prefix, d.Name, strings.Join(variants, "; "))
 }
 
 // UnionVariant represents one tagged union variant.
@@ -149,6 +181,7 @@ func (v UnionVariant) String() string {
 type ContractDecl struct {
 	Name    string
 	Methods []*FunctionDecl
+	Public  bool
 }
 
 // declNode marks ContractDecl as a declaration node.
@@ -160,7 +193,11 @@ func (d *ContractDecl) String() string {
 	for _, method := range d.Methods {
 		methods = append(methods, method.String())
 	}
-	return fmt.Sprintf("contract %s { %s }", d.Name, strings.Join(methods, "; "))
+	prefix := ""
+	if d.Public {
+		prefix = "pub "
+	}
+	return fmt.Sprintf("%scontract %s { %s }", prefix, d.Name, strings.Join(methods, "; "))
 }
 
 // ImplDecl represents methods implemented for one concrete type.
@@ -201,6 +238,7 @@ type Field struct {
 	TypeName  string
 	Borrow    bool
 	MutBorrow bool
+	Public    bool
 }
 
 // String returns a compact debug representation of the field.
@@ -211,7 +249,11 @@ func (f Field) String() string {
 	} else if f.Borrow {
 		prefix = "&"
 	}
-	return fmt.Sprintf("%s: %s%s", f.Name, prefix, f.TypeName)
+	visibility := ""
+	if f.Public {
+		visibility = "pub "
+	}
+	return fmt.Sprintf("%s%s: %s%s", visibility, f.Name, prefix, f.TypeName)
 }
 
 // Param represents a function parameter.

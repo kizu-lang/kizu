@@ -60,6 +60,8 @@ var selfHostKindByGoToken = map[token.Type]string{
 	token.RBrace:      "TokenKind::RBrace",
 	token.LBracket:    "TokenKind::LBracket",
 	token.RBracket:    "TokenKind::RBracket",
+	token.Import:      "TokenKind::Import",
+	token.Public:      "TokenKind::Public",
 	token.Function:    "TokenKind::Fn",
 	token.Let:         "TokenKind::Let",
 	token.Var:         "TokenKind::Var",

@@ -144,6 +144,31 @@ fn main() {  }`
 	}
 }
 
+// TestParseImportsAndPublicDeclarations checks module imports and visibility syntax.
+func TestParseImportsAndPublicDeclarations(t *testing.T) {
+	input := `import app::lexer;
+pub struct Token {
+    pub kind: TokenKind;
+    start: i64;
+}
+pub enum TokenKind {
+    Ident
+}
+pub fn lex(source: []const u8) -> void {}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `import app::lexer
+pub struct Token { pub kind: TokenKind; start: i64 }
+pub enum TokenKind { Ident }
+pub fn lex(source: []const u8) -> void {  }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseEnumDecl checks Zig/C-style tag enum parsing.
 func TestParseEnumDecl(t *testing.T) {
 	input := `enum Color {

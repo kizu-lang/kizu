@@ -218,6 +218,62 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsPublicAPIWithPublicTypes checks public boundary declarations.
+func TestCheckAcceptsPublicAPIWithPublicTypes(t *testing.T) {
+	source := `pub enum TokenKind {
+    Ident
+}
+pub struct Token {
+    pub kind: TokenKind;
+    start: i64;
+}
+pub fn take(token: Token) -> Token {
+    return token;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsPrivateTypesInPublicAPI checks visibility leak errors.
+func TestCheckRejectsPrivateTypesInPublicAPI(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "public function parameter",
+			source: `struct Secret {}
+pub fn leak(secret: Secret) -> void {
+    return;
+}
+fn main() {}`,
+			want: "public function `leak` parameter exposes private type `Secret`",
+		},
+		{
+			name: "public field",
+			source: `struct Secret {}
+pub struct Token {
+    pub secret: Secret;
+}
+fn main() {}`,
+			want: "public field `Token.secret` exposes private type `Secret`",
+		},
+		{
+			name: "public union payload",
+			source: `struct Secret {}
+pub union Result {
+    Ok(Secret)
+}
+fn main() {}`,
+			want: "public union variant `Result::Ok` exposes private type `Secret`",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckAcceptsEnumDeclarations checks Zig/C-style tag enum values.
 func TestCheckAcceptsEnumDeclarations(t *testing.T) {
 	source := `enum Color {
