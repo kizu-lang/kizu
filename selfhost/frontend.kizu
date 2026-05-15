@@ -92,6 +92,8 @@ struct Diagnostic {
     message: []const u8;
     primary_start: i64;
     primary_end: i64;
+    primary_line: i64;
+    primary_column: i64;
     related_start: i64;
     related_end: i64;
 }
@@ -770,6 +772,37 @@ fn collect_lex_diagnostics(tokens: &std::array::Array<Token>) -> !i64 {
     return count;
 }
 
+// print_diagnostic_snapshot writes structured lexer diagnostics for oracle tests.
+fn print_diagnostic_snapshot(tokens: &std::array::Array<Token>) -> !void {
+    var index = 0;
+
+    print("diagnostic snapshot");
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Illegal {
+            let diagnostic = Diagnostic {
+                message: "illegal token",
+                primary_start: token.start,
+                primary_end: token.end,
+                primary_line: token.line,
+                primary_column: token.column,
+                related_start: token.start,
+                related_end: token.end,
+            };
+            print(diagnostic.message);
+            print(diagnostic.primary_start);
+            print(diagnostic.primary_end);
+            print(diagnostic.primary_line);
+            print(diagnostic.primary_column);
+            print(diagnostic.related_start);
+            print(diagnostic.related_end);
+        }
+        index = index + 1;
+    }
+    print("diagnostic snapshot end");
+    return void;
+}
+
 // build_symbol_summary constructs the minimal semantic symbol summary.
 fn build_symbol_summary(summary: &ParseSummary) -> SymbolSummary {
     return SymbolSummary {
@@ -988,12 +1021,30 @@ fn run_frontend(source: []const u8) -> !void {
     return void;
 }
 
+// run_diagnostics executes the diagnostic-only compiler path.
+fn run_diagnostics(source: []const u8) -> !void {
+    let tokens = try lex_source(source);
+
+    try print_diagnostic_snapshot(tokens);
+    tokens.deinit();
+    return void;
+}
+
 // source_path_from_process returns the input path passed to the prototype CLI.
 fn source_path_from_process() -> ![]const u8 {
     if std::process::arg_count() > 0 {
         return try std::process::arg(0);
     }
     return "selfhost/fixtures/simple.kizu";
+}
+
+// diagnostics_mode reports whether the prototype CLI should stop after diagnostics.
+fn diagnostics_mode() -> !bool {
+    if std::process::arg_count() > 1 {
+        let mode = try std::process::arg(1);
+        return std::mem::equal_bytes("--diagnostics", mode);
+    }
+    return false;
 }
 
 // validate_source_path checks path helpers needed by compiler diagnostics.
@@ -1032,6 +1083,10 @@ fn main() -> !void {
 
     try print_source_summary(io, clean);
     try run_lexer_self_tests();
+    if try diagnostics_mode() {
+        try run_diagnostics(source);
+        return void;
+    }
     try run_frontend(source);
     return void;
 }
