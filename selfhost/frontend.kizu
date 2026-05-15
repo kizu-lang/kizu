@@ -935,6 +935,7 @@ fn print_ast_function_detail(tokens: &std::array::Array<Token>, start: i64) -> !
     print("returns");
     print(try function_return_count(tokens, start));
     try print_function_control_details(tokens, start);
+    try print_function_expression_details(tokens, start);
     return void;
 }
 
@@ -976,6 +977,213 @@ fn function_token_count(tokens: &std::array::Array<Token>, start: i64, kind: Tok
         index = index + 1;
     }
     return count;
+}
+
+// print_function_expression_details writes selected expression and statement counts.
+fn print_function_expression_details(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    print("expressions");
+    print("locals");
+    print(try function_locals_count(tokens, start));
+    print("assignments");
+    print(try function_assignments_count(tokens, start));
+    print("calls");
+    print(try function_calls_count(tokens, start));
+    print("field accesses");
+    print(try function_token_count(tokens, start, TokenKind::Dot));
+    print("struct literals");
+    print(try function_struct_literal_count(tokens, start));
+    print("binary expressions");
+    print(try function_binary_operator_count(tokens, start));
+    return void;
+}
+
+// function_locals_count counts local let and var declarations.
+fn function_locals_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    return try function_token_count(tokens, start, TokenKind::Let)
+        + try function_token_count(tokens, start, TokenKind::Var);
+}
+
+// function_assignments_count counts assignments outside local declarations.
+fn function_assignments_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if token.kind == TokenKind::Assign {
+            if !try assignment_belongs_to_local(tokens, index) {
+                count = count + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// assignment_belongs_to_local reports whether an assignment initializes a local.
+fn assignment_belongs_to_local(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    var cursor = index;
+
+    while cursor > 0 {
+        cursor = cursor - 1;
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::Let {
+            return true;
+        }
+        if token.kind == TokenKind::Var {
+            return true;
+        }
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if token.kind == TokenKind::LBrace {
+            return false;
+        }
+    }
+    return false;
+}
+
+// function_calls_count counts direct call expressions.
+fn function_calls_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start + 2;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        let previous = try tokens.at(index - 1);
+        let before = try tokens.at(index - 2);
+        if token.kind == TokenKind::Fn {
+            return count;
+        }
+        if token.kind == TokenKind::LParen {
+            if previous.kind == TokenKind::Ident {
+                if before.kind != TokenKind::Fn {
+                    if !try call_is_match_pattern(tokens, index) {
+                        count = count + 1;
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// call_is_match_pattern reports whether a paren pair belongs to a match arm pattern.
+fn call_is_match_pattern(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            let next = try tokens.at(index + 1);
+            return next.kind == TokenKind::FatArrow;
+        }
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_struct_literal_count counts direct struct literal bodies.
+fn function_struct_literal_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start + 1;
+    var count = 0;
+
+    while index + 1 < tokens.len() {
+        let token = try tokens.at(index);
+        let next = try tokens.at(index + 1);
+        let previous = try tokens.at(index - 1);
+        if token.kind == TokenKind::Fn {
+            return count;
+        }
+        if token.kind == TokenKind::Ident {
+            if next.kind == TokenKind::LBrace {
+                if try token_starts_struct_literal(tokens, index) {
+                    count = count + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// token_starts_struct_literal reports whether an identifier opens a struct literal.
+fn token_starts_struct_literal(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let previous = try tokens.at(index - 1);
+    if previous.kind == TokenKind::Assign {
+        return true;
+    }
+    if previous.kind == TokenKind::Return {
+        return true;
+    }
+    if previous.kind == TokenKind::LParen {
+        return true;
+    }
+    return previous.kind == TokenKind::Comma;
+}
+
+// function_binary_operator_count counts selected infix operators.
+fn function_binary_operator_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if is_binary_operator(token.kind) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// is_binary_operator reports whether a token is part of the binary expression subset.
+fn is_binary_operator(kind: TokenKind) -> bool {
+    if kind == TokenKind::Plus {
+        return true;
+    }
+    if kind == TokenKind::Minus {
+        return true;
+    }
+    if kind == TokenKind::Asterisk {
+        return true;
+    }
+    if kind == TokenKind::Slash {
+        return true;
+    }
+    if kind == TokenKind::Percent {
+        return true;
+    }
+    if kind == TokenKind::Eq {
+        return true;
+    }
+    if kind == TokenKind::NotEq {
+        return true;
+    }
+    if kind == TokenKind::LT {
+        return true;
+    }
+    if kind == TokenKind::LTE {
+        return true;
+    }
+    if kind == TokenKind::GT {
+        return true;
+    }
+    return kind == TokenKind::GTE;
 }
 
 // function_return_count counts return statements before the next declaration.
