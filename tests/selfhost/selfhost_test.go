@@ -498,48 +498,12 @@ func TestSelfHostAstDetailOracle(t *testing.T) {
 	}
 }
 
-// TestSelfHostAstNodeDumpOracle compares a selected AST node dump.
+// TestSelfHostAstNodeDumpOracle compares AST node dumps for every parseable fixture.
 func TestSelfHostAstNodeDumpOracle(t *testing.T) {
-	cases := []string{
-		"selfhost/fixtures/simple.kizu",
-		"examples/functions.kizu",
-		"examples/variables.kizu",
-		"examples/arithmetic.kizu",
-		"examples/if.kizu",
-		"examples/while.kizu",
-		"examples/for.kizu",
-		"examples/if_expression.kizu",
-		"examples/arena.kizu",
-		"examples/fs_read.kizu",
-		"examples/error_union_void.kizu",
-		"examples/typed_error.kizu",
-		"examples/match.kizu",
-		"examples/union.kizu",
-		"examples/custom_error.kizu",
-		"examples/std_mem.kizu",
-		"examples/std_path.kizu",
-		"examples/std_array.kizu",
-		"examples/std_array_borrow.kizu",
-		"examples/std_array_token_list.kizu",
-		"examples/std_string.kizu",
-		"examples/std_map.kizu",
-		"examples/std_map_symbol_table.kizu",
-		"examples/atomic_flag.kizu",
-		"examples/channel.kizu",
-		"examples/channel_string.kizu",
-		"examples/task_group.kizu",
-		"examples/task_cancel.kizu",
-		"examples/thread_boundary.kizu",
-		"examples/fs_task.kizu",
-		"examples/io_runtime.kizu",
-		"examples/std_io_process.kizu",
-		"examples/task_queue.kizu",
-		"examples/parallel_for.kizu",
-		"tests/conformance/modules/private_module_access/src/main.kizu",
-	}
+	cases := selfHostParseableAstNodeDumpSources(t)
 	for _, path := range cases {
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+		t.Run(astNodeDumpCaseName(t, path), func(t *testing.T) {
+			fixture := path
 			got := extractMarkedSnapshot(
 				t, runSelfHostFrontend(t, fixture),
 				"ast node dump snapshot", "ast node dump snapshot end",
@@ -550,6 +514,36 @@ func TestSelfHostAstNodeDumpOracle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// selfHostParseableAstNodeDumpSources returns every manifest source the Go parser accepts.
+func selfHostParseableAstNodeDumpSources(t *testing.T) []string {
+	t.Helper()
+	paths := map[string]bool{
+		filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu"): true,
+	}
+	for _, path := range selfHostConformanceSources(t) {
+		if sourceParses(t, path) {
+			paths[path] = true
+		}
+	}
+	return sortedMapKeys(paths)
+}
+
+// sourceParses reports whether the production Go parser accepts one source file.
+func sourceParses(t *testing.T, path string) bool {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	p := parser.New(l)
+	_ = p.ParseProgram()
+	return len(p.Errors()) == 0
+}
+
+// astNodeDumpCaseName returns a stable, readable subtest name.
+func astNodeDumpCaseName(t *testing.T, path string) string {
+	t.Helper()
+	name := strings.TrimPrefix(path, repoRoot(t)+string(filepath.Separator))
+	return filepath.ToSlash(name)
 }
 
 // TestSelfHostDiagnosticObjectOracle compares structured diagnostics.
@@ -635,6 +629,7 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/borrow.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
+		"examples/negative/assignment_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
 	}
 	for _, path := range cases {

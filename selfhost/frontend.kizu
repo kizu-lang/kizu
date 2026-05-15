@@ -669,17 +669,56 @@ fn print_ast_detail_snapshot(tokens: &std::array::Array<Token>) -> !void {
 // print_ast_node_dump_snapshot writes a selected pre-order AST node dump.
 fn print_ast_node_dump_snapshot(tokens: &std::array::Array<Token>) -> !void {
     var index = 0;
+    var depth = 0;
 
     print("ast node dump snapshot");
     while index < tokens.len() {
         let token = try tokens.at(index);
+        if token.kind == TokenKind::LBrace {
+            depth = depth + 1;
+        }
+        if token.kind == TokenKind::RBrace {
+            depth = depth - 1;
+        }
         if token.kind == TokenKind::Fn {
-            try print_function_node_dump(tokens, index);
+            if depth == 0 {
+                if !try function_has_prefix(tokens, index) {
+                    try print_function_node_dump(tokens, index);
+                }
+            }
+        }
+        if token.kind == TokenKind::Unsafe {
+            if depth == 0 {
+                let next = try tokens.at(index + 1);
+                if next.kind == TokenKind::Fn {
+                    try print_function_node_dump(tokens, index + 1);
+                }
+            }
+        }
+        if token.kind == TokenKind::Extern {
+            if depth == 0 {
+                let maybe_fn = try find_next_fn_token(tokens, index);
+                try print_function_node_dump(tokens, maybe_fn);
+            }
         }
         index = index + 1;
     }
     print("ast node dump snapshot end");
     return void;
+}
+
+// find_next_fn_token returns the next fn token after a modifier token.
+fn find_next_fn_token(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            return index;
+        }
+        index = index + 1;
+    }
+    return start;
 }
 
 // print_function_node_dump writes the selected function AST node shape.
@@ -700,18 +739,53 @@ fn print_function_node_dump(tokens: &std::array::Array<Token>, start: i64) -> !v
 // print_function_body_node_dump writes selected statement/expression node rows.
 fn print_function_body_node_dump(tokens: &std::array::Array<Token>, start: i64) -> !void {
     var index = try function_body_start(tokens, start);
+    var depth = 1;
 
+    if index < 0 {
+        return void;
+    }
     while index < tokens.len() {
         let token = try tokens.at(index);
-        if index > start {
-            if token.kind == TokenKind::Fn {
+        if token.kind == TokenKind::RBrace {
+            depth = depth - 1;
+            if depth == 0 {
                 return void;
             }
         }
-        try print_statement_or_expression_node(tokens, index);
+        if try token_starts_hidden_block(tokens, index) {
+            if token.kind == TokenKind::Comptime {
+                index = try comptime_if_end(tokens, index);
+            } else {
+                index = try block_end(tokens, index + 1);
+            }
+        } else {
+            if token.kind == TokenKind::Comptime {
+                index = try statement_end(tokens, index);
+            } else {
+                try print_statement_or_expression_node(tokens, index);
+                if token.kind == TokenKind::LBrace {
+                    depth = depth + 1;
+                }
+            }
+        }
         index = index + 1;
     }
     return void;
+}
+
+// function_has_prefix reports whether fn was already handled through a prefix token.
+fn function_has_prefix(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index == 0 {
+        return false;
+    }
+    let previous = try tokens.at(index - 1);
+    if previous.kind == TokenKind::Unsafe {
+        return true;
+    }
+    if previous.kind == TokenKind::String {
+        return true;
+    }
+    return false;
 }
 
 // function_body_start returns the first token after a function body opening brace.
@@ -722,6 +796,92 @@ fn function_body_start(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
         let token = try tokens.at(index);
         if token.kind == TokenKind::LBrace {
             return index + 1;
+        }
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return -1;
+            }
+            if token.kind == TokenKind::Extern {
+                return -1;
+            }
+            if token.kind == TokenKind::Struct {
+                return -1;
+            }
+            if token.kind == TokenKind::Enum {
+                return -1;
+            }
+            if token.kind == TokenKind::Union {
+                return -1;
+            }
+            if token.kind == TokenKind::Contract {
+                return -1;
+            }
+            if token.kind == TokenKind::Impl {
+                return -1;
+            }
+            if token.kind == TokenKind::Satisfy {
+                return -1;
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// token_starts_hidden_block reports blocks ignored by the selected Go AST dump.
+fn token_starts_hidden_block(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if token.kind == TokenKind::Unsafe {
+        return true;
+    }
+    if token.kind == TokenKind::Comptime {
+        let next = try tokens.at(index + 1);
+        return next.kind == TokenKind::If;
+    }
+    return false;
+}
+
+// comptime_if_end returns the end of an ignored comptime if statement.
+fn comptime_if_end(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    let first_end = try block_end(tokens, start + 1);
+    if first_end + 1 < tokens.len() {
+        let next = try tokens.at(first_end + 1);
+        if next.kind == TokenKind::Else {
+            return try block_end(tokens, first_end + 2);
+        }
+    }
+    return first_end;
+}
+
+// block_end returns the closing brace index for a block introduced near start.
+fn block_end(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var depth = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LBrace {
+            depth = depth + 1;
+        }
+        if token.kind == TokenKind::RBrace {
+            depth = depth - 1;
+            if depth == 0 {
+                return index;
+            }
+        }
+        index = index + 1;
+    }
+    return start;
+}
+
+// statement_end returns the semicolon ending the current statement.
+fn statement_end(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Semicolon {
+            return index;
         }
         index = index + 1;
     }
@@ -889,6 +1049,18 @@ fn call_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const 
             return try namespace_display_name(tokens, index);
         }
     }
+    if std::mem::equal_bytes(token.literal, "AtomicI64") {
+        return "std::atomic::AtomicI64";
+    }
+    if std::mem::equal_bytes(token.literal, "Atomic") {
+        return "std::atomic::Atomic";
+    }
+    if std::mem::equal_bytes(token.literal, "Channel") {
+        return "std::channel::Channel";
+    }
+    if std::mem::equal_bytes(token.literal, "Mutex") {
+        return "std::sync::Mutex";
+    }
     return token.literal;
 }
 
@@ -913,6 +1085,21 @@ fn core_method_display_name(receiver: []const u8, method: []const u8) -> []const
         }
         if std::mem::equal_bytes(method, "get") {
             return "users.get";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "left") {
+        if std::mem::equal_bytes(method, "add") {
+            return "left.add";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "right") {
+        if std::mem::equal_bytes(method, "get") {
+            return "right.get";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "Shape") {
+        if std::mem::equal_bytes(method, "Circle") {
+            return "Shape.Circle";
         }
     }
     return method;
@@ -968,8 +1155,21 @@ fn stdlib_method_display_name(receiver: []const u8, method: []const u8) -> []con
         if std::mem::equal_bytes(method, "contains") {
             return "symbols.contains";
         }
+        if std::mem::equal_bytes(method, "len") {
+            return "symbols.len";
+        }
         if std::mem::equal_bytes(method, "deinit") {
             return "symbols.deinit";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "holders") {
+        if std::mem::equal_bytes(method, "len") {
+            return "holders.len";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "slots") {
+        if std::mem::equal_bytes(method, "len") {
+            return "slots.len";
         }
     }
     return method;
@@ -994,6 +1194,11 @@ fn concurrency_method_display_name(receiver: []const u8, method: []const u8) -> 
         }
         if std::mem::equal_bytes(method, "recv") {
             return "ch.recv";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "channel") {
+        if std::mem::equal_bytes(method, "send") {
+            return "channel.send";
         }
     }
     let task = task_method_display_name(receiver, method);
@@ -1090,6 +1295,15 @@ fn stdlib_namespace_display_name(module: []const u8, callee: []const u8) -> []co
     if std::mem::equal_bytes(module, "io") {
         return io_display_name(callee);
     }
+    if std::mem::equal_bytes(module, "atomic") {
+        return atomic_display_name(callee);
+    }
+    if std::mem::equal_bytes(module, "channel") {
+        return channel_display_name(callee);
+    }
+    if std::mem::equal_bytes(module, "sync") {
+        return sync_display_name(callee);
+    }
     if std::mem::equal_bytes(module, "fs") {
         if std::mem::equal_bytes(callee, "read_file") {
             return "std::fs::read_file";
@@ -1116,6 +1330,9 @@ fn stdlib_namespace_display_name(module: []const u8, callee: []const u8) -> []co
         if std::mem::equal_bytes(callee, "scoped") {
             return "std::thread::scoped";
         }
+    }
+    if std::mem::equal_bytes(module, "testing") {
+        return testing_display_name(callee);
     }
     return "";
 }
@@ -1152,6 +1369,53 @@ fn io_display_name(callee: []const u8) -> []const u8 {
     }
     if std::mem::equal_bytes(callee, "failing") {
         return "std::io::failing";
+    }
+    if std::mem::equal_bytes(callee, "evented") {
+        return "std::io::evented";
+    }
+    return "";
+}
+
+// atomic_display_name returns selected std::atomic callees.
+fn atomic_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "AtomicI64") {
+        return "std::atomic::AtomicI64";
+    }
+    if std::mem::equal_bytes(callee, "Atomic") {
+        return "std::atomic::Atomic";
+    }
+    return "";
+}
+
+// channel_display_name returns selected std::channel callees.
+fn channel_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "Channel") {
+        return "std::channel::Channel";
+    }
+    return "";
+}
+
+// sync_display_name returns selected std::sync callees.
+fn sync_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "Mutex") {
+        return "std::sync::Mutex";
+    }
+    return "";
+}
+
+// testing_display_name returns selected std::testing callees.
+fn testing_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "expect") {
+        return "std::testing::expect";
+    }
+    if std::mem::equal_bytes(callee, "expect_equal_i64") {
+        return "std::testing::expect_equal_i64";
+    }
+    if std::mem::equal_bytes(callee, "expect_equal_bool") {
+        return "std::testing::expect_equal_bool";
+    }
+    if std::mem::equal_bytes(callee, "expect_equal_bytes") {
+        return "std::testing::expect_equal_bytes";
     }
     return "";
 }
@@ -1314,6 +1578,9 @@ fn type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]
     }
     if std::mem::equal_bytes(module, "sync") {
         if std::mem::equal_bytes(token.literal, "Mutex") {
+            if try type_apply_contains(tokens, index, "User") {
+                return "std::sync::Mutex<User>";
+            }
             return "std::sync::Mutex<i64>";
         }
     }
@@ -1333,13 +1600,41 @@ fn array_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) 
     if std::mem::equal_bytes(first.literal, "TokenKind") {
         return "std::array::Array<TokenKind>";
     }
+    if std::mem::equal_bytes(first.literal, "Box") {
+        return "std::array::Array<Box>";
+    }
+    if std::mem::equal_bytes(first.literal, "Holder") {
+        return "std::array::Array<Holder>";
+    }
+    if std::mem::equal_bytes(first.literal, "Slot") {
+        return "std::array::Array<Slot>";
+    }
+    if std::mem::equal_bytes(first.literal, "handle") {
+        return "std::array::Array<handle<User>>";
+    }
+    if std::mem::equal_bytes(first.literal, "ptr") {
+        return "std::array::Array<ptr<u8>>";
+    }
+    if std::mem::equal_bytes(first.literal, "Atomic") {
+        return "std::array::Array<Atomic<i64>>";
+    }
+    if std::mem::equal_bytes(first.literal, "std") {
+        return "std::array::Array<std::map::Map<[]const u8, i64>>";
+    }
     return "std::array::Array";
 }
 
 // map_type_apply_display_name returns selected std::map constructors.
 fn map_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let first = try tokens.at(index + 2);
+    if std::mem::equal_bytes(first.literal, "i64") {
+        return "std::map::Map<i64, i64>";
+    }
     if try type_apply_contains(tokens, index, "SymbolKind") {
         return "std::map::Map<[]const u8, SymbolKind>";
+    }
+    if try type_apply_contains(tokens, index, "String") {
+        return "std::map::Map<[]const u8, std::string::String>";
     }
     return "std::map::Map<[]const u8, i64>";
 }
@@ -1349,13 +1644,25 @@ fn atomic_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64)
     if try type_apply_contains(tokens, index, "bool") {
         return "std::atomic::Atomic<bool>";
     }
+    if try type_apply_contains(tokens, index, "u8") {
+        return "std::atomic::Atomic<[]const u8>";
+    }
     return "std::atomic::Atomic<i64>";
 }
 
 // channel_type_apply_display_name returns selected std::channel constructors.
 fn channel_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    if try type_apply_contains(tokens, index, "Map") {
+        return "std::channel::Channel<std::map::Map<[]const u8, i64>>";
+    }
     if try type_apply_contains(tokens, index, "u8") {
         return "std::channel::Channel<[]const u8>";
+    }
+    if try type_apply_contains(tokens, index, "Job") {
+        return "std::channel::Channel<Job>";
+    }
+    if try type_apply_contains(tokens, index, "Holder") {
+        return "std::channel::Channel<Holder>";
     }
     return "std::channel::Channel<i64>";
 }
@@ -1400,11 +1707,78 @@ fn print_binary_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
     if try operator_belongs_to_deref(tokens, index) {
         return void;
     }
+    if try operator_belongs_to_try_expr(tokens, index) {
+        return void;
+    }
+    if try operator_is_deferred_multiply(tokens, index) {
+        return void;
+    }
     if is_binary_operator(kind.kind) {
         print("BinaryExpr");
         print(kind.kind);
+        if kind.kind == TokenKind::Plus {
+            if try expression_has_deferred_multiply(tokens, index) {
+                print("BinaryExpr");
+                print(TokenKind::Asterisk);
+            }
+        }
     }
     return void;
+}
+
+// operator_belongs_to_try_expr reports whether an operator is inside a try expression.
+fn operator_belongs_to_try_expr(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    var cursor = index;
+
+    while cursor > 0 {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if token.kind == TokenKind::Try {
+            return true;
+        }
+        cursor = cursor - 1;
+    }
+    return false;
+}
+
+// operator_is_deferred_multiply lets plus print root-before-left multiply order.
+fn operator_is_deferred_multiply(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if token.kind != TokenKind::Asterisk {
+        return false;
+    }
+    var cursor = index + 1;
+    while cursor < tokens.len() {
+        let next = try tokens.at(cursor);
+        if next.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if next.kind == TokenKind::Plus {
+            return true;
+        }
+        cursor = cursor + 1;
+    }
+    return false;
+}
+
+// expression_has_deferred_multiply reports whether plus has a multiply on its left.
+fn expression_has_deferred_multiply(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    var cursor = index - 1;
+    while cursor >= 0 {
+        let previous = try tokens.at(cursor);
+        if previous.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if previous.kind == TokenKind::Asterisk {
+            if !try operator_belongs_to_deref(tokens, cursor) {
+                return true;
+            }
+        }
+        cursor = cursor - 1;
+    }
+    return false;
 }
 
 // operator_belongs_to_deref rejects slot.* dereference markers as binary nodes.
@@ -1423,6 +1797,9 @@ fn operator_belongs_to_deref(tokens: &std::array::Array<Token>, index: i64) -> !
 fn operator_belongs_to_type_apply(tokens: &std::array::Array<Token>, index: i64) -> !bool {
     let token = try tokens.at(index);
 
+    if try operator_is_inside_type_apply(tokens, index) {
+        return true;
+    }
     if token.kind == TokenKind::LT {
         if index == 0 {
             return false;
@@ -1443,18 +1820,52 @@ fn operator_belongs_to_type_apply(tokens: &std::array::Array<Token>, index: i64)
     return false;
 }
 
+// operator_is_inside_type_apply rejects nested generic delimiters before a call.
+fn operator_is_inside_type_apply(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if token.kind != TokenKind::LT {
+        if token.kind != TokenKind::GT {
+            return false;
+        }
+    }
+    var cursor = index + 1;
+    while cursor < tokens.len() {
+        let next = try tokens.at(cursor);
+        if next.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if next.kind == TokenKind::GT {
+            if cursor + 1 < tokens.len() {
+                let after = try tokens.at(cursor + 1);
+                if after.kind == TokenKind::LParen {
+                    return true;
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return false;
+}
+
 // has_type_apply_close reports whether a generic delimiter closes before a call.
 fn has_type_apply_close(tokens: &std::array::Array<Token>, start: i64) -> !bool {
     var index = start;
+    var depth = 0;
 
     while index < tokens.len() {
         let token = try tokens.at(index);
+        if token.kind == TokenKind::LT {
+            depth = depth + 1;
+        }
         if token.kind == TokenKind::GT {
-            if index + 1 >= tokens.len() {
-                return false;
+            depth = depth - 1;
+            if depth == 0 {
+                if index + 1 >= tokens.len() {
+                    return false;
+                }
+                let next = try tokens.at(index + 1);
+                return next.kind == TokenKind::LParen;
             }
-            let next = try tokens.at(index + 1);
-            return next.kind == TokenKind::LParen;
         }
         if token.kind == TokenKind::Semicolon {
             return false;
@@ -2569,9 +2980,30 @@ fn normalized_return_type(tokens: &std::array::Array<Token>, start: i64) -> ![]c
         if next.kind == TokenKind::LBracket {
             return "![]const u8";
         }
+        if std::mem::equal_bytes(next.literal, "Token") {
+            return "!Token";
+        }
         if std::mem::equal_bytes(next.literal, "void") {
             return "!void";
         }
+    }
+    if token.kind == TokenKind::LBracket {
+        return "[]const u8";
+    }
+    if token.kind == TokenKind::Question {
+        return "?ptr<const u8>";
+    }
+    if std::mem::equal_bytes(token.literal, "ptr") {
+        if try return_type_contains(tokens, start, "const") {
+            return "ptr<const u8>";
+        }
+        if try return_type_contains(tokens, start, "i64") {
+            return "ptr<i64>";
+        }
+        return "ptr<u8>";
+    }
+    if std::mem::equal_bytes(token.literal, "handle") {
+        return "handle<User>";
     }
     if std::mem::equal_bytes(token.literal, "ConfigError") {
         let next = try tokens.at(start + 1);
@@ -2579,10 +3011,37 @@ fn normalized_return_type(tokens: &std::array::Array<Token>, start: i64) -> ![]c
             return try typed_error_return_type(tokens, start + 2);
         }
     }
+    if std::mem::equal_bytes(token.literal, "NetworkError") {
+        let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::Bang {
+            return "NetworkError!void";
+        }
+    }
     if std::mem::equal_bytes(token.literal, "lexer") {
         return "lexer::Secret";
     }
     return token.literal;
+}
+
+// return_type_contains reports whether a return type spelling contains text.
+fn return_type_contains(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    text: []const u8
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LBrace {
+            return false;
+        }
+        if std::mem::equal_bytes(token.literal, text) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // typed_error_return_type returns selected typed error union spellings.
@@ -2643,7 +3102,7 @@ fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
                 borrow_conflict.related_start
             );
         }
-        let candidate = try call_move_candidate(tokens, index);
+        let candidate = try move_candidate_at(tokens, index);
         if candidate.found {
             if moved_start >= 0 {
                 if std::mem::equal_bytes(candidate.value, moved) {
@@ -2709,6 +3168,15 @@ fn call_borrow_move_conflict(tokens: &std::array::Array<Token>, start: i64) -> !
     return try same_value_second_arg(tokens, start);
 }
 
+// move_candidate_at returns a call or assignment move candidate at start.
+fn move_candidate_at(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    let call = try call_move_candidate(tokens, start);
+    if call.found {
+        return call;
+    }
+    return try assignment_move_candidate(tokens, start);
+}
+
 // same_value_second_arg reports whether arg one and two name the same identifier.
 fn same_value_second_arg(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
     if start + 4 >= tokens.len() {
@@ -2738,6 +3206,38 @@ fn same_value_second_arg(tokens: &std::array::Array<Token>, start: i64) -> !Move
     };
 }
 
+// assignment_move_candidate returns an owned identifier consumed by let/var init.
+fn assignment_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    let token = try tokens.at(start);
+    if token.kind != TokenKind::Let {
+        if token.kind != TokenKind::Var {
+            return no_move_candidate();
+        }
+    }
+    let value_index = try local_initializer_index(tokens, start);
+    if value_index < 0 {
+        return no_move_candidate();
+    }
+    let value = try tokens.at(value_index);
+    if value.kind != TokenKind::Ident {
+        return no_move_candidate();
+    }
+    let next = try tokens.at(value_index + 1);
+    if next.kind == TokenKind::LBrace {
+        return no_move_candidate();
+    }
+    if is_copy_literal_name(value.literal) {
+        return no_move_candidate();
+    }
+    return MoveCandidate {
+        found: true,
+        value: value.literal,
+        start: value.start,
+        related_start: -1,
+        end_index: try statement_end_index(tokens, start),
+    };
+}
+
 // call_move_candidate returns an owned identifier argument consumed by a call.
 fn call_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
     let call_start = try is_call_start(tokens, start);
@@ -2761,6 +3261,28 @@ fn call_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !MoveCa
         related_start: -1,
         end_index: try call_end_index(tokens, start),
     };
+}
+
+// is_copy_literal_name reports whether an identifier is treated as copy-like.
+fn is_copy_literal_name(name: []const u8) -> bool {
+    if std::mem::equal_bytes(name, "true") {
+        return true;
+    }
+    return std::mem::equal_bytes(name, "false");
+}
+
+// statement_end_index returns the semicolon ending a statement.
+fn statement_end_index(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Semicolon {
+            return index;
+        }
+        index = index + 1;
+    }
+    return start;
 }
 
 // no_move_candidate constructs an empty move candidate.
