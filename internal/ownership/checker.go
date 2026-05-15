@@ -680,6 +680,9 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
 		return c.checkFieldCallExpr(field, expr.Args, env)
 	}
+	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("move error: callee must be a function name")
@@ -748,11 +751,7 @@ func (c *Checker) checkQualifiedBuiltin(
 		}
 		return "TaskGroup", true, nil
 	case "std.channel.Channel":
-		_, err := checkNoArgOwnershipCall(name, args)
-		if err != nil {
-			return "", true, err
-		}
-		return "Channel", true, nil
+		return "", true, fmt.Errorf("move error: use `std::channel::Channel<T>()`")
 	case "std.task.Queue":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
@@ -769,12 +768,37 @@ func (c *Checker) checkQualifiedBuiltin(
 		return c.checkParallelMap(args, env)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env)
-	case "std.atomic.Atomic":
+	case "std.atomic.AtomicI64":
 		return c.checkAtomic(args, env)
 	case "std.sync.Mutex":
-		return c.checkMutex(args, env)
+		return "", true, fmt.Errorf("move error: use `std::sync::Mutex<T>(value)`")
 	default:
 		return "", false, nil
+	}
+}
+
+// checkTypeApplyCallExpr validates typed std constructor ownership effects.
+func (c *Checker) checkTypeApplyCallExpr(
+	expr *ast.TypeApplyExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	name, ok := qualifiedName(expr.Callee)
+	if !ok {
+		return "", fmt.Errorf("move error: unsupported type application `%s`", expr.String())
+	}
+	switch name {
+	case "std.channel.Channel":
+		_, err := checkNoArgOwnershipCall(name, args)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Channel<%s>", expr.TypeArg), nil
+	case "std.sync.Mutex":
+		typ, _, err := c.checkMutex(expr.TypeArg, args, env)
+		return typ, err
+	default:
+		return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
 	}
 }
 
@@ -1118,12 +1142,20 @@ func (c *Checker) checkConcurrencyMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	base, arg, generic := splitGenericType(receiver)
+	if generic {
+		switch base {
+		case "Channel":
+			typ, err := c.checkChannelMethod(arg, name, args, env)
+			return typ, true, err
+		case "Mutex":
+			typ, err := c.checkMutexMethod(arg, name, args, env)
+			return typ, true, err
+		}
+	}
 	switch receiver {
 	case "Queue":
 		typ, err := c.checkQueueMethod(name, args, env)
-		return typ, true, err
-	case "Channel":
-		typ, err := c.checkChannelMethod(name, args, env)
 		return typ, true, err
 	case "Partition":
 		typ, err := c.checkPartitionMethod(name, args, env)
@@ -1131,11 +1163,8 @@ func (c *Checker) checkConcurrencyMethod(
 	case "LocalBuffer":
 		typ, err := c.checkLocalBufferMethod(name, args, env)
 		return typ, true, err
-	case "Atomic":
+	case "AtomicI64":
 		typ, err := c.checkAtomicMethod(name, args, env)
-		return typ, true, err
-	case "Mutex":
-		typ, err := c.checkMutexMethod(name, args, env)
 		return typ, true, err
 	default:
 		return "", false, nil
@@ -1258,6 +1287,7 @@ func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope) (string, 
 
 // checkChannelMethod applies owned message passing move rules.
 func (c *Checker) checkChannelMethod(
+	elem string,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -1270,15 +1300,19 @@ func (c *Checker) checkChannelMethod(
 		if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
 			return "", err
 		}
-		if _, err := c.moveExpr(args[0], env); err != nil {
+		got, err := c.moveExpr(args[0], env)
+		if err != nil {
 			return "", err
+		}
+		if got != elem {
+			return "", fmt.Errorf("channel error: `channel.send` expects %s, got %s", elem, got)
 		}
 		return "void", nil
 	case "recv":
 		if len(args) != 0 {
 			return "", fmt.Errorf("channel error: `channel.recv` expects 0 args, got %d", len(args))
 		}
-		return "i64", nil
+		return elem, nil
 	case "close":
 		if len(args) != 0 {
 			return "", fmt.Errorf("channel error: `channel.close` expects 0 args, got %d", len(args))
@@ -1334,14 +1368,19 @@ func (c *Checker) checkAtomicMethod(
 }
 
 // checkMutexMethod validates the minimal synchronized wrapper API.
-func (c *Checker) checkMutexMethod(name string, args []ast.Expression, _ *scope) (string, error) {
+func (c *Checker) checkMutexMethod(
+	elem string,
+	name string,
+	args []ast.Expression,
+	_ *scope,
+) (string, error) {
 	if name != "get" {
 		return "", fmt.Errorf("sync error: Mutex has no method `%s`", name)
 	}
 	if len(args) != 0 {
 		return "", fmt.Errorf("sync error: `mutex.get` expects 0 args, got %d", len(args))
 	}
-	return "i64", nil
+	return elem, nil
 }
 
 // checkOneI64Arg reads one i64 argument.
@@ -1851,26 +1890,39 @@ func (c *Checker) checkThreadScoped(args []ast.Expression, env *scope) (string, 
 // checkAtomic validates ownership for an integer atomic constructor.
 func (c *Checker) checkAtomic(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("atomic error: `std::atomic::Atomic` expects 1 arg")
+		return "", true, fmt.Errorf("atomic error: `std::atomic::AtomicI64` expects 1 arg")
 	}
-	if _, err := c.readExpr(args[0], env); err != nil {
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
 		return "", true, err
 	}
-	return "Atomic", true, nil
+	if got != "i64" {
+		return "", true, fmt.Errorf("atomic error: `std::atomic::AtomicI64` expects i64, got %s", got)
+	}
+	return "AtomicI64", true, nil
 }
 
 // checkMutex validates ownership for a synchronized wrapper constructor.
-func (c *Checker) checkMutex(args []ast.Expression, env *scope) (string, bool, error) {
+func (c *Checker) checkMutex(elem string, args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("sync error: `std::sync::Mutex` expects 1 arg")
+		return "", true, fmt.Errorf("sync error: `std::sync::Mutex<%s>` expects 1 arg", elem)
 	}
 	if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
 		return "", true, err
 	}
-	if _, err := c.moveExpr(args[0], env); err != nil {
+	got, err := c.moveExpr(args[0], env)
+	if err != nil {
 		return "", true, err
 	}
-	return "Mutex", true, nil
+	if got != elem {
+		return "", true, fmt.Errorf("sync error: `std::sync::Mutex<%s>` expects %s, got %s",
+			elem, elem, got)
+	}
+	if !c.isCopyType(elem) {
+		return "", true, fmt.Errorf(
+			"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1", elem)
+	}
+	return fmt.Sprintf("Mutex<%s>", elem), true, nil
 }
 
 // rejectConcurrencyBoundaryArg rejects borrows and safe raw pointers at boundaries.

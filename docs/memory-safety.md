@@ -119,6 +119,10 @@ policy.
 
 ### Concurrency Boundaries
 
+- v0.1 fixes the async and multi-threading stdlib API shape and checker rules,
+  not a real asynchronous runtime.
+- The v0.1 interpreter may execute task, queue, thread, and data-parallel APIs
+  synchronously.
 - Tasks must be awaited or canceled.
 - Task, queue, channel, and thread boundaries cannot capture or transport local
   borrows.
@@ -126,6 +130,17 @@ policy.
 - Sending a non-copy value through a channel moves it.
 - Safe Kizu does not allow implicit shared mutable state across tasks.
 - Data parallel mutation is restricted to trusted structured APIs.
+- `std::channel::Channel<T>` sends and receives owned `T` values.
+- `std::sync::Mutex<T>` is the explicit shared-mutable-state wrapper.
+- `Mutex<T>` accepts copy values only in v0.1; guard mutation and non-copy
+  payloads are future work.
+- `std::atomic::AtomicI64` is seq_cst-only in v0.1.
+- Kizu does not adopt Rust `Send`; boundary-crossing types are explicit checker
+  rules.
+- Copy primitives and owned values may cross concurrency boundaries.
+- Local borrows, mutable borrows, and raw pointers may not cross safe Kizu
+  concurrency boundaries.
+- Arena / handle thread-safe sharing is not part of v0.1.
 - `std::task::partition_mut(init, count)` creates checked disjoint output slots.
 - `partition.at(i)` bounds-checks slot access.
 - `std::task::parallel_map(io, partition, start, end, worker)` writes only into the
@@ -199,13 +214,13 @@ memory-safety invariants to representative examples.
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |
 | runtime borrow cannot cross comptime | `examples/comptime.kizu` | `examples/negative/comptime_borrow_escape.kizu` |
 | task ownership is structured | `examples/task_group.kizu` | `examples/negative/unawaited_task.kizu`, `examples/negative/task_move.kizu`, `examples/negative/task_borrow_capture.kizu`, `examples/negative/task_spawn_pointer.kizu` |
-| channel sends owned values | `examples/channel.kizu` | `examples/negative/channel_send_move.kizu`, `examples/negative/channel_send_borrow.kizu`, `examples/negative/channel_send_pointer.kizu`, `examples/negative/channel_empty_recv.kizu` |
+| channel sends owned values | `examples/channel.kizu`, `examples/channel_string.kizu` | `examples/negative/channel_send_move.kizu`, `examples/negative/channel_send_borrow.kizu`, `examples/negative/channel_send_pointer.kizu`, `examples/negative/channel_empty_recv.kizu`, `examples/negative/channel_send_wrong_type.kizu`, `examples/negative/channel_untyped_constructor.kizu` |
 | queued work cannot capture borrows or raw pointers | `examples/task_queue.kizu` | `examples/negative/queue_borrow_capture.kizu`, `examples/negative/queue_enqueue_pointer.kizu` |
 | structured data parallelism uses disjoint output | `examples/parallel_for.kizu` | `examples/negative/parallel_shared_mutable.kizu`, `examples/negative/parallel_map_wrong_worker.kizu`, `examples/negative/partition_mut_non_i64.kizu` |
 | partition bounds are checked | `examples/parallel_for.kizu` | `examples/negative/partition_index_out_of_bounds.kizu`, `examples/negative/parallel_map_out_of_bounds.kizu` |
 | scoped thread boundary rejects borrows and raw pointers | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu` |
-| atomic prototype is i64-only | `examples/thread_boundary.kizu` | `examples/negative/atomic_store_wrong_type.kizu` |
-| mutex prototype rejects raw pointer sharing | `examples/thread_boundary.kizu` | `examples/negative/mutex_pointer.kizu` |
+| `AtomicI64` is i64-only and seq_cst-only | `examples/thread_boundary.kizu` | `examples/negative/atomic_store_wrong_type.kizu`, `examples/negative/atomic_old_name.kizu` |
+| `Mutex<T>` rejects raw pointer and non-copy/non-matching payloads | `examples/thread_boundary.kizu` | `examples/negative/mutex_pointer.kizu`, `examples/negative/mutex_wrong_type.kizu`, `examples/negative/mutex_non_copy.kizu`, `examples/negative/mutex_untyped_constructor.kizu` |
 
 ## Release Gate
 

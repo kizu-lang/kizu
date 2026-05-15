@@ -781,6 +781,9 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		}
 		return i.evalMethodCallExpr(field, expr.Args, env)
 	}
+	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		return i.evalTypeApplyCallExpr(typeApply, expr.Args, env)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: callee must be a function name")
@@ -821,7 +824,7 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	case "std.task.Group":
 		return callTaskGroupFromExprs(args), true, nil
 	case "std.channel.Channel":
-		return callChannelFromExprs(args), true, nil
+		return errorUnionValue("use std::channel::Channel<T>()"), true, nil
 	case "std.task.Queue":
 		return callQueueFromExprs(args), true, nil
 	case "std.task.partition_mut":
@@ -839,14 +842,33 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	case "std.thread.scoped":
 		value, err := i.evalThreadScoped(args, env)
 		return value, true, err
-	case "std.atomic.Atomic":
+	case "std.atomic.AtomicI64":
 		value, err := i.evalAtomic(args, env)
 		return value, true, err
 	case "std.sync.Mutex":
-		value, err := i.evalMutex(args, env)
-		return value, true, err
+		return errorUnionValue("use std::sync::Mutex<T>(value)"), true, nil
 	default:
 		return voidValue(), false, nil
+	}
+}
+
+// evalTypeApplyCallExpr evaluates typed std constructor calls.
+func (i *Interpreter) evalTypeApplyCallExpr(
+	expr *ast.TypeApplyExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	name, ok := qualifiedName(expr.Callee)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: unsupported type application `%s`", expr.String())
+	}
+	switch name {
+	case "std.channel.Channel":
+		return callChannelFromExprs(expr.TypeArg, args), nil
+	case "std.sync.Mutex":
+		return i.evalMutex(expr.TypeArg, args, env)
+	default:
+		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	}
 }
 
@@ -1235,28 +1257,28 @@ func (i *Interpreter) evalThreadScoped(args []ast.Expression, env *Env) (Value, 
 // evalAtomic constructs a seq_cst integer atomic value.
 func (i *Interpreter) evalAtomic(args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: std::atomic::Atomic expects 1 arg")
+		return voidValue(), fmt.Errorf("runtime error: std::atomic::AtomicI64 expects 1 arg")
 	}
 	value, err := i.evalExpr(args[0], env)
 	if err != nil {
 		return voidValue(), err
 	}
 	if value.kind != kindInt {
-		return voidValue(), fmt.Errorf("runtime error: Atomic expects i64")
+		return voidValue(), fmt.Errorf("runtime error: AtomicI64 expects i64")
 	}
 	return atomicValue(value.i), nil
 }
 
 // evalMutex constructs a synchronous protected value.
-func (i *Interpreter) evalMutex(args []ast.Expression, env *Env) (Value, error) {
+func (i *Interpreter) evalMutex(typeArg string, args []ast.Expression, env *Env) (Value, error) {
 	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: std::sync::Mutex expects 1 arg")
+		return voidValue(), fmt.Errorf("runtime error: std::sync::Mutex<%s> expects 1 arg", typeArg)
 	}
 	value, err := i.evalExpr(args[0], env)
 	if err != nil {
 		return voidValue(), err
 	}
-	return mutexValue(value), nil
+	return mutexValue(typeArg, value), nil
 }
 
 // evalTaskGroupMethod executes the v0.1 synchronous spawn model.
@@ -1579,12 +1601,12 @@ func callTaskGroupFromExprs(args []ast.Expression) Value {
 	return taskGroupValue()
 }
 
-// callChannelFromExprs validates std::channel::Channel has no constructor args.
-func callChannelFromExprs(args []ast.Expression) Value {
+// callChannelFromExprs validates std::channel::Channel<T> has no constructor args.
+func callChannelFromExprs(typeArg string, args []ast.Expression) Value {
 	if len(args) != 0 {
-		return errorUnionValue("std::channel::Channel expected 0 args")
+		return errorUnionValue("std::channel::Channel<" + typeArg + "> expected 0 args")
 	}
-	return channelValue()
+	return channelValue(typeArg)
 }
 
 // callQueueFromExprs validates std::task::Queue has no constructor args.

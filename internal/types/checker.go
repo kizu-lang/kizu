@@ -37,11 +37,9 @@ var knownTypes = map[Type]bool{
 	"Io":           true,
 	"TaskGroup":    true,
 	"Queue":        true,
-	"Channel":      true,
 	"Partition":    true,
 	"LocalBuffer":  true,
-	"Atomic":       true,
-	"Mutex":        true,
+	"AtomicI64":    true,
 }
 
 var numericTypes = map[Type]bool{
@@ -57,6 +55,25 @@ var numericTypes = map[Type]bool{
 	"isize": true,
 	"f32":   true,
 	"f64":   true,
+}
+
+var copyTypes = map[Type]bool{
+	typeBool:       true,
+	typeI64:        true,
+	typeByteString: true,
+	typeVoid:       true,
+	"i8":           true,
+	"i16":          true,
+	"i32":          true,
+	"u8":           true,
+	"u16":          true,
+	"u32":          true,
+	"u64":          true,
+	"usize":        true,
+	"isize":        true,
+	"f32":          true,
+	"f64":          true,
+	"Io":           true,
 }
 
 var signedNumericTypes = map[Type]bool{
@@ -484,7 +501,8 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 		}
 		return Type(name), nil
 	}
-	if base != "arena" && base != "handle" && base != "option" && base != "Task" {
+	if base != "arena" && base != "handle" && base != "option" && base != "Task" &&
+		base != "Channel" && base != "Mutex" {
 		return "", fmt.Errorf("type error: unknown generic type `%s`", base)
 	}
 	if _, err := c.parseType(arg); err != nil {
@@ -1203,6 +1221,9 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 		}
 		return c.checkMethodCallExpr(field, expr.Args, env, unsafe)
 	}
+	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env, unsafe)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("type error: callee must be a function name")
@@ -1244,8 +1265,7 @@ func (c *Checker) checkQualifiedBuiltin(
 		typ, err := checkNoArgConstructor(name, args, "TaskGroup")
 		return typ, true, err
 	case "std.channel.Channel":
-		typ, err := checkNoArgConstructor(name, args, "Channel")
-		return typ, true, err
+		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
 	case "std.task.Queue":
 		typ, err := checkNoArgConstructor(name, args, "Queue")
 		return typ, true, err
@@ -1259,12 +1279,38 @@ func (c *Checker) checkQualifiedBuiltin(
 		return c.checkParallelMap(args, env, unsafe)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env, unsafe)
-	case "std.atomic.Atomic":
+	case "std.atomic.AtomicI64":
 		return c.checkAtomic(args, env, unsafe)
 	case "std.sync.Mutex":
-		return c.checkMutex(args, env, unsafe)
+		return "", true, fmt.Errorf("type error: use `std::sync::Mutex<T>(value)`")
 	default:
 		return "", false, nil
+	}
+}
+
+// checkTypeApplyCallExpr validates typed std constructor calls.
+func (c *Checker) checkTypeApplyCallExpr(
+	expr *ast.TypeApplyExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	name, ok := qualifiedName(expr.Callee)
+	if !ok {
+		return "", fmt.Errorf("type error: unsupported type application `%s`", expr.String())
+	}
+	arg, err := c.parseType(expr.TypeArg)
+	if err != nil {
+		return "", err
+	}
+	switch name {
+	case "std.channel.Channel":
+		return checkNoArgConstructor(name, args, Type(fmt.Sprintf("Channel<%s>", arg)))
+	case "std.sync.Mutex":
+		typ, _, err := c.checkMutex(arg, args, env, unsafe)
+		return typ, err
+	default:
+		return "", fmt.Errorf("type error: `%s` does not take a type argument", name)
 	}
 }
 
@@ -1584,12 +1630,20 @@ func (c *Checker) checkConcurrencyMethod(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
+	base, arg, generic := splitGenericType(string(receiver))
+	if generic {
+		switch base {
+		case "Channel":
+			typ, err := c.checkChannelMethod(Type(arg), name, args, env, unsafe)
+			return typ, true, err
+		case "Mutex":
+			typ, err := c.checkMutexMethod(Type(arg), name, args)
+			return typ, true, err
+		}
+	}
 	switch receiver {
 	case "Queue":
 		typ, err := c.checkQueueMethod(name, args, env, unsafe)
-		return typ, true, err
-	case "Channel":
-		typ, err := c.checkChannelMethod(name, args, env, unsafe)
 		return typ, true, err
 	case "Partition":
 		typ, err := c.checkPartitionMethod(name, args, env, unsafe)
@@ -1597,11 +1651,8 @@ func (c *Checker) checkConcurrencyMethod(
 	case "LocalBuffer":
 		typ, err := c.checkLocalBufferMethod(name, args, env, unsafe)
 		return typ, true, err
-	case "Atomic":
+	case "AtomicI64":
 		typ, err := c.checkAtomicMethod(name, args, env, unsafe)
-		return typ, true, err
-	case "Mutex":
-		typ, err := c.checkMutexMethod(name, args)
 		return typ, true, err
 	default:
 		return "", false, nil
@@ -1739,6 +1790,7 @@ func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope, unsafe bo
 
 // checkChannelMethod validates owned message passing operations.
 func (c *Checker) checkChannelMethod(
+	elem Type,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -1752,12 +1804,19 @@ func (c *Checker) checkChannelMethod(
 		if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
 			return "", err
 		}
+		got, err := c.checkExpr(args[0], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != elem {
+			return "", fmt.Errorf("type error: `channel.send` expects %s, got %s", elem, got)
+		}
 		return typeVoid, nil
 	case "recv":
 		if len(args) != 0 {
 			return "", fmt.Errorf("type error: `channel.recv` expects 0 args, got %d", len(args))
 		}
-		return typeI64, nil
+		return elem, nil
 	case "close":
 		if len(args) != 0 {
 			return "", fmt.Errorf("type error: `channel.close` expects 0 args, got %d", len(args))
@@ -1845,14 +1904,14 @@ func (c *Checker) checkAtomicMethod(
 }
 
 // checkMutexMethod validates the minimal synchronized wrapper API.
-func (c *Checker) checkMutexMethod(name string, args []ast.Expression) (Type, error) {
+func (c *Checker) checkMutexMethod(elem Type, name string, args []ast.Expression) (Type, error) {
 	if name != "get" {
 		return "", fmt.Errorf("type error: Mutex has no method `%s`", name)
 	}
 	if len(args) != 0 {
 		return "", fmt.Errorf("type error: `mutex.get` expects 0 args, got %d", len(args))
 	}
-	return typeI64, nil
+	return elem, nil
 }
 
 // checkTaskMethod validates await/cancel on a task value.
@@ -2004,30 +2063,44 @@ func (c *Checker) checkThreadScoped(
 // checkAtomic validates the v0.1 seq_cst integer atomic constructor.
 func (c *Checker) checkAtomic(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::atomic::Atomic` expects 1 arg")
+		return "", true, fmt.Errorf("type error: `std::atomic::AtomicI64` expects 1 arg")
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if got != typeI64 {
-		return "", true, fmt.Errorf("type error: `std::atomic::Atomic` expects i64, got %s", got)
+		return "", true, fmt.Errorf("type error: `std::atomic::AtomicI64` expects i64, got %s", got)
 	}
-	return "Atomic", true, nil
+	return "AtomicI64", true, nil
 }
 
 // checkMutex validates an explicit synchronized ownership wrapper.
-func (c *Checker) checkMutex(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
+func (c *Checker) checkMutex(
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::sync::Mutex` expects 1 arg")
+		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects 1 arg", elem)
 	}
 	if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
 		return "", true, err
 	}
-	if _, err := c.checkExpr(args[0], env, unsafe); err != nil {
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
 		return "", true, err
 	}
-	return "Mutex", true, nil
+	if got != elem {
+		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
+			elem, elem, got)
+	}
+	if !c.isCopyType(elem) {
+		return "", true, fmt.Errorf(
+			"type error: `std::sync::Mutex<%s>` requires copy value in v0.1", elem)
+	}
+	return Type(fmt.Sprintf("Mutex<%s>", elem)), true, nil
 }
 
 // checkDynMethodCall validates a method call through &Dyn<Contract>.
@@ -2226,6 +2299,14 @@ func pointerElement(typ Type) (string, bool) {
 func isPointerType(typ Type) bool {
 	_, ok := pointerElement(typ)
 	return ok
+}
+
+// isCopyType reports whether values of typ can be duplicated in v0.1 safe code.
+func (c *Checker) isCopyType(typ Type) bool {
+	if c.enums[string(typ)] != nil {
+		return true
+	}
+	return copyTypes[typ]
 }
 
 // checkNoArgConstructor validates a zero-argument builtin constructor.

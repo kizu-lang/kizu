@@ -59,6 +59,7 @@ go test ./...
 | `contract`, `satisfy`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
+| typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
 | safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
@@ -129,6 +130,8 @@ go test ./...
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
 | empty channel receive is checked | `negative/channel_empty_recv.kizu` | `channel is empty` |
+| channel send payload must match `T` | `negative/channel_send_wrong_type.kizu` | `channel.send` |
+| channel constructor requires `T` | `negative/channel_untyped_constructor.kizu` | `Channel<T>` |
 | queue cannot capture borrow params | `negative/queue_borrow_capture.kizu` | `queue cannot capture borrow` |
 | queue cannot capture safe raw pointers | `negative/queue_enqueue_pointer.kizu` | `raw pointer` |
 | parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
@@ -139,7 +142,11 @@ go test ./...
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |
 | atomic store is i64-only | `negative/atomic_store_wrong_type.kizu` | `atomic.store` |
+| atomic constructor is `AtomicI64` | `negative/atomic_old_name.kizu` | `unknown namespace` |
 | mutex cannot wrap safe raw pointers | `negative/mutex_pointer.kizu` | `raw pointer` |
+| mutex constructor payload must match `T` | `negative/mutex_wrong_type.kizu` | `Mutex<i64>` |
+| mutex payload must be copy in v0.1 | `negative/mutex_non_copy.kizu` | `requires copy value` |
+| mutex constructor requires `T` | `negative/mutex_untyped_constructor.kizu` | `Mutex<T>` |
 | shared borrows cannot be written through | `negative/shared_borrow_assignment.kizu` | `not a mutable borrow` |
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
 | duplicate match tags are rejected | `negative/match_duplicate_tag.kizu` | `duplicate match tag` |

@@ -604,6 +604,20 @@ func (e *CallExpr) String() string {
 	return fmt.Sprintf("%s(%s)", e.Callee.String(), strings.Join(args, ", "))
 }
 
+// TypeApplyExpr represents a namespace item with one explicit type argument.
+type TypeApplyExpr struct {
+	Callee  Expression
+	TypeArg string
+}
+
+// expressionNode marks TypeApplyExpr as an expression node.
+func (*TypeApplyExpr) expressionNode() {}
+
+// String returns a compact debug representation of the type application.
+func (e *TypeApplyExpr) String() string {
+	return fmt.Sprintf("%s<%s>", e.Callee.String(), e.TypeArg)
+}
+
 // CastExpr represents an explicit cast<T>(value) conversion.
 type CastExpr struct {
 	TargetType string

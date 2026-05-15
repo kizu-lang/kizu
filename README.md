@@ -38,10 +38,10 @@ Implemented language-core pieces:
 - explicit `cast<T>(value)` checker policy
 - Zig/C-style tag `enum`, tagged `union`, and exhaustive `match`
 - `Io` capability and `TaskGroup` structured task model
-- `std::channel::Channel` owned message passing
+- `std::channel::Channel<T>` owned message passing
 - `std::task::Queue` deterministic deferred task queue
 - `std::task::parallel_for` and `std::task::parallel_map` safe data-parallel prototypes
-- scoped thread, seq_cst atomic, and mutex boundary prototypes
+- scoped thread, `AtomicI64`, and `Mutex<T>` boundary prototypes
 - `contract`, `satisfy`, and `&Dyn<Contract>`
 
 Experimental compiler and tooling pieces:

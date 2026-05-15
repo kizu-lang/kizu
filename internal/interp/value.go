@@ -287,8 +287,8 @@ func queueValue() Value {
 }
 
 // channelValue returns an empty owned-message channel.
-func channelValue() Value {
-	return Value{kind: kindChannel, channel: &Channel{}}
+func channelValue(typeName string) Value {
+	return Value{kind: kindChannel, typeName: typeName, channel: &Channel{}}
 }
 
 // partitionValue returns a bounded partition initialized with copied values.
@@ -326,8 +326,8 @@ func atomicValue(value int64) Value {
 }
 
 // mutexValue returns a protected synchronous value.
-func mutexValue(value Value) Value {
-	return Value{kind: kindMutex, mutex: &Mutex{value: value}}
+func mutexValue(typeName string, value Value) Value {
+	return Value{kind: kindMutex, typeName: typeName, mutex: &Mutex{value: value}}
 }
 
 // refValue returns a local borrow reference to a runtime binding.
