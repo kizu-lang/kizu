@@ -110,8 +110,7 @@ tests, and self-check/build.
 - Enforce visibility across module boundaries: #89.
 - Preserve byte spans and file IDs through compiler phases: #89.
 - Render multi-file diagnostics: #89.
-- Add artifact layout under `target/`: #90.
-- Extend build cache keys with module graph and public interface hashes: #90.
+- Connect explicit build outputs to a package artifact layout under `target/`: #100.
 - Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
   IR, backend outputs, and module fixtures: #91.
 
@@ -123,6 +122,10 @@ tests, and self-check/build.
 - Minimal `kizu.toml` parsing for `[package]` and `[modules]`.
 - File path to module path graph resolution.
 - Single-program public API checks for private type leaks.
+- Module-aware build cache keys include manifest, module graph, source, public
+  interface, target/backend/optimization, and stdlib hashes.
+- `why-rebuild` explains package input changes for manifest, module graph,
+  public interface, source-only, stdlib, and cache version changes.
 - Multi-file module conformance fixture at `tests/conformance/modules/basic`.
 - Go project tests resolve the module fixture graph and parse every fixture
   source file.

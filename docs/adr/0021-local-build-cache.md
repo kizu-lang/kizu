@@ -24,7 +24,7 @@ Kizu のローカルビルドキャッシュは上限付きにする。
 - 上限超過時は古い entry から削除する
 - `kizu cache status` で状態を表示する
 - `kizu cache prune` で明示的に削除できる
-- `kizu why-rebuild <file>` で cache hit / miss と理由を表示する
+- `kizu why-rebuild <file|package>` で cache hit / miss と理由を表示する
 
 ## v0 の対象
 
