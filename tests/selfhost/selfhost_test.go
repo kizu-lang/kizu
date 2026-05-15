@@ -15,11 +15,13 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 	kir "github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/types"
+	"github.com/kizu-lang/kizu/internal/wasm"
 )
 
 const maxLineWidth = 100
@@ -155,6 +157,15 @@ type irDumpFunction struct {
 	Terminator string
 }
 
+type backendFingerprint struct {
+	Target    string
+	Status    string
+	Message   string
+	Functions int
+	Strings   int
+	Entry     string
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -197,6 +208,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	ownershipSnapshot := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
 	irDumpSnapshot := formatIrDumpSnapshot(goIrDumpSnapshot(t, fixture))
+	backendSnapshot := formatBackendFingerprints(goBackendFingerprints(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
@@ -230,6 +242,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"ir dump snapshot\n" +
 		irDumpSnapshot +
 		"ir dump snapshot end\n" +
+		"backend fingerprint snapshot\n" +
+		backendSnapshot +
+		"backend fingerprint snapshot end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -394,6 +409,27 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 			want := formatIrDumpSnapshot(goIrDumpSnapshot(t, fixture))
 			if got != want {
 				t.Fatalf("self-host IR dump snapshot got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestSelfHostBackendFingerprintOracle compares backend smoke fingerprints.
+func TestSelfHostBackendFingerprintOracle(t *testing.T) {
+	cases := []string{
+		"examples/hello.kizu",
+		"examples/negative/missing_return.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, fixture),
+				"backend fingerprint snapshot", "backend fingerprint snapshot end",
+			)
+			want := formatBackendFingerprints(goBackendFingerprints(t, fixture))
+			if got != want {
+				t.Fatalf("self-host backend fingerprint got %q, want %q", got, want)
 			}
 		})
 	}
@@ -949,6 +985,111 @@ func formatIrDumpSnapshot(snapshot irDumpSnapshot) string {
 			lines = append(lines, "param", param)
 		}
 		lines = append(lines, "block", fn.Block, "terminator", fn.Terminator)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// goBackendFingerprints returns backend smoke facts derived from Go emitters.
+func goBackendFingerprints(t *testing.T, path string) []backendFingerprint {
+	t.Helper()
+	module, ok := goLowerableModule(t, path)
+	if !ok {
+		return []backendFingerprint{
+			failingBackendFingerprint("llvm"),
+			failingBackendFingerprint("wasm32-wasi"),
+		}
+	}
+	return []backendFingerprint{
+		goLLVMFingerprint(t, module),
+		goWASMFingerprint(t, module),
+	}
+}
+
+// goLowerableModule returns the checked Go IR module when the input is lowerable.
+func goLowerableModule(t *testing.T, path string) (*kir.Module, bool) {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	if err := types.New().Check(program); err != nil {
+		return nil, false
+	}
+	if err := ownership.New().Check(program); err != nil {
+		return nil, false
+	}
+	module, err := kir.Lower(program)
+	if err != nil {
+		return nil, false
+	}
+	return module, true
+}
+
+// failingBackendFingerprint returns the normalized backend failure shape.
+func failingBackendFingerprint(target string) backendFingerprint {
+	return backendFingerprint{
+		Target: target, Status: "fail", Message: "backend error: source is not lowerable",
+	}
+}
+
+// goLLVMFingerprint emits LLVM and extracts the shared smoke schema.
+func goLLVMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
+	t.Helper()
+	output, err := llvm.Emit(module)
+	if err != nil {
+		t.Fatalf("LLVM emit failed: %v", err)
+	}
+	if !strings.Contains(output, "define void @main()") {
+		t.Fatalf("LLVM output has no main entry:\n%s", output)
+	}
+	return backendFingerprint{
+		Target: "llvm", Status: "pass", Functions: len(module.Functions),
+		Strings: countIrStringConstants(module), Entry: "main",
+	}
+}
+
+// goWASMFingerprint emits WAT and extracts the shared smoke schema.
+func goWASMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
+	t.Helper()
+	output, err := wasm.Emit(module)
+	if err != nil {
+		t.Fatalf("WASM emit failed: %v", err)
+	}
+	if !strings.Contains(output, `(func $_start (export "_start")`) {
+		t.Fatalf("WASM output has no _start entry:\n%s", output)
+	}
+	return backendFingerprint{
+		Target: "wasm32-wasi", Status: "pass", Functions: len(module.Functions),
+		Strings: countIrStringConstants(module), Entry: "_start",
+	}
+}
+
+// countIrStringConstants counts source string constants that reach backend input.
+func countIrStringConstants(module *kir.Module) int {
+	count := 0
+	for _, fn := range module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == "const" && instr.Result.Type == "[]const u8" {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
+// formatBackendFingerprints formats backend smoke rows as frontend.kizu prints them.
+func formatBackendFingerprints(fingerprints []backendFingerprint) string {
+	lines := []string{}
+	for _, fingerprint := range fingerprints {
+		lines = append(lines, "target", fingerprint.Target, "status", fingerprint.Status)
+		if fingerprint.Status == "fail" {
+			lines = append(lines, "message", fingerprint.Message)
+			continue
+		}
+		lines = append(lines,
+			"functions", strconv.Itoa(fingerprint.Functions),
+			"strings", strconv.Itoa(fingerprint.Strings),
+			"entry", fingerprint.Entry,
+		)
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
