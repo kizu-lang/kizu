@@ -494,24 +494,71 @@ func (c *Checker) parseErrorUnionType(name string) (Type, error) {
 
 // parseGenericType validates supported generic-like type spellings.
 func (c *Checker) parseGenericType(name string, base string, arg string) (Type, error) {
-	if base == "ptr" {
-		return c.parsePointerType(name, arg)
+	args, ok := splitGenericArgs(arg)
+	if !ok {
+		return "", fmt.Errorf("type error: invalid generic arguments for `%s`", base)
 	}
-	if base == "Dyn" {
-		if c.contracts[arg] == nil {
-			return "", fmt.Errorf("type error: unknown contract `%s`", arg)
+	switch base {
+	case "std::map::Map":
+		return c.parseMapType(name, args)
+	case "ptr":
+		arg, err := singleGenericArg(base, args)
+		if err != nil {
+			return "", err
 		}
-		return Type(name), nil
+		return c.parsePointerType(name, arg)
+	case "Dyn":
+		return c.parseDynType(name, base, args)
 	}
-	if base != "arena" && base != "handle" && base != "option" &&
-		base != "std::array::Array" && base != "Task" &&
-		base != "Channel" && base != "Mutex" && base != "Atomic" {
+
+	if !isKnownSingleArgGeneric(base) {
 		return "", fmt.Errorf("type error: unknown generic type `%s`", base)
+	}
+	arg, err := singleGenericArg(base, args)
+	if err != nil {
+		return "", err
 	}
 	if _, err := c.parseType(arg); err != nil {
 		return "", err
 	}
 	return Type(name), nil
+}
+
+// parseDynType validates contract object type spellings.
+func (c *Checker) parseDynType(name string, base string, args []string) (Type, error) {
+	arg, err := singleGenericArg(base, args)
+	if err != nil {
+		return "", err
+	}
+	if c.contracts[arg] == nil {
+		return "", fmt.Errorf("type error: unknown contract `%s`", arg)
+	}
+	return Type(name), nil
+}
+
+// parseMapType validates the v0.2 symbol-table map spelling.
+func (c *Checker) parseMapType(name string, args []string) (Type, error) {
+	if len(args) != 2 {
+		return "", fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+	}
+	if args[0] != string(typeByteString) {
+		return "", fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
+	}
+	if _, err := c.parseType(args[1]); err != nil {
+		return "", err
+	}
+	return Type(name), nil
+}
+
+// isKnownSingleArgGeneric reports whether base currently takes exactly one type argument.
+func isKnownSingleArgGeneric(base string) bool {
+	switch base {
+	case "arena", "handle", "option", "std::array::Array", "Task",
+		"Channel", "Mutex", "Atomic":
+		return true
+	default:
+		return false
+	}
 }
 
 // parseNullableType validates nullable pointer types.
@@ -3431,7 +3478,7 @@ func (s *scope) isMutBorrowed(name string) bool {
 	return false
 }
 
-// splitGenericType extracts base and argument from base<arg>.
+// splitGenericType extracts base and raw arguments from base<args>.
 func splitGenericType(name string) (string, string, bool) {
 	start := strings.IndexByte(name, '<')
 	if start < 1 || !strings.HasSuffix(name, ">") {
@@ -3442,4 +3489,47 @@ func splitGenericType(name string) (string, string, bool) {
 		return "", "", false
 	}
 	return name[:start], arg, true
+}
+
+// splitGenericArgs extracts top-level comma-separated generic arguments.
+func splitGenericArgs(arg string) ([]string, bool) {
+	args := []string{}
+	start := 0
+	depth := 0
+	for idx, ch := range arg {
+		switch ch {
+		case '<':
+			depth++
+		case '>':
+			if depth == 0 {
+				return nil, false
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				item := strings.TrimSpace(arg[start:idx])
+				if item == "" {
+					return nil, false
+				}
+				args = append(args, item)
+				start = idx + 1
+			}
+		}
+	}
+	if depth != 0 {
+		return nil, false
+	}
+	item := strings.TrimSpace(arg[start:])
+	if item == "" {
+		return nil, false
+	}
+	return append(args, item), true
+}
+
+// singleGenericArg returns the only argument for one-parameter generic types.
+func singleGenericArg(base string, args []string) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `%s` expects 1 type argument", base)
+	}
+	return args[0], nil
 }

@@ -246,6 +246,27 @@ fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice
 	}
 }
 
+// TestParseMultiArgGenericTypes checks generic type argument lists.
+func TestParseMultiArgGenericTypes(t *testing.T) {
+	input := `fn lookup(table: std::map::Map<[]const u8, i64>) -> i64 {
+    return table.get("main");
+}
+fn main() {
+    let table = std::map::Map<[]const u8, i64>(allocator);
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn lookup(table: std::map::Map<[]const u8, i64>) -> i64 { ` +
+		`return table.get("main"); }
+fn main() { let table = std::map::Map<[]const u8, i64>(allocator); }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseUnsafeAndExtern checks Phase 12 unsafe and C ABI declarations.
 func TestParseUnsafeAndExtern(t *testing.T) {
 	input := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
