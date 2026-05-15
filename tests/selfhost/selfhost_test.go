@@ -163,8 +163,10 @@ type backendFingerprint struct {
 	Status    string
 	Message   string
 	Functions int
+	Names     []string
 	Strings   int
 	Entry     string
+	Lines     []string
 }
 
 type moduleGraphSnapshot struct {
@@ -1413,7 +1415,8 @@ func goLLVMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
 	}
 	return backendFingerprint{
 		Target: "llvm", Status: "pass", Functions: len(module.Functions),
-		Strings: countIrStringConstants(module), Entry: "main",
+		Names: backendFunctionNames(module), Strings: countIrStringConstants(module), Entry: "main",
+		Lines: []string{"; Kizu LLVM IR", "define void @main()"},
 	}
 }
 
@@ -1429,8 +1432,21 @@ func goWASMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
 	}
 	return backendFingerprint{
 		Target: "wasm32-wasi", Status: "pass", Functions: len(module.Functions),
-		Strings: countIrStringConstants(module), Entry: "_start",
+		Names: backendFunctionNames(module), Strings: countIrStringConstants(module), Entry: "_start",
+		Lines: []string{
+			"import wasi_snapshot_preview1 fd_write",
+			"func _start export _start",
+		},
 	}
+}
+
+// backendFunctionNames returns emitted function names in module order.
+func backendFunctionNames(module *kir.Module) []string {
+	names := make([]string, 0, len(module.Functions))
+	for _, fn := range module.Functions {
+		names = append(names, fn.Name)
+	}
+	return names
 }
 
 // countIrStringConstants counts source string constants that reach backend input.
@@ -1459,9 +1475,18 @@ func formatBackendFingerprints(fingerprints []backendFingerprint) string {
 		}
 		lines = append(lines,
 			"functions", strconv.Itoa(fingerprint.Functions),
+		)
+		for _, name := range fingerprint.Names {
+			lines = append(lines, "function", name)
+		}
+		lines = append(lines,
 			"strings", strconv.Itoa(fingerprint.Strings),
 			"entry", fingerprint.Entry,
+			"lines", strconv.Itoa(len(fingerprint.Lines)),
 		)
+		for _, line := range fingerprint.Lines {
+			lines = append(lines, "line", line)
+		}
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
