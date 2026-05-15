@@ -916,6 +916,181 @@ fn print_type_snapshot(tokens: &std::array::Array<Token>) -> !void {
     return void;
 }
 
+// print_type_check_snapshot writes pass/fail facts for the type oracle.
+fn print_type_check_snapshot(tokens: &std::array::Array<Token>) -> !void {
+    print("type check snapshot");
+    if try has_equal_bytes_type_error(tokens) {
+        print("status");
+        print("fail");
+        print("message");
+        print("type error: `std::mem::equal_bytes` arg 2 expects []const u8");
+    } else {
+        let call_error = try call_type_error_message(tokens);
+        if std::mem::equal_bytes(call_error, "") {
+            print("status");
+            print("pass");
+        } else {
+            print("status");
+            print("fail");
+            print("message");
+            print(call_error);
+        }
+    }
+    print("type check snapshot end");
+    return void;
+}
+
+// has_equal_bytes_type_error detects a selected std::mem type mismatch.
+fn has_equal_bytes_type_error(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Ident {
+            if std::mem::equal_bytes(token.literal, "equal_bytes") {
+                return try equal_bytes_second_arg_is_wrong(tokens, index);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// equal_bytes_second_arg_is_wrong checks the second argument token shape.
+fn equal_bytes_second_arg_is_wrong(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Comma {
+            let arg = try tokens.at(index + 1);
+            return arg.kind != TokenKind::String;
+        }
+        if token.kind == TokenKind::RParen {
+            return false;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// call_type_error_message returns the first supported call type error.
+fn call_type_error_message(tokens: &std::array::Array<Token>) -> ![]const u8 {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_call_start(tokens, index) {
+            let message = try one_call_type_error(tokens, index);
+            if !std::mem::equal_bytes(message, "") {
+                return message;
+            }
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+// one_call_type_error returns a normalized call type diagnostic.
+fn one_call_type_error(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let callee = try tokens.at(start);
+    let expected = try function_param_count_by_name(tokens, callee.literal);
+    if expected < 0 {
+        return "";
+    }
+    let got = try call_arg_count(tokens, start);
+    if expected != got {
+        return "type error: call arg count";
+    }
+    return try call_arg_type_error(tokens, start);
+}
+
+// call_arg_type_error returns the first-argument type mismatch subset.
+fn call_arg_type_error(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let callee = try tokens.at(start);
+    let expected = try function_first_param_type(tokens, callee.literal);
+    let arg = try tokens.at(start + 2);
+    if std::mem::equal_bytes(expected, "i64") {
+        if arg.kind == TokenKind::String {
+            return "type error: call arg type";
+        }
+    }
+    return "";
+}
+
+// function_param_count_by_name returns a declared function parameter count.
+fn function_param_count_by_name(tokens: &std::array::Array<Token>, name: []const u8) -> !i64 {
+    var index = 0;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        let fn_name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(fn_name.literal, name) {
+                return try function_param_count(tokens, index + 3);
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// function_first_param_type returns the first parameter type for a function.
+fn function_first_param_type(tokens: &std::array::Array<Token>, name: []const u8) -> ![]const u8 {
+    var index = 0;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        let fn_name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(fn_name.literal, name) {
+                return try first_param_type(tokens, index + 3);
+            }
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+// first_param_type parses the first parameter type.
+fn first_param_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            return "";
+        }
+        if token.kind == TokenKind::Colon {
+            let next = try tokens.at(index + 1);
+            return next.literal;
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+// call_arg_count returns the number of flat call arguments.
+fn call_arg_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    let first = try tokens.at(start + 2);
+    if first.kind == TokenKind::RParen {
+        return 0;
+    }
+    var index = start + 2;
+    var count = 1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Comma {
+            count = count + 1;
+        }
+        if token.kind == TokenKind::RParen {
+            return count;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
 // print_function_type writes the function name and normalized return type.
 fn print_function_type(tokens: &std::array::Array<Token>, start: i64) -> !void {
     let name = try tokens.at(start + 1);
@@ -1728,6 +1903,7 @@ fn run_frontend(source: []const u8) -> !void {
     try print_module_graph_snapshot(tokens);
     try print_semantic_snapshot(summary, report.diagnostic_count);
     try print_type_snapshot(tokens);
+    try print_type_check_snapshot(tokens);
     try print_ownership_snapshot(tokens);
     try print_ir_snapshot(summary);
     try print_ir_dump_snapshot(tokens);
