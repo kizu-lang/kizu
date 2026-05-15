@@ -88,6 +88,15 @@ var selfHostKindByGoToken = map[token.Type]string{
 	token.Try:         "TokenKind::Try",
 }
 
+type tokenSnapshot struct {
+	Kind    string
+	Literal string
+	Start   int
+	End     int
+	Line    int
+	Column  int
+}
+
 // TestSelfHostSourcesCheck verifies every self-host Kizu file passes static checks.
 func TestSelfHostSourcesCheck(t *testing.T) {
 	for _, path := range selfHostSources(t) {
@@ -108,6 +117,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
 	got := runSelfHostFrontend(t, fixture)
 	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
+	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
@@ -117,6 +127,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"token stream\n" +
 		tokenStream + "\n" +
 		"token stream end\n" +
+		"token snapshots\n" +
+		snapshots +
+		"token snapshots end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -140,6 +153,7 @@ func TestSelfHostFixtureComparedWithGoLexer(t *testing.T) {
 	if !same(gotStream, wantStream) {
 		t.Fatalf("self-host token stream got %v, want %v", gotStream, wantStream)
 	}
+	assertTokenSnapshots(t, got, fixture)
 }
 
 // TestSelfHostRichLexerStreamComparedWithGoLexer checks a wider token corpus.
@@ -155,6 +169,7 @@ func TestSelfHostRichLexerStreamComparedWithGoLexer(t *testing.T) {
 	if !same(gotStream, wantStream) {
 		t.Fatalf("self-host token stream got %v, want %v", gotStream, wantStream)
 	}
+	assertTokenSnapshots(t, got, fixture)
 }
 
 // TestSelfHostReadsModuleFixture checks self-host can read the module fixture.
@@ -170,6 +185,14 @@ func TestSelfHostReadsModuleFixture(t *testing.T) {
 	if !strings.Contains(got, want) {
 		t.Fatalf("got %q, want it to contain %q", got, want)
 	}
+	assertTokenSnapshots(t, got, fixture)
+}
+
+// TestSelfHostExampleLexerSnapshotsComparedWithGoLexer checks an examples subset.
+func TestSelfHostExampleLexerSnapshotsComparedWithGoLexer(t *testing.T) {
+	fixture := filepath.Join(repoRoot(t), "examples", "hello.kizu")
+	got := runSelfHostFrontend(t, fixture)
+	assertTokenSnapshots(t, got, fixture)
 }
 
 // TestSelfHostSourcePolicy enforces lightweight compiler-code style rules.
@@ -250,6 +273,45 @@ func goSelfHostTokenKinds(t *testing.T, path string) []string {
 	}
 }
 
+// goSelfHostTokenSnapshots returns Go lexer snapshots in self-host spelling.
+func goSelfHostTokenSnapshots(t *testing.T, path string) []tokenSnapshot {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	snapshots := []tokenSnapshot{}
+	for {
+		tok := l.NextToken()
+		kind, ok := selfHostKindByGoToken[tok.Type]
+		if !ok {
+			t.Fatalf("missing self-host token mapping for %s", tok.Type)
+		}
+		snapshots = append(snapshots, tokenSnapshot{
+			Kind:    kind,
+			Literal: tok.Literal,
+			Start:   tok.Start,
+			End:     tok.End,
+			Line:    tok.Line,
+			Column:  tok.Column,
+		})
+		if tok.Type == token.EOF {
+			return snapshots
+		}
+	}
+}
+
+// formatTokenSnapshots formats snapshots exactly as frontend.kizu prints them.
+func formatTokenSnapshots(snapshots []tokenSnapshot) string {
+	var out strings.Builder
+	for _, snapshot := range snapshots {
+		out.WriteString(snapshot.Kind + "\n")
+		out.WriteString(snapshot.Literal + "\n")
+		out.WriteString(strconv.Itoa(snapshot.Start) + "\n")
+		out.WriteString(strconv.Itoa(snapshot.End) + "\n")
+		out.WriteString(strconv.Itoa(snapshot.Line) + "\n")
+		out.WriteString(strconv.Itoa(snapshot.Column) + "\n")
+	}
+	return out.String()
+}
+
 // extractSelfHostTokenKinds returns the token stream printed by frontend.kizu.
 func extractSelfHostTokenKinds(t *testing.T, output string) []string {
 	t.Helper()
@@ -270,8 +332,87 @@ func extractSelfHostTokenKinds(t *testing.T, output string) []string {
 	return nil
 }
 
+// assertTokenSnapshots compares all self-host token snapshots against Go lexer output.
+func assertTokenSnapshots(t *testing.T, output string, fixture string) {
+	t.Helper()
+	gotSnapshots := extractSelfHostTokenSnapshots(t, output)
+	wantSnapshots := goSelfHostTokenSnapshots(t, fixture)
+	if !sameSnapshots(gotSnapshots, wantSnapshots) {
+		t.Fatalf("self-host token snapshots got %#v, want %#v", gotSnapshots, wantSnapshots)
+	}
+}
+
+// extractSelfHostTokenSnapshots returns token snapshots printed by frontend.kizu.
+func extractSelfHostTokenSnapshots(t *testing.T, output string) []tokenSnapshot {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	for idx, line := range lines {
+		if line == "token snapshots" {
+			return parseSelfHostTokenSnapshots(t, lines[idx+1:])
+		}
+	}
+	t.Fatal("self-host token snapshot markers were not found")
+	return nil
+}
+
+// parseSelfHostTokenSnapshots parses six-line token snapshot records.
+func parseSelfHostTokenSnapshots(t *testing.T, lines []string) []tokenSnapshot {
+	t.Helper()
+	snapshots := []tokenSnapshot{}
+	for idx := 0; idx < len(lines); {
+		if lines[idx] == "token snapshots end" {
+			return snapshots
+		}
+		if idx+5 >= len(lines) {
+			t.Fatalf("truncated token snapshot near %q", lines[idx:])
+		}
+		snapshots = append(snapshots, parseSelfHostTokenSnapshot(t, lines[idx:idx+6]))
+		idx += 6
+	}
+	t.Fatal("self-host token snapshot end marker was not found")
+	return nil
+}
+
+// parseSelfHostTokenSnapshot parses one six-line token snapshot record.
+func parseSelfHostTokenSnapshot(t *testing.T, lines []string) tokenSnapshot {
+	t.Helper()
+	start, end := atoi(t, lines[2]), atoi(t, lines[3])
+	line, column := atoi(t, lines[4]), atoi(t, lines[5])
+	return tokenSnapshot{
+		Kind:    lines[0],
+		Literal: lines[1],
+		Start:   start,
+		End:     end,
+		Line:    line,
+		Column:  column,
+	}
+}
+
+// atoi parses a test integer or fails with context.
+func atoi(t *testing.T, value string) int {
+	t.Helper()
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatalf("invalid integer %q: %v", value, err)
+	}
+	return parsed
+}
+
 // same reports whether two token-kind slices are identical.
 func same(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for idx := range left {
+		if left[idx] != right[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+// sameSnapshots reports whether two token snapshot slices are identical.
+func sameSnapshots(left []tokenSnapshot, right []tokenSnapshot) bool {
 	if len(left) != len(right) {
 		return false
 	}
