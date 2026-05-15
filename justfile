@@ -39,6 +39,10 @@ kizu-fmt file="examples/hello.kizu":
 run file="examples/hello.kizu":
     go run ./cmd/kizu run {{file}}
 
+# Run a single Kizu test source.
+kizu-test file="examples/std_testing.kizu":
+    go run ./cmd/kizu test {{file}}
+
 # Dump typed SSA IR for a Kizu file.
 ir file="examples/hello.kizu":
     go run ./cmd/kizu ir {{file}}

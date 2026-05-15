@@ -73,6 +73,12 @@ Run it with the interpreter:
 go run ./cmd/kizu run examples/hello.kizu
 ```
 
+Run one Kizu test source:
+
+```sh
+go run ./cmd/kizu test examples/std_testing.kizu
+```
+
 See the [v0.1 examples catalog](examples/README.md) for runnable feature
 examples and negative safety-rule examples. The machine-readable conformance
 manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json).

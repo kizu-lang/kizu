@@ -1173,6 +1173,22 @@ non-copy value、borrow view、iteration、deletion、custom hash/equality は�
 `deinit` 後の map 使用は safe Kizu では禁止します。
 `std::map::Map<K, V>` は v0.2 では task/thread/channel boundary を越えられません。
 
+v0.2 の `std::testing` は、self-host compiler component test 用の
+最小 assertion API です。
+
+```text
+std::testing::expect(condition: bool) -> !void
+std::testing::expect_equal_i64(expected: i64, actual: i64) -> !void
+std::testing::expect_equal_bool(expected: bool, actual: bool) -> !void
+std::testing::expect_equal_bytes(expected: []const u8, actual: []const u8) -> !void
+std::testing::fail(message: []const u8) -> !void
+```
+
+assertion failure は panic ではなく `!void` の error として返します。
+`kizu test <file>` は v0.2 では discovery なしの single-file runner です。
+file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示します。
+generic equality、test discovery、location-aware diagnostics は後続で扱います。
+
 ## 15. concurrency / async 方針
 
 Kizu v0.1 では `async fn` / `await` syntax は実装しません。

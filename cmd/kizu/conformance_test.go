@@ -73,6 +73,11 @@ func runConformanceCase(t *testing.T, tt conformanceCase) {
 		}
 	case "check":
 		runKizuOK(t, "check", tt.Path)
+	case "test":
+		out := runKizuOK(t, "test", tt.Path)
+		if out != tt.Stdout {
+			t.Fatalf("got %q, want %q", out, tt.Stdout)
+		}
 	case "error":
 		runConformanceErrorCase(t, tt)
 	default:
@@ -117,6 +122,10 @@ func validateConformanceCase(t *testing.T, tt conformanceCase, seen map[string]b
 			t.Fatalf("%s: run case must declare stdout", tt.Name)
 		}
 	case "check":
+	case "test":
+		if tt.Stdout == "" {
+			t.Fatalf("%s: test case must declare stdout", tt.Name)
+		}
 	case "error":
 		if tt.StderrContains == "" {
 			t.Fatalf("%s: error case must declare stderr_contains", tt.Name)
