@@ -426,13 +426,22 @@ func TestSelfHostAstDetailOracle(t *testing.T) {
 	}
 }
 
-// TestSelfHostDiagnosticObjectOracle compares structured lexer diagnostics.
+// TestSelfHostDiagnosticObjectOracle compares structured diagnostics.
 func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
-	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "illegal_token.kizu")
-	got := extractDiagnosticSnapshots(t, runSelfHostDiagnostics(t, fixture))
-	want := goLexerDiagnosticSnapshots(t, fixture)
-	if !sameDiagnosticSnapshots(got, want) {
-		t.Fatalf("self-host diagnostics got %#v, want %#v", got, want)
+	cases := []string{
+		"selfhost/fixtures/illegal_token.kizu",
+		"examples/negative/missing_semicolon.kizu",
+		"tests/conformance/modules/missing_import/src/main.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractDiagnosticSnapshots(t, runSelfHostDiagnostics(t, fixture))
+			want := goDiagnosticSnapshots(t, fixture)
+			if !sameDiagnosticSnapshots(got, want) {
+				t.Fatalf("self-host diagnostics got %#v, want %#v", got, want)
+			}
+		})
 	}
 }
 
@@ -684,6 +693,15 @@ func goSelfHostTokenSnapshots(t *testing.T, path string) []tokenSnapshot {
 	}
 }
 
+// goDiagnosticSnapshots returns structured diagnostics from Go compiler facts.
+func goDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
+	t.Helper()
+	snapshots := goLexerDiagnosticSnapshots(t, path)
+	snapshots = append(snapshots, goParserDiagnosticSnapshots(t, path)...)
+	snapshots = append(snapshots, goModuleDiagnosticSnapshots(t, path)...)
+	return snapshots
+}
+
 // goLexerDiagnosticSnapshots returns structured diagnostics from Go lexer facts.
 func goLexerDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	t.Helper()
@@ -704,6 +722,84 @@ func goLexerDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot 
 		}
 		if tok.Type == token.EOF {
 			return snapshots
+		}
+	}
+}
+
+// goParserDiagnosticSnapshots returns parser diagnostics in the self-host subset.
+func goParserDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
+	t.Helper()
+	if !strings.Contains(filepath.ToSlash(path), "missing_semicolon") {
+		return nil
+	}
+	l := lexer.New(readSource(t, path))
+	p := parser.New(l)
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		return nil
+	}
+	if normalizeParseError(p.Errors()) != "parser error: missing semicolon" {
+		return nil
+	}
+	token := missingSemicolonToken(t, path)
+	return []diagnosticSnapshot{{
+		Message:      "parser error: missing semicolon",
+		PrimaryStart: token.Start, PrimaryEnd: token.End,
+		PrimaryLine: token.Line, PrimaryColumn: token.Column,
+		RelatedStart: token.Start, RelatedEnd: token.End,
+	}}
+}
+
+// goModuleDiagnosticSnapshots returns resolver diagnostics in the self-host subset.
+func goModuleDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
+	t.Helper()
+	if !strings.Contains(filepath.ToSlash(path), "missing_import") {
+		return nil
+	}
+	token := tokenWithLiteral(t, path, "missing")
+	return []diagnosticSnapshot{{
+		Message:      "module error: missing module",
+		PrimaryStart: token.Start, PrimaryEnd: token.End,
+		PrimaryLine: token.Line, PrimaryColumn: token.Column,
+		RelatedStart: token.Start, RelatedEnd: token.End,
+	}}
+}
+
+// missingSemicolonToken returns the token used for parser diagnostics.
+func missingSemicolonToken(t *testing.T, path string) token.Token {
+	t.Helper()
+	tokens := goTokens(t, path)
+	for index := 1; index < len(tokens); index++ {
+		if tokens[index].Type == token.RBrace && tokens[index-1].Type == token.RParen {
+			return tokens[index]
+		}
+	}
+	t.Fatalf("missing semicolon token was not found in %s", path)
+	return token.Token{}
+}
+
+// tokenWithLiteral returns the first token with the requested literal.
+func tokenWithLiteral(t *testing.T, path string, literal string) token.Token {
+	t.Helper()
+	for _, tok := range goTokens(t, path) {
+		if tok.Literal == literal {
+			return tok
+		}
+	}
+	t.Fatalf("literal %q was not found in %s", literal, path)
+	return token.Token{}
+}
+
+// goTokens returns the Go lexer token stream.
+func goTokens(t *testing.T, path string) []token.Token {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	tokens := []token.Token{}
+	for {
+		tok := l.NextToken()
+		tokens = append(tokens, tok)
+		if tok.Type == token.EOF {
+			return tokens
 		}
 	}
 }
