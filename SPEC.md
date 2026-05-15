@@ -1248,6 +1248,8 @@ std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
 std::fs::read_file        explicit-Io file read returning ![]const u8
 std::fs::write_file       explicit-Io file write returning !void
+std::path                 pure path helpers with no hidden I/O
+std::process              explicit process argv/env helpers
 ```
 
 v0.1 の `std::io` implementation:
@@ -1306,10 +1308,37 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 * `std::fs::read_file(io, path)` は `![]const u8` を返す
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
+* `std::fs::exists(io, path)` は `!bool` を返す
+* `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
+* `std::fs::create_dir(io, path)` は `!void` を返す
+* `std::fs::remove_dir(io, path)` は `!void` を返す
+* `std::fs::remove_file(io, path)` は `!void` を返す
+* `std::fs::Metadata` は v0.2 では `size: i64` と `is_dir: bool` だけを持つ
 * `path` と `bytes` は `[]const u8`
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない
 * `std::io::failing()` は deterministic failing I/O として、テストで I/O error path を確認する
+
+`std::path`:
+
+* `std::path::join(left, right)` は `[]const u8` を返す
+* `std::path::clean(path)` は `[]const u8` を返す
+* `std::path::basename(path)` は `[]const u8` を返す
+* `std::path::dirname(path)` は `[]const u8` を返す
+* `std::path::extension(path)` は `[]const u8` を返す
+* path helper は pure helper であり、filesystem を読まない
+
+`std::io` / `std::process`:
+
+* `std::io::write_stdout(io, bytes)` は `!void` を返す
+* `std::io::write_stderr(io, bytes)` は `!void` を返す
+* `std::io::read_stdin(io)` は `![]const u8` を返す
+* stdio helper は `Io` capability を必ず要求する
+* `std::process::arg_count()` は `i64` を返す
+* `std::process::arg(index)` は `![]const u8` を返す
+* `std::process::env(name)` は `![]const u8` を返す
+* `std::process::exit_code(code)` は `i64` を返す
+* `std::process` helper は hidden I/O を持たない
 
 `std::channel::Channel<T>` is owned message passing:
 

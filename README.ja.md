@@ -77,6 +77,12 @@ Kizu の test source は次のように実行します。
 go run ./cmd/kizu test examples/std_testing.kizu
 ```
 
+prototype の process argument は `--` 以降で渡します。
+
+```sh
+go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
+```
+
 機能ごとの実行例と失敗すべき安全性ルールは
 [v0.1 examples catalog](examples/README.md) にまとめています。
 機械判定用の conformance manifest は

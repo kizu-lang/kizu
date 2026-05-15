@@ -79,6 +79,12 @@ Run one Kizu test source:
 go run ./cmd/kizu test examples/std_testing.kizu
 ```
 
+Pass prototype process arguments with `--`:
+
+```sh
+go run ./cmd/kizu run examples/std_io_process.kizu -- input.kizu
+```
+
 See the [v0.1 examples catalog](examples/README.md) for runnable feature
 examples and negative safety-rule examples. The machine-readable conformance
 manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json).

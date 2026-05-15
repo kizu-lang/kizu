@@ -36,6 +36,7 @@ var knownTypes = map[Type]bool{
 	"f64":                 true,
 	"Io":                  true,
 	"Allocator":           true,
+	"std::fs::Metadata":   true,
 	"std::string::String": true,
 	"TaskGroup":           true,
 	"Queue":               true,
@@ -59,23 +60,24 @@ var numericTypes = map[Type]bool{
 }
 
 var copyTypes = map[Type]bool{
-	typeBool:       true,
-	typeI64:        true,
-	typeByteString: true,
-	typeVoid:       true,
-	"i8":           true,
-	"i16":          true,
-	"i32":          true,
-	"u8":           true,
-	"u16":          true,
-	"u32":          true,
-	"u64":          true,
-	"usize":        true,
-	"isize":        true,
-	"f32":          true,
-	"f64":          true,
-	"Io":           true,
-	"Allocator":    true,
+	typeBool:            true,
+	typeI64:             true,
+	typeByteString:      true,
+	typeVoid:            true,
+	"i8":                true,
+	"i16":               true,
+	"i32":               true,
+	"u8":                true,
+	"u16":               true,
+	"u32":               true,
+	"u64":               true,
+	"usize":             true,
+	"isize":             true,
+	"f32":               true,
+	"f64":               true,
+	"Io":                true,
+	"Allocator":         true,
+	"std::fs::Metadata": true,
 }
 
 var signedNumericTypes = map[Type]bool{
@@ -1391,12 +1393,44 @@ func (c *Checker) checkQualifiedBuiltin(
 	if !ok {
 		return "", false, nil
 	}
+	if typ, ok, err := c.checkStdCoreBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
+	return c.checkStdRuntimeBuiltin(name, args, env, unsafe)
+}
+
+// checkStdCoreBuiltin validates pure, filesystem, I/O, and process std calls.
+func (c *Checker) checkStdCoreBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
 	if typ, ok, err := c.checkFsBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkPathBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
 	if typ, ok, err := c.checkMemBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
+	if typ, ok, err := c.checkIoBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkProcessBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
+	return "", false, nil
+}
+
+// checkStdRuntimeBuiltin validates task, testing, and constructor std calls.
+func (c *Checker) checkStdRuntimeBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
@@ -1486,6 +1520,168 @@ func (c *Checker) checkStdConstructorBuiltin(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkIoBuiltin validates explicit-Io stdio helpers.
+func (c *Checker) checkIoBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.io.write_stdout", "std.io.write_stderr":
+		return c.checkIoBytesCall(name, args, env, unsafe)
+	case "std.io.read_stdin":
+		return c.checkIoOnlyCall(name, args, env, unsafe, "![]const u8")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkIoBytesCall validates an Io plus []const u8 call.
+func (c *Checker) checkIoBytesCall(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if len(args) != 2 {
+		return "", true, fmt.Errorf("type error: `%s` expects io and bytes", name)
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
+		return "", true, err
+	}
+	got, err := c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != typeByteString {
+		return "", true, fmt.Errorf("type error: `%s` expects []const u8 bytes, got %s", name, got)
+	}
+	return "!void", true, nil
+}
+
+// checkIoOnlyCall validates a call that only takes Io.
+func (c *Checker) checkIoOnlyCall(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	result Type,
+) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `%s` expects io", name)
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
+		return "", true, err
+	}
+	return result, true, nil
+}
+
+// checkProcessBuiltin validates minimal process helpers for CLI prototypes.
+func (c *Checker) checkProcessBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.process.arg_count":
+		typ, err := checkNoArgConstructor(name, args, "i64")
+		return typ, true, err
+	case "std.process.arg":
+		return c.checkOneI64Arg(name, args, env, unsafe, "![]const u8")
+	case "std.process.env":
+		return c.checkOneBytesArg(name, args, env, unsafe, "![]const u8")
+	case "std.process.exit_code":
+		return c.checkOneI64Arg(name, args, env, unsafe, "i64")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkPathBuiltin validates pure std::path helpers.
+func (c *Checker) checkPathBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.path.join":
+		return c.checkPathBytesArgs(name, args, env, unsafe, 2)
+	case "std.path.clean", "std.path.basename", "std.path.dirname", "std.path.extension":
+		return c.checkPathBytesArgs(name, args, env, unsafe, 1)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkPathBytesArgs validates pure path helpers over []const u8.
+func (c *Checker) checkPathBytesArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	want int,
+) (Type, bool, error) {
+	if len(args) != want {
+		return "", true, fmt.Errorf("type error: `%s` expects %d []const u8 args", name, want)
+	}
+	for idx, arg := range args {
+		got, err := c.checkExpr(arg, env, unsafe)
+		if err != nil {
+			return "", true, err
+		}
+		if got != typeByteString {
+			return "", true, fmt.Errorf("type error: `%s` arg %d expects []const u8, got %s",
+				name, idx+1, got)
+		}
+	}
+	return typeByteString, true, nil
+}
+
+// checkOneI64Arg validates one i64 argument.
+func (c *Checker) checkOneI64Arg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	result Type,
+) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `%s` expects i64", name)
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != typeI64 {
+		return "", true, fmt.Errorf("type error: `%s` expects i64, got %s", name, got)
+	}
+	return result, true, nil
+}
+
+// checkOneBytesArg validates one []const u8 argument.
+func (c *Checker) checkOneBytesArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	result Type,
+) (Type, bool, error) {
+	if len(args) != 1 {
+		return "", true, fmt.Errorf("type error: `%s` expects []const u8", name)
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != typeByteString {
+		return "", true, fmt.Errorf("type error: `%s` expects []const u8, got %s", name, got)
+	}
+	return result, true, nil
 }
 
 // checkStringConstructor validates std::string::String(allocator).
@@ -1637,6 +1833,12 @@ func (c *Checker) checkFsBuiltin(
 		return c.checkFsReadFile(args, env, unsafe)
 	case "std.fs.write_file":
 		return c.checkFsWriteFile(args, env, unsafe)
+	case "std.fs.exists":
+		return c.checkFsExists(args, env, unsafe)
+	case "std.fs.metadata":
+		return c.checkFsMetadata(args, env, unsafe)
+	case "std.fs.create_dir", "std.fs.remove_dir", "std.fs.remove_file":
+		return c.checkFsPathOnly(name, args, env, unsafe, "!void")
 	default:
 		return "", false, nil
 	}
@@ -1714,6 +1916,61 @@ func (c *Checker) checkFsWriteFile(
 		}
 	}
 	return "!void", true, nil
+}
+
+// checkFsExists validates std::fs::exists.
+func (c *Checker) checkFsExists(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	_, _, err := c.checkFsPathArgs("std::fs::exists", args, env, unsafe)
+	return "!bool", true, err
+}
+
+// checkFsMetadata validates std::fs::metadata.
+func (c *Checker) checkFsMetadata(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	_, _, err := c.checkFsPathArgs("std::fs::metadata", args, env, unsafe)
+	return "!std::fs::Metadata", true, err
+}
+
+// checkFsPathOnly validates an Io plus path API and returns result.
+func (c *Checker) checkFsPathOnly(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	result Type,
+) (Type, bool, error) {
+	_, _, err := c.checkFsPathArgs(name, args, env, unsafe)
+	return result, true, err
+}
+
+// checkFsPathArgs validates common std::fs Io and path arguments.
+func (c *Checker) checkFsPathArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, Type, error) {
+	if len(args) != 2 {
+		return "", "", fmt.Errorf("type error: `%s` expects io and path", name)
+	}
+	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
+		return "", "", err
+	}
+	path, err := c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return "", "", err
+	}
+	if path != typeByteString {
+		return "", "", fmt.Errorf("type error: `%s` expects []const u8 path, got %s", name, path)
+	}
+	return "Io", path, nil
 }
 
 // checkArrayConstructor validates std::array::Array<T>(allocator).
@@ -2073,6 +2330,9 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 	if err != nil {
 		return "", err
 	}
+	if receiver == "std::fs::Metadata" {
+		return checkFsMetadataField(expr.Name)
+	}
 	decl := c.structs[string(receiver)]
 	if decl == nil {
 		return "", fmt.Errorf("type error: `%s` has no fields", receiver)
@@ -2083,6 +2343,18 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 		}
 	}
 	return "", fmt.Errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+}
+
+// checkFsMetadataField returns builtin metadata field types.
+func checkFsMetadataField(name string) (Type, error) {
+	switch name {
+	case "size":
+		return typeI64, nil
+	case "is_dir":
+		return typeBool, nil
+	default:
+		return "", fmt.Errorf("type error: unknown field `std::fs::Metadata.%s`", name)
+	}
 }
 
 // checkNamespaceExpr returns the type of enum or payload-free union namespace lookup.

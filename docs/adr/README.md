@@ -64,3 +64,5 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0043: std::string::String owned buffer](0043-std-string-owned-buffer.md)
 - [ADR-0044: std::map::Map<K, V> symbol table map](0044-std-map-symbol-table.md)
 - [ADR-0045: std::testing minimal API](0045-std-testing-minimal-api.md)
+- [ADR-0046: std::fs / std::path minimal API](0046-std-fs-path-minimal-api.md)
+- [ADR-0047: std::io / std::process minimal API](0047-std-io-process-minimal-api.md)

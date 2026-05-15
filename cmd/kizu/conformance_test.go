@@ -22,6 +22,7 @@ type conformanceCase struct {
 	Mode           string   `json:"mode"`
 	Command        string   `json:"command"`
 	Path           string   `json:"path"`
+	Args           []string `json:"args"`
 	Stdout         string   `json:"stdout"`
 	StderrContains string   `json:"stderr_contains"`
 	Features       []string `json:"features"`
@@ -67,7 +68,7 @@ func runConformanceCase(t *testing.T, tt conformanceCase) {
 	switch tt.Mode {
 	case "run":
 		runKizuOK(t, "check", tt.Path)
-		out := runKizuOK(t, "run", tt.Path)
+		out := runKizuOK(t, runArgs(tt)...)
 		if out != tt.Stdout {
 			t.Fatalf("got %q, want %q", out, tt.Stdout)
 		}
@@ -92,7 +93,11 @@ func runConformanceErrorCase(t *testing.T, tt conformanceCase) {
 	if command == "" {
 		command = "check"
 	}
-	out, err := runKizu(command, tt.Path)
+	args := []string{command, tt.Path}
+	if command == "run" || command == "test" {
+		args = append(args, tt.Args...)
+	}
+	out, err := runKizu(args...)
 	if err == nil {
 		t.Fatalf("expected command to fail\n%s", out)
 	}
@@ -102,6 +107,12 @@ func runConformanceErrorCase(t *testing.T, tt conformanceCase) {
 	if !strings.Contains(out, tt.StderrContains) {
 		t.Fatalf("got %q, want substring %q", out, tt.StderrContains)
 	}
+}
+
+// runArgs returns CLI args for a positive run case.
+func runArgs(tt conformanceCase) []string {
+	args := []string{"run", tt.Path}
+	return append(args, tt.Args...)
 }
 
 // validateConformanceCase rejects ambiguous or incomplete manifest entries.
@@ -232,6 +243,7 @@ func runKizu(args ...string) (string, error) {
 	cmdArgs := append([]string{"run", "./cmd/kizu"}, args...)
 	cmd := exec.Command("go", cmdArgs...)
 	cmd.Dir = "../.."
+	cmd.Env = append(os.Environ(), "KIZU_TEST_ENV=env-ok")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

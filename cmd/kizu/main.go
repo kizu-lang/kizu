@@ -46,11 +46,13 @@ func dispatch(cmd string, args []string) error {
 	case "parse":
 		return parseFile(args[0])
 	case "run":
-		return runFile(args[0])
+		path, programArgs := splitProgramArgs(args)
+		return runFile(path, programArgs)
 	case "check":
 		return checkFile(args[0])
 	case "test":
-		return testFile(args[0])
+		path, programArgs := splitProgramArgs(args)
+		return testFile(path, programArgs)
 	case "fmt":
 		return fmtFile(args[0])
 	case "ir":
@@ -71,7 +73,7 @@ func dispatch(cmd string, args []string) error {
 
 // usage prints the supported command line shape.
 func usage() {
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -97,7 +99,7 @@ func parseFile(path string) error {
 }
 
 // runFile parses a source file and executes it with the interpreter.
-func runFile(path string) error {
+func runFile(path string, args []string) error {
 	program, errs, err := parsePath(path)
 	if err != nil {
 		return err
@@ -111,7 +113,7 @@ func runFile(path string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	return interp.New(os.Stdout).Run(program)
+	return interp.NewWithProcessArgs(os.Stdout, args).Run(program)
 }
 
 // checkFile parses a source file and runs static checks.
@@ -134,7 +136,7 @@ func checkFile(path string) error {
 }
 
 // testFile runs a single Kizu test source and reports a minimal test result.
-func testFile(path string) error {
+func testFile(path string, args []string) error {
 	program, errs, err := parsePath(path)
 	if err != nil {
 		return err
@@ -148,11 +150,22 @@ func testFile(path string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	if err := interp.New(os.Stdout).Run(program); err != nil {
+	if err := interp.NewWithProcessArgs(os.Stdout, args).Run(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")
 	return nil
+}
+
+// splitProgramArgs separates the source path from optional Kizu process args.
+func splitProgramArgs(args []string) (string, []string) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	if len(args) >= 2 && args[1] == "--" {
+		return args[0], args[2:]
+	}
+	return args[0], nil
 }
 
 // fmtFile prints the stable formatter output for a Kizu source file.
