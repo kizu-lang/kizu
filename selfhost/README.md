@@ -37,8 +37,8 @@ to compare the full self-host token-kind stream against the production lexer.
 
 The v0.2 standard-library bridge is complete when `tests/selfhost` can parse,
 check, and run the skeleton through the same APIs a future compiler frontend
-will need. #31 should build from this by replacing the parser summary with real
-lexer, parser, AST, diagnostics, and conformance comparison components.
+will need. #31 should build from this by replacing the normalized parser
+snapshot with full AST, diagnostics, and conformance comparison components.
 
 ## Conformance Reuse
 
@@ -46,18 +46,18 @@ The future self-host compiler must reuse `tests/conformance/v0_*.json` and
 produce the same pass/fail behavior as the Go implementation before it can
 replace any production path.
 
-For now, Go tests parse, check, and run the skeleton source. They also compare
-the self-host parser summary and token count for `selfhost/fixtures/simple.kizu`
-with the production Go lexer. Missing APIs found while growing this directory
-must be reflected back into the relevant v0.2 stdlib issue instead of becoming
-isolated TODOs here.
+For now, Go tests parse, check, and run the skeleton source. They compare the
+self-host token snapshots with the production Go lexer and compare normalized
+AST snapshots with the Go parser for representative parseable sources. Missing
+APIs found while growing this directory must be reflected back into the relevant
+stdlib issue instead of becoming isolated TODOs here.
 
 ## Compiler Stage Harness
 
 `frontend.kizu` intentionally runs eight stages before it is a full compiler:
 
 1. lexer
-2. parser summary
+2. parser snapshot
 3. diagnostics
 4. type-check preconditions
 5. ownership-check preconditions
@@ -69,12 +69,18 @@ Stages 4-8 are still skeletons. They are kept executable so v0.2 stdlib and
 language-core gaps are found before the self-host implementation replaces Go
 components.
 
-## Lexer Oracle
+## Lexer And Parser Oracle
 
 The self-host lexer oracle compares token kind, literal spelling, byte start,
 byte end, line, and column against the Go lexer. Byte spans are zero-based and
 end-exclusive. Line and column are one-based. String token literals exclude the
 surrounding quotes so they match the Go `token.Token.Literal` field.
+
+The parser oracle currently compares a normalized AST snapshot containing
+function, import, struct, enum, union, and return counts. This is intentionally
+smaller than a complete AST dump, but it is generated from the Go parser and the
+self-host parser stage for the same source and is the v0.3 bridge toward full
+AST oracle coverage.
 
 Current stdlib feedback is tracked in [`STDLIB.md`](STDLIB.md).
 
