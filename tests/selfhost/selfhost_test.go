@@ -13,6 +13,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/interp"
+	kir "github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
@@ -140,6 +141,20 @@ type ownershipSnapshot struct {
 	RelatedStart int
 }
 
+type irDumpSnapshot struct {
+	Status    string
+	Message   string
+	Functions []irDumpFunction
+}
+
+type irDumpFunction struct {
+	Name       string
+	ReturnType string
+	Params     []string
+	Block      string
+	Terminator string
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -181,6 +196,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
 	ownershipSnapshot := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
+	irDumpSnapshot := formatIrDumpSnapshot(goIrDumpSnapshot(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
@@ -211,6 +227,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"ir snapshot\n" +
 		irSnapshot +
 		"ir snapshot end\n" +
+		"ir dump snapshot\n" +
+		irDumpSnapshot +
+		"ir dump snapshot end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -355,6 +374,26 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 			want := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
 			if got != want {
 				t.Fatalf("self-host ownership snapshot got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestSelfHostIrDumpOracle compares minimal normalized IR dump facts.
+func TestSelfHostIrDumpOracle(t *testing.T) {
+	cases := []string{
+		"examples/functions.kizu",
+		"examples/negative/missing_return.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, fixture), "ir dump snapshot", "ir dump snapshot end",
+			)
+			want := formatIrDumpSnapshot(goIrDumpSnapshot(t, fixture))
+			if got != want {
+				t.Fatalf("self-host IR dump snapshot got %q, want %q", got, want)
 			}
 		})
 	}
@@ -847,6 +886,69 @@ func formatIrSnapshot(snapshot irSnapshot) string {
 		"functions", strconv.Itoa(snapshot.Functions),
 		"blocks", strconv.Itoa(snapshot.Blocks),
 		"backend artifacts", strconv.Itoa(snapshot.BackendArtifacts),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// goIrDumpSnapshot returns the normalized Go IR lowering dump subset.
+func goIrDumpSnapshot(t *testing.T, path string) irDumpSnapshot {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	if err := types.New().Check(program); err != nil {
+		return irDumpSnapshot{Status: "fail", Message: "ir error: source is not lowerable"}
+	}
+	if err := ownership.New().Check(program); err != nil {
+		return irDumpSnapshot{Status: "fail", Message: "ir error: source is not lowerable"}
+	}
+	module, err := kir.Lower(program)
+	if err != nil {
+		return irDumpSnapshot{Status: "fail", Message: "ir error: source is not lowerable"}
+	}
+	return goIrDumpFromModule(module)
+}
+
+// goIrDumpFromModule converts Go IR into the self-host normalized dump subset.
+func goIrDumpFromModule(module *kir.Module) irDumpSnapshot {
+	snapshot := irDumpSnapshot{Status: "pass"}
+	for _, fn := range module.Functions {
+		dump := irDumpFunction{Name: fn.Name, ReturnType: fn.Return}
+		for _, param := range fn.Params {
+			dump.Params = append(dump.Params, param.Type)
+		}
+		if len(fn.Blocks) > 0 {
+			dump.Block = fn.Blocks[0].Name
+			dump.Terminator = normalizeIrTerminator(fn.Blocks[0].Terminator)
+		}
+		snapshot.Functions = append(snapshot.Functions, dump)
+	}
+	return snapshot
+}
+
+// normalizeIrTerminator returns the schema shared with frontend.kizu.
+func normalizeIrTerminator(term kir.Terminator) string {
+	if term.Op == "return" && term.Value.Name == "void" {
+		return "return void"
+	}
+	return term.Op
+}
+
+// formatIrDumpSnapshot formats normalized IR dump rows.
+func formatIrDumpSnapshot(snapshot irDumpSnapshot) string {
+	lines := []string{"status", snapshot.Status}
+	if snapshot.Status == "fail" {
+		lines = append(lines, "message", snapshot.Message)
+		return strings.Join(lines, "\n") + "\n"
+	}
+	for _, fn := range snapshot.Functions {
+		lines = append(lines,
+			"fn", fn.Name,
+			"return", fn.ReturnType,
+			"params", strconv.Itoa(len(fn.Params)),
+		)
+		for _, param := range fn.Params {
+			lines = append(lines, "param", param)
+		}
+		lines = append(lines, "block", fn.Block, "terminator", fn.Terminator)
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
