@@ -108,6 +108,13 @@ type astSnapshot struct {
 	Returns   int
 }
 
+type semanticSnapshot struct {
+	FunctionSymbols int
+	TypeSymbols     int
+	ValueSymbols    int
+	Diagnostics     int
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -144,6 +151,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
 	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
+	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
@@ -159,6 +167,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"ast snapshot\n" +
 		astSnapshot +
 		"ast snapshot end\n" +
+		"semantic snapshot\n" +
+		semanticSnapshot +
+		"semantic snapshot end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -183,6 +194,8 @@ func TestSelfHostFixtureComparedWithGoLexer(t *testing.T) {
 		t.Fatalf("self-host token stream got %v, want %v", gotStream, wantStream)
 	}
 	assertTokenSnapshots(t, got, fixture)
+	assertAstSnapshot(t, got, fixture)
+	assertSemanticSnapshot(t, got, fixture)
 }
 
 // TestSelfHostRichLexerStreamComparedWithGoLexer checks a wider token corpus.
@@ -216,6 +229,8 @@ func TestSelfHostReadsModuleFixture(t *testing.T) {
 	}
 	assertTokenSnapshots(t, got, fixture)
 	assertAstSnapshot(t, got, fixture)
+	assertSemanticSnapshot(t, got, fixture)
+	assertSemanticSnapshot(t, got, fixture)
 }
 
 // TestSelfHostExampleLexerSnapshotsComparedWithGoLexer checks an examples subset.
@@ -238,6 +253,35 @@ func TestSelfHostReadsModuleConformanceManifest(t *testing.T) {
 			got := runSelfHostFrontend(t, fixture)
 			assertTokenSnapshots(t, got, fixture)
 			assertAstSnapshot(t, got, fixture)
+			assertSemanticSnapshot(t, got, fixture)
+		})
+	}
+}
+
+// TestSelfHostSemanticOracleCorpus checks selected semantic pass/fail cases.
+func TestSelfHostSemanticOracleCorpus(t *testing.T) {
+	positives := []string{
+		"examples/hello.kizu",
+		"examples/borrow.kizu",
+		"examples/std_mem.kizu",
+	}
+	for _, path := range positives {
+		t.Run("positive/"+filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			checkGoSourcePasses(t, fixture)
+			got := runSelfHostFrontend(t, fixture)
+			assertSemanticSnapshot(t, got, fixture)
+		})
+	}
+	negatives := map[string]string{
+		"examples/negative/moved_value.kizu":          "moved value `name` was used",
+		"examples/negative/move_while_borrowed.kizu":  "cannot be moved while borrowed",
+		"examples/negative/immutable_assignment.kizu": "immutable binding `x`",
+	}
+	for path, want := range negatives {
+		t.Run("negative/"+filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			checkGoSourceFails(t, fixture, want)
 		})
 	}
 }
@@ -453,6 +497,29 @@ func formatAstSnapshot(snapshot astSnapshot) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// goSemanticSnapshot returns the normalized Go semantic snapshot.
+func goSemanticSnapshot(t *testing.T, path string) semanticSnapshot {
+	t.Helper()
+	ast := goAstSnapshot(t, path)
+	return semanticSnapshot{
+		FunctionSymbols: ast.Functions,
+		TypeSymbols:     ast.Structs + ast.Enums + ast.Unions,
+		ValueSymbols:    0,
+		Diagnostics:     0,
+	}
+}
+
+// formatSemanticSnapshot formats semantic snapshots as frontend.kizu prints them.
+func formatSemanticSnapshot(snapshot semanticSnapshot) string {
+	lines := []string{
+		"function symbols", strconv.Itoa(snapshot.FunctionSymbols),
+		"type symbols", strconv.Itoa(snapshot.TypeSymbols),
+		"value symbols", strconv.Itoa(snapshot.ValueSymbols),
+		"diagnostics", strconv.Itoa(snapshot.Diagnostics),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // extractSelfHostTokenKinds returns the token stream printed by frontend.kizu.
 func extractSelfHostTokenKinds(t *testing.T, output string) []string {
 	t.Helper()
@@ -493,30 +560,46 @@ func assertAstSnapshot(t *testing.T, output string, fixture string) {
 	}
 }
 
+// assertSemanticSnapshot compares self-host semantic output with Go parser facts.
+func assertSemanticSnapshot(t *testing.T, output string, fixture string) {
+	t.Helper()
+	got := extractMarkedSnapshot(t, output, "semantic snapshot", "semantic snapshot end")
+	want := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
+	if got != want {
+		t.Fatalf("self-host semantic snapshot got %q, want %q", got, want)
+	}
+}
+
 // extractSelfHostAstSnapshot returns the AST snapshot printed by frontend.kizu.
 func extractSelfHostAstSnapshot(t *testing.T, output string) string {
 	t.Helper()
+	return extractMarkedSnapshot(t, output, "ast snapshot", "ast snapshot end")
+}
+
+// extractMarkedSnapshot returns lines between a pair of snapshot markers.
+func extractMarkedSnapshot(t *testing.T, output string, start string, end string) string {
+	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
 	for idx, line := range lines {
-		if line == "ast snapshot" {
-			return parseSelfHostAstSnapshot(t, lines[idx+1:])
+		if line == start {
+			return parseMarkedSnapshot(t, lines[idx+1:], end)
 		}
 	}
-	t.Fatal("self-host AST snapshot markers were not found")
+	t.Fatalf("self-host snapshot marker %q was not found", start)
 	return ""
 }
 
-// parseSelfHostAstSnapshot parses lines until the AST snapshot end marker.
-func parseSelfHostAstSnapshot(t *testing.T, lines []string) string {
+// parseMarkedSnapshot parses lines until the end marker.
+func parseMarkedSnapshot(t *testing.T, lines []string, end string) string {
 	t.Helper()
 	out := []string{}
 	for _, line := range lines {
-		if line == "ast snapshot end" {
+		if line == end {
 			return strings.Join(out, "\n") + "\n"
 		}
 		out = append(out, line)
 	}
-	t.Fatal("self-host AST snapshot end marker was not found")
+	t.Fatalf("self-host snapshot end marker %q was not found", end)
 	return ""
 }
 
@@ -612,6 +695,34 @@ func parseSelfHostSource(t *testing.T, path string) *ast.Program {
 		t.Fatalf("parse failed: %s", strings.Join(p.Errors(), "\n"))
 	}
 	return program
+}
+
+// checkGoSourcePasses runs the Go semantic checkers for a positive fixture.
+func checkGoSourcePasses(t *testing.T, path string) {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	if err := types.New().Check(program); err != nil {
+		t.Fatalf("type check failed: %v", err)
+	}
+	if err := ownership.New().Check(program); err != nil {
+		t.Fatalf("ownership check failed: %v", err)
+	}
+}
+
+// checkGoSourceFails runs the Go semantic checkers for a negative fixture.
+func checkGoSourceFails(t *testing.T, path string, want string) {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	err := types.New().Check(program)
+	if err == nil {
+		err = ownership.New().Check(program)
+	}
+	if err == nil {
+		t.Fatalf("expected semantic error containing %q", want)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("got error %q, want substring %q", err, want)
+	}
 }
 
 // selfHostSources returns all tracked Kizu skeleton sources.
