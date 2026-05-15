@@ -154,6 +154,7 @@ type irDumpFunction struct {
 	ReturnType string
 	Params     []string
 	Block      string
+	Opcodes    []string
 	Terminator string
 }
 
@@ -509,6 +510,7 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 func TestSelfHostIrDumpOracle(t *testing.T) {
 	cases := []string{
 		"examples/functions.kizu",
+		"examples/arithmetic.kizu",
 		"examples/negative/missing_return.kizu",
 	}
 	for _, path := range cases {
@@ -1309,11 +1311,21 @@ func goIrDumpFromModule(module *kir.Module) irDumpSnapshot {
 		}
 		if len(fn.Blocks) > 0 {
 			dump.Block = fn.Blocks[0].Name
+			dump.Opcodes = irOpcodes(fn.Blocks[0])
 			dump.Terminator = normalizeIrTerminator(fn.Blocks[0].Terminator)
 		}
 		snapshot.Functions = append(snapshot.Functions, dump)
 	}
 	return snapshot
+}
+
+// irOpcodes returns the instruction opcodes in one block.
+func irOpcodes(block *kir.Block) []string {
+	opcodes := make([]string, 0, len(block.Instrs))
+	for _, instr := range block.Instrs {
+		opcodes = append(opcodes, instr.Op)
+	}
+	return opcodes
 }
 
 // normalizeIrTerminator returns the schema shared with frontend.kizu.
@@ -1340,7 +1352,11 @@ func formatIrDumpSnapshot(snapshot irDumpSnapshot) string {
 		for _, param := range fn.Params {
 			lines = append(lines, "param", param)
 		}
-		lines = append(lines, "block", fn.Block, "terminator", fn.Terminator)
+		lines = append(lines, "block", fn.Block, "ops", strconv.Itoa(len(fn.Opcodes)))
+		for _, opcode := range fn.Opcodes {
+			lines = append(lines, "op", opcode)
+		}
+		lines = append(lines, "terminator", fn.Terminator)
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
