@@ -3,6 +3,7 @@ package selfhost_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,7 @@ import (
 const maxLineWidth = 100
 const maxFunctionLines = 70
 const maxFunctionStatements = 45
+const moduleConformanceManifest = "tests/conformance/modules/v0_3.json"
 
 // selfHostKindByGoToken maps production Go lexer tokens to self-host enum output.
 var selfHostKindByGoToken = map[token.Type]string{
@@ -95,6 +97,20 @@ type tokenSnapshot struct {
 	End     int
 	Line    int
 	Column  int
+}
+
+type moduleConformanceManifestData struct {
+	Version string                  `json:"version"`
+	Cases   []moduleConformanceCase `json:"cases"`
+}
+
+type moduleConformanceCase struct {
+	Name           string   `json:"name"`
+	Mode           string   `json:"mode"`
+	Path           string   `json:"path"`
+	RootSource     string   `json:"root_source"`
+	StderrContains string   `json:"stderr_contains"`
+	Features       []string `json:"features"`
 }
 
 // TestSelfHostSourcesCheck verifies every self-host Kizu file passes static checks.
@@ -195,6 +211,21 @@ func TestSelfHostExampleLexerSnapshotsComparedWithGoLexer(t *testing.T) {
 	assertTokenSnapshots(t, got, fixture)
 }
 
+// TestSelfHostReadsModuleConformanceManifest uses the shared module fixtures.
+func TestSelfHostReadsModuleConformanceManifest(t *testing.T) {
+	manifest := loadModuleConformanceManifest(t)
+	for _, tt := range manifest.Cases {
+		if tt.Mode != "check" {
+			continue
+		}
+		t.Run(tt.Name, func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(tt.RootSource))
+			got := runSelfHostFrontend(t, fixture)
+			assertTokenSnapshots(t, got, fixture)
+		})
+	}
+}
+
 // TestSelfHostSourcePolicy enforces lightweight compiler-code style rules.
 func TestSelfHostSourcePolicy(t *testing.T) {
 	for _, path := range selfHostSources(t) {
@@ -223,6 +254,24 @@ func runSelfHostFrontend(t *testing.T, fixture string) string {
 		t.Fatalf("run failed: %v", err)
 	}
 	return out.String()
+}
+
+// loadModuleConformanceManifest reads the shared module fixture manifest.
+func loadModuleConformanceManifest(t *testing.T) moduleConformanceManifestData {
+	t.Helper()
+	path := filepath.Join(repoRoot(t), filepath.FromSlash(moduleConformanceManifest))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest moduleConformanceManifestData
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version != "v0.3-modules" {
+		t.Fatalf("unexpected module conformance version %q", manifest.Version)
+	}
+	return manifest
 }
 
 // countGoFunctionTokens counts function tokens with the production Go lexer.
