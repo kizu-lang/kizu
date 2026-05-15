@@ -27,5 +27,10 @@ manifest and executes pass-case root sources through the current frontend
 skeleton.
 
 `modules/basic` is the first positive multi-file package fixture. Negative
-fixtures, such as `modules/missing_import`, keep expected diagnostic substrings
-next to the fixture manifest.
+fixtures, such as `modules/missing_import`, `modules/private_module_access`,
+`modules/private_type_leak`, and `modules/private_field_construction`, keep
+expected diagnostic substrings next to the fixture manifest.
+
+Module visibility diagnostics must include a primary location and a related
+location so the same expected diagnostic corpus can be reused by the future
+self-host compiler.

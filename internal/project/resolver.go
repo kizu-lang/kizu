@@ -59,7 +59,11 @@ func ResolvePackage(baseDir string, manifest Manifest) (*Package, error) {
 	if err := resolveImports(modules); err != nil {
 		return nil, err
 	}
-	return &Package{BaseDir: baseDir, Manifest: manifest, Graph: graph, Modules: modules}, nil
+	pkg := &Package{BaseDir: baseDir, Manifest: manifest, Graph: graph, Modules: modules}
+	if err := CheckVisibility(pkg); err != nil {
+		return nil, err
+	}
+	return pkg, nil
 }
 
 // parseModules parses every source file in graph order.
