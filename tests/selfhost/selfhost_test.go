@@ -456,6 +456,8 @@ func TestSelfHostAstDetailOracle(t *testing.T) {
 		"examples/while.kizu",
 		"examples/for.kizu",
 		"examples/match.kizu",
+		"examples/variables.kizu",
+		"examples/arithmetic.kizu",
 		"examples/negative/missing_semicolon.kizu",
 	}
 	for _, path := range cases {
@@ -1176,6 +1178,7 @@ func astFunctionDetail(fn *ast.FunctionDecl) []string {
 		"returns", strconv.Itoa(countReturnsInBlock(fn.Body)),
 	)
 	lines = append(lines, astFunctionControlDetail(fn.Body)...)
+	lines = append(lines, astFunctionExpressionDetail(fn.Body)...)
 	return lines
 }
 
@@ -1249,6 +1252,115 @@ func countControlsInStatement(stmt ast.Statement) controlCounts {
 		counts.Breaks++
 	case *ast.ContinueStmt:
 		counts.Continues++
+	}
+	return counts
+}
+
+// astFunctionExpressionDetail returns selected expression and statement counts.
+func astFunctionExpressionDetail(block *ast.BlockStmt) []string {
+	counts := countExpressionsInBlock(block)
+	return []string{
+		"expressions",
+		"locals", strconv.Itoa(counts.Locals),
+		"assignments", strconv.Itoa(counts.Assignments),
+		"calls", strconv.Itoa(counts.Calls),
+		"field accesses", strconv.Itoa(counts.FieldAccesses),
+		"struct literals", strconv.Itoa(counts.StructLiterals),
+		"binary expressions", strconv.Itoa(counts.BinaryExpressions),
+	}
+}
+
+// expressionCounts stores selected expression and statement counts.
+type expressionCounts struct {
+	Locals            int
+	Assignments       int
+	Calls             int
+	FieldAccesses     int
+	StructLiterals    int
+	BinaryExpressions int
+}
+
+// countExpressionsInBlock counts selected expressions recursively.
+func countExpressionsInBlock(block *ast.BlockStmt) expressionCounts {
+	counts := expressionCounts{}
+	if block == nil {
+		return counts
+	}
+	for _, stmt := range block.Statements {
+		counts.Add(countExpressionsInStatement(stmt))
+	}
+	return counts
+}
+
+// Add accumulates expression counts.
+func (c *expressionCounts) Add(other expressionCounts) {
+	c.Locals += other.Locals
+	c.Assignments += other.Assignments
+	c.Calls += other.Calls
+	c.FieldAccesses += other.FieldAccesses
+	c.StructLiterals += other.StructLiterals
+	c.BinaryExpressions += other.BinaryExpressions
+}
+
+// countExpressionsInStatement counts selected expressions in one statement.
+func countExpressionsInStatement(stmt ast.Statement) expressionCounts {
+	counts := expressionCounts{}
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		counts.Locals++
+		counts.Add(countExpressionsInExpr(s.Value))
+	case *ast.AssignStmt:
+		counts.Assignments++
+		counts.Add(countExpressionsInExpr(s.Target))
+		counts.Add(countExpressionsInExpr(s.Value))
+	case *ast.ExprStmt:
+		counts.Add(countExpressionsInExpr(s.Expr))
+	case *ast.ReturnStmt:
+		counts.Add(countExpressionsInExpr(s.Value))
+	case *ast.IfStmt:
+		counts.Add(countExpressionsInExpr(s.Condition))
+		counts.Add(countExpressionsInBlock(s.Consequence))
+		counts.Add(countExpressionsInBlock(s.Alternative))
+	case *ast.WhileStmt:
+		counts.Add(countExpressionsInExpr(s.Condition))
+		counts.Add(countExpressionsInBlock(s.Body))
+	case *ast.ForStmt:
+		counts.Add(countExpressionsInExpr(s.Start))
+		counts.Add(countExpressionsInExpr(s.End))
+		counts.Add(countExpressionsInBlock(s.Body))
+	case *ast.MatchStmt:
+		counts.Add(countExpressionsInExpr(s.Value))
+		for _, arm := range s.Arms {
+			counts.Add(countExpressionsInStatement(arm.Body))
+		}
+	}
+	return counts
+}
+
+// countExpressionsInExpr counts selected expression nodes recursively.
+func countExpressionsInExpr(expr ast.Expression) expressionCounts {
+	counts := expressionCounts{}
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		counts.BinaryExpressions++
+		counts.Add(countExpressionsInExpr(e.Left))
+		counts.Add(countExpressionsInExpr(e.Right))
+	case *ast.CallExpr:
+		counts.Calls++
+		counts.Add(countExpressionsInExpr(e.Callee))
+		for _, arg := range e.Args {
+			counts.Add(countExpressionsInExpr(arg))
+		}
+	case *ast.FieldExpr:
+		if !e.Namespace {
+			counts.FieldAccesses++
+		}
+		counts.Add(countExpressionsInExpr(e.Receiver))
+	case *ast.StructLiteralExpr:
+		counts.StructLiterals++
+		for _, field := range e.Fields {
+			counts.Add(countExpressionsInExpr(field.Value))
+		}
 	}
 	return counts
 }
