@@ -507,10 +507,14 @@ func TestSelfHostAstNodeDumpOracle(t *testing.T) {
 		"examples/if.kizu",
 		"examples/while.kizu",
 		"examples/for.kizu",
+		"examples/if_expression.kizu",
 		"examples/arena.kizu",
 		"examples/fs_read.kizu",
 		"examples/error_union_void.kizu",
 		"examples/typed_error.kizu",
+		"examples/match.kizu",
+		"examples/union.kizu",
+		"examples/custom_error.kizu",
 		"tests/conformance/modules/private_module_access/src/main.kizu",
 	}
 	for _, path := range cases {
@@ -1513,6 +1517,12 @@ func astStatementNodeDump(stmt ast.Statement) []string {
 		lines := append([]string{"ForStmt"}, astExpressionNodeDump(s.Start)...)
 		lines = append(lines, astExpressionNodeDump(s.End)...)
 		return append(lines, astBlockNodeDump(s.Body)...)
+	case *ast.MatchStmt:
+		lines := append([]string{"MatchStmt"}, astExpressionNodeDump(s.Value)...)
+		for _, arm := range s.Arms {
+			lines = append(lines, astStatementNodeDump(arm.Body)...)
+		}
+		return lines
 	case *ast.BreakStmt:
 		return []string{"BreakStmt"}
 	case *ast.ContinueStmt:
@@ -1530,6 +1540,10 @@ func astExpressionNodeDump(expr ast.Expression) []string {
 		lines := []string{"BinaryExpr", tokenKindForOperator(e.Operator)}
 		lines = append(lines, astExpressionNodeDump(e.Left)...)
 		return append(lines, astExpressionNodeDump(e.Right)...)
+	case *ast.IfExpr:
+		lines := append([]string{"IfExpr"}, astExpressionNodeDump(e.Condition)...)
+		lines = append(lines, astBlockNodeDump(e.Consequence)...)
+		return append(lines, astBlockNodeDump(e.Alternative)...)
 	case *ast.CallExpr:
 		lines := []string{"CallExpr", e.Callee.String(), strconv.Itoa(len(e.Args))}
 		for _, arg := range e.Args {
