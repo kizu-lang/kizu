@@ -26,9 +26,9 @@ each row below.
 | Phase | Current evidence | Coverage strength | Missing for 1:1 |
 | --- | --- | --- | --- |
 | lexer | `tests/selfhost` compares token kind, literal, byte span, line, column for all conformance manifest sources | strong | none |
-| parser | self-host AST counts, declaration order, declaration detail, selected control/expression/if-expression/qualified-call/error-return/match snapshots, and selected statement/expression AST node dump vs Go parser | weak | full AST node model and dump equality across all parseable conformance fixtures |
+| parser | self-host AST counts, declaration order, declaration detail, selected control/expression/if-expression/qualified-call/error-return/match/stdlib-call snapshots, and selected statement/expression AST node dump vs Go parser | weak | full AST node model and dump equality across all parseable conformance fixtures |
 | resolver | self-host root module graph/import snapshot vs Go resolver for selected pass/fail packages | weak | full Kizu module graph resolver and graph snapshot equality |
-| diagnostics | self-host diagnostic objects cover lexer, parser, resolver, and type subset spans vs Go facts | weak | broaden to ownership diagnostics, all checker diagnostics, and all conformance failure classes |
+| diagnostics | self-host diagnostic objects cover lexer, parser, resolver, type, and ownership subset spans vs Go facts | weak | broaden to all checker diagnostics and all conformance failure classes |
 | type | self-host return/call/std-mem and selected local binding type snapshots compare pass/fail cases vs Go checker | weak | broaden to full type environment and all checker diagnostic classes |
 | ownership | self-host owned-call move and borrow-while-move snapshots cover borrow, moved-value, double-move, and move-while-borrowed fixtures vs Go checker | weak | full Kizu move/borrow checker with memory-safety diagnostic equality |
 | IR | self-host IR summary plus normalized function/block/opcode/result/operand/immediate/terminator dump for selected pass/fail fixtures | weak | broaden to full instruction operand/value dump equality across conformance fixtures |

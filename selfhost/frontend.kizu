@@ -768,6 +768,7 @@ fn print_statement_or_expression_node(tokens: &std::array::Array<Token>, index: 
         }
     }
     try print_call_node(tokens, index);
+    try print_type_apply_call_node(tokens, index);
     try print_binary_node(tokens, index);
     return void;
 }
@@ -871,6 +872,58 @@ fn method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
             return "users.get";
         }
     }
+    if std::mem::equal_bytes(receiver, "values") {
+        if std::mem::equal_bytes(method, "len") {
+            return "values.len";
+        }
+        if std::mem::equal_bytes(method, "capacity") {
+            return "values.capacity";
+        }
+        if std::mem::equal_bytes(method, "deinit") {
+            return "values.deinit";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "tokens") {
+        if std::mem::equal_bytes(method, "len") {
+            return "tokens.len";
+        }
+        if std::mem::equal_bytes(method, "deinit") {
+            return "tokens.deinit";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "text") {
+        if std::mem::equal_bytes(method, "as_bytes") {
+            return "text.as_bytes";
+        }
+        if std::mem::equal_bytes(method, "len") {
+            return "text.len";
+        }
+        if std::mem::equal_bytes(method, "clear") {
+            return "text.clear";
+        }
+        if std::mem::equal_bytes(method, "deinit") {
+            return "text.deinit";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "table") {
+        if std::mem::equal_bytes(method, "contains") {
+            return "table.contains";
+        }
+        if std::mem::equal_bytes(method, "len") {
+            return "table.len";
+        }
+        if std::mem::equal_bytes(method, "deinit") {
+            return "table.deinit";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "symbols") {
+        if std::mem::equal_bytes(method, "contains") {
+            return "symbols.contains";
+        }
+        if std::mem::equal_bytes(method, "deinit") {
+            return "symbols.deinit";
+        }
+    }
     return method;
 }
 
@@ -887,6 +940,17 @@ fn namespace_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]c
     if std::mem::equal_bytes(module, "fs") {
         if std::mem::equal_bytes(callee.literal, "read_file") {
             return "std::fs::read_file";
+        }
+    }
+    if std::mem::equal_bytes(module, "mem") {
+        return mem_display_name(callee.literal);
+    }
+    if std::mem::equal_bytes(module, "path") {
+        return path_display_name(callee.literal);
+    }
+    if std::mem::equal_bytes(module, "string") {
+        if std::mem::equal_bytes(callee.literal, "String") {
+            return "std::string::String";
         }
     }
     if std::mem::equal_bytes(module, "lexer") {
@@ -922,6 +986,46 @@ fn namespace_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]c
     return callee.literal;
 }
 
+// mem_display_name returns selected std::mem callees.
+fn mem_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "page_allocator") {
+        return "std::mem::page_allocator";
+    }
+    if std::mem::equal_bytes(callee, "len") {
+        return "std::mem::len";
+    }
+    if std::mem::equal_bytes(callee, "equal_bytes") {
+        return "std::mem::equal_bytes";
+    }
+    if std::mem::equal_bytes(callee, "starts_with") {
+        return "std::mem::starts_with";
+    }
+    if std::mem::equal_bytes(callee, "trim_ascii") {
+        return "std::mem::trim_ascii";
+    }
+    return callee;
+}
+
+// path_display_name returns selected std::path callees.
+fn path_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "join") {
+        return "std::path::join";
+    }
+    if std::mem::equal_bytes(callee, "dirname") {
+        return "std::path::dirname";
+    }
+    if std::mem::equal_bytes(callee, "basename") {
+        return "std::path::basename";
+    }
+    if std::mem::equal_bytes(callee, "extension") {
+        return "std::path::extension";
+    }
+    if std::mem::equal_bytes(callee, "clean") {
+        return "std::path::clean";
+    }
+    return callee;
+}
+
 // namespace_module_name returns the module segment before the final callee.
 fn namespace_module_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
     if index >= 4 {
@@ -934,10 +1038,109 @@ fn namespace_module_name(tokens: &std::array::Array<Token>, index: i64) -> ![]co
     return previous.literal;
 }
 
+// print_type_apply_call_node writes selected generic constructor calls.
+fn print_type_apply_call_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
+    if index + 1 >= tokens.len() {
+        return void;
+    }
+    let token = try tokens.at(index);
+    let next = try tokens.at(index + 1);
+
+    if token.kind == TokenKind::Ident {
+        if next.kind == TokenKind::LT {
+            if try has_type_apply_close(tokens, index + 1) {
+                let name = try type_apply_display_name(tokens, index);
+                if !std::mem::equal_bytes(name, "") {
+                    print("CallExpr");
+                    print(name);
+                    print(try call_arg_count_after_type_apply(tokens, index));
+                }
+            }
+        }
+    }
+    return void;
+}
+
+// type_apply_display_name returns selected generic constructor spellings.
+fn type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let token = try tokens.at(index);
+    let module = try namespace_module_name(tokens, index);
+
+    if std::mem::equal_bytes(module, "array") {
+        if std::mem::equal_bytes(token.literal, "Array") {
+            return try array_type_apply_display_name(tokens, index);
+        }
+    }
+    if std::mem::equal_bytes(module, "map") {
+        if std::mem::equal_bytes(token.literal, "Map") {
+            return try map_type_apply_display_name(tokens, index);
+        }
+    }
+    return "";
+}
+
+// array_type_apply_display_name returns selected std::array constructors.
+fn array_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let first = try tokens.at(index + 2);
+
+    if std::mem::equal_bytes(first.literal, "i64") {
+        return "std::array::Array<i64>";
+    }
+    if std::mem::equal_bytes(first.literal, "Token") {
+        return "std::array::Array<Token>";
+    }
+    if std::mem::equal_bytes(first.literal, "TokenKind") {
+        return "std::array::Array<TokenKind>";
+    }
+    return "std::array::Array";
+}
+
+// map_type_apply_display_name returns selected std::map constructors.
+fn map_type_apply_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    if try type_apply_contains(tokens, index, "SymbolKind") {
+        return "std::map::Map<[]const u8, SymbolKind>";
+    }
+    return "std::map::Map<[]const u8, i64>";
+}
+
+// type_apply_contains reports whether a type argument token appears before `>`.
+fn type_apply_contains(tokens: &std::array::Array<Token>, index: i64, text: []const u8) -> !bool {
+    var cursor = index + 1;
+
+    while cursor < tokens.len() {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::GT {
+            return false;
+        }
+        if std::mem::equal_bytes(token.literal, text) {
+            return true;
+        }
+        cursor = cursor + 1;
+    }
+    return false;
+}
+
+// call_arg_count_after_type_apply counts constructor args after generic type args.
+fn call_arg_count_after_type_apply(tokens: &std::array::Array<Token>, index: i64) -> !i64 {
+    var cursor = index + 1;
+
+    while cursor < tokens.len() {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::LParen {
+            return try call_arg_count(tokens, cursor - 1);
+        }
+        cursor = cursor + 1;
+    }
+    return 0;
+}
+
 // print_binary_node writes a selected binary expression row.
 fn print_binary_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
     let kind = try tokens.at(index);
     if try operator_belongs_to_type_apply(tokens, index) {
+        return void;
+    }
+    if try operator_belongs_to_deref(tokens, index) {
         return void;
     }
     if is_binary_operator(kind.kind) {
@@ -945,6 +1148,18 @@ fn print_binary_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
         print(kind.kind);
     }
     return void;
+}
+
+// operator_belongs_to_deref rejects slot.* dereference markers as binary nodes.
+fn operator_belongs_to_deref(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if token.kind == TokenKind::Asterisk {
+        if index > 0 {
+            let previous = try tokens.at(index - 1);
+            return previous.kind == TokenKind::Dot;
+        }
+    }
+    return false;
 }
 
 // operator_belongs_to_type_apply rejects generic type delimiters as binary nodes.
@@ -978,6 +1193,9 @@ fn has_type_apply_close(tokens: &std::array::Array<Token>, start: i64) -> !bool 
     while index < tokens.len() {
         let token = try tokens.at(index);
         if token.kind == TokenKind::GT {
+            if index + 1 >= tokens.len() {
+                return false;
+            }
             let next = try tokens.at(index + 1);
             return next.kind == TokenKind::LParen;
         }
@@ -2444,6 +2662,7 @@ fn print_diagnostic_snapshot(tokens: &std::array::Array<Token>) -> !void {
     try print_parser_diagnostic(tokens);
     try print_module_diagnostic(tokens);
     try print_type_diagnostic(tokens);
+    try print_ownership_diagnostic(tokens);
     print("diagnostic snapshot end");
     return void;
 }
@@ -2503,6 +2722,43 @@ fn print_type_diagnostic(tokens: &std::array::Array<Token>) -> !void {
         print_diagnostic(diagnostic);
     }
     return void;
+}
+
+// print_ownership_diagnostic writes the ownership checker diagnostic subset.
+fn print_ownership_diagnostic(tokens: &std::array::Array<Token>) -> !void {
+    let snapshot = try check_ownership_subset(tokens);
+    if snapshot.ok {
+        return void;
+    }
+    let primary_index = try token_index_at_start(tokens, snapshot.primary_start);
+    let related_index = try token_index_at_start(tokens, snapshot.related_start);
+    let primary = try tokens.at(primary_index);
+    let related = try tokens.at(related_index);
+    let diagnostic = Diagnostic {
+        message: snapshot.message,
+        primary_start: primary.start,
+        primary_end: primary.end,
+        primary_line: primary.line,
+        primary_column: primary.column,
+        related_start: related.start,
+        related_end: related.end,
+    };
+    print_diagnostic(diagnostic);
+    return void;
+}
+
+// token_index_at_start returns the index whose byte start offset matches start.
+fn token_index_at_start(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.start == start {
+            return index;
+        }
+        index = index + 1;
+    }
+    return 0;
 }
 
 // missing_semicolon_index returns the parser subset diagnostic token index.
