@@ -1691,9 +1691,188 @@ fn print_ir_function_dump(tokens: &std::array::Array<Token>, start: i64) -> !voi
     try print_function_param_types(tokens, start + 3);
     print("block");
     print("entry");
+    try print_ir_ops(tokens, start);
     print("terminator");
     print(try function_terminator(tokens, start));
     return void;
+}
+
+// print_ir_ops writes a normalized instruction opcode sequence.
+fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    print("ops");
+    print(try function_instruction_count(tokens, start));
+    try print_literal_ops(tokens, start);
+    if try has_function_operator(tokens, start, TokenKind::Asterisk) {
+        print("op");
+        print("binary.*");
+    }
+    if try has_function_operator(tokens, start, TokenKind::Plus) {
+        print("op");
+        print("binary.+");
+    }
+    try print_call_ops(tokens, start);
+    return void;
+}
+
+// function_instruction_count returns the supported IR instruction count.
+fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var count = try literal_instruction_count(tokens, start);
+
+    if try has_function_operator(tokens, start, TokenKind::Asterisk) {
+        count = count + 1;
+    }
+    if try has_function_operator(tokens, start, TokenKind::Plus) {
+        count = count + 1;
+    }
+    return count + try call_instruction_count(tokens, start);
+}
+
+// literal_instruction_count counts constant instructions in one function.
+fn literal_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if is_ir_literal_or_operator(token.kind) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// is_ir_literal_or_operator reports literal token shapes that lower to const.
+fn is_ir_literal_or_operator(kind: TokenKind) -> bool {
+    if kind == TokenKind::Number {
+        return true;
+    }
+    if kind == TokenKind::String {
+        return true;
+    }
+    if kind == TokenKind::True {
+        return true;
+    }
+    if kind == TokenKind::False {
+        return true;
+    }
+    return false;
+}
+
+// print_literal_ops writes constant opcodes in source order.
+fn print_literal_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return void;
+            }
+        }
+        if is_ir_literal_or_operator(token.kind) {
+            print("op");
+            print("const");
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// has_function_operator reports whether one function body contains an operator.
+fn has_function_operator(tokens: &std::array::Array<Token>, start: i64, kind: TokenKind) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if token.kind == kind {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// call_instruction_count counts call instructions in one function.
+fn call_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if try is_call_start(tokens, index) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// print_call_ops writes call opcodes in source order.
+fn print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return void;
+            }
+        }
+        if try is_call_start(tokens, index) {
+            let callee = try tokens.at(index);
+            if std::mem::equal_bytes(callee.literal, "print") {
+                try print_print_call_ops(tokens, index);
+                index = try call_end_index(tokens, index);
+            } else {
+                print("op");
+                print(try call_opcode(callee.literal));
+            }
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_print_call_ops writes nested call op before the print call.
+fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let arg = try tokens.at(start + 2);
+
+    if arg.kind == TokenKind::Ident {
+        if try is_call_start(tokens, start + 2) {
+            print("op");
+            print(try call_opcode(arg.literal));
+        }
+    }
+    print("op");
+    print("call.print");
+    return void;
+}
+
+// call_opcode returns the normalized IR opcode for one call.
+fn call_opcode(name: []const u8) -> ![]const u8 {
+    if std::mem::equal_bytes(name, "print") {
+        return "call.print";
+    }
+    if std::mem::equal_bytes(name, "add") {
+        return "call.add";
+    }
+    return "call";
 }
 
 // function_param_count returns the number of function parameters.
