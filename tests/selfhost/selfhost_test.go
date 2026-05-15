@@ -507,6 +507,11 @@ func TestSelfHostAstNodeDumpOracle(t *testing.T) {
 		"examples/if.kizu",
 		"examples/while.kizu",
 		"examples/for.kizu",
+		"examples/arena.kizu",
+		"examples/fs_read.kizu",
+		"examples/error_union_void.kizu",
+		"examples/typed_error.kizu",
+		"tests/conformance/modules/private_module_access/src/main.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -1531,6 +1536,8 @@ func astExpressionNodeDump(expr ast.Expression) []string {
 			lines = append(lines, astExpressionNodeDump(arg)...)
 		}
 		return lines
+	case *ast.FieldExpr:
+		return astExpressionNodeDump(e.Receiver)
 	}
 	return nil
 }
