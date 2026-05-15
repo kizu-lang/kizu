@@ -1063,6 +1063,7 @@ std::fs
 std::mem
 std::slice
 std::array
+std::map
 ```
 
 文字列 literal は v0.1 では `[]const u8` として扱います。
@@ -1095,14 +1096,13 @@ view が生きている間は `append_bytes`、`append_byte`、`clear`、`deinit
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
 v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure は実装しません。
 
-v0.1 では collection runtime API を実装しません。
-collection は次の順で検討します。
+collection は次の順で実装します。
 
 ```text
 std::array::Array<T>  先に検討する owned contiguous collection
 slice<T>              contiguous mutable view
 slice<const T>        contiguous read-only view
-std::map::Map<K, V>   後続 phase
+std::map::Map<K, V>   self-host compiler 向け symbol table
 std::set::Set<T>      後続 phase
 ```
 
@@ -1147,9 +1147,31 @@ element borrow が生きている間は `append`、`set`、`deinit` を禁止し
 mutable element borrow が生きている間は array 全体の read も禁止します。
 `deinit` 後の array 使用は safe Kizu では禁止します。
 v0.2 の `Array<T>` element には raw pointer、arena、handle、nested array、
-concurrency capability type を入れられません。この制限は struct field と union
-payload の中も再帰的に検査します。これらは lifetime、provenance、thread boundary
+`std::map::Map<K, V>`、concurrency capability type を入れられません。
+この制限は struct field と union payload の中も再帰的に検査します。
+これらは lifetime、provenance、thread boundary
 の仕様を collection 向けに固めてから扱います。
+
+v0.2 の `std::map::Map<K, V>` は、self-host compiler の symbol table と
+scope lookup に必要な最小 owned map です。
+
+```text
+std::map::Map<[]const u8, V>(allocator: Allocator) -> std::map::Map<[]const u8, V>
+map.insert(key: []const u8, value: V) -> !void
+map.get(key: []const u8) -> !V
+map.contains(key: []const u8) -> bool
+map.len() -> i64
+map.deinit() -> void
+```
+
+v0.2 では key type は `[]const u8` 限定です。
+`insert` は key bytes を owned map 内に copy するため、source key を move しません。
+`get` は missing key を `!V` の error として返します。
+v0.2 の value type は copy type 限定です。
+non-copy value、borrow view、iteration、deletion、custom hash/equality は後続で扱います。
+`std::map::Map<K, V>()` のような hidden default allocator は使いません。
+`deinit` 後の map 使用は safe Kizu では禁止します。
+`std::map::Map<K, V>` は v0.2 では task/thread/channel boundary を越えられません。
 
 ## 15. concurrency / async 方針
 

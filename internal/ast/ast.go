@@ -604,7 +604,7 @@ func (e *CallExpr) String() string {
 	return fmt.Sprintf("%s(%s)", e.Callee.String(), strings.Join(args, ", "))
 }
 
-// TypeApplyExpr represents a namespace item with one explicit type argument.
+// TypeApplyExpr represents a namespace item with explicit type arguments.
 type TypeApplyExpr struct {
 	Callee  Expression
 	TypeArg string

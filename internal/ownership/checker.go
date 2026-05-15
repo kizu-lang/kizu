@@ -2,6 +2,7 @@ package ownership
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -1088,6 +1089,8 @@ func checkConcurrencyConstructor(name string) (string, bool, error) {
 	switch name {
 	case "std.array.Array":
 		return "", true, fmt.Errorf("move error: use `std::array::Array<T>(allocator)`")
+	case "std.map.Map":
+		return "", true, fmt.Errorf("move error: use `std::map::Map<K, V>(allocator)`")
 	case "std.atomic.Atomic":
 		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
@@ -1162,6 +1165,29 @@ func (c *Checker) checkArrayConstructor(
 	return fmt.Sprintf("std::array::Array<%s>", elem), nil
 }
 
+// checkMapConstructor validates std::map::Map<[]const u8, V>(allocator) ownership.
+func (c *Checker) checkMapConstructor(
+	argsText string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	mapArgs, err := c.checkedMapArgs(argsText)
+	if err != nil {
+		return "", err
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("map error: `std::map::Map` expects allocator")
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", fmt.Errorf("map error: `std::map::Map` expects Allocator, got %s", got)
+	}
+	return fmt.Sprintf("std::map::Map<[]const u8, %s>", mapArgs[1]), nil
+}
+
 // rejectArrayElementType rejects element types with unresolved ownership hazards.
 func (c *Checker) rejectArrayElementType(elem string) error {
 	if err := c.rejectArrayStorageType(elem, map[string]bool{}); err != nil {
@@ -1201,6 +1227,8 @@ func (c *Checker) rejectArrayStorageGeneric(typeName string, seen map[string]boo
 		return fmt.Errorf("array error: Array element cannot be handle in v0.2")
 	case "std::array::Array":
 		return fmt.Errorf("array error: Array element cannot be nested array in v0.2")
+	case "std::map::Map":
+		return fmt.Errorf("array error: Array element cannot be std::map::Map in v0.2")
 	case "Task", "Channel", "Mutex", "Atomic", "Dyn":
 		return fmt.Errorf("array error: Array element cannot be %s in v0.2", base)
 	case "option":
@@ -1278,6 +1306,8 @@ func (c *Checker) checkTypeApplyCallExpr(
 	switch name {
 	case "std.array.Array":
 		return c.checkArrayConstructor(expr.TypeArg, args, env)
+	case "std.map.Map":
+		return c.checkMapConstructor(expr.TypeArg, args, env)
 	case "std.channel.Channel":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
@@ -1608,6 +1638,9 @@ func (c *Checker) checkMethodCallExpr(
 	base, elem, ok := splitGenericType(arena.typeName)
 	if ok && base == "std::array::Array" {
 		return c.checkArrayMethod(arena, elem, field.Name, args, env)
+	}
+	if ok && base == "std::map::Map" {
+		return c.checkMapMethod(arena, elem, field.Name, args, env)
 	}
 	if !ok || base != "arena" {
 		return c.checkNonArenaMethod(arena, field.Name, args, env)
@@ -2110,6 +2143,104 @@ func (c *Checker) checkArrayGet(elem string, args []ast.Expression, env *scope) 
 		return "", fmt.Errorf("array error: `Array.get` requires copy element in v0.2")
 	}
 	return "!" + elem, nil
+}
+
+// checkMapMethod validates ownership effects for owned Map<[]const u8, V> methods.
+func (c *Checker) checkMapMethod(
+	mapValue *binding,
+	argsText string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	mapArgs, err := c.checkedMapArgs(argsText)
+	if err != nil {
+		return "", err
+	}
+	valueType := mapArgs[1]
+	switch name {
+	case "insert":
+		return c.checkMapInsert(mapValue, valueType, args, env)
+	case "get":
+		if err := c.checkMapKeyArg(name, args, env); err != nil {
+			return "", err
+		}
+		return "!" + valueType, nil
+	case "contains":
+		if err := c.checkMapKeyArg(name, args, env); err != nil {
+			return "", err
+		}
+		return "bool", nil
+	case "len":
+		return c.checkMapReadNoArgs(name, args)
+	case "deinit":
+		return c.checkMapDeinit(mapValue, args)
+	default:
+		return "", fmt.Errorf("map error: Map has no method `%s`", name)
+	}
+}
+
+// checkMapInsert validates read-only key and copy value insertion.
+func (c *Checker) checkMapInsert(
+	mapValue *binding,
+	valueType string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if mapValue.hasAnyBorrow() {
+		return "", fmt.Errorf("map error: `Map.insert` cannot run while map is borrowed")
+	}
+	if len(args) != 2 {
+		return "", fmt.Errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
+	}
+	if got, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	} else if got != "[]const u8" {
+		return "", fmt.Errorf("map error: `Map.insert` expects []const u8 key, got %s", got)
+	}
+	got, err := c.readExpr(args[1], env)
+	if err != nil {
+		return "", err
+	}
+	if got != valueType {
+		return "", fmt.Errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
+	}
+	return "!void", nil
+}
+
+// checkMapKeyArg validates one []const u8 lookup key.
+func (c *Checker) checkMapKeyArg(name string, args []ast.Expression, env *scope) error {
+	if len(args) != 1 {
+		return fmt.Errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return err
+	}
+	if got != "[]const u8" {
+		return fmt.Errorf("map error: `Map.%s` expects []const u8 key, got %s", name, got)
+	}
+	return nil
+}
+
+// checkMapReadNoArgs validates no-argument Map reads.
+func (c *Checker) checkMapReadNoArgs(name string, args []ast.Expression) (string, error) {
+	if len(args) != 0 {
+		return "", fmt.Errorf("map error: `Map.%s` expects 0 args, got %d", name, len(args))
+	}
+	return "i64", nil
+}
+
+// checkMapDeinit validates owned Map cleanup and marks it moved.
+func (c *Checker) checkMapDeinit(mapValue *binding, args []ast.Expression) (string, error) {
+	if mapValue.hasAnyBorrow() {
+		return "", fmt.Errorf("map error: `Map.deinit` cannot run while map is borrowed")
+	}
+	if len(args) != 0 {
+		return "", fmt.Errorf("map error: `Map.deinit` expects 0 args, got %d", len(args))
+	}
+	mapValue.moved = true
+	return "void", nil
 }
 
 // checkAtomicMethod validates seq_cst-only integer atomic operations.
@@ -2757,6 +2888,8 @@ func (c *Checker) rejectConcurrencyBoundaryGeneric(typeName string, seen map[str
 		return fmt.Errorf("thread error: arena cannot cross concurrency boundary")
 	case "std::array::Array":
 		return fmt.Errorf("thread error: Array cannot cross concurrency boundary in v0.2")
+	case "std::map::Map":
+		return fmt.Errorf("thread error: Map cannot cross concurrency boundary in v0.2")
 	case "handle":
 		return fmt.Errorf("thread error: handle cannot cross concurrency boundary")
 	case "Dyn":
@@ -2838,7 +2971,22 @@ func taskElement(typeName string) (string, bool) {
 	return arg, true
 }
 
-// splitGenericType extracts base and argument from base<arg>.
+// checkedMapArgs validates and returns Map key/value type arguments.
+func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
+	args, ok := splitGenericArgs(arg)
+	if !ok || len(args) != 2 {
+		return nil, fmt.Errorf("map error: std::map::Map expects 2 type arguments")
+	}
+	if args[0] != "[]const u8" {
+		return nil, fmt.Errorf("map error: std::map::Map key type must be []const u8 in v0.2")
+	}
+	if !c.isCopyType(args[1]) {
+		return nil, fmt.Errorf("map error: std::map::Map value type must be copy in v0.2")
+	}
+	return args, nil
+}
+
+// splitGenericType extracts base and raw arguments from base<args>.
 func splitGenericType(name string) (string, string, bool) {
 	for idx, ch := range name {
 		if ch != '<' {
@@ -2854,6 +3002,41 @@ func splitGenericType(name string) (string, string, bool) {
 		return name[:idx], arg, true
 	}
 	return "", "", false
+}
+
+// splitGenericArgs extracts top-level comma-separated generic arguments.
+func splitGenericArgs(arg string) ([]string, bool) {
+	args := []string{}
+	start := 0
+	depth := 0
+	for idx, ch := range arg {
+		switch ch {
+		case '<':
+			depth++
+		case '>':
+			if depth == 0 {
+				return nil, false
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				item := strings.TrimSpace(arg[start:idx])
+				if item == "" {
+					return nil, false
+				}
+				args = append(args, item)
+				start = idx + 1
+			}
+		}
+	}
+	if depth != 0 {
+		return nil, false
+	}
+	item := strings.TrimSpace(arg[start:])
+	if item == "" {
+		return nil, false
+	}
+	return append(args, item), true
 }
 
 // newScope creates a lexical ownership scope.

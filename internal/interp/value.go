@@ -28,6 +28,7 @@ const (
 	kindMutex
 	kindArray
 	kindOwnedString
+	kindMap
 	kindRef
 )
 
@@ -55,6 +56,7 @@ type Value struct {
 	mutex     *Mutex
 	array     *Array
 	ownedStr  *OwnedString
+	mapValue  *Map
 	ref       *binding
 }
 
@@ -79,6 +81,13 @@ type Array struct {
 type OwnedString struct {
 	bytes  string
 	deinit bool
+}
+
+// Map stores owned key/value entries for the v0.2 std::map prototype.
+type Map struct {
+	valueType string
+	entries   map[string]Value
+	deinit    bool
 }
 
 // ErrorUnion stores an error value for !T runtime propagation.
@@ -215,6 +224,8 @@ func (v Value) objectString() string {
 		return v.enum.typeName + "::" + v.enum.tag
 	case kindUnion:
 		return v.union.typeName + "::" + v.union.tag
+	case kindMap:
+		return "<map>"
 	default:
 		return v.capabilityString()
 	}
@@ -329,6 +340,18 @@ func arrayValue(typeName string) Value {
 // ownedStringValue returns an empty owned string value.
 func ownedStringValue() Value {
 	return Value{kind: kindOwnedString, typeName: "std::string::String", ownedStr: &OwnedString{}}
+}
+
+// mapValue returns an empty owned map value.
+func mapValue(valueType string) Value {
+	return Value{
+		kind:     kindMap,
+		typeName: fmt.Sprintf("std::map::Map<[]const u8, %s>", valueType),
+		mapValue: &Map{
+			valueType: valueType,
+			entries:   map[string]Value{},
+		},
+	}
 }
 
 // taskGroupValue returns a structured task group value.

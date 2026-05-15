@@ -167,6 +167,44 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsMapTypeDecl checks v0.2 two-argument Map type spelling.
+func TestCheckAcceptsMapTypeDecl(t *testing.T) {
+	source := `fn use_table(table: std::map::Map<[]const u8, i64>) -> void {
+    return;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsMapTypeErrors checks explicit Map arity and key constraints.
+func TestCheckRejectsMapTypeErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "wrong arity",
+			source: `fn use_table(table: std::map::Map<i64>) -> void {
+    return;
+}
+fn main() {}`,
+			want: "std::map::Map expects 2 type arguments",
+		},
+		{
+			name: "wrong key",
+			source: `fn use_table(table: std::map::Map<i64, i64>) -> void {
+    return;
+}
+fn main() {}`,
+			want: "std::map::Map key type must be []const u8 in v0.2",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckAcceptsStructDeclarations checks Phase 5 struct declarations.
 func TestCheckAcceptsStructDeclarations(t *testing.T) {
 	source := `struct User {

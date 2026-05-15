@@ -865,7 +865,7 @@ func (p *Parser) parseCastExpr() ast.Expression {
 	return expr
 }
 
-// parseTypeName parses a plain, pointer, or single-argument generic type name.
+// parseTypeName parses a plain, pointer, or generic type name.
 func (p *Parser) parseTypeName() string {
 	if p.cur.Type == token.Bang {
 		p.nextToken()
@@ -913,11 +913,11 @@ func (p *Parser) parseTypeName() string {
 	}
 	p.nextToken()
 	p.nextToken()
-	arg := p.parseTypeArg()
-	if arg == "" || !p.expectTypeClose() {
+	args := p.parseTypeArgList()
+	if args == "" || !p.expectTypeClose() {
 		return ""
 	}
-	out := fmt.Sprintf("%s<%s>", name, arg)
+	out := fmt.Sprintf("%s<%s>", name, args)
 	if nullable {
 		return "?" + out
 	}
@@ -935,6 +935,24 @@ func (p *Parser) parseTypeBaseName() string {
 		parts = append(parts, p.cur.Literal)
 	}
 	return strings.Join(parts, "::")
+}
+
+// parseTypeArgList parses one or more comma-separated generic type arguments.
+func (p *Parser) parseTypeArgList() string {
+	args := []string{}
+	for {
+		arg := p.parseTypeArg()
+		if arg == "" {
+			return ""
+		}
+		args = append(args, arg)
+		if p.peek.Type != token.Comma {
+			break
+		}
+		p.nextToken()
+		p.nextToken()
+	}
+	return strings.Join(args, ", ")
 }
 
 // expectTypeClose consumes or accepts the closing generic angle bracket.
@@ -992,7 +1010,7 @@ func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 func (p *Parser) parseTypeApplyExpr(callee ast.Expression) ast.Expression {
 	expr := &ast.TypeApplyExpr{Callee: callee}
 	p.nextToken()
-	expr.TypeArg = p.parseTypeName()
+	expr.TypeArg = p.parseTypeArgList()
 	if expr.TypeArg == "" || !p.expectTypeClose() {
 		return expr
 	}

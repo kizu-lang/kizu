@@ -1243,6 +1243,8 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	switch name {
 	case "std.array.Array":
 		return i.evalArrayConstructor(expr.TypeArg, args, env)
+	case "std.map.Map":
+		return i.evalMapConstructor(expr.TypeArg, args, env)
 	case "std.channel.Channel":
 		return callChannelFromExprs(expr.TypeArg, args), nil
 	case "std.atomic.Atomic":
@@ -1452,6 +1454,8 @@ func (i *Interpreter) evalNonArenaMethod(
 		return i.evalArrayMethod(receiver, name, args, env)
 	case kindOwnedString:
 		return i.evalStringMethod(receiver, name, args, env)
+	case kindMap:
+		return i.evalMapMethod(receiver, name, args, env)
 	case kindStruct:
 		return i.evalImplMethod(receiver, name, args, env)
 	default:
@@ -1688,6 +1692,29 @@ func (i *Interpreter) evalArrayConstructor(
 		return voidValue(), fmt.Errorf("runtime error: std::array::Array<%s> expects Allocator", typeArg)
 	}
 	return arrayValue(typeArg), nil
+}
+
+// evalMapConstructor creates an owned Map<[]const u8, V> with an allocator.
+func (i *Interpreter) evalMapConstructor(
+	typeArg string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	parts, ok := splitGenericArgs(typeArg)
+	if !ok || len(parts) != 2 || parts[0] != "[]const u8" {
+		return voidValue(), fmt.Errorf("runtime error: std::map::Map expects []const u8 key")
+	}
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std::map::Map<%s> expects allocator", typeArg)
+	}
+	allocator, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if allocator.kind != kindAllocator {
+		return voidValue(), fmt.Errorf("runtime error: std::map::Map<%s> expects Allocator", typeArg)
+	}
+	return mapValue(parts[1]), nil
 }
 
 // runtimeValueMatchesType checks primitive values used by typed runtime containers.
@@ -2109,6 +2136,111 @@ func (i *Interpreter) evalArrayGet(array Value, args []ast.Expression, env *Env)
 	return array.array.values[index], nil
 }
 
+// evalMapMethod executes owned Map<[]const u8, V> prototype operations.
+func (i *Interpreter) evalMapMethod(
+	mapVal Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if mapVal.mapValue.deinit {
+		return voidValue(), fmt.Errorf("runtime error: Map was deinitialized")
+	}
+	switch name {
+	case "insert":
+		return i.evalMapInsert(mapVal, args, env)
+	case "get":
+		return i.evalMapGet(mapVal, args, env)
+	case "contains":
+		return i.evalMapContains(mapVal, args, env)
+	case "len":
+		return intValue(int64(len(mapVal.mapValue.entries))), requireNoArgs("Map.len", args)
+	case "deinit":
+		mapVal.mapValue.entries = nil
+		mapVal.mapValue.deinit = true
+		return voidValue(), requireNoArgs("Map.deinit", args)
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Map has no method `%s`", name)
+	}
+}
+
+// evalMapInsert stores a copy of one byte-slice key and copy value.
+func (i *Interpreter) evalMapInsert(mapVal Value, args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 2 {
+		return voidValue(), fmt.Errorf("runtime error: Map.insert expects 2 args")
+	}
+	key, value, err := i.evalMapEntryArgs(args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if !runtimeValueMatchesType(value, mapVal.mapValue.valueType) {
+		return errorUnionValue("Map.insert value type mismatch"), nil
+	}
+	mapVal.mapValue.entries[key.s] = value
+	return voidValue(), nil
+}
+
+// evalMapGet reads one copyable value by byte-slice key.
+func (i *Interpreter) evalMapGet(mapVal Value, args []ast.Expression, env *Env) (Value, error) {
+	key, err := i.evalMapKey("Map.get", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	value, exists := mapVal.mapValue.entries[key]
+	if !exists {
+		return errorUnionValue("Map.get key not found"), nil
+	}
+	return value, nil
+}
+
+// evalMapContains reports whether a byte-slice key is present.
+func (i *Interpreter) evalMapContains(
+	mapVal Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	key, err := i.evalMapKey("Map.contains", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	_, exists := mapVal.mapValue.entries[key]
+	return boolValue(exists), nil
+}
+
+// evalMapEntryArgs evaluates and validates Map.insert arguments.
+func (i *Interpreter) evalMapEntryArgs(
+	args []ast.Expression,
+	env *Env,
+) (Value, Value, error) {
+	key, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), voidValue(), err
+	}
+	if key.kind != kindString {
+		return voidValue(), voidValue(), fmt.Errorf("runtime error: Map.insert expects []const u8 key")
+	}
+	value, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), voidValue(), err
+	}
+	return key, value, nil
+}
+
+// evalMapKey evaluates one []const u8 lookup key.
+func (i *Interpreter) evalMapKey(name string, args []ast.Expression, env *Env) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("runtime error: %s expects 1 arg", name)
+	}
+	key, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if key.kind != kindString {
+		return "", fmt.Errorf("runtime error: %s expects []const u8 key", name)
+	}
+	return key.s, nil
+}
+
 // evalArrayIndex evaluates one checked i64 index argument.
 func (i *Interpreter) evalArrayIndex(name string, args []ast.Expression, env *Env) (int, error) {
 	if len(args) != 1 {
@@ -2122,6 +2254,41 @@ func (i *Interpreter) evalArrayIndex(name string, args []ast.Expression, env *En
 		return 0, fmt.Errorf("runtime error: %s expects i64 index", name)
 	}
 	return int(index.i), nil
+}
+
+// splitGenericArgs extracts top-level comma-separated generic arguments.
+func splitGenericArgs(arg string) ([]string, bool) {
+	args := []string{}
+	start := 0
+	depth := 0
+	for idx, ch := range arg {
+		switch ch {
+		case '<':
+			depth++
+		case '>':
+			if depth == 0 {
+				return nil, false
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				item := strings.TrimSpace(arg[start:idx])
+				if item == "" {
+					return nil, false
+				}
+				args = append(args, item)
+				start = idx + 1
+			}
+		}
+	}
+	if depth != 0 {
+		return nil, false
+	}
+	item := strings.TrimSpace(arg[start:])
+	if item == "" {
+		return nil, false
+	}
+	return append(args, item), true
 }
 
 // evalAtomicMethod executes seq_cst-only integer atomic operations.

@@ -62,3 +62,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0041: std::mem and allocator boundary](0041-std-mem-allocator-boundary.md)
 - [ADR-0042: std::array::Array<T> owned buffer](0042-std-array-owned-buffer.md)
 - [ADR-0043: std::string::String owned buffer](0043-std-string-owned-buffer.md)
+- [ADR-0044: std::map::Map<K, V> symbol table map](0044-std-map-symbol-table.md)
