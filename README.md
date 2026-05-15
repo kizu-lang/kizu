@@ -172,6 +172,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - [docs/memory-safety.md](docs/memory-safety.md): safe Kizu memory-safety contract
 - [examples](examples/README.md): examples catalog
 - [tests/conformance](tests/conformance/README.md): reusable conformance manifests
+- [docs/stdlib.md](docs/stdlib.md): standard-library builtin registry and migration plan
 - [docs/adr](docs/adr): architecture decision records
 - [docs/perf.md](docs/perf.md): build and cache performance policy
 - [AGENTS.md](AGENTS.md): implementation guidance for Codex agents
