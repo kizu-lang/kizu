@@ -3110,6 +3110,18 @@ fn print_ownership_snapshot(tokens: &std::array::Array<Token>) -> !void {
 
 // check_ownership_subset detects owned-call moves followed by use.
 fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    let struct_borrow = try struct_borrow_field_subset(tokens);
+    if !struct_borrow.ok {
+        return struct_borrow;
+    }
+    let deref_move = try borrowed_param_deref_move_subset(tokens);
+    if !deref_move.ok {
+        return deref_move;
+    }
+    let mut_conflict = try mutable_borrow_conflict_subset(tokens);
+    if !mut_conflict.ok {
+        return mut_conflict;
+    }
     let escape = try borrow_escape_subset(tokens);
     if !escape.ok {
         return escape;
@@ -3152,6 +3164,138 @@ fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
         } else {
             index = index + 1;
         }
+    }
+    return ownership_ok();
+}
+
+// struct_borrow_field_subset rejects struct fields that store local borrows.
+fn struct_borrow_field_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index + 4 < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Struct {
+            let type_name = try tokens.at(index + 1);
+            let field = try struct_borrow_field(tokens, index + 2);
+            if field.found {
+                return ownership_custom_error(
+                    "borrow error: struct field cannot store borrow",
+                    field.value,
+                    field.start,
+                    type_name.start
+                );
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// struct_borrow_field returns the first field whose type starts with &.
+fn struct_borrow_field(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    var index = start;
+
+    while index + 2 < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RBrace {
+            return no_move_candidate();
+        }
+        if token.kind == TokenKind::Ident {
+            let colon = try tokens.at(index + 1);
+            let maybe_amp = try tokens.at(index + 2);
+            if colon.kind == TokenKind::Colon {
+                if maybe_amp.kind == TokenKind::Amp {
+                    return move_at_parts(token.literal, token.start);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return no_move_candidate();
+}
+
+// borrowed_param_deref_move_subset detects moving non-copy data out through a borrow.
+fn borrowed_param_deref_move_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            let param = try first_borrowed_param(tokens, index);
+            if param.found {
+                let move = try borrowed_param_deref_move(tokens, index, param.value);
+                if move.found {
+                    return ownership_custom_error(
+                        "borrow error: value cannot be moved out of borrow",
+                        param.value,
+                        move.start,
+                        param.start
+                    );
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// borrowed_param_deref_move returns a return expression that moves param.*.
+fn borrowed_param_deref_move(
+    tokens: &std::array::Array<Token>,
+    fn_start: i64,
+    param: []const u8
+) -> !MoveCandidate {
+    var index = try function_body_start(tokens, fn_start);
+
+    if index < 0 {
+        return no_move_candidate();
+    }
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        if index > fn_start {
+            if token.kind == TokenKind::Fn {
+                return no_move_candidate();
+            }
+        }
+        if token.kind == TokenKind::Return {
+            let value = try tokens.at(index + 1);
+            let dot = try tokens.at(index + 2);
+            let star = try tokens.at(index + 3);
+            if std::mem::equal_bytes(value.literal, param) {
+                if dot.kind == TokenKind::Dot {
+                    if star.kind == TokenKind::Asterisk {
+                        return move_at_parts(param, value.start);
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return no_move_candidate();
+}
+
+// mutable_borrow_conflict_subset detects overlapping & and &mut arguments.
+fn mutable_borrow_conflict_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_call_start(tokens, index) {
+            let callee = try tokens.at(index);
+            if try function_first_param_borrowed(tokens, callee.literal) {
+                if try function_second_param_mut_borrowed(tokens, callee.literal) {
+                    let conflict = try same_value_second_arg(tokens, index);
+                    if conflict.found {
+                        return ownership_custom_error(
+                            "borrow error: value cannot be mutably borrowed while borrowed",
+                            conflict.value,
+                            conflict.start,
+                            conflict.related_start
+                        );
+                    }
+                }
+            }
+        }
+        index = index + 1;
     }
     return ownership_ok();
 }
@@ -3284,16 +3428,12 @@ fn field_borrow_conflict_subset(tokens: &std::array::Array<Token>) -> !Ownership
                                     tokens,
                                     index + 3,
                                     TokenKind::Dot
-                                );
-                                if second_dot >= 0 {
-                                    return borrow_move_error(
-                                        owner.literal,
-                                        owner.start,
-                                        owner.start
-                                    );
-                                }
-                                borrowed_owner = owner.literal;
-                                related_start = owner.start;
+                            );
+                            if second_dot >= 0 {
+                                return ownership_ok();
+                            }
+                            borrowed_owner = owner.literal;
+                            related_start = owner.start;
                             }
                             if dot.kind != TokenKind::Dot {
                                 borrowed_owner = owner.literal;
@@ -3400,6 +3540,22 @@ fn borrow_move_error(value: []const u8, primary: i64, related: i64) -> Ownership
     return OwnershipSnapshot {
         ok: false,
         message: "borrow error: value cannot be moved while borrowed",
+        value: value,
+        primary_start: primary,
+        related_start: related,
+    };
+}
+
+// ownership_custom_error constructs an ownership oracle result with a custom message.
+fn ownership_custom_error(
+    message: []const u8,
+    value: []const u8,
+    primary: i64,
+    related: i64
+) -> OwnershipSnapshot {
+    return OwnershipSnapshot {
+        ok: false,
+        message: message,
         value: value,
         primary_start: primary,
         related_start: related,
@@ -3657,6 +3813,26 @@ fn function_second_param_owned(tokens: &std::array::Array<Token>, name: []const 
     return false;
 }
 
+// function_second_param_mut_borrowed reports whether second arg is &mut.
+fn function_second_param_mut_borrowed(
+    tokens: &std::array::Array<Token>,
+    name: []const u8
+) -> !bool {
+    var index = 0;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        let fn_name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(fn_name.literal, name) {
+                return try second_param_is_mut_borrowed(tokens, index + 3);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 // second_param_is_owned parses the second parameter ownership mode.
 fn second_param_is_owned(tokens: &std::array::Array<Token>, start: i64) -> !bool {
     var index = start;
@@ -3674,6 +3850,34 @@ fn second_param_is_owned(tokens: &std::array::Array<Token>, start: i64) -> !bool
             if token.kind == TokenKind::Colon {
                 let next = try tokens.at(index + 1);
                 return next.kind != TokenKind::Amp;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// second_param_is_mut_borrowed parses whether the second parameter is &mut.
+fn second_param_is_mut_borrowed(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+    var commas = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            return false;
+        }
+        if token.kind == TokenKind::Comma {
+            commas = commas + 1;
+        }
+        if commas == 1 {
+            if token.kind == TokenKind::Colon {
+                let amp = try tokens.at(index + 1);
+                let mut_token = try tokens.at(index + 2);
+                if amp.kind == TokenKind::Amp {
+                    return mut_token.kind == TokenKind::Mut;
+                }
+                return false;
             }
         }
         index = index + 1;
@@ -3882,6 +4086,20 @@ fn print_type_diagnostic(tokens: &std::array::Array<Token>) -> !void {
         };
         print_diagnostic(diagnostic);
     }
+    let borrow_index = try borrow_type_error_index(tokens);
+    if borrow_index >= 0 {
+        let token = try tokens.at(borrow_index);
+        let diagnostic = Diagnostic {
+            message: try borrow_type_error_message_at(tokens, borrow_index),
+            primary_start: token.start,
+            primary_end: token.end,
+            primary_line: token.line,
+            primary_column: token.column,
+            related_start: token.start,
+            related_end: token.end,
+        };
+        print_diagnostic(diagnostic);
+    }
     return void;
 }
 
@@ -3911,6 +4129,212 @@ fn call_type_error_message_at(tokens: &std::array::Array<Token>, call_index: i64
         return "type error: call arg type";
     }
     return "type error: call arg count";
+}
+
+// borrow_type_error_index returns the selected token for borrow type diagnostics.
+fn borrow_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let nested = try nested_field_borrow_index(tokens);
+    if nested >= 0 {
+        return nested;
+    }
+    let immutable = try immutable_mut_borrow_arg_index(tokens);
+    if immutable >= 0 {
+        return immutable;
+    }
+    return try shared_borrow_assignment_index(tokens);
+}
+
+// borrow_type_error_message_at returns the normalized borrow type diagnostic.
+fn borrow_type_error_message_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> ![]const u8 {
+    if try is_shared_borrow_assignment_at(tokens, index) {
+        return "type error: shared borrow is not mutable";
+    }
+    if try is_nested_field_borrow_at(tokens, index) {
+        return "type error: nested field borrow";
+    }
+    return "type error: &mut argument must be mutable";
+}
+
+// nested_field_borrow_index detects &owner.field.inner borrow syntax.
+fn nested_field_borrow_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index + 5 < tokens.len() {
+        let amp = try tokens.at(index);
+        if amp.kind == TokenKind::Amp {
+            if try is_nested_field_borrow_at(tokens, index + 3) {
+                return index + 3;
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_nested_field_borrow_at reports whether index is the first borrowed field.
+fn is_nested_field_borrow_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index < 3 {
+        return false;
+    }
+    if index + 2 >= tokens.len() {
+        return false;
+    }
+    let amp = try tokens.at(index - 3);
+    let owner = try tokens.at(index - 2);
+    let first_dot = try tokens.at(index - 1);
+    let field = try tokens.at(index);
+    let second_dot = try tokens.at(index + 1);
+    let inner = try tokens.at(index + 2);
+    if amp.kind != TokenKind::Amp {
+        return false;
+    }
+    if owner.kind != TokenKind::Ident {
+        return false;
+    }
+    if first_dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if field.kind != TokenKind::Ident {
+        return false;
+    }
+    if second_dot.kind != TokenKind::Dot {
+        return false;
+    }
+    return inner.kind == TokenKind::Ident;
+}
+
+// immutable_mut_borrow_arg_index detects passing an immutable local to &mut.
+fn immutable_mut_borrow_arg_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_call_start(tokens, index) {
+            let callee = try tokens.at(index);
+            if try function_first_param_mut_borrowed(tokens, callee.literal) {
+                if index + 2 >= tokens.len() {
+                    return -1;
+                }
+                let arg = try tokens.at(index + 2);
+                if arg.kind == TokenKind::Ident {
+                    if !try local_binding_is_var(tokens, arg.literal, index) {
+                        return index + 2;
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// function_first_param_mut_borrowed reports whether the first argument is &mut.
+fn function_first_param_mut_borrowed(
+    tokens: &std::array::Array<Token>,
+    name: []const u8
+) -> !bool {
+    var index = 0;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        let fn_name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(fn_name.literal, name) {
+                return try first_param_is_mut_borrowed(tokens, index + 3);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// first_param_is_mut_borrowed parses whether the first parameter is &mut.
+fn first_param_is_mut_borrowed(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            return false;
+        }
+        if token.kind == TokenKind::Colon {
+            let amp = try tokens.at(index + 1);
+            let mut_token = try tokens.at(index + 2);
+            if amp.kind == TokenKind::Amp {
+                return mut_token.kind == TokenKind::Mut;
+            }
+            return false;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// local_binding_is_var reports whether the latest local binding before end is var.
+fn local_binding_is_var(tokens: &std::array::Array<Token>, name: []const u8, end: i64) -> !bool {
+    var index = 0;
+    var is_var = false;
+
+    while index + 1 < end {
+        let token = try tokens.at(index);
+        let ident = try tokens.at(index + 1);
+        if ident.kind == TokenKind::Ident {
+            if std::mem::equal_bytes(ident.literal, name) {
+                if token.kind == TokenKind::Var {
+                    is_var = true;
+                }
+                if token.kind == TokenKind::Let {
+                    is_var = false;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return is_var;
+}
+
+// shared_borrow_assignment_index detects assignment through a shared borrow.
+fn shared_borrow_assignment_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index + 4 < tokens.len() {
+        if try is_shared_borrow_assignment_at(tokens, index) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_shared_borrow_assignment_at reports whether index starts receiver.*.field =.
+fn is_shared_borrow_assignment_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index + 5 >= tokens.len() {
+        return false;
+    }
+    let receiver = try tokens.at(index);
+    let dot = try tokens.at(index + 1);
+    let star = try tokens.at(index + 2);
+    let second_dot = try tokens.at(index + 3);
+    let field = try tokens.at(index + 4);
+    let assign = try tokens.at(index + 5);
+    if receiver.kind != TokenKind::Ident {
+        return false;
+    }
+    if dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if star.kind != TokenKind::Asterisk {
+        return false;
+    }
+    if second_dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if field.kind != TokenKind::Ident {
+        return false;
+    }
+    return assign.kind == TokenKind::Assign;
 }
 
 // print_ownership_diagnostic writes the ownership checker diagnostic subset.
