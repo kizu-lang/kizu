@@ -78,17 +78,19 @@ func (p *Parser) ParseProgram() *ast.Program {
 
 // parseImportDecl parses an explicit top-level module import.
 func (p *Parser) parseImportDecl() ast.Decl {
-	decl := &ast.ImportDecl{}
+	decl := &ast.ImportDecl{Span: p.curSpan()}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
 	decl.Path = append(decl.Path, p.cur.Literal)
+	decl.Span.End = p.cur.End
 	for p.peek.Type == token.DoubleColon {
 		p.nextToken()
 		if !p.expectPeek(token.Ident) {
 			return decl
 		}
 		decl.Path = append(decl.Path, p.cur.Literal)
+		decl.Span.End = p.cur.End
 	}
 	p.expectStatementTerminator("import declaration")
 	return decl
@@ -180,10 +182,12 @@ func (p *Parser) parseFunctionDecl() ast.Decl {
 
 // parseFunctionSignature parses a function declaration after the fn token.
 func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) ast.Decl {
+	fn.Span = p.curSpan()
 	if !p.expectPeek(token.Ident) {
 		return fn
 	}
 	fn.Name = p.cur.Literal
+	fn.Span.End = p.cur.End
 	if !p.expectPeek(token.LParen) {
 		return fn
 	}
@@ -211,11 +215,12 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 
 // parseContractDecl parses a contract with method requirements.
 func (p *Parser) parseContractDecl() ast.Decl {
-	decl := &ast.ContractDecl{}
+	decl := &ast.ContractDecl{Span: p.curSpan()}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	decl.Span.End = p.cur.End
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
@@ -295,11 +300,12 @@ func (p *Parser) parseSatisfyDecl() ast.Decl {
 
 // parseStructDecl parses a top-level struct declaration.
 func (p *Parser) parseStructDecl() ast.Decl {
-	decl := &ast.StructDecl{}
+	decl := &ast.StructDecl{Span: p.curSpan()}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	decl.Span.End = p.cur.End
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
@@ -327,16 +333,18 @@ func (p *Parser) parseStructFields() []ast.Field {
 
 // parseStructField parses one struct field declaration.
 func (p *Parser) parseStructField() (ast.Field, bool) {
-	field := ast.Field{}
+	field := ast.Field{Span: p.curSpan()}
 	if p.cur.Type == token.Public {
 		field.Public = true
 		p.nextToken()
+		field.Span = p.curSpan()
 	}
 	if p.cur.Type != token.Ident {
 		p.errorf("expected field name, got %s", p.cur.Type)
 		return field, false
 	}
 	field.Name = p.cur.Literal
+	field.Span.End = p.cur.End
 	if !p.expectPeek(token.Colon) {
 		return field, false
 	}
@@ -358,11 +366,12 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 
 // parseEnumDecl parses a top-level Zig/C-style tag enum declaration.
 func (p *Parser) parseEnumDecl() ast.Decl {
-	decl := &ast.EnumDecl{}
+	decl := &ast.EnumDecl{Span: p.curSpan()}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	decl.Span.End = p.cur.End
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
@@ -390,11 +399,12 @@ func (p *Parser) parseEnumTags() []string {
 
 // parseUnionDecl parses a top-level tagged union declaration.
 func (p *Parser) parseUnionDecl() ast.Decl {
-	decl := &ast.UnionDecl{}
+	decl := &ast.UnionDecl{Span: p.curSpan()}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	decl.Span.End = p.cur.End
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
@@ -813,7 +823,14 @@ var precedences = map[token.Type]int{
 // parseExpression parses an expression using Pratt parser precedence.
 func (p *Parser) parseExpression(precedence int) ast.Expression {
 	left := p.parsePrefixExpression()
-	for p.peek.Type != token.Semicolon && precedence < p.peekPrecedence() {
+	for p.peek.Type != token.Semicolon {
+		if precedence == lowest && p.peek.Type == token.LBrace && canStructLiteral(left) {
+			left = p.parseStructLiteralExpr(left.String())
+			continue
+		}
+		if precedence >= p.peekPrecedence() {
+			return left
+		}
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
 			token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
@@ -841,6 +858,18 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 		}
 	}
 	return left
+}
+
+// canStructLiteral reports whether expr may be followed by a struct literal body.
+func canStructLiteral(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return startsUpper(e.Name)
+	case *ast.FieldExpr:
+		return e.Namespace
+	default:
+		return false
+	}
 }
 
 // parsePrefixExpression parses literals, identifiers, and unary expressions.
@@ -1113,7 +1142,10 @@ func (p *Parser) parseArenaNewExpr() ast.Expression {
 
 // parseStructLiteralExpr parses Type { field: value }.
 func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
-	expr := &ast.StructLiteralExpr{TypeName: typeName}
+	expr := &ast.StructLiteralExpr{
+		TypeName: typeName,
+		Span:     p.curSpan(),
+	}
 	p.nextToken()
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
@@ -1132,12 +1164,13 @@ func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
 
 // parseFieldValue parses one field initializer.
 func (p *Parser) parseFieldValue() (ast.FieldValue, bool) {
-	field := ast.FieldValue{}
+	field := ast.FieldValue{Span: p.curSpan()}
 	if p.cur.Type != token.Ident {
 		p.errorf("expected field name, got %s", p.cur.Type)
 		return field, false
 	}
 	field.Name = p.cur.Literal
+	field.Span.End = p.cur.End
 	if !p.expectPeek(token.Colon) {
 		return field, false
 	}
@@ -1157,7 +1190,16 @@ func (p *Parser) parseFieldExpr(receiver ast.Expression, namespace bool) ast.Exp
 		return expr
 	}
 	expr.Name = p.cur.Literal
+	expr.Span = p.curSpan()
 	return expr
+}
+
+// curSpan returns the current token's source span.
+func (p *Parser) curSpan() ast.Span {
+	return ast.Span{
+		Start: p.cur.Start, End: p.cur.End,
+		Line: p.cur.Line, Column: p.cur.Column,
+	}
 }
 
 // nextToken advances the current and lookahead tokens.

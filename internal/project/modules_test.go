@@ -70,6 +70,58 @@ func TestResolvePackageRejectsImportShadowing(t *testing.T) {
 	requireErrorContains(t, err, "shadows an import")
 }
 
+// TestResolvePackageAcceptsPublicModuleAccess checks public namespace access.
+func TestResolvePackageAcceptsPublicModuleAccess(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+fn main() -> void { lexer::lex(); return; }`,
+		"src/lexer.kizu": `pub fn lex() -> void { return; }`,
+	})
+	if _, err := LoadPackage(root); err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+}
+
+// TestResolvePackageRejectsPrivateModuleAccess checks top-level visibility.
+func TestResolvePackageRejectsPrivateModuleAccess(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+fn main() -> void { lexer::hidden(); return; }`,
+		"src/lexer.kizu": `fn hidden() -> void { return; }`,
+	})
+	_, err := LoadPackage(root)
+	requireDiagnosticContains(t, err, "private declaration `lexer::hidden` is not visible")
+}
+
+// TestResolvePackageRejectsPrivateTypeLeak checks imported public signatures.
+func TestResolvePackageRejectsPrivateTypeLeak(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+pub fn leak() -> lexer::Secret { return lexer::make_secret(); }`,
+		"src/lexer.kizu": `struct Secret { pub value: i64; }
+pub fn make_secret() -> Secret { return Secret { value: 1 }; }`,
+	})
+	_, err := LoadPackage(root)
+	requireDiagnosticContains(t, err, "public signature exposes private type `lexer::Secret`")
+}
+
+// TestResolvePackageRejectsPrivateFieldConstruction checks struct fields.
+func TestResolvePackageRejectsPrivateFieldConstruction(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+fn main() -> void {
+    let token = lexer::Token { secret: 1, kind: 2 };
+    return;
+}`,
+		"src/lexer.kizu": `pub struct Token {
+    secret: i64;
+    pub kind: i64;
+}`,
+	})
+	_, err := LoadPackage(root)
+	requireDiagnosticContains(t, err, "private field `app::lexer::Token.secret` is not visible")
+}
+
 // checkParsedModule runs static checks for one parsed module.
 func checkParsedModule(t *testing.T, module ParsedModule) {
 	t.Helper()
@@ -190,6 +242,14 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("got error %q, want substring %q", err, want)
 	}
+}
+
+// requireDiagnosticContains checks stable message and span-related shape.
+func requireDiagnosticContains(t *testing.T, err error, want string) {
+	t.Helper()
+	requireErrorContains(t, err, want)
+	requireErrorContains(t, err, "  --> ")
+	requireErrorContains(t, err, "related: ")
 }
 
 // sameStrings reports whether two string slices match exactly.

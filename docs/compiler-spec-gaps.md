@@ -107,9 +107,6 @@ tests, and self-check/build.
 
 ## Implementation Work Still Needed
 
-- Enforce visibility across module boundaries: #89.
-- Preserve byte spans and file IDs through compiler phases: #89.
-- Render multi-file diagnostics: #89.
 - Connect explicit build outputs to a package artifact layout under `target/`: #100.
 - Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
   IR, backend outputs, and module fixtures: #91.
@@ -122,6 +119,12 @@ tests, and self-check/build.
 - Minimal `kizu.toml` parsing for `[package]` and `[modules]`.
 - File path to module path graph resolution.
 - Single-program public API checks for private type leaks.
+- Module-boundary visibility checks reject private namespace access, imported
+  private type leaks in public signatures, and private field construction.
+- AST declarations and visibility-sensitive expressions carry byte spans with
+  line/column origins for multi-file diagnostics.
+- Visibility diagnostics render a primary location and related declaration or
+  field location.
 - Module-aware build cache keys include manifest, module graph, source, public
   interface, target/backend/optimization, and stdlib hashes.
 - `why-rebuild` explains package input changes for manifest, module graph,
