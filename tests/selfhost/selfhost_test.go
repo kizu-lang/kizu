@@ -16,6 +16,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/types"
 )
@@ -275,6 +276,19 @@ func TestSelfHostReadsModuleConformanceManifest(t *testing.T) {
 			assertSemanticSnapshot(t, got, fixture)
 			assertIrSnapshot(t, got, fixture)
 		})
+	}
+}
+
+// TestSelfHostModuleImportOracle compares root imports with the Go resolver.
+func TestSelfHostModuleImportOracle(t *testing.T) {
+	root := filepath.Join(repoRoot(t), "tests", "conformance", "modules", "basic")
+	source := filepath.Join(root, "src", "main.kizu")
+	got := extractImportPaths(t, extractMarkedSnapshot(
+		t, runSelfHostFrontend(t, source), "decl snapshot", "decl snapshot end",
+	))
+	want := goRootImportPaths(t, root)
+	if !same(got, want) {
+		t.Fatalf("self-host module imports got %v, want %v", got, want)
 	}
 }
 
@@ -554,6 +568,45 @@ func appendDeclSnapshot(lines []string, decl ast.Decl) []string {
 // formatDeclSnapshot formats declaration snapshots as frontend.kizu prints them.
 func formatDeclSnapshot(lines []string) string {
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// extractImportPaths converts declaration snapshot lines to module import paths.
+func extractImportPaths(t *testing.T, snapshot string) []string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(snapshot, "\n"), "\n")
+	imports := []string{}
+	for idx := 0; idx < len(lines); idx++ {
+		if lines[idx] != "import" {
+			continue
+		}
+		parts := []string{}
+		for idx++; idx < len(lines) && lines[idx] != "import end"; idx++ {
+			parts = append(parts, lines[idx])
+		}
+		imports = append(imports, strings.Join(parts, "::"))
+	}
+	return imports
+}
+
+// goRootImportPaths returns resolved import paths for a package root module.
+func goRootImportPaths(t *testing.T, root string) []string {
+	t.Helper()
+	pkg, err := project.LoadPackage(root)
+	if err != nil {
+		t.Fatalf("load package failed: %v", err)
+	}
+	for _, module := range pkg.Modules {
+		if module.Module.Path != pkg.Graph.Root {
+			continue
+		}
+		imports := make([]string, 0, len(module.Imports))
+		for _, imported := range module.Imports {
+			imports = append(imports, imported.Path)
+		}
+		return imports
+	}
+	t.Fatalf("root module %q was not found", pkg.Graph.Root)
+	return nil
 }
 
 // goSemanticSnapshot returns the normalized Go semantic snapshot.
