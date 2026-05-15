@@ -452,6 +452,10 @@ func TestSelfHostAstDetailOracle(t *testing.T) {
 		"examples/struct.kizu",
 		"examples/enum.kizu",
 		"examples/union.kizu",
+		"examples/if.kizu",
+		"examples/while.kizu",
+		"examples/for.kizu",
+		"examples/match.kizu",
 		"examples/negative/missing_semicolon.kizu",
 	}
 	for _, path := range cases {
@@ -1171,7 +1175,82 @@ func astFunctionDetail(fn *ast.FunctionDecl) []string {
 		"return", normalizeReturnType(fn.ReturnType),
 		"returns", strconv.Itoa(countReturnsInBlock(fn.Body)),
 	)
+	lines = append(lines, astFunctionControlDetail(fn.Body)...)
 	return lines
+}
+
+// astFunctionControlDetail returns selected statement node counts.
+func astFunctionControlDetail(block *ast.BlockStmt) []string {
+	counts := countControlsInBlock(block)
+	return []string{
+		"controls",
+		"ifs", strconv.Itoa(counts.Ifs),
+		"whiles", strconv.Itoa(counts.Whiles),
+		"fors", strconv.Itoa(counts.Fors),
+		"matches", strconv.Itoa(counts.Matches),
+		"breaks", strconv.Itoa(counts.Breaks),
+		"continues", strconv.Itoa(counts.Continues),
+		"match arms", strconv.Itoa(counts.MatchArms),
+	}
+}
+
+// controlCounts stores selected AST statement counts.
+type controlCounts struct {
+	Ifs       int
+	Whiles    int
+	Fors      int
+	Matches   int
+	Breaks    int
+	Continues int
+	MatchArms int
+}
+
+// countControlsInBlock counts selected control statements recursively.
+func countControlsInBlock(block *ast.BlockStmt) controlCounts {
+	counts := controlCounts{}
+	if block == nil {
+		return counts
+	}
+	for _, stmt := range block.Statements {
+		counts.Add(countControlsInStatement(stmt))
+	}
+	return counts
+}
+
+// Add accumulates statement counts.
+func (c *controlCounts) Add(other controlCounts) {
+	c.Ifs += other.Ifs
+	c.Whiles += other.Whiles
+	c.Fors += other.Fors
+	c.Matches += other.Matches
+	c.Breaks += other.Breaks
+	c.Continues += other.Continues
+	c.MatchArms += other.MatchArms
+}
+
+// countControlsInStatement counts one statement and its children.
+func countControlsInStatement(stmt ast.Statement) controlCounts {
+	counts := controlCounts{}
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		counts.Ifs++
+		counts.Add(countControlsInBlock(s.Consequence))
+		counts.Add(countControlsInBlock(s.Alternative))
+	case *ast.WhileStmt:
+		counts.Whiles++
+		counts.Add(countControlsInBlock(s.Body))
+	case *ast.ForStmt:
+		counts.Fors++
+		counts.Add(countControlsInBlock(s.Body))
+	case *ast.MatchStmt:
+		counts.Matches++
+		counts.MatchArms += len(s.Arms)
+	case *ast.BreakStmt:
+		counts.Breaks++
+	case *ast.ContinueStmt:
+		counts.Continues++
+	}
+	return counts
 }
 
 // normalizeParseError maps parser diagnostics into the self-host subset.
