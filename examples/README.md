@@ -70,6 +70,7 @@ go test ./...
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
 | owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]const u8, i64>` |
 | symbol table map shape | `std_map_symbol_table.kizu` | maps byte keys to copy enum values |
+| owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&mut Map` |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -200,6 +201,12 @@ go test ./...
 | map keys are `[]const u8` in v0.2 | `negative/std_map_wrong_key_type.kizu` | `key type must be []const u8` |
 | map insert value type must match `V` | `negative/std_map_wrong_insert_type.kizu` | `Map.insert` |
 | maps cannot be used after `deinit` | `negative/std_map_use_after_deinit.kizu` | `moved value` |
+| shared map borrows cannot insert | `negative/std_map_insert_through_shared_borrow.kizu` | `requires mutable Map receiver` |
+| shared map borrows cannot deinit | `negative/std_map_deinit_through_shared_borrow.kizu` | `requires owned Map receiver` |
+| mutable map borrows cannot deinit | `negative/std_map_deinit_through_mut_borrow.kizu` | `requires owned Map receiver` |
+| maps cannot cross task boundaries | `negative/std_map_task_spawn.kizu` | `Map cannot cross concurrency boundary` |
+| maps cannot cross channel boundaries | `negative/std_map_channel_send.kizu` | `Map cannot cross concurrency boundary` |
+| arrays cannot store maps in v0.2 | `negative/std_array_map_element.kizu` | `std::map::Map` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |
