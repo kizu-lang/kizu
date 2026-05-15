@@ -30,6 +30,8 @@ The skeleton currently includes:
 
 The default smoke input is `selfhost/fixtures/simple.kizu`. Passing a path after
 `--` exercises the same runner path with explicit process arguments.
+`selfhost/fixtures/simple_tokens.kizu` is a wider lexer corpus used by Go tests
+to compare the full self-host token-kind stream against the production lexer.
 
 ## v0.3 Handoff
 

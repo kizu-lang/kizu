@@ -23,6 +23,69 @@ const maxLineWidth = 100
 const maxFunctionLines = 70
 const maxFunctionStatements = 45
 
+// selfHostKindByGoToken maps production Go lexer tokens to self-host enum output.
+var selfHostKindByGoToken = map[token.Type]string{
+	token.Illegal:     "TokenKind::Illegal",
+	token.EOF:         "TokenKind::Eof",
+	token.Ident:       "TokenKind::Ident",
+	token.Int:         "TokenKind::Number",
+	token.String:      "TokenKind::String",
+	token.Assign:      "TokenKind::Assign",
+	token.Plus:        "TokenKind::Plus",
+	token.Minus:       "TokenKind::Minus",
+	token.Bang:        "TokenKind::Bang",
+	token.Question:    "TokenKind::Question",
+	token.Amp:         "TokenKind::Amp",
+	token.Asterisk:    "TokenKind::Asterisk",
+	token.Slash:       "TokenKind::Slash",
+	token.Percent:     "TokenKind::Percent",
+	token.Eq:          "TokenKind::Eq",
+	token.FatArrow:    "TokenKind::FatArrow",
+	token.NotEq:       "TokenKind::NotEq",
+	token.LT:          "TokenKind::LT",
+	token.LTE:         "TokenKind::LTE",
+	token.GT:          "TokenKind::GT",
+	token.GTE:         "TokenKind::GTE",
+	token.Arrow:       "TokenKind::Arrow",
+	token.Dot:         "TokenKind::Dot",
+	token.Range:       "TokenKind::Range",
+	token.DoubleColon: "TokenKind::DoubleColon",
+	token.Comma:       "TokenKind::Comma",
+	token.Colon:       "TokenKind::Colon",
+	token.Semicolon:   "TokenKind::Semicolon",
+	token.Pipe:        "TokenKind::Pipe",
+	token.LParen:      "TokenKind::LParen",
+	token.RParen:      "TokenKind::RParen",
+	token.LBrace:      "TokenKind::LBrace",
+	token.RBrace:      "TokenKind::RBrace",
+	token.LBracket:    "TokenKind::LBracket",
+	token.RBracket:    "TokenKind::RBracket",
+	token.Function:    "TokenKind::Fn",
+	token.Let:         "TokenKind::Let",
+	token.Var:         "TokenKind::Var",
+	token.Return:      "TokenKind::Return",
+	token.If:          "TokenKind::If",
+	token.Else:        "TokenKind::Else",
+	token.While:       "TokenKind::While",
+	token.Break:       "TokenKind::Break",
+	token.Continue:    "TokenKind::Continue",
+	token.Match:       "TokenKind::Match",
+	token.Struct:      "TokenKind::Struct",
+	token.Enum:        "TokenKind::Enum",
+	token.Union:       "TokenKind::Union",
+	token.Contract:    "TokenKind::Contract",
+	token.Satisfy:     "TokenKind::Satisfy",
+	token.For:         "TokenKind::For",
+	token.Impl:        "TokenKind::Impl",
+	token.True:        "TokenKind::True",
+	token.False:       "TokenKind::False",
+	token.Mut:         "TokenKind::Mut",
+	token.Unsafe:      "TokenKind::Unsafe",
+	token.Extern:      "TokenKind::Extern",
+	token.Comptime:    "TokenKind::Comptime",
+	token.Try:         "TokenKind::Try",
+}
+
 // TestSelfHostSourcesCheck verifies every self-host Kizu file passes static checks.
 func TestSelfHostSourcesCheck(t *testing.T) {
 	for _, path := range selfHostSources(t) {
@@ -42,12 +105,16 @@ func TestSelfHostSourcesCheck(t *testing.T) {
 func TestSelfHostFrontendSmoke(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
 	got := runSelfHostFrontend(t, fixture)
+	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
 		"parsed functions\n2\n" +
 		"tokens\n19\n" +
 		"bootstrap ready\ntrue\n" +
+		"token stream\n" +
+		tokenStream + "\n" +
+		"token stream end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -65,6 +132,26 @@ func TestSelfHostFixtureComparedWithGoLexer(t *testing.T) {
 	want = "tokens\n" + strconv.Itoa(countGoTokens(t, fixture)) + "\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got %q, want it to contain %q", got, want)
+	}
+	gotStream := extractSelfHostTokenKinds(t, got)
+	wantStream := goSelfHostTokenKinds(t, fixture)
+	if !same(gotStream, wantStream) {
+		t.Fatalf("self-host token stream got %v, want %v", gotStream, wantStream)
+	}
+}
+
+// TestSelfHostRichLexerStreamComparedWithGoLexer checks a wider token corpus.
+func TestSelfHostRichLexerStreamComparedWithGoLexer(t *testing.T) {
+	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple_tokens.kizu")
+	got := runSelfHostFrontend(t, fixture)
+	want := "tokens\n" + strconv.Itoa(countGoTokens(t, fixture)) + "\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got %q, want it to contain %q", got, want)
+	}
+	gotStream := extractSelfHostTokenKinds(t, got)
+	wantStream := goSelfHostTokenKinds(t, fixture)
+	if !same(gotStream, wantStream) {
+		t.Fatalf("self-host token stream got %v, want %v", gotStream, wantStream)
 	}
 }
 
@@ -126,6 +213,57 @@ func countGoTokens(t *testing.T, path string) int {
 			return count
 		}
 	}
+}
+
+// goSelfHostTokenKinds returns the Go lexer stream using self-host enum names.
+func goSelfHostTokenKinds(t *testing.T, path string) []string {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	kinds := []string{}
+	for {
+		tok := l.NextToken()
+		kind, ok := selfHostKindByGoToken[tok.Type]
+		if !ok {
+			t.Fatalf("missing self-host token mapping for %s", tok.Type)
+		}
+		kinds = append(kinds, kind)
+		if tok.Type == token.EOF {
+			return kinds
+		}
+	}
+}
+
+// extractSelfHostTokenKinds returns the token stream printed by frontend.kizu.
+func extractSelfHostTokenKinds(t *testing.T, output string) []string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	kinds := []string{}
+	inStream := false
+	for _, line := range lines {
+		switch {
+		case line == "token stream":
+			inStream = true
+		case line == "token stream end":
+			return kinds
+		case inStream:
+			kinds = append(kinds, line)
+		}
+	}
+	t.Fatal("self-host token stream markers were not found")
+	return nil
+}
+
+// same reports whether two token-kind slices are identical.
+func same(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for idx := range left {
+		if left[idx] != right[idx] {
+			return false
+		}
+	}
+	return true
 }
 
 // parseSelfHostSource parses one Kizu source file and fails on parser errors.
