@@ -813,7 +813,7 @@ func (c *Checker) moveDerefExpr(expr *ast.DerefExpr, env *scope) (string, error)
 		expr.Receiver.String())
 }
 
-// readBinaryExpr reads both operands and preserves the left operand type.
+// readBinaryExpr reads both operands and returns the operator result type.
 func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, error) {
 	left, err := c.readExpr(expr.Left, env)
 	if err != nil {
@@ -822,7 +822,20 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 	if _, err := c.readExpr(expr.Right, env); err != nil {
 		return "", err
 	}
+	if isBooleanBinaryOperator(expr.Operator) {
+		return "bool", nil
+	}
 	return left, nil
+}
+
+// isBooleanBinaryOperator reports whether a binary operator returns bool.
+func isBooleanBinaryOperator(op string) bool {
+	switch op {
+	case "==", "!=", "<", "<=", ">", ">=":
+		return true
+	default:
+		return false
+	}
 }
 
 // checkCallExpr validates ownership effects of builtin and user calls.

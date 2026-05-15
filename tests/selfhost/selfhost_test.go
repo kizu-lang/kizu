@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -38,23 +40,23 @@ func TestSelfHostSourcesCheck(t *testing.T) {
 
 // TestSelfHostFrontendSmoke runs the current frontend skeleton entry point.
 func TestSelfHostFrontendSmoke(t *testing.T) {
-	program := parseSelfHostSource(t, filepath.Join(repoRoot(t), "selfhost", "frontend.kizu"))
-	if err := types.New().Check(program); err != nil {
-		t.Fatalf("type check failed: %v", err)
-	}
-	if err := ownership.New().Check(program); err != nil {
-		t.Fatalf("ownership check failed: %v", err)
-	}
-	var out bytes.Buffer
 	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
-	if err := interp.NewWithProcessArgs(&out, []string{fixture}).Run(program); err != nil {
-		t.Fatalf("run failed: %v", err)
-	}
+	got := runSelfHostFrontend(t, fixture)
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"parsed functions\n2\nTokenKind::Fn\n"
-	if got := out.String(); got != want {
+	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestSelfHostFixtureComparedWithGoLexer checks the first Go/self-host bridge.
+func TestSelfHostFixtureComparedWithGoLexer(t *testing.T) {
+	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
+	got := runSelfHostFrontend(t, fixture)
+	want := "parsed functions\n" + strconv.Itoa(countGoFunctionTokens(t, fixture)) + "\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got %q, want it to contain %q", got, want)
 	}
 }
 
@@ -68,6 +70,39 @@ func TestSelfHostSourcePolicy(t *testing.T) {
 			checkFunctionComments(t, source)
 			checkFunctionSize(t, source)
 		})
+	}
+}
+
+// runSelfHostFrontend executes the current Kizu frontend against one fixture.
+func runSelfHostFrontend(t *testing.T, fixture string) string {
+	t.Helper()
+	program := parseSelfHostSource(t, filepath.Join(repoRoot(t), "selfhost", "frontend.kizu"))
+	if err := types.New().Check(program); err != nil {
+		t.Fatalf("type check failed: %v", err)
+	}
+	if err := ownership.New().Check(program); err != nil {
+		t.Fatalf("ownership check failed: %v", err)
+	}
+	var out bytes.Buffer
+	if err := interp.NewWithProcessArgs(&out, []string{fixture}).Run(program); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	return out.String()
+}
+
+// countGoFunctionTokens counts function tokens with the production Go lexer.
+func countGoFunctionTokens(t *testing.T, path string) int {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	count := 0
+	for {
+		tok := l.NextToken()
+		if tok.Type == token.Function {
+			count++
+		}
+		if tok.Type == token.EOF {
+			return count
+		}
 	}
 }
 

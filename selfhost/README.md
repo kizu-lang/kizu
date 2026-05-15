@@ -16,7 +16,7 @@ kizu run selfhost/frontend.kizu -- selfhost/fixtures/simple.kizu
 The skeleton currently includes:
 
 - token representation
-- lexer-shaped source scanning with `std::mem`
+- Go-shaped token kinds and lexer-shaped source scanning with `std::mem`
 - token storage with `std::array::Array<T>`
 - diagnostic text construction with `std::string::String`
 - parser summary shape
@@ -42,9 +42,11 @@ The future self-host compiler must reuse `tests/conformance/v0_*.json` and
 produce the same pass/fail behavior as the Go implementation before it can
 replace any production path.
 
-For now, Go tests parse, check, and run the skeleton source. Missing APIs found
-while growing this directory must be reflected back into the relevant v0.2
-stdlib issue instead of becoming isolated TODOs here.
+For now, Go tests parse, check, and run the skeleton source. They also compare
+the self-host parser summary for `selfhost/fixtures/simple.kizu` with the
+production Go lexer function-token count. Missing APIs found while growing this
+directory must be reflected back into the relevant v0.2 stdlib issue instead of
+becoming isolated TODOs here.
 
 Current stdlib feedback is tracked in [`STDLIB.md`](STDLIB.md).
 
