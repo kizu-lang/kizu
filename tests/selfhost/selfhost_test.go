@@ -181,11 +181,12 @@ type backendFingerprint struct {
 }
 
 type moduleGraphSnapshot struct {
-	Status  string
-	Message string
-	Root    string
-	Modules int
-	Imports []string
+	Status      string
+	Message     string
+	Root        string
+	Modules     int
+	ModulePaths []string
+	Imports     []string
 }
 
 type moduleConformanceManifestData struct {
@@ -529,6 +530,11 @@ func TestSelfHostAstNodeDumpOracle(t *testing.T) {
 		"examples/task_group.kizu",
 		"examples/task_cancel.kizu",
 		"examples/thread_boundary.kizu",
+		"examples/fs_task.kizu",
+		"examples/io_runtime.kizu",
+		"examples/std_io_process.kizu",
+		"examples/task_queue.kizu",
+		"examples/parallel_for.kizu",
 		"tests/conformance/modules/private_module_access/src/main.kizu",
 	}
 	for _, path := range cases {
@@ -1708,7 +1714,9 @@ func extractImportPaths(t *testing.T, snapshot string) []string {
 
 // singleFileModuleGraphSnapshot returns the non-package graph shape.
 func singleFileModuleGraphSnapshot() moduleGraphSnapshot {
-	return moduleGraphSnapshot{Status: "pass", Root: "<single>", Modules: 1}
+	return moduleGraphSnapshot{
+		Status: "pass", Root: "<single>", Modules: 1, ModulePaths: []string{"<single>"},
+	}
 }
 
 // goModuleGraphSnapshot returns package graph facts from the Go resolver.
@@ -1720,6 +1728,9 @@ func goModuleGraphSnapshot(t *testing.T, root string) moduleGraphSnapshot {
 	}
 	snapshot := moduleGraphSnapshot{
 		Status: "pass", Root: pkg.Graph.Root, Modules: len(pkg.Graph.Modules),
+	}
+	for _, module := range pkg.Graph.Modules {
+		snapshot.ModulePaths = append(snapshot.ModulePaths, module.Path)
 	}
 	for _, module := range pkg.Modules {
 		if module.Module.Path != pkg.Graph.Root {
@@ -1748,6 +1759,11 @@ func formatModuleGraphSnapshot(snapshot moduleGraphSnapshot) string {
 		return strings.Join(lines, "\n") + "\n"
 	}
 	lines = append(lines, "root", snapshot.Root, "modules", strconv.Itoa(snapshot.Modules))
+	for _, module := range snapshot.ModulePaths {
+		lines = append(lines, "module")
+		lines = append(lines, strings.Split(module, "::")...)
+		lines = append(lines, "module end")
+	}
 	for _, imported := range snapshot.Imports {
 		lines = append(lines, "import")
 		lines = append(lines, strings.Split(imported, "::")...)

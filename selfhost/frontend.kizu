@@ -817,15 +817,45 @@ fn print_call_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
             if previous.kind != TokenKind::Fn {
                 if !try call_belongs_to_try_expr(tokens, index) {
                     if !try call_is_match_pattern(tokens, index + 1) {
-                        print("CallExpr");
-                        print(try call_display_name(tokens, index));
-                        print(try call_arg_count(tokens, index));
+                        if !try call_is_assignment_target(tokens, index) {
+                            print("CallExpr");
+                            print(try call_display_name(tokens, index));
+                            print(try call_arg_count(tokens, index));
+                        }
                     }
                 }
             }
         }
     }
     return void;
+}
+
+// call_is_assignment_target reports whether a call is the left side of assignment.
+fn call_is_assignment_target(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    var cursor = index;
+    var depth = 0;
+
+    while cursor < tokens.len() {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::LParen {
+            depth = depth + 1;
+        }
+        if token.kind == TokenKind::RParen {
+            depth = depth - 1;
+            if depth == 0 {
+                if cursor + 1 >= tokens.len() {
+                    return false;
+                }
+                let next = try tokens.at(cursor + 1);
+                return next.kind == TokenKind::Assign;
+            }
+        }
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        cursor = cursor + 1;
+    }
+    return false;
 }
 
 // call_belongs_to_try_expr reports whether a call is wrapped by a try expression.
@@ -966,9 +996,33 @@ fn concurrency_method_display_name(receiver: []const u8, method: []const u8) -> 
             return "ch.recv";
         }
     }
+    let task = task_method_display_name(receiver, method);
+    if !std::mem::equal_bytes(task, method) {
+        return task;
+    }
+    return sync_method_display_name(receiver, method);
+}
+
+// task_method_display_name returns selected task helper method spellings.
+fn task_method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
     if std::mem::equal_bytes(receiver, "group") {
         if std::mem::equal_bytes(method, "spawn") {
             return "group.spawn";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "blocking_group") {
+        if std::mem::equal_bytes(method, "spawn") {
+            return "blocking_group.spawn";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "threaded_group") {
+        if std::mem::equal_bytes(method, "spawn") {
+            return "threaded_group.spawn";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "failing_group") {
+        if std::mem::equal_bytes(method, "spawn") {
+            return "failing_group.spawn";
         }
     }
     if std::mem::equal_bytes(receiver, "task") {
@@ -976,6 +1030,29 @@ fn concurrency_method_display_name(receiver: []const u8, method: []const u8) -> 
             return "task.cancel";
         }
     }
+    if std::mem::equal_bytes(receiver, "queue") {
+        if std::mem::equal_bytes(method, "enqueue") {
+            return "queue.enqueue";
+        }
+        if std::mem::equal_bytes(method, "drain") {
+            return "queue.drain";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "parts") {
+        if std::mem::equal_bytes(method, "at") {
+            return "parts.at";
+        }
+    }
+    if std::mem::equal_bytes(receiver, "scratch") {
+        if std::mem::equal_bytes(method, "get") {
+            return "scratch.get";
+        }
+    }
+    return method;
+}
+
+// sync_method_display_name returns selected sync method spellings.
+fn sync_method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
     if std::mem::equal_bytes(receiver, "atomic") {
         if std::mem::equal_bytes(method, "load") {
             return "atomic.load";
@@ -997,71 +1074,142 @@ fn namespace_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]c
     let callee = try tokens.at(index);
     let module = try namespace_module_name(tokens, index);
 
+    let stdlib = stdlib_namespace_display_name(module, callee.literal);
+    if !std::mem::equal_bytes(stdlib, "") {
+        return stdlib;
+    }
+    let user = user_namespace_display_name(module, callee.literal);
+    if !std::mem::equal_bytes(user, "") {
+        return user;
+    }
+    return callee.literal;
+}
+
+// stdlib_namespace_display_name returns selected stdlib qualified callees.
+fn stdlib_namespace_display_name(module: []const u8, callee: []const u8) -> []const u8 {
     if std::mem::equal_bytes(module, "io") {
-        if std::mem::equal_bytes(callee.literal, "blocking") {
-            return "std::io::blocking";
-        }
-        if std::mem::equal_bytes(callee.literal, "threaded") {
-            return "std::io::threaded";
-        }
+        return io_display_name(callee);
     }
     if std::mem::equal_bytes(module, "fs") {
-        if std::mem::equal_bytes(callee.literal, "read_file") {
+        if std::mem::equal_bytes(callee, "read_file") {
             return "std::fs::read_file";
         }
     }
     if std::mem::equal_bytes(module, "mem") {
-        return mem_display_name(callee.literal);
+        return mem_display_name(callee);
     }
     if std::mem::equal_bytes(module, "path") {
-        return path_display_name(callee.literal);
+        return path_display_name(callee);
     }
     if std::mem::equal_bytes(module, "string") {
-        if std::mem::equal_bytes(callee.literal, "String") {
+        if std::mem::equal_bytes(callee, "String") {
             return "std::string::String";
         }
     }
     if std::mem::equal_bytes(module, "task") {
-        if std::mem::equal_bytes(callee.literal, "Group") {
-            return "std::task::Group";
-        }
+        return task_namespace_display_name(callee);
+    }
+    if std::mem::equal_bytes(module, "process") {
+        return process_display_name(callee);
     }
     if std::mem::equal_bytes(module, "thread") {
-        if std::mem::equal_bytes(callee.literal, "scoped") {
+        if std::mem::equal_bytes(callee, "scoped") {
             return "std::thread::scoped";
         }
     }
+    return "";
+}
+
+// user_namespace_display_name returns selected package/type qualified callees.
+fn user_namespace_display_name(module: []const u8, callee: []const u8) -> []const u8 {
     if std::mem::equal_bytes(module, "lexer") {
-        if std::mem::equal_bytes(callee.literal, "hidden") {
+        if std::mem::equal_bytes(callee, "hidden") {
             return "lexer::hidden";
         }
-        if std::mem::equal_bytes(callee.literal, "make_secret") {
+        if std::mem::equal_bytes(callee, "make_secret") {
             return "lexer::make_secret";
         }
     }
     if std::mem::equal_bytes(module, "Shape") {
-        if std::mem::equal_bytes(callee.literal, "Circle") {
-            return "Shape::Circle";
-        }
-        if std::mem::equal_bytes(callee.literal, "Label") {
-            return "Shape::Label";
-        }
-        if std::mem::equal_bytes(callee.literal, "Point") {
-            return "Shape::Point";
-        }
+        return shape_display_name(callee);
     }
     if std::mem::equal_bytes(module, "ConfigRead") {
-        if std::mem::equal_bytes(callee.literal, "Ok") {
-            return "ConfigRead::Ok";
-        }
-        if std::mem::equal_bytes(callee.literal, "Err") {
-            return "ConfigRead::Err";
-        }
+        return config_read_display_name(callee);
     }
-    if std::mem::equal_bytes(callee.literal, "NotFound") {
+    if std::mem::equal_bytes(callee, "NotFound") {
         return "ConfigError::NotFound";
     }
-    return callee.literal;
+    return "";
+}
+
+// io_display_name returns selected std::io callees.
+fn io_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "blocking") {
+        return "std::io::blocking";
+    }
+    if std::mem::equal_bytes(callee, "threaded") {
+        return "std::io::threaded";
+    }
+    if std::mem::equal_bytes(callee, "failing") {
+        return "std::io::failing";
+    }
+    return "";
+}
+
+// task_namespace_display_name returns selected std::task callees.
+fn task_namespace_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "Group") {
+        return "std::task::Group";
+    }
+    if std::mem::equal_bytes(callee, "Queue") {
+        return "std::task::Queue";
+    }
+    if std::mem::equal_bytes(callee, "LocalBuffer") {
+        return "std::task::LocalBuffer";
+    }
+    if std::mem::equal_bytes(callee, "partition_mut") {
+        return "std::task::partition_mut";
+    }
+    if std::mem::equal_bytes(callee, "parallel_map") {
+        return "std::task::parallel_map";
+    }
+    return "";
+}
+
+// process_display_name returns selected std::process callees.
+fn process_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "arg_count") {
+        return "std::process::arg_count";
+    }
+    if std::mem::equal_bytes(callee, "exit_code") {
+        return "std::process::exit_code";
+    }
+    return "";
+}
+
+// shape_display_name returns selected Shape variant constructors.
+fn shape_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "Circle") {
+        return "Shape::Circle";
+    }
+    if std::mem::equal_bytes(callee, "Label") {
+        return "Shape::Label";
+    }
+    if std::mem::equal_bytes(callee, "Point") {
+        return "Shape::Point";
+    }
+    return "";
+}
+
+// config_read_display_name returns selected ConfigRead variant constructors.
+fn config_read_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "Ok") {
+        return "ConfigRead::Ok";
+    }
+    if std::mem::equal_bytes(callee, "Err") {
+        return "ConfigRead::Err";
+    }
+    return "";
 }
 
 // mem_display_name returns selected std::mem callees.
@@ -1895,6 +2043,7 @@ fn print_module_graph_snapshot(tokens: &std::array::Array<Token>) -> !void {
         print("modules");
         let imports = try count_imports(tokens);
         print(imports + 1);
+        try print_module_paths(tokens);
         try print_module_import_edges(tokens);
     }
     print("module graph snapshot end");
@@ -1930,6 +2079,49 @@ fn module_root_name(tokens: &std::array::Array<Token>) -> ![]const u8 {
         index = index + 1;
     }
     return "<single>";
+}
+
+// print_module_paths writes the root module and imported modules in graph order.
+fn print_module_paths(tokens: &std::array::Array<Token>) -> !void {
+    print("module");
+    print(try module_root_name(tokens));
+    print("module end");
+    try print_module_import_paths(tokens);
+    return void;
+}
+
+// print_module_import_paths writes imported module paths in source order.
+fn print_module_import_paths(tokens: &std::array::Array<Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Import {
+            print("module");
+            index = try print_import_module_path(tokens, index + 1);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_import_module_path prints one imported module path.
+fn print_import_module_path(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Semicolon {
+            print("module end");
+            return index;
+        }
+        if token.kind == TokenKind::Ident {
+            print(token.literal);
+        }
+        index = index + 1;
+    }
+    print("module end");
+    return index;
 }
 
 // count_imports returns the number of import declarations.
@@ -2373,6 +2565,9 @@ fn normalized_return_type(tokens: &std::array::Array<Token>, start: i64) -> ![]c
         }
         if std::mem::equal_bytes(next.literal, "i64") {
             return "!i64";
+        }
+        if next.kind == TokenKind::LBracket {
+            return "![]const u8";
         }
         if std::mem::equal_bytes(next.literal, "void") {
             return "!void";
