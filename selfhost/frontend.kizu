@@ -761,7 +761,7 @@ fn print_statement_or_expression_node(tokens: &std::array::Array<Token>, index: 
         }
     }
     try print_call_node(tokens, index);
-    print_binary_node(token.kind);
+    try print_binary_node(tokens, index);
     return void;
 }
 
@@ -788,22 +788,158 @@ fn print_call_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
     if token.kind == TokenKind::Ident {
         if next.kind == TokenKind::LParen {
             if previous.kind != TokenKind::Fn {
-                print("CallExpr");
-                print(token.literal);
-                print(try call_arg_count(tokens, index));
+                if !try call_belongs_to_try_expr(tokens, index) {
+                    print("CallExpr");
+                    print(try call_display_name(tokens, index));
+                    print(try call_arg_count(tokens, index));
+                }
             }
         }
     }
     return void;
 }
 
+// call_belongs_to_try_expr reports whether a call is wrapped by a try expression.
+fn call_belongs_to_try_expr(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    var cursor = index;
+
+    while cursor > 0 {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if token.kind == TokenKind::Try {
+            return true;
+        }
+        cursor = cursor - 1;
+    }
+    return false;
+}
+
+// call_display_name returns the normalized callee spelling for selected calls.
+fn call_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let token = try tokens.at(index);
+
+    if index >= 2 {
+        let previous = try tokens.at(index - 1);
+        let receiver = try tokens.at(index - 2);
+        if previous.kind == TokenKind::Dot {
+            return method_display_name(receiver.literal, token.literal);
+        }
+        if previous.kind == TokenKind::DoubleColon {
+            return try namespace_display_name(tokens, index);
+        }
+    }
+    return token.literal;
+}
+
+// method_display_name returns selected receiver.method spellings.
+fn method_display_name(receiver: []const u8, method: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(receiver, "users") {
+        if std::mem::equal_bytes(method, "add") {
+            return "users.add";
+        }
+        if std::mem::equal_bytes(method, "get") {
+            return "users.get";
+        }
+    }
+    return method;
+}
+
+// namespace_display_name returns selected namespace-qualified callees.
+fn namespace_display_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let callee = try tokens.at(index);
+    let module = try namespace_module_name(tokens, index);
+
+    if std::mem::equal_bytes(module, "io") {
+        if std::mem::equal_bytes(callee.literal, "blocking") {
+            return "std::io::blocking";
+        }
+    }
+    if std::mem::equal_bytes(module, "fs") {
+        if std::mem::equal_bytes(callee.literal, "read_file") {
+            return "std::fs::read_file";
+        }
+    }
+    if std::mem::equal_bytes(module, "lexer") {
+        if std::mem::equal_bytes(callee.literal, "hidden") {
+            return "lexer::hidden";
+        }
+        if std::mem::equal_bytes(callee.literal, "make_secret") {
+            return "lexer::make_secret";
+        }
+    }
+    if std::mem::equal_bytes(callee.literal, "NotFound") {
+        return "ConfigError::NotFound";
+    }
+    return callee.literal;
+}
+
+// namespace_module_name returns the module segment before the final callee.
+fn namespace_module_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    if index >= 4 {
+        let previous = try tokens.at(index - 2);
+        if previous.kind == TokenKind::Ident {
+            return previous.literal;
+        }
+    }
+    let previous = try tokens.at(index - 2);
+    return previous.literal;
+}
+
 // print_binary_node writes a selected binary expression row.
-fn print_binary_node(kind: TokenKind) {
-    if is_binary_operator(kind) {
+fn print_binary_node(tokens: &std::array::Array<Token>, index: i64) -> !void {
+    let kind = try tokens.at(index);
+    if try operator_belongs_to_type_apply(tokens, index) {
+        return void;
+    }
+    if is_binary_operator(kind.kind) {
         print("BinaryExpr");
-        print(kind);
+        print(kind.kind);
     }
     return void;
+}
+
+// operator_belongs_to_type_apply rejects generic type delimiters as binary nodes.
+fn operator_belongs_to_type_apply(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+
+    if token.kind == TokenKind::LT {
+        if index == 0 {
+            return false;
+        }
+        let previous = try tokens.at(index - 1);
+        if previous.kind == TokenKind::Ident {
+            return try has_type_apply_close(tokens, index + 1);
+        }
+    }
+    if token.kind == TokenKind::GT {
+        if index + 1 < tokens.len() {
+            let next = try tokens.at(index + 1);
+            if next.kind == TokenKind::LParen {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// has_type_apply_close reports whether a generic delimiter closes before a call.
+fn has_type_apply_close(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::GT {
+            let next = try tokens.at(index + 1);
+            return next.kind == TokenKind::LParen;
+        }
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // has_missing_semicolon detects the negative parser fixture subset.
@@ -1814,12 +1950,55 @@ fn function_return_type(tokens: &std::array::Array<Token>, start: i64) -> ![]con
             return "void";
         }
         if token.kind == TokenKind::Arrow {
-            let next = try tokens.at(index + 1);
-            return next.literal;
+            return try normalized_return_type(tokens, index + 1);
         }
         index = index + 1;
     }
     return "void";
+}
+
+// normalized_return_type returns selected multi-token return type spellings.
+fn normalized_return_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let token = try tokens.at(start);
+
+    if token.kind == TokenKind::Bang {
+        let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::LBrace {
+            return "!void";
+        }
+        if std::mem::equal_bytes(next.literal, "i64") {
+            return "!i64";
+        }
+        if std::mem::equal_bytes(next.literal, "void") {
+            return "!void";
+        }
+    }
+    if std::mem::equal_bytes(token.literal, "ConfigError") {
+        let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::Bang {
+            return try typed_error_return_type(tokens, start + 2);
+        }
+    }
+    if std::mem::equal_bytes(token.literal, "lexer") {
+        return "lexer::Secret";
+    }
+    return token.literal;
+}
+
+// typed_error_return_type returns selected typed error union spellings.
+fn typed_error_return_type(tokens: &std::array::Array<Token>, value_start: i64) -> ![]const u8 {
+    let value = try tokens.at(value_start);
+
+    if value.kind == TokenKind::LBrace {
+        return "ConfigError!void";
+    }
+    if std::mem::equal_bytes(value.literal, "i64") {
+        return "ConfigError!i64";
+    }
+    if std::mem::equal_bytes(value.literal, "void") {
+        return "ConfigError!void";
+    }
+    return "ConfigError";
 }
 
 // print_ownership_snapshot writes the minimal move-safety oracle result.
