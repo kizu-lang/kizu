@@ -536,8 +536,12 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"selfhost/fixtures/illegal_token.kizu",
 		"examples/negative/missing_semicolon.kizu",
 		"tests/conformance/modules/missing_import/src/main.kizu",
+		"tests/conformance/modules/private_module_access/src/main.kizu",
+		"tests/conformance/modules/private_type_leak/src/main.kizu",
+		"tests/conformance/modules/private_field_construction/src/main.kizu",
 		"examples/negative/std_mem_wrong_type.kizu",
 		"examples/negative/double_move.kizu",
+		"examples/negative/assignment_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
 	}
 	for _, path := range cases {
@@ -968,12 +972,34 @@ func goParserDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot
 // goModuleDiagnosticSnapshots returns resolver diagnostics in the self-host subset.
 func goModuleDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	t.Helper()
-	if !strings.Contains(filepath.ToSlash(path), "missing_import") {
-		return nil
+	slashPath := filepath.ToSlash(path)
+	if strings.Contains(slashPath, "missing_import") {
+		token := tokenWithLiteral(t, path, "missing")
+		return []diagnosticSnapshot{{
+			Message:      "module error: missing module",
+			PrimaryStart: token.Start, PrimaryEnd: token.End,
+			PrimaryLine: token.Line, PrimaryColumn: token.Column,
+			RelatedStart: token.Start, RelatedEnd: token.End,
+		}}
 	}
-	token := tokenWithLiteral(t, path, "missing")
+	if strings.Contains(slashPath, "private_module_access") {
+		return moduleVisibilityDiagnostic(t, path, "hidden")
+	}
+	if strings.Contains(slashPath, "private_type_leak") {
+		return moduleVisibilityDiagnostic(t, path, "Secret")
+	}
+	if strings.Contains(slashPath, "private_field_construction") {
+		return moduleVisibilityDiagnostic(t, path, "secret")
+	}
+	return nil
+}
+
+// moduleVisibilityDiagnostic returns the shared module visibility diagnostic row.
+func moduleVisibilityDiagnostic(t *testing.T, path string, literal string) []diagnosticSnapshot {
+	t.Helper()
+	token := tokenWithLiteral(t, path, literal)
 	return []diagnosticSnapshot{{
-		Message:      "module error: missing module",
+		Message:      "module error",
 		PrimaryStart: token.Start, PrimaryEnd: token.End,
 		PrimaryLine: token.Line, PrimaryColumn: token.Column,
 		RelatedStart: token.Start, RelatedEnd: token.End,
@@ -1018,6 +1044,7 @@ func goOwnershipDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnaps
 func isOwnershipDiagnosticFixture(path string) bool {
 	slashPath := filepath.ToSlash(path)
 	return strings.Contains(slashPath, "double_move") ||
+		strings.Contains(slashPath, "assignment_move") ||
 		strings.Contains(slashPath, "move_while_borrowed")
 }
 
