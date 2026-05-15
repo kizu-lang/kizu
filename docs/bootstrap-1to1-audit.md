@@ -26,7 +26,7 @@ each row below.
 | Phase | Current evidence | Coverage strength | Missing for 1:1 |
 | --- | --- | --- | --- |
 | lexer | `tests/selfhost` compares token kind, literal, byte span, line, column | strong for covered files | broaden to all conformance parseable files |
-| parser | self-host AST counts, declaration order, and function detail snapshots vs Go parser | weak | full AST node model and dump equality across all parseable conformance fixtures |
+| parser | self-host AST counts, declaration order, function details, and struct field snapshots vs Go parser | weak | full AST node model and dump equality across all parseable conformance fixtures |
 | resolver | self-host root module graph/import snapshot vs Go resolver for selected pass/fail packages | weak | full Kizu module graph resolver and graph snapshot equality |
 | diagnostics | self-host diagnostic objects cover lexer, parser, and resolver subset spans vs Go facts | weak | broaden to checker diagnostics and all conformance failure classes |
 | type | self-host return/call/std-mem type snapshots compare selected pass/fail cases vs Go checker | weak | broaden to full type environment and all checker diagnostic classes |
@@ -49,6 +49,17 @@ oracle tests, and acceptance evidence before closing.
 7. Backend smoke fingerprint oracle: #118
 8. Cache ownership and self-host switch decision: #119
 9. 1:1 completion gate that fails if any phase lacks coverage: #111
+
+## Completion Gate
+
+`tests/bootstrap` checks that this audit cannot silently claim completion while
+rows still have incomplete coverage. The normal test keeps the audit internally
+consistent. The strict final gate is opt-in and must fail until every phase is
+strong and has no missing work:
+
+```sh
+KIZU_REQUIRE_1TO1=1 go test ./tests/bootstrap
+```
 
 ## Non-Goals For The Audit
 

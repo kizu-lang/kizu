@@ -71,8 +71,15 @@ Use these commands before changing bootstrap, backend, or cache behavior:
 
 ```sh
 go test ./tests/selfhost
+go test ./tests/bootstrap
 go test ./internal/buildcache -run 'Package(Cache|Why)'
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 just perf-cache-isolated
+```
+
+Use the strict completion gate only when claiming Go/Kizu 1:1 completion:
+
+```sh
+KIZU_REQUIRE_1TO1=1 go test ./tests/bootstrap
 ```
