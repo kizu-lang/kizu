@@ -46,6 +46,19 @@ func LoadPackage(baseDir string) (*Package, error) {
 	return ResolvePackage(baseDir, manifest)
 }
 
+// LoadStdPackage reads the compiler-owned std package manifest.
+func LoadStdPackage(baseDir string) (*Package, error) {
+	source, err := os.ReadFile(filepath.Join(baseDir, "kizu.toml"))
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := ParseStdManifest(string(source))
+	if err != nil {
+		return nil, err
+	}
+	return ResolvePackage(baseDir, manifest)
+}
+
 // ResolvePackage resolves modules, parses source files, and validates imports.
 func ResolvePackage(baseDir string, manifest Manifest) (*Package, error) {
 	graph, err := ResolveModules(baseDir, manifest)

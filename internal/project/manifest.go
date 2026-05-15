@@ -15,6 +15,16 @@ type Manifest struct {
 
 // ParseManifest parses the declarative subset of kizu.toml used by Kizu.
 func ParseManifest(source string) (Manifest, error) {
+	return parseManifest(source, false)
+}
+
+// ParseStdManifest parses the compiler-owned std manifest.
+func ParseStdManifest(source string) (Manifest, error) {
+	return parseManifest(source, true)
+}
+
+// parseManifest parses kizu.toml with an optional std package exception.
+func parseManifest(source string, allowStd bool) (Manifest, error) {
 	var manifest Manifest
 	section := ""
 	for lineNo, raw := range strings.Split(source, "\n") {
@@ -38,7 +48,7 @@ func ParseManifest(source string) (Manifest, error) {
 			return manifest, err
 		}
 	}
-	return validateManifest(manifest)
+	return validateManifest(manifest, allowStd)
 }
 
 // stripComment removes a full-line or suffix TOML comment in the supported subset.
@@ -145,11 +155,11 @@ func parseStringList(value string, lineNo int) ([]string, error) {
 }
 
 // validateManifest checks required fields and reserved package names.
-func validateManifest(manifest Manifest) (Manifest, error) {
+func validateManifest(manifest Manifest, allowStd bool) (Manifest, error) {
 	if manifest.PackageName == "" {
 		return manifest, fmt.Errorf("manifest error: missing [package].name")
 	}
-	if manifest.PackageName == "std" {
+	if manifest.PackageName == "std" && !allowStd {
 		return manifest, fmt.Errorf("manifest error: package name `std` is reserved")
 	}
 	if manifest.Root == "" {

@@ -168,6 +168,17 @@ func TestPackageWhyRebuildExplainsGraphEdit(t *testing.T) {
 	}
 }
 
+// TestCurrentStdlibHashUsesSourceSkeleton checks std sources shape cache keys.
+func TestCurrentStdlibHashUsesSourceSkeleton(t *testing.T) {
+	hash, err := currentStdlibHash()
+	if err != nil {
+		t.Fatalf("stdlib hash failed: %v", err)
+	}
+	if hash == "" || hash == fallbackStdlibHash {
+		t.Fatalf("got stdlib hash %q", hash)
+	}
+}
+
 // writeTempSource writes source to a temp Kizu file.
 func writeTempSource(t *testing.T, source string) string {
 	t.Helper()

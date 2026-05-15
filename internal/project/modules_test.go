@@ -82,6 +82,20 @@ fn main() -> void { lexer::lex(); return; }`,
 	}
 }
 
+// TestLoadStdPackageAcceptsCompilerOwnedStd checks the std source skeleton.
+func TestLoadStdPackageAcceptsCompilerOwnedStd(t *testing.T) {
+	root := filepath.Join("..", "..", "std")
+	pkg, err := LoadStdPackage(root)
+	if err != nil {
+		t.Fatalf("load std failed: %v", err)
+	}
+	got := parsedModulePaths(pkg.Modules)
+	want := []string{"std", "std::io", "std::mem", "std::path", "std::process", "std::testing"}
+	if !sameStrings(got, want) {
+		t.Fatalf("got modules %#v, want %#v", got, want)
+	}
+}
+
 // TestResolvePackageRejectsPrivateModuleAccess checks top-level visibility.
 func TestResolvePackageRejectsPrivateModuleAccess(t *testing.T) {
 	root := packageFixture(t, map[string]string{
