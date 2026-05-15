@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -11,6 +12,7 @@ import (
 // Interpreter executes a parsed Kizu program.
 type Interpreter struct {
 	out       io.Writer
+	outMu     sync.Mutex
 	functions map[string]*ast.FunctionDecl
 	impls     map[string]map[string]*ast.FunctionDecl
 	enums     map[string]map[string]bool
@@ -820,9 +822,13 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	if !ok {
 		return voidValue(), false, nil
 	}
+	if value, ok := evalIoBuiltin(name, args); ok {
+		return value, true, nil
+	}
 	switch name {
 	case "std.task.Group":
-		return callTaskGroupFromExprs(args), true, nil
+		value, err := i.evalTaskGroup(args, env)
+		return value, true, err
 	case "std.channel.Channel":
 		return errorUnionValue("use std::channel::Channel<T>()"), true, nil
 	case "std.task.Queue":
@@ -850,6 +856,22 @@ func (i *Interpreter) evalQualifiedBuiltin(
 		return errorUnionValue("use std::sync::Mutex<T>(value)"), true, nil
 	default:
 		return voidValue(), false, nil
+	}
+}
+
+// evalIoBuiltin evaluates std::io constructor calls.
+func evalIoBuiltin(name string, args []ast.Expression) (Value, bool) {
+	switch name {
+	case "std.io.blocking":
+		return callIoFromExprs("blocking", args), true
+	case "std.io.threaded":
+		return callIoFromExprs("threaded", args), true
+	case "std.io.failing":
+		return callIoFromExprs("failing", args), true
+	case "std.io.evented":
+		return errorUnionValue("std::io::evented is not implemented in v0.1"), true
+	default:
+		return voidValue(), false
 	}
 }
 
@@ -1034,7 +1056,7 @@ func (i *Interpreter) evalMethodCallExpr(
 	}
 	if receiver.kind != kindArena {
 		if receiver.kind == kindTaskGroup {
-			return i.evalTaskGroupMethod(field.Name, args, env)
+			return i.evalTaskGroupMethod(receiver, field.Name, args, env)
 		}
 		if receiver.kind == kindTask {
 			return evalTaskMethod(receiver, field.Name, args)
@@ -1304,8 +1326,24 @@ func (i *Interpreter) evalMutex(typeArg string, args []ast.Expression, env *Env)
 	return mutexValue(typeArg, value), nil
 }
 
-// evalTaskGroupMethod executes the v0.1 synchronous spawn model.
+// evalTaskGroup constructs a task group bound to one Io implementation.
+func (i *Interpreter) evalTaskGroup(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std::task::Group expects io")
+	}
+	ioValue, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if ioValue.kind != kindIo {
+		return voidValue(), fmt.Errorf("runtime error: std::task::Group expects Io")
+	}
+	return taskGroupValue(ioValue), nil
+}
+
+// evalTaskGroupMethod executes the v0.1 structured spawn model.
 func (i *Interpreter) evalTaskGroupMethod(
+	group Value,
 	name string,
 	args []ast.Expression,
 	env *Env,
@@ -1313,43 +1351,67 @@ func (i *Interpreter) evalTaskGroupMethod(
 	if name != "spawn" {
 		return voidValue(), fmt.Errorf("runtime error: TaskGroup has no method `%s`", name)
 	}
-	if len(args) < 2 {
-		return voidValue(), fmt.Errorf("runtime error: TaskGroup.spawn expects io, function, and args")
+	if len(args) < 1 {
+		return voidValue(), fmt.Errorf("runtime error: TaskGroup.spawn expects function and args")
 	}
-	ioValue, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), err
-	}
-	target, ok := args[1].(*ast.IdentExpr)
+	target, ok := args[0].(*ast.IdentExpr)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: TaskGroup.spawn expects function name")
 	}
-	values, err := i.evalArgs(args[2:], env)
+	values, err := i.evalArgs(args[1:], env)
 	if err != nil {
 		return voidValue(), err
 	}
-	callArgs := append([]Value{ioValue}, values...)
-	result, err := i.callFunction(target.Name, callArgs)
-	if err != nil {
-		return voidValue(), err
-	}
-	return taskValue(result), nil
+	callArgs := append([]Value{group.taskGroup.io}, values...)
+	return i.spawnTask(group.taskGroup.io, target.Name, callArgs), nil
 }
 
-// evalTaskMethod awaits or cancels a synchronous task value.
+// spawnTask executes a task according to the group's Io implementation.
+func (i *Interpreter) spawnTask(ioValue Value, name string, args []Value) Value {
+	if ioValue.typeName == "threaded" {
+		result := make(chan TaskResult, 1)
+		go func() {
+			value, err := i.callFunction(name, args)
+			result <- TaskResult{value: value, err: err}
+		}()
+		return runningTaskValue(result)
+	}
+	result, err := i.callFunction(name, args)
+	return completedTaskValue(result, err)
+}
+
+// evalTaskMethod awaits or cancels a task value.
 func evalTaskMethod(task Value, name string, args []ast.Expression) (Value, error) {
 	if len(args) != 0 {
 		return voidValue(), fmt.Errorf("runtime error: task.%s expected 0 args", name)
 	}
 	switch name {
 	case "await":
+		value, err := finishTask(task.task)
 		task.task.done = true
-		return task.task.value, nil
+		return value, err
 	case "cancel":
+		waitTask(task.task)
 		task.task.done = true
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Task has no method `%s`", name)
+	}
+}
+
+// finishTask waits for a running task and returns its result.
+func finishTask(task *Task) (Value, error) {
+	waitTask(task)
+	return task.value, task.err
+}
+
+// waitTask waits for a running task and stores its result.
+func waitTask(task *Task) {
+	if task.result != nil && !task.done {
+		result := <-task.result
+		task.value = result.value
+		task.err = result.err
+		task.result = nil
 	}
 }
 
@@ -1573,6 +1635,8 @@ func (i *Interpreter) callPrint(args []Value) (Value, error) {
 	if len(args) != 1 {
 		return voidValue(), fmt.Errorf("runtime error: print expected 1 arg")
 	}
+	i.outMu.Lock()
+	defer i.outMu.Unlock()
 	if _, err := fmt.Fprintln(i.out, args[0].String()); err != nil {
 		return voidValue(), err
 	}
@@ -1605,7 +1669,7 @@ func callIo(args []Value) (Value, error) {
 	if len(args) != 0 {
 		return voidValue(), fmt.Errorf("runtime error: Io expected 0 args")
 	}
-	return ioValue(), nil
+	return voidValue(), fmt.Errorf("runtime error: use std::io::blocking()")
 }
 
 // callTaskGroup constructs a structured task group value.
@@ -1613,15 +1677,15 @@ func callTaskGroup(args []Value) (Value, error) {
 	if len(args) != 0 {
 		return voidValue(), fmt.Errorf("runtime error: TaskGroup expected 0 args")
 	}
-	return taskGroupValue(), nil
+	return voidValue(), fmt.Errorf("runtime error: use std::task::Group(io)")
 }
 
-// callTaskGroupFromExprs validates std::task::Group has no constructor args.
-func callTaskGroupFromExprs(args []ast.Expression) Value {
+// callIoFromExprs validates std::io constructors and returns an Io value.
+func callIoFromExprs(mode string, args []ast.Expression) Value {
 	if len(args) != 0 {
-		return errorUnionValue("std::task::Group expected 0 args")
+		return errorUnionValue("std::io::" + mode + " expected 0 args")
 	}
-	return taskGroupValue()
+	return ioValue(mode)
 }
 
 // callChannelFromExprs validates std::channel::Channel<T> has no constructor args.

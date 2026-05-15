@@ -58,6 +58,8 @@ go test ./...
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 | `contract`, `satisfy`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
+| selectable `Io` implementations | `io_runtime.kizu` | uses blocking, threaded, and failing Io constructors |
+| task cancellation cleanup | `task_cancel.kizu` | waits for a threaded task and discards its result |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -127,6 +129,12 @@ go test ./...
 | task args move non-copy values | `negative/task_move.kizu` | `moved value` |
 | tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |
 | tasks cannot capture safe raw pointers | `negative/task_spawn_pointer.kizu` | `raw pointer` |
+| spawned functions require owned Io | `negative/task_spawn_borrowed_io.kizu` | `owned Io` |
+| spawned functions reject mutable Io borrow | `negative/task_spawn_mut_borrowed_io.kizu` | `owned Io` |
+| bare `Io()` constructor is rejected | `negative/io_builtin_constructor.kizu` | `std::io::blocking` |
+| evented Io is not implemented in v0.1 | `negative/io_evented_unimplemented.kizu` | `not implemented` |
+| task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |
+| old spawn Io argument is rejected | `negative/task_spawn_old_io_arg.kizu` | `function name` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |

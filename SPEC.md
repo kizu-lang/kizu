@@ -313,7 +313,8 @@ Kizu は型や名前空間に属する item lookup に `::` を使います。
 ```kizu
 let color = Color::Red;
 let shape = Shape::Circle(10);
-let group = std::task::Group();
+let io = std::io::blocking();
+let group = std::task::Group(io);
 ```
 
 `.` は runtime value の field / method access だけに使います。
@@ -1089,8 +1090,6 @@ safe Kizu の安全契約は v0.1 で固定します。
 
 ただし、I/O と並行処理の境界は v0.1 から実装対象にします。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
-`Io` / `Task` / `TaskGroup` は v0.1 では interpreter builtin から始めますが、
-v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せます。
 Kizu は Zig 0.16 寄りに、hidden global runtime ではなく、明示的な `Io`
 interface を渡す設計にします。
 
@@ -1122,12 +1121,10 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 * data parallelism は `std::task::parallel_for` のような structured API に閉じ込める
 * shared mutable state は `std::sync` / `std::atomic` の明示型だけで扱う
 
-v0.1 の最初の `TaskGroup` は interpreter 上の structured task model として実装します。
-現在の `spawn` は OS thread や event loop を作らず、同期的に対象関数を評価して
-`Task<T>` に結果を保持します。
-v0.1 の `Io()` は prototype builtin です。
-後続では `std::io::blocking()`、`std::io::threaded()`、`std::io::evented()`、
-`std::io::failing()` のような implementation selection に移行します。
+v0.1 の `TaskGroup` は interpreter 上の structured task model として実装します。
+`std::io::blocking()` と `std::io::failing()` は同期評価します。
+`std::io::threaded()` は `group.spawn` を goroutine で実行し、`await` / `cancel` が
+完了を待ちます。
 
 v0.1 で追加していく concurrency foundation:
 
@@ -1144,27 +1141,32 @@ std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
 ```
 
-将来の `std::io` implementation 候補:
+v0.1 の `std::io` implementation:
 
 ```text
 std::io::blocking()  simple blocking I/O
 std::io::threaded()  thread-backed I/O and task execution
-std::io::evented()   event-loop or coroutine backed I/O
 std::io::failing()   test implementation that supports no external I/O
+```
+
+将来の `std::io` implementation 候補:
+
+```text
+std::io::evented()   event-loop or coroutine backed I/O
 std::io::uring()     Linux io_uring backend
 std::io::kqueue()    kqueue backend
 ```
 
-v0.1 ではこれらを実装しません。
+v0.1 では `evented` / `uring` / `kqueue` は実装しません。
 ただし、safe Kizu の checker rule はどの runtime implementation でも同じです。
 
 v0.1 では次の API 形状を正とします。
 
 ```kizu
-let io = Io();
+let io = std::io::blocking();
 
-let group = std::task::Group();
-let task = group.spawn(io, load_config, "config.kizu");
+let group = std::task::Group(io);
+let task = group.spawn(load_config, "config.kizu");
 let value = try task.await();
 
 let ch = std::channel::Channel<i64>();
@@ -1178,12 +1180,14 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 `Task<T>`:
 
-* `group.spawn(io, fn, args...)` は `Task<T>` を返す
+* `std::task::Group(io)` は task group を `Io` implementation に紐づける
+* `group.spawn(fn, args...)` は `Task<T>` を返す
+* spawn 対象関数は第1引数に `Io` を受け取る
 * `T` は spawn 対象関数の戻り値
 * `task.await()` は `T` または `!T` を返す
 * `task.cancel()` は `void` を返す
 * task は scope を抜ける前に await または cancel されなければならない
-* v0.1 interpreter の `spawn` は同期評価でもよい
+* `threaded` runtime の `cancel()` は v0.1 では実行中 task の完了を待って結果を破棄する
 
 `std::channel::Channel<T>` is owned message passing:
 

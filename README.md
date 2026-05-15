@@ -37,7 +37,7 @@ Implemented language-core pieces:
 - unsafe boundary and C ABI declaration checks
 - explicit `cast<T>(value)` checker policy
 - Zig/C-style tag `enum`, tagged `union`, and exhaustive `match`
-- `Io` capability and `TaskGroup` structured task model
+- `std::io::blocking/threaded/failing` and `TaskGroup` structured task model
 - `std::channel::Channel<T>` owned message passing
 - `std::task::Queue` deterministic deferred task queue
 - `std::task::parallel_for` and `std::task::parallel_map` safe data-parallel prototypes

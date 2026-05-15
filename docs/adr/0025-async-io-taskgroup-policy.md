@@ -16,8 +16,8 @@ Kizu v0.1 では `async fn` / `await` syntax は実装しない。
 ただし、I/O と並行処理の境界は v0.1 から実装する。
 最初の design では `async fn` を中心にしない。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示する。
-`Io` / `Task` / `TaskGroup` は v0.1 では interpreter builtin から始めるが、
-v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せる。
+v0.1 の API は `std::io` と `std::task` の境界に置く。
+裸の `Io()` / `TaskGroup()` constructor は採用しない。
 `Io` runtime の選択式 interface については ADR-0039 に従う。
 
 マルチスレッドと async は Kizu の重要な言語特性として扱う。
@@ -43,8 +43,9 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 並行処理は `TaskGroup` を通して明示する。
 
 ```kizu
-let group = std::task::Group();
-let task = group.spawn(io, read_config, "config.toml");
+let io = std::io::blocking();
+let group = std::task::Group(io);
+let task = group.spawn(read_config, "config.toml");
 let text = task.await();
 ```
 
@@ -108,7 +109,7 @@ safe Kizu では task 間で mutable state を暗黙共有できない。
 
 ```kizu
 let name = "alice";
-let task = group.spawn(io, print_name, name);
+let task = group.spawn(print_name, name);
 print(name); // error: moved into task
 ```
 
@@ -118,10 +119,11 @@ print(name); // error: moved into task
 - borrow checker と task lifetime の複雑さを抑える
 - cancellation と cleanup の境界を TaskGroup に寄せる
 - v0.1 は interpreter 上の structured task model を実装対象にする
-- v0.1 interpreter の `spawn` は同期評価であり、OS thread や event loop を作らない
+- v0.1 の `blocking` / `failing` spawn は同期評価であり、event loop を作らない
+- v0.1 の `threaded` spawn は goroutine で実行し、await / cancel が完了を待つ
 - v0.1 の目標に `std::task`、`std::channel`、`std::thread`、`std::sync`、
   `std::atomic`、safe data parallelism の API 形状と安全契約を含める
 - 実並行 runtime を導入する場合も、owned/copy value だけを task 境界に渡す方針を維持する
-- 標準ライブラリ化するときは `std::io` と `std::task` の API に分ける
+- `std::io` と `std::task` の API 境界を v0.1 から使う
 - hidden global runtime は持たず、`Io` implementation を明示的に渡す
 - OS thread、event loop、networking runtime、atomic ordering の詳細 API は safe structured API の後に扱う
