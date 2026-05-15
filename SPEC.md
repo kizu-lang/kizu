@@ -1082,6 +1082,23 @@ std::map::Map<K, V>   後続 phase
 std::set::Set<T>      後続 phase
 ```
 
+v0.2 の `std::mem` は、self-host compiler の lexer が必要とする
+allocation-free な read-only byte helper から始めます。
+
+```text
+std::mem::len(bytes: []const u8) -> i64
+std::mem::byte_at(bytes: []const u8, index: i64) -> !u8
+std::mem::equal_bytes(left: []const u8, right: []const u8) -> bool
+std::mem::starts_with(bytes: []const u8, prefix: []const u8) -> bool
+std::mem::slice(bytes: []const u8, start: i64, end: i64) -> ![]const u8
+std::mem::trim_ascii(bytes: []const u8) -> []const u8
+```
+
+`std::mem` の safe API は raw pointer を返しません。
+`std::mem::slice` と `std::mem::byte_at` は境界外アクセスを `!T` として返します。
+allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
+mutable slice の仕様後に実装します。
+
 ## 15. concurrency / async 方針
 
 Kizu v0.1 では `async fn` / `await` syntax は実装しません。

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -846,6 +847,9 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	if value, ok, err := i.evalFsBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
+	if value, ok, err := i.evalMemBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
 	if value, ok, err := i.evalTaskBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
@@ -864,6 +868,209 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	default:
 		return voidValue(), false, nil
 	}
+}
+
+// evalMemBuiltin evaluates allocation-free std::mem byte-slice helpers.
+func (i *Interpreter) evalMemBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "std.mem.len":
+		value, err := i.evalMemLen(args, env)
+		return value, true, err
+	case "std.mem.byte_at":
+		value, err := i.evalMemByteAt(args, env)
+		return value, true, err
+	case "std.mem.equal_bytes":
+		value, err := i.evalMemCompare(args, env, func(left string, right string) bool {
+			return left == right
+		})
+		return value, true, err
+	case "std.mem.starts_with":
+		value, err := i.evalMemStartsWith(args, env)
+		return value, true, err
+	case "std.mem.slice":
+		value, err := i.evalMemSlice(args, env)
+		return value, true, err
+	case "std.mem.trim_ascii":
+		value, err := i.evalMemTrimASCII(args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalMemLen returns the byte length of a read-only byte slice.
+func (i *Interpreter) evalMemLen(args []ast.Expression, env *Env) (Value, error) {
+	bytes, err := i.evalMemOneBytes("std::mem::len", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return intValue(int64(len(bytes))), nil
+}
+
+// evalMemByteAt returns one checked byte as the runtime integer payload for u8.
+func (i *Interpreter) evalMemByteAt(args []ast.Expression, env *Env) (Value, error) {
+	bytes, index, err := i.evalMemBytesIndex("std::mem::byte_at", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= int64(len(bytes)) {
+		return errorUnionValue("std::mem::byte_at index out of bounds"), nil
+	}
+	return intValue(int64(bytes[int(index)])), nil
+}
+
+// evalMemCompare evaluates two-byte-slice boolean predicates.
+func (i *Interpreter) evalMemCompare(
+	args []ast.Expression,
+	env *Env,
+	predicate func(string, string) bool,
+) (Value, error) {
+	left, right, err := i.evalMemTwoBytes("std::mem::equal_bytes", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return boolValue(predicate(left, right)), nil
+}
+
+// evalMemStartsWith reports whether bytes starts with prefix.
+func (i *Interpreter) evalMemStartsWith(args []ast.Expression, env *Env) (Value, error) {
+	bytes, prefix, err := i.evalMemTwoBytes("std::mem::starts_with", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return boolValue(strings.HasPrefix(bytes, prefix)), nil
+}
+
+// evalMemSlice returns a checked byte sub-slice without allocating.
+func (i *Interpreter) evalMemSlice(args []ast.Expression, env *Env) (Value, error) {
+	bytes, start, end, err := i.evalMemSliceArgs("std::mem::slice", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if start < 0 || end < start || end > int64(len(bytes)) {
+		return errorUnionValue("std::mem::slice range out of bounds"), nil
+	}
+	return stringValue(bytes[int(start):int(end)]), nil
+}
+
+// evalMemTrimASCII trims ASCII whitespace from both ends of a byte slice.
+func (i *Interpreter) evalMemTrimASCII(args []ast.Expression, env *Env) (Value, error) {
+	bytes, err := i.evalMemOneBytes("std::mem::trim_ascii", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return stringValue(strings.Trim(bytes, " \t\n\r\v\f")), nil
+}
+
+// evalMemOneBytes evaluates one []const u8 argument.
+func (i *Interpreter) evalMemOneBytes(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("runtime error: %s expects 1 arg", name)
+	}
+	bytes, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if bytes.kind != kindString {
+		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
+	}
+	return bytes.s, nil
+}
+
+// evalMemTwoBytes evaluates two []const u8 arguments.
+func (i *Interpreter) evalMemTwoBytes(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (string, string, error) {
+	if len(args) != 2 {
+		return "", "", fmt.Errorf("runtime error: %s expects 2 args", name)
+	}
+	left, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return "", "", err
+	}
+	right, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return "", "", err
+	}
+	if left.kind != kindString || right.kind != kindString {
+		return "", "", fmt.Errorf("runtime error: %s expects []const u8 args", name)
+	}
+	return left.s, right.s, nil
+}
+
+// evalMemBytesIndex evaluates byte-slice and i64 index arguments.
+func (i *Interpreter) evalMemBytesIndex(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (string, int64, error) {
+	if len(args) != 2 {
+		return "", 0, fmt.Errorf("runtime error: %s expects bytes and index", name)
+	}
+	bytes, index, err := i.evalMemBytesAndInt(name, args[0], args[1], env)
+	return bytes, index, err
+}
+
+// evalMemSliceArgs evaluates checked slice arguments.
+func (i *Interpreter) evalMemSliceArgs(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (string, int64, int64, error) {
+	if len(args) != 3 {
+		return "", 0, 0, fmt.Errorf("runtime error: %s expects bytes, start, and end", name)
+	}
+	bytes, start, err := i.evalMemBytesAndInt(name, args[0], args[1], env)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	end, err := i.evalMemIntArg(name, "end", args[2], env)
+	return bytes, start, end, err
+}
+
+// evalMemBytesAndInt evaluates one byte-slice and one i64 argument.
+func (i *Interpreter) evalMemBytesAndInt(
+	name string,
+	bytesExpr ast.Expression,
+	indexExpr ast.Expression,
+	env *Env,
+) (string, int64, error) {
+	bytes, err := i.evalExpr(bytesExpr, env)
+	if err != nil {
+		return "", 0, err
+	}
+	if bytes.kind != kindString {
+		return "", 0, fmt.Errorf("runtime error: %s expects []const u8 bytes", name)
+	}
+	index, err := i.evalMemIntArg(name, "index", indexExpr, env)
+	return bytes.s, index, err
+}
+
+// evalMemIntArg evaluates one i64 argument for std::mem.
+func (i *Interpreter) evalMemIntArg(
+	name string,
+	label string,
+	expr ast.Expression,
+	env *Env,
+) (int64, error) {
+	value, err := i.evalExpr(expr, env)
+	if err != nil {
+		return 0, err
+	}
+	if value.kind != kindInt {
+		return 0, fmt.Errorf("runtime error: %s expects i64 %s", name, label)
+	}
+	return value.i, nil
 }
 
 // evalFsBuiltin evaluates std::fs functions with explicit Io.

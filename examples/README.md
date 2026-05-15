@@ -1,11 +1,11 @@
-# Kizu v0.1 Examples Catalog
+# Kizu Examples Catalog
 
-This directory is the user-visible catalog for Kizu v0.1 behavior.
+This directory is the user-visible catalog for Kizu language behavior.
 
 Executable and negative examples are listed in
-[`tests/conformance/v0_1.json`](../tests/conformance/v0_1.json). The Go test
-runner reads that manifest, and the future self-host compiler should reuse it
-as the v0.1 compatibility corpus.
+[`tests/conformance/`](../tests/conformance/). The Go test runner reads the
+versioned manifests, and the future self-host compiler should reuse them as the
+compatibility corpus.
 
 Run the full catalog through the normal project gate:
 
@@ -62,6 +62,7 @@ go test ./...
 | task cancellation cleanup | `task_cancel.kizu` | waits for a threaded task and discards its result |
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
 | task-based file read | `fs_task.kizu` | reads a fixture from a spawned task |
+| allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -148,6 +149,9 @@ go test ./...
 | missing file returns `!T` error | `negative/fs_read_missing.kizu` | `no such file` |
 | file write bytes must be `[]const u8` | `negative/fs_write_wrong_bytes.kizu` | `bytes` |
 | failing Io returns deterministic error | `negative/fs_failing_io.kizu` | `io runtime is failing` |
+| byte-slice helper args must be `[]const u8` | `negative/std_mem_wrong_type.kizu` | `expects []const u8` |
+| checked byte slices reject invalid ranges | `negative/std_mem_slice_out_of_bounds.kizu` | `range out of bounds` |
+| checked byte access rejects invalid indexes | `negative/std_mem_byte_at_out_of_bounds.kizu` | `index out of bounds` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |

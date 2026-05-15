@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const conformanceManifestPath = "../../tests/conformance/v0_1.json"
+const conformanceManifestGlob = "../../tests/conformance/v0_*.json"
 
 type conformanceManifest struct {
 	Version string            `json:"version"`
@@ -27,20 +27,21 @@ type conformanceCase struct {
 	Features       []string `json:"features"`
 }
 
-// TestV01ConformanceManifest runs the reusable v0.1 conformance manifest.
-func TestV01ConformanceManifest(t *testing.T) {
-	manifest := loadConformanceManifest(t)
-	for _, tt := range manifest.Cases {
-		t.Run(tt.Name, func(t *testing.T) {
-			runConformanceCase(t, tt)
-		})
+// TestConformanceManifests runs reusable conformance manifests.
+func TestConformanceManifests(t *testing.T) {
+	for _, manifest := range loadConformanceManifests(t) {
+		for _, tt := range manifest.Cases {
+			name := manifest.Version + "/" + tt.Name
+			t.Run(name, func(t *testing.T) {
+				runConformanceCase(t, tt)
+			})
+		}
 	}
 }
 
-// TestV01ConformanceManifestCoversExamples keeps examples in the reusable corpus.
-func TestV01ConformanceManifestCoversExamples(t *testing.T) {
-	manifest := loadConformanceManifest(t)
-	got := manifestPaths(manifest)
+// TestConformanceManifestsCoverExamples keeps examples in the reusable corpus.
+func TestConformanceManifestsCoverExamples(t *testing.T) {
+	got := manifestPaths(loadConformanceManifests(t))
 	want := examplePaths(t)
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("manifest paths do not match examples\nmissing:\n%s\nextra:\n%s",
@@ -49,13 +50,14 @@ func TestV01ConformanceManifestCoversExamples(t *testing.T) {
 	}
 }
 
-// TestV01ConformanceManifestShape validates fields needed by self-host runners.
-func TestV01ConformanceManifestShape(t *testing.T) {
-	manifest := loadConformanceManifest(t)
+// TestConformanceManifestShape validates fields needed by self-host runners.
+func TestConformanceManifestShape(t *testing.T) {
 	seen := map[string]bool{}
-	for _, tt := range manifest.Cases {
-		validateConformanceCase(t, tt, seen)
-		seen[tt.Name] = true
+	for _, manifest := range loadConformanceManifests(t) {
+		for _, tt := range manifest.Cases {
+			validateConformanceCase(t, tt, seen)
+			seen[tt.Name] = true
+		}
 	}
 }
 
@@ -124,10 +126,27 @@ func validateConformanceCase(t *testing.T, tt conformanceCase, seen map[string]b
 	}
 }
 
-// loadConformanceManifest reads the machine-usable v0.1 test manifest.
-func loadConformanceManifest(t *testing.T) conformanceManifest {
+// loadConformanceManifests reads machine-usable versioned test manifests.
+func loadConformanceManifests(t *testing.T) []conformanceManifest {
 	t.Helper()
-	data, err := os.ReadFile(conformanceManifestPath)
+	paths, err := filepath.Glob(conformanceManifestGlob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no conformance manifests found")
+	}
+	manifests := make([]conformanceManifest, 0, len(paths))
+	for _, path := range paths {
+		manifests = append(manifests, loadConformanceManifest(t, path))
+	}
+	return manifests
+}
+
+// loadConformanceManifest reads one conformance manifest from disk.
+func loadConformanceManifest(t *testing.T, path string) conformanceManifest {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,17 +154,21 @@ func loadConformanceManifest(t *testing.T) conformanceManifest {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Version != "v0.1" {
-		t.Fatalf("unexpected conformance version %q", manifest.Version)
+	want := strings.TrimSuffix(filepath.Base(path), ".json")
+	want = strings.ReplaceAll(want, "_", ".")
+	if manifest.Version != want {
+		t.Fatalf("%s: unexpected conformance version %q", path, manifest.Version)
 	}
 	return manifest
 }
 
-// manifestPaths returns sorted Kizu file paths declared by the manifest.
-func manifestPaths(manifest conformanceManifest) []string {
-	paths := make([]string, 0, len(manifest.Cases))
-	for _, tt := range manifest.Cases {
-		paths = append(paths, tt.Path)
+// manifestPaths returns sorted Kizu file paths declared by the manifests.
+func manifestPaths(manifests []conformanceManifest) []string {
+	paths := []string{}
+	for _, manifest := range manifests {
+		for _, tt := range manifest.Cases {
+			paths = append(paths, tt.Path)
+		}
 	}
 	sort.Strings(paths)
 	return paths
