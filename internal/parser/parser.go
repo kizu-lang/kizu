@@ -740,12 +740,20 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 	for p.peek.Type != token.Semicolon && precedence < p.peekPrecedence() {
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
-			token.Eq, token.NotEq, token.LT, token.LTE, token.GT, token.GTE:
+			token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
 			p.nextToken()
 			left = p.parseBinaryExpr(left)
 		case token.LParen:
 			p.nextToken()
 			left = p.parseCallExpr(left)
+		case token.LT:
+			if !canTypeApply(left) {
+				p.nextToken()
+				left = p.parseBinaryExpr(left)
+				continue
+			}
+			p.nextToken()
+			left = p.parseTypeApplyExpr(left)
 		case token.Dot:
 			p.nextToken()
 			left = p.parseFieldExpr(left, false)
@@ -963,6 +971,17 @@ func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 	return expr
 }
 
+// parseTypeApplyExpr parses Namespace::Item<T> before a constructor call.
+func (p *Parser) parseTypeApplyExpr(callee ast.Expression) ast.Expression {
+	expr := &ast.TypeApplyExpr{Callee: callee}
+	p.nextToken()
+	expr.TypeArg = p.parseTypeName()
+	if expr.TypeArg == "" || !p.expectTypeClose() {
+		return expr
+	}
+	return expr
+}
+
 // parseArenaNewExpr parses arena<T>().
 func (p *Parser) parseArenaNewExpr() ast.Expression {
 	expr := &ast.ArenaNewExpr{}
@@ -1081,4 +1100,10 @@ func (p *Parser) errorf(format string, args ...any) {
 // startsUpper reports whether name follows the v0 struct literal convention.
 func startsUpper(name string) bool {
 	return len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z'
+}
+
+// canTypeApply reports whether expr may be followed by a constructor type argument.
+func canTypeApply(expr ast.Expression) bool {
+	field, ok := expr.(*ast.FieldExpr)
+	return ok && field.Namespace
 }

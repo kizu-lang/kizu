@@ -1190,7 +1190,8 @@ Low-level concurrency boundary:
 * `std::thread::scoped(io, fn, args...)` は `fn(args...)` の結果を返す
 * v0.1 interpreter では OS thread を作らず同期評価してよい
 * `std::sync::Mutex<T>` は explicit shared-mutable-state wrapper
-* v0.1 の `Mutex<T>` は API 形状を固定し、guard / lock mutation semantics は後続で固める
+* v0.1 の `Mutex<T>` は copy value だけを受け取る
+* guard / lock mutation semantics と non-copy payload は後続で固める
 * `std::atomic::AtomicI64` は v0.1 seq_cst-only
 * v0.1 では atomic ordering parameter を持たない
 * raw pointers cannot cross thread/task/channel/mutex boundaries in safe Kizu

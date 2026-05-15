@@ -83,7 +83,8 @@ v0.1 interpreter は逐次実行でもよいが、API と checker rule は実並
 維持できる形にする。
 
 `std::sync::Mutex<T>` は explicit shared mutable state wrapper とする。
-v0.1 では API 形状を固定し、guard / lock mutation semantics は後続で固める。
+v0.1 では copy value だけを受け取り、API 形状を固定する。
+guard / lock mutation semantics と non-copy payload は後続で固める。
 raw pointer は Mutex に入れられない。
 
 `std::atomic::AtomicI64` は v0.1 では seq_cst-only とする。
