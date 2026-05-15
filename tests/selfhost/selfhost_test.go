@@ -215,6 +215,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	moduleSnapshot := formatModuleGraphSnapshot(singleFileModuleGraphSnapshot())
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
+	typeCheckSnapshot := formatTypeCheckSnapshot(goTypeCheckSnapshot(t, fixture))
 	ownershipSnapshot := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
 	irDumpSnapshot := formatIrDumpSnapshot(goIrDumpSnapshot(t, fixture))
@@ -250,6 +251,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"type snapshot\n" +
 		typeSnapshot +
 		"type snapshot end\n" +
+		"type check snapshot\n" +
+		typeCheckSnapshot +
+		"type check snapshot end\n" +
 		"ownership snapshot\n" +
 		ownershipSnapshot +
 		"ownership snapshot end\n" +
@@ -454,6 +458,29 @@ func TestSelfHostTypeSubsetOracle(t *testing.T) {
 	want := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
 	if got != want {
 		t.Fatalf("self-host type snapshot got %q, want %q", got, want)
+	}
+}
+
+// TestSelfHostTypeCheckOracle compares a selected type pass/fail subset.
+func TestSelfHostTypeCheckOracle(t *testing.T) {
+	cases := []string{
+		"examples/functions.kizu",
+		"examples/negative/std_mem_wrong_type.kizu",
+		"selfhost/fixtures/type_arg_count.kizu",
+		"selfhost/fixtures/type_arg_type.kizu",
+	}
+	for _, path := range cases {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, fixture),
+				"type check snapshot", "type check snapshot end",
+			)
+			want := formatTypeCheckSnapshot(goTypeCheckSnapshot(t, fixture))
+			if got != want {
+				t.Fatalf("self-host type check snapshot got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -1123,6 +1150,36 @@ func normalizeReturnType(returnType string) string {
 
 // formatTypeSnapshot formats function type snapshots as frontend.kizu prints them.
 func formatTypeSnapshot(lines []string) string {
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// goTypeCheckSnapshot returns normalized Go type checker facts.
+func goTypeCheckSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	err := types.New().Check(program)
+	if err == nil {
+		return []string{"status", "pass"}
+	}
+	return []string{"status", "fail", "message", normalizeTypeError(err.Error())}
+}
+
+// normalizeTypeError maps type checker diagnostics into the self-host subset.
+func normalizeTypeError(message string) string {
+	if strings.Contains(message, "equal_bytes") {
+		return "type error: `std::mem::equal_bytes` arg 2 expects []const u8"
+	}
+	if strings.Contains(message, "expects 2 args") {
+		return "type error: call arg count"
+	}
+	if strings.Contains(message, "arg 1 of `take` expects i64") {
+		return "type error: call arg type"
+	}
+	return "type error"
+}
+
+// formatTypeCheckSnapshot formats type checker pass/fail rows.
+func formatTypeCheckSnapshot(lines []string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
