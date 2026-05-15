@@ -3,6 +3,10 @@
 This document defines how the Go compiler and the Kizu self-host compiler stay
 1:1 until the Kizu implementation can replace a production path.
 
+The current completion audit is tracked in
+[`docs/bootstrap-1to1-audit.md`](bootstrap-1to1-audit.md). That audit is the
+source of truth for whether "1:1対応完了" is actually achieved.
+
 ## Phase Oracle Contract
 
 Each compiler phase must expose the same normalized output from Go and Kizu.
