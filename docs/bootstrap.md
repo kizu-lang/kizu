@@ -44,6 +44,14 @@ Backend smoke scope in v0.3:
 - WASM WAT emission remains Go-owned and smoke-tested through `kizu build --target wasm32-wasi`
 - native executable generation is not a v0.3 self-host switch target
 
+Cache ownership in v0.3:
+
+- build cache remains Go-owned until Kizu owns filesystem, hashing, module graph,
+  and artifact layout APIs
+- self-host compiler must keep emitting the cache contract snapshot so a future
+  switch cannot silently drop compiler version, target, input kind, source hash,
+  or stdlib hash inputs
+
 ## Switch Checklist
 
 Before any phase switches from Go to Kizu, all of these must be true:

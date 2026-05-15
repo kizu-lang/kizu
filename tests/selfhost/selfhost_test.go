@@ -209,6 +209,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
 	irDumpSnapshot := formatIrDumpSnapshot(goIrDumpSnapshot(t, fixture))
 	backendSnapshot := formatBackendFingerprints(goBackendFingerprints(t, fixture))
+	cacheSnapshot := formatCacheContractSnapshot()
 	want := "source:simple.kizu\n" +
 		filepath.ToSlash(filepath.Dir(fixture)) + "\n" +
 		"compiler stages\n8\n" +
@@ -245,6 +246,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"backend fingerprint snapshot\n" +
 		backendSnapshot +
 		"backend fingerprint snapshot end\n" +
+		"cache contract snapshot\n" +
+		cacheSnapshot +
+		"cache contract snapshot end\n" +
 		"TokenKind::Fn\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -432,6 +436,19 @@ func TestSelfHostBackendFingerprintOracle(t *testing.T) {
 				t.Fatalf("self-host backend fingerprint got %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// TestSelfHostCacheContractOracle compares the Go-owned cache switch decision.
+func TestSelfHostCacheContractOracle(t *testing.T) {
+	fixture := filepath.Join(repoRoot(t), "examples", "hello.kizu")
+	got := extractMarkedSnapshot(
+		t, runSelfHostFrontend(t, fixture),
+		"cache contract snapshot", "cache contract snapshot end",
+	)
+	want := formatCacheContractSnapshot()
+	if got != want {
+		t.Fatalf("self-host cache contract got %q, want %q", got, want)
 	}
 }
 
@@ -1090,6 +1107,23 @@ func formatBackendFingerprints(fingerprints []backendFingerprint) string {
 			"strings", strconv.Itoa(fingerprint.Strings),
 			"entry", fingerprint.Entry,
 		)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// formatCacheContractSnapshot formats the current Go-owned cache contract.
+func formatCacheContractSnapshot() string {
+	lines := []string{
+		"owner", "go",
+		"switch", "blocked",
+		"required inputs",
+		"compiler version",
+		"target",
+		"input kind",
+		"source hash",
+		"stdlib hash",
+		"positive", "cache hit",
+		"negative", "source changed",
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
