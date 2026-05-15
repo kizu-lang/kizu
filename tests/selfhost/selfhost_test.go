@@ -167,14 +167,17 @@ type irInstrDetail struct {
 }
 
 type backendFingerprint struct {
-	Target    string
-	Status    string
-	Message   string
-	Functions int
-	Names     []string
-	Strings   int
-	Entry     string
-	Lines     []string
+	Target       string
+	Status       string
+	Message      string
+	Functions    int
+	Names        []string
+	Strings      int
+	Instructions int
+	Consts       int
+	Calls        int
+	Entry        string
+	Lines        []string
 }
 
 type moduleGraphSnapshot struct {
@@ -634,6 +637,8 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 func TestSelfHostBackendFingerprintOracle(t *testing.T) {
 	cases := []string{
 		"examples/hello.kizu",
+		"examples/functions.kizu",
+		"examples/arithmetic.kizu",
 		"examples/negative/missing_return.kizu",
 	}
 	for _, path := range cases {
@@ -2111,8 +2116,12 @@ func goLLVMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
 	}
 	return backendFingerprint{
 		Target: "llvm", Status: "pass", Functions: len(module.Functions),
-		Names: backendFunctionNames(module), Strings: countIrStringConstants(module), Entry: "main",
-		Lines: []string{"; Kizu LLVM IR", "define void @main()"},
+		Names: backendFunctionNames(module), Strings: countIrStringConstants(module),
+		Instructions: countBackendInstructions(module),
+		Consts:       countBackendOpcodes(module, "const"),
+		Calls:        countBackendCalls(module),
+		Entry:        "main",
+		Lines:        []string{"; Kizu LLVM IR", "define void @main()"},
 	}
 }
 
@@ -2128,7 +2137,11 @@ func goWASMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
 	}
 	return backendFingerprint{
 		Target: "wasm32-wasi", Status: "pass", Functions: len(module.Functions),
-		Names: backendFunctionNames(module), Strings: countIrStringConstants(module), Entry: "_start",
+		Names: backendFunctionNames(module), Strings: countIrStringConstants(module),
+		Instructions: countBackendInstructions(module),
+		Consts:       countBackendOpcodes(module, "const"),
+		Calls:        countBackendCalls(module),
+		Entry:        "_start",
 		Lines: []string{
 			"import wasi_snapshot_preview1 fd_write",
 			"func _start export _start",
@@ -2143,6 +2156,47 @@ func backendFunctionNames(module *kir.Module) []string {
 		names = append(names, fn.Name)
 	}
 	return names
+}
+
+// countBackendInstructions counts all lowered instructions reaching emitters.
+func countBackendInstructions(module *kir.Module) int {
+	count := 0
+	for _, fn := range module.Functions {
+		for _, block := range fn.Blocks {
+			count += len(block.Instrs)
+		}
+	}
+	return count
+}
+
+// countBackendOpcodes counts one opcode across backend input blocks.
+func countBackendOpcodes(module *kir.Module, opcode string) int {
+	count := 0
+	for _, fn := range module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == opcode {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
+// countBackendCalls counts call-family instructions reaching emitters.
+func countBackendCalls(module *kir.Module) int {
+	count := 0
+	for _, fn := range module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if strings.HasPrefix(instr.Op, "call.") {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }
 
 // countIrStringConstants counts source string constants that reach backend input.
@@ -2177,6 +2231,9 @@ func formatBackendFingerprints(fingerprints []backendFingerprint) string {
 		}
 		lines = append(lines,
 			"strings", strconv.Itoa(fingerprint.Strings),
+			"instructions", strconv.Itoa(fingerprint.Instructions),
+			"consts", strconv.Itoa(fingerprint.Consts),
+			"calls", strconv.Itoa(fingerprint.Calls),
 			"entry", fingerprint.Entry,
 			"lines", strconv.Itoa(len(fingerprint.Lines)),
 		)
