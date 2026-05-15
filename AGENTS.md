@@ -56,6 +56,9 @@ Markdown の phase TODO 文書は使いません。
 Kizu 固有の Codex skill は `.codex/skills/kizu-language-design/` を正として管理します。
 言語設計、stdlib、self-host、memory-safety の判断では、この skill の方針を参照してください。
 
+stdlib API の現状整理と Kizu 製 std への移行方針は `docs/stdlib.md` を参照してください。
+新しい `std::...` builtin を追加する場合は、同じ変更で registry、examples、conformance を更新してください。
+
 開発は branch / Pull Request ベースで進めます。
 `main` への直接 commit / push は行わないでください。
 
