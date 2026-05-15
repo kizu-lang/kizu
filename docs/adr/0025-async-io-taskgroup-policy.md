@@ -62,11 +62,11 @@ std::task::parallel_map   disjoint partition output
 std::channel::Channel<T>  owned message passing
 std::thread::scoped       scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
-std::atomic::AtomicI64    seq_cst-only atomic integer
+std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
 ```
 
-`std::thread::scoped`、`std::atomic::AtomicI64`、`std::sync::Mutex<T>` は必要だが、
+`std::thread::scoped`、`std::atomic::Atomic<T>`、`std::sync::Mutex<T>` は必要だが、
 v0.1 では safe structured API の境界を固定するための API として扱う。
 ユーザーに raw thread sharing を中心に書かせない。
 
@@ -87,7 +87,8 @@ v0.1 では copy value だけを受け取り、API 形状を固定する。
 guard / lock mutation semantics と non-copy payload は後続で固める。
 raw pointer は Mutex に入れられない。
 
-`std::atomic::AtomicI64` は v0.1 では seq_cst-only とする。
+`std::atomic::Atomic<T>` は v0.1 では seq_cst-only とする。
+対応する `T` は `bool` と `i64` に限定する。
 memory order を細かく選ぶ API は、safe structured API が固まった後に追加する。
 
 Rust の `Send` trait は採用しない。

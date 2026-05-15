@@ -134,7 +134,8 @@ policy.
 - `std::sync::Mutex<T>` is the explicit shared-mutable-state wrapper.
 - `Mutex<T>` accepts copy values only in v0.1; guard mutation and non-copy
   payloads are future work.
-- `std::atomic::AtomicI64` is seq_cst-only in v0.1.
+- `std::atomic::Atomic<T>` is seq_cst-only in v0.1.
+- `Atomic<T>` supports `bool` and `i64` in v0.1.
 - Kizu does not adopt Rust `Send`; boundary-crossing types are explicit checker
   rules.
 - Copy primitives and owned values may cross concurrency boundaries.
@@ -219,7 +220,7 @@ memory-safety invariants to representative examples.
 | structured data parallelism uses disjoint output | `examples/parallel_for.kizu` | `examples/negative/parallel_shared_mutable.kizu`, `examples/negative/parallel_map_wrong_worker.kizu`, `examples/negative/partition_mut_non_i64.kizu` |
 | partition bounds are checked | `examples/parallel_for.kizu` | `examples/negative/partition_index_out_of_bounds.kizu`, `examples/negative/parallel_map_out_of_bounds.kizu` |
 | scoped thread boundary rejects borrows and raw pointers | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu` |
-| `AtomicI64` is i64-only and seq_cst-only | `examples/thread_boundary.kizu` | `examples/negative/atomic_store_wrong_type.kizu`, `examples/negative/atomic_old_name.kizu` |
+| `Atomic<T>` is bool/i64-only and seq_cst-only | `examples/thread_boundary.kizu`, `examples/atomic_flag.kizu` | `examples/negative/atomic_store_wrong_type.kizu`, `examples/negative/atomic_old_name.kizu`, `examples/negative/atomic_untyped_constructor.kizu`, `examples/negative/atomic_unsupported_type.kizu` |
 | `Mutex<T>` rejects raw pointer and non-copy/non-matching payloads | `examples/thread_boundary.kizu` | `examples/negative/mutex_pointer.kizu`, `examples/negative/mutex_wrong_type.kizu`, `examples/negative/mutex_non_copy.kizu`, `examples/negative/mutex_untyped_constructor.kizu` |
 
 ## Release Gate

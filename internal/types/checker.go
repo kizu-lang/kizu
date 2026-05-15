@@ -39,7 +39,6 @@ var knownTypes = map[Type]bool{
 	"Queue":        true,
 	"Partition":    true,
 	"LocalBuffer":  true,
-	"AtomicI64":    true,
 }
 
 var numericTypes = map[Type]bool{
@@ -502,7 +501,7 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 		return Type(name), nil
 	}
 	if base != "arena" && base != "handle" && base != "option" && base != "Task" &&
-		base != "Channel" && base != "Mutex" {
+		base != "Channel" && base != "Mutex" && base != "Atomic" {
 		return "", fmt.Errorf("type error: unknown generic type `%s`", base)
 	}
 	if _, err := c.parseType(arg); err != nil {
@@ -1279,8 +1278,10 @@ func (c *Checker) checkQualifiedBuiltin(
 		return c.checkParallelMap(args, env, unsafe)
 	case "std.thread.scoped":
 		return c.checkThreadScoped(args, env, unsafe)
+	case "std.atomic.Atomic":
+		return "", true, fmt.Errorf("type error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
-		return c.checkAtomic(args, env, unsafe)
+		return "", true, fmt.Errorf("type error: use `std::atomic::Atomic<i64>(value)`")
 	case "std.sync.Mutex":
 		return "", true, fmt.Errorf("type error: use `std::sync::Mutex<T>(value)`")
 	default:
@@ -1306,6 +1307,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 	switch name {
 	case "std.channel.Channel":
 		return checkNoArgConstructor(name, args, Type(fmt.Sprintf("Channel<%s>", arg)))
+	case "std.atomic.Atomic":
+		typ, _, err := c.checkAtomic(arg, args, env, unsafe)
+		return typ, err
 	case "std.sync.Mutex":
 		typ, _, err := c.checkMutex(arg, args, env, unsafe)
 		return typ, err
@@ -1639,6 +1643,9 @@ func (c *Checker) checkConcurrencyMethod(
 		case "Mutex":
 			typ, err := c.checkMutexMethod(Type(arg), name, args)
 			return typ, true, err
+		case "Atomic":
+			typ, err := c.checkAtomicMethod(Type(arg), name, args, env, unsafe)
+			return typ, true, err
 		}
 	}
 	switch receiver {
@@ -1650,9 +1657,6 @@ func (c *Checker) checkConcurrencyMethod(
 		return typ, true, err
 	case "LocalBuffer":
 		typ, err := c.checkLocalBufferMethod(name, args, env, unsafe)
-		return typ, true, err
-	case "AtomicI64":
-		typ, err := c.checkAtomicMethod(name, args, env, unsafe)
 		return typ, true, err
 	default:
 		return "", false, nil
@@ -1875,6 +1879,7 @@ func (c *Checker) checkLocalBufferMethod(
 
 // checkAtomicMethod validates seq_cst-only atomic operations.
 func (c *Checker) checkAtomicMethod(
+	elem Type,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -1885,7 +1890,7 @@ func (c *Checker) checkAtomicMethod(
 		if len(args) != 0 {
 			return "", fmt.Errorf("type error: `atomic.load` expects 0 args, got %d", len(args))
 		}
-		return typeI64, nil
+		return elem, nil
 	case "store":
 		if len(args) != 1 {
 			return "", fmt.Errorf("type error: `atomic.store` expects 1 arg, got %d", len(args))
@@ -1894,8 +1899,8 @@ func (c *Checker) checkAtomicMethod(
 		if err != nil {
 			return "", err
 		}
-		if got != typeI64 {
-			return "", fmt.Errorf("type error: `atomic.store` expects i64, got %s", got)
+		if got != elem {
+			return "", fmt.Errorf("type error: `atomic.store` expects %s, got %s", elem, got)
 		}
 		return typeVoid, nil
 	default:
@@ -2060,19 +2065,28 @@ func (c *Checker) checkThreadScoped(
 	return c.checkThreadScopedArgs(target.Name, fn, args[2:], env, unsafe)
 }
 
-// checkAtomic validates the v0.1 seq_cst integer atomic constructor.
-func (c *Checker) checkAtomic(args []ast.Expression, env *scope, unsafe bool) (Type, bool, error) {
+// checkAtomic validates the v0.1 seq_cst atomic constructor.
+func (c *Checker) checkAtomic(
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if !isAtomicSupportedType(elem) {
+		return "", true, fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", elem)
+	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::atomic::AtomicI64` expects 1 arg")
+		return "", true, fmt.Errorf("type error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
-	if got != typeI64 {
-		return "", true, fmt.Errorf("type error: `std::atomic::AtomicI64` expects i64, got %s", got)
+	if got != elem {
+		return "", true, fmt.Errorf("type error: `std::atomic::Atomic<%s>` expects %s, got %s",
+			elem, elem, got)
 	}
-	return "AtomicI64", true, nil
+	return Type(fmt.Sprintf("Atomic<%s>", elem)), true, nil
 }
 
 // checkMutex validates an explicit synchronized ownership wrapper.
@@ -2307,6 +2321,11 @@ func (c *Checker) isCopyType(typ Type) bool {
 		return true
 	}
 	return copyTypes[typ]
+}
+
+// isAtomicSupportedType reports whether Atomic<T> is available in v0.1.
+func isAtomicSupportedType(typ Type) bool {
+	return typ == typeBool || typ == typeI64
 }
 
 // checkNoArgConstructor validates a zero-argument builtin constructor.

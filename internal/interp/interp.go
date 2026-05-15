@@ -842,9 +842,10 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	case "std.thread.scoped":
 		value, err := i.evalThreadScoped(args, env)
 		return value, true, err
+	case "std.atomic.Atomic":
+		return errorUnionValue("use std::atomic::Atomic<T>(value)"), true, nil
 	case "std.atomic.AtomicI64":
-		value, err := i.evalAtomic(args, env)
-		return value, true, err
+		return errorUnionValue("use std::atomic::Atomic<i64>(value)"), true, nil
 	case "std.sync.Mutex":
 		return errorUnionValue("use std::sync::Mutex<T>(value)"), true, nil
 	default:
@@ -865,6 +866,8 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	switch name {
 	case "std.channel.Channel":
 		return callChannelFromExprs(expr.TypeArg, args), nil
+	case "std.atomic.Atomic":
+		return i.evalAtomic(expr.TypeArg, args, env)
 	case "std.sync.Mutex":
 		return i.evalMutex(expr.TypeArg, args, env)
 	default:
@@ -1254,19 +1257,39 @@ func (i *Interpreter) evalThreadScoped(args []ast.Expression, env *Env) (Value, 
 	return i.callFunction(target.Name, values)
 }
 
-// evalAtomic constructs a seq_cst integer atomic value.
-func (i *Interpreter) evalAtomic(args []ast.Expression, env *Env) (Value, error) {
+// evalAtomic constructs a seq_cst primitive atomic value.
+func (i *Interpreter) evalAtomic(typeArg string, args []ast.Expression, env *Env) (Value, error) {
+	if !isRuntimeAtomicSupportedType(typeArg) {
+		return voidValue(), fmt.Errorf("runtime error: unsupported atomic type `%s` in v0.1", typeArg)
+	}
 	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: std::atomic::AtomicI64 expects 1 arg")
+		return voidValue(), fmt.Errorf("runtime error: std::atomic::Atomic<%s> expects 1 arg", typeArg)
 	}
 	value, err := i.evalExpr(args[0], env)
 	if err != nil {
 		return voidValue(), err
 	}
-	if value.kind != kindInt {
-		return voidValue(), fmt.Errorf("runtime error: AtomicI64 expects i64")
+	if !runtimeValueMatchesType(value, typeArg) {
+		return voidValue(), fmt.Errorf("runtime error: Atomic<%s> expects %s", typeArg, typeArg)
 	}
-	return atomicValue(value.i), nil
+	return atomicValue(typeArg, value), nil
+}
+
+// isRuntimeAtomicSupportedType reports whether Atomic<T> can run in v0.1.
+func isRuntimeAtomicSupportedType(typeName string) bool {
+	return typeName == "bool" || typeName == "i64"
+}
+
+// runtimeValueMatchesType checks primitive values used by typed runtime containers.
+func runtimeValueMatchesType(value Value, typeName string) bool {
+	switch typeName {
+	case "bool":
+		return value.kind == kindBool
+	case "i64":
+		return value.kind == kindInt
+	default:
+		return false
+	}
 }
 
 // evalMutex constructs a synchronous protected value.
@@ -1427,7 +1450,7 @@ func (i *Interpreter) evalAtomicMethod(
 		if len(args) != 0 {
 			return voidValue(), fmt.Errorf("runtime error: atomic.load expects 0 args")
 		}
-		return intValue(atomic.atomic.value), nil
+		return atomic.atomic.value, nil
 	case "store":
 		if len(args) != 1 {
 			return voidValue(), fmt.Errorf("runtime error: atomic.store expects 1 arg")
@@ -1436,10 +1459,10 @@ func (i *Interpreter) evalAtomicMethod(
 		if err != nil {
 			return voidValue(), err
 		}
-		if value.kind != kindInt {
-			return voidValue(), fmt.Errorf("runtime error: atomic.store expects i64")
+		if !runtimeValueMatchesType(value, atomic.typeName) {
+			return voidValue(), fmt.Errorf("runtime error: atomic.store expects %s", atomic.typeName)
 		}
-		atomic.atomic.value = value.i
+		atomic.atomic.value = value
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Atomic has no method `%s`", name)

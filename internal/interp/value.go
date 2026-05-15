@@ -108,9 +108,9 @@ type LocalBuffer struct {
 	values []Value
 }
 
-// Atomic stores one integer with seq_cst-only semantics in v0.1.
+// Atomic stores one primitive value with seq_cst-only semantics in v0.1.
 type Atomic struct {
-	value int64
+	value Value
 }
 
 // Mutex stores one protected value for the v0.1 synchronous model.
@@ -320,9 +320,9 @@ func localBufferValue(count int64, init Value) Value {
 	return Value{kind: kindLocalBuffer, localBuf: LocalBuffer{values: values}}
 }
 
-// atomicValue returns a seq_cst integer atomic value.
-func atomicValue(value int64) Value {
-	return Value{kind: kindAtomic, atomic: &Atomic{value: value}}
+// atomicValue returns a seq_cst primitive atomic value.
+func atomicValue(typeName string, value Value) Value {
+	return Value{kind: kindAtomic, typeName: typeName, atomic: &Atomic{value: value}}
 }
 
 // mutexValue returns a protected synchronous value.

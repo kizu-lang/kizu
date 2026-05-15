@@ -41,7 +41,7 @@ Implemented language-core pieces:
 - `std::channel::Channel<T>` owned message passing
 - `std::task::Queue` deterministic deferred task queue
 - `std::task::parallel_for` and `std::task::parallel_map` safe data-parallel prototypes
-- scoped thread, `AtomicI64`, and `Mutex<T>` boundary prototypes
+- scoped thread, `Atomic<T>`, and `Mutex<T>` boundary prototypes
 - `contract`, `satisfy`, and `&Dyn<Contract>`
 
 Experimental compiler and tooling pieces:
