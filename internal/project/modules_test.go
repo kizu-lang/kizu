@@ -3,48 +3,81 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/kizu-lang/kizu/internal/lexer"
-	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/ownership"
+	"github.com/kizu-lang/kizu/internal/types"
 )
 
-// TestModuleConformanceFixture resolves and parses the basic multi-file fixture.
+// TestModuleConformanceFixture resolves, parses, and checks the basic fixture.
 func TestModuleConformanceFixture(t *testing.T) {
 	root := filepath.Join("..", "..", "tests", "conformance", "modules", "basic")
-	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
+	pkg, err := LoadPackage(root)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("load failed: %v", err)
 	}
-	manifest, err := ParseManifest(string(source))
-	if err != nil {
-		t.Fatalf("parse manifest failed: %v", err)
-	}
-	graph, err := ResolveModules(root, manifest)
-	if err != nil {
-		t.Fatalf("resolve failed: %v", err)
-	}
-	got := modulePaths(graph.Modules)
+	got := parsedModulePaths(pkg.Modules)
 	want := []string{"app", "app::lexer", "app::parser::ast"}
 	if !sameStrings(got, want) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
-	for _, module := range graph.Modules {
-		parseConformanceModule(t, module)
+	for _, module := range pkg.Modules {
+		checkParsedModule(t, module)
 	}
 }
 
-// parseConformanceModule checks that one fixture source is valid Kizu syntax.
-func parseConformanceModule(t *testing.T, module Module) {
+// TestResolvePackageRejectsMissingImport checks unknown module imports.
+func TestResolvePackageRejectsMissingImport(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu": `import app::missing;
+fn main() -> void { return; }`,
+	})
+	_, err := LoadPackage(root)
+	requireErrorContains(t, err, "missing module `app::missing`")
+}
+
+// TestResolvePackageRejectsDuplicateImportName checks same last-segment imports.
+func TestResolvePackageRejectsDuplicateImportName(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu": `import app::left::ast;
+import app::right::ast;
+fn main() -> void { return; }`,
+		"src/left/ast.kizu":  `pub fn left() -> void { return; }`,
+		"src/right/ast.kizu": `pub fn right() -> void { return; }`,
+	})
+	_, err := LoadPackage(root)
+	requireErrorContains(t, err, "imports `app::left::ast` and `app::right::ast` as `ast`")
+}
+
+// TestResolvePackageRejectsImportCycles checks direct import cycles.
+func TestResolvePackageRejectsImportCycles(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu":  `import app::lexer; fn main() -> void { return; }`,
+		"src/lexer.kizu": `import app; pub fn lex() -> void { return; }`,
+	})
+	_, err := LoadPackage(root)
+	requireErrorContains(t, err, "cyclic import")
+}
+
+// TestResolvePackageRejectsImportShadowing checks declaration/import name clashes.
+func TestResolvePackageRejectsImportShadowing(t *testing.T) {
+	root := packageFixture(t, map[string]string{
+		"src/main.kizu":  `import app::lexer; fn lexer() -> void { return; }`,
+		"src/lexer.kizu": `pub fn lex() -> void { return; }`,
+	})
+	_, err := LoadPackage(root)
+	requireErrorContains(t, err, "shadows an import")
+}
+
+// checkParsedModule runs static checks for one parsed module.
+func checkParsedModule(t *testing.T, module ParsedModule) {
 	t.Helper()
-	source, err := os.ReadFile(module.File)
-	if err != nil {
-		t.Fatal(err)
+	if err := types.New().Check(module.Program); err != nil {
+		t.Fatalf("type check failed in %s: %v", module.Module.Path, err)
 	}
-	p := parser.New(lexer.New(string(source)))
-	p.ParseProgram()
-	if len(p.Errors()) != 0 {
-		t.Fatalf("parser errors in %s: %v", module.Path, p.Errors())
+	if err := ownership.New().Check(module.Program); err != nil {
+		t.Fatalf("ownership check failed in %s: %v", module.Module.Path, err)
 	}
 }
 
@@ -100,6 +133,36 @@ func writeFile(t *testing.T, root string, rel string) {
 	}
 }
 
+// packageFixture creates a manifest package with the supplied source files.
+func packageFixture(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	writeTextFile(t, root, "kizu.toml", `[package]
+name = "app"
+version = "0.3.0"
+
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+`)
+	for rel, source := range files {
+		writeTextFile(t, root, rel, source)
+	}
+	return root
+}
+
+// writeTextFile creates a source file with content under root.
+func writeTextFile(t *testing.T, root string, rel string, source string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // modulePaths returns only module path strings.
 func modulePaths(modules []Module) []string {
 	paths := make([]string, 0, len(modules))
@@ -107,6 +170,26 @@ func modulePaths(modules []Module) []string {
 		paths = append(paths, module.Path)
 	}
 	return paths
+}
+
+// parsedModulePaths returns only parsed module path strings.
+func parsedModulePaths(modules []ParsedModule) []string {
+	paths := make([]string, 0, len(modules))
+	for _, module := range modules {
+		paths = append(paths, module.Module.Path)
+	}
+	return paths
+}
+
+// requireErrorContains checks the error includes a stable diagnostic fragment.
+func requireErrorContains(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error containing %q", want)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("got error %q, want substring %q", err, want)
+	}
 }
 
 // sameStrings reports whether two string slices match exactly.

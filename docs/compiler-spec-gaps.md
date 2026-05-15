@@ -107,8 +107,6 @@ tests, and self-check/build.
 
 ## Implementation Work Still Needed
 
-- Connect parsed imports to multi-file checking: #88.
-- Add resolver phase between parser and type checker: #88.
 - Enforce visibility across module boundaries: #89.
 - Preserve byte spans and file IDs through compiler phases: #89.
 - Render multi-file diagnostics: #89.
@@ -128,6 +126,12 @@ tests, and self-check/build.
 - Multi-file module conformance fixture at `tests/conformance/modules/basic`.
 - Go project tests resolve the module fixture graph and parse every fixture
   source file.
+- Resolver phase parses package modules, validates explicit imports, rejects
+  missing imports, same-name import collisions, import shadowing, and cycles.
+- `kizu check <package-dir>` and `kizu check <package-dir>/kizu.toml` run
+  multi-file package smoke checks.
+- The self-host frontend can read the module fixture source path through the
+  same explicit `std::fs` / `std::path` / `std::process` APIs.
 
 ## Postponed
 

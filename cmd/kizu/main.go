@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -14,6 +15,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/llvm"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/types"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
@@ -118,6 +120,9 @@ func runFile(path string, args []string) error {
 
 // checkFile parses a source file and runs static checks.
 func checkFile(path string) error {
+	if packageTarget(path) {
+		return checkPackageTarget(path)
+	}
 	program, errs, err := parsePath(path)
 	if err != nil {
 		return err
@@ -130,6 +135,34 @@ func checkFile(path string) error {
 	}
 	if err := checkProgram(program); err != nil {
 		return err
+	}
+	_, _ = fmt.Println("check: ok")
+	return nil
+}
+
+// packageTarget reports whether path names a package directory or manifest.
+func packageTarget(path string) bool {
+	info, err := os.Stat(path)
+	if err == nil && info.IsDir() {
+		return true
+	}
+	return filepath.Base(path) == "kizu.toml"
+}
+
+// checkPackageTarget resolves a package and runs per-module static checks.
+func checkPackageTarget(path string) error {
+	baseDir := path
+	if filepath.Base(path) == "kizu.toml" {
+		baseDir = filepath.Dir(path)
+	}
+	pkg, err := project.LoadPackage(baseDir)
+	if err != nil {
+		return err
+	}
+	for _, module := range pkg.Modules {
+		if err := checkProgram(module.Program); err != nil {
+			return fmt.Errorf("%s: %w", module.Module.Path, err)
+		}
 	}
 	_, _ = fmt.Println("check: ok")
 	return nil
