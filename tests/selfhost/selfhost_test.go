@@ -555,8 +555,15 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/field_borrow_owner_move.kizu",
 		"examples/negative/field_borrow_same_field_assignment.kizu",
 		"examples/negative/borrow_escape.kizu",
+		"examples/negative/borrow_field.kizu",
 		"examples/negative/borrow_local_alias.kizu",
 		"examples/negative/borrow_to_owner.kizu",
+		"examples/negative/borrow_deref_move.kizu",
+		"examples/negative/mut_borrow_conflict.kizu",
+		"examples/negative/mut_borrow_deref_move.kizu",
+		"examples/negative/mut_borrow_immutable.kizu",
+		"examples/negative/nested_field_borrow.kizu",
+		"examples/negative/shared_borrow_assignment.kizu",
 		"examples/negative/unsafe_borrow_escape.kizu",
 	}
 	for _, path := range cases {
@@ -639,8 +646,12 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/field_borrow_owner_move.kizu",
 		"examples/negative/field_borrow_same_field_assignment.kizu",
 		"examples/negative/borrow_escape.kizu",
+		"examples/negative/borrow_field.kizu",
 		"examples/negative/borrow_local_alias.kizu",
 		"examples/negative/borrow_to_owner.kizu",
+		"examples/negative/borrow_deref_move.kizu",
+		"examples/negative/mut_borrow_conflict.kizu",
+		"examples/negative/mut_borrow_deref_move.kizu",
 		"examples/negative/unsafe_borrow_escape.kizu",
 	}
 	for _, path := range cases {
@@ -1041,6 +1052,22 @@ func goTypeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 		tok := tokenWithLiteral(t, path, "no")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: call arg type", tok, tok)}
 	}
+	if strings.Contains(slashPath, "nested_field_borrow") {
+		tok := tokenWithLiteralOccurrence(t, path, "profile", 3)
+		return []diagnosticSnapshot{diagnosticFromToken("type error: nested field borrow", tok, tok)}
+	}
+	if strings.Contains(slashPath, "mut_borrow_immutable") {
+		tok := lastTokenWithLiteral(t, path, "user")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: &mut argument must be mutable", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "shared_borrow_assignment") {
+		tok := tokenWithLiteralOccurrence(t, path, "user", 2)
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: shared borrow is not mutable", tok, tok),
+		}
+	}
 	if !strings.Contains(slashPath, "std_mem_wrong_type") {
 		return nil
 	}
@@ -1097,9 +1124,13 @@ func ownershipDiagnosticFixtures() []string {
 		"borrow_loop_last_use",
 		"field_borrow_owner_move",
 		"field_borrow_same_field_assignment",
+		"borrow_field",
 		"borrow_escape",
 		"borrow_local_alias",
 		"borrow_to_owner",
+		"borrow_deref_move",
+		"mut_borrow_conflict",
+		"mut_borrow_deref_move",
 		"unsafe_borrow_escape",
 		"move_while_borrowed",
 	}
@@ -1190,6 +1221,27 @@ func tokenWithLiteral(t *testing.T, path string, literal string) token.Token {
 		}
 	}
 	t.Fatalf("literal %q was not found in %s", literal, path)
+	return token.Token{}
+}
+
+// tokenWithLiteralOccurrence returns a one-based token occurrence for a literal.
+func tokenWithLiteralOccurrence(
+	t *testing.T,
+	path string,
+	literal string,
+	occurrence int,
+) token.Token {
+	t.Helper()
+	found := 0
+	for _, tok := range goTokens(t, path) {
+		if tok.Literal == literal {
+			found++
+			if found == occurrence {
+				return tok
+			}
+		}
+	}
+	t.Fatalf("literal %q occurrence %d was not found in %s", literal, occurrence, path)
 	return token.Token{}
 }
 
@@ -2032,6 +2084,15 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	if err == nil {
 		return ownershipSnapshot{Status: "pass", PrimaryStart: -1, RelatedStart: -1}
 	}
+	if strings.Contains(err.Error(), "cannot store borrow") {
+		return structBorrowFieldOwnershipSnapshot(t, path)
+	}
+	if strings.Contains(err.Error(), "cannot be moved out of borrow") {
+		return borrowedDerefMoveOwnershipSnapshot(t, path, err.Error())
+	}
+	if strings.Contains(err.Error(), "cannot be mutably borrowed while borrowed") {
+		return mutableBorrowConflictOwnershipSnapshot(t, path, err.Error())
+	}
 	if strings.Contains(err.Error(), "cannot be assigned while borrowed") {
 		return fieldBorrowAssignmentOwnershipSnapshot(t, path, err.Error())
 	}
@@ -2042,6 +2103,48 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	primary, related := movedValueSpans(t, path, value)
 	return ownershipSnapshot{
 		Status: "fail", Message: "move error: moved value was used",
+		Value: value, PrimaryStart: primary, RelatedStart: related,
+	}
+}
+
+// structBorrowFieldOwnershipSnapshot normalizes struct borrow-storage diagnostics.
+func structBorrowFieldOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
+	t.Helper()
+	field := tokenWithLiteral(t, path, "value")
+	typeName := tokenWithLiteral(t, path, "Bad")
+	return ownershipSnapshot{
+		Status: "fail", Message: "borrow error: struct field cannot store borrow",
+		Value: "value", PrimaryStart: field.Start, RelatedStart: typeName.Start,
+	}
+}
+
+// borrowedDerefMoveOwnershipSnapshot normalizes moving a value through a borrow.
+func borrowedDerefMoveOwnershipSnapshot(
+	t *testing.T,
+	path string,
+	message string,
+) ownershipSnapshot {
+	t.Helper()
+	value := movedValueFromDiagnostic(t, message)
+	related := tokenWithLiteralOccurrence(t, path, value, 1)
+	primary := tokenWithLiteralOccurrence(t, path, value, 2)
+	return ownershipSnapshot{
+		Status: "fail", Message: "borrow error: value cannot be moved out of borrow",
+		Value: value, PrimaryStart: primary.Start, RelatedStart: related.Start,
+	}
+}
+
+// mutableBorrowConflictOwnershipSnapshot normalizes overlapping & and &mut args.
+func mutableBorrowConflictOwnershipSnapshot(
+	t *testing.T,
+	path string,
+	message string,
+) ownershipSnapshot {
+	t.Helper()
+	value := movedValueFromDiagnostic(t, message)
+	primary, related := lastTwoValueSpans(t, path, value)
+	return ownershipSnapshot{
+		Status: "fail", Message: "borrow error: value cannot be mutably borrowed while borrowed",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
 	}
 }
@@ -2086,6 +2189,22 @@ func fieldBorrowOwnerFromDiagnostic(t *testing.T, message string) string {
 		t.Fatalf("field borrow diagnostic has no owner terminator: %q", message)
 	}
 	return rest[:end]
+}
+
+// lastTwoValueSpans returns the final two occurrences of one identifier.
+func lastTwoValueSpans(t *testing.T, path string, value string) (int, int) {
+	t.Helper()
+	tokens := goSelfHostTokenSnapshots(t, path)
+	positions := []int{}
+	for _, tok := range tokens {
+		if tok.Kind == "TokenKind::Ident" && tok.Literal == value {
+			positions = append(positions, tok.Start)
+		}
+	}
+	if len(positions) < 2 {
+		t.Fatalf("could not find final value spans for %q in %s", value, path)
+	}
+	return positions[len(positions)-1], positions[len(positions)-2]
 }
 
 // movedValueFromDiagnostic extracts the identifier from a moved-value diagnostic.
