@@ -91,7 +91,7 @@ blocking / threaded の違いは呼び出し側が選んだ `Io` と `TaskGroup`
 `std::task::parallel_map(io, partition, start, end, worker)` に閉じ込める。
 worker-local scratch は `std::task::LocalBuffer` のような trusted std API に閉じ込める。
 collection / mutable slice への直接接続は v0.1 では行わず、ADR-0040 に従って
-`std.mem` と `array<T>` の仕様後に設計する。
+`std::mem` と `std::array::Array<T>` の仕様後に設計する。
 v0.1 interpreter は逐次実行でもよいが、API と checker rule は実並行 runtime でも
 維持できる形にする。
 

@@ -42,6 +42,9 @@ v0.1 の中心は以下です。
 active work は GitHub Issues を正として管理します。
 Markdown の phase TODO 文書は使いません。
 
+Kizu 固有の Codex skill は `.codex/skills/kizu-language-design/` を正として管理します。
+言語設計、stdlib、self-host、memory-safety の判断では、この skill の方針を参照してください。
+
 開発は branch / Pull Request ベースで進めます。
 `main` への直接 commit / push は行わないでください。
 
@@ -80,6 +83,11 @@ tests
 
 日常コマンドは `justfile` にまとめています。利用可能な recipe は `just --list` で確認してください。
 特に build/cache 性能確認は `just perf`、`just perf-cache`、`just cache-smoke` を使ってください。
+
+Kizu は target / build cache が無制限に肥大化する設計を避けます。compiler、backend、
+stdlib、test、CI に関わる変更では、build time、cache size、no-op rebuild、CI 実行時間への
+影響を常に確認し、悪化があり得る場合は `docs/perf.md` または対象 Issue の受け入れ条件に
+測定方法を明記してください。
 
 commit 前に次を通してください。
 
