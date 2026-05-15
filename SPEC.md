@@ -203,6 +203,25 @@ kizu.toml
 kizu.lock
 ```
 
+`kizu.toml` は宣言的な TOML manifest です。
+build script、plugin、条件分岐、実行可能な設定は書けません。
+
+最小形式:
+
+```toml
+[package]
+name = "app"
+version = "0.1.0"
+
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+```
+
+`package.name` は user module の root namespace になります。
+たとえば `name = "app"` の package では、`src/lexer.kizu` を
+`app::lexer` として import します。
+
 ## 4. 設計概要
 
 Kizu の値は、基本的に1つの所有者を持ちます。
@@ -327,7 +346,68 @@ let handle = users.add(user);
 `Color.Red` や `Shape.Circle(10)` のような dot による enum / union lookup は
 compile error です。互換構文としては扱いません。
 
-### 6.6 enum
+### 6.6 import と visibility
+
+Kizu の user module は明示 import します。
+
+```kizu
+import app::lexer;
+import app::parser::ast;
+
+pub fn main() -> void {
+    let tokens = try lexer::lex("fn main() -> void { return void; }");
+    return void;
+}
+```
+
+import は top-level にだけ書けます。
+wildcard import、relative import、re-export、alias import は v0.2/v0.3 では扱いません。
+cyclic import は compile error です。
+
+import した module は最後の segment 名で参照します。
+
+```kizu
+import app::compiler::lexer;
+
+let tokens = try lexer::lex(source);
+```
+
+`std::...` は標準ライブラリ namespace として import なしで使えます。
+
+visibility は default private です。
+
+```kizu
+pub struct Token {
+    pub kind: TokenKind;
+    pub start: i64;
+    pub end: i64;
+}
+
+enum TokenKind {
+    Ident
+    Number
+    Eof
+}
+
+pub fn lex(source: []const u8) -> !std::array::Array<Token> {
+    return lex_source(source);
+}
+
+fn lex_source(source: []const u8) -> !std::array::Array<Token> {
+    ...
+}
+```
+
+ルール:
+
+* top-level declaration は default private
+* 外部 module に見せる top-level declaration には `pub` を付ける
+* struct field は default private
+* 外部 module に見せる field には `pub` を付ける
+* `pub` な enum の tag と `pub` な union の variant は外部から使える
+* `pub(crate)`、`pub(super)`、`protected` は v0.2/v0.3 では採用しない
+
+### 6.7 enum
 
 Kizu の `enum` は Zig/C 寄りの tag enum です。
 Rust の payload enum / algebraic data type とは分けます。
@@ -351,7 +431,7 @@ let color = Color::Red;
 payload を持つ sum type は `enum` では扱いません。
 `union` として別機能で扱います。
 
-### 6.7 union
+### 6.8 union
 
 Kizu の `union` は payload を持てる tagged union です。
 tag だけの値が必要な場合は `enum` を使います。
@@ -389,7 +469,7 @@ v0.1 の `union` は次に限定します。
 * destructuring は payload binding 1つだけ
 * `match` は exhaustive でなければならない
 
-### 6.8 if
+### 6.9 if
 
 Kizu v0.1 の `if` は statement と expression の両方で使えます。
 
@@ -415,7 +495,7 @@ let level = if age >= 20 {
 両 branch の value type は一致しなければなりません。
 branch 内で move された値は、`if` expression の外側でも moved として扱います。
 
-### 6.9 while
+### 6.10 while
 
 ```kizu
 while i < 10 {
@@ -444,7 +524,7 @@ outer: while i < 10 {
 }
 ```
 
-### 6.10 for
+### 6.11 for
 
 v0.1 の `for` は、i64 の half-open range に限定します。
 終了値は含みません。
@@ -457,7 +537,7 @@ for 0..3 |i| {
 
 v0.1 では iterator protocol、collection iteration、`inline for` は扱いません。
 
-### 6.11 match
+### 6.12 match
 
 v0.1 の `match` は、単純な enum value と tagged union value を分岐する用途に限定します。
 

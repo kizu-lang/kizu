@@ -90,6 +90,8 @@ examples and negative safety-rule examples. The machine-readable conformance
 manifest is [tests/conformance/v0_1.json](tests/conformance/v0_1.json).
 The safe-code memory-safety contract is documented in
 [docs/memory-safety.md](docs/memory-safety.md).
+Open compiler specification gaps are tracked in
+[docs/compiler-spec-gaps.md](docs/compiler-spec-gaps.md).
 
 ## Development Environment
 
