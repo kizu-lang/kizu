@@ -624,6 +624,13 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/double_move.kizu",
 		"examples/negative/assignment_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
+		"examples/negative/borrow_before_last_use_move.kizu",
+		"examples/negative/borrow_loop_last_use.kizu",
+		"examples/negative/field_borrow_owner_move.kizu",
+		"examples/negative/borrow_escape.kizu",
+		"examples/negative/borrow_local_alias.kizu",
+		"examples/negative/borrow_to_owner.kizu",
+		"examples/negative/unsafe_borrow_escape.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -1055,6 +1062,13 @@ func isOwnershipDiagnosticFixture(path string) bool {
 		strings.Contains(slashPath, "if_branch_partial_move") ||
 		strings.Contains(slashPath, "while_body_move") ||
 		strings.Contains(slashPath, "unsafe_moved_value") ||
+		strings.Contains(slashPath, "borrow_before_last_use_move") ||
+		strings.Contains(slashPath, "borrow_loop_last_use") ||
+		strings.Contains(slashPath, "field_borrow_owner_move") ||
+		strings.Contains(slashPath, "borrow_escape") ||
+		strings.Contains(slashPath, "borrow_local_alias") ||
+		strings.Contains(slashPath, "borrow_to_owner") ||
+		strings.Contains(slashPath, "unsafe_borrow_escape") ||
 		strings.Contains(slashPath, "move_while_borrowed")
 }
 

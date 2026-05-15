@@ -3110,6 +3110,14 @@ fn print_ownership_snapshot(tokens: &std::array::Array<Token>) -> !void {
 
 // check_ownership_subset detects owned-call moves followed by use.
 fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    let escape = try borrow_escape_subset(tokens);
+    if !escape.ok {
+        return escape;
+    }
+    let field_conflict = try field_borrow_conflict_subset(tokens);
+    if !field_conflict.ok {
+        return field_conflict;
+    }
     var index = 0;
     var moved = "";
     var moved_start = -1;
@@ -3146,6 +3154,223 @@ fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
         }
     }
     return ownership_ok();
+}
+
+// borrow_escape_subset detects borrowed parameters used where owned values escape.
+fn borrow_escape_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            let param = try first_borrowed_param(tokens, index);
+            if param.found {
+                let escape = try borrowed_param_escape(tokens, index, param.value);
+                if escape.found {
+                    return ownership_error(param.value, escape.start, param.start);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// first_borrowed_param returns the first borrowed parameter in a function.
+fn first_borrowed_param(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            return no_move_candidate();
+        }
+        if token.kind == TokenKind::Colon {
+            let next = try tokens.at(index + 1);
+            if next.kind == TokenKind::Amp {
+                let name = try tokens.at(index - 1);
+                return MoveCandidate {
+                    found: true,
+                    value: name.literal,
+                    start: name.start,
+                    related_start: -1,
+                    end_index: index,
+                };
+            }
+        }
+        index = index + 1;
+    }
+    return no_move_candidate();
+}
+
+// borrowed_param_escape returns the use of a borrowed parameter that escapes.
+fn borrowed_param_escape(
+    tokens: &std::array::Array<Token>,
+    fn_start: i64,
+    param: []const u8
+) -> !MoveCandidate {
+    var index = try function_body_start(tokens, fn_start);
+
+    if index < 0 {
+        return no_move_candidate();
+    }
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > fn_start {
+            if token.kind == TokenKind::Fn {
+                return no_move_candidate();
+            }
+        }
+        if token.kind == TokenKind::Return {
+            let next = try tokens.at(index + 1);
+            if std::mem::equal_bytes(next.literal, param) {
+                return move_at_parts(param, next.start);
+            }
+        }
+        if token.kind == TokenKind::Let {
+            let value_index = try local_initializer_index(tokens, index);
+            if value_index >= 0 {
+                let value = try tokens.at(value_index);
+                if std::mem::equal_bytes(value.literal, param) {
+                    return move_at_parts(param, value.start);
+                }
+            }
+        }
+        if try borrowed_param_owned_call(tokens, index, param) {
+            let value = try tokens.at(index + 2);
+            return move_at_parts(param, value.start);
+        }
+        index = index + 1;
+    }
+    return no_move_candidate();
+}
+
+// borrowed_param_owned_call reports whether a borrowed parameter is passed owned.
+fn borrowed_param_owned_call(
+    tokens: &std::array::Array<Token>,
+    index: i64,
+    param: []const u8
+) -> !bool {
+    let call_start = try is_call_start(tokens, index);
+    if !call_start {
+        return false;
+    }
+    let callee = try tokens.at(index);
+    if !try function_first_param_owned(tokens, callee.literal) {
+        return false;
+    }
+    let arg = try tokens.at(index + 2);
+    return std::mem::equal_bytes(arg.literal, param);
+}
+
+// field_borrow_conflict_subset detects direct field borrow assignment conflicts.
+fn field_borrow_conflict_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+    var borrowed_owner = "";
+    var related_start = -1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Amp {
+            if index > 0 {
+                if index + 2 < tokens.len() {
+                    let previous = try tokens.at(index - 1);
+                    if previous.kind != TokenKind::Colon {
+                        let owner = try tokens.at(index + 1);
+                        let dot = try tokens.at(index + 2);
+                        if owner.kind == TokenKind::Ident {
+                            if dot.kind == TokenKind::Dot {
+                                let second_dot = try token_before_semicolon(
+                                    tokens,
+                                    index + 3,
+                                    TokenKind::Dot
+                                );
+                                if second_dot >= 0 {
+                                    return borrow_move_error(
+                                        owner.literal,
+                                        owner.start,
+                                        owner.start
+                                    );
+                                }
+                                borrowed_owner = owner.literal;
+                                related_start = owner.start;
+                            }
+                            if dot.kind != TokenKind::Dot {
+                                borrowed_owner = owner.literal;
+                                related_start = owner.start;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let move = try move_candidate_at(tokens, index);
+        if move.found {
+            if std::mem::equal_bytes(move.value, borrowed_owner) {
+                return borrow_move_error(move.value, move.start, related_start);
+            }
+        }
+        if token.kind == TokenKind::Assign {
+            if !std::mem::equal_bytes(borrowed_owner, "") {
+                let owner_index = try assignment_owner_index(tokens, index);
+                let owner = try tokens.at(owner_index);
+                if std::mem::equal_bytes(owner.literal, borrowed_owner) {
+                    return borrow_move_error(owner.literal, owner.start, related_start);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// token_before_semicolon finds one token kind before the statement semicolon.
+fn token_before_semicolon(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    kind: TokenKind
+) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Semicolon {
+            return -1;
+        }
+        if token.kind == kind {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// assignment_owner_index returns the root identifier index on the left side.
+fn assignment_owner_index(tokens: &std::array::Array<Token>, assign_index: i64) -> !i64 {
+    var index = assign_index - 1;
+
+    while index >= 0 {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Semicolon {
+            return index + 1;
+        }
+        if token.kind == TokenKind::LBrace {
+            return index + 1;
+        }
+        index = index - 1;
+    }
+    return 0;
+}
+
+// move_at_parts constructs a move candidate from token parts.
+fn move_at_parts(value: []const u8, start: i64) -> MoveCandidate {
+    return MoveCandidate {
+        found: true,
+        value: value,
+        start: start,
+        related_start: -1,
+        end_index: -1,
+    };
 }
 
 // ownership_ok constructs a passing ownership oracle result.
