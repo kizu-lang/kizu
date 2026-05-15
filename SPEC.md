@@ -1091,6 +1091,8 @@ safe Kizu の安全契約は v0.1 で固定します。
 I/O は `Io` capability として明示し、並行処理は `Task` / `TaskGroup` で明示します。
 `Io` / `Task` / `TaskGroup` は v0.1 では interpreter builtin から始めますが、
 v0.1 のうちに `std::io` と `std::task` の API 境界へ寄せます。
+Kizu は Zig 0.16 寄りに、hidden global runtime ではなく、明示的な `Io`
+interface を渡す設計にします。
 
 v0.1 で固定するのは API と checker rule です。
 実 OS thread、event loop、networking runtime、advanced atomic ordering は実装しません。
@@ -1106,6 +1108,8 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 方針:
 
 * I/O する関数は `Io` を受け取る
+* `Io` implementation は将来 `std::io` で明示的に選ぶ
+* hidden global async runtime は持たない
 * `TaskGroup` で structured concurrency に寄せる
 * detached task は許可しない
 * spawn された task は await または cancel される必要がある
@@ -1121,6 +1125,9 @@ fn read_config(io: Io, path: []const u8) -> ![]const u8 {
 v0.1 の最初の `TaskGroup` は interpreter 上の structured task model として実装します。
 現在の `spawn` は OS thread や event loop を作らず、同期的に対象関数を評価して
 `Task<T>` に結果を保持します。
+v0.1 の `Io()` は prototype builtin です。
+後続では `std::io::blocking()`、`std::io::threaded()`、`std::io::evented()`、
+`std::io::failing()` のような implementation selection に移行します。
 
 v0.1 で追加していく concurrency foundation:
 
@@ -1136,6 +1143,20 @@ std::sync::Mutex<T>       explicit shared mutable state wrapper
 std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
 ```
+
+将来の `std::io` implementation 候補:
+
+```text
+std::io::blocking()  simple blocking I/O
+std::io::threaded()  thread-backed I/O and task execution
+std::io::evented()   event-loop or coroutine backed I/O
+std::io::failing()   test implementation that supports no external I/O
+std::io::uring()     Linux io_uring backend
+std::io::kqueue()    kqueue backend
+```
+
+v0.1 ではこれらを実装しません。
+ただし、safe Kizu の checker rule はどの runtime implementation でも同じです。
 
 v0.1 では次の API 形状を正とします。
 
@@ -1207,6 +1228,7 @@ Send 相当ルール:
 OS thread、event loop、networking runtime、atomic ordering の詳細 API は、
 safe structured API の後に追加します。
 実並行 runtime を導入する場合も、上記の ownership / borrow / structured scope の制約を維持します。
+詳細な runtime selection 方針は ADR-0039 に従います。
 
 ## 16. contract / satisfy / Dyn 方針
 

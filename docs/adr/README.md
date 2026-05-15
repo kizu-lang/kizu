@@ -57,3 +57,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0036: statement semicolon を必須にする](0036-require-statement-semicolons.md)
 - [ADR-0037: v0.1 で if expression を採用する](0037-if-expression-in-v0-1.md)
 - [ADR-0038: namespace lookup は `::` に限定する](0038-explicit-namespace-separator.md)
+- [ADR-0039: Io runtime は Zig 0.16 寄りの選択式 interface にする](0039-zig-style-io-runtime-interface.md)
