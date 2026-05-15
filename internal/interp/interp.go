@@ -1786,9 +1786,7 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 	if err != nil {
 		return voidValue(), err
 	}
-	if receiver.kind == kindRef {
-		receiver = receiver.ref.value
-	}
+	receiver = unwrapRefValue(receiver)
 	if receiver.kind != kindStruct {
 		return voidValue(), fmt.Errorf("runtime error: field access expects struct")
 	}
@@ -1797,6 +1795,14 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", expr.Name)
 	}
 	return value, nil
+}
+
+// unwrapRefValue follows local borrow references to the current stored value.
+func unwrapRefValue(value Value) Value {
+	for value.kind == kindRef {
+		value = value.ref.value
+	}
+	return value
 }
 
 // evalNamespaceExpr evaluates enum and payload-free union namespace lookup.
@@ -1896,9 +1902,7 @@ func (i *Interpreter) evalMethodCallExpr(
 	if err != nil {
 		return voidValue(), err
 	}
-	if receiver.kind == kindRef {
-		receiver = receiver.ref.value
-	}
+	receiver = unwrapRefValue(receiver)
 	if receiver.kind != kindArena {
 		return i.evalNonArenaMethod(receiver, field.Name, args, env)
 	}
