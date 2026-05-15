@@ -221,6 +221,15 @@ func TestSelfHostSourcesCheck(t *testing.T) {
 func TestSelfHostFrontendSmoke(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
 	got := runSelfHostFrontend(t, fixture)
+	want := selfHostFrontendSmokeOutput(t, fixture)
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// selfHostFrontendSmokeOutput returns the expected full skeleton output.
+func selfHostFrontendSmokeOutput(t *testing.T, fixture string) string {
+	t.Helper()
 	tokenStream := strings.Join(goSelfHostTokenKinds(t, fixture), "\n")
 	snapshots := formatTokenSnapshots(goSelfHostTokenSnapshots(t, fixture))
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
@@ -229,6 +238,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	moduleSnapshot := formatModuleGraphSnapshot(singleFileModuleGraphSnapshot())
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
+	typeEnvSnapshot := formatTypeEnvSnapshot(goLocalTypeEnvSnapshot(t, fixture))
 	typeCheckSnapshot := formatTypeCheckSnapshot(goTypeCheckSnapshot(t, fixture))
 	ownershipSnapshot := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
@@ -265,6 +275,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"type snapshot\n" +
 		typeSnapshot +
 		"type snapshot end\n" +
+		"type env snapshot\n" +
+		typeEnvSnapshot +
+		"type env snapshot end\n" +
 		"type check snapshot\n" +
 		typeCheckSnapshot +
 		"type check snapshot end\n" +
@@ -284,9 +297,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		cacheSnapshot +
 		"cache contract snapshot end\n" +
 		"TokenKind::Fn\n"
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
+	return want
 }
 
 // TestSelfHostFixtureComparedWithGoLexer checks the first Go/self-host bridge.
@@ -486,6 +497,18 @@ func TestSelfHostTypeSubsetOracle(t *testing.T) {
 	want := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
 	if got != want {
 		t.Fatalf("self-host type snapshot got %q, want %q", got, want)
+	}
+}
+
+// TestSelfHostTypeEnvironmentOracle compares selected local binding types.
+func TestSelfHostTypeEnvironmentOracle(t *testing.T) {
+	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "type_env.kizu")
+	got := extractMarkedSnapshot(
+		t, runSelfHostFrontend(t, fixture), "type env snapshot", "type env snapshot end",
+	)
+	want := formatTypeEnvSnapshot(goLocalTypeEnvSnapshot(t, fixture))
+	if got != want {
+		t.Fatalf("self-host type env snapshot got %q, want %q", got, want)
 	}
 }
 
@@ -1344,6 +1367,64 @@ func normalizeReturnType(returnType string) string {
 
 // formatTypeSnapshot formats function type snapshots as frontend.kizu prints them.
 func formatTypeSnapshot(lines []string) string {
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// goLocalTypeEnvSnapshot returns local binding type facts in source order.
+func goLocalTypeEnvSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	lines := []string{}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok {
+			continue
+		}
+		lines = append(lines, goBlockLocalTypeEnv(t, fn.Body)...)
+	}
+	return lines
+}
+
+// goBlockLocalTypeEnv returns local binding type facts for one block.
+func goBlockLocalTypeEnv(t *testing.T, block *ast.BlockStmt) []string {
+	t.Helper()
+	lines := []string{}
+	for _, stmt := range block.Statements {
+		local, ok := stmt.(*ast.LetStmt)
+		if !ok {
+			continue
+		}
+		mutability := "let"
+		if local.Mutable {
+			mutability = "var"
+		}
+		lines = append(lines, mutability, local.Name, goLocalInitializerType(t, local.Value))
+	}
+	return lines
+}
+
+// goLocalInitializerType infers the supported local initializer type subset.
+func goLocalInitializerType(t *testing.T, expr ast.Expression) string {
+	t.Helper()
+	switch value := expr.(type) {
+	case *ast.StringExpr:
+		return "[]const u8"
+	case *ast.IntExpr:
+		return "i64"
+	case *ast.BoolExpr:
+		return "bool"
+	case *ast.StructLiteralExpr:
+		return value.TypeName
+	default:
+		return "unknown"
+	}
+}
+
+// formatTypeEnvSnapshot formats local binding type facts.
+func formatTypeEnvSnapshot(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
