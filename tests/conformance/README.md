@@ -17,3 +17,10 @@ results before replacing the Go implementation.
 Every `.kizu` file under `examples/` and `examples/negative/` must appear exactly once
 in `v0_1.json`. The Go conformance test enforces this so new examples cannot silently
 fall out of the self-host compiler test corpus.
+
+## Module Fixtures
+
+`modules/basic` is the first reusable multi-file package fixture. The current Go
+tests resolve its `kizu.toml` module graph and parse every source file. Full
+multi-file import resolution, visibility checking, diagnostics, and self-host runner
+coverage are tracked by #88, #89, #90, and #91.

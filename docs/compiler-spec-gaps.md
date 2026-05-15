@@ -107,15 +107,15 @@ tests, and self-check/build.
 
 ## Implementation Work Still Needed
 
-- Connect parsed imports to multi-file checking.
-- Add resolver phase between parser and type checker.
-- Enforce visibility across module boundaries.
-- Preserve byte spans and file IDs through compiler phases.
-- Render multi-file diagnostics.
-- Add artifact layout under `target/`.
-- Extend build cache keys with module graph and public interface hashes.
+- Connect parsed imports to multi-file checking: #88.
+- Add resolver phase between parser and type checker: #88.
+- Enforce visibility across module boundaries: #89.
+- Preserve byte spans and file IDs through compiler phases: #89.
+- Render multi-file diagnostics: #89.
+- Add artifact layout under `target/`: #90.
+- Extend build cache keys with module graph and public interface hashes: #90.
 - Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
-  IR, and backend outputs.
+  IR, backend outputs, and module fixtures: #91.
 
 ## Implemented Groundwork
 
@@ -125,6 +125,9 @@ tests, and self-check/build.
 - Minimal `kizu.toml` parsing for `[package]` and `[modules]`.
 - File path to module path graph resolution.
 - Single-program public API checks for private type leaks.
+- Multi-file module conformance fixture at `tests/conformance/modules/basic`.
+- Go project tests resolve the module fixture graph and parse every fixture
+  source file.
 
 ## Postponed
 
