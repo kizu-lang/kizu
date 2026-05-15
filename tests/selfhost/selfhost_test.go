@@ -166,6 +166,14 @@ type backendFingerprint struct {
 	Entry     string
 }
 
+type moduleGraphSnapshot struct {
+	Status  string
+	Message string
+	Root    string
+	Modules int
+	Imports []string
+}
+
 type moduleConformanceManifestData struct {
 	Version string                  `json:"version"`
 	Cases   []moduleConformanceCase `json:"cases"`
@@ -204,6 +212,7 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 	astSnapshot := formatAstSnapshot(goAstSnapshot(t, fixture))
 	astDetailSnapshot := formatAstDetailSnapshot(goAstDetailSnapshot(t, fixture))
 	declSnapshot := formatDeclSnapshot(goDeclSnapshot(t, fixture))
+	moduleSnapshot := formatModuleGraphSnapshot(singleFileModuleGraphSnapshot())
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
 	ownershipSnapshot := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
@@ -232,6 +241,9 @@ func TestSelfHostFrontendSmoke(t *testing.T) {
 		"decl snapshot\n" +
 		declSnapshot +
 		"decl snapshot end\n" +
+		"module graph snapshot\n" +
+		moduleSnapshot +
+		"module graph snapshot end\n" +
 		"semantic snapshot\n" +
 		semanticSnapshot +
 		"semantic snapshot end\n" +
@@ -357,6 +369,40 @@ func TestSelfHostModuleImportOracle(t *testing.T) {
 	want := goRootImportPaths(t, root)
 	if !same(got, want) {
 		t.Fatalf("self-host module imports got %v, want %v", got, want)
+	}
+}
+
+// TestSelfHostModuleGraphOracle compares package root graph facts and a failure.
+func TestSelfHostModuleGraphOracle(t *testing.T) {
+	cases := []struct {
+		name   string
+		root   string
+		source string
+	}{
+		{
+			name:   "basic",
+			root:   "tests/conformance/modules/basic",
+			source: "tests/conformance/modules/basic/src/main.kizu",
+		},
+		{
+			name:   "missing_import",
+			root:   "tests/conformance/modules/missing_import",
+			source: "tests/conformance/modules/missing_import/src/main.kizu",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			root := filepath.Join(repoRoot(t), filepath.FromSlash(tt.root))
+			source := filepath.Join(repoRoot(t), filepath.FromSlash(tt.source))
+			got := extractMarkedSnapshot(
+				t, runSelfHostFrontend(t, source),
+				"module graph snapshot", "module graph snapshot end",
+			)
+			want := formatModuleGraphSnapshot(goModuleGraphSnapshot(t, root))
+			if got != want {
+				t.Fatalf("self-host module graph got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -871,6 +917,56 @@ func extractImportPaths(t *testing.T, snapshot string) []string {
 		imports = append(imports, strings.Join(parts, "::"))
 	}
 	return imports
+}
+
+// singleFileModuleGraphSnapshot returns the non-package graph shape.
+func singleFileModuleGraphSnapshot() moduleGraphSnapshot {
+	return moduleGraphSnapshot{Status: "pass", Root: "<single>", Modules: 1}
+}
+
+// goModuleGraphSnapshot returns package graph facts from the Go resolver.
+func goModuleGraphSnapshot(t *testing.T, root string) moduleGraphSnapshot {
+	t.Helper()
+	pkg, err := project.LoadPackage(root)
+	if err != nil {
+		return moduleGraphSnapshot{Status: "fail", Message: normalizeModuleError(err.Error())}
+	}
+	snapshot := moduleGraphSnapshot{
+		Status: "pass", Root: pkg.Graph.Root, Modules: len(pkg.Graph.Modules),
+	}
+	for _, module := range pkg.Modules {
+		if module.Module.Path != pkg.Graph.Root {
+			continue
+		}
+		for _, imported := range module.Imports {
+			snapshot.Imports = append(snapshot.Imports, imported.Path)
+		}
+	}
+	return snapshot
+}
+
+// normalizeModuleError maps resolver diagnostics into the self-host subset.
+func normalizeModuleError(message string) string {
+	if strings.Contains(message, "missing module") {
+		return "module error: missing module"
+	}
+	return "module error"
+}
+
+// formatModuleGraphSnapshot formats module graph rows.
+func formatModuleGraphSnapshot(snapshot moduleGraphSnapshot) string {
+	lines := []string{"status", snapshot.Status}
+	if snapshot.Status == "fail" {
+		lines = append(lines, "message", snapshot.Message)
+		return strings.Join(lines, "\n") + "\n"
+	}
+	lines = append(lines, "root", snapshot.Root, "modules", strconv.Itoa(snapshot.Modules))
+	for _, imported := range snapshot.Imports {
+		lines = append(lines, "import")
+		lines = append(lines, strings.Split(imported, "::")...)
+		lines = append(lines, "import end")
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // goRootImportPaths returns resolved import paths for a package root module.
