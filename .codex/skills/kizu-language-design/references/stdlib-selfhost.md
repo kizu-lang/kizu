@@ -1,0 +1,67 @@
+# v0.2 Stdlib And Self-Host Guidance
+
+Kizu v0.2 stdlib は、Kizu self-host compiler を可能にするための基盤です。
+stdlib API を抽象的な便利関数としてだけ設計せず、compiler frontend の必要性から検証します。
+
+## 推奨順序
+
+1. `std::mem`
+2. `std::array::Array<T>`
+3. `std::string::String` と `[]const u8` helper
+4. self-host frontend skeleton
+5. `std::map::Map<K, V>`
+6. `std::fs` / `std::path`
+7. `std::io` / `std::process`
+8. `std::testing`
+
+## `std::mem`
+
+まずは allocation-free な byte / slice helper から始めます。
+
+```text
+std::mem::equal_bytes(a, b) -> bool
+std::mem::starts_with(bytes, prefix) -> bool
+std::mem::index_of(bytes, needle) -> ?usize
+std::mem::slice(bytes, start, end) -> ![]const u8
+std::mem::trim_ascii(bytes) -> []const u8
+```
+
+方針:
+
+- `index_of` は not found が正常系なので `?usize` を返す。
+- `slice` は invalid range が理由付き caller error なので `![]const u8` を返す。
+- safe API は raw pointer を返さない。
+- raw pointer 実装は trusted stdlib または `unsafe` 内に閉じる。
+- hidden default allocator を追加しない。
+
+## Allocator Boundary
+
+owned container には allocator を明示的に渡します。
+
+```text
+let allocator = std::mem::page_allocator();
+let tokens = std::array::Array<Token>(allocator);
+```
+
+方針:
+
+- `std::mem::Allocator` は visible type として存在してよい。
+- allocator factory は明示的に呼ぶ。
+- owned collection は明示的な cleanup / `deinit` を要求する。
+- allocator の詳細が safe Kizu に raw pointer safety hazard として漏れてはいけない。
+
+## Self-Host Skeleton Rule
+
+各 v0.2 stdlib API について、self-host compiler がどう使うかを記録します。
+
+- lexer source scanning
+- token list construction
+- parser node list construction
+- diagnostic string construction
+- symbol table lookup
+- source file loading
+- CLI args and exit code
+- component test assertions
+
+skeleton が未存在の API を必要とした場合は、孤立した TODO を skeleton に作らず、
+関連する stdlib issue を更新します。

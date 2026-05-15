@@ -37,10 +37,12 @@ kizu why-rebuild <file>
 
 - キャッシュにはデフォルト上限を持たせる
 - キャッシュ測定を CI で実行できる形にする
+- CI の必須 path は軽く保ち、重い測定は明示 command として分離する
 - benchmark は wall clock だけでなく、入力サイズと cache size も記録する
 - debug artifact と optimized artifact は cache key を分ける
 - build script と proc macro は採用しない
 - 巨大な中間生成物は opt-in で保存する
+- target / build cache 相当の生成物が無制限に増える設計を避ける
 - performance regression は GitHub Issues の受け入れ条件で扱えるようにする
 
 ## 初期の測定対象

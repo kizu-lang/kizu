@@ -522,12 +522,12 @@ ptr<const T>
 type alias は v0.1 では導入しません。
 
 v0.1 では collection runtime API を実装しません。
-将来追加する collection 型:
+将来追加する collection 型は primitive ではなく、標準ライブラリ型として扱います。
 
 ```text
-array<T>
-map<K, V>
-set<T>
+std::array::Array<T>
+std::map::Map<K, V>
+std::set::Set<T>
 ```
 
 v0.1 では `arena<T>` / `handle<T>` だけを実装対象にします。
@@ -1066,20 +1066,20 @@ std::array
 ```
 
 文字列 literal は v0.1 では `[]const u8` として扱います。
-owned string は primitive ではなく、将来 `std::string` で扱います。
+owned string は primitive ではなく、将来 `std::string::String` で扱います。
 
-C ABI へ `std::string` を暗黙に渡してはいけません。
+C ABI へ `std::string::String` を暗黙に渡してはいけません。
 C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使います。
 
 v0.1 では collection runtime API を実装しません。
 collection は次の順で検討します。
 
 ```text
-array<T>         先に検討する owned contiguous collection
-slice<T>         contiguous mutable view
-slice<const T>   contiguous read-only view
-map<K, V>        後続 phase
-set<T>           後続 phase
+std::array::Array<T>  先に検討する owned contiguous collection
+slice<T>              contiguous mutable view
+slice<const T>        contiguous read-only view
+std::map::Map<K, V>   後続 phase
+std::set::Set<T>      後続 phase
 ```
 
 ## 15. concurrency / async 方針
@@ -1225,7 +1225,7 @@ let atomic = std::atomic::Atomic<i64>(0);
 * the interpreter may execute workers sequentially while preserving the API contract
 * v0.1 の `parallel_for` は range 専用で、collection iteration には接続しない
 * v0.1 の `parallel_map` output は `Partition` に限定する
-* mutable slice / array との接続は `std.mem` と `array<T>` の仕様後に設計する
+* mutable slice / array との接続は `std::mem` と `std::array::Array<T>` の仕様後に設計する
 * 詳細は ADR-0040 に従う
 
 Low-level concurrency boundary:

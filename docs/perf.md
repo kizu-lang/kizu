@@ -6,8 +6,11 @@
 
 - ビルド時間を短く保つ
 - キャッシュが無制限に肥大化しないようにする
+- `target` 相当の生成物ディレクトリやローカル build cache が、気づかないうちに
+  数十 GB へ膨らむ設計を避ける
 - 性能改善をインクリメンタルに評価できるようにする
 - 再ビルド理由を説明できるようにする
+- CI で毎回走る path を軽く保ち、重い測定は明示 command として分離する
 
 ## 測定カテゴリ
 
@@ -93,3 +96,7 @@ kizu why-rebuild <file>
 - `why-rebuild` で再ビルド理由を見られる
 - debug artifact は明示 opt-in にする
 - build script と proc macro による隠れた依存は作らない
+- CI の必須 path に巨大 artifact 生成や無制限 cache population を入れない
+- cache / artifact の新規種類を追加する場合は、cache key、保存条件、prune 条件、
+  status 表示、測定 command を同じ変更で定義する
+- no-op rebuild と single-file edit rebuild が不必要に重くならないことを確認する

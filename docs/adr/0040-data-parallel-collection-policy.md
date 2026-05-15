@@ -4,8 +4,9 @@ Status: 採用
 
 ## 背景
 
-Kizu v0.1 では `array<T>`、general slice mutation、allocator-backed collection を
-まだ実装しない。一方で、data parallel API の memory-safety contract は早く固定したい。
+Kizu v0.1 では `std::array::Array<T>`、general slice mutation、
+allocator-backed collection をまだ実装しない。一方で、data parallel API の
+memory-safety contract は早く固定したい。
 
 ## 決定
 
@@ -36,7 +37,7 @@ worker rule:
 
 ## Collection との接続
 
-`array<T>` / mutable slice / allocator を導入するまでは、`parallel_map` を
+`std::array::Array<T>` / mutable slice / allocator を導入するまでは、`parallel_map` を
 collection に直接書き込ませない。
 
 v0.2 以降で検討する API:
@@ -46,7 +47,8 @@ std::mem::partition_mut(slice, parts)
 std::array::parallel_map(io, array, worker)
 ```
 
-これらは #24 `std.mem` / allocator 境界と #27 `std.array` の仕様が固まった後に
+これらは #24 `std::mem` / allocator 境界と #27 `std::array::Array<T>` の仕様が
+固まった後に
 設計する。
 
 ## 安全性
