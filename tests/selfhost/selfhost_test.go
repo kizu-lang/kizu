@@ -156,7 +156,14 @@ type irDumpFunction struct {
 	Params     []string
 	Block      string
 	Opcodes    []string
+	Details    []irInstrDetail
 	Terminator string
+}
+
+type irInstrDetail struct {
+	Result    string
+	Args      []string
+	Immediate string
 }
 
 type backendFingerprint struct {
@@ -494,6 +501,9 @@ func TestSelfHostAstNodeDumpOracle(t *testing.T) {
 		"examples/functions.kizu",
 		"examples/variables.kizu",
 		"examples/arithmetic.kizu",
+		"examples/if.kizu",
+		"examples/while.kizu",
+		"examples/for.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -1482,6 +1492,21 @@ func astStatementNodeDump(stmt ast.Statement) []string {
 		return append([]string{kind, s.Name}, astExpressionNodeDump(s.Value)...)
 	case *ast.AssignStmt:
 		return append([]string{"AssignStmt"}, astExpressionNodeDump(s.Value)...)
+	case *ast.IfStmt:
+		lines := append([]string{"IfStmt"}, astExpressionNodeDump(s.Condition)...)
+		lines = append(lines, astBlockNodeDump(s.Consequence)...)
+		return append(lines, astBlockNodeDump(s.Alternative)...)
+	case *ast.WhileStmt:
+		lines := append([]string{"WhileStmt"}, astExpressionNodeDump(s.Condition)...)
+		return append(lines, astBlockNodeDump(s.Body)...)
+	case *ast.ForStmt:
+		lines := append([]string{"ForStmt"}, astExpressionNodeDump(s.Start)...)
+		lines = append(lines, astExpressionNodeDump(s.End)...)
+		return append(lines, astBlockNodeDump(s.Body)...)
+	case *ast.BreakStmt:
+		return []string{"BreakStmt"}
+	case *ast.ContinueStmt:
+		return []string{"ContinueStmt"}
 	case *ast.ExprStmt:
 		return astExpressionNodeDump(s.Expr)
 	}
@@ -1939,6 +1964,7 @@ func goIrDumpFromModule(module *kir.Module) irDumpSnapshot {
 		if len(fn.Blocks) > 0 {
 			dump.Block = fn.Blocks[0].Name
 			dump.Opcodes = irOpcodes(fn.Blocks[0])
+			dump.Details = irDetails(fn.Blocks[0])
 			dump.Terminator = normalizeIrTerminator(fn.Blocks[0].Terminator)
 		}
 		snapshot.Functions = append(snapshot.Functions, dump)
@@ -1953,6 +1979,38 @@ func irOpcodes(block *kir.Block) []string {
 		opcodes = append(opcodes, instr.Op)
 	}
 	return opcodes
+}
+
+// irDetails returns selected result and operand facts for one block.
+func irDetails(block *kir.Block) []irInstrDetail {
+	details := make([]irInstrDetail, 0, len(block.Instrs))
+	for _, instr := range block.Instrs {
+		detail := irInstrDetail{
+			Result:    normalizeIrResultType(instr.Result),
+			Immediate: normalizeImmediate(instr.Immediate),
+		}
+		for _, arg := range instr.Args {
+			detail.Args = append(detail.Args, arg.Type)
+		}
+		details = append(details, detail)
+	}
+	return details
+}
+
+// normalizeIrResultType maps void result values to the shared dump schema.
+func normalizeIrResultType(value kir.Value) string {
+	if value.Type == "" {
+		return "<none>"
+	}
+	return value.Type
+}
+
+// normalizeImmediate maps empty immediates to the shared dump schema.
+func normalizeImmediate(value string) string {
+	if value == "" {
+		return "<none>"
+	}
+	return value
 }
 
 // normalizeIrTerminator returns the schema shared with frontend.kizu.
@@ -1980,12 +2038,25 @@ func formatIrDumpSnapshot(snapshot irDumpSnapshot) string {
 			lines = append(lines, "param", param)
 		}
 		lines = append(lines, "block", fn.Block, "ops", strconv.Itoa(len(fn.Opcodes)))
-		for _, opcode := range fn.Opcodes {
+		for index, opcode := range fn.Opcodes {
 			lines = append(lines, "op", opcode)
+			if index < len(fn.Details) {
+				lines = append(lines, formatIrInstrDetail(fn.Details[index])...)
+			}
 		}
 		lines = append(lines, "terminator", fn.Terminator)
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// formatIrInstrDetail formats selected result and operand rows.
+func formatIrInstrDetail(detail irInstrDetail) []string {
+	lines := []string{"result", detail.Result, "args", strconv.Itoa(len(detail.Args))}
+	for _, arg := range detail.Args {
+		lines = append(lines, "arg", arg)
+	}
+	lines = append(lines, "immediate", detail.Immediate)
+	return lines
 }
 
 // goBackendFingerprints returns backend smoke facts derived from Go emitters.
