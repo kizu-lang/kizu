@@ -1076,13 +1076,7 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 
 // TestSelfHostBackendFingerprintOracle compares backend smoke fingerprints.
 func TestSelfHostBackendFingerprintOracle(t *testing.T) {
-	cases := []string{
-		"examples/hello.kizu",
-		"examples/functions.kizu",
-		"examples/arithmetic.kizu",
-		"examples/negative/missing_return.kizu",
-	}
-	for _, path := range cases {
+	for _, path := range backendFingerprintOracleCases() {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
 			got := extractMarkedSnapshot(
@@ -1094,6 +1088,29 @@ func TestSelfHostBackendFingerprintOracle(t *testing.T) {
 				t.Fatalf("self-host backend fingerprint got %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// backendFingerprintOracleCases lists backend-supported and target-failure fixtures.
+func backendFingerprintOracleCases() []string {
+	return []string{
+		"examples/hello.kizu",
+		"examples/functions.kizu",
+		"examples/arithmetic.kizu",
+		"examples/variables.kizu",
+		"examples/negative/missing_return.kizu",
+		"examples/struct.kizu",
+		"examples/arena.kizu",
+		"examples/field_assignment.kizu",
+		"examples/field_borrow.kizu",
+		"examples/last_use_borrow.kizu",
+		"examples/error_union_try.kizu",
+		"examples/error_union_void.kizu",
+		"examples/mutable_borrow.kizu",
+		"examples/pointer_policy.kizu",
+		"examples/unsafe_nested_block.kizu",
+		"examples/unsafe_ptr_read_with_unrelated_nullable_source.kizu",
+		"examples/unsafe_wrapper.kizu",
 	}
 }
 
@@ -3960,10 +3977,10 @@ func goLLVMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
 	t.Helper()
 	output, err := llvm.Emit(module)
 	if err != nil {
-		t.Fatalf("LLVM emit failed: %v", err)
+		return failingBackendFingerprint("llvm")
 	}
 	if !strings.Contains(output, "define void @main()") {
-		t.Fatalf("LLVM output has no main entry:\n%s", output)
+		return failingBackendFingerprint("llvm")
 	}
 	return backendFingerprint{
 		Target: "llvm", Status: "pass", Functions: len(module.Functions),
@@ -3981,10 +3998,10 @@ func goWASMFingerprint(t *testing.T, module *kir.Module) backendFingerprint {
 	t.Helper()
 	output, err := wasm.Emit(module)
 	if err != nil {
-		t.Fatalf("WASM emit failed: %v", err)
+		return failingBackendFingerprint("wasm32-wasi")
 	}
 	if !strings.Contains(output, `(func $_start (export "_start")`) {
-		t.Fatalf("WASM output has no _start entry:\n%s", output)
+		return failingBackendFingerprint("wasm32-wasi")
 	}
 	return backendFingerprint{
 		Target: "wasm32-wasi", Status: "pass", Functions: len(module.Functions),

@@ -32,23 +32,24 @@ each row below.
 | type | self-host return/basic/control/variant and match/typed-error/unsafe/contract/Dyn/comptime/stdlib/concurrency/Io/fs/path/String/Map/Array resource/call/std-mem/task/channel/queue/thread/parallel boundary diagnostics plus local binding type environment snapshots for all parseable conformance manifest sources compare against Go facts | strong | none |
 | ownership | self-host ownership snapshots cover positive conformance sources plus all type-checkable ownership diagnostic fixtures, including moved-value, double-move, assignment-move, copy-preserving channel send, channel/task ownership-transfer moves, deinit use-after-move, Arena/Handle provenance/escape, String view invalidation, Array append move/element-borrow conflicts, task completion, if branch move, borrow escape, field borrow, mutable borrow conflict, and move-while-borrowed fixtures vs Go checker | strong | none |
 | IR | self-host IR summary plus normalized function/block/opcode/result/operand/immediate/terminator dump equality across all positive conformance manifest sources and selected lowerability failures vs Go IR facts | strong | none |
-| backend | self-host target/status/function/string/instruction/const/call/entry plus selected LLVM/WASM output lines vs Go emitters | weak | broaden to full output fingerprints for all backend-supported conformance fixtures |
+| backend | self-host target/status/function/string/instruction/const/call/entry plus LLVM/WASM output-line fingerprints across the backend-supported fixture matrix, including target-specific emitter failures, vs Go emitters | strong | none |
 | cache | Go module-aware cache tests include std source hash; self-host snapshot declares Go-owned cache switch contract | medium | keep Go-owned until Kizu owns filesystem, hashing, module graph, and artifact layout |
 
-## Required Issues
+## Tracking Issues
 
-The remaining work should stay issue-driven. Each issue must include examples,
-oracle tests, and acceptance evidence before closing.
+Completed phase rows keep their issue references here as audit history.
+Incomplete rows remain open and must include examples, oracle tests, and
+acceptance evidence before closing.
 
-1. Full parser AST oracle: #112
-2. Kizu module resolver oracle: #113
-3. Kizu diagnostic object oracle: #114
-4. Kizu type checker subset oracle: #115
-5. Kizu ownership/memory-safety oracle: #116
-6. Normalized IR dump oracle: #117
-7. Backend smoke fingerprint oracle: #118
-8. Cache ownership and self-host switch decision: #119
-9. 1:1 completion gate that fails if any phase lacks coverage: #111
+1. Full parser AST oracle: #112 (complete)
+2. Kizu module resolver oracle: #113 (complete)
+3. Kizu diagnostic object oracle: #114 (complete)
+4. Kizu type checker subset oracle: #115 (complete)
+5. Kizu ownership/memory-safety oracle: #116 (complete)
+6. Normalized IR dump oracle: #117 (complete)
+7. Backend smoke fingerprint oracle: #118 (complete)
+8. Cache ownership and self-host switch decision: #119 (open)
+9. 1:1 completion gate that fails if any phase lacks coverage: #111 (open)
 
 ## Completion Gate
 

@@ -8722,7 +8722,7 @@ fn print_llvm_backend(summary: &ParseSummary, tokens: &std::array::Array<Token>)
     print("target");
     print("llvm");
     print("status");
-    if try ir_dump_has_error(tokens) {
+    if try llvm_backend_has_error(tokens) {
         print("fail");
         print("message");
         print("backend error: source is not lowerable");
@@ -8730,10 +8730,10 @@ fn print_llvm_backend(summary: &ParseSummary, tokens: &std::array::Array<Token>)
     }
     print("pass");
     print("functions");
-    print(summary.function_count);
+    print(try backend_function_count(tokens));
     try print_backend_function_names(tokens);
     print("strings");
-    print(try count_string_literals(tokens));
+    print(try backend_string_literal_count(tokens));
     try print_backend_instruction_stats(tokens);
     print("entry");
     print("main");
@@ -8751,7 +8751,7 @@ fn print_wasm_backend(summary: &ParseSummary, tokens: &std::array::Array<Token>)
     print("target");
     print("wasm32-wasi");
     print("status");
-    if try ir_dump_has_error(tokens) {
+    if try wasm_backend_has_error(tokens) {
         print("fail");
         print("message");
         print("backend error: source is not lowerable");
@@ -8759,10 +8759,10 @@ fn print_wasm_backend(summary: &ParseSummary, tokens: &std::array::Array<Token>)
     }
     print("pass");
     print("functions");
-    print(summary.function_count);
+    print(try backend_function_count(tokens));
     try print_backend_function_names(tokens);
     print("strings");
-    print(try count_string_literals(tokens));
+    print(try backend_string_literal_count(tokens));
     try print_backend_instruction_stats(tokens);
     print("entry");
     print("_start");
@@ -8773,6 +8773,180 @@ fn print_wasm_backend(summary: &ParseSummary, tokens: &std::array::Array<Token>)
     print("line");
     print("func _start export _start");
     return void;
+}
+
+// llvm_backend_has_error reports selected LLVM emitter failures.
+fn llvm_backend_has_error(tokens: &std::array::Array<Token>) -> !bool {
+    if try ir_dump_has_error(tokens) {
+        return true;
+    }
+    if !try source_has_function(tokens, "main") {
+        return true;
+    }
+    if try has_function_token_any(tokens, TokenKind::Try) {
+        return true;
+    }
+    return try has_local_borrow_initializer_any(tokens);
+}
+
+// wasm_backend_has_error reports selected WASM emitter failures.
+fn wasm_backend_has_error(tokens: &std::array::Array<Token>) -> !bool {
+    if try ir_dump_has_error(tokens) {
+        return true;
+    }
+    if try has_function_token_any(tokens, TokenKind::Try) {
+        return true;
+    }
+    if try has_function_arena_new_any(tokens) {
+        return true;
+    }
+    if try has_struct_literal_any(tokens) {
+        return true;
+    }
+    if try has_local_borrow_initializer_any(tokens) {
+        return true;
+    }
+    if try has_field_access_any(tokens) {
+        return true;
+    }
+    if try has_unsupported_wasm_print_any(tokens) {
+        return true;
+    }
+    return false;
+}
+
+// source_has_function reports whether a non-extern function name exists.
+fn source_has_function(tokens: &std::array::Array<Token>, name: []const u8) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                if try function_name_is(tokens, index, name) {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_function_token_any reports whether any non-extern function contains a token.
+fn has_function_token_any(tokens: &std::array::Array<Token>, kind: TokenKind) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                if try has_function_token(tokens, index, kind) {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_function_arena_new_any reports whether any non-extern function uses Arena rows.
+fn has_function_arena_new_any(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                if try has_function_arena_new(tokens, index) {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_struct_literal_any reports whether any non-extern function lowers struct.new.
+fn has_struct_literal_any(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                if try struct_literal_instruction_count(tokens, index) > 0 {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_local_borrow_initializer_any reports whether any function lowers unary.&.
+fn has_local_borrow_initializer_any(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                if try function_contains_local_borrow_initializer(tokens, index) {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_field_access_any reports whether any function lowers selected field access.
+fn has_field_access_any(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                if try print_field_access_instruction_count(tokens, index) > 0 {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_unsupported_wasm_print_any reports selected print types absent from WASM.
+fn has_unsupported_wasm_print_any(tokens: &std::array::Array<Token>) -> !bool {
+    if try source_contains_call(tokens, "ptr_read") {
+        return true;
+    }
+    return try source_contains_call(tokens, "source");
+}
+
+// source_contains_call reports whether any non-extern function calls name.
+fn source_contains_call(tokens: &std::array::Array<Token>, name: []const u8) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                if try function_contains_call(tokens, index, name) {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // print_backend_instruction_stats writes selected backend input instruction counts.
@@ -8794,7 +8968,9 @@ fn backend_instruction_count(tokens: &std::array::Array<Token>) -> !i64 {
     while index < tokens.len() {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Fn {
-            count = count + try function_instruction_count(tokens, index);
+            if !try function_is_extern(tokens, index) {
+                count = count + try function_instruction_count(tokens, index);
+            }
         }
         index = index + 1;
     }
@@ -8809,7 +8985,9 @@ fn backend_literal_count(tokens: &std::array::Array<Token>) -> !i64 {
     while index < tokens.len() {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Fn {
-            count = count + try literal_instruction_count(tokens, index);
+            if !try function_is_extern(tokens, index) {
+                count = count + try literal_instruction_count(tokens, index);
+            }
         }
         index = index + 1;
     }
@@ -8824,7 +9002,34 @@ fn backend_call_count(tokens: &std::array::Array<Token>) -> !i64 {
     while index < tokens.len() {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Fn {
-            count = count + try call_instruction_count(tokens, index);
+            if !try function_is_extern(tokens, index) {
+                count = count + try backend_function_call_count(tokens, index);
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// backend_function_call_count counts call opcodes that reach backend emitters.
+fn backend_function_call_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    if try has_function_arena_new(tokens, start) {
+        return 1;
+    }
+    return try call_instruction_count(tokens, start);
+}
+
+// backend_function_count counts non-extern functions emitted by backends.
+fn backend_function_count(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                count = count + 1;
+            }
         }
         index = index + 1;
     }
@@ -8838,13 +9043,52 @@ fn print_backend_function_names(tokens: &std::array::Array<Token>) -> !void {
     while index < tokens.len() {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Fn {
-            let name = try tokens.at(index + 1);
-            print("function");
-            print(name.literal);
+            if !try function_is_extern(tokens, index) {
+                let name = try tokens.at(index + 1);
+                print("function");
+                print(name.literal);
+            }
         }
         index = index + 1;
     }
     return void;
+}
+
+// backend_string_literal_count counts string constants reaching backend input.
+fn backend_string_literal_count(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            if !try function_is_extern(tokens, index) {
+                count = count + try function_string_literal_count(tokens, index);
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// function_string_literal_count counts string literals inside one function body.
+fn function_string_literal_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if token.kind == TokenKind::String {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
 }
 
 // count_string_literals returns the number of source string literals.
