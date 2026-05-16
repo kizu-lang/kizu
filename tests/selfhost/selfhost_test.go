@@ -544,9 +544,21 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"selfhost/fixtures/type_arg_type.kizu",
 		"examples/negative/invalid_field.kizu",
 		"examples/negative/if_expression_type_mismatch.kizu",
+		"examples/negative/if_expression_missing_else.kizu",
 		"examples/negative/empty_return_value.kizu",
 		"examples/negative/missing_return.kizu",
 		"examples/negative/invalid_cast.kizu",
+		"examples/negative/break_outside_loop.kizu",
+		"examples/negative/continue_outside_loop.kizu",
+		"examples/negative/unknown_loop_label.kizu",
+		"examples/negative/label_on_non_loop.kizu",
+		"examples/negative/enum_dot_variant.kizu",
+		"examples/negative/union_dot_variant.kizu",
+		"examples/negative/std_array_wrong_type.kizu",
+		"examples/negative/std_map_wrong_key_type.kizu",
+		"examples/negative/std_map_wrong_insert_type.kizu",
+		"examples/negative/std_string_wrong_append_type.kizu",
+		"examples/negative/std_testing_wrong_type.kizu",
 		"examples/move_error.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
@@ -630,6 +642,11 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/empty_return_value.kizu",
 		"examples/negative/missing_return.kizu",
 		"examples/negative/invalid_cast.kizu",
+		"examples/negative/std_array_wrong_type.kizu",
+		"examples/negative/std_map_wrong_key_type.kizu",
+		"examples/negative/std_map_wrong_insert_type.kizu",
+		"examples/negative/std_string_wrong_append_type.kizu",
+		"examples/negative/std_testing_wrong_type.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -995,7 +1012,18 @@ func goLexerDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot 
 // goParserDiagnosticSnapshots returns parser diagnostics in the self-host subset.
 func goParserDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	t.Helper()
-	if !strings.Contains(filepath.ToSlash(path), "missing_semicolon") {
+	slashPath := filepath.ToSlash(path)
+	if strings.Contains(slashPath, "if_expression_missing_else") {
+		tok := tokenWithLiteralOccurrence(t, path, ";", 2)
+		return []diagnosticSnapshot{
+			diagnosticFromToken("parser error: if expression missing else", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "label_on_non_loop") {
+		tok := tokenWithLiteral(t, path, "print")
+		return []diagnosticSnapshot{diagnosticFromToken("parser error: label on non-loop", tok, tok)}
+	}
+	if !strings.Contains(slashPath, "missing_semicolon") {
 		return nil
 	}
 	l := lexer.New(readSource(t, path))
@@ -1086,6 +1114,9 @@ func goNamedTypeDiagnosticSnapshots(
 	if snapshots := goCoreTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
 		return snapshots
 	}
+	if snapshots := goStdlibTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
 	return goBorrowAndBasicTypeDiagnosticSnapshots(t, path, slashPath)
 }
 
@@ -1133,6 +1164,62 @@ func goCoreTypeDiagnosticSnapshots(
 		return []diagnosticSnapshot{
 			diagnosticFromToken("type error: invalid cast", tok, tok),
 		}
+	}
+	if strings.Contains(slashPath, "break_outside_loop") {
+		tok := tokenWithLiteral(t, path, "break")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: break outside loop", tok, tok)}
+	}
+	if strings.Contains(slashPath, "continue_outside_loop") {
+		tok := tokenWithLiteral(t, path, "continue")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: continue outside loop", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "unknown_loop_label") {
+		tok := tokenWithLiteral(t, path, "missing")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: unknown loop label", tok, tok)}
+	}
+	if strings.Contains(slashPath, "enum_dot_variant") {
+		tok := tokenWithLiteralOccurrence(t, path, "Color", 2)
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: enum variant must use namespace", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "union_dot_variant") {
+		tok := tokenWithLiteralOccurrence(t, path, "Shape", 2)
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: union variant must use namespace", tok, tok),
+		}
+	}
+	return nil
+}
+
+// goStdlibTypeDiagnosticSnapshots returns selected stdlib type diagnostics.
+func goStdlibTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "std_array_wrong_type") {
+		tok := tokenWithLiteral(t, path, "no")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Array.append type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "std_map_wrong_key_type") {
+		tok := tokenWithLiteral(t, path, "Map")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Map key type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "std_map_wrong_insert_type") {
+		tok := tokenWithLiteral(t, path, "function")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Map.insert type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "std_string_wrong_append_type") {
+		tok := tokenWithLiteral(t, path, "1")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: String.append_bytes type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "std_testing_wrong_type") {
+		tok := tokenWithLiteral(t, path, "four")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: testing arg type", tok, tok)}
 	}
 	return nil
 }
@@ -2172,6 +2259,21 @@ func normalizeTypeError(message string) string {
 	}
 	if strings.Contains(message, "cannot cast") {
 		return "type error: invalid cast"
+	}
+	if strings.Contains(message, "Array.append") {
+		return "type error: Array.append type"
+	}
+	if strings.Contains(message, "Map key type") {
+		return "type error: Map key type"
+	}
+	if strings.Contains(message, "Map.insert") {
+		return "type error: Map.insert type"
+	}
+	if strings.Contains(message, "String.append_bytes") {
+		return "type error: String.append_bytes type"
+	}
+	if strings.Contains(message, "expect_equal_i64") {
+		return "type error: testing arg type"
 	}
 	return "type error"
 }
