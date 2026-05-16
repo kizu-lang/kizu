@@ -9018,6 +9018,10 @@ fn print_ir_function_dump(tokens: &std::array::Array<Token>, start: i64) -> !voi
 
 // print_ir_ops writes a normalized instruction opcode sequence.
 fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    if try has_function_token(tokens, start, TokenKind::If) {
+        try print_if_ir_ops(tokens, start);
+        return void;
+    }
     if try has_function_arena_new(tokens, start) {
         try print_arena_ir_ops(tokens, start);
         return void;
@@ -9066,6 +9070,116 @@ fn print_struct_literal_ops(tokens: &std::array::Array<Token>, start: i64) -> !v
         index = index + 1;
     }
     return void;
+}
+
+// print_if_ir_ops writes the selected entry-block if condition IR shape.
+fn print_if_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let if_index = try first_function_token_kind_index(tokens, start, TokenKind::If);
+    let left = try tokens.at(if_index + 1);
+    let op = try tokens.at(if_index + 2);
+    let right = try tokens.at(if_index + 3);
+
+    print("ops");
+    print(3);
+    try print_if_operand_const(tokens, start, if_index + 1);
+    try print_const_value(right.kind, right.literal);
+    print_ir_binary_bool_op(binary_opcode(op.kind));
+    return void;
+}
+
+// print_ir_binary_bool_op writes selected boolean binary result facts.
+fn print_ir_binary_bool_op(op: []const u8) {
+    print("op");
+    print(op);
+    print("result");
+    print("bool");
+    print("args");
+    print(2);
+    print("arg");
+    print("i64");
+    print("arg");
+    print("i64");
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_if_operand_const writes a const row for a selected if condition operand.
+fn print_if_operand_const(
+    tokens: &std::array::Array<Token>,
+    fn_start: i64,
+    operand_index: i64
+) -> !void {
+    let operand = try tokens.at(operand_index);
+    if operand.kind == TokenKind::Ident {
+        let literal = try local_binding_literal_before(
+            tokens,
+            fn_start,
+            operand.literal,
+            operand_index
+        );
+        try print_const_value(TokenKind::Number, literal);
+        return void;
+    }
+    try print_const_value(operand.kind, operand.literal);
+    return void;
+}
+
+// local_binding_literal_before returns a literal initializer before one token.
+fn local_binding_literal_before(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    name: []const u8,
+    end: i64
+) -> ![]const u8 {
+    var index = start;
+
+    while index < end {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Let {
+            let local = try tokens.at(index + 1);
+            if std::mem::equal_bytes(local.literal, name) {
+                let init = try local_initializer_index(tokens, index);
+                let literal = try tokens.at(init);
+                return literal.literal;
+            }
+        }
+        index = index + 1;
+    }
+    return name;
+}
+
+// print_const_value writes one normalized const instruction row.
+fn print_const_value(kind: TokenKind, literal: []const u8) -> !void {
+    print("op");
+    print("const");
+    print("result");
+    print(ir_literal_type(kind));
+    print("args");
+    print(0);
+    print("immediate");
+    print(ir_literal_immediate(kind, literal));
+    return void;
+}
+
+// binary_opcode returns the normalized IR opcode for selected binary operators.
+fn binary_opcode(kind: TokenKind) -> []const u8 {
+    if kind == TokenKind::GTE {
+        return "binary.>=";
+    }
+    if kind == TokenKind::GT {
+        return "binary.>";
+    }
+    if kind == TokenKind::LT {
+        return "binary.<";
+    }
+    if kind == TokenKind::LTE {
+        return "binary.<=";
+    }
+    if kind == TokenKind::Eq {
+        return "binary.==";
+    }
+    return "binary";
 }
 
 // print_arena_ir_ops writes the selected Arena/Handle IR shape in Go order.
@@ -9168,6 +9282,9 @@ fn print_arena_print_op() -> void {
 
 // function_instruction_count returns the supported IR instruction count.
 fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    if try has_function_token(tokens, start, TokenKind::If) {
+        return 3;
+    }
     if try has_function_arena_new(tokens, start) {
         return 7;
     }
@@ -9295,6 +9412,29 @@ fn has_function_token(tokens: &std::array::Array<Token>, start: i64, kind: Token
         index = index + 1;
     }
     return false;
+}
+
+// first_function_token_kind_index returns the first token kind index inside a function.
+fn first_function_token_kind_index(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    kind: TokenKind
+) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return -1;
+            }
+        }
+        if token.kind == kind {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
 }
 
 // try_function_instruction_count counts supported try-lowering instructions.
@@ -9733,7 +9873,7 @@ fn print_ir_binary_op(op: []const u8) {
     print("op");
     print(op);
     print("result");
-    print("i64");
+    print(binary_result_type(op));
     print("args");
     print(2);
     print("arg");
@@ -9743,6 +9883,26 @@ fn print_ir_binary_op(op: []const u8) {
     print("immediate");
     print("<none>");
     return void;
+}
+
+// binary_result_type returns the selected IR result type for a binary opcode.
+fn binary_result_type(op: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(op, "binary.>=") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(op, "binary.>") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(op, "binary.<") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(op, "binary.<=") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(op, "binary.==") {
+        return "bool";
+    }
+    return "i64";
 }
 
 // print_call_value_detail writes selected result and operand facts for a call.
@@ -10211,6 +10371,9 @@ fn is_std_string_type(tokens: &std::array::Array<Token>, start: i64) -> !bool {
 
 // function_terminator returns the normalized entry block terminator.
 fn function_terminator(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    if try has_function_token(tokens, start, TokenKind::If) {
+        return "branch";
+    }
     var index = start;
 
     while index < tokens.len() {
