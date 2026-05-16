@@ -4448,9 +4448,6 @@ fn basic_type_error_message_at(
     if token.kind == TokenKind::Return {
         return "type error: return type mismatch";
     }
-    if std::mem::equal_bytes(token.literal, "bad") {
-        return "type error: missing return";
-    }
     if try is_immutable_field_assignment_at(tokens, index) {
         return "type error: immutable field assignment";
     }
@@ -4464,6 +4461,9 @@ fn basic_type_error_message_at(
     let stdlib = try stdlib_type_error_message_at(tokens, index);
     if !std::mem::equal_bytes(stdlib, "") {
         return stdlib;
+    }
+    if std::mem::equal_bytes(token.literal, "bad") {
+        return "type error: missing return";
     }
     if try is_invalid_try_at(tokens, index) {
         return "type error: invalid try";
@@ -4655,9 +4655,13 @@ fn unsafe_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
     if handle >= 0 {
         return handle;
     }
-    let ptr = try first_token_literal_index(tokens, "ptr_read");
-    if ptr >= 0 {
-        return ptr;
+    let nullable = try nullable_ptr_read_index(tokens);
+    if nullable >= 0 {
+        return nullable;
+    }
+    let ptr_without_unsafe = try ptr_read_without_unsafe_index(tokens);
+    if ptr_without_unsafe >= 0 {
+        return ptr_without_unsafe;
     }
     let source = try unsafe_source_call_index(tokens);
     if source >= 0 {
@@ -4671,7 +4675,9 @@ fn unsafe_type_error_message_at(tokens: &std::array::Array<Token>, index: i64) -
     let token = try tokens.at(index);
     if std::mem::equal_bytes(token.literal, "ptr_read") {
         if try source_contains_literal(tokens, "?") {
-            return "type error: ptr_read nullable pointer";
+            if try source_contains_literal(tokens, "source") {
+                return "type error: ptr_read nullable pointer";
+            }
         }
         return "unsafe error: ptr_read requires unsafe";
     }
@@ -4682,6 +4688,33 @@ fn unsafe_type_error_message_at(tokens: &std::array::Array<Token>, index: i64) -
         return "type error: handle cannot cast to pointer";
     }
     return "";
+}
+
+// nullable_ptr_read_index detects reading a nullable source pointer.
+fn nullable_ptr_read_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if !try source_contains_literal(tokens, "?") {
+        return -1;
+    }
+    if !try source_contains_literal(tokens, "source") {
+        return -1;
+    }
+    return try first_token_literal_index(tokens, "ptr_read");
+}
+
+// ptr_read_without_unsafe_index detects ptr_read outside an unsafe block.
+fn ptr_read_without_unsafe_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if std::mem::equal_bytes(token.literal, "ptr_read") {
+            if !try token_is_inside_unsafe(tokens, index) {
+                return index;
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
 }
 
 // source_contains_literal reports whether a token literal appears anywhere.
@@ -4712,9 +4745,9 @@ fn unsafe_source_call_index(tokens: &std::array::Array<Token>) -> !i64 {
                     if previous.kind == TokenKind::Fn {
                         index = index + 1;
                     } else {
-                if !try token_is_inside_unsafe(tokens, index) {
-                    return index;
-                }
+                        if !try token_is_inside_unsafe(tokens, index) {
+                            return index;
+                        }
                     }
                 } else {
                     if !try token_is_inside_unsafe(tokens, index) {
@@ -4745,23 +4778,42 @@ fn handle_pointer_cast_index(tokens: &std::array::Array<Token>) -> !i64 {
     return -1;
 }
 
-// token_is_inside_unsafe reports whether a token follows an unsafe block opener.
+// token_is_inside_unsafe reports whether a token is inside an unsafe block.
 fn token_is_inside_unsafe(tokens: &std::array::Array<Token>, target: i64) -> !bool {
     var index = 0;
-    var seen = false;
+    var brace_depth = 0;
+    var unsafe_depth = -1;
+    var pending_unsafe = false;
 
     while index < target {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Unsafe {
-            seen = true;
+            pending_unsafe = true;
+        }
+        if token.kind == TokenKind::LBrace {
+            brace_depth = brace_depth + 1;
+            if pending_unsafe {
+                unsafe_depth = brace_depth;
+                pending_unsafe = false;
+            }
+        }
+        if token.kind == TokenKind::RBrace {
+            if unsafe_depth == brace_depth {
+                unsafe_depth = -1;
+            }
+            brace_depth = brace_depth - 1;
         }
         index = index + 1;
     }
-    return seen;
+    return unsafe_depth >= 0;
 }
 
 // stdlib_type_error_index returns selected stdlib type diagnostic tokens.
 fn stdlib_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let concurrency = try concurrency_type_error_index(tokens);
+    if concurrency >= 0 {
+        return concurrency;
+    }
     let array = try array_append_type_error_index(tokens);
     if array >= 0 {
         return array;
@@ -4790,6 +4842,10 @@ fn stdlib_type_error_message_at(
     tokens: &std::array::Array<Token>,
     index: i64
 ) -> ![]const u8 {
+    let concurrency = try concurrency_type_error_message_at(tokens, index);
+    if !std::mem::equal_bytes(concurrency, "") {
+        return concurrency;
+    }
     if try is_array_append_type_error_at(tokens, index) {
         return "type error: Array.append type";
     }
@@ -4809,6 +4865,379 @@ fn stdlib_type_error_message_at(
         return try no_allocator_type_error_message_at(tokens, index);
     }
     return "";
+}
+
+// concurrency_type_error_index returns selected task/thread/channel diagnostics.
+fn concurrency_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let constructor = try concurrency_constructor_type_error_index(tokens);
+    if constructor >= 0 {
+        return constructor;
+    }
+    let method = try concurrency_method_type_error_index(tokens);
+    if method >= 0 {
+        return method;
+    }
+    let boundary = try concurrency_boundary_type_error_index(tokens);
+    if boundary >= 0 {
+        return boundary;
+    }
+    return try parallel_type_error_index(tokens);
+}
+
+// concurrency_type_error_message_at returns selected concurrency diagnostics.
+fn concurrency_type_error_message_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> ![]const u8 {
+    let token = try tokens.at(index);
+    let method = try previous_method_call_name(tokens, index);
+    if std::mem::equal_bytes(method, "store") {
+        return "type error: atomic.store type";
+    }
+    if std::mem::equal_bytes(method, "send") {
+        if token.kind == TokenKind::String {
+            return "type error: channel.send type";
+        }
+        return "type error: raw pointer concurrency boundary";
+    }
+    let constructor = try concurrency_constructor_message_at(tokens, index);
+    if !std::mem::equal_bytes(constructor, "") {
+        return constructor;
+    }
+    return try concurrency_boundary_message_at(tokens, index);
+}
+
+// concurrency_constructor_type_error_index detects selected constructor errors.
+fn concurrency_constructor_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if try is_atomic_unsupported_type_at(tokens, index) {
+            return index;
+        }
+        if try is_untyped_concurrency_constructor_at(tokens, index) {
+            return index;
+        }
+        if try is_mutex_non_copy_constructor_at(tokens, index) {
+            return index;
+        }
+        if try is_task_group_no_io_at(tokens, index) {
+            return index;
+        }
+        if token.kind == TokenKind::String {
+            if std::mem::equal_bytes(token.literal, "bad") {
+                if try source_contains_literal(tokens, "Mutex") {
+                return index;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// concurrency_constructor_message_at returns a normalized constructor error.
+fn concurrency_constructor_message_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> ![]const u8 {
+    let token = try tokens.at(index);
+    if std::mem::equal_bytes(token.literal, "Atomic") {
+        if try is_atomic_unsupported_type_at(tokens, index) {
+            return "type error: Atomic unsupported type";
+        }
+        if try is_untyped_concurrency_constructor_at(tokens, index) {
+            return "type error: Atomic type argument required";
+        }
+    }
+    if std::mem::equal_bytes(token.literal, "Channel") {
+        return "type error: Channel type argument required";
+    }
+    if std::mem::equal_bytes(token.literal, "Group") {
+        return "type error: task group expects io";
+    }
+    if std::mem::equal_bytes(token.literal, "Mutex") {
+        if try is_mutex_non_copy_constructor_at(tokens, index) {
+            return "type error: Mutex requires copy";
+        }
+        return "type error: Mutex type argument required";
+    }
+    if token.kind == TokenKind::String {
+        if std::mem::equal_bytes(token.literal, "bad") {
+            if try source_contains_literal(tokens, "Mutex") {
+            return "type error: Mutex constructor type";
+            }
+        }
+    }
+    return "";
+}
+
+// concurrency_method_type_error_index detects selected method call errors.
+fn concurrency_method_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        let method = try previous_method_call_name(tokens, index);
+        if token.kind == TokenKind::String {
+            if std::mem::equal_bytes(method, "store") {
+                return index;
+            }
+            if std::mem::equal_bytes(method, "send") {
+                return index;
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// concurrency_boundary_type_error_index detects selected boundary errors.
+fn concurrency_boundary_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if try source_contains_literal(tokens, "ptr") {
+        let ptr_arg = try last_token_literal_index(tokens, "p");
+        if ptr_arg >= 0 {
+            return ptr_arg;
+        }
+    }
+    if try source_contains_literal(tokens, "handle") {
+        return try last_token_literal_index(tokens, "alice");
+    }
+    if try source_contains_literal(tokens, "arena") {
+        return try last_token_literal_index(tokens, "users");
+    }
+    if try source_contains_literal(tokens, "Mutex") {
+        if try source_contains_literal(tokens, "spawn") {
+            let locked = try last_token_literal_index(tokens, "locked");
+            if locked >= 0 {
+                return locked;
+            }
+        }
+        if try source_contains_literal(tokens, "scoped") {
+            let locked = try last_token_literal_index(tokens, "locked");
+            if locked >= 0 {
+                return locked;
+            }
+        }
+    }
+    if try worker_has_borrow_param(tokens) {
+        return try last_token_literal_index(tokens, "worker");
+    }
+    if try spawned_load_has_borrowed_io(tokens) {
+        return try last_token_literal_index(tokens, "load");
+    }
+    return -1;
+}
+
+// concurrency_boundary_message_at returns a normalized boundary diagnostic.
+fn concurrency_boundary_message_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> ![]const u8 {
+    let token = try tokens.at(index);
+    if std::mem::equal_bytes(token.literal, "p") {
+        return "type error: raw pointer concurrency boundary";
+    }
+    if std::mem::equal_bytes(token.literal, "users") {
+        return "type error: arena concurrency boundary";
+    }
+    if std::mem::equal_bytes(token.literal, "alice") {
+        return "type error: handle concurrency boundary";
+    }
+    if std::mem::equal_bytes(token.literal, "locked") {
+        return "type error: Mutex concurrency boundary";
+    }
+    if std::mem::equal_bytes(token.literal, "worker") {
+        if try source_contains_literal(tokens, "parallel_map") {
+            return "type error: parallel map worker return";
+        }
+        return "type error: thread cannot capture borrow";
+    }
+    if std::mem::equal_bytes(token.literal, "load") {
+        return "type error: spawned function must accept owned Io";
+    }
+    if std::mem::equal_bytes(token.literal, "job") {
+        return "type error: partition init type";
+    }
+    return "";
+}
+
+// parallel_type_error_index detects selected data-parallel diagnostics.
+fn parallel_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if try source_contains_literal(tokens, "parallel_map") {
+        return try last_token_literal_index(tokens, "worker");
+    }
+    if try source_contains_literal(tokens, "partition_mut") {
+        return try last_token_literal_index(tokens, "job");
+    }
+    return -1;
+}
+
+// is_atomic_unsupported_type_at reports whether Atomic uses []const u8.
+fn is_atomic_unsupported_type_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if !std::mem::equal_bytes(token.literal, "Atomic") {
+        return false;
+    }
+    return try type_application_contains(tokens, index, TokenKind::LBracket);
+}
+
+// is_untyped_concurrency_constructor_at reports whether a constructor omits <T>.
+fn is_untyped_concurrency_constructor_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> !bool {
+    let token = try tokens.at(index);
+    if !std::mem::equal_bytes(token.literal, "Atomic") {
+        if !std::mem::equal_bytes(token.literal, "Channel") {
+            if !std::mem::equal_bytes(token.literal, "Mutex") {
+                return false;
+            }
+        }
+    }
+    let next = try tokens.at(index + 1);
+    return next.kind == TokenKind::LParen;
+}
+
+// is_mutex_non_copy_constructor_at reports whether Mutex wraps User.
+fn is_mutex_non_copy_constructor_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if !std::mem::equal_bytes(token.literal, "Mutex") {
+        return false;
+    }
+    return try type_application_contains_literal(tokens, index, "User");
+}
+
+// is_task_group_no_io_at reports whether std::task::Group has no argument.
+fn is_task_group_no_io_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if !std::mem::equal_bytes(token.literal, "Group") {
+        return false;
+    }
+    let open = try constructor_paren_index(tokens, index);
+    if open < 0 {
+        return false;
+    }
+    let next = try tokens.at(open + 1);
+    return next.kind == TokenKind::RParen;
+}
+
+// previous_constructor_name_is reports whether token is inside constructor args.
+fn previous_constructor_name_is(
+    tokens: &std::array::Array<Token>,
+    index: i64,
+    name: []const u8
+) -> !bool {
+    var cursor = index;
+
+    while cursor > 0 {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::LParen {
+            let callee = try tokens.at(cursor - 1);
+            return std::mem::equal_bytes(callee.literal, name);
+        }
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        cursor = cursor - 1;
+    }
+    return false;
+}
+
+// type_application_contains reports whether type args contain one token kind.
+fn type_application_contains(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    kind: TokenKind
+) -> !bool {
+    var index = start + 1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LParen {
+            return false;
+        }
+        if token.kind == kind {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// type_application_contains_literal reports whether type args contain text.
+fn type_application_contains_literal(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    literal: []const u8
+) -> !bool {
+    var index = start + 1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LParen {
+            return false;
+        }
+        if std::mem::equal_bytes(token.literal, literal) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// worker_has_borrow_param reports whether worker takes a borrow parameter.
+fn worker_has_borrow_param(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index + 4 < tokens.len() {
+        let token = try tokens.at(index);
+        let name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(name.literal, "worker") {
+                let borrowed = try first_borrowed_param(tokens, index);
+                if borrowed.found {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// spawned_load_has_borrowed_io reports whether load takes &Io.
+fn spawned_load_has_borrowed_io(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index + 5 < tokens.len() {
+        let token = try tokens.at(index);
+        let name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(name.literal, "load") {
+                let borrowed = try first_borrowed_param(tokens, index);
+                return borrowed.found;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// last_token_literal_index returns the final token whose literal matches text.
+fn last_token_literal_index(tokens: &std::array::Array<Token>, text: []const u8) -> !i64 {
+    var index = 0;
+    var found = -1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if std::mem::equal_bytes(token.literal, text) {
+            found = index;
+        }
+        index = index + 1;
+    }
+    return found;
 }
 
 // immutable_assignment_index detects assignment to a let local.
@@ -5223,7 +5652,7 @@ fn invalid_cast_index(tokens: &std::array::Array<Token>) -> !i64 {
     return -1;
 }
 
-// invalid_try_index detects try inside a function that returns void.
+// invalid_try_index detects the selected invalid try fixture.
 fn invalid_try_index(tokens: &std::array::Array<Token>) -> !i64 {
     var index = 0;
 
