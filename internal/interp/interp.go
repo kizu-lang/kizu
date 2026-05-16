@@ -1195,7 +1195,11 @@ func (i *Interpreter) evalMemOneBytes(
 		return "", err
 	}
 	if bytes.kind != kindString {
-		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
+		return "", fmt.Errorf(
+			"runtime error: %s expects []const u8, got %s",
+			name,
+			bytes.KindString(),
+		)
 	}
 	return bytes.s, nil
 }

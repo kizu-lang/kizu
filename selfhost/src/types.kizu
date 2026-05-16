@@ -4,10 +4,89 @@ pub enum TypeKind {
     Void
     Bool
     I64
+    U8
+    Bytes
+    ErrorUnion
+    User
+    Unknown
 }
 
 pub struct TypeInfo {
     pub kind: TypeKind;
+    pub name: []const u8;
+    pub success_type: []const u8;
+    pub is_copy: bool;
+    pub is_error_union: bool;
+}
+
+// classify returns the type facts needed by early self-host checker stages.
+pub fn classify(name: []const u8) -> !TypeInfo {
+    if std::mem::equal_bytes(name, "void") {
+        return primitive(TypeKind::Void, name, true);
+    }
+    if std::mem::equal_bytes(name, "bool") {
+        return primitive(TypeKind::Bool, name, true);
+    }
+    if std::mem::equal_bytes(name, "i64") {
+        return primitive(TypeKind::I64, name, true);
+    }
+    if std::mem::equal_bytes(name, "u8") {
+        return primitive(TypeKind::U8, name, true);
+    }
+    if std::mem::equal_bytes(name, "[]const u8") {
+        return primitive(TypeKind::Bytes, name, false);
+    }
+    if std::mem::starts_with(name, "!") {
+        return TypeInfo {
+            kind: TypeKind::ErrorUnion,
+            name: name,
+            success_type: try std::mem::slice(name, 1, std::mem::len(name)),
+            is_copy: false,
+            is_error_union: true,
+        };
+    }
+    if try is_ident_start(name) {
+        return primitive(TypeKind::User, name, false);
+    }
+    return primitive(TypeKind::Unknown, name, false);
+}
+
+// same reports exact type spelling equality.
+pub fn same(left: &TypeInfo, right: &TypeInfo) -> bool {
+    return std::mem::equal_bytes(left.name, right.name);
+}
+
+// can_copy reports whether a type can be copied by default.
+pub fn can_copy(info: &TypeInfo) -> bool {
+    return info.is_copy;
+}
+
+// primitive constructs a non-error type summary.
+fn primitive(kind: TypeKind, name: []const u8, is_copy: bool) -> TypeInfo {
+    return TypeInfo {
+        kind: kind,
+        name: name,
+        success_type: "",
+        is_copy: is_copy,
+        is_error_union: false,
+    };
+}
+
+// is_ident_start accepts the first byte shape for a user type spelling.
+fn is_ident_start(name: []const u8) -> !bool {
+    if std::mem::len(name) == 0 {
+        return false;
+    }
+    let first = try std::mem::byte_at(name, 0);
+    if first >= cast<u8>(65) {
+        if first <= cast<u8>(90) {
+            return true;
+        }
+    }
+    if first >= cast<u8>(97) {
+        return first <= cast<u8>(122);
+    }
+    return first == cast<u8>(95);
 }
 
 // ready exposes the type module to package-level resolution checks.

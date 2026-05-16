@@ -279,9 +279,9 @@ func componentTestNames(module project.ParsedModule) []string {
 func packageRuntimeProgram(pkg *project.Package) *ast.Program {
 	program := &ast.Program{}
 	for _, module := range pkg.Modules {
+		functions, types := runtimeLocalNames(module.Program)
 		for _, decl := range module.Program.Decls {
-			program.Decls = append(program.Decls, decl)
-			if clone := runtimeQualifiedDecl(module, decl); clone != nil {
+			if clone := runtimeQualifiedDecl(module, decl, functions, types); clone != nil {
 				program.Decls = append(program.Decls, clone)
 			}
 		}
@@ -289,13 +289,36 @@ func packageRuntimeProgram(pkg *project.Package) *ast.Program {
 	return program
 }
 
+// runtimeLocalNames returns top-level names rewritten inside qualified clones.
+func runtimeLocalNames(program *ast.Program) (map[string]bool, map[string]bool) {
+	functions := map[string]bool{}
+	types := map[string]bool{}
+	for _, decl := range program.Decls {
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			functions[d.Name] = true
+		case *ast.EnumDecl:
+			types[d.Name] = true
+		case *ast.UnionDecl:
+			types[d.Name] = true
+		}
+	}
+	return functions, types
+}
+
 // runtimeQualifiedDecl returns a module-qualified runtime declaration clone.
-func runtimeQualifiedDecl(module project.ParsedModule, decl ast.Decl) ast.Decl {
+func runtimeQualifiedDecl(
+	module project.ParsedModule,
+	decl ast.Decl,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Decl {
 	prefix := runtimeModulePrefix(module)
 	switch d := decl.(type) {
 	case *ast.FunctionDecl:
 		clone := *d
 		clone.Name = prefix + "." + d.Name
+		clone.Body = runtimeBlockClone(d.Body, prefix, functions, types)
 		return &clone
 	case *ast.EnumDecl:
 		clone := *d
@@ -308,6 +331,194 @@ func runtimeQualifiedDecl(module project.ParsedModule, decl ast.Decl) ast.Decl {
 	default:
 		return nil
 	}
+}
+
+// runtimeBlockClone copies a block and qualifies local package runtime names.
+func runtimeBlockClone(
+	block *ast.BlockStmt,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) *ast.BlockStmt {
+	if block == nil {
+		return nil
+	}
+	clone := &ast.BlockStmt{Statements: make([]ast.Statement, 0, len(block.Statements))}
+	for _, stmt := range block.Statements {
+		clone.Statements = append(clone.Statements, runtimeStmtClone(stmt, prefix, functions, types))
+	}
+	return clone
+}
+
+// runtimeStmtClone copies one statement and rewrites contained expressions.
+func runtimeStmtClone(
+	stmt ast.Statement,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Statement {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		clone := *s
+		clone.Value = runtimeExprClone(s.Value, prefix, functions, types)
+		return &clone
+	case *ast.AssignStmt:
+		clone := *s
+		clone.Target = runtimeExprClone(s.Target, prefix, functions, types)
+		clone.Value = runtimeExprClone(s.Value, prefix, functions, types)
+		return &clone
+	case *ast.ReturnStmt:
+		clone := *s
+		clone.Value = runtimeExprClone(s.Value, prefix, functions, types)
+		return &clone
+	case *ast.ExprStmt:
+		clone := *s
+		clone.Expr = runtimeExprClone(s.Expr, prefix, functions, types)
+		return &clone
+	default:
+		return runtimeControlStmtClone(stmt, prefix, functions, types)
+	}
+}
+
+// runtimeControlStmtClone copies control-flow statements for package tests.
+func runtimeControlStmtClone(
+	stmt ast.Statement,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Statement {
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		clone := *s
+		clone.Condition = runtimeExprClone(s.Condition, prefix, functions, types)
+		clone.Consequence = runtimeBlockClone(s.Consequence, prefix, functions, types)
+		clone.Alternative = runtimeBlockClone(s.Alternative, prefix, functions, types)
+		return &clone
+	case *ast.WhileStmt:
+		clone := *s
+		clone.Condition = runtimeExprClone(s.Condition, prefix, functions, types)
+		clone.Body = runtimeBlockClone(s.Body, prefix, functions, types)
+		return &clone
+	case *ast.UnsafeStmt:
+		clone := *s
+		clone.Body = runtimeBlockClone(s.Body, prefix, functions, types)
+		return &clone
+	default:
+		return stmt
+	}
+}
+
+// runtimeExprClone copies one expression and qualifies local runtime lookups.
+func runtimeExprClone(
+	expr ast.Expression,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	switch e := expr.(type) {
+	case nil:
+		return nil
+	case *ast.CallExpr:
+		return runtimeCallClone(e, prefix, functions, types)
+	case *ast.FieldExpr:
+		return runtimeFieldClone(e, prefix, functions, types)
+	case *ast.BinaryExpr:
+		clone := *e
+		clone.Left = runtimeExprClone(e.Left, prefix, functions, types)
+		clone.Right = runtimeExprClone(e.Right, prefix, functions, types)
+		return &clone
+	case *ast.PrefixExpr:
+		clone := *e
+		clone.Right = runtimeExprClone(e.Right, prefix, functions, types)
+		return &clone
+	default:
+		return runtimeOtherExprClone(expr, prefix, functions, types)
+	}
+}
+
+// runtimeCallClone copies a call and qualifies same-module function callees.
+func runtimeCallClone(
+	expr *ast.CallExpr,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	clone := *expr
+	if ident, ok := expr.Callee.(*ast.IdentExpr); ok && functions[ident.Name] {
+		clone.Callee = &ast.IdentExpr{Name: prefix + "." + ident.Name}
+	} else {
+		clone.Callee = runtimeExprClone(expr.Callee, prefix, functions, types)
+	}
+	clone.Args = runtimeExprsClone(expr.Args, prefix, functions, types)
+	return &clone
+}
+
+// runtimeFieldClone copies field and namespace expressions.
+func runtimeFieldClone(
+	expr *ast.FieldExpr,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	clone := *expr
+	if expr.Namespace {
+		if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && types[ident.Name] {
+			clone.Receiver = &ast.IdentExpr{Name: prefix + "." + ident.Name}
+			return &clone
+		}
+	}
+	clone.Receiver = runtimeExprClone(expr.Receiver, prefix, functions, types)
+	return &clone
+}
+
+// runtimeOtherExprClone copies less common expression nodes.
+func runtimeOtherExprClone(
+	expr ast.Expression,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	switch e := expr.(type) {
+	case *ast.TryExpr:
+		clone := *e
+		clone.Value = runtimeExprClone(e.Value, prefix, functions, types)
+		return &clone
+	case *ast.StructLiteralExpr:
+		clone := *e
+		clone.Fields = runtimeFieldValuesClone(e.Fields, prefix, functions, types)
+		return &clone
+	default:
+		return expr
+	}
+}
+
+// runtimeExprsClone copies an expression list.
+func runtimeExprsClone(
+	exprs []ast.Expression,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) []ast.Expression {
+	clone := make([]ast.Expression, 0, len(exprs))
+	for _, expr := range exprs {
+		clone = append(clone, runtimeExprClone(expr, prefix, functions, types))
+	}
+	return clone
+}
+
+// runtimeFieldValuesClone copies struct literal field initializers.
+func runtimeFieldValuesClone(
+	fields []ast.FieldValue,
+	prefix string,
+	functions map[string]bool,
+	types map[string]bool,
+) []ast.FieldValue {
+	clone := make([]ast.FieldValue, 0, len(fields))
+	for _, field := range fields {
+		field.Value = runtimeExprClone(field.Value, prefix, functions, types)
+		clone = append(clone, field)
+	}
+	return clone
 }
 
 // runtimeModulePrefix returns the import alias used by source expressions.
