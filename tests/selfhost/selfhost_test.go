@@ -273,6 +273,51 @@ func TestSelfHostLexerModuleUsesImportedTokenArray(t *testing.T) {
 	}
 }
 
+// TestSelfHostParserModuleUsesTokenSummary checks the ported parser API.
+func TestSelfHostParserModuleUsesTokenSummary(t *testing.T) {
+	program := parseSelfHostSource(t, filepath.Join(repoRoot(t), "selfhost", "src", "parser.kizu"))
+	fn := functionDeclByName(t, program, "parse_tokens")
+	if len(fn.Params) != 1 {
+		t.Fatalf("parse_tokens params got %#v, want token array borrow", fn.Params)
+	}
+	wantParam := "std::array::Array<token::Token>"
+	if !fn.Params[0].Borrow || fn.Params[0].TypeName != wantParam {
+		t.Fatalf("parse_tokens param got %#v, want &%s", fn.Params[0], wantParam)
+	}
+	if fn.ReturnType != "!ast::ParseSummary" {
+		t.Fatalf("parse_tokens return got %q", fn.ReturnType)
+	}
+}
+
+// TestSelfHostParserModuleExposesParseSummary checks the parser component API.
+func TestSelfHostParserModuleExposesParseSummary(t *testing.T) {
+	root := filepath.Join(repoRoot(t), "selfhost", "src")
+	astProgram := parseSelfHostSource(t, filepath.Join(root, "ast.kizu"))
+	fields := structFieldNamesByName(t, astProgram, "ParseSummary")
+	for _, field := range []string{
+		"function_count",
+		"import_count",
+		"struct_count",
+		"enum_count",
+		"union_count",
+		"return_count",
+	} {
+		if !fields[field] {
+			t.Fatalf("ParseSummary is missing field %s", field)
+		}
+	}
+
+	parserProgram := parseSelfHostSource(t, filepath.Join(root, "parser.kizu"))
+	fn := functionDeclByName(t, parserProgram, "parse_tokens")
+	wantParam := "std::array::Array<token::Token>"
+	if len(fn.Params) != 1 || !fn.Params[0].Borrow || fn.Params[0].TypeName != wantParam {
+		t.Fatalf("parse_tokens params got %#v", fn.Params)
+	}
+	if fn.ReturnType != "!ast::ParseSummary" {
+		t.Fatalf("parse_tokens return got %q", fn.ReturnType)
+	}
+}
+
 // TestSelfHostFrontendSmoke runs the current frontend skeleton entry point.
 func TestSelfHostFrontendSmoke(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
@@ -4454,6 +4499,24 @@ func enumTagsByName(t *testing.T, program *ast.Program, name string) map[string]
 		return tags
 	}
 	t.Fatalf("enum %s was not found", name)
+	return nil
+}
+
+// structFieldNamesByName returns the public shape of one struct declaration.
+func structFieldNamesByName(t *testing.T, program *ast.Program, name string) map[string]bool {
+	t.Helper()
+	for _, decl := range program.Decls {
+		structDecl, ok := decl.(*ast.StructDecl)
+		if !ok || structDecl.Name != name {
+			continue
+		}
+		fields := map[string]bool{}
+		for _, field := range structDecl.Fields {
+			fields[field.Name] = true
+		}
+		return fields
+	}
+	t.Fatalf("struct %s was not found", name)
 	return nil
 }
 
