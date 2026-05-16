@@ -160,12 +160,21 @@ func checkPackageTarget(path string) error {
 		return err
 	}
 	for _, module := range pkg.Modules {
-		if err := checkProgram(module.Program); err != nil {
+		if err := checkPackageProgram(pkg, module); err != nil {
 			return fmt.Errorf("%s: %w", module.Module.Path, err)
 		}
 	}
 	_, _ = fmt.Println("check: ok")
 	return nil
+}
+
+// checkPackageProgram checks one module with imported public type names visible.
+func checkPackageProgram(pkg *project.Package, module project.ParsedModule) error {
+	if err := types.New().WithExternalTypes(project.ImportedPublicTypeNames(pkg, module)).
+		Check(module.Program); err != nil {
+		return err
+	}
+	return ownership.New().Check(module.Program)
 }
 
 // loadPackageTarget loads user packages and the compiler-owned std package.

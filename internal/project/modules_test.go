@@ -23,7 +23,7 @@ func TestModuleConformanceFixture(t *testing.T) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
 	for _, module := range pkg.Modules {
-		checkParsedModule(t, module)
+		checkParsedModule(t, pkg, module)
 	}
 }
 
@@ -137,9 +137,10 @@ fn main() -> void {
 }
 
 // checkParsedModule runs static checks for one parsed module.
-func checkParsedModule(t *testing.T, module ParsedModule) {
+func checkParsedModule(t *testing.T, pkg *Package, module ParsedModule) {
 	t.Helper()
-	if err := types.New().Check(module.Program); err != nil {
+	if err := types.New().WithExternalTypes(ImportedPublicTypeNames(pkg, module)).
+		Check(module.Program); err != nil {
 		t.Fatalf("type check failed in %s: %v", module.Module.Path, err)
 	}
 	if err := ownership.New().Check(module.Program); err != nil {
