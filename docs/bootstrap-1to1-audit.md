@@ -33,7 +33,7 @@ each row below.
 | ownership | self-host ownership snapshots cover positive conformance sources plus all type-checkable ownership diagnostic fixtures, including moved-value, double-move, assignment-move, copy-preserving channel send, channel/task ownership-transfer moves, deinit use-after-move, Arena/Handle provenance/escape, String view invalidation, Array append move/element-borrow conflicts, task completion, if branch move, borrow escape, field borrow, mutable borrow conflict, and move-while-borrowed fixtures vs Go checker | strong | none |
 | IR | self-host IR summary plus normalized function/block/opcode/result/operand/immediate/terminator dump equality across all positive conformance manifest sources and selected lowerability failures vs Go IR facts | strong | none |
 | backend | self-host target/status/function/string/instruction/const/call/entry plus LLVM/WASM output-line fingerprints across the backend-supported fixture matrix, including target-specific emitter failures, vs Go emitters | strong | none |
-| cache | Go module-aware cache tests include std source hash; self-host snapshot declares Go-owned cache switch contract | medium | keep Go-owned until Kizu owns filesystem, hashing, module graph, and artifact layout |
+| cache | Go module-aware cache tests cover no-op rebuild, rebuild reason classes, std source hash, status, and prune; self-host snapshot matches the Go-owned cache switch contract, including required inputs and blocked Kizu-owned APIs | strong | none |
 
 ## Tracking Issues
 
@@ -48,7 +48,7 @@ acceptance evidence before closing.
 5. Kizu ownership/memory-safety oracle: #116 (complete)
 6. Normalized IR dump oracle: #117 (complete)
 7. Backend smoke fingerprint oracle: #118 (complete)
-8. Cache ownership and self-host switch decision: #119 (open)
+8. Cache ownership and self-host switch decision: #119 (complete)
 9. 1:1 completion gate that fails if any phase lacks coverage: #111 (open)
 
 ## Completion Gate
