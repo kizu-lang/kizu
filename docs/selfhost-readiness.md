@@ -53,8 +53,8 @@ Before switching production behavior from Go to Kizu:
 | AST / parser | strong legacy oracle through `tests/selfhost` | AST node shapes plus executable parser summary/declaration/detail component tests are ported under `selfhost/src` | production switch decision |
 | diagnostics / resolver | strong legacy oracle through `tests/selfhost` and module fixtures | diagnostic span shape, module alias helpers, and executable package component test are ported under `selfhost/src` | expand to full module graph and diagnostic object oracle |
 | type checker | strong legacy oracle for selected conformance and diagnostics | core type-name classification and executable package component test are ported under `selfhost/src` | expand to function/local type environment snapshots |
-| ownership / borrow checker | strong legacy memory-safety oracle | scaffold only | type environment module first |
-| IR | strong normalized dump oracle | scaffold only | type and ownership modules first |
+| ownership / borrow checker | strong legacy memory-safety oracle | move/copy/borrow transition facts and executable package component test are ported under `selfhost/src` | expand to scoped environment snapshots |
+| IR | strong normalized dump oracle | IR module/function/block/instruction summary facts and executable package component test are ported under `selfhost/src` | expand to full normalized IR dump |
 | backend | Go-owned smoke fingerprint oracle | contract only | not a v0.3 production switch target |
 | cache | Go-owned switch contract oracle | contract only | Kizu filesystem, hashing, module graph, artifact layout APIs |
 
@@ -166,3 +166,54 @@ Completion evidence:
   `kizu test selfhost`.
 - Full type checker porting still requires Go/Kizu snapshots for function
   signatures, local bindings, call checking, stdlib boundaries, and diagnostics.
+
+## #224 Ownership / Borrow Readiness
+
+Target mapping:
+
+```text
+internal/ownership -> selfhost/src/ownership.kizu
+```
+
+Ready to expand after:
+
+- Type summaries expose copy-ness and error-union facts.
+- Parser snapshots expose enough local binding and call information.
+- Move and borrow transitions are executable through package component tests.
+
+Completion evidence:
+
+- `selfhost/src/ownership.kizu` exposes explicit value states and transitions
+  for owned, moved, shared-borrowed, and mutably-borrowed values.
+- The transition helpers cover copy-preserving moves, non-copy move
+  invalidation, double move, shared borrow, mutable borrow conflict, and
+  move-while-borrowed facts.
+- `selfhost/src/ownership_component_test.kizu` executes those APIs through
+  `kizu test selfhost`.
+- Full ownership checker porting still requires scoped environment snapshots
+  and parity against the memory-safety oracle in `tests/selfhost`.
+
+## #223 IR Readiness
+
+Target mapping:
+
+```text
+internal/ir -> selfhost/src/ir.kizu
+```
+
+Ready to expand after:
+
+- Type and ownership summaries can feed lowerability decisions.
+- Parser snapshots expose enough function/block structure for lowering.
+- IR summary facts are executable through package component tests.
+
+Completion evidence:
+
+- `selfhost/src/ir.kizu` exposes instruction, block, function, and module
+  summary shapes.
+- The summary helpers compare deterministic function-level facts without hidden
+  runtime behavior.
+- `selfhost/src/ir_component_test.kizu` executes those APIs through
+  `kizu test selfhost`.
+- Full IR porting still requires normalized Go/Kizu IR dump equality for the
+  conformance and lowerability fixture matrix.
