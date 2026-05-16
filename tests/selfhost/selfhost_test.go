@@ -255,6 +255,22 @@ func TestSelfHostLexerModuleUsesImportedTokenArray(t *testing.T) {
 	if fn.ReturnType != want {
 		t.Fatalf("lex return got %q, want %q", fn.ReturnType, want)
 	}
+	if len(fn.Body.Statements) < 5 {
+		t.Fatalf("lex body has %d statements, want scanner body", len(fn.Body.Statements))
+	}
+	for _, helper := range []string{
+		"token_literal",
+		"make_token",
+		"keyword_kind",
+		"single_char_kind",
+		"two_char_kind",
+		"lex_identifier",
+		"lex_number",
+		"lex_string",
+		"lex_symbol",
+	} {
+		functionDeclByName(t, program, helper)
+	}
 }
 
 // TestSelfHostFrontendSmoke runs the current frontend skeleton entry point.
