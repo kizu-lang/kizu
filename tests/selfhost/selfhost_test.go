@@ -206,8 +206,10 @@ type conformanceManifestData struct {
 }
 
 type conformanceCase struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Name           string `json:"name"`
+	Mode           string `json:"mode"`
+	Path           string `json:"path"`
+	StderrContains string `json:"stderr_contains"`
 }
 
 type moduleConformanceCase struct {
@@ -576,6 +578,19 @@ func TestSelfHostDiagnosticOracleCoversNegativeFixtures(t *testing.T) {
 	}
 }
 
+// TestSelfHostDiagnosticOracleKeepsSelectedPositivesClean checks clean fixtures.
+func TestSelfHostDiagnosticOracleKeepsSelectedPositivesClean(t *testing.T) {
+	for _, path := range selfHostPositiveConformanceSources(t) {
+		fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			got := extractDiagnosticSnapshots(t, runSelfHostDiagnostics(t, fixture))
+			if len(got) != 0 {
+				t.Fatalf("positive source emitted diagnostics: %#v", got)
+			}
+		})
+	}
+}
+
 // selfHostDiagnosticObjectOracleCases returns diagnostic oracle fixtures.
 func selfHostDiagnosticObjectOracleCases() []string {
 	cases := []string{
@@ -585,17 +600,47 @@ func selfHostDiagnosticObjectOracleCases() []string {
 		"tests/conformance/modules/private_module_access/src/main.kizu",
 		"tests/conformance/modules/private_type_leak/src/main.kizu",
 		"tests/conformance/modules/private_field_construction/src/main.kizu",
-		"examples/io_runtime.kizu",
-		"examples/std_mem.kizu",
-		"examples/std_array.kizu",
-		"examples/std_testing.kizu",
-		"examples/channel.kizu",
-		"examples/task_cancel.kizu",
 	}
+	cases = append(cases, selfHostPositiveDiagnosticCleanCases()...)
 	cases = append(cases, selfHostTypeDiagnosticObjectOracleCases()...)
 	cases = append(cases, selfHostOwnershipDiagnosticObjectOracleCases()...)
 	cases = append(cases, selfHostRuntimeDiagnosticObjectOracleCases()...)
 	return cases
+}
+
+// selfHostPositiveDiagnosticCleanCases returns selected positive counter-fixtures.
+func selfHostPositiveDiagnosticCleanCases() []string {
+	return []string{
+		"examples/io_runtime.kizu",
+		"examples/std_mem.kizu",
+		"examples/std_array.kizu",
+		"examples/std_array_single_get.kizu",
+		"examples/std_testing.kizu",
+		"examples/channel.kizu",
+		"examples/task_cancel.kizu",
+	}
+}
+
+// selfHostPositiveConformanceSources returns every non-error conformance source.
+func selfHostPositiveConformanceSources(t *testing.T) []string {
+	t.Helper()
+	paths := map[string]bool{}
+	for _, manifest := range loadConformanceManifests(t) {
+		for _, item := range manifest.Cases {
+			if conformanceModeIsPositive(item.Mode) {
+				paths[item.Path] = true
+			}
+		}
+	}
+	for _, path := range selfHostPositiveDiagnosticCleanCases() {
+		paths[path] = true
+	}
+	return sortedMapKeys(paths)
+}
+
+// conformanceModeIsPositive reports whether diagnostics should stay empty.
+func conformanceModeIsPositive(mode string) bool {
+	return mode == "run" || mode == "check"
 }
 
 // selfHostTypeDiagnosticObjectOracleCases returns type diagnostic fixtures.
