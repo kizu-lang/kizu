@@ -2,6 +2,7 @@ package project
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -126,6 +127,14 @@ func cloneImportedEnum(alias string, decl *ast.EnumDecl) *ast.EnumDecl {
 
 // qualifyImportedType qualifies direct references to public imported types.
 func qualifyImportedType(alias string, typeName string, publicTypes map[string]bool) string {
+	if strings.HasPrefix(typeName, "!") {
+		return "!" + qualifyImportedType(alias, strings.TrimPrefix(typeName, "!"), publicTypes)
+	}
+	if idx := strings.Index(typeName, "!"); idx > 0 && idx < len(typeName)-1 {
+		left := qualifyImportedType(alias, typeName[:idx], publicTypes)
+		right := qualifyImportedType(alias, typeName[idx+1:], publicTypes)
+		return left + "!" + right
+	}
 	if publicTypes[typeName] {
 		return alias + "::" + typeName
 	}

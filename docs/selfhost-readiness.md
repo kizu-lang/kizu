@@ -49,10 +49,10 @@ Before switching production behavior from Go to Kizu:
 
 | Component | Go oracle status | Kizu module status | Next blocker |
 | --- | --- | --- | --- |
-| token / lexer | strong legacy oracle through `tests/selfhost` | token API, lexer scanner body, and package component test are ported under `selfhost/src` | #214 package runtime execution before production switch |
-| AST / parser | strong legacy oracle through `tests/selfhost` | AST node shapes plus parser summary/declaration/detail APIs with token spans are ported under `selfhost/src` | #214 package runtime execution before production switch |
-| diagnostics / resolver | strong legacy oracle through `tests/selfhost` and module fixtures | scaffold only | token/parser modules first |
-| type checker | strong legacy oracle for selected conformance and diagnostics | scaffold only | parser/resolver modules first |
+| token / lexer | strong legacy oracle through `tests/selfhost` | token API, lexer scanner body, and executable package component test are ported under `selfhost/src` | production switch decision |
+| AST / parser | strong legacy oracle through `tests/selfhost` | AST node shapes plus executable parser summary/declaration/detail component tests are ported under `selfhost/src` | production switch decision |
+| diagnostics / resolver | strong legacy oracle through `tests/selfhost` and module fixtures | diagnostic span shape, module alias helpers, and executable package component test are ported under `selfhost/src` | expand to full module graph and diagnostic object oracle |
+| type checker | strong legacy oracle for selected conformance and diagnostics | scaffold only | diagnostics/resolver module graph first |
 | ownership / borrow checker | strong legacy memory-safety oracle | scaffold only | type checker module first |
 | IR | strong normalized dump oracle | scaffold only | type and ownership modules first |
 | backend | Go-owned smoke fingerprint oracle | contract only | not a v0.3 production switch target |
@@ -75,13 +75,12 @@ Ready to implement after:
   `std::array::Array<Token>`, `!T`, `?T`, allocator, and `deinit`.
 - The Kizu lexer output schema is fixed to token kind, literal, byte start,
   byte end, line, and column.
-- Until #197 lands, #192 must keep using Go tests as the component oracle and
-  must not claim that Kizu package component tests fully replace it.
+- Package component tests now execute through `kizu test selfhost`. Go tests
+  remain the production oracle until the switch gate is satisfied.
 - Cross-module value expression support is available for imported enum variants,
   public struct literals, and public function calls.
-- The scanner body is now ported into `selfhost/src/lexer.kizu`; #197 remains
-  the blocker for replacing the legacy frontend oracle with package component
-  tests.
+- The scanner body is now ported into `selfhost/src/lexer.kizu`, and package
+  component tests exercise the module boundary.
 
 Completion evidence:
 
@@ -116,3 +115,29 @@ Completion evidence:
 - Negative parser fixtures compare diagnostic message substrings and spans.
 - Semicolon, explicit return, `::` namespace, import, `pub`, enum, union, and
   typed-error syntax are covered.
+
+## #218 Diagnostics / Resolver Readiness
+
+Target mapping:
+
+```text
+internal/project diagnostics -> selfhost/src/diagnostics.kizu
+internal/project resolver    -> selfhost/src/resolver.kizu
+```
+
+Ready to expand after:
+
+- Token and parser package component tests execute through `kizu test selfhost`.
+- Diagnostic primary span data is represented in Kizu source.
+- Module alias resolution is represented without allocation-heavy helpers.
+
+Completion evidence:
+
+- `selfhost/src/diagnostics.kizu` exposes severity, message, and primary span
+  data.
+- `selfhost/src/resolver.kizu` exposes final-segment alias and reserved `std`
+  path classification.
+- `selfhost/src/resolver_component_test.kizu` executes those APIs through the
+  package component runtime.
+- Further resolver work must compare full module graph snapshots against the Go
+  package resolver before production switching.

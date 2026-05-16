@@ -1,5 +1,62 @@
 // Module: name and module resolver boundary for the future self-host compiler.
 
+pub struct ModulePath {
+    pub full: []const u8;
+    pub alias: []const u8;
+    pub is_std: bool;
+}
+
+// resolve_module_path computes the import-facing summary for a module path.
+pub fn resolve_module_path(path: []const u8) -> !ModulePath {
+    return ModulePath {
+        full: path,
+        alias: try import_alias(path),
+        is_std: is_std_path(path),
+    };
+}
+
+// import_alias returns the final module segment used at expression sites.
+pub fn import_alias(path: []const u8) -> ![]const u8 {
+    return try last_segment(path);
+}
+
+// is_std_path reports whether a module path belongs to the reserved std root.
+pub fn is_std_path(path: []const u8) -> bool {
+    if std::mem::equal_bytes(path, "std") {
+        return true;
+    }
+    return std::mem::starts_with(path, "std::");
+}
+
+// alias_conflicts reports whether two imported paths have the same alias.
+pub fn alias_conflicts(left: []const u8, right: []const u8) -> !bool {
+    let left_alias = try import_alias(left);
+    let right_alias = try import_alias(right);
+    return std::mem::equal_bytes(left_alias, right_alias);
+}
+
+// last_segment returns the bytes after the final namespace separator.
+fn last_segment(path: []const u8) -> ![]const u8 {
+    var start = 0;
+    var index = 0;
+    let length = std::mem::len(path);
+    while index + 1 < length {
+        let first = try std::mem::byte_at(path, index);
+        let second = try std::mem::byte_at(path, index + 1);
+        if first == cast<u8>(58) {
+            if second == cast<u8>(58) {
+                start = index + 2;
+                index = index + 2;
+            } else {
+                index = index + 1;
+            }
+        } else {
+            index = index + 1;
+        }
+    }
+    return try std::mem::slice(path, start, length);
+}
+
 // ready exposes the resolver module to package-level resolution checks.
 pub fn ready() -> bool {
     return true;
