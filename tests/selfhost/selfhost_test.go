@@ -885,66 +885,9 @@ func selfHostTypeEnvironmentOracleSources(t *testing.T) []string {
 	return sortedMapKeys(paths)
 }
 
-// TestSelfHostTypeCheckOracle compares a selected type pass/fail subset.
+// TestSelfHostTypeCheckOracle compares type pass/fail snapshots.
 func TestSelfHostTypeCheckOracle(t *testing.T) {
-	cases := []string{
-		"examples/negative/std_mem_wrong_type.kizu",
-		"selfhost/fixtures/type_arg_count.kizu",
-		"selfhost/fixtures/type_arg_type.kizu",
-		"examples/negative/invalid_field.kizu",
-		"examples/negative/if_expression_type_mismatch.kizu",
-		"examples/negative/empty_return_value.kizu",
-		"examples/negative/missing_return.kizu",
-		"examples/negative/invalid_cast.kizu",
-		"examples/negative/comptime_borrow_escape.kizu",
-		"examples/negative/missing_contract_method.kizu",
-		"examples/negative/owned_dyn.kizu",
-		"examples/negative/unsatisfied_dyn.kizu",
-		"examples/negative/io_builtin_constructor.kizu",
-		"examples/negative/io_evented_unimplemented.kizu",
-		"examples/negative/fs_read_without_io.kizu",
-		"examples/negative/fs_write_wrong_bytes.kizu",
-		"examples/negative/std_fs_exists_without_io.kizu",
-		"examples/negative/std_path_wrong_type.kizu",
-		"examples/negative/std_array_wrong_type.kizu",
-		"examples/negative/std_array_at_mut_immutable.kizu",
-		"examples/negative/std_array_at_mut_unrelated_var.kizu",
-		"examples/negative/std_array_at_pass_to_owned_param.kizu",
-		"examples/negative/std_array_at_return_escape.kizu",
-		"examples/negative/std_array_atomic_element.kizu",
-		"examples/negative/std_array_channel_send.kizu",
-		"examples/negative/std_array_get_non_copy.kizu",
-		"examples/negative/std_array_handle_element.kizu",
-		"examples/negative/std_array_map_element.kizu",
-		"examples/negative/std_array_raw_pointer_element.kizu",
-		"examples/negative/std_array_struct_channel_element.kizu",
-		"examples/negative/std_array_struct_nested_array_element.kizu",
-		"examples/negative/std_array_struct_raw_pointer_element.kizu",
-		"examples/negative/std_array_task_spawn.kizu",
-		"examples/negative/std_array_union_handle_element.kizu",
-		"examples/negative/std_map_wrong_key_type.kizu",
-		"examples/negative/std_map_wrong_insert_type.kizu",
-		"examples/negative/std_string_wrong_append_type.kizu",
-		"examples/negative/std_testing_wrong_type.kizu",
-		"examples/negative/std_array_no_allocator.kizu",
-		"examples/negative/std_string_no_allocator.kizu",
-		"examples/negative/std_map_no_allocator.kizu",
-		"examples/negative/std_string_append_through_shared_borrow.kizu",
-		"examples/negative/std_string_deinit_through_shared_borrow.kizu",
-		"examples/negative/std_string_deinit_through_mut_borrow.kizu",
-		"examples/negative/std_string_as_bytes_direct_use.kizu",
-		"examples/negative/std_string_as_bytes_return_escape.kizu",
-		"examples/negative/std_string_append_byte_wrong_type.kizu",
-		"examples/negative/std_map_insert_through_shared_borrow.kizu",
-		"examples/negative/std_map_deinit_through_shared_borrow.kizu",
-		"examples/negative/std_map_deinit_through_mut_borrow.kizu",
-		"examples/negative/std_map_non_copy_value.kizu",
-		"examples/task_queue.kizu",
-		"examples/parallel_for.kizu",
-		"examples/parallel_map_with_unrelated_bytes.kizu",
-	}
-	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
-	for _, path := range cases {
+	for _, path := range selfHostTypeCheckOracleCases(t) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
 			got := extractMarkedSnapshot(
@@ -957,6 +900,31 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// selfHostTypeCheckOracleCases returns the type checker snapshot corpus.
+func selfHostTypeCheckOracleCases(t *testing.T) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	cases := []string{
+		"examples/task_queue.kizu",
+		"examples/parallel_for.kizu",
+		"examples/parallel_map_with_unrelated_bytes.kizu",
+	}
+	for _, path := range cases {
+		seen[path] = true
+	}
+	for _, path := range selfHostTypeDiagnosticObjectOracleCases() {
+		fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+		if !sourceParses(t, fixture) {
+			continue
+		}
+		if !seen[path] {
+			seen[path] = true
+			cases = append(cases, path)
+		}
+	}
+	return cases
 }
 
 // TestSelfHostOwnershipMemoryOracle compares minimal move/borrow safety facts.
@@ -3158,6 +3126,9 @@ func goTypeCheckSnapshot(t *testing.T, path string) []string {
 	if err == nil {
 		return []string{"status", "pass"}
 	}
+	if snapshots := goTypeDiagnosticSnapshots(t, path); len(snapshots) > 0 {
+		return []string{"status", "fail", "message", snapshots[0].Message}
+	}
 	return []string{"status", "fail", "message", normalizeTypeError(err.Error())}
 }
 
@@ -3259,20 +3230,58 @@ type typeErrorNormalizer struct {
 
 // typeErrorNormalizers returns simple substring-based type diagnostic mappings.
 func typeErrorNormalizers() []typeErrorNormalizer {
+	items := coreTypeErrorNormalizers()
+	items = append(items, advancedTypeErrorNormalizers()...)
+	items = append(items, stdlibTypeErrorNormalizers()...)
+	items = append(items, concurrencyTypeErrorNormalizers()...)
+	return items
+}
+
+// coreTypeErrorNormalizers returns core language type diagnostic mappings.
+func coreTypeErrorNormalizers() []typeErrorNormalizer {
 	return []typeErrorNormalizer{
 		{"equal_bytes", "type error: `std::mem::equal_bytes` arg 2 expects []const u8"},
 		{"expects 2 args", "type error: call arg count"},
 		{"arg 1 of `take` expects i64", "type error: call arg type"},
 		{"unknown field", "type error: unknown field"},
 		{"if expression branch types differ", "type error: if expression branch types differ"},
+		{"`break` used outside loop", "type error: break outside loop"},
+		{"`continue` used outside loop", "type error: continue outside loop"},
+		{"unknown loop label", "type error: unknown loop label"},
+		{"enum tag", "type error: enum variant must use namespace"},
+		{"union variant", "type error: union variant must use namespace"},
+		{"is not exhaustive", "type error: match not exhaustive"},
+		{"duplicate match tag", "type error: duplicate match tag"},
+		{"unknown match tag", "type error: unknown match tag"},
+		{"try cannot propagate", "type error: typed error mismatch"},
+		{
+			"typed error cannot use untyped constructor",
+			"type error: typed error cannot use untyped constructor",
+		},
+		{"call requires unsafe", "unsafe error: call requires unsafe"},
+		{"ptr_read requires unsafe", "unsafe error: ptr_read requires unsafe"},
+		{"ptr_read nullable pointer", "type error: ptr_read nullable pointer"},
+		{"cannot cast handle", "type error: handle cannot cast to pointer"},
 		{"return expects", "type error: return type mismatch"},
 		{"runtime value cannot be used", "comptime error: runtime value"},
+		{"must return", "type error: missing return"},
+		{"cannot cast", "type error: invalid cast"},
+	}
+}
+
+// advancedTypeErrorNormalizers returns contract, Dyn, and unsafe mappings.
+func advancedTypeErrorNormalizers() []typeErrorNormalizer {
+	return []typeErrorNormalizer{
 		{"missing method", "type error: contract missing method"},
 		{"Dyn parameter", "type error: Dyn parameter borrowed"},
 		{"does not satisfy `Writer`", "type error: Dyn not satisfied"},
 		{"parallel map worker", "type error: parallel map worker return"},
-		{"must return", "type error: missing return"},
-		{"cannot cast", "type error: invalid cast"},
+	}
+}
+
+// stdlibTypeErrorNormalizers returns stdlib and resource diagnostic mappings.
+func stdlibTypeErrorNormalizers() []typeErrorNormalizer {
+	return []typeErrorNormalizer{
 		{"use `std::io::blocking()`", "type error: Io constructor"},
 		{"`std::io::evented` is not implemented", "type error: Io evented"},
 		{"`std::fs::read_file` expects Io", "type error: fs.read_file Io"},
@@ -3297,6 +3306,12 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"Map.insert", "type error: Map.insert type"},
 		{"String.append_bytes", "type error: String.append_bytes type"},
 		{"expect_equal_i64", "type error: testing arg type"},
+	}
+}
+
+// concurrencyTypeErrorNormalizers returns task/thread/channel diagnostic mappings.
+func concurrencyTypeErrorNormalizers() []typeErrorNormalizer {
+	return []typeErrorNormalizer{
 		{"Atomic<i64>", "type error: Atomic old name"},
 		{"AtomicI64", "type error: Atomic old name"},
 		{"use `std::atomic::Atomic<T>(value)`", "type error: Atomic type argument required"},
