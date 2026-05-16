@@ -589,26 +589,16 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/ptr_read_unrelated_nullable_source.kizu",
 		"examples/negative/nullable_ptr_read.kizu",
 		"examples/negative/handle_as_pointer.kizu",
-		"examples/negative/std_array_wrong_type.kizu",
-		"examples/negative/std_array_at_mut_immutable.kizu",
-		"examples/negative/std_array_at_pass_to_owned_param.kizu",
-		"examples/negative/std_array_at_return_escape.kizu",
-		"examples/negative/std_array_atomic_element.kizu",
-		"examples/negative/std_array_channel_send.kizu",
-		"examples/negative/std_array_get_non_copy.kizu",
-		"examples/negative/std_array_handle_element.kizu",
-		"examples/negative/std_array_map_element.kizu",
-		"examples/negative/std_array_raw_pointer_element.kizu",
-		"examples/negative/std_array_struct_channel_element.kizu",
-		"examples/negative/std_array_struct_nested_array_element.kizu",
-		"examples/negative/std_array_struct_raw_pointer_element.kizu",
-		"examples/negative/std_array_task_spawn.kizu",
-		"examples/negative/std_array_union_handle_element.kizu",
+		"examples/negative/io_builtin_constructor.kizu",
+		"examples/negative/io_evented_unimplemented.kizu",
+		"examples/negative/fs_read_without_io.kizu",
+		"examples/negative/fs_write_wrong_bytes.kizu",
+		"examples/negative/std_fs_exists_without_io.kizu",
+		"examples/negative/std_path_wrong_type.kizu",
 		"examples/negative/std_map_wrong_key_type.kizu",
 		"examples/negative/std_map_wrong_insert_type.kizu",
 		"examples/negative/std_string_wrong_append_type.kizu",
 		"examples/negative/std_testing_wrong_type.kizu",
-		"examples/negative/std_array_no_allocator.kizu",
 		"examples/negative/std_string_no_allocator.kizu",
 		"examples/negative/std_map_no_allocator.kizu",
 		"examples/negative/std_string_append_through_shared_borrow.kizu",
@@ -624,8 +614,33 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/unsafe_nested_block.kizu",
 		"examples/unsafe_ptr_read_with_unrelated_nullable_source.kizu",
 	}
+	cases = append(cases, selfHostArrayTypeDiagnosticCases()...)
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
 	return cases
+}
+
+// selfHostArrayTypeDiagnosticCases returns Array type diagnostic fixtures.
+func selfHostArrayTypeDiagnosticCases() []string {
+	return []string{
+		"examples/negative/std_array_wrong_type.kizu",
+		"examples/negative/std_array_at_mut_immutable.kizu",
+		"examples/negative/std_array_at_mut_unrelated_var.kizu",
+		"examples/negative/std_array_at_pass_to_owned_param.kizu",
+		"examples/negative/std_array_at_return_escape.kizu",
+		"examples/negative/std_array_atomic_element.kizu",
+		"examples/negative/std_array_channel_send.kizu",
+		"examples/negative/std_array_get_non_copy.kizu",
+		"examples/negative/std_array_handle_element.kizu",
+		"examples/negative/std_array_map_element.kizu",
+		"examples/negative/std_array_no_allocator.kizu",
+		"examples/negative/std_array_raw_pointer_element.kizu",
+		"examples/negative/std_array_struct_channel_element.kizu",
+		"examples/negative/std_array_struct_nested_array_element.kizu",
+		"examples/negative/std_array_struct_raw_pointer_element.kizu",
+		"examples/negative/std_array_task_spawn.kizu",
+		"examples/negative/std_array_union_handle_element.kizu",
+		"examples/std_array_with_unrelated_pointer.kizu",
+	}
 }
 
 // selfHostConcurrencyTypeDiagnosticCases returns concurrency type fixtures.
@@ -642,6 +657,8 @@ func selfHostConcurrencyTypeDiagnosticCases() []string {
 		"examples/negative/mutex_non_copy.kizu",
 		"examples/negative/task_group_without_io.kizu",
 		"examples/negative/task_spawn_borrowed_io.kizu",
+		"examples/negative/task_spawn_mut_borrowed_io.kizu",
+		"examples/negative/task_spawn_old_io_arg.kizu",
 		"examples/negative/task_spawn_pointer.kizu",
 		"examples/negative/task_spawn_arena.kizu",
 		"examples/negative/task_spawn_handle.kizu",
@@ -679,6 +696,9 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_array_use_after_deinit.kizu",
 		"examples/negative/std_array_append_moves.kizu",
 		"examples/negative/std_array_append_while_borrowed.kizu",
+		"examples/negative/std_array_at_mut_append_while_borrowed.kizu",
+		"examples/negative/std_array_at_mut_deinit_while_borrowed.kizu",
+		"examples/negative/std_array_at_mut_set_while_borrowed.kizu",
 		"examples/negative/std_array_deinit_while_borrowed.kizu",
 		"examples/negative/std_array_read_while_mut_borrowed.kizu",
 		"examples/negative/std_array_set_while_borrowed.kizu",
@@ -747,8 +767,15 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/empty_return_value.kizu",
 		"examples/negative/missing_return.kizu",
 		"examples/negative/invalid_cast.kizu",
+		"examples/negative/io_builtin_constructor.kizu",
+		"examples/negative/io_evented_unimplemented.kizu",
+		"examples/negative/fs_read_without_io.kizu",
+		"examples/negative/fs_write_wrong_bytes.kizu",
+		"examples/negative/std_fs_exists_without_io.kizu",
+		"examples/negative/std_path_wrong_type.kizu",
 		"examples/negative/std_array_wrong_type.kizu",
 		"examples/negative/std_array_at_mut_immutable.kizu",
+		"examples/negative/std_array_at_mut_unrelated_var.kizu",
 		"examples/negative/std_array_at_pass_to_owned_param.kizu",
 		"examples/negative/std_array_at_return_escape.kizu",
 		"examples/negative/std_array_atomic_element.kizu",
@@ -818,6 +845,9 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/std_array_use_after_deinit.kizu",
 		"examples/negative/std_array_append_moves.kizu",
 		"examples/negative/std_array_append_while_borrowed.kizu",
+		"examples/negative/std_array_at_mut_append_while_borrowed.kizu",
+		"examples/negative/std_array_at_mut_deinit_while_borrowed.kizu",
+		"examples/negative/std_array_at_mut_set_while_borrowed.kizu",
 		"examples/negative/std_array_deinit_while_borrowed.kizu",
 		"examples/negative/std_array_read_while_mut_borrowed.kizu",
 		"examples/negative/std_array_set_while_borrowed.kizu",
@@ -1445,6 +1475,9 @@ func goStdlibTypeDiagnosticSnapshots(
 	slashPath string,
 ) []diagnosticSnapshot {
 	t.Helper()
+	if snapshots := goIoFsTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
 	if snapshots := goStdArrayTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
 		return snapshots
 	}
@@ -1486,6 +1519,34 @@ func goStdlibTypeDiagnosticSnapshots(
 	return nil
 }
 
+// goIoFsTypeDiagnosticSnapshots returns selected Io, fs, and path diagnostics.
+func goIoFsTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "io_builtin_constructor") {
+		return goLastLiteralDiagnostic(t, path, "Io", "type error: Io constructor")
+	}
+	if strings.Contains(slashPath, "io_evented_unimplemented") {
+		return goLastLiteralDiagnostic(t, path, "evented", "type error: Io evented")
+	}
+	if strings.Contains(slashPath, "fs_read_without_io") {
+		return goLastLiteralDiagnostic(t, path, "read_file", "type error: fs.read_file Io")
+	}
+	if strings.Contains(slashPath, "fs_write_wrong_bytes") {
+		return goLastLiteralDiagnostic(t, path, "write_file", "type error: fs.write_file bytes")
+	}
+	if strings.Contains(slashPath, "std_fs_exists_without_io") {
+		return goLastLiteralDiagnostic(t, path, "exists", "type error: fs.exists Io")
+	}
+	if strings.Contains(slashPath, "std_path_wrong_type") {
+		return goLastLiteralDiagnostic(t, path, "basename", "type error: path.basename arg")
+	}
+	return nil
+}
+
 // goStdArrayTypeDiagnosticSnapshots returns selected Array resource diagnostics.
 func goStdArrayTypeDiagnosticSnapshots(
 	t *testing.T,
@@ -1493,7 +1554,8 @@ func goStdArrayTypeDiagnosticSnapshots(
 	slashPath string,
 ) []diagnosticSnapshot {
 	t.Helper()
-	if strings.Contains(slashPath, "std_array_at_mut_immutable") {
+	if strings.Contains(slashPath, "std_array_at_mut_immutable") ||
+		strings.Contains(slashPath, "std_array_at_mut_unrelated_var") {
 		return goLastLiteralDiagnostic(t, path, "at_mut", "type error: Array.at_mut mutability")
 	}
 	if strings.Contains(slashPath, "std_array_at_pass_to_owned_param") ||
@@ -1726,6 +1788,16 @@ func goTaskWorkerDiagnosticSnapshots(
 			t, path, "load", "type error: spawned function must accept owned Io",
 		)
 	}
+	if strings.Contains(slashPath, "task_spawn_mut_borrowed_io") {
+		return goLastLiteralDiagnostic(
+			t, path, "load", "type error: spawned function must accept owned Io",
+		)
+	}
+	if strings.Contains(slashPath, "task_spawn_old_io_arg") {
+		return goLastLiteralDiagnostic(
+			t, path, "spawn", "type error: TaskGroup.spawn function name",
+		)
+	}
 	if strings.Contains(slashPath, "parallel_map_wrong_worker") {
 		return goLastLiteralDiagnostic(t, path, "worker", "type error: parallel map worker return")
 	}
@@ -1837,6 +1909,9 @@ func ownershipDiagnosticFixtures() []string {
 		"std_array_use_after_deinit",
 		"std_array_append_moves",
 		"std_array_append_while_borrowed",
+		"std_array_at_mut_append_while_borrowed",
+		"std_array_at_mut_deinit_while_borrowed",
+		"std_array_at_mut_set_while_borrowed",
 		"std_array_deinit_while_borrowed",
 		"std_array_read_while_mut_borrowed",
 		"std_array_set_while_borrowed",
@@ -2823,6 +2898,12 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"parallel map worker", "type error: parallel map worker return"},
 		{"must return", "type error: missing return"},
 		{"cannot cast", "type error: invalid cast"},
+		{"use `std::io::blocking()`", "type error: Io constructor"},
+		{"`std::io::evented` is not implemented", "type error: Io evented"},
+		{"`std::fs::read_file` expects Io", "type error: fs.read_file Io"},
+		{"`std::fs::write_file` expects []const u8 bytes", "type error: fs.write_file bytes"},
+		{"`std::fs::exists` expects Io", "type error: fs.exists Io"},
+		{"std.path.basename", "type error: path.basename arg"},
 		{"`Array.at_mut` requires mutable array binding", "type error: Array.at_mut mutability"},
 		{"`Array.at` must be bound", "type error: Array.at bind required"},
 		{"`Array.get` requires copy element", "type error: Array.get copy element"},
@@ -2850,6 +2931,7 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"Mutex<i64>", "type error: Mutex constructor type"},
 		{"requires copy value", "type error: Mutex requires copy"},
 		{"std::task::Group", "type error: task group expects io"},
+		{"TaskGroup.spawn` expects function name", "type error: TaskGroup.spawn function name"},
 		{"must accept owned Io", "type error: spawned function must accept owned Io"},
 		{"raw pointer cannot cross", "type error: raw pointer concurrency boundary"},
 		{"arena cannot cross", "type error: arena concurrency boundary"},
