@@ -597,7 +597,18 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_array_no_allocator.kizu",
 		"examples/negative/std_string_no_allocator.kizu",
 		"examples/negative/std_map_no_allocator.kizu",
+		"examples/negative/std_string_append_through_shared_borrow.kizu",
+		"examples/negative/std_string_deinit_through_shared_borrow.kizu",
+		"examples/negative/std_string_deinit_through_mut_borrow.kizu",
+		"examples/negative/std_string_as_bytes_direct_use.kizu",
+		"examples/negative/std_string_as_bytes_return_escape.kizu",
+		"examples/negative/std_string_append_byte_wrong_type.kizu",
+		"examples/negative/std_map_insert_through_shared_borrow.kizu",
+		"examples/negative/std_map_deinit_through_shared_borrow.kizu",
+		"examples/negative/std_map_deinit_through_mut_borrow.kizu",
+		"examples/negative/std_map_non_copy_value.kizu",
 		"examples/unsafe_nested_block.kizu",
+		"examples/unsafe_ptr_read_with_unrelated_nullable_source.kizu",
 	}
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
 	return cases
@@ -654,6 +665,9 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_array_use_after_deinit.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
+		"examples/negative/std_string_append_while_viewed.kizu",
+		"examples/negative/std_string_clear_while_viewed.kizu",
+		"examples/negative/std_string_deinit_while_viewed.kizu",
 		"examples/negative/arena_wrong_handle.kizu",
 		"examples/negative/arena_inline_wrong_handle.kizu",
 		"examples/negative/arena_unknown_handle.kizu",
@@ -722,6 +736,16 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/std_array_no_allocator.kizu",
 		"examples/negative/std_string_no_allocator.kizu",
 		"examples/negative/std_map_no_allocator.kizu",
+		"examples/negative/std_string_append_through_shared_borrow.kizu",
+		"examples/negative/std_string_deinit_through_shared_borrow.kizu",
+		"examples/negative/std_string_deinit_through_mut_borrow.kizu",
+		"examples/negative/std_string_as_bytes_direct_use.kizu",
+		"examples/negative/std_string_as_bytes_return_escape.kizu",
+		"examples/negative/std_string_append_byte_wrong_type.kizu",
+		"examples/negative/std_map_insert_through_shared_borrow.kizu",
+		"examples/negative/std_map_deinit_through_shared_borrow.kizu",
+		"examples/negative/std_map_deinit_through_mut_borrow.kizu",
+		"examples/negative/std_map_non_copy_value.kizu",
 	}
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
 	for _, path := range cases {
@@ -761,6 +785,9 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/std_array_use_after_deinit.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
+		"examples/negative/std_string_append_while_viewed.kizu",
+		"examples/negative/std_string_clear_while_viewed.kizu",
+		"examples/negative/std_string_deinit_while_viewed.kizu",
 		"examples/negative/arena_wrong_handle.kizu",
 		"examples/negative/arena_inline_wrong_handle.kizu",
 		"examples/negative/arena_unknown_handle.kizu",
@@ -1412,6 +1439,53 @@ func goStdlibTypeDiagnosticSnapshots(
 		tok := tokenWithLiteral(t, path, "Map")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: Map allocator", tok, tok)}
 	}
+	if snapshots := goStdResourceTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
+	return nil
+}
+
+// goStdResourceTypeDiagnosticSnapshots returns String/Map resource diagnostics.
+func goStdResourceTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "std_string_append_through_shared_borrow") {
+		return goLastLiteralDiagnostic(t, path, "append_bytes", "type error: String mutable receiver")
+	}
+	if strings.Contains(slashPath, "std_string_deinit_through_shared_borrow") ||
+		strings.Contains(slashPath, "std_string_deinit_through_mut_borrow") {
+		return goLastLiteralDiagnostic(t, path, "deinit", "type error: String owned receiver")
+	}
+	if strings.Contains(slashPath, "std_string_as_bytes_direct_use") ||
+		strings.Contains(slashPath, "std_string_as_bytes_return_escape") {
+		return goLastLiteralDiagnostic(t, path, "as_bytes", "type error: String.as_bytes bind required")
+	}
+	return goStdMapResourceTypeDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goStdMapResourceTypeDiagnosticSnapshots returns Map resource diagnostics.
+func goStdMapResourceTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "std_string_append_byte_wrong_type") {
+		return goLastLiteralDiagnostic(t, path, "x", "type error: String.append_byte type")
+	}
+	if strings.Contains(slashPath, "std_map_insert_through_shared_borrow") {
+		return goLastLiteralDiagnostic(t, path, "insert", "type error: Map mutable receiver")
+	}
+	if strings.Contains(slashPath, "std_map_deinit_through_shared_borrow") ||
+		strings.Contains(slashPath, "std_map_deinit_through_mut_borrow") {
+		return goLastLiteralDiagnostic(t, path, "deinit", "type error: Map owned receiver")
+	}
+	if strings.Contains(slashPath, "std_map_non_copy_value") {
+		return goLastLiteralDiagnostic(t, path, "Map", "type error: Map value copy")
+	}
 	return nil
 }
 
@@ -1668,6 +1742,9 @@ func ownershipDiagnosticFixtures() []string {
 		"std_array_use_after_deinit",
 		"std_string_use_after_deinit",
 		"std_map_use_after_deinit",
+		"std_string_append_while_viewed",
+		"std_string_clear_while_viewed",
+		"std_string_deinit_while_viewed",
 		"arena_wrong_handle",
 		"arena_inline_wrong_handle",
 		"arena_unknown_handle",
@@ -2608,6 +2685,18 @@ func normalizeTypeError(message string) string {
 	if strings.Contains(message, "map::Map") && strings.Contains(message, "expects allocator") {
 		return "type error: Map allocator"
 	}
+	if strings.Contains(message, "requires mutable String receiver") {
+		return "type error: String mutable receiver"
+	}
+	if strings.Contains(message, "requires owned String receiver") {
+		return "type error: String owned receiver"
+	}
+	if strings.Contains(message, "requires mutable Map receiver") {
+		return "type error: Map mutable receiver"
+	}
+	if strings.Contains(message, "requires owned Map receiver") {
+		return "type error: Map owned receiver"
+	}
 	for _, item := range typeErrorNormalizers() {
 		if strings.Contains(message, item.match) {
 			return item.normalized
@@ -2636,6 +2725,9 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"cannot cast", "type error: invalid cast"},
 		{"Array.append", "type error: Array.append type"},
 		{"Map key type", "type error: Map key type"},
+		{"String.append_byte`", "type error: String.append_byte type"},
+		{"String.as_bytes", "type error: String.as_bytes bind required"},
+		{"Map value type must be copy", "type error: Map value copy"},
 		{"Map.insert", "type error: Map.insert type"},
 		{"String.append_bytes", "type error: String.append_bytes type"},
 		{"expect_equal_i64", "type error: testing arg type"},
@@ -2692,11 +2784,49 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	if strings.Contains(err.Error(), "arena error:") {
 		return arenaOwnershipSnapshot(t, path, err.Error())
 	}
+	if strings.Contains(err.Error(), "string error:") {
+		return stringViewOwnershipSnapshot(t, path, err.Error())
+	}
 	value := movedValueFromDiagnostic(t, err.Error())
 	primary, related := movedValueSpans(t, path, value)
 	return ownershipSnapshot{
 		Status: "fail", Message: "move error: moved value was used",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
+	}
+}
+
+// stringViewOwnershipSnapshot normalizes String view lifetime diagnostics.
+func stringViewOwnershipSnapshot(t *testing.T, path string, message string) ownershipSnapshot {
+	t.Helper()
+	if strings.Contains(message, "append_bytes") {
+		return stringViewCustomSnapshot(t, path, "append_bytes",
+			"string error: String.append_bytes while borrowed")
+	}
+	if strings.Contains(message, "clear") {
+		return stringViewCustomSnapshot(t, path, "clear",
+			"string error: String.clear while borrowed")
+	}
+	if strings.Contains(message, "deinit") {
+		return stringViewCustomSnapshot(t, path, "deinit",
+			"string error: String.deinit while borrowed")
+	}
+	t.Fatalf("string diagnostic is outside oracle subset: %q", message)
+	return ownershipSnapshot{}
+}
+
+// stringViewCustomSnapshot builds one normalized String view diagnostic.
+func stringViewCustomSnapshot(
+	t *testing.T,
+	path string,
+	method string,
+	message string,
+) ownershipSnapshot {
+	t.Helper()
+	primary := lastTokenWithLiteral(t, path, method)
+	related := tokenWithLiteralOccurrence(t, path, "text", 3)
+	return ownershipSnapshot{
+		Status: "fail", Message: message, Value: method,
+		PrimaryStart: primary.Start, RelatedStart: related.Start,
 	}
 }
 
