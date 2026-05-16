@@ -224,16 +224,36 @@ type moduleConformanceCase struct {
 
 // TestSelfHostSourcesCheck verifies every self-host Kizu file passes static checks.
 func TestSelfHostSourcesCheck(t *testing.T) {
+	pkg := loadSelfHostPackage(t)
 	for _, path := range selfHostSources(t) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			program := parseSelfHostSource(t, path)
-			if err := types.New().Check(program); err != nil {
-				t.Fatalf("type check failed: %v", err)
-			}
-			if err := ownership.New().Check(program); err != nil {
-				t.Fatalf("ownership check failed: %v", err)
-			}
+			checkSelfHostSource(t, pkg, path)
 		})
+	}
+}
+
+// TestSelfHostTokenModuleCoversGoLexerKinds checks token module parity.
+func TestSelfHostTokenModuleCoversGoLexerKinds(t *testing.T) {
+	program := parseSelfHostSource(t, filepath.Join(repoRoot(t), "selfhost", "src", "token.kizu"))
+	tags := enumTagsByName(t, program, "TokenKind")
+	for _, kind := range selfHostKindByGoToken {
+		tag := strings.TrimPrefix(kind, "TokenKind::")
+		if !tags[tag] {
+			t.Fatalf("self-host token module is missing TokenKind::%s", tag)
+		}
+	}
+}
+
+// TestSelfHostLexerModuleUsesImportedTokenArray checks the ported lexer API.
+func TestSelfHostLexerModuleUsesImportedTokenArray(t *testing.T) {
+	program := parseSelfHostSource(t, filepath.Join(repoRoot(t), "selfhost", "src", "lexer.kizu"))
+	fn := functionDeclByName(t, program, "lex")
+	if len(fn.Params) != 1 || fn.Params[0].TypeName != "[]const u8" {
+		t.Fatalf("lex params got %#v, want source: []const u8", fn.Params)
+	}
+	want := "!std::array::Array<token::Token>"
+	if fn.ReturnType != want {
+		t.Fatalf("lex return got %q, want %q", fn.ReturnType, want)
 	}
 }
 
@@ -4352,6 +4372,85 @@ func parseSelfHostSource(t *testing.T, path string) *ast.Program {
 		t.Fatalf("parse failed: %s", strings.Join(p.Errors(), "\n"))
 	}
 	return program
+}
+
+// loadSelfHostPackage loads the module-first self-host package.
+func loadSelfHostPackage(t *testing.T) *project.Package {
+	t.Helper()
+	pkg, err := project.LoadPackage(filepath.Join(repoRoot(t), "selfhost"))
+	if err != nil {
+		t.Fatalf("load self-host package failed: %v", err)
+	}
+	return pkg
+}
+
+// checkSelfHostSource checks a legacy source or module source with proper imports.
+func checkSelfHostSource(t *testing.T, pkg *project.Package, path string) {
+	t.Helper()
+	if module, ok := selfHostModuleForPath(pkg, path); ok {
+		checkSelfHostModule(t, pkg, module)
+		return
+	}
+	program := parseSelfHostSource(t, path)
+	if err := types.New().Check(program); err != nil {
+		t.Fatalf("type check failed: %v", err)
+	}
+	if err := ownership.New().Check(program); err != nil {
+		t.Fatalf("ownership check failed: %v", err)
+	}
+}
+
+// checkSelfHostModule checks one self-host module with imported public types.
+func checkSelfHostModule(t *testing.T, pkg *project.Package, module project.ParsedModule) {
+	t.Helper()
+	if err := types.New().WithExternalTypes(project.ImportedPublicTypeNames(pkg, module)).
+		Check(module.Program); err != nil {
+		t.Fatalf("type check failed: %v", err)
+	}
+	if err := ownership.New().Check(module.Program); err != nil {
+		t.Fatalf("ownership check failed: %v", err)
+	}
+}
+
+// selfHostModuleForPath returns the package module for a source path.
+func selfHostModuleForPath(pkg *project.Package, path string) (project.ParsedModule, bool) {
+	for _, module := range pkg.Modules {
+		if filepath.Clean(module.Module.File) == filepath.Clean(path) {
+			return module, true
+		}
+	}
+	return project.ParsedModule{}, false
+}
+
+// enumTagsByName returns the tag set for one enum declaration.
+func enumTagsByName(t *testing.T, program *ast.Program, name string) map[string]bool {
+	t.Helper()
+	for _, decl := range program.Decls {
+		enum, ok := decl.(*ast.EnumDecl)
+		if !ok || enum.Name != name {
+			continue
+		}
+		tags := map[string]bool{}
+		for _, tag := range enum.Tags {
+			tags[tag] = true
+		}
+		return tags
+	}
+	t.Fatalf("enum %s was not found", name)
+	return nil
+}
+
+// functionDeclByName returns one function declaration by name.
+func functionDeclByName(t *testing.T, program *ast.Program, name string) *ast.FunctionDecl {
+	t.Helper()
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if ok && fn.Name == name {
+			return fn
+		}
+	}
+	t.Fatalf("function %s was not found", name)
+	return nil
 }
 
 // checkGoSourcePasses runs the Go semantic checkers for a positive fixture.

@@ -49,7 +49,7 @@ Before switching production behavior from Go to Kizu:
 
 | Component | Go oracle status | Kizu module status | Next blocker |
 | --- | --- | --- | --- |
-| token / lexer | strong legacy oracle through `tests/selfhost` | scaffold only in `selfhost/src/token.kizu` and `selfhost/src/lexer.kizu` | #198 and #199 |
+| token / lexer | strong legacy oracle through `tests/selfhost` | token surface and lexer API scaffold in `selfhost/src` | #204 before full scanner move |
 | AST / parser | strong legacy oracle through `tests/selfhost` | scaffold only in `selfhost/src/ast.kizu` and `selfhost/src/parser.kizu` | #192 first, then parser data model decisions |
 | diagnostics / resolver | strong legacy oracle through `tests/selfhost` and module fixtures | scaffold only | token/parser modules first |
 | type checker | strong legacy oracle for selected conformance and diagnostics | scaffold only | parser/resolver modules first |
@@ -75,6 +75,10 @@ Ready to implement after:
   `std::array::Array<Token>`, `!T`, `?T`, allocator, and `deinit`.
 - The Kizu lexer output schema is fixed to token kind, literal, byte start,
   byte end, line, and column.
+- Until #197 lands, #192 must keep using Go tests as the component oracle and
+  must not claim that Kizu package component tests fully replace it.
+- Full scanner movement also requires #204, because the lexer body needs
+  imported enum variants, public struct literals, and public function calls.
 
 Completion evidence:
 
@@ -109,4 +113,3 @@ Completion evidence:
 - Negative parser fixtures compare diagnostic message substrings and spans.
 - Semicolon, explicit return, `::` namespace, import, `pub`, enum, union, and
   typed-error syntax are covered.
-

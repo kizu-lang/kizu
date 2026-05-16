@@ -70,6 +70,32 @@ behavior whenever possible.
 | `std::sync` | `Mutex<T>` | shared mutable state primitive and copy-value restrictions | trusted primitive; safe wrapper remains Kizu-facing |
 | `std::atomic` | `Atomic<T>` | atomic storage, seq_cst operations, supported type set | trusted primitive; ordering API should be designed before expanding |
 
+## Lexer Dependency Gate
+
+The self-host lexer may depend on this v0.2 stdlib surface before it is ported
+from Go to `selfhost/src/lexer.kizu`:
+
+- source buffers are `[]const u8`
+- string literals remain `[]const u8`, not primitive `string`
+- byte scanning uses `std::mem::len`, `std::mem::byte_at`,
+  `std::mem::equal_bytes`, `std::mem::starts_with`, `std::mem::slice`, and
+  `std::mem::trim_ascii`
+- token streams use `std::array::Array<token::Token>` with an explicit
+  `std::mem::page_allocator()` allocator
+- recoverable lexer failures use `!T`
+- not-found lookups use `?T`
+- token stream cleanup uses explicit `deinit`
+- `Array<Token>` must keep the existing borrow and cleanup rules: append, set,
+  and deinit are rejected while an element borrow is live; deinit moves the
+  array; `get` remains copy-only; non-copy token values are read through
+  `at` / `at_mut`
+
+The conformance suite already includes negative cases for Array use after
+`deinit`, append/set/deinit while borrowed, read while mutably borrowed,
+copy-only `get`, non-copy moves, and rejected raw pointer / handle / nested
+array / map / concurrency capability element types. New lexer work must reuse
+those cases instead of weakening Array rules for compiler convenience.
+
 ## Source Layout
 
 The Kizu-written stdlib skeleton lives under `std/`:

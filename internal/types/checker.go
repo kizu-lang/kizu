@@ -110,6 +110,7 @@ type Checker struct {
 	enums         map[string]*enumType
 	unions        map[string]*unionType
 	contracts     map[string]*contractType
+	externalTypes map[string]bool
 	impls         map[string]map[string]*functionType
 	satisfactions map[string]map[string]bool
 	currentReturn Type
@@ -162,9 +163,18 @@ func New() *Checker {
 		enums:         map[string]*enumType{},
 		unions:        map[string]*unionType{},
 		contracts:     map[string]*contractType{},
+		externalTypes: map[string]bool{},
 		impls:         map[string]map[string]*functionType{},
 		satisfactions: map[string]map[string]bool{},
 	}
+}
+
+// WithExternalTypes allows package checks to reference imported public types.
+func (c *Checker) WithExternalTypes(names []string) *Checker {
+	for _, name := range names {
+		c.externalTypes[name] = true
+	}
+	return c
 }
 
 // Check validates the program and returns the first type error.
@@ -564,6 +574,9 @@ func (c *Checker) parseType(name string) (Type, error) {
 	}
 	typ := Type(name)
 	if typ == typeSelf {
+		return typ, nil
+	}
+	if c.externalTypes[name] {
 		return typ, nil
 	}
 	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil &&
