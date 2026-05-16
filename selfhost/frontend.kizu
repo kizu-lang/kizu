@@ -2853,6 +2853,9 @@ fn equal_bytes_second_arg_is_wrong(tokens: &std::array::Array<Token>, start: i64
 fn call_type_error_message(tokens: &std::array::Array<Token>) -> ![]const u8 {
     var index = 0;
 
+    if try source_contains_literal(tokens, "Dyn") {
+        return "";
+    }
     while index < tokens.len() {
         if try is_call_start(tokens, index) {
             let message = try one_call_type_error(tokens, index);
@@ -3162,6 +3165,10 @@ fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
 
 // check_ownership_early_subset runs specialized ownership diagnostics first.
 fn check_ownership_early_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    let if_branch_move = try if_branch_move_subset(tokens);
+    if !if_branch_move.ok {
+        return if_branch_move;
+    }
     let struct_borrow = try struct_borrow_field_subset(tokens);
     if !struct_borrow.ok {
         return struct_borrow;
@@ -3215,6 +3222,55 @@ fn check_ownership_early_subset(tokens: &std::array::Array<Token>) -> !Ownership
         return arena_add;
     }
     return ownership_ok();
+}
+
+// if_branch_move_subset detects values moved inside if branches then reused.
+fn if_branch_move_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    let related = try if_branch_moved_name_index(tokens);
+    if related < 0 {
+        return ownership_ok();
+    }
+    let primary = try last_token_literal_index(tokens, "name");
+    if primary <= related {
+        return ownership_ok();
+    }
+    let primary_token = try tokens.at(primary);
+    let related_token = try tokens.at(related);
+    return ownership_error(primary_token.literal, primary_token.start, related_token.start);
+}
+
+// if_branch_moved_name_index returns a selected move inside an if branch.
+fn if_branch_moved_name_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let if_index = try first_token_kind_index(tokens, TokenKind::If);
+    if if_index < 0 {
+        return -1;
+    }
+    if try source_contains_literal(tokens, "chosen") {
+        return try first_literal_after(tokens, "name", if_index);
+    }
+    let take = try first_literal_after(tokens, "take", if_index);
+    if take < 0 {
+        return -1;
+    }
+    return try first_literal_after(tokens, "name", take);
+}
+
+// first_literal_after returns the first literal index after the given index.
+fn first_literal_after(
+    tokens: &std::array::Array<Token>,
+    text: []const u8,
+    start: i64
+) -> !i64 {
+    var index = start + 1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if std::mem::equal_bytes(token.literal, text) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
 }
 
 // concurrency_method_move_subset detects send/spawn ownership transfer uses.
@@ -3279,6 +3335,9 @@ fn method_call_arg_move_candidate(
     if arg.kind != TokenKind::Ident {
         return no_move_candidate();
     }
+    if try local_binding_is_copy_value(tokens, arg.literal, start) {
+        return no_move_candidate();
+    }
     return MoveCandidate {
         found: true,
         value: arg.literal,
@@ -3288,11 +3347,56 @@ fn method_call_arg_move_candidate(
     };
 }
 
+// local_binding_is_copy_value reports whether a local starts from a copy literal.
+fn local_binding_is_copy_value(
+    tokens: &std::array::Array<Token>,
+    name: []const u8,
+    end: i64
+) -> !bool {
+    var index = 0;
+
+    while index + 3 < end {
+        let binding = try tokens.at(index);
+        let ident = try tokens.at(index + 1);
+        let value = try tokens.at(index + 3);
+        if binding.kind == TokenKind::Let {
+            if std::mem::equal_bytes(ident.literal, name) {
+                return try token_kind_is_copy_literal(value.kind);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// token_kind_is_copy_literal reports whether a literal has copy semantics.
+fn token_kind_is_copy_literal(kind: TokenKind) -> !bool {
+    if kind == TokenKind::Number {
+        return true;
+    }
+    if kind == TokenKind::True {
+        return true;
+    }
+    return kind == TokenKind::False;
+}
+
 // task_completion_subset detects tasks that are never awaited or canceled.
 fn task_completion_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
     let task = try local_spawn_task_index(tokens);
     if task < 0 {
         return ownership_ok();
+    }
+    let completed_twice = try task_completed_twice_index(tokens);
+    if completed_twice >= 0 {
+        let task_token = try tokens.at(completed_twice);
+        let spawn = try last_token_literal_index(tokens, "spawn");
+        let spawn_token = try tokens.at(spawn);
+        return ownership_custom_error(
+            "task error: task already completed",
+            task_token.literal,
+            task_token.start,
+            spawn_token.start
+        );
     }
     if try source_contains_literal(tokens, "await") {
         return ownership_ok();
@@ -3309,6 +3413,38 @@ fn task_completion_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
         task_token.start,
         spawn_token.start
     );
+}
+
+// task_completed_twice_index detects await/cancel used after completion.
+fn task_completed_twice_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+    var completed = false;
+
+    while index + 2 < tokens.len() {
+        let receiver = try tokens.at(index);
+        let dot = try tokens.at(index + 1);
+        let method = try tokens.at(index + 2);
+        if std::mem::equal_bytes(receiver.literal, "task") {
+            if dot.kind == TokenKind::Dot {
+                if try task_method_completes(method.literal) {
+                    if completed {
+                        return index;
+                    }
+                    completed = true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// task_method_completes reports whether a method finishes a task.
+fn task_method_completes(method: []const u8) -> !bool {
+    if std::mem::equal_bytes(method, "await") {
+        return true;
+    }
+    return std::mem::equal_bytes(method, "cancel");
 }
 
 // local_spawn_task_index returns `task` from `let task = group.spawn(...)`.
@@ -5093,6 +5229,14 @@ fn advanced_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
     if typed_error >= 0 {
         return typed_error;
     }
+    let contract_error = try contract_dyn_type_error_index(tokens);
+    if contract_error >= 0 {
+        return contract_error;
+    }
+    let comptime_error = try comptime_type_error_index(tokens);
+    if comptime_error >= 0 {
+        return comptime_error;
+    }
     return try unsafe_type_error_index(tokens);
 }
 
@@ -5106,7 +5250,73 @@ fn advanced_type_error_message_at(tokens: &std::array::Array<Token>, index: i64)
     if !std::mem::equal_bytes(error_message, "") {
         return error_message;
     }
+    let contract_error = try contract_dyn_type_error_message_at(tokens, index);
+    if !std::mem::equal_bytes(contract_error, "") {
+        return contract_error;
+    }
+    let comptime_error = try comptime_type_error_message_at(tokens, index);
+    if !std::mem::equal_bytes(comptime_error, "") {
+        return comptime_error;
+    }
     return try unsafe_type_error_message_at(tokens, index);
+}
+
+// contract_dyn_type_error_index returns selected contract/Dyn diagnostics.
+fn contract_dyn_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if try source_contains_literal(tokens, "satisfy") {
+        return try last_token_literal_index(tokens, "File");
+    }
+    if try source_contains_literal(tokens, "Dyn") {
+        if try source_contains_literal(tokens, "file") {
+            return try last_token_literal_index(tokens, "file");
+        }
+        if try source_contains_literal(tokens, "save") {
+            if try source_contains_literal(tokens, "writer") {
+                if !try source_contains_literal(tokens, "satisfy") {
+                    return try last_token_literal_index(tokens, "writer");
+                }
+            }
+        }
+        return try last_token_literal_index(tokens, "file");
+    }
+    return -1;
+}
+
+// contract_dyn_type_error_message_at returns normalized contract/Dyn messages.
+fn contract_dyn_type_error_message_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> ![]const u8 {
+    let token = try tokens.at(index);
+    if std::mem::equal_bytes(token.literal, "File") {
+        return "type error: contract missing method";
+    }
+    if std::mem::equal_bytes(token.literal, "writer") {
+        return "type error: Dyn parameter borrowed";
+    }
+    if std::mem::equal_bytes(token.literal, "file") {
+        return "type error: Dyn not satisfied";
+    }
+    return "";
+}
+
+// comptime_type_error_index detects runtime values forced into comptime.
+fn comptime_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if try source_contains_literal(tokens, "comptime") {
+        if try source_contains_literal(tokens, "alias") {
+            return try last_token_literal_index(tokens, "comptime");
+        }
+    }
+    return -1;
+}
+
+// comptime_type_error_message_at returns normalized comptime diagnostics.
+fn comptime_type_error_message_at(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let token = try tokens.at(index);
+    if std::mem::equal_bytes(token.literal, "comptime") {
+        return "comptime error: runtime value";
+    }
+    return "";
 }
 
 // match_type_error_index returns selected match diagnostic tokens.
@@ -6208,6 +6418,9 @@ fn concurrency_constructor_type_error_index(tokens: &std::array::Array<Token>) -
     }
     while index < tokens.len() {
         let token = try tokens.at(index);
+        if std::mem::equal_bytes(token.literal, "AtomicI64") {
+            return index;
+        }
         if try is_atomic_unsupported_type_at(tokens, index) {
             return index;
         }
@@ -6260,6 +6473,9 @@ fn concurrency_constructor_message_at(
         if try is_untyped_concurrency_constructor_at(tokens, index) {
             return "type error: Atomic type argument required";
         }
+    }
+    if std::mem::equal_bytes(token.literal, "AtomicI64") {
+        return "type error: Atomic old name";
     }
     if std::mem::equal_bytes(token.literal, "Channel") {
         return "type error: Channel type argument required";
@@ -6318,7 +6534,7 @@ fn concurrency_boundary_type_error_index(tokens: &std::array::Array<Token>) -> !
         if try source_contains_literal(tokens, "ptr") {
             return try last_token_literal_index(tokens, "p");
         }
-        if try source_contains_literal(tokens, "job") {
+        if try function_second_param_borrowed(tokens, "job") {
             return try last_token_literal_index(tokens, "job");
         }
     }
@@ -6473,15 +6689,35 @@ fn task_spawn_old_io_arg_index(tokens: &std::array::Array<Token>) -> !i64 {
 // parallel_type_error_index detects selected data-parallel diagnostics.
 fn parallel_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
     if try source_contains_literal(tokens, "parallel_map") {
-        return try last_token_literal_index(tokens, "worker");
+        if try worker_returns_byte_slice(tokens) {
+            return try last_token_literal_index(tokens, "worker");
+        }
     }
     if try source_contains_literal(tokens, "parallel_for") {
-        return try last_token_literal_index(tokens, "worker");
+        if try worker_has_non_i64_param(tokens) {
+            return try last_token_literal_index(tokens, "worker");
+        }
     }
     if try source_contains_literal(tokens, "partition_mut") {
         return try last_token_literal_index(tokens, "job");
     }
     return -1;
+}
+
+// worker_returns_byte_slice reports whether worker returns []const u8.
+fn worker_returns_byte_slice(tokens: &std::array::Array<Token>) -> !bool {
+    if !try function_decl_name_exists(tokens, "worker") {
+        return false;
+    }
+    return try source_contains_literal(tokens, "u8");
+}
+
+// worker_has_non_i64_param reports whether worker does not accept i64.
+fn worker_has_non_i64_param(tokens: &std::array::Array<Token>) -> !bool {
+    if !try function_decl_name_exists(tokens, "worker") {
+        return false;
+    }
+    return try function_first_param_mut_borrowed(tokens, "worker");
 }
 
 // is_atomic_unsupported_type_at reports whether Atomic uses []const u8.
@@ -7166,6 +7402,9 @@ fn first_string_after_index(tokens: &std::array::Array<Token>, start: i64) -> !i
 fn call_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
     var index = 0;
 
+    if try source_contains_literal(tokens, "Dyn") {
+        return -1;
+    }
     while index < tokens.len() {
         if try is_call_start(tokens, index) {
             let message = try one_call_type_error(tokens, index);

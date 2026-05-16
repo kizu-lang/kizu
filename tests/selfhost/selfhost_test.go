@@ -582,6 +582,10 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/match_unknown_tag.kizu",
 		"examples/negative/typed_error_mismatch.kizu",
 		"examples/negative/typed_error_untyped_constructor.kizu",
+		"examples/negative/comptime_borrow_escape.kizu",
+		"examples/negative/missing_contract_method.kizu",
+		"examples/negative/owned_dyn.kizu",
+		"examples/negative/unsatisfied_dyn.kizu",
 		"examples/negative/unsafe_call.kizu",
 		"examples/negative/unsafe_call_after_block.kizu",
 		"examples/negative/ptr_read_without_unsafe.kizu",
@@ -616,6 +620,8 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_map_non_copy_value.kizu",
 		"examples/unsafe_nested_block.kizu",
 		"examples/unsafe_ptr_read_with_unrelated_nullable_source.kizu",
+		"examples/task_queue.kizu",
+		"examples/parallel_for.kizu",
 	}
 	cases = append(cases, selfHostArrayTypeDiagnosticCases()...)
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
@@ -653,6 +659,7 @@ func selfHostConcurrencyTypeDiagnosticCases() []string {
 	return []string{
 		"examples/negative/atomic_unsupported_type.kizu",
 		"examples/negative/atomic_untyped_constructor.kizu",
+		"examples/negative/atomic_old_name.kizu",
 		"examples/negative/atomic_store_wrong_type.kizu",
 		"examples/negative/channel_untyped_constructor.kizu",
 		"examples/negative/channel_send_borrow.kizu",
@@ -670,6 +677,7 @@ func selfHostConcurrencyTypeDiagnosticCases() []string {
 		"examples/negative/task_spawn_mut_borrowed_io.kizu",
 		"examples/negative/task_spawn_old_io_arg.kizu",
 		"examples/negative/task_spawn_pointer.kizu",
+		"examples/negative/task_spawn_struct_pointer.kizu",
 		"examples/negative/task_spawn_arena.kizu",
 		"examples/negative/task_spawn_handle.kizu",
 		"examples/negative/task_spawn_mutex.kizu",
@@ -678,6 +686,7 @@ func selfHostConcurrencyTypeDiagnosticCases() []string {
 		"examples/negative/thread_borrow_capture.kizu",
 		"examples/negative/thread_scoped_pointer.kizu",
 		"examples/negative/thread_scoped_mutex.kizu",
+		"examples/negative/parallel_shared_mutable.kizu",
 		"examples/negative/parallel_map_wrong_worker.kizu",
 		"examples/negative/partition_mut_non_i64.kizu",
 	}
@@ -691,7 +700,9 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/double_move.kizu",
 		"examples/negative/assignment_move.kizu",
 		"examples/negative/channel_send_move.kizu",
+		"examples/negative/if_branch_move.kizu",
 		"examples/negative/if_branch_partial_move.kizu",
+		"examples/negative/if_expression_branch_move.kizu",
 		"examples/negative/while_body_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
 		"examples/negative/unsafe_moved_value.kizu",
@@ -718,6 +729,8 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
 		"examples/negative/task_move.kizu",
+		"examples/negative/task_await_after_cancel.kizu",
+		"examples/negative/task_cancel_after_await.kizu",
 		"examples/negative/unawaited_task.kizu",
 		"examples/negative/std_string_append_while_viewed.kizu",
 		"examples/negative/std_string_clear_while_viewed.kizu",
@@ -782,6 +795,10 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/empty_return_value.kizu",
 		"examples/negative/missing_return.kizu",
 		"examples/negative/invalid_cast.kizu",
+		"examples/negative/comptime_borrow_escape.kizu",
+		"examples/negative/missing_contract_method.kizu",
+		"examples/negative/owned_dyn.kizu",
+		"examples/negative/unsatisfied_dyn.kizu",
 		"examples/negative/io_builtin_constructor.kizu",
 		"examples/negative/io_evented_unimplemented.kizu",
 		"examples/negative/fs_read_without_io.kizu",
@@ -821,6 +838,8 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/std_map_deinit_through_shared_borrow.kizu",
 		"examples/negative/std_map_deinit_through_mut_borrow.kizu",
 		"examples/negative/std_map_non_copy_value.kizu",
+		"examples/task_queue.kizu",
+		"examples/parallel_for.kizu",
 	}
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
 	for _, path := range cases {
@@ -842,11 +861,14 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 	cases := []string{
 		"examples/borrow.kizu",
+		"examples/channel_send_copy.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
 		"examples/negative/assignment_move.kizu",
 		"examples/negative/channel_send_move.kizu",
+		"examples/negative/if_branch_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
+		"examples/negative/if_expression_branch_move.kizu",
 		"examples/negative/borrow_before_last_use_move.kizu",
 		"examples/negative/borrow_loop_last_use.kizu",
 		"examples/negative/field_borrow_owner_move.kizu",
@@ -870,6 +892,8 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
 		"examples/negative/task_move.kizu",
+		"examples/negative/task_await_after_cancel.kizu",
+		"examples/negative/task_cancel_after_await.kizu",
 		"examples/negative/unawaited_task.kizu",
 		"examples/negative/std_string_append_while_viewed.kizu",
 		"examples/negative/std_string_clear_while_viewed.kizu",
@@ -1450,6 +1474,18 @@ func goErrorUnsafeTypeDiagnosticSnapshots(
 			diagnosticFromToken("type error: typed error cannot use untyped constructor", tok, tok),
 		}
 	}
+	if strings.Contains(slashPath, "comptime_borrow_escape") {
+		return goLastLiteralDiagnostic(t, path, "comptime", "comptime error: runtime value")
+	}
+	if strings.Contains(slashPath, "missing_contract_method") {
+		return goLastLiteralDiagnostic(t, path, "File", "type error: contract missing method")
+	}
+	if strings.Contains(slashPath, "owned_dyn") {
+		return goLastLiteralDiagnostic(t, path, "writer", "type error: Dyn parameter borrowed")
+	}
+	if strings.Contains(slashPath, "unsatisfied_dyn") {
+		return goLastLiteralDiagnostic(t, path, "file", "type error: Dyn not satisfied")
+	}
 	return goUnsafeTypeDiagnosticSnapshots(t, path, slashPath)
 }
 
@@ -1692,6 +1728,10 @@ func goConcurrencyConstructorDiagnosticSnapshots(
 		tok := tokenWithLiteral(t, path, "Atomic")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: Atomic unsupported type", tok, tok)}
 	}
+	if strings.Contains(slashPath, "atomic_old_name") {
+		tok := tokenWithLiteral(t, path, "AtomicI64")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Atomic old name", tok, tok)}
+	}
 	if strings.Contains(slashPath, "atomic_untyped_constructor") {
 		tok := tokenWithLiteral(t, path, "Atomic")
 		return []diagnosticSnapshot{
@@ -1919,8 +1959,9 @@ func goOwnershipDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnaps
 // isOwnershipDiagnosticFixture reports whether a path is in the diagnostic subset.
 func isOwnershipDiagnosticFixture(path string) bool {
 	slashPath := filepath.ToSlash(path)
+	name := strings.TrimSuffix(filepath.Base(slashPath), filepath.Ext(slashPath))
 	for _, fixture := range ownershipDiagnosticFixtures() {
-		if strings.Contains(slashPath, fixture) {
+		if name == fixture {
 			return true
 		}
 	}
@@ -1934,8 +1975,10 @@ func ownershipDiagnosticFixtures() []string {
 		"assignment_move",
 		"channel_send_move",
 		"moved_value",
+		"if_branch_move",
 		"move_error",
 		"if_branch_partial_move",
+		"if_expression_branch_move",
 		"while_body_move",
 		"unsafe_moved_value",
 		"borrow_before_last_use_move",
@@ -1964,6 +2007,8 @@ func ownershipDiagnosticFixtures() []string {
 		"std_string_clear_while_viewed",
 		"std_string_deinit_while_viewed",
 		"task_move",
+		"task_await_after_cancel",
+		"task_cancel_after_await",
 		"unawaited_task",
 		"arena_wrong_handle",
 		"arena_inline_wrong_handle",
@@ -2940,6 +2985,10 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"unknown field", "type error: unknown field"},
 		{"if expression branch types differ", "type error: if expression branch types differ"},
 		{"return expects", "type error: return type mismatch"},
+		{"runtime value cannot be used", "comptime error: runtime value"},
+		{"missing method", "type error: contract missing method"},
+		{"Dyn parameter", "type error: Dyn parameter borrowed"},
+		{"does not satisfy `Writer`", "type error: Dyn not satisfied"},
 		{"parallel map worker", "type error: parallel map worker return"},
 		{"must return", "type error: missing return"},
 		{"cannot cast", "type error: invalid cast"},
@@ -2967,8 +3016,10 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"Map.insert", "type error: Map.insert type"},
 		{"String.append_bytes", "type error: String.append_bytes type"},
 		{"expect_equal_i64", "type error: testing arg type"},
-		{"unsupported atomic type", "type error: Atomic unsupported type"},
+		{"Atomic<i64>", "type error: Atomic old name"},
+		{"AtomicI64", "type error: Atomic old name"},
 		{"use `std::atomic::Atomic<T>(value)`", "type error: Atomic type argument required"},
+		{"unsupported atomic type", "type error: Atomic unsupported type"},
 		{"atomic.store", "type error: atomic.store type"},
 		{"use `std::channel::Channel<T>()`", "type error: Channel type argument required"},
 		{"channel.send", "type error: channel.send type"},
@@ -3051,6 +3102,14 @@ func taskOwnershipSnapshot(t *testing.T, path string, message string) ownershipS
 		spawn := lastTokenWithLiteral(t, path, "spawn")
 		return ownershipSnapshot{
 			Status: "fail", Message: "task error: task must be awaited or canceled",
+			Value: "task", PrimaryStart: task.Start, RelatedStart: spawn.Start,
+		}
+	}
+	if strings.Contains(message, "already completed") {
+		task := lastTokenWithLiteral(t, path, "task")
+		spawn := lastTokenWithLiteral(t, path, "spawn")
+		return ownershipSnapshot{
+			Status: "fail", Message: "task error: task already completed",
 			Value: "task", PrimaryStart: task.Start, RelatedStart: spawn.Start,
 		}
 	}
