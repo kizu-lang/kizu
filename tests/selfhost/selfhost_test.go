@@ -532,6 +532,20 @@ func astNodeDumpCaseName(t *testing.T, path string) string {
 
 // TestSelfHostDiagnosticObjectOracle compares structured diagnostics.
 func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
+	for _, path := range selfHostDiagnosticObjectOracleCases() {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+			got := extractDiagnosticSnapshots(t, runSelfHostDiagnostics(t, fixture))
+			want := goDiagnosticSnapshots(t, fixture)
+			if !sameDiagnosticSnapshots(got, want) {
+				t.Fatalf("self-host diagnostics got %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+// selfHostDiagnosticObjectOracleCases returns diagnostic oracle fixtures.
+func selfHostDiagnosticObjectOracleCases() []string {
 	cases := []string{
 		"selfhost/fixtures/illegal_token.kizu",
 		"examples/negative/missing_semicolon.kizu",
@@ -554,11 +568,23 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/label_on_non_loop.kizu",
 		"examples/negative/enum_dot_variant.kizu",
 		"examples/negative/union_dot_variant.kizu",
+		"examples/negative/match_non_exhaustive.kizu",
+		"examples/negative/match_duplicate_tag.kizu",
+		"examples/negative/match_unknown_tag.kizu",
+		"examples/negative/typed_error_mismatch.kizu",
+		"examples/negative/typed_error_untyped_constructor.kizu",
+		"examples/negative/unsafe_call.kizu",
+		"examples/negative/ptr_read_without_unsafe.kizu",
+		"examples/negative/nullable_ptr_read.kizu",
+		"examples/negative/handle_as_pointer.kizu",
 		"examples/negative/std_array_wrong_type.kizu",
 		"examples/negative/std_map_wrong_key_type.kizu",
 		"examples/negative/std_map_wrong_insert_type.kizu",
 		"examples/negative/std_string_wrong_append_type.kizu",
 		"examples/negative/std_testing_wrong_type.kizu",
+		"examples/negative/std_array_no_allocator.kizu",
+		"examples/negative/std_string_no_allocator.kizu",
+		"examples/negative/std_map_no_allocator.kizu",
 		"examples/move_error.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
@@ -578,6 +604,9 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/borrow_deref_move.kizu",
 		"examples/negative/mut_borrow_conflict.kizu",
 		"examples/negative/mut_borrow_deref_move.kizu",
+		"examples/negative/std_array_use_after_deinit.kizu",
+		"examples/negative/std_string_use_after_deinit.kizu",
+		"examples/negative/std_map_use_after_deinit.kizu",
 		"examples/negative/mut_borrow_immutable.kizu",
 		"examples/negative/nested_field_borrow.kizu",
 		"examples/negative/shared_borrow_assignment.kizu",
@@ -586,16 +615,7 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/invalid_try.kizu",
 		"examples/negative/unsafe_borrow_escape.kizu",
 	}
-	for _, path := range cases {
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
-			got := extractDiagnosticSnapshots(t, runSelfHostDiagnostics(t, fixture))
-			want := goDiagnosticSnapshots(t, fixture)
-			if !sameDiagnosticSnapshots(got, want) {
-				t.Fatalf("self-host diagnostics got %#v, want %#v", got, want)
-			}
-		})
-	}
+	return cases
 }
 
 // TestSelfHostTypeSubsetOracle compares function return types for a small subset.
@@ -647,6 +667,9 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/std_map_wrong_insert_type.kizu",
 		"examples/negative/std_string_wrong_append_type.kizu",
 		"examples/negative/std_testing_wrong_type.kizu",
+		"examples/negative/std_array_no_allocator.kizu",
+		"examples/negative/std_string_no_allocator.kizu",
+		"examples/negative/std_map_no_allocator.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -682,6 +705,9 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/borrow_deref_move.kizu",
 		"examples/negative/mut_borrow_conflict.kizu",
 		"examples/negative/mut_borrow_deref_move.kizu",
+		"examples/negative/std_array_use_after_deinit.kizu",
+		"examples/negative/std_string_use_after_deinit.kizu",
+		"examples/negative/std_map_use_after_deinit.kizu",
 		"examples/negative/unsafe_borrow_escape.kizu",
 	}
 	for _, path := range cases {
@@ -1114,6 +1140,9 @@ func goNamedTypeDiagnosticSnapshots(
 	if snapshots := goCoreTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
 		return snapshots
 	}
+	if snapshots := goAdvancedTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
 	if snapshots := goStdlibTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
 		return snapshots
 	}
@@ -1165,6 +1194,41 @@ func goCoreTypeDiagnosticSnapshots(
 			diagnosticFromToken("type error: invalid cast", tok, tok),
 		}
 	}
+	return nil
+}
+
+// goAdvancedTypeDiagnosticSnapshots returns match, typed-error, and unsafe diagnostics.
+func goAdvancedTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if snapshots := goControlVariantTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
+	if strings.Contains(slashPath, "match_non_exhaustive") {
+		tok := tokenWithLiteral(t, path, "match")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: match not exhaustive", tok, tok)}
+	}
+	if strings.Contains(slashPath, "match_duplicate_tag") {
+		tok := tokenWithLiteralOccurrence(t, path, "Red", 4)
+		return []diagnosticSnapshot{diagnosticFromToken("type error: duplicate match tag", tok, tok)}
+	}
+	if strings.Contains(slashPath, "match_unknown_tag") {
+		tok := tokenWithLiteral(t, path, "Blue")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: unknown match tag", tok, tok)}
+	}
+	return goErrorUnsafeTypeDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goControlVariantTypeDiagnosticSnapshots returns control and namespace diagnostics.
+func goControlVariantTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
 	if strings.Contains(slashPath, "break_outside_loop") {
 		tok := tokenWithLiteral(t, path, "break")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: break outside loop", tok, tok)}
@@ -1189,6 +1253,58 @@ func goCoreTypeDiagnosticSnapshots(
 		tok := tokenWithLiteralOccurrence(t, path, "Shape", 2)
 		return []diagnosticSnapshot{
 			diagnosticFromToken("type error: union variant must use namespace", tok, tok),
+		}
+	}
+	return nil
+}
+
+// goErrorUnsafeTypeDiagnosticSnapshots returns typed-error and unsafe diagnostics.
+func goErrorUnsafeTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "typed_error_mismatch") {
+		tok := tokenWithLiteral(t, path, "try")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: typed error mismatch", tok, tok)}
+	}
+	if strings.Contains(slashPath, "typed_error_untyped_constructor") {
+		tok := tokenWithLiteral(t, path, "error")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: typed error cannot use untyped constructor", tok, tok),
+		}
+	}
+	return goUnsafeTypeDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goUnsafeTypeDiagnosticSnapshots returns unsafe and pointer diagnostics.
+func goUnsafeTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "unsafe_call") {
+		tok := lastTokenWithLiteral(t, path, "source")
+		return []diagnosticSnapshot{diagnosticFromToken("unsafe error: call requires unsafe", tok, tok)}
+	}
+	if strings.Contains(slashPath, "ptr_read_without_unsafe") {
+		tok := tokenWithLiteral(t, path, "ptr_read")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("unsafe error: ptr_read requires unsafe", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "nullable_ptr_read") {
+		tok := tokenWithLiteral(t, path, "ptr_read")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: ptr_read nullable pointer", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "handle_as_pointer") {
+		tok := tokenWithLiteral(t, path, "cast")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: handle cannot cast to pointer", tok, tok),
 		}
 	}
 	return nil
@@ -1220,6 +1336,18 @@ func goStdlibTypeDiagnosticSnapshots(
 	if strings.Contains(slashPath, "std_testing_wrong_type") {
 		tok := tokenWithLiteral(t, path, "four")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: testing arg type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "std_array_no_allocator") {
+		tok := tokenWithLiteral(t, path, "Array")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Array allocator", tok, tok)}
+	}
+	if strings.Contains(slashPath, "std_string_no_allocator") {
+		tok := tokenWithLiteral(t, path, "String")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: String allocator", tok, tok)}
+	}
+	if strings.Contains(slashPath, "std_map_no_allocator") {
+		tok := tokenWithLiteral(t, path, "Map")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Map allocator", tok, tok)}
 	}
 	return nil
 }
@@ -1311,6 +1439,9 @@ func ownershipDiagnosticFixtures() []string {
 		"borrow_deref_move",
 		"mut_borrow_conflict",
 		"mut_borrow_deref_move",
+		"std_array_use_after_deinit",
+		"std_string_use_after_deinit",
+		"std_map_use_after_deinit",
 		"unsafe_borrow_escape",
 		"move_while_borrowed",
 	}
@@ -2236,46 +2367,46 @@ func goTypeCheckSnapshot(t *testing.T, path string) []string {
 
 // normalizeTypeError maps type checker diagnostics into the self-host subset.
 func normalizeTypeError(message string) string {
-	if strings.Contains(message, "equal_bytes") {
-		return "type error: `std::mem::equal_bytes` arg 2 expects []const u8"
+	if strings.Contains(message, "array::Array") && strings.Contains(message, "expects allocator") {
+		return "type error: Array allocator"
 	}
-	if strings.Contains(message, "expects 2 args") {
-		return "type error: call arg count"
+	if strings.Contains(message, "string::String") && strings.Contains(message, "expects allocator") {
+		return "type error: String allocator"
 	}
-	if strings.Contains(message, "arg 1 of `take` expects i64") {
-		return "type error: call arg type"
+	if strings.Contains(message, "map::Map") && strings.Contains(message, "expects allocator") {
+		return "type error: Map allocator"
 	}
-	if strings.Contains(message, "unknown field") {
-		return "type error: unknown field"
-	}
-	if strings.Contains(message, "if expression branch types differ") {
-		return "type error: if expression branch types differ"
-	}
-	if strings.Contains(message, "return expects") {
-		return "type error: return type mismatch"
-	}
-	if strings.Contains(message, "must return") {
-		return "type error: missing return"
-	}
-	if strings.Contains(message, "cannot cast") {
-		return "type error: invalid cast"
-	}
-	if strings.Contains(message, "Array.append") {
-		return "type error: Array.append type"
-	}
-	if strings.Contains(message, "Map key type") {
-		return "type error: Map key type"
-	}
-	if strings.Contains(message, "Map.insert") {
-		return "type error: Map.insert type"
-	}
-	if strings.Contains(message, "String.append_bytes") {
-		return "type error: String.append_bytes type"
-	}
-	if strings.Contains(message, "expect_equal_i64") {
-		return "type error: testing arg type"
+	for _, item := range typeErrorNormalizers() {
+		if strings.Contains(message, item.match) {
+			return item.normalized
+		}
 	}
 	return "type error"
+}
+
+// typeErrorNormalizer maps a source diagnostic substring to a normalized message.
+type typeErrorNormalizer struct {
+	match      string
+	normalized string
+}
+
+// typeErrorNormalizers returns simple substring-based type diagnostic mappings.
+func typeErrorNormalizers() []typeErrorNormalizer {
+	return []typeErrorNormalizer{
+		{"equal_bytes", "type error: `std::mem::equal_bytes` arg 2 expects []const u8"},
+		{"expects 2 args", "type error: call arg count"},
+		{"arg 1 of `take` expects i64", "type error: call arg type"},
+		{"unknown field", "type error: unknown field"},
+		{"if expression branch types differ", "type error: if expression branch types differ"},
+		{"return expects", "type error: return type mismatch"},
+		{"must return", "type error: missing return"},
+		{"cannot cast", "type error: invalid cast"},
+		{"Array.append", "type error: Array.append type"},
+		{"Map key type", "type error: Map key type"},
+		{"Map.insert", "type error: Map.insert type"},
+		{"String.append_bytes", "type error: String.append_bytes type"},
+		{"expect_equal_i64", "type error: testing arg type"},
+	}
 }
 
 // formatTypeCheckSnapshot formats type checker pass/fail rows.
