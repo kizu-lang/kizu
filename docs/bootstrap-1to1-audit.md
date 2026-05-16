@@ -49,14 +49,14 @@ acceptance evidence before closing.
 6. Normalized IR dump oracle: #117 (complete)
 7. Backend smoke fingerprint oracle: #118 (complete)
 8. Cache ownership and self-host switch decision: #119 (complete)
-9. 1:1 completion gate that fails if any phase lacks coverage: #111 (open)
+9. 1:1 completion gate that fails if any phase lacks coverage: #111 (complete)
 
 ## Completion Gate
 
 `tests/bootstrap` checks that this audit cannot silently claim completion while
 rows still have incomplete coverage. The normal test keeps the audit internally
-consistent. The strict final gate is opt-in and must fail until every phase is
-strong and has no missing work:
+consistent. The strict final gate is opt-in and must pass only when every phase
+is strong and has no missing work:
 
 ```sh
 KIZU_REQUIRE_1TO1=1 go test ./tests/bootstrap
