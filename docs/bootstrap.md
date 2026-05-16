@@ -38,6 +38,45 @@ Implemented oracle bridges:
 - minimal IR/backend snapshots
 - module-aware cache measurement through `internal/buildcache`
 
+## Self-Host Migration Strategy
+
+Self-host migration is module-first. The Go compiler remains the oracle for
+multi-file package loading, module graph resolution, visibility, diagnostics,
+and package-level check/build behavior while Kizu compiler modules are ported
+one component at a time.
+
+`selfhost/frontend.kizu` is a legacy oracle harness. It can keep protecting
+existing bootstrap behavior, but it is not the production self-host compiler
+source. New self-host work should target a normal multi-file Kizu package under
+`selfhost/src`.
+
+The target source layout is:
+
+```text
+selfhost/
+  kizu.toml
+  src/
+    main.kizu
+    token.kizu
+    lexer.kizu
+    ast.kizu
+    parser.kizu
+    diagnostics.kizu
+    resolver.kizu
+    types.kizu
+    ownership.kizu
+    ir.kizu
+    backend.kizu
+    cache_contract.kizu
+```
+
+The initial migration issues are:
+
+- module-first migration reset: #190
+- multi-file self-host scaffold: #191
+- token and lexer port: #192
+- AST and parser port: #193
+
 Backend smoke scope in v0.3:
 
 - LLVM text emission remains Go-owned and smoke-tested through `kizu build --emit-llvm`

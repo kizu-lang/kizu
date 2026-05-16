@@ -70,3 +70,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0049: module graph and name resolution](0049-module-graph-name-resolution.md)
 - [ADR-0050: visibility and diagnostics](0050-visibility-diagnostics.md)
 - [ADR-0051: compiler outputs, build cache, and bootstrap criteria](0051-compiler-outputs-cache-bootstrap.md)
+- [ADR-0052: module-first self-host migration](0052-module-first-self-host-migration.md)
