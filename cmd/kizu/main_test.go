@@ -96,6 +96,39 @@ func TestTestCommandSelfHostPackage(t *testing.T) {
 	}
 }
 
+// TestTestCommandPackageRuntimeFailure checks package component tests execute.
+func TestTestCommandPackageRuntimeFailure(t *testing.T) {
+	root := t.TempDir()
+	writePackageTestFile(t, root, "kizu.toml", `[package]
+name = "app"
+version = "0.1.0"
+
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+`)
+	writePackageTestFile(t, root, "src/main.kizu", `pub fn ready() -> bool {
+    return true;
+}
+`)
+	writePackageTestFile(t, root, "src/main_test.kizu", `import app;
+
+pub fn failing_test() -> !void {
+    try std::testing::expect(app::ready() == false);
+    return void;
+}
+`)
+	cmd := exec.Command("go", "run", ".", "test", root)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected package test to fail\n%s", out)
+	}
+	want := "test error: main_test.failing_test"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
 func TestIRCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "ir", "../../examples/hello.kizu")
@@ -275,6 +308,18 @@ func TestImportCHeaderCommandRejectsUnsupportedSyntax(t *testing.T) {
 	want := "c import error: variadic functions are unsupported"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
+// writePackageTestFile writes one file in a temporary package fixture.
+func writePackageTestFile(t *testing.T, root string, rel string, source string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

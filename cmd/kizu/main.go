@@ -222,14 +222,23 @@ func testPackageTarget(path string) error {
 		return err
 	}
 	count := 0
+	tests := []string{}
 	for _, module := range pkg.Modules {
 		if err := checkPackageProgram(pkg, module); err != nil {
 			return err
 		}
 		count += componentTestCount(module)
+		tests = append(tests, componentTestNames(module)...)
 	}
 	if count == 0 {
 		return fmt.Errorf("test error: no package component tests found")
+	}
+	runner := interp.NewWithProcessArgs(os.Stdout, nil)
+	runner.Register(packageRuntimeProgram(pkg))
+	for _, testName := range tests {
+		if err := runner.RunFunction(testName); err != nil {
+			return fmt.Errorf("test error: %s: %w", testName, err)
+		}
 	}
 	_, _ = fmt.Printf("test: ok (%d component tests)\n", count)
 	return nil
@@ -248,6 +257,63 @@ func componentTestCount(module project.ParsedModule) int {
 		}
 	}
 	return count
+}
+
+// componentTestNames returns qualified package runtime test entry names.
+func componentTestNames(module project.ParsedModule) []string {
+	if !strings.HasSuffix(filepath.Base(module.Module.File), "_test.kizu") {
+		return nil
+	}
+	names := []string{}
+	prefix := runtimeModulePrefix(module)
+	for _, decl := range module.Program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if ok && strings.HasSuffix(fn.Name, "_test") {
+			names = append(names, prefix+"."+fn.Name)
+		}
+	}
+	return names
+}
+
+// packageRuntimeProgram flattens package modules into explicit runtime names.
+func packageRuntimeProgram(pkg *project.Package) *ast.Program {
+	program := &ast.Program{}
+	for _, module := range pkg.Modules {
+		for _, decl := range module.Program.Decls {
+			program.Decls = append(program.Decls, decl)
+			if clone := runtimeQualifiedDecl(module, decl); clone != nil {
+				program.Decls = append(program.Decls, clone)
+			}
+		}
+	}
+	return program
+}
+
+// runtimeQualifiedDecl returns a module-qualified runtime declaration clone.
+func runtimeQualifiedDecl(module project.ParsedModule, decl ast.Decl) ast.Decl {
+	prefix := runtimeModulePrefix(module)
+	switch d := decl.(type) {
+	case *ast.FunctionDecl:
+		clone := *d
+		clone.Name = prefix + "." + d.Name
+		return &clone
+	case *ast.EnumDecl:
+		clone := *d
+		clone.Name = prefix + "." + d.Name
+		return &clone
+	case *ast.UnionDecl:
+		clone := *d
+		clone.Name = prefix + "." + d.Name
+		return &clone
+	default:
+		return nil
+	}
+}
+
+// runtimeModulePrefix returns the import alias used by source expressions.
+func runtimeModulePrefix(module project.ParsedModule) string {
+	parts := strings.Split(module.Module.Path, "::")
+	return parts[len(parts)-1]
 }
 
 // splitProgramArgs separates the source path from optional Kizu process args.
