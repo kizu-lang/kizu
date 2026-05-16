@@ -542,6 +542,11 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/std_mem_wrong_type.kizu",
 		"selfhost/fixtures/type_arg_count.kizu",
 		"selfhost/fixtures/type_arg_type.kizu",
+		"examples/negative/invalid_field.kizu",
+		"examples/negative/if_expression_type_mismatch.kizu",
+		"examples/negative/empty_return_value.kizu",
+		"examples/negative/missing_return.kizu",
+		"examples/negative/invalid_cast.kizu",
 		"examples/move_error.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
@@ -564,6 +569,9 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 		"examples/negative/mut_borrow_immutable.kizu",
 		"examples/negative/nested_field_borrow.kizu",
 		"examples/negative/shared_borrow_assignment.kizu",
+		"examples/negative/immutable_assignment.kizu",
+		"examples/negative/immutable_field_assignment.kizu",
+		"examples/negative/invalid_try.kizu",
 		"examples/negative/unsafe_borrow_escape.kizu",
 	}
 	for _, path := range cases {
@@ -617,6 +625,11 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/std_mem_wrong_type.kizu",
 		"selfhost/fixtures/type_arg_count.kizu",
 		"selfhost/fixtures/type_arg_type.kizu",
+		"examples/negative/invalid_field.kizu",
+		"examples/negative/if_expression_type_mismatch.kizu",
+		"examples/negative/empty_return_value.kizu",
+		"examples/negative/missing_return.kizu",
+		"examples/negative/invalid_cast.kizu",
 	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -1044,6 +1057,45 @@ func moduleVisibilityDiagnostic(t *testing.T, path string, literal string) []dia
 func goTypeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	t.Helper()
 	slashPath := filepath.ToSlash(path)
+	if snapshots := goNamedTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
+	if !strings.Contains(slashPath, "std_mem_wrong_type") {
+		return nil
+	}
+	program := parseSelfHostSource(t, path)
+	err := types.New().Check(program)
+	if err == nil {
+		t.Fatalf("expected type diagnostic for %s", path)
+	}
+	message := normalizeTypeError(err.Error())
+	if message != "type error: `std::mem::equal_bytes` arg 2 expects []const u8" {
+		t.Fatalf("type diagnostic is outside oracle subset: %q", message)
+	}
+	tok := equalBytesWrongArgumentToken(t, path)
+	return []diagnosticSnapshot{diagnosticFromToken(message, tok, tok)}
+}
+
+// goNamedTypeDiagnosticSnapshots returns fixture-named type diagnostic rows.
+func goNamedTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if snapshots := goCoreTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
+	return goBorrowAndBasicTypeDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goCoreTypeDiagnosticSnapshots returns core type diagnostic fixture rows.
+func goCoreTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
 	if strings.Contains(slashPath, "type_arg_count") {
 		tok := lastTokenWithLiteral(t, path, "add")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: call arg count", tok, tok)}
@@ -1052,6 +1104,46 @@ func goTypeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 		tok := tokenWithLiteral(t, path, "no")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: call arg type", tok, tok)}
 	}
+	if strings.Contains(slashPath, "invalid_field") {
+		tok := tokenWithLiteral(t, path, "age")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: unknown field", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "if_expression_type_mismatch") {
+		tok := tokenWithLiteral(t, path, "one")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: if expression branch types differ", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "empty_return_value") {
+		tok := tokenWithLiteral(t, path, "return")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: return type mismatch", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "missing_return") {
+		tok := tokenWithLiteral(t, path, "bad")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: missing return", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "invalid_cast") {
+		tok := tokenWithLiteral(t, path, "no")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: invalid cast", tok, tok),
+		}
+	}
+	return nil
+}
+
+// goBorrowAndBasicTypeDiagnosticSnapshots returns borrow/basic type rows.
+func goBorrowAndBasicTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
 	if strings.Contains(slashPath, "nested_field_borrow") {
 		tok := tokenWithLiteralOccurrence(t, path, "profile", 3)
 		return []diagnosticSnapshot{diagnosticFromToken("type error: nested field borrow", tok, tok)}
@@ -1068,20 +1160,21 @@ func goTypeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 			diagnosticFromToken("type error: shared borrow is not mutable", tok, tok),
 		}
 	}
-	if !strings.Contains(slashPath, "std_mem_wrong_type") {
-		return nil
+	if strings.Contains(slashPath, "immutable_assignment") {
+		tok := tokenWithLiteralOccurrence(t, path, "x", 2)
+		return []diagnosticSnapshot{diagnosticFromToken("type error: immutable assignment", tok, tok)}
 	}
-	program := parseSelfHostSource(t, path)
-	err := types.New().Check(program)
-	if err == nil {
-		t.Fatalf("expected type diagnostic for %s", path)
+	if strings.Contains(slashPath, "immutable_field_assignment") {
+		tok := tokenWithLiteralOccurrence(t, path, "user", 2)
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: immutable field assignment", tok, tok),
+		}
 	}
-	message := normalizeTypeError(err.Error())
-	if message != "type error: `std::mem::equal_bytes` arg 2 expects []const u8" {
-		t.Fatalf("type diagnostic is outside oracle subset: %q", message)
+	if strings.Contains(slashPath, "invalid_try") {
+		tok := tokenWithLiteral(t, path, "try")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: invalid try", tok, tok)}
 	}
-	tok := equalBytesWrongArgumentToken(t, path)
-	return []diagnosticSnapshot{diagnosticFromToken(message, tok, tok)}
+	return nil
 }
 
 // goOwnershipDiagnosticSnapshots returns ownership diagnostics in the self-host subset.
@@ -2064,6 +2157,21 @@ func normalizeTypeError(message string) string {
 	}
 	if strings.Contains(message, "arg 1 of `take` expects i64") {
 		return "type error: call arg type"
+	}
+	if strings.Contains(message, "unknown field") {
+		return "type error: unknown field"
+	}
+	if strings.Contains(message, "if expression branch types differ") {
+		return "type error: if expression branch types differ"
+	}
+	if strings.Contains(message, "return expects") {
+		return "type error: return type mismatch"
+	}
+	if strings.Contains(message, "must return") {
+		return "type error: missing return"
+	}
+	if strings.Contains(message, "cannot cast") {
+		return "type error: invalid cast"
 	}
 	return "type error"
 }
