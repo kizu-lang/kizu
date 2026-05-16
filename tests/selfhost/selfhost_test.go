@@ -4379,14 +4379,23 @@ func checkGoSourceFails(t *testing.T, path string, want string) {
 // selfHostSources returns all tracked Kizu skeleton sources.
 func selfHostSources(t *testing.T) []string {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(repoRoot(t), "selfhost", "*.kizu"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	matches := selfHostSourceGlob(t, filepath.Join(repoRoot(t), "selfhost", "*.kizu"))
+	srcPattern := filepath.Join(repoRoot(t), "selfhost", "src", "*.kizu")
+	matches = append(matches, selfHostSourceGlob(t, srcPattern)...)
 	if len(matches) == 0 {
 		t.Fatal("no selfhost Kizu sources found")
 	}
 	sort.Strings(matches)
+	return matches
+}
+
+// selfHostSourceGlob returns source matches for a self-host source glob.
+func selfHostSourceGlob(t *testing.T, pattern string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return matches
 }
 
@@ -4431,7 +4440,7 @@ func checkFunctionComments(t *testing.T, source string) {
 	t.Helper()
 	lines := strings.Split(source, "\n")
 	for idx, line := range lines {
-		if !strings.HasPrefix(strings.TrimSpace(line), "fn ") {
+		if !isFunctionLine(line) {
 			continue
 		}
 		comment := previousNonEmptyLine(lines, idx)
@@ -4446,7 +4455,7 @@ func checkFunctionSize(t *testing.T, source string) {
 	t.Helper()
 	lines := strings.Split(source, "\n")
 	for idx := 0; idx < len(lines); idx++ {
-		if !strings.HasPrefix(strings.TrimSpace(lines[idx]), "fn ") {
+		if !isFunctionLine(lines[idx]) {
 			continue
 		}
 		end, statements := functionExtent(lines, idx)
@@ -4458,6 +4467,12 @@ func checkFunctionSize(t *testing.T, source string) {
 		}
 		idx = end
 	}
+}
+
+// isFunctionLine reports whether a line starts a Kizu function declaration.
+func isFunctionLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "fn ") || strings.HasPrefix(trimmed, "pub fn ")
 }
 
 // functionExtent returns the inclusive end line and semicolon statement count.

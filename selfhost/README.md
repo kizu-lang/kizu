@@ -12,7 +12,7 @@ multi-file package loading, module graph resolution, visibility diagnostics,
 and package-level check/build behavior while Go compiler packages are ported to
 Kizu modules one component at a time.
 
-The future source layout is:
+The module-first source layout now exists as a checkable package scaffold:
 
 ```text
 selfhost/
@@ -34,6 +34,9 @@ selfhost/
 
 The migration reset is tracked by #190. The first implementation steps are the
 multi-file scaffold (#191), token/lexer port (#192), and AST/parser port (#193).
+The scaffold intentionally contains only minimal public module surfaces; compiler
+logic should move into these files through the component issues instead of
+expanding `frontend.kizu`.
 
 ## Current Entry
 
