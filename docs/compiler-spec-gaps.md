@@ -112,6 +112,12 @@ The self-host compiler replacement path is module-first. The legacy
 `selfhost/frontend.kizu` file remains an oracle harness while new compiler
 modules are ported under `selfhost/src`.
 
+Self-host component migration readiness is tracked by
+[ADR-0053](adr/0053-self-host-readiness-gate.md) and
+[`docs/selfhost-readiness.md`](selfhost-readiness.md). A component should not
+replace a Go production path until its language features, stdlib dependencies,
+diagnostics, memory-safety cases, and oracle tests are explicit.
+
 ## Implementation Work Still Needed
 
 - Connect explicit build outputs to a package artifact layout under `target/`: #100.
@@ -120,6 +126,10 @@ modules are ported under `selfhost/src`.
 - Scaffold `selfhost/kizu.toml` and `selfhost/src/*.kizu`: #191.
 - Port `internal/token` and `internal/lexer` to Kizu modules: #192.
 - Port `internal/ast` and `internal/parser` to Kizu modules: #193.
+- Track self-host readiness before file-by-file migration: #196.
+- Add package component tests for self-host modules: #197.
+- Add cross-module type reference conformance for imported compiler modules: #198.
+- Gate lexer stdlib dependencies before porting lexer logic: #199.
 
 ## Implemented Groundwork
 

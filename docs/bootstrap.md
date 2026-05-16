@@ -77,6 +77,12 @@ The initial migration issues are:
 - token and lexer port: #192
 - AST and parser port: #193
 
+Self-host component migration must pass the readiness gate described in
+[`docs/selfhost-readiness.md`](selfhost-readiness.md) and
+[ADR-0053](adr/0053-self-host-readiness-gate.md). The gate is intentionally
+component-scoped: Go remains the oracle while each Kizu module proves the same
+behavior with explicit language, stdlib, diagnostic, and memory-safety coverage.
+
 Backend smoke scope in v0.3:
 
 - LLVM text emission remains Go-owned and smoke-tested through `kizu build --emit-llvm`
