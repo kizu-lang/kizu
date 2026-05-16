@@ -1,8 +1,7 @@
 # Compiler Specification Decisions
 
 This document tracks compiler-facing language and toolchain decisions that are
-specified but still need implementation work before the self-host compiler can
-replace the Go implementation.
+specified for the Go compiler and the Kizu self-host compiler migration path.
 
 ## Accepted Decisions
 
@@ -115,15 +114,30 @@ The self-host compiler replacement path is module-first. The legacy
 `selfhost/frontend.kizu` file remains an oracle harness while new compiler
 modules are ported under `selfhost/src`.
 
-## Implementation Work Still Needed
+## Completed Bootstrap Work
+
+The current compiler completion tracks are closed:
 
 - Connect explicit build outputs to a package artifact layout under `target/`: #100.
-- Expand self-host snapshots from normalized summaries to full phase outputs: #31.
+- Complete the Kizu self-host compiler oracle surface: #31.
 - Reset self-host migration around a multi-file Kizu package: #190.
 - Scaffold `selfhost/kizu.toml` and `selfhost/src/*.kizu`: #191.
 - Review component readiness gate before porting self-host modules: #196.
 - Port `internal/token` and `internal/lexer` to Kizu modules: #192.
 - Port `internal/ast` and `internal/parser` to Kizu modules: #193.
+- Port diagnostics, resolver, and type-summary package boundaries: #218 and #220.
+- Prove the Go/Kizu 1:1 completion gate: #111.
+
+Current completion evidence lives in
+[`docs/bootstrap-1to1-audit.md`](bootstrap-1to1-audit.md). The strict gate is:
+
+```sh
+KIZU_REQUIRE_1TO1=1 go test ./tests/bootstrap
+```
+
+At the time this document was updated, there are no open GitHub Issues for the
+tracked compiler completion work. New work must be opened as GitHub Issues
+instead of being added as a Markdown TODO list.
 
 ## Implemented Groundwork
 
