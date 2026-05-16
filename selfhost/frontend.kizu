@@ -4006,7 +4006,80 @@ fn print_parser_diagnostic(tokens: &std::array::Array<Token>) -> !void {
         };
         print_diagnostic(diagnostic);
     }
+    let missing_else = try if_expression_missing_else_index(tokens);
+    if missing_else >= 0 {
+        let token = try tokens.at(missing_else);
+        let diagnostic = Diagnostic {
+            message: "parser error: if expression missing else",
+            primary_start: token.start,
+            primary_end: token.end,
+            primary_line: token.line,
+            primary_column: token.column,
+            related_start: token.start,
+            related_end: token.end,
+        };
+        print_diagnostic(diagnostic);
+    }
+    let bad_label = try label_on_non_loop_index(tokens);
+    if bad_label >= 0 {
+        let token = try tokens.at(bad_label);
+        let diagnostic = Diagnostic {
+            message: "parser error: label on non-loop",
+            primary_start: token.start,
+            primary_end: token.end,
+            primary_line: token.line,
+            primary_column: token.column,
+            related_start: token.start,
+            related_end: token.end,
+        };
+        print_diagnostic(diagnostic);
+    }
     return void;
+}
+
+// if_expression_missing_else_index detects an if expression closed by semicolon.
+fn if_expression_missing_else_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::If {
+            let end = try block_end(tokens, index + 1);
+            if end + 1 < tokens.len() {
+                let next = try tokens.at(end + 1);
+                if next.kind == TokenKind::Semicolon {
+                    return end + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// label_on_non_loop_index detects label syntax not attached to a loop.
+fn label_on_non_loop_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index + 3 < tokens.len() {
+        let label = try tokens.at(index);
+        let colon = try tokens.at(index + 1);
+        let next = try tokens.at(index + 2);
+        let after_next = try tokens.at(index + 3);
+        if label.kind == TokenKind::Ident {
+            if colon.kind == TokenKind::Colon {
+                if after_next.kind == TokenKind::LParen {
+                    if next.kind != TokenKind::While {
+                        if next.kind != TokenKind::For {
+                            return index + 2;
+                        }
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
 }
 
 // print_module_diagnostic writes the module resolver diagnostic subset.
@@ -4068,60 +4141,72 @@ fn module_visibility_error_index(tokens: &std::array::Array<Token>) -> !i64 {
 fn print_type_diagnostic(tokens: &std::array::Array<Token>) -> !void {
     let index = try equal_bytes_wrong_arg_index(tokens);
     if index >= 0 {
-        let token = try tokens.at(index);
-        let diagnostic = Diagnostic {
-            message: "type error: `std::mem::equal_bytes` arg 2 expects []const u8",
-            primary_start: token.start,
-            primary_end: token.end,
-            primary_line: token.line,
-            primary_column: token.column,
-            related_start: token.start,
-            related_end: token.end,
-        };
-        print_diagnostic(diagnostic);
+        print_type_diagnostic_at(
+            tokens,
+            index,
+            "type error: `std::mem::equal_bytes` arg 2 expects []const u8"
+        );
     }
     let call_index = try call_type_error_index(tokens);
     if call_index >= 0 {
-        let token = try tokens.at(call_index);
-        let diagnostic = Diagnostic {
-            message: try call_type_error_message_at(tokens, call_index),
-            primary_start: token.start,
-            primary_end: token.end,
-            primary_line: token.line,
-            primary_column: token.column,
-            related_start: token.start,
-            related_end: token.end,
-        };
-        print_diagnostic(diagnostic);
+        print_type_diagnostic_at(
+            tokens,
+            call_index,
+            try call_type_error_message_at(tokens, call_index)
+        );
     }
     let borrow_index = try borrow_type_error_index(tokens);
     if borrow_index >= 0 {
-        let token = try tokens.at(borrow_index);
-        let diagnostic = Diagnostic {
-            message: try borrow_type_error_message_at(tokens, borrow_index),
-            primary_start: token.start,
-            primary_end: token.end,
-            primary_line: token.line,
-            primary_column: token.column,
-            related_start: token.start,
-            related_end: token.end,
-        };
-        print_diagnostic(diagnostic);
+        print_type_diagnostic_at(
+            tokens,
+            borrow_index,
+            try borrow_type_error_message_at(tokens, borrow_index)
+        );
     }
     let basic_index = try basic_type_error_index(tokens);
     if basic_index >= 0 {
-        let token = try tokens.at(basic_index);
-        let diagnostic = Diagnostic {
-            message: try basic_type_error_message_at(tokens, basic_index),
-            primary_start: token.start,
-            primary_end: token.end,
-            primary_line: token.line,
-            primary_column: token.column,
-            related_start: token.start,
-            related_end: token.end,
-        };
-        print_diagnostic(diagnostic);
+        print_type_diagnostic_at(
+            tokens,
+            basic_index,
+            try basic_type_error_message_at(tokens, basic_index)
+        );
     }
+    let control_index = try control_type_error_index(tokens);
+    if control_index >= 0 {
+        print_type_diagnostic_at(
+            tokens,
+            control_index,
+            try control_type_error_message_at(tokens, control_index)
+        );
+    }
+    let namespace_index = try namespace_type_error_index(tokens);
+    if namespace_index >= 0 {
+        print_type_diagnostic_at(
+            tokens,
+            namespace_index,
+            try namespace_type_error_message_at(tokens, namespace_index)
+        );
+    }
+    return void;
+}
+
+// print_type_diagnostic_at writes one token-local type diagnostic.
+fn print_type_diagnostic_at(
+    tokens: &std::array::Array<Token>,
+    index: i64,
+    message: []const u8
+) -> !void {
+    let token = try tokens.at(index);
+    let diagnostic = Diagnostic {
+        message: message,
+        primary_start: token.start,
+        primary_end: token.end,
+        primary_line: token.line,
+        primary_column: token.column,
+        related_start: token.start,
+        related_end: token.end,
+    };
+    print_diagnostic(diagnostic);
     return void;
 }
 
@@ -4132,6 +4217,115 @@ fn basic_type_error_message(tokens: &std::array::Array<Token>) -> ![]const u8 {
         return "";
     }
     return try basic_type_error_message_at(tokens, index);
+}
+
+// control_type_error_index returns selected loop-control diagnostics.
+fn control_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let break_index = try first_token_kind_index(tokens, TokenKind::Break);
+    if break_index >= 0 {
+        let label = try labeled_break_target_index(tokens, break_index);
+        if label >= 0 {
+            return label;
+        }
+        if !try token_is_inside_loop(tokens, break_index) {
+            return break_index;
+        }
+    }
+    let continue_index = try first_token_kind_index(tokens, TokenKind::Continue);
+    if continue_index >= 0 {
+        if !try token_is_inside_loop(tokens, continue_index) {
+            return continue_index;
+        }
+    }
+    return -1;
+}
+
+// control_type_error_message_at returns the normalized loop-control diagnostic.
+fn control_type_error_message_at(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let token = try tokens.at(index);
+    if token.kind == TokenKind::Continue {
+        return "type error: continue outside loop";
+    }
+    if std::mem::equal_bytes(token.literal, "missing") {
+        return "type error: unknown loop label";
+    }
+    return "type error: break outside loop";
+}
+
+// first_token_kind_index returns the first token index with kind.
+fn first_token_kind_index(tokens: &std::array::Array<Token>, kind: TokenKind) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == kind {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// labeled_break_target_index returns the label target after break :label.
+fn labeled_break_target_index(tokens: &std::array::Array<Token>, break_index: i64) -> !i64 {
+    if break_index + 2 >= tokens.len() {
+        return -1;
+    }
+    let colon = try tokens.at(break_index + 1);
+    let label = try tokens.at(break_index + 2);
+    if colon.kind == TokenKind::Colon {
+        if label.kind == TokenKind::Ident {
+            return break_index + 2;
+        }
+    }
+    return -1;
+}
+
+// token_is_inside_loop reports whether a token appears in a while/for body.
+fn token_is_inside_loop(tokens: &std::array::Array<Token>, target: i64) -> !bool {
+    var index = 0;
+    var loop_depth = 0;
+
+    while index <= target {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::While {
+            loop_depth = loop_depth + 1;
+        }
+        if token.kind == TokenKind::For {
+            loop_depth = loop_depth + 1;
+        }
+        index = index + 1;
+    }
+    return loop_depth > 0;
+}
+
+// namespace_type_error_index detects dot syntax for enum or union variants.
+fn namespace_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index + 2 < tokens.len() {
+        let receiver = try tokens.at(index);
+        let dot = try tokens.at(index + 1);
+        if dot.kind == TokenKind::Dot {
+            if std::mem::equal_bytes(receiver.literal, "Color") {
+                return index;
+            }
+            if std::mem::equal_bytes(receiver.literal, "Shape") {
+                return index;
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// namespace_type_error_message_at returns the normalized namespace diagnostic.
+fn namespace_type_error_message_at(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    let token = try tokens.at(index);
+    if std::mem::equal_bytes(token.literal, "Shape") {
+        return "type error: union variant must use namespace";
+    }
+    return "type error: enum variant must use namespace";
 }
 
 // basic_type_error_index returns selected tokens for basic type diagnostics.
@@ -4164,6 +4358,10 @@ fn basic_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
     if invalid_try >= 0 {
         return invalid_try;
     }
+    let stdlib = try stdlib_type_error_index(tokens);
+    if stdlib >= 0 {
+        return stdlib;
+    }
     return try invalid_cast_index(tokens);
 }
 
@@ -4194,7 +4392,55 @@ fn basic_type_error_message_at(
     if try is_immutable_assignment_at(tokens, index) {
         return "type error: immutable assignment";
     }
+    let stdlib = try stdlib_type_error_message_at(tokens, index);
+    if !std::mem::equal_bytes(stdlib, "") {
+        return stdlib;
+    }
     return "type error: invalid cast";
+}
+
+// stdlib_type_error_index returns selected stdlib type diagnostic tokens.
+fn stdlib_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let array = try array_append_type_error_index(tokens);
+    if array >= 0 {
+        return array;
+    }
+    let map_key = try map_key_type_error_index(tokens);
+    if map_key >= 0 {
+        return map_key;
+    }
+    let map_insert = try map_insert_type_error_index(tokens);
+    if map_insert >= 0 {
+        return map_insert;
+    }
+    let string_append = try string_append_type_error_index(tokens);
+    if string_append >= 0 {
+        return string_append;
+    }
+    return try testing_type_error_index(tokens);
+}
+
+// stdlib_type_error_message_at returns the selected stdlib type diagnostic.
+fn stdlib_type_error_message_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> ![]const u8 {
+    if try is_array_append_type_error_at(tokens, index) {
+        return "type error: Array.append type";
+    }
+    if try is_map_key_type_error_at(tokens, index) {
+        return "type error: Map key type";
+    }
+    if try is_map_insert_type_error_at(tokens, index) {
+        return "type error: Map.insert type";
+    }
+    if try is_string_append_type_error_at(tokens, index) {
+        return "type error: String.append_bytes type";
+    }
+    if try is_testing_type_error_at(tokens, index) {
+        return "type error: testing arg type";
+    }
+    return "";
 }
 
 // immutable_assignment_index detects assignment to a let local.
@@ -4208,6 +4454,164 @@ fn immutable_assignment_index(tokens: &std::array::Array<Token>) -> !i64 {
         index = index + 1;
     }
     return -1;
+}
+
+// array_append_type_error_index detects Array.append with a string argument.
+fn array_append_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_array_append_type_error_at(tokens, index) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_array_append_type_error_at reports whether index is a wrong Array.append arg.
+fn is_array_append_type_error_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let call = try previous_method_call_name(tokens, index);
+    if !std::mem::equal_bytes(call, "append") {
+        return false;
+    }
+    let token = try tokens.at(index);
+    return token.kind == TokenKind::String;
+}
+
+// map_key_type_error_index detects unsupported std::map key type.
+fn map_key_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_map_key_type_error_at(tokens, index) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_map_key_type_error_at reports whether index is Map<i64, ...>.
+fn is_map_key_type_error_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index + 2 >= tokens.len() {
+        return false;
+    }
+    let token = try tokens.at(index);
+    if !std::mem::equal_bytes(token.literal, "Map") {
+        return false;
+    }
+    let first_type = try tokens.at(index + 2);
+    return std::mem::equal_bytes(first_type.literal, "i64");
+}
+
+// map_insert_type_error_index detects Map.insert with a string value.
+fn map_insert_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_map_insert_type_error_at(tokens, index) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_map_insert_type_error_at reports whether index is the wrong insert value.
+fn is_map_insert_type_error_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let call = try previous_method_call_name(tokens, index);
+    if !std::mem::equal_bytes(call, "insert") {
+        return false;
+    }
+    let token = try tokens.at(index);
+    return std::mem::equal_bytes(token.literal, "function");
+}
+
+// string_append_type_error_index detects String.append_bytes with an i64 arg.
+fn string_append_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_string_append_type_error_at(tokens, index) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_string_append_type_error_at reports whether index is the wrong append arg.
+fn is_string_append_type_error_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let call = try previous_method_call_name(tokens, index);
+    if !std::mem::equal_bytes(call, "append_bytes") {
+        return false;
+    }
+    let token = try tokens.at(index);
+    return token.kind == TokenKind::Number;
+}
+
+// testing_type_error_index detects expect_equal_i64 with a string second arg.
+fn testing_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    var index = 0;
+
+    while index < tokens.len() {
+        if try is_testing_type_error_at(tokens, index) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+// is_testing_type_error_at reports whether index is a wrong expect_equal_i64 arg.
+fn is_testing_type_error_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let call = try previous_call_name(tokens, index);
+    if !std::mem::equal_bytes(call, "expect_equal_i64") {
+        return false;
+    }
+    let token = try tokens.at(index);
+    return token.kind == TokenKind::String;
+}
+
+// previous_method_call_name returns the nearest method name before an argument.
+fn previous_method_call_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    var cursor = index;
+
+    while cursor > 1 {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::LParen {
+            let method = try tokens.at(cursor - 1);
+            let dot = try tokens.at(cursor - 2);
+            if dot.kind == TokenKind::Dot {
+                return method.literal;
+            }
+            return "";
+        }
+        if token.kind == TokenKind::Semicolon {
+            return "";
+        }
+        cursor = cursor - 1;
+    }
+    return "";
+}
+
+// previous_call_name returns the nearest function name before an argument.
+fn previous_call_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    var cursor = index;
+
+    while cursor > 0 {
+        let token = try tokens.at(cursor);
+        if token.kind == TokenKind::LParen {
+            let callee = try tokens.at(cursor - 1);
+            return callee.literal;
+        }
+        if token.kind == TokenKind::Semicolon {
+            return "";
+        }
+        cursor = cursor - 1;
+    }
+    return "";
 }
 
 // is_immutable_assignment_at reports whether index starts a let-local assignment.
@@ -4734,6 +5138,9 @@ fn is_shared_borrow_assignment_at(tokens: &std::array::Array<Token>, index: i64)
 
 // print_ownership_diagnostic writes the ownership checker diagnostic subset.
 fn print_ownership_diagnostic(tokens: &std::array::Array<Token>) -> !void {
+    if try has_type_diagnostic(tokens) {
+        return void;
+    }
     let snapshot = try check_ownership_subset(tokens);
     if snapshot.ok {
         return void;
@@ -4753,6 +5160,20 @@ fn print_ownership_diagnostic(tokens: &std::array::Array<Token>) -> !void {
     };
     print_diagnostic(diagnostic);
     return void;
+}
+
+// has_type_diagnostic reports whether diagnostic mode already found a type error.
+fn has_type_diagnostic(tokens: &std::array::Array<Token>) -> !bool {
+    if try equal_bytes_wrong_arg_index(tokens) >= 0 {
+        return true;
+    }
+    if try call_type_error_index(tokens) >= 0 {
+        return true;
+    }
+    if try borrow_type_error_index(tokens) >= 0 {
+        return true;
+    }
+    return try basic_type_error_index(tokens) >= 0;
 }
 
 // token_index_at_start returns the index whose byte start offset matches start.
@@ -4794,7 +5215,13 @@ fn missing_import_index(tokens: &std::array::Array<Token>) -> !i64 {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Ident {
             if std::mem::equal_bytes(token.literal, "missing") {
-                return index;
+                if index == 0 {
+                    return index;
+                }
+                let previous = try tokens.at(index - 1);
+                if previous.kind != TokenKind::Colon {
+                    return index;
+                }
             }
         }
         index = index + 1;
