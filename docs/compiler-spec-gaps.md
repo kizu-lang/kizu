@@ -101,15 +101,25 @@ Required user-facing commands:
 
 Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
 Operational contract: [docs/bootstrap.md](bootstrap.md).
+Self-host migration strategy:
+[ADR-0052](adr/0052-module-first-self-host-migration.md).
 
 The Go implementation remains the oracle until the Kizu compiler matches it for
 lexer, parser, diagnostics, type checking, ownership checking, IR, backend smoke
 tests, and self-check/build.
 
+The self-host compiler replacement path is module-first. The legacy
+`selfhost/frontend.kizu` file remains an oracle harness while new compiler
+modules are ported under `selfhost/src`.
+
 ## Implementation Work Still Needed
 
 - Connect explicit build outputs to a package artifact layout under `target/`: #100.
 - Expand self-host snapshots from normalized summaries to full phase outputs: #31.
+- Reset self-host migration around a multi-file Kizu package: #190.
+- Scaffold `selfhost/kizu.toml` and `selfhost/src/*.kizu`: #191.
+- Port `internal/token` and `internal/lexer` to Kizu modules: #192.
+- Port `internal/ast` and `internal/parser` to Kizu modules: #193.
 
 ## Implemented Groundwork
 

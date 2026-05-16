@@ -2,9 +2,38 @@
 
 This directory contains Kizu source for the future self-host compiler frontend.
 
-The current goal is not to replace the Go implementation. The skeleton is a
-small compatibility probe that verifies whether the v0.2 standard library is
-enough to write compiler-shaped Kizu code.
+The current goal is not to replace the Go implementation. `frontend.kizu` is a
+legacy oracle harness that verifies whether the v0.2 standard library is enough
+to write compiler-shaped Kizu code. It is not the long-term production
+self-host compiler source.
+
+Self-host migration is now module-first. The Go compiler keeps owning
+multi-file package loading, module graph resolution, visibility diagnostics,
+and package-level check/build behavior while Go compiler packages are ported to
+Kizu modules one component at a time.
+
+The future source layout is:
+
+```text
+selfhost/
+  kizu.toml
+  src/
+    main.kizu
+    token.kizu
+    lexer.kizu
+    ast.kizu
+    parser.kizu
+    diagnostics.kizu
+    resolver.kizu
+    types.kizu
+    ownership.kizu
+    ir.kizu
+    backend.kizu
+    cache_contract.kizu
+```
+
+The migration reset is tracked by #190. The first implementation steps are the
+multi-file scaffold (#191), token/lexer port (#192), and AST/parser port (#193).
 
 ## Current Entry
 
@@ -36,9 +65,12 @@ to compare the full self-host token-kind stream against the production lexer.
 ## v0.3 Handoff
 
 The v0.2 standard-library bridge is complete when `tests/selfhost` can parse,
-check, and run the skeleton through the same APIs a future compiler frontend
-will need. #31 should build from this by replacing the normalized parser
-snapshot with full AST, diagnostics, and conformance comparison components.
+check, and run the harness through the same APIs a future compiler frontend
+will need. New compiler implementation work should build from the module-first
+package tree, not by adding more production logic to `frontend.kizu`.
+
+`frontend.kizu` can be deleted after the module tree covers the same oracle
+surface with package-level tests.
 
 ## Conformance Reuse
 
