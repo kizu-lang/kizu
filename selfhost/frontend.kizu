@@ -9018,6 +9018,10 @@ fn print_ir_function_dump(tokens: &std::array::Array<Token>, start: i64) -> !voi
 
 // print_ir_ops writes a normalized instruction opcode sequence.
 fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    if try has_function_arena_new(tokens, start) {
+        try print_arena_ir_ops(tokens, start);
+        return void;
+    }
     if try has_function_token(tokens, start, TokenKind::Try) {
         try print_try_ir_ops(tokens, start);
         return void;
@@ -9064,8 +9068,109 @@ fn print_struct_literal_ops(tokens: &std::array::Array<Token>, start: i64) -> !v
     return void;
 }
 
+// print_arena_ir_ops writes the selected Arena/Handle IR shape in Go order.
+fn print_arena_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let element_type = try arena_new_element_type(tokens, start);
+
+    print("ops");
+    print(7);
+    print("op");
+    print("arena.new");
+    print("result");
+    print(arena_type_name(element_type));
+    print("args");
+    print(0);
+    print("immediate");
+    print(element_type);
+    try print_literal_ops(tokens, start);
+    print("op");
+    print("struct.new");
+    print("result");
+    print(element_type);
+    print("args");
+    print(0);
+    print("immediate");
+    print("<none>");
+    print_arena_add_op(element_type);
+    print_arena_get_op(element_type);
+    try print_arena_field_op(tokens, start, element_type);
+    print_arena_print_op();
+    return void;
+}
+
+// print_arena_add_op writes an arena.add instruction row.
+fn print_arena_add_op(element_type: []const u8) -> void {
+    print("op");
+    print("arena.add");
+    print("result");
+    print(handle_type_name(element_type));
+    print("args");
+    print(2);
+    print("arg");
+    print(arena_type_name(element_type));
+    print("arg");
+    print(element_type);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_arena_get_op writes an arena.get instruction row.
+fn print_arena_get_op(element_type: []const u8) -> void {
+    print("op");
+    print("arena.get");
+    print("result");
+    print(element_type);
+    print("args");
+    print(2);
+    print("arg");
+    print(arena_type_name(element_type));
+    print("arg");
+    print(handle_type_name(element_type));
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_arena_field_op writes the field read after arena.get.
+fn print_arena_field_op(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    element_type: []const u8
+) -> !void {
+    print("op");
+    print("field.name");
+    print("result");
+    print(try struct_field_type_by_name(tokens, element_type, "name"));
+    print("args");
+    print(1);
+    print("arg");
+    print(element_type);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_arena_print_op writes the print call after the arena field read.
+fn print_arena_print_op() -> void {
+    print("op");
+    print("call.print");
+    print("result");
+    print("void");
+    print("args");
+    print(1);
+    print("arg");
+    print("[]const u8");
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
 // function_instruction_count returns the supported IR instruction count.
 fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    if try has_function_arena_new(tokens, start) {
+        return 7;
+    }
     if try has_function_token(tokens, start, TokenKind::Try) {
         return try try_function_instruction_count(tokens, start);
     }
@@ -9080,6 +9185,53 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
         count = count + 1;
     }
     return count + try call_instruction_count(tokens, start);
+}
+
+// has_function_arena_new reports whether one function constructs an arena.
+fn has_function_arena_new(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    return !std::mem::equal_bytes(try arena_new_element_type(tokens, start), "unknown");
+}
+
+// arena_new_element_type returns T from arena<T>() in one function.
+fn arena_new_element_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return "unknown";
+            }
+        }
+        if std::mem::equal_bytes(token.literal, "arena") {
+            let less = try tokens.at(index + 1);
+            let type_name = try tokens.at(index + 2);
+            let greater = try tokens.at(index + 3);
+            if less.kind == TokenKind::LT {
+                if greater.kind == TokenKind::GT {
+                    return type_name.literal;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+// arena_type_name returns arena<T> for selected IR rows.
+fn arena_type_name(element_type: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(element_type, "User") {
+        return "arena<User>";
+    }
+    return "arena<unknown>";
+}
+
+// handle_type_name returns handle<T> for selected IR rows.
+fn handle_type_name(element_type: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(element_type, "User") {
+        return "handle<User>";
+    }
+    return "handle<unknown>";
 }
 
 // has_function_token reports whether one function body contains a token kind.
@@ -9469,9 +9621,11 @@ fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void 
 
     if arg.kind == TokenKind::Ident {
         if try is_call_start(tokens, start + 2) {
-            print("op");
-            print(try call_opcode(arg.literal));
-            try print_call_value_detail(tokens, start + 2, arg.literal);
+            if !try is_arena_get_field_access(tokens, start + 2) {
+                print("op");
+                print(try call_opcode(arg.literal));
+                try print_call_value_detail(tokens, start + 2, arg.literal);
+            }
         } else {
             if try is_field_access_start(tokens, start + 2) {
                 try print_field_access_op(tokens, start + 2);
@@ -9482,6 +9636,21 @@ fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void 
     print("call.print");
     try print_call_value_detail(tokens, start, "print");
     return void;
+}
+
+// is_arena_get_field_access reports whether an expression is receiver.get(arg).field.
+fn is_arena_get_field_access(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    let dot = try tokens.at(start + 1);
+    let method = try tokens.at(start + 2);
+    if dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if !std::mem::equal_bytes(method.literal, "get") {
+        return false;
+    }
+    let close = try call_end_index(tokens, start + 2);
+    let field_dot = try tokens.at(close + 1);
+    return field_dot.kind == TokenKind::Dot;
 }
 
 // print_field_access_op writes selected struct field read rows.

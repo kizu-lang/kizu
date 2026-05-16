@@ -1025,6 +1025,7 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 		"examples/hello.kizu",
 		"examples/functions.kizu",
 		"examples/arithmetic.kizu",
+		"examples/arena.kizu",
 		"examples/borrow.kizu",
 		"examples/copy_after_move.kizu",
 		"examples/error_union_try.kizu",
