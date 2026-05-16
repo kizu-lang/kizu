@@ -595,6 +595,9 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/fs_write_wrong_bytes.kizu",
 		"examples/negative/std_fs_exists_without_io.kizu",
 		"examples/negative/std_path_wrong_type.kizu",
+		"examples/fs_read.kizu",
+		"examples/std_fs_path.kizu",
+		"examples/std_path.kizu",
 		"examples/negative/std_map_wrong_key_type.kizu",
 		"examples/negative/std_map_wrong_insert_type.kizu",
 		"examples/negative/std_string_wrong_append_type.kizu",
@@ -639,6 +642,8 @@ func selfHostArrayTypeDiagnosticCases() []string {
 		"examples/negative/std_array_struct_raw_pointer_element.kizu",
 		"examples/negative/std_array_task_spawn.kizu",
 		"examples/negative/std_array_union_handle_element.kizu",
+		"examples/std_array_borrow_len.kizu",
+		"examples/std_array_holder_with_unrelated_values.kizu",
 		"examples/std_array_with_unrelated_pointer.kizu",
 	}
 }
@@ -650,12 +655,17 @@ func selfHostConcurrencyTypeDiagnosticCases() []string {
 		"examples/negative/atomic_untyped_constructor.kizu",
 		"examples/negative/atomic_store_wrong_type.kizu",
 		"examples/negative/channel_untyped_constructor.kizu",
+		"examples/negative/channel_send_borrow.kizu",
 		"examples/negative/channel_send_wrong_type.kizu",
 		"examples/negative/channel_send_pointer.kizu",
 		"examples/negative/mutex_untyped_constructor.kizu",
 		"examples/negative/mutex_wrong_type.kizu",
 		"examples/negative/mutex_non_copy.kizu",
+		"examples/negative/mutex_pointer.kizu",
+		"examples/negative/std_map_channel_send.kizu",
+		"examples/negative/std_map_task_spawn.kizu",
 		"examples/negative/task_group_without_io.kizu",
+		"examples/negative/task_borrow_capture.kizu",
 		"examples/negative/task_spawn_borrowed_io.kizu",
 		"examples/negative/task_spawn_mut_borrowed_io.kizu",
 		"examples/negative/task_spawn_old_io_arg.kizu",
@@ -663,6 +673,8 @@ func selfHostConcurrencyTypeDiagnosticCases() []string {
 		"examples/negative/task_spawn_arena.kizu",
 		"examples/negative/task_spawn_handle.kizu",
 		"examples/negative/task_spawn_mutex.kizu",
+		"examples/negative/queue_borrow_capture.kizu",
+		"examples/negative/queue_enqueue_pointer.kizu",
 		"examples/negative/thread_borrow_capture.kizu",
 		"examples/negative/thread_scoped_pointer.kizu",
 		"examples/negative/thread_scoped_mutex.kizu",
@@ -678,6 +690,7 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
 		"examples/negative/assignment_move.kizu",
+		"examples/negative/channel_send_move.kizu",
 		"examples/negative/if_branch_partial_move.kizu",
 		"examples/negative/while_body_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
@@ -704,6 +717,8 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_array_set_while_borrowed.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
+		"examples/negative/task_move.kizu",
+		"examples/negative/unawaited_task.kizu",
 		"examples/negative/std_string_append_while_viewed.kizu",
 		"examples/negative/std_string_clear_while_viewed.kizu",
 		"examples/negative/std_string_deinit_while_viewed.kizu",
@@ -830,6 +845,7 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
 		"examples/negative/assignment_move.kizu",
+		"examples/negative/channel_send_move.kizu",
 		"examples/negative/move_while_borrowed.kizu",
 		"examples/negative/borrow_before_last_use_move.kizu",
 		"examples/negative/borrow_loop_last_use.kizu",
@@ -853,6 +869,8 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/std_array_set_while_borrowed.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
+		"examples/negative/task_move.kizu",
+		"examples/negative/unawaited_task.kizu",
 		"examples/negative/std_string_append_while_viewed.kizu",
 		"examples/negative/std_string_clear_while_viewed.kizu",
 		"examples/negative/std_string_deinit_while_viewed.kizu",
@@ -1539,7 +1557,8 @@ func goIoFsTypeDiagnosticSnapshots(
 		return goLastLiteralDiagnostic(t, path, "write_file", "type error: fs.write_file bytes")
 	}
 	if strings.Contains(slashPath, "std_fs_exists_without_io") {
-		return goLastLiteralDiagnostic(t, path, "exists", "type error: fs.exists Io")
+		tok := tokenWithLiteral(t, path, "exists")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: fs.exists Io", tok, tok)}
 	}
 	if strings.Contains(slashPath, "std_path_wrong_type") {
 		return goLastLiteralDiagnostic(t, path, "basename", "type error: path.basename arg")
@@ -1741,8 +1760,18 @@ func goConcurrencyBoundaryDiagnosticSnapshots(
 	slashPath string,
 ) []diagnosticSnapshot {
 	t.Helper()
+	if strings.Contains(slashPath, "channel_send_borrow") {
+		return goLastLiteralDiagnostic(t, path, "name", "type error: borrow concurrency boundary")
+	}
 	if strings.Contains(slashPath, "channel_send_pointer") {
 		return goLastLiteralDiagnostic(t, path, "p", "type error: raw pointer concurrency boundary")
+	}
+	if strings.Contains(slashPath, "mutex_pointer") ||
+		strings.Contains(slashPath, "queue_enqueue_pointer") {
+		return goLastLiteralDiagnostic(t, path, "p", "type error: raw pointer concurrency boundary")
+	}
+	if strings.Contains(slashPath, "task_spawn_struct_pointer") {
+		return goLastLiteralDiagnostic(t, path, "cell", "type error: raw pointer concurrency boundary")
 	}
 	if strings.Contains(slashPath, "task_spawn_pointer") {
 		return goLastLiteralDiagnostic(t, path, "p", "type error: raw pointer concurrency boundary")
@@ -1763,6 +1792,10 @@ func goTaskThreadBoundaryDiagnosticSnapshots(
 	if strings.Contains(slashPath, "task_spawn_arena") {
 		return goLastLiteralDiagnostic(t, path, "users", "type error: arena concurrency boundary")
 	}
+	if strings.Contains(slashPath, "std_map_channel_send") ||
+		strings.Contains(slashPath, "std_map_task_spawn") {
+		return goLastLiteralDiagnostic(t, path, "symbols", "type error: Map concurrency boundary")
+	}
 	if strings.Contains(slashPath, "task_spawn_handle") {
 		return goLastLiteralDiagnostic(t, path, "alice", "type error: handle concurrency boundary")
 	}
@@ -1772,6 +1805,12 @@ func goTaskThreadBoundaryDiagnosticSnapshots(
 	}
 	if strings.Contains(slashPath, "thread_borrow_capture") {
 		return goLastLiteralDiagnostic(t, path, "worker", "type error: thread cannot capture borrow")
+	}
+	if strings.Contains(slashPath, "task_borrow_capture") {
+		return goLastLiteralDiagnostic(t, path, "load", "type error: task cannot capture borrow")
+	}
+	if strings.Contains(slashPath, "queue_borrow_capture") {
+		return goLastLiteralDiagnostic(t, path, "job", "type error: queue cannot capture borrow")
 	}
 	return goTaskWorkerDiagnosticSnapshots(t, path, slashPath)
 }
@@ -1800,6 +1839,9 @@ func goTaskWorkerDiagnosticSnapshots(
 	}
 	if strings.Contains(slashPath, "parallel_map_wrong_worker") {
 		return goLastLiteralDiagnostic(t, path, "worker", "type error: parallel map worker return")
+	}
+	if strings.Contains(slashPath, "parallel_shared_mutable") {
+		return goLastLiteralDiagnostic(t, path, "worker", "type error: parallel worker param")
 	}
 	if strings.Contains(slashPath, "partition_mut_non_i64") {
 		return goLastLiteralDiagnostic(t, path, "job", "type error: partition init type")
@@ -1890,6 +1932,7 @@ func ownershipDiagnosticFixtures() []string {
 	return []string{
 		"double_move",
 		"assignment_move",
+		"channel_send_move",
 		"moved_value",
 		"move_error",
 		"if_branch_partial_move",
@@ -1920,6 +1963,8 @@ func ownershipDiagnosticFixtures() []string {
 		"std_string_append_while_viewed",
 		"std_string_clear_while_viewed",
 		"std_string_deinit_while_viewed",
+		"task_move",
+		"unawaited_task",
 		"arena_wrong_handle",
 		"arena_inline_wrong_handle",
 		"arena_unknown_handle",
@@ -2927,6 +2972,7 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"atomic.store", "type error: atomic.store type"},
 		{"use `std::channel::Channel<T>()`", "type error: Channel type argument required"},
 		{"channel.send", "type error: channel.send type"},
+		{"borrow cannot cross", "type error: borrow concurrency boundary"},
 		{"use `std::sync::Mutex<T>(value)`", "type error: Mutex type argument required"},
 		{"Mutex<i64>", "type error: Mutex constructor type"},
 		{"requires copy value", "type error: Mutex requires copy"},
@@ -2935,9 +2981,13 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"must accept owned Io", "type error: spawned function must accept owned Io"},
 		{"raw pointer cannot cross", "type error: raw pointer concurrency boundary"},
 		{"arena cannot cross", "type error: arena concurrency boundary"},
+		{"Map cannot cross", "type error: Map concurrency boundary"},
 		{"handle cannot cross", "type error: handle concurrency boundary"},
 		{"Mutex cannot cross", "type error: Mutex concurrency boundary"},
+		{"task cannot capture borrow", "type error: task cannot capture borrow"},
+		{"queue cannot capture borrow", "type error: queue cannot capture borrow"},
 		{"thread cannot capture borrow", "type error: thread cannot capture borrow"},
+		{"must accept i64", "type error: parallel worker param"},
 		{"partition init", "type error: partition init type"},
 	}
 }
@@ -2979,6 +3029,9 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	if strings.Contains(err.Error(), "array error:") {
 		return arrayOwnershipSnapshot(t, path, err.Error())
 	}
+	if strings.Contains(err.Error(), "task error:") {
+		return taskOwnershipSnapshot(t, path, err.Error())
+	}
 	if strings.Contains(err.Error(), "string error:") {
 		return stringViewOwnershipSnapshot(t, path, err.Error())
 	}
@@ -2988,6 +3041,21 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 		Status: "fail", Message: "move error: moved value was used",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
 	}
+}
+
+// taskOwnershipSnapshot normalizes selected task ownership diagnostics.
+func taskOwnershipSnapshot(t *testing.T, path string, message string) ownershipSnapshot {
+	t.Helper()
+	if strings.Contains(message, "must be awaited or canceled") {
+		task := lastTokenWithLiteral(t, path, "task")
+		spawn := lastTokenWithLiteral(t, path, "spawn")
+		return ownershipSnapshot{
+			Status: "fail", Message: "task error: task must be awaited or canceled",
+			Value: "task", PrimaryStart: task.Start, RelatedStart: spawn.Start,
+		}
+	}
+	t.Fatalf("task diagnostic is outside oracle subset: %q", message)
+	return ownershipSnapshot{}
 }
 
 // arrayOwnershipSnapshot normalizes Array borrow/resource diagnostics.
