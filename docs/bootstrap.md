@@ -74,8 +74,13 @@ The initial migration issues are:
 
 - module-first migration reset: #190
 - multi-file self-host scaffold: #191
+- component readiness gate: #196
 - token and lexer port: #192
 - AST and parser port: #193
+
+Before starting a port, use [`docs/selfhost-readiness.md`](selfhost-readiness.md)
+to confirm the component's Go oracle, fixture coverage, stdlib dependencies,
+memory-safety boundary, and switch criteria.
 
 Backend smoke scope in v0.3:
 
