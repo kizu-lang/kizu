@@ -52,8 +52,8 @@ Before switching production behavior from Go to Kizu:
 | token / lexer | strong legacy oracle through `tests/selfhost` | token API, lexer scanner body, and executable package component test are ported under `selfhost/src` | production switch decision |
 | AST / parser | strong legacy oracle through `tests/selfhost` | AST node shapes plus executable parser summary/declaration/detail component tests are ported under `selfhost/src` | production switch decision |
 | diagnostics / resolver | strong legacy oracle through `tests/selfhost` and module fixtures | diagnostic span shape, module alias helpers, and executable package component test are ported under `selfhost/src` | expand to full module graph and diagnostic object oracle |
-| type checker | strong legacy oracle for selected conformance and diagnostics | scaffold only | diagnostics/resolver module graph first |
-| ownership / borrow checker | strong legacy memory-safety oracle | scaffold only | type checker module first |
+| type checker | strong legacy oracle for selected conformance and diagnostics | core type-name classification and executable package component test are ported under `selfhost/src` | expand to function/local type environment snapshots |
+| ownership / borrow checker | strong legacy memory-safety oracle | scaffold only | type environment module first |
 | IR | strong normalized dump oracle | scaffold only | type and ownership modules first |
 | backend | Go-owned smoke fingerprint oracle | contract only | not a v0.3 production switch target |
 | cache | Go-owned switch contract oracle | contract only | Kizu filesystem, hashing, module graph, artifact layout APIs |
@@ -141,3 +141,28 @@ Completion evidence:
   package component runtime.
 - Further resolver work must compare full module graph snapshots against the Go
   package resolver before production switching.
+
+## #220 Type Checker Readiness
+
+Target mapping:
+
+```text
+internal/types -> selfhost/src/types.kizu
+```
+
+Ready to expand after:
+
+- Parser declaration snapshots expose enough type spellings for checker input.
+- Resolver module path helpers can classify imported namespaces.
+- Core type-name facts are executable through package component tests.
+
+Completion evidence:
+
+- `selfhost/src/types.kizu` classifies primitive, byte-slice, user, unknown, and
+  `!T` error-union type spellings.
+- Type summaries expose copy-ness and error-union success type without hidden
+  runtime behavior.
+- `selfhost/src/types_component_test.kizu` executes those APIs through
+  `kizu test selfhost`.
+- Full type checker porting still requires Go/Kizu snapshots for function
+  signatures, local bindings, call checking, stdlib boundaries, and diagnostics.
