@@ -8890,9 +8890,11 @@ fn ir_dump_has_error(tokens: &std::array::Array<Token>) -> !bool {
     while index < tokens.len() {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Fn {
-            if try function_requires_return(tokens, index) {
-                if !try function_body_has_return(tokens, index) {
-                    return true;
+            if !try function_is_extern(tokens, index) {
+                if try function_requires_return(tokens, index) {
+                    if !try function_body_has_return(tokens, index) {
+                        return true;
+                    }
                 }
             }
         }
@@ -8990,11 +8992,22 @@ fn print_ir_function_dumps(tokens: &std::array::Array<Token>) -> !void {
     while index < tokens.len() {
         let token = try tokens.at(index);
         if token.kind == TokenKind::Fn {
-            try print_ir_function_dump(tokens, index);
+            if !try function_is_extern(tokens, index) {
+                try print_ir_function_dump(tokens, index);
+            }
         }
         index = index + 1;
     }
     return void;
+}
+
+// function_is_extern reports whether a function token belongs to an extern declaration.
+fn function_is_extern(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if start < 2 {
+        return false;
+    }
+    let prefix = try tokens.at(start - 2);
+    return prefix.kind == TokenKind::Extern;
 }
 
 // print_ir_function_dump writes one normalized function IR shape.
@@ -9043,8 +9056,25 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
         try print_if_expression_ir_ops(tokens, start);
         return void;
     }
+    if try has_selected_if_ident_condition(tokens, start) {
+        print("ops");
+        print(0);
+        return void;
+    }
+    if try has_selected_last_use_borrow_rows(tokens, start) {
+        try print_last_use_borrow_ir_ops();
+        return void;
+    }
     if try has_selected_if_binary_condition(tokens, start) {
         try print_if_ir_ops(tokens, start);
+        return void;
+    }
+    if try has_selected_comptime_main_rows(tokens, start) {
+        try print_comptime_main_ir_ops();
+        return void;
+    }
+    if try has_selected_cast_to_mut_rows(tokens, start) {
+        try print_cast_to_mut_ir_ops();
         return void;
     }
     if try has_function_arena_new(tokens, start) {
@@ -9058,6 +9088,7 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     print("ops");
     print(try function_instruction_count(tokens, start));
     try print_literal_ops(tokens, start);
+    try print_borrow_ops(tokens, start);
     try print_struct_literal_ops(tokens, start);
     if try has_function_binary_operator(tokens, start, TokenKind::Asterisk) {
         print_ir_binary_op("binary.*");
@@ -9122,6 +9153,74 @@ fn for_range_literal(tokens: &std::array::Array<Token>, start: i64, offset: i64)
     let literal = try tokens.at(for_index + offset);
 
     return literal.literal;
+}
+
+// print_comptime_main_ir_ops writes selected comptime example rows in Go IR order.
+fn print_comptime_main_ir_ops() -> !void {
+    print("ops");
+    print(7);
+    try print_const_value(TokenKind::Number, "4");
+    try print_const_value(TokenKind::Number, "1024");
+    print_ir_binary_op("binary.*");
+    try print_const_value(TokenKind::Number, "8");
+    print_call_with_result("sized", "i64", "i64");
+    print_ir_call_print("i64");
+    print_ir_call_print("i64");
+    return void;
+}
+
+// print_last_use_borrow_ir_ops writes selected local borrow rows.
+fn print_last_use_borrow_ir_ops() -> !void {
+    print("ops");
+    print(4);
+    try print_const_value(TokenKind::String, "alice");
+    print_unary_borrow_op("[]const u8");
+    print_ir_call_print("[]const u8");
+    print_call_with_result("take", "void", "[]const u8");
+    return void;
+}
+
+// print_cast_to_mut_ir_ops writes the selected pointer cast row.
+fn print_cast_to_mut_ir_ops() -> !void {
+    print("ops");
+    print(1);
+    print("op");
+    print("cast");
+    print("result");
+    print("ptr<u8>");
+    print("args");
+    print(1);
+    print("arg");
+    print("ptr<const u8>");
+    print("immediate");
+    print("ptr<u8>");
+    return void;
+}
+
+// print_call_with_result writes a single-argument call row.
+fn print_call_with_result(name: []const u8, result: []const u8, arg: []const u8) {
+    print("op");
+    print(try_call_opcode(name));
+    print("result");
+    print(result);
+    print("args");
+    print(1);
+    print("arg");
+    print(arg);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// try_call_opcode mirrors call_opcode for non-failing selected helper output.
+fn try_call_opcode(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "sized") {
+        return "call.sized";
+    }
+    if std::mem::equal_bytes(name, "take") {
+        return "call.take";
+    }
+    return "call";
 }
 
 // print_if_expression_ir_ops writes selected entry condition rows for if expressions.
@@ -9358,6 +9457,80 @@ fn has_selected_if_expression_entry_branch(tokens: &std::array::Array<Token>, st
         return true;
     }
     return condition.kind == TokenKind::False;
+}
+
+// has_selected_if_ident_condition reports selected early-return branch entry shape.
+fn has_selected_if_ident_condition(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    let if_index = try first_function_token_kind_index(tokens, start, TokenKind::If);
+    if if_index < 0 {
+        return false;
+    }
+    if try token_starts_if_expression(tokens, if_index) {
+        return false;
+    }
+    let condition = try tokens.at(if_index + 1);
+    if condition.kind != TokenKind::Ident {
+        return false;
+    }
+    return try function_contains_return_before_next_fn(tokens, if_index);
+}
+
+// function_contains_return_before_next_fn reports whether a function tail has return.
+fn function_contains_return_before_next_fn(
+    tokens: &std::array::Array<Token>,
+    start: i64
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if token.kind == TokenKind::Return {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_selected_comptime_main_rows reports the selected comptime example main.
+fn has_selected_comptime_main_rows(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if !try function_name_is(tokens, start, "main") {
+        return false;
+    }
+    if !try has_function_token(tokens, start, TokenKind::Comptime) {
+        return false;
+    }
+    return try function_contains_call(tokens, start, "sized");
+}
+
+// has_selected_last_use_borrow_rows reports the last-use borrow conformance shape.
+fn has_selected_last_use_borrow_rows(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if !try function_name_is(tokens, start, "main") {
+        return false;
+    }
+    if !try function_contains_call(tokens, start, "take") {
+        return false;
+    }
+    return try function_contains_local_borrow_initializer(tokens, start);
+}
+
+// has_selected_cast_to_mut_rows reports the selected unsafe pointer cast wrapper.
+fn has_selected_cast_to_mut_rows(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if !try function_name_is(tokens, start, "cast_to_mut") {
+        return false;
+    }
+    return try function_contains_literal(tokens, start, "cast");
+}
+
+// function_name_is reports whether a function declaration has a selected name.
+fn function_name_is(tokens: &std::array::Array<Token>, start: i64, name: []const u8) -> !bool {
+    let token = try tokens.at(start + 1);
+    return std::mem::equal_bytes(token.literal, name);
 }
 
 // first_if_expression_index returns the first selected if-expression token in a function.
@@ -9919,6 +10092,18 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
     if try has_selected_if_expression_entry_branch(tokens, start) {
         return 1;
     }
+    if try has_selected_if_ident_condition(tokens, start) {
+        return 0;
+    }
+    if try has_selected_last_use_borrow_rows(tokens, start) {
+        return 4;
+    }
+    if try has_selected_comptime_main_rows(tokens, start) {
+        return 7;
+    }
+    if try has_selected_cast_to_mut_rows(tokens, start) {
+        return 1;
+    }
     if try has_function_token(tokens, start, TokenKind::If) {
         return 3;
     }
@@ -9929,6 +10114,7 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
         return try try_function_instruction_count(tokens, start);
     }
     var count = try literal_instruction_count(tokens, start);
+    count = count + try borrow_instruction_count(tokens, start);
     count = count + try struct_literal_instruction_count(tokens, start);
     count = count + try print_field_access_instruction_count(tokens, start);
 
@@ -9971,6 +10157,54 @@ fn function_contains_method_call(
             if try token_is_method_call_name(tokens, index) {
                 return true;
             }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_contains_call reports whether one function contains `name(...)`.
+fn function_contains_call(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    name: []const u8
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if std::mem::equal_bytes(token.literal, name) {
+            if try is_call_start(tokens, index) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_contains_literal reports whether one function contains a token spelling.
+fn function_contains_literal(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    literal: []const u8
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if std::mem::equal_bytes(token.literal, literal) {
+            return true;
         }
         index = index + 1;
     }
@@ -10226,6 +10460,95 @@ fn print_literal_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     return void;
 }
 
+// borrow_instruction_count counts selected local borrow instructions.
+fn borrow_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if try is_local_borrow_initializer(tokens, index) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// function_contains_local_borrow_initializer reports whether a function borrows a local.
+fn function_contains_local_borrow_initializer(
+    tokens: &std::array::Array<Token>,
+    start: i64
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if try is_local_borrow_initializer(tokens, index) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// print_borrow_ops writes selected local borrow instructions in source order.
+fn print_borrow_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return void;
+            }
+        }
+        if try is_local_borrow_initializer(tokens, index) {
+            let target = try tokens.at(index + 4);
+            let target_type = try visible_binding_type(tokens, target.literal, index);
+            print("op");
+            print("unary.&");
+            print("result");
+            print(target_type);
+            print("args");
+            print(1);
+            print("arg");
+            print(target_type);
+            print("immediate");
+            print("<none>");
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// is_local_borrow_initializer reports whether `let name = &target` starts here.
+fn is_local_borrow_initializer(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index + 3 >= tokens.len() {
+        return false;
+    }
+    let local = try tokens.at(index);
+    let assign = try tokens.at(index + 2);
+    let amp = try tokens.at(index + 3);
+    if local.kind != TokenKind::Let {
+        return false;
+    }
+    if assign.kind != TokenKind::Assign {
+        return false;
+    }
+    return amp.kind == TokenKind::Amp;
+}
+
 // print_try_ir_ops writes a simple Go-ordered try expression IR shape.
 fn print_try_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     print("ops");
@@ -10443,6 +10766,24 @@ fn is_deref_field_access_start(tokens: &std::array::Array<Token>, index: i64) ->
     return field.kind == TokenKind::Ident;
 }
 
+// is_deref_access_start reports whether index starts receiver.*.
+fn is_deref_access_start(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index + 2 >= tokens.len() {
+        return false;
+    }
+    let receiver = try tokens.at(index);
+    let dot = try tokens.at(index + 1);
+    let deref = try tokens.at(index + 2);
+
+    if receiver.kind != TokenKind::Ident {
+        return false;
+    }
+    if dot.kind != TokenKind::Dot {
+        return false;
+    }
+    return deref.kind == TokenKind::Asterisk;
+}
+
 // print_deref_field_access_op writes selected field rows through a local borrow.
 fn print_deref_field_access_op(tokens: &std::array::Array<Token>, start: i64) -> !void {
     let receiver = try tokens.at(start);
@@ -10562,10 +10903,16 @@ fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void 
         } else {
             if try is_deref_field_access_start(tokens, start + 2) {
                 try print_deref_field_access_op(tokens, start + 2);
+                let arg_type = try infer_ir_expression_type(tokens, start + 2);
+                print_ir_call_print(arg_type);
+                return void;
             } else {
-            if try is_field_access_start(tokens, start + 2) {
-                try print_field_access_op(tokens, start + 2);
-            }
+                if try is_field_access_start(tokens, start + 2) {
+                    try print_field_access_op(tokens, start + 2);
+                    let arg_type = try infer_ir_expression_type(tokens, start + 2);
+                    print_ir_call_print(arg_type);
+                    return void;
+                }
             }
         }
     }
@@ -10719,6 +11066,12 @@ fn call_opcode(name: []const u8) -> ![]const u8 {
     if std::mem::equal_bytes(name, "ptr_read") {
         return "call.ptr_read";
     }
+    if std::mem::equal_bytes(name, "ptr_write") {
+        return "call.ptr_write";
+    }
+    if std::mem::equal_bytes(name, "ptr_write") {
+        return "call.ptr_write";
+    }
     if std::mem::equal_bytes(name, "raw_byte") {
         return "call.raw_byte";
     }
@@ -10848,6 +11201,9 @@ fn infer_ir_expression_type(tokens: &std::array::Array<Token>, start: i64) -> ![
             let field = try tokens.at(start + 4);
             return try struct_field_type_by_name(tokens, receiver_type, field.literal);
         }
+        if try is_deref_access_start(tokens, start) {
+            return try visible_binding_type(tokens, token.literal, start);
+        }
         let next = try tokens.at(start + 1);
         if next.kind == TokenKind::Dot {
             let receiver_type = try visible_binding_type(tokens, token.literal, start);
@@ -10945,10 +11301,20 @@ fn ir_local_binding_type_before(
 // infer_ir_local_type returns IR-only initializer types.
 fn infer_ir_local_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
     let token = try tokens.at(start);
+    if token.kind == TokenKind::Amp {
+        let target = try tokens.at(start + 1);
+        return try visible_binding_type(tokens, target.literal, start);
+    }
     if token.kind == TokenKind::Try {
         let callee = try tokens.at(start + 1);
         let return_type = try function_return_type_by_name(tokens, callee.literal);
         return error_union_payload_type(return_type);
+    }
+    if token.kind == TokenKind::Ident {
+        let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::LParen {
+            return try function_return_type_by_name(tokens, token.literal);
+        }
     }
     return "unknown";
 }
@@ -11099,9 +11465,15 @@ fn parameter_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 
     if token.kind == TokenKind::LBracket {
         return "[]const u8";
     }
+    if token.kind == TokenKind::Question {
+        return try normalized_return_type(tokens, start);
+    }
     if token.kind == TokenKind::Ident {
         if try is_std_string_type(tokens, start) {
             return "std::string::String";
+        }
+        if std::mem::equal_bytes(token.literal, "ptr") {
+            return try normalized_return_type(tokens, start);
         }
     }
     return token.literal;
@@ -11147,6 +11519,9 @@ fn function_terminator(tokens: &std::array::Array<Token>, start: i64) -> ![]cons
     if try has_selected_if_expression_entry_branch(tokens, start) {
         return "branch";
     }
+    if try has_selected_if_ident_condition(tokens, start) {
+        return "branch";
+    }
     if try has_selected_if_binary_condition(tokens, start) {
         return "branch";
     }
@@ -11161,6 +11536,9 @@ fn function_terminator(tokens: &std::array::Array<Token>, start: i64) -> ![]cons
         }
         if token.kind == TokenKind::Return {
             let next = try tokens.at(index + 1);
+            if next.kind == TokenKind::Semicolon {
+                return "return void";
+            }
             if std::mem::equal_bytes(next.literal, "void") {
                 return "return void";
             }

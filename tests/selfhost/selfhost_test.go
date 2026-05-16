@@ -1050,6 +1050,16 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 		"selfhost/fixtures/ir_while_true_break.kizu",
 		"examples/negative/missing_return.kizu",
 	}
+	seen := map[string]bool{}
+	for _, path := range cases {
+		seen[path] = true
+	}
+	for _, path := range selfHostPositiveConformanceSources(t) {
+		if !seen[path] {
+			seen[path] = true
+			cases = append(cases, path)
+		}
+	}
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
