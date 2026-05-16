@@ -91,7 +91,7 @@ func TestTestCommandSelfHostPackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if string(out) != "test: ok (2 component tests)\n" {
+	if string(out) != "test: ok (3 component tests)\n" {
 		t.Fatalf("got %q", out)
 	}
 }
