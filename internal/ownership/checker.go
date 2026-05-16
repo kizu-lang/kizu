@@ -66,6 +66,53 @@ func New() *Checker {
 	}
 }
 
+// WithExternalDecls exposes imported public declarations to package module checks.
+func (c *Checker) WithExternalDecls(decls map[string]ast.Decl) *Checker {
+	for _, decl := range decls {
+		switch d := decl.(type) {
+		case *ast.StructDecl:
+			c.addExternalStruct(d)
+		case *ast.EnumDecl:
+			c.addExternalEnum(d)
+		case *ast.FunctionDecl:
+			c.addExternalFunction(d)
+		}
+	}
+	return c
+}
+
+// addExternalStruct records fields for one imported public struct.
+func (c *Checker) addExternalStruct(decl *ast.StructDecl) {
+	fields := map[string]string{}
+	for _, field := range decl.Fields {
+		fields[field.Name] = field.TypeName
+	}
+	c.structs[decl.Name] = fields
+}
+
+// addExternalEnum records tags for one imported public enum.
+func (c *Checker) addExternalEnum(decl *ast.EnumDecl) {
+	tags := map[string]bool{}
+	for _, tag := range decl.Tags {
+		tags[tag] = true
+	}
+	c.enums[decl.Name] = tags
+}
+
+// addExternalFunction records the signature for one imported public function.
+func (c *Checker) addExternalFunction(decl *ast.FunctionDecl) {
+	params := make([]paramInfo, 0, len(decl.Params))
+	for _, param := range decl.Params {
+		params = append(params, paramInfo{
+			typeName: param.TypeName, borrow: param.Borrow, mutBorrow: param.MutBorrow,
+			comptime: param.Comptime,
+		})
+	}
+	c.functions[decl.Name] = &functionInfo{
+		name: decl.Name, params: params, returnType: decl.ReturnType, decl: decl,
+	}
+}
+
 // Check validates ownership rules and returns the first move error.
 func (c *Checker) Check(program *ast.Program) error {
 	if err := c.checkStructs(program); err != nil {
@@ -853,20 +900,29 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
 		return result, err
 	}
-	fn, ok := c.functions[name.Name]
+	return c.checkUserCallByName(name.Name, expr.Args, env)
+}
+
+// checkUserCallByName validates ownership for one declared function call.
+func (c *Checker) checkUserCallByName(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	fn, ok := c.functions[name]
 	if !ok {
-		return "", fmt.Errorf("move error: undefined function `%s`", name.Name)
+		return "", fmt.Errorf("move error: undefined function `%s`", name)
 	}
-	if len(expr.Args) != len(fn.params) {
+	if len(args) != len(fn.params) {
 		return "", fmt.Errorf("move error: `%s` expects %d args, got %d",
-			name.Name, len(fn.params), len(expr.Args))
+			name, len(fn.params), len(args))
 	}
-	borrowed, err := c.activateBorrowArgs(fn, expr.Args, env)
+	borrowed, err := c.activateBorrowArgs(fn, args, env)
 	if err != nil {
 		return "", err
 	}
 	defer releaseBorrows(borrowed)
-	for idx, arg := range expr.Args {
+	for idx, arg := range args {
 		if fn.params[idx].comptime {
 			_, err = c.readExpr(arg, env)
 		} else if fn.params[idx].borrow {
@@ -890,10 +946,27 @@ func (c *Checker) checkFieldCallExpr(
 	if typ, ok, err := c.checkUnionConstructor(field, args, env); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkExternalFunctionCall(field, args, env); ok || err != nil {
+		return typ, err
+	}
 	if typ, ok, err := c.checkQualifiedBuiltin(field, args, env); ok || err != nil {
 		return typ, err
 	}
 	return c.checkMethodCallExpr(field, args, env)
+}
+
+// checkExternalFunctionCall validates ownership effects of imported function calls.
+func (c *Checker) checkExternalFunctionCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	name, ok := namespaceName(field)
+	if !ok || c.functions[name] == nil {
+		return "", false, nil
+	}
+	typ, err := c.checkUserCallByName(name, args, env)
+	return typ, true, err
 }
 
 // checkQualifiedBuiltin validates ownership for std:: namespace prototype calls.
@@ -1738,29 +1811,29 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 
 // readNamespaceExpr reads enum or payload-free union namespace lookup.
 func (c *Checker) readNamespaceExpr(expr *ast.FieldExpr) (string, error) {
-	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	name, ok := namespaceName(expr.Receiver)
 	if !ok {
 		return "", fmt.Errorf("move error: invalid namespace lookup `%s`", expr.String())
 	}
-	if tags, exists := c.enums[ident.Name]; exists {
+	if tags, exists := c.enums[name]; exists {
 		if !tags[expr.Name] {
-			return "", fmt.Errorf("move error: unknown enum tag `%s::%s`", ident.Name, expr.Name)
+			return "", fmt.Errorf("move error: unknown enum tag `%s::%s`", name, expr.Name)
 		}
-		return ident.Name, nil
+		return name, nil
 	}
-	if variants, exists := c.unions[ident.Name]; exists {
+	if variants, exists := c.unions[name]; exists {
 		payload, ok := variants[expr.Name]
 		if !ok {
 			return "", fmt.Errorf("move error: unknown union variant `%s::%s`",
-				ident.Name, expr.Name)
+				name, expr.Name)
 		}
 		if payload != "" {
 			return "", fmt.Errorf("move error: union variant `%s::%s` expects payload",
-				ident.Name, expr.Name)
+				name, expr.Name)
 		}
-		return ident.Name, nil
+		return name, nil
 	}
-	return "", fmt.Errorf("move error: unknown namespace `%s`", ident.Name)
+	return "", fmt.Errorf("move error: unknown namespace `%s`", name)
 }
 
 // moveFieldExpr rejects partial moves from borrowed or aggregate values.
@@ -3273,6 +3346,15 @@ func qualifiedName(expr ast.Expression) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// namespaceName renders a namespace chain using source-level :: separators.
+func namespaceName(expr ast.Expression) (string, bool) {
+	name, ok := qualifiedName(expr)
+	if !ok {
+		return "", false
+	}
+	return strings.ReplaceAll(name, ".", "::"), true
 }
 
 // taskElement extracts T from Task<T>.

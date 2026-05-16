@@ -139,11 +139,12 @@ fn main() -> void {
 // checkParsedModule runs static checks for one parsed module.
 func checkParsedModule(t *testing.T, pkg *Package, module ParsedModule) {
 	t.Helper()
-	if err := types.New().WithExternalTypes(ImportedPublicTypeNames(pkg, module)).
+	decls := ImportedPublicDecls(pkg, module)
+	if err := types.New().WithExternalDecls(decls).
 		Check(module.Program); err != nil {
 		t.Fatalf("type check failed in %s: %v", module.Module.Path, err)
 	}
-	if err := ownership.New().Check(module.Program); err != nil {
+	if err := ownership.New().WithExternalDecls(decls).Check(module.Program); err != nil {
 		t.Fatalf("ownership check failed in %s: %v", module.Module.Path, err)
 	}
 }
