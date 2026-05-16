@@ -55,8 +55,8 @@ Before switching production behavior from Go to Kizu:
 | type checker | strong legacy oracle for selected conformance and diagnostics | core type-name classification and executable package component test are ported under `selfhost/src` | expand to function/local type environment snapshots |
 | ownership / borrow checker | strong legacy memory-safety oracle | move/copy/borrow transition facts and executable package component test are ported under `selfhost/src` | expand to scoped environment snapshots |
 | IR | strong normalized dump oracle | IR module/function/block/instruction summary facts and executable package component test are ported under `selfhost/src` | expand to full normalized IR dump |
-| backend | Go-owned smoke fingerprint oracle | contract only | not a v0.3 production switch target |
-| cache | Go-owned switch contract oracle | contract only | Kizu filesystem, hashing, module graph, artifact layout APIs |
+| backend | Go-owned smoke fingerprint oracle | target/artifact summary facts and executable package component test are ported under `selfhost/src` | not a native production switch target |
+| cache | Go-owned switch contract oracle | cache input/rebuild reason summary facts and executable package component test are ported under `selfhost/src` | Go-owned filesystem and hashing primitives |
 
 ## #192 Token / Lexer Readiness
 
@@ -217,3 +217,51 @@ Completion evidence:
   `kizu test selfhost`.
 - Full IR porting still requires normalized Go/Kizu IR dump equality for the
   conformance and lowerability fixture matrix.
+
+## #227 Backend Readiness
+
+Target mapping:
+
+```text
+internal/llvm and internal/wasm -> selfhost/src/backend.kizu
+```
+
+Ready to expand after:
+
+- IR summaries can provide deterministic function and instruction counts.
+- Backend target and artifact smoke facts are executable through package
+  component tests.
+
+Completion evidence:
+
+- `selfhost/src/backend.kizu` exposes target and artifact summary shapes.
+- The target helpers classify `llvm`, `wasm`, `c`, and unsupported spellings.
+- `selfhost/src/backend_component_test.kizu` executes those APIs through
+  `kizu test selfhost`.
+- Native executable production switching remains out of scope until a backend
+  emission path is explicitly selected.
+
+## #226 Cache Contract Readiness
+
+Target mapping:
+
+```text
+internal/buildcache -> selfhost/src/cache_contract.kizu
+```
+
+Ready to expand after:
+
+- Backend and module graph summaries define deterministic artifact identities.
+- Cache input and rebuild reason facts are executable through package component
+  tests.
+
+Completion evidence:
+
+- `selfhost/src/cache_contract.kizu` exposes compiler version, target, backend,
+  optimization, source hash, and std hash cache input facts.
+- The rebuild helper reports no-op, source, std, target/backend/optimization,
+  and compiler-version changes.
+- `selfhost/src/cache_component_test.kizu` executes those APIs through
+  `kizu test selfhost`.
+- Go remains responsible for filesystem walking, hashing, status, and prune
+  execution until Kizu owns those host primitives.
