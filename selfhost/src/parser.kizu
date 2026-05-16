@@ -3,6 +3,111 @@
 import selfhost::ast;
 import selfhost::token;
 
+// zero_span returns a placeholder span until parser-owned spans are produced.
+fn zero_span() -> ast::Span {
+    return ast::Span {
+        start: 0,
+        end: 0,
+        line: 0,
+        column: 0,
+    };
+}
+
+// decl_kind returns the AST node kind for a top-level declaration token.
+fn decl_kind(kind: token::TokenKind) -> ast::NodeKind {
+    if kind == token::TokenKind::Import {
+        return ast::NodeKind::Import;
+    }
+    if kind == token::TokenKind::Fn {
+        return ast::NodeKind::Function;
+    }
+    if kind == token::TokenKind::Unsafe {
+        return ast::NodeKind::Function;
+    }
+    if kind == token::TokenKind::Extern {
+        return ast::NodeKind::Function;
+    }
+    if kind == token::TokenKind::Struct {
+        return ast::NodeKind::Struct;
+    }
+    if kind == token::TokenKind::Enum {
+        return ast::NodeKind::Enum;
+    }
+    if kind == token::TokenKind::Union {
+        return ast::NodeKind::Union;
+    }
+    if kind == token::TokenKind::Contract {
+        return ast::NodeKind::Contract;
+    }
+    if kind == token::TokenKind::Impl {
+        return ast::NodeKind::Impl;
+    }
+    if kind == token::TokenKind::Satisfy {
+        return ast::NodeKind::Satisfy;
+    }
+    return ast::NodeKind::Empty;
+}
+
+// is_decl_token reports whether a token begins one top-level declaration.
+fn is_decl_token(kind: token::TokenKind) -> bool {
+    return decl_kind(kind) != ast::NodeKind::Empty;
+}
+
+// decl_name returns the first identifier associated with a declaration token.
+fn decl_name(index: i64, tokens: &std::array::Array<token::Token>) -> ![]const u8 {
+    let current = try tokens.at(index);
+    let kind = current.kind;
+    var cursor = index + 1;
+    if kind == token::TokenKind::Unsafe {
+        cursor = cursor + 1;
+    }
+    if kind == token::TokenKind::Extern {
+        cursor = cursor + 2;
+    }
+    let next = try tokens.at(cursor);
+    if next.kind == token::TokenKind::Ident {
+        return next.literal;
+    }
+    return "";
+}
+
+// declaration_count returns the number of top-level declaration starts.
+pub fn declaration_count(tokens: &std::array::Array<token::Token>) -> !i64 {
+    var count = 0;
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if is_decl_token(current.kind) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// parse_declarations returns a declaration-order snapshot for a token stream.
+pub fn parse_declarations(
+    tokens: &std::array::Array<token::Token>
+) -> !std::array::Array<ast::DeclSnapshot> {
+    let allocator = std::mem::page_allocator();
+    var decls = std::array::Array<ast::DeclSnapshot>(allocator);
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if is_decl_token(current.kind) {
+            try decls.append(ast::DeclSnapshot {
+                kind: decl_kind(current.kind),
+                name: try decl_name(index, tokens),
+                span: zero_span(),
+            });
+        }
+        index = index + 1;
+    }
+    return decls;
+}
+
 // parse_tokens returns the current AST summary used by the parser oracle.
 pub fn parse_tokens(tokens: &std::array::Array<token::Token>) -> !ast::ParseSummary {
     var functions = 0;
