@@ -52,7 +52,7 @@ Implemented language-core pieces:
 
 Experimental compiler and tooling pieces:
 
-- self-host compiler skeleton in `selfhost/`
+- module-first self-host compiler package in `selfhost/`
 - typed SSA IR
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations
@@ -64,8 +64,8 @@ These experimental pieces are not the language oracle yet. LLVM and WASM
 currently support more limited target subsets than the interpreter, and native
 executable generation is not implemented.
 
-There are no open v0.2 issues at the time of writing. Remaining work is tracked
-as v0.3 self-host and module-boundary implementation issues in GitHub Issues.
+There are no open v0.2 or v0.3 compiler-boundary issues at the time of writing.
+New compiler work is tracked in GitHub Issues.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.

@@ -1,18 +1,18 @@
-# Kizu Self-Host Frontend Skeleton
+# Kizu Self-Host Compiler Package
 
-This directory contains Kizu source for the future self-host compiler frontend.
+This directory contains Kizu source for the module-first self-host compiler
+package.
 
-The current goal is not to replace the Go implementation. `frontend.kizu` is a
-legacy oracle harness that verifies whether the v0.2 standard library is enough
-to write compiler-shaped Kizu code. It is not the long-term production
-self-host compiler source.
+The Go implementation remains the production compiler while Kizu modules prove
+each compiler component against the oracle tests. `frontend.kizu` is now a
+legacy oracle harness; new compiler code belongs under `selfhost/src`.
 
 Self-host migration is now module-first. The Go compiler keeps owning
 multi-file package loading, module graph resolution, visibility diagnostics,
 and package-level check/build behavior while Go compiler packages are ported to
 Kizu modules one component at a time.
 
-The module-first source layout now exists as a checkable package scaffold:
+The module-first source layout is a checkable and executable package:
 
 ```text
 selfhost/
@@ -32,11 +32,11 @@ selfhost/
     cache_contract.kizu
 ```
 
-The migration reset is tracked by #190. The first implementation steps are the
-multi-file scaffold (#191), token/lexer port (#192), and AST/parser port (#193).
-The scaffold intentionally contains only minimal public module surfaces; compiler
-logic should move into these files through the component issues instead of
-expanding `frontend.kizu`.
+The migration reset is tracked by #190. The component ports now cover token,
+lexer, AST, parser, diagnostics, resolver, type summaries, ownership summaries,
+IR summaries, backend summaries, and cache contract summaries. Compiler logic
+should keep moving into these files through GitHub Issues instead of expanding
+`frontend.kizu`.
 
 ## Current Entry
 
@@ -45,15 +45,18 @@ kizu run selfhost/frontend.kizu
 kizu run selfhost/frontend.kizu -- selfhost/fixtures/simple.kizu
 ```
 
-The skeleton currently includes:
+The package currently includes:
 
 - token representation
 - Go-shaped token kinds and lexer-shaped source scanning with `std::mem`
 - token storage with `std::array::Array<T>`
 - diagnostic text construction with `std::string::String`
 - parser summary shape
-- compiler1-8 stage report covering lexer, parser, diagnostics, type, ownership,
-  IR, backend artifact, and bootstrap readiness
+- executable package component tests for lexer, parser, diagnostics/resolver,
+  type summaries, ownership summaries, IR summaries, backend summaries, and
+  cache contract summaries
+- compiler1-8 legacy stage report covering lexer, parser, diagnostics, type,
+  ownership, IR, backend artifact, and bootstrap readiness
 - source loading through `std::fs`
 - path decomposition through `std::path`
 - prototype CLI argument handling through `std::process`
@@ -67,29 +70,31 @@ to compare the full self-host token-kind stream against the production lexer.
 
 ## v0.3 Handoff
 
-The v0.2 standard-library bridge is complete when `tests/selfhost` can parse,
-check, and run the harness through the same APIs a future compiler frontend
-will need. New compiler implementation work should build from the module-first
-package tree, not by adding more production logic to `frontend.kizu`.
+The v0.2 standard-library bridge is complete for the current self-host package
+surface: `tests/selfhost` parses, checks, and runs the harness and the package
+component tests through the same APIs the self-host compiler needs. New compiler
+implementation work should build from the module-first package tree, not by
+adding more production logic to `frontend.kizu`.
 
-`frontend.kizu` can be deleted after the module tree covers the same oracle
-surface with package-level tests.
+`frontend.kizu` can be deleted after the module tree owns the same oracle
+surface with package-level tests and the production switch is explicit.
 
 ## Conformance Reuse
 
-The future self-host compiler must reuse `tests/conformance/v0_*.json` and
-produce the same pass/fail behavior as the Go implementation before it can
-replace any production path.
+The self-host compiler must reuse `tests/conformance/v0_*.json` and produce the
+same pass/fail behavior as the Go implementation before it can replace any
+production path.
 
-For now, Go tests parse, check, and run the skeleton source. They compare the
-self-host token snapshots with the production Go lexer and compare normalized
-AST snapshots with the Go parser for representative parseable sources. Missing
-APIs found while growing this directory must be reflected back into the relevant
-stdlib issue instead of becoming isolated TODOs here.
+Go tests parse, check, and run the self-host package source. They compare
+self-host token snapshots with the production Go lexer, normalized AST snapshots
+with the Go parser, semantic snapshots with the Go checker oracle, and
+IR/backend/cache summary facts with the bootstrap audit. Missing APIs found
+while growing this directory must be reflected back into the relevant stdlib or
+compiler Issue instead of becoming isolated TODOs here.
 
 ## Compiler Stage Harness
 
-`frontend.kizu` intentionally runs eight stages before it is a full compiler:
+`frontend.kizu` still runs the legacy eight-stage smoke path:
 
 1. lexer
 2. parser snapshot
@@ -100,9 +105,9 @@ stdlib issue instead of becoming isolated TODOs here.
 7. backend artifact summary
 8. bootstrap readiness check
 
-Stages 4-8 are still skeletons. They are kept executable so v0.2 stdlib and
-language-core gaps are found before the self-host implementation replaces Go
-components.
+The module-first package now has executable component tests for every stage
+boundary. The legacy smoke path remains useful as broad stdlib coverage until
+the module tree fully replaces it.
 
 ## Lexer And Parser Oracle
 

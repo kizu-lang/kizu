@@ -50,7 +50,7 @@ v0.1 の対象は interpreter-first の language core です。
 
 実験的な compiler / tooling:
 
-- `selfhost/` の self-host compiler skeleton
+- `selfhost/` の module-first self-host compiler package
 - typed SSA IR
 - LLVM IR text backend
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
@@ -61,8 +61,8 @@ v0.1 の対象は interpreter-first の language core です。
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
 LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
 
-現時点で open な v0.2 Issue はありません。残作業は GitHub Issues 上の v0.3 self-host /
-module-boundary 実装 Issue として管理しています。
+現時点で open な v0.2 / v0.3 compiler-boundary Issue はありません。
+新しい compiler 作業は GitHub Issues で管理します。
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
