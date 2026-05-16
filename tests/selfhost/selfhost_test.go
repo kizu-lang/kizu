@@ -1022,8 +1022,12 @@ func selfHostOwnershipMemoryOracleCases(t *testing.T) []string {
 // TestSelfHostIrDumpOracle compares minimal normalized IR dump facts.
 func TestSelfHostIrDumpOracle(t *testing.T) {
 	cases := []string{
+		"examples/hello.kizu",
 		"examples/functions.kizu",
 		"examples/arithmetic.kizu",
+		"examples/borrow.kizu",
+		"examples/copy_after_move.kizu",
+		"examples/variables.kizu",
 		"examples/negative/missing_return.kizu",
 	}
 	for _, path := range cases {
@@ -3828,6 +3832,9 @@ func normalizeIrResultType(value kir.Value) string {
 func normalizeImmediate(value string) string {
 	if value == "" {
 		return "<none>"
+	}
+	if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") {
+		return strings.Trim(value, "\"")
 	}
 	return value
 }
