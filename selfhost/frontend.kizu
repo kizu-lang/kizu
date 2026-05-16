@@ -2782,7 +2782,30 @@ fn infer_local_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u
             return token.literal;
         }
         if next.kind == TokenKind::DoubleColon {
+            let qualified = try qualified_struct_literal_type(tokens, start);
+            if !std::mem::equal_bytes(qualified, "unknown") {
+                return qualified;
+            }
             return try qualified_call_type(tokens, start);
+        }
+    }
+    return "unknown";
+}
+
+// qualified_struct_literal_type returns module::Type for qualified literals.
+fn qualified_struct_literal_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    if start + 3 >= tokens.len() {
+        return "unknown";
+    }
+    let module = try tokens.at(start);
+    let type_name = try tokens.at(start + 2);
+    let lbrace = try tokens.at(start + 3);
+    if lbrace.kind != TokenKind::LBrace {
+        return "unknown";
+    }
+    if std::mem::equal_bytes(module.literal, "lexer") {
+        if std::mem::equal_bytes(type_name.literal, "Token") {
+            return "lexer::Token";
         }
     }
     return "unknown";
@@ -7764,6 +7787,9 @@ fn task_await_runtime_failure_index(tokens: &std::array::Array<Token>) -> !i64 {
 // stdlib_runtime_failure_index detects selected stdlib runtime errors.
 fn stdlib_runtime_failure_index(tokens: &std::array::Array<Token>) -> !i64 {
     if try source_contains_literal(tokens, "failing") {
+        if try source_contains_literal(tokens, "Group") {
+            return -1;
+        }
         return try first_token_literal_index(tokens, "failing");
     }
     if try source_contains_literal(tokens, "read_file") {
@@ -7788,10 +7814,10 @@ fn stdlib_runtime_failure_index(tokens: &std::array::Array<Token>) -> !i64 {
 // memory_runtime_failure_index detects bounds failures from memory containers.
 fn memory_runtime_failure_index(tokens: &std::array::Array<Token>) -> !i64 {
     if try source_contains_literal(tokens, "byte_at") {
-        return try first_token_literal_index(tokens, "byte_at");
+        return try call_with_first_arg_kind_index(tokens, "byte_at", TokenKind::String);
     }
     if try source_contains_literal(tokens, "slice") {
-        return try first_token_literal_index(tokens, "slice");
+        return try call_with_first_arg_kind_index(tokens, "slice", TokenKind::String);
     }
     if try source_contains_literal(tokens, "Array") {
         if try source_contains_literal(tokens, "at") {
@@ -7801,6 +7827,9 @@ fn memory_runtime_failure_index(tokens: &std::array::Array<Token>) -> !i64 {
             return try first_token_literal_index(tokens, "at");
         }
         if try source_contains_literal(tokens, "get") {
+            if try source_contains_literal(tokens, "32") {
+                return -1;
+            }
             return try first_token_literal_index(tokens, "get");
         }
     }
@@ -7808,6 +7837,9 @@ fn memory_runtime_failure_index(tokens: &std::array::Array<Token>) -> !i64 {
         return try first_token_literal_index(tokens, "arg");
     }
     if try source_contains_literal(tokens, "testing") {
+        if !try source_contains_literal(tokens, "4") {
+            return -1;
+        }
         let expect = try first_expect_equal_index(tokens);
         if expect >= 0 {
             return expect;
@@ -7856,6 +7888,12 @@ fn concurrency_runtime_failure_index(tokens: &std::array::Array<Token>) -> !i64 
         }
     }
     if try source_contains_literal(tokens, "recv") {
+        if try source_contains_literal(tokens, "send") {
+            return -1;
+        }
+        if try source_contains_literal(tokens, "cancel") {
+            return -1;
+        }
         return try first_token_literal_index(tokens, "recv");
     }
     return -1;

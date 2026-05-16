@@ -273,6 +273,9 @@ func selfHostFrontendSmokeSnapshots(t *testing.T, fixture string) string {
 	semanticSnapshot := formatSemanticSnapshot(goSemanticSnapshot(t, fixture))
 	typeSnapshot := formatTypeSnapshot(goFunctionReturnTypes(t, fixture))
 	typeEnvSnapshot := formatTypeEnvSnapshot(goLocalTypeEnvSnapshot(t, fixture))
+	if typeEnvSnapshot == "\n" {
+		typeEnvSnapshot = ""
+	}
 	typeCheckSnapshot := formatTypeCheckSnapshot(goTypeCheckSnapshot(t, fixture))
 	ownershipSnapshot := formatOwnershipSnapshot(goOwnershipSnapshot(t, fixture))
 	irSnapshot := formatIrSnapshot(goIrSnapshot(t, fixture))
@@ -582,6 +585,12 @@ func selfHostDiagnosticObjectOracleCases() []string {
 		"tests/conformance/modules/private_module_access/src/main.kizu",
 		"tests/conformance/modules/private_type_leak/src/main.kizu",
 		"tests/conformance/modules/private_field_construction/src/main.kizu",
+		"examples/io_runtime.kizu",
+		"examples/std_mem.kizu",
+		"examples/std_array.kizu",
+		"examples/std_testing.kizu",
+		"examples/channel.kizu",
+		"examples/task_cancel.kizu",
 	}
 	cases = append(cases, selfHostTypeDiagnosticObjectOracleCases()...)
 	cases = append(cases, selfHostOwnershipDiagnosticObjectOracleCases()...)
@@ -803,13 +812,8 @@ func TestSelfHostTypeSubsetOracle(t *testing.T) {
 
 // TestSelfHostTypeEnvironmentOracle compares selected local binding types.
 func TestSelfHostTypeEnvironmentOracle(t *testing.T) {
-	cases := []string{
-		"selfhost/fixtures/type_env.kizu",
-		"selfhost/fixtures/type_env_stdlib.kizu",
-	}
-	for _, path := range cases {
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+	for _, fixture := range selfHostTypeEnvironmentOracleSources(t) {
+		t.Run(astNodeDumpCaseName(t, fixture), func(t *testing.T) {
 			got := extractMarkedSnapshot(
 				t, runSelfHostFrontend(t, fixture), "type env snapshot", "type env snapshot end",
 			)
@@ -819,6 +823,21 @@ func TestSelfHostTypeEnvironmentOracle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// selfHostTypeEnvironmentOracleSources returns parseable sources for type env facts.
+func selfHostTypeEnvironmentOracleSources(t *testing.T) []string {
+	t.Helper()
+	paths := map[string]bool{
+		filepath.Join(repoRoot(t), "selfhost", "fixtures", "type_env.kizu"):        true,
+		filepath.Join(repoRoot(t), "selfhost", "fixtures", "type_env_stdlib.kizu"): true,
+	}
+	for _, path := range selfHostConformanceSources(t) {
+		if sourceParses(t, path) {
+			paths[path] = true
+		}
+	}
+	return sortedMapKeys(paths)
 }
 
 // TestSelfHostTypeCheckOracle compares a selected type pass/fail subset.
@@ -2960,6 +2979,9 @@ func goLocalTypeEnvSnapshot(t *testing.T, path string) []string {
 		if !ok {
 			continue
 		}
+		if fn.Body == nil {
+			continue
+		}
 		lines = append(lines, goBlockLocalTypeEnv(t, fn.Body)...)
 	}
 	return lines
@@ -2970,15 +2992,65 @@ func goBlockLocalTypeEnv(t *testing.T, block *ast.BlockStmt) []string {
 	t.Helper()
 	lines := []string{}
 	for _, stmt := range block.Statements {
-		local, ok := stmt.(*ast.LetStmt)
-		if !ok {
-			continue
-		}
-		mutability := "let"
-		if local.Mutable {
-			mutability = "var"
-		}
-		lines = append(lines, mutability, local.Name, goLocalInitializerType(t, local.Value))
+		lines = appendStmtLocalTypeEnv(t, lines, stmt)
+	}
+	return lines
+}
+
+// appendStmtLocalTypeEnv appends local type facts from one statement subtree.
+func appendStmtLocalTypeEnv(t *testing.T, lines []string, stmt ast.Statement) []string {
+	t.Helper()
+	switch value := stmt.(type) {
+	case *ast.LetStmt:
+		return appendLetLocalTypeEnv(t, lines, value)
+	case *ast.BlockStmt:
+		return appendBlockLocalTypeEnv(t, lines, value)
+	case *ast.IfStmt:
+		lines = appendBlockLocalTypeEnv(t, lines, value.Consequence)
+		return appendBlockLocalTypeEnv(t, lines, value.Alternative)
+	case *ast.WhileStmt:
+		return appendBlockLocalTypeEnv(t, lines, value.Body)
+	case *ast.ForStmt:
+		return appendBlockLocalTypeEnv(t, lines, value.Body)
+	case *ast.UnsafeStmt:
+		return appendBlockLocalTypeEnv(t, lines, value.Body)
+	case *ast.ComptimeIfStmt:
+		lines = appendBlockLocalTypeEnv(t, lines, value.Consequence)
+		return appendBlockLocalTypeEnv(t, lines, value.Alternative)
+	case *ast.MatchStmt:
+		return appendMatchLocalTypeEnv(t, lines, value)
+	default:
+		return lines
+	}
+}
+
+// appendLetLocalTypeEnv appends one local binding fact.
+func appendLetLocalTypeEnv(t *testing.T, lines []string, local *ast.LetStmt) []string {
+	t.Helper()
+	mutability := "let"
+	if local.Mutable {
+		mutability = "var"
+	}
+	return append(lines, mutability, local.Name, goLocalInitializerType(t, local.Value))
+}
+
+// appendBlockLocalTypeEnv appends local facts from a possibly nil block.
+func appendBlockLocalTypeEnv(t *testing.T, lines []string, block *ast.BlockStmt) []string {
+	t.Helper()
+	if block == nil {
+		return lines
+	}
+	for _, stmt := range block.Statements {
+		lines = appendStmtLocalTypeEnv(t, lines, stmt)
+	}
+	return lines
+}
+
+// appendMatchLocalTypeEnv appends local facts from match arm bodies.
+func appendMatchLocalTypeEnv(t *testing.T, lines []string, stmt *ast.MatchStmt) []string {
+	t.Helper()
+	for _, arm := range stmt.Arms {
+		lines = appendStmtLocalTypeEnv(t, lines, arm.Body)
 	}
 	return lines
 }
@@ -3015,6 +3087,12 @@ func goCallInitializerType(call *ast.CallExpr) string {
 	case "std::map::Map<[]const u8, i64>":
 		return "std::map::Map<[]const u8, i64>"
 	default:
+		if strings.HasPrefix(name, "std::array::Array<") {
+			return name
+		}
+		if strings.HasPrefix(name, "std::map::Map<") {
+			return name
+		}
 		return "unknown"
 	}
 }
@@ -3022,7 +3100,7 @@ func goCallInitializerType(call *ast.CallExpr) string {
 // formatTypeEnvSnapshot formats local binding type facts.
 func formatTypeEnvSnapshot(lines []string) string {
 	if len(lines) == 0 {
-		return ""
+		return "\n"
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
