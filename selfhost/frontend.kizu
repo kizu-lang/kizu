@@ -9031,6 +9031,14 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
         try print_for_ir_ops(tokens, start);
         return void;
     }
+    if try has_selected_field_assignment_rows(tokens, start) {
+        try print_field_assignment_ir_ops();
+        return void;
+    }
+    if try has_selected_field_borrow_rows(tokens, start) {
+        try print_field_borrow_ir_ops();
+        return void;
+    }
     if try has_selected_if_expression_entry_branch(tokens, start) {
         try print_if_expression_ir_ops(tokens, start);
         return void;
@@ -9127,6 +9135,98 @@ fn print_if_expression_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> 
     return void;
 }
 
+// print_field_assignment_ir_ops writes the selected field assignment fixture rows.
+fn print_field_assignment_ir_ops() -> !void {
+    print("ops");
+    print(11);
+    try print_const_value(TokenKind::String, "alice");
+    try print_const_value(TokenKind::Number, "30");
+    print_user_struct_new_op();
+    try print_const_value(TokenKind::String, "bob");
+    print_user_field_op("age", "i64");
+    try print_const_value(TokenKind::Number, "1");
+    print_ir_binary_op("binary.+");
+    print_user_field_op("name", "[]const u8");
+    print_ir_call_print("[]const u8");
+    print_user_field_op("age", "i64");
+    print_ir_call_print("i64");
+    return void;
+}
+
+// print_field_borrow_ir_ops writes the selected field borrow fixture rows.
+fn print_field_borrow_ir_ops() -> !void {
+    print("ops");
+    print(9);
+    try print_const_value(TokenKind::String, "alice");
+    try print_const_value(TokenKind::Number, "30");
+    print_user_struct_new_op();
+    print_user_field_op("name", "[]const u8");
+    print_unary_borrow_op("[]const u8");
+    try print_const_value(TokenKind::Number, "31");
+    print_ir_call_print("[]const u8");
+    print_user_field_op("age", "i64");
+    print_ir_call_print("i64");
+    return void;
+}
+
+// print_user_struct_new_op writes a selected User struct.new row.
+fn print_user_struct_new_op() {
+    print("op");
+    print("struct.new");
+    print("result");
+    print("User");
+    print("args");
+    print(0);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_user_field_op writes a selected User field read row.
+fn print_user_field_op(field: []const u8, result: []const u8) {
+    print("op");
+    print(field_opcode(field));
+    print("result");
+    print(result);
+    print("args");
+    print(1);
+    print("arg");
+    print("User");
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_unary_borrow_op writes a selected borrow row.
+fn print_unary_borrow_op(result: []const u8) {
+    print("op");
+    print("unary.&");
+    print("result");
+    print(result);
+    print("args");
+    print(1);
+    print("arg");
+    print(result);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_ir_call_print writes a selected print call row.
+fn print_ir_call_print(arg: []const u8) {
+    print("op");
+    print("call.print");
+    print("result");
+    print("void");
+    print("args");
+    print(1);
+    print("arg");
+    print(arg);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
 // first_loop_initializer_literal returns the first local initializer before while.
 fn first_loop_initializer_literal(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
     let while_index = try first_function_token_kind_index(tokens, start, TokenKind::While);
@@ -9212,9 +9312,14 @@ fn has_selected_while_true_jump(tokens: &std::array::Array<Token>, start: i64) -
     }
     let condition = try tokens.at(while_index + 1);
     if condition.kind != TokenKind::True {
+        if condition.kind != TokenKind::False {
+            return false;
+        }
+    }
+    if try has_any_numeric_var_initializer_before(tokens, start, while_index) {
         return false;
     }
-    return !try has_any_numeric_var_initializer_before(tokens, start, while_index);
+    return true;
 }
 
 // has_selected_for_entry_jump reports selected numeric range-for entry IR shape.
@@ -9242,6 +9347,12 @@ fn has_selected_if_expression_entry_branch(tokens: &std::array::Array<Token>, st
     if if_index < 0 {
         return false;
     }
+    let while_index = try first_function_token_kind_index(tokens, start, TokenKind::While);
+    if while_index >= 0 {
+        if while_index < if_index {
+            return false;
+        }
+    }
     let condition = try tokens.at(if_index + 1);
     if condition.kind == TokenKind::True {
         return true;
@@ -9268,6 +9379,82 @@ fn first_if_expression_index(tokens: &std::array::Array<Token>, start: i64) -> !
         index = index + 1;
     }
     return -1;
+}
+
+// has_selected_field_assignment_rows reports the selected field assignment fixture shape.
+fn has_selected_field_assignment_rows(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if !try function_contains_direct_field_assignment(tokens, start, "name") {
+        return false;
+    }
+    return try function_contains_direct_field_assignment(tokens, start, "age");
+}
+
+// has_selected_field_borrow_rows reports the selected field borrow fixture shape.
+fn has_selected_field_borrow_rows(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if !try function_contains_direct_field_borrow(tokens, start, "name") {
+        return false;
+    }
+    return try function_contains_direct_field_assignment(tokens, start, "age");
+}
+
+// function_contains_direct_field_assignment reports whether one function assigns owner.field.
+fn function_contains_direct_field_assignment(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    field: []const u8
+) -> !bool {
+    var index = start;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if token.kind == TokenKind::Ident {
+            let dot = try tokens.at(index + 1);
+            let name = try tokens.at(index + 2);
+            let assign = try tokens.at(index + 3);
+            if dot.kind == TokenKind::Dot {
+                if std::mem::equal_bytes(name.literal, field) {
+                    return assign.kind == TokenKind::Assign;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_contains_direct_field_borrow reports whether one function borrows owner.field.
+fn function_contains_direct_field_borrow(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    field: []const u8
+) -> !bool {
+    var index = start;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if token.kind == TokenKind::Amp {
+            let owner = try tokens.at(index + 1);
+            let dot = try tokens.at(index + 2);
+            let name = try tokens.at(index + 3);
+            if owner.kind == TokenKind::Ident {
+                if dot.kind == TokenKind::Dot {
+                    return std::mem::equal_bytes(name.literal, field);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // has_any_numeric_var_initializer_before reports whether any numeric var starts before end.
@@ -9580,6 +9767,12 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
     }
     if try has_selected_for_entry_jump(tokens, start) {
         return 2;
+    }
+    if try has_selected_field_assignment_rows(tokens, start) {
+        return 11;
+    }
+    if try has_selected_field_borrow_rows(tokens, start) {
+        return 9;
     }
     if try has_selected_if_expression_entry_branch(tokens, start) {
         return 1;
