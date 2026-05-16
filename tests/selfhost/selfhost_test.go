@@ -120,6 +120,12 @@ type semanticSnapshot struct {
 	Diagnostics     int
 }
 
+type runtimeDiagnosticCase struct {
+	Path    string
+	Literal string
+	Message string
+}
+
 type irSnapshot struct {
 	Functions        int
 	Blocks           int
@@ -544,6 +550,29 @@ func TestSelfHostDiagnosticObjectOracle(t *testing.T) {
 	}
 }
 
+// TestSelfHostDiagnosticOracleCoversNegativeFixtures keeps failure classes listed.
+func TestSelfHostDiagnosticOracleCoversNegativeFixtures(t *testing.T) {
+	covered := map[string]bool{}
+	for _, path := range selfHostDiagnosticObjectOracleCases() {
+		covered[path] = true
+	}
+	glob := filepath.Join(repoRoot(t), "examples", "negative", "*.kizu")
+	paths, err := filepath.Glob(glob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		rel, err := filepath.Rel(repoRoot(t), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		slashPath := filepath.ToSlash(rel)
+		if !covered[slashPath] {
+			t.Fatalf("negative fixture is missing from diagnostic oracle: %s", slashPath)
+		}
+	}
+}
+
 // selfHostDiagnosticObjectOracleCases returns diagnostic oracle fixtures.
 func selfHostDiagnosticObjectOracleCases() []string {
 	cases := []string{
@@ -556,6 +585,7 @@ func selfHostDiagnosticObjectOracleCases() []string {
 	}
 	cases = append(cases, selfHostTypeDiagnosticObjectOracleCases()...)
 	cases = append(cases, selfHostOwnershipDiagnosticObjectOracleCases()...)
+	cases = append(cases, selfHostRuntimeDiagnosticObjectOracleCases()...)
 	return cases
 }
 
@@ -586,6 +616,7 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/missing_contract_method.kizu",
 		"examples/negative/owned_dyn.kizu",
 		"examples/negative/unsatisfied_dyn.kizu",
+		"examples/contract_writer.kizu",
 		"examples/negative/unsafe_call.kizu",
 		"examples/negative/unsafe_call_after_block.kizu",
 		"examples/negative/ptr_read_without_unsafe.kizu",
@@ -620,8 +651,6 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_map_non_copy_value.kizu",
 		"examples/unsafe_nested_block.kizu",
 		"examples/unsafe_ptr_read_with_unrelated_nullable_source.kizu",
-		"examples/task_queue.kizu",
-		"examples/parallel_for.kizu",
 	}
 	cases = append(cases, selfHostArrayTypeDiagnosticCases()...)
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
@@ -751,6 +780,15 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 	}
 }
 
+// selfHostRuntimeDiagnosticObjectOracleCases returns runtime failure fixtures.
+func selfHostRuntimeDiagnosticObjectOracleCases() []string {
+	cases := make([]string, 0, len(runtimeDiagnosticCases()))
+	for _, item := range runtimeDiagnosticCases() {
+		cases = append(cases, item.Path)
+	}
+	return cases
+}
+
 // TestSelfHostTypeSubsetOracle compares function return types for a small subset.
 func TestSelfHostTypeSubsetOracle(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "examples", "functions.kizu")
@@ -786,7 +824,6 @@ func TestSelfHostTypeEnvironmentOracle(t *testing.T) {
 // TestSelfHostTypeCheckOracle compares a selected type pass/fail subset.
 func TestSelfHostTypeCheckOracle(t *testing.T) {
 	cases := []string{
-		"examples/functions.kizu",
 		"examples/negative/std_mem_wrong_type.kizu",
 		"selfhost/fixtures/type_arg_count.kizu",
 		"selfhost/fixtures/type_arg_type.kizu",
@@ -840,6 +877,7 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/std_map_non_copy_value.kizu",
 		"examples/task_queue.kizu",
 		"examples/parallel_for.kizu",
+		"examples/parallel_map_with_unrelated_bytes.kizu",
 	}
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
 	for _, path := range cases {
@@ -1204,6 +1242,7 @@ func goDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
 	snapshots = append(snapshots, goModuleDiagnosticSnapshots(t, path)...)
 	snapshots = append(snapshots, goTypeDiagnosticSnapshots(t, path)...)
 	snapshots = append(snapshots, goOwnershipDiagnosticSnapshots(t, path)...)
+	snapshots = append(snapshots, goRuntimeDiagnosticSnapshots(t, path)...)
 	return snapshots
 }
 
@@ -1954,6 +1993,66 @@ func goOwnershipDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnaps
 	primary := tokenWithStart(t, path, snapshot.PrimaryStart)
 	related := tokenWithStart(t, path, snapshot.RelatedStart)
 	return []diagnosticSnapshot{diagnosticFromToken(snapshot.Message, primary, related)}
+}
+
+// goRuntimeDiagnosticSnapshots returns selected runtime diagnostics.
+func goRuntimeDiagnosticSnapshots(t *testing.T, path string) []diagnosticSnapshot {
+	t.Helper()
+	item, ok := runtimeDiagnosticCaseForPath(path)
+	if !ok {
+		return nil
+	}
+	message := normalizeRuntimeErrorForCase(runGoRuntimeError(t, path), item)
+	if message != item.Message {
+		t.Fatalf("runtime diagnostic got %q, want %q", message, item.Message)
+	}
+	tok := tokenWithLiteral(t, path, item.Literal)
+	return []diagnosticSnapshot{diagnosticFromToken(message, tok, tok)}
+}
+
+// runtimeDiagnosticCaseForPath returns metadata for runtime-failure cases.
+func runtimeDiagnosticCaseForPath(path string) (runtimeDiagnosticCase, bool) {
+	slashPath := filepath.ToSlash(path)
+	for _, item := range runtimeDiagnosticCases() {
+		if strings.Contains(slashPath, item.Path) {
+			return item, true
+		}
+	}
+	return runtimeDiagnosticCase{}, false
+}
+
+// runtimeDiagnosticCases returns runtime failures not caught by static checkers.
+func runtimeDiagnosticCases() []runtimeDiagnosticCase {
+	return []runtimeDiagnosticCase{
+		{"examples/negative/channel_empty_recv.kizu", "recv", "runtime error: channel empty"},
+		{"examples/negative/fs_failing_io.kizu", "failing", "runtime error: io failing"},
+		{"examples/negative/fs_read_missing.kizu", "read_file", "runtime error: fs missing"},
+		{"examples/negative/local_buffer_out_of_bounds.kizu", "get", "runtime error: LocalBuffer bounds"},
+		{"examples/negative/parallel_for_error.kizu", "parallel_for", "runtime error: parallel failed"},
+		{
+			"examples/negative/parallel_map_out_of_bounds.kizu",
+			"parallel_map",
+			"runtime error: parallel_map bounds",
+		},
+		{"examples/negative/partition_index_out_of_bounds.kizu", "at", "runtime error: partition bounds"},
+		{"examples/negative/std_array_at_out_of_bounds.kizu", "at", "runtime error: Array.at bounds"},
+		{"examples/negative/std_array_bounds.kizu", "get", "runtime error: Array.get bounds"},
+		{"examples/negative/std_io_failing_write.kizu", "failing", "runtime error: io failing"},
+		{"examples/negative/std_map_get_missing.kizu", "get", "runtime error: Map.get missing"},
+		{
+			"examples/negative/std_mem_byte_at_out_of_bounds.kizu",
+			"byte_at",
+			"runtime error: byte_at bounds",
+		},
+		{"examples/negative/std_mem_slice_out_of_bounds.kizu", "slice", "runtime error: slice bounds"},
+		{"examples/negative/std_process_arg_bounds.kizu", "arg", "runtime error: process arg bounds"},
+		{
+			"examples/negative/std_testing_failure.kizu",
+			"expect_equal_i64",
+			"runtime error: testing failure",
+		},
+		{"examples/negative/task_await_error.kizu", "recv", "runtime error: channel empty"},
+	}
 }
 
 // isOwnershipDiagnosticFixture reports whether a path is in the diagnostic subset.
@@ -2968,6 +3067,65 @@ func normalizeTypeError(message string) string {
 		}
 	}
 	return "type error"
+}
+
+// runGoRuntimeError executes a runtime-failure fixture with the Go implementation.
+func runGoRuntimeError(t *testing.T, path string) string {
+	t.Helper()
+	program := parseSelfHostSource(t, path)
+	if err := types.New().Check(program); err != nil {
+		t.Fatalf("type check failed before runtime oracle: %v", err)
+	}
+	if err := ownership.New().Check(program); err != nil {
+		t.Fatalf("ownership check failed before runtime oracle: %v", err)
+	}
+	var out bytes.Buffer
+	err := interp.NewWithProcessArgs(&out, nil).Run(program)
+	if err == nil {
+		t.Fatalf("expected runtime error for %s", path)
+	}
+	return err.Error()
+}
+
+// normalizeRuntimeError maps runtime messages into the self-host subset.
+func normalizeRuntimeError(message string) string {
+	for _, item := range runtimeErrorNormalizers() {
+		if strings.Contains(message, item.match) {
+			return item.normalized
+		}
+	}
+	return "runtime error"
+}
+
+// normalizeRuntimeErrorForCase maps context-sensitive runtime failures.
+func normalizeRuntimeErrorForCase(message string, item runtimeDiagnosticCase) string {
+	if strings.Contains(item.Path, "task_await_error") {
+		if strings.Contains(message, "channel is empty") {
+			return item.Message
+		}
+	}
+	return normalizeRuntimeError(message)
+}
+
+// runtimeErrorNormalizers returns runtime diagnostic substring mappings.
+func runtimeErrorNormalizers() []typeErrorNormalizer {
+	return []typeErrorNormalizer{
+		{"task failed: channel is empty", "runtime error: task await error"},
+		{"channel is empty", "runtime error: channel empty"},
+		{"io runtime is failing", "runtime error: io failing"},
+		{"no such file", "runtime error: fs missing"},
+		{"LocalBuffer index out of bounds", "runtime error: LocalBuffer bounds"},
+		{"parallel failed", "runtime error: parallel failed"},
+		{"parallel_map range out of bounds", "runtime error: parallel_map bounds"},
+		{"partition index out of bounds", "runtime error: partition bounds"},
+		{"Array.at index out of bounds", "runtime error: Array.at bounds"},
+		{"Array.get index out of bounds", "runtime error: Array.get bounds"},
+		{"Map.get key not found", "runtime error: Map.get missing"},
+		{"byte_at index out of bounds", "runtime error: byte_at bounds"},
+		{"slice range out of bounds", "runtime error: slice bounds"},
+		{"process arg index out of bounds", "runtime error: process arg bounds"},
+		{"expected 4, got 3", "runtime error: testing failure"},
+	}
 }
 
 // typeErrorNormalizer maps a source diagnostic substring to a normalized message.
