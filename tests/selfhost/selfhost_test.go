@@ -586,6 +586,7 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/unsafe_call_after_block.kizu",
 		"examples/negative/ptr_read_without_unsafe.kizu",
 		"examples/negative/ptr_read_unrelated_nullable.kizu",
+		"examples/negative/ptr_read_unrelated_nullable_source.kizu",
 		"examples/negative/nullable_ptr_read.kizu",
 		"examples/negative/handle_as_pointer.kizu",
 		"examples/negative/std_array_wrong_type.kizu",
@@ -596,6 +597,7 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_array_no_allocator.kizu",
 		"examples/negative/std_string_no_allocator.kizu",
 		"examples/negative/std_map_no_allocator.kizu",
+		"examples/unsafe_nested_block.kizu",
 	}
 	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
 	return cases
@@ -652,6 +654,12 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_array_use_after_deinit.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
+		"examples/negative/arena_wrong_handle.kizu",
+		"examples/negative/arena_inline_wrong_handle.kizu",
+		"examples/negative/arena_unknown_handle.kizu",
+		"examples/negative/arena_handle_outlive.kizu",
+		"examples/negative/arena_add_move.kizu",
+		"examples/negative/arena_get_move.kizu",
 		"examples/negative/mut_borrow_immutable.kizu",
 		"examples/negative/nested_field_borrow.kizu",
 		"examples/negative/shared_borrow_assignment.kizu",
@@ -753,6 +761,12 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/std_array_use_after_deinit.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
+		"examples/negative/arena_wrong_handle.kizu",
+		"examples/negative/arena_inline_wrong_handle.kizu",
+		"examples/negative/arena_unknown_handle.kizu",
+		"examples/negative/arena_handle_outlive.kizu",
+		"examples/negative/arena_add_move.kizu",
+		"examples/negative/arena_get_move.kizu",
 		"examples/negative/unsafe_borrow_escape.kizu",
 	}
 	for _, path := range cases {
@@ -1654,6 +1668,12 @@ func ownershipDiagnosticFixtures() []string {
 		"std_array_use_after_deinit",
 		"std_string_use_after_deinit",
 		"std_map_use_after_deinit",
+		"arena_wrong_handle",
+		"arena_inline_wrong_handle",
+		"arena_unknown_handle",
+		"arena_handle_outlive",
+		"arena_add_move",
+		"arena_get_move",
 		"unsafe_borrow_escape",
 		"move_while_borrowed",
 	}
@@ -2669,11 +2689,57 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	if strings.Contains(err.Error(), "cannot be moved while borrowed") {
 		return borrowedMoveOwnershipSnapshot(t, path, err.Error())
 	}
+	if strings.Contains(err.Error(), "arena error:") {
+		return arenaOwnershipSnapshot(t, path, err.Error())
+	}
 	value := movedValueFromDiagnostic(t, err.Error())
 	primary, related := movedValueSpans(t, path, value)
 	return ownershipSnapshot{
 		Status: "fail", Message: "move error: moved value was used",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
+	}
+}
+
+// arenaOwnershipSnapshot normalizes Arena/Handle provenance diagnostics.
+func arenaOwnershipSnapshot(t *testing.T, path string, message string) ownershipSnapshot {
+	t.Helper()
+	slashPath := filepath.ToSlash(path)
+	switch {
+	case strings.Contains(slashPath, "arena_wrong_handle"):
+		return arenaCustomSnapshot(t, path, "alice", "right",
+			"arena error: handle does not belong to arena")
+	case strings.Contains(slashPath, "arena_inline_wrong_handle"):
+		return arenaCustomSnapshot(t, path, "left", "right",
+			"arena error: handle from wrong arena")
+	case strings.Contains(slashPath, "arena_unknown_handle"):
+		return arenaCustomSnapshot(t, path, "users", "user",
+			"arena error: arena has unknown provenance")
+	case strings.Contains(slashPath, "arena_handle_outlive"):
+		return arenaCustomSnapshot(t, path, "alice", "users",
+			"arena error: handle cannot outlive arena")
+	case strings.Contains(slashPath, "arena_get_move"):
+		return arenaCustomSnapshot(t, path, "get", "take",
+			"arena error: arena.get local borrow cannot be moved")
+	default:
+		t.Fatalf("arena diagnostic is outside oracle subset: %q", message)
+		return ownershipSnapshot{}
+	}
+}
+
+// arenaCustomSnapshot builds one normalized Arena diagnostic snapshot.
+func arenaCustomSnapshot(
+	t *testing.T,
+	path string,
+	primary string,
+	related string,
+	message string,
+) ownershipSnapshot {
+	t.Helper()
+	primaryToken := lastTokenWithLiteral(t, path, primary)
+	relatedToken := lastTokenWithLiteral(t, path, related)
+	return ownershipSnapshot{
+		Status: "fail", Message: message, Value: primary,
+		PrimaryStart: primaryToken.Start, RelatedStart: relatedToken.Start,
 	}
 }
 
