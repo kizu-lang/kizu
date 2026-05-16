@@ -972,6 +972,23 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 	}
 }
 
+// TestSelfHostOwnershipMemoryOracleCoversOwnershipDiagnostics keeps cases listed.
+func TestSelfHostOwnershipMemoryOracleCoversOwnershipDiagnostics(t *testing.T) {
+	covered := map[string]bool{}
+	for _, path := range selfHostOwnershipMemoryOracleCases(t) {
+		covered[path] = true
+	}
+	for _, path := range selfHostOwnershipDiagnosticObjectOracleCases() {
+		fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+		if !sourceTypeChecks(t, fixture) {
+			continue
+		}
+		if !covered[path] {
+			t.Fatalf("type-checkable ownership diagnostic fixture is not covered: %s", path)
+		}
+	}
+}
+
 // selfHostOwnershipMemoryOracleCases returns the ownership snapshot corpus.
 func selfHostOwnershipMemoryOracleCases(t *testing.T) []string {
 	t.Helper()
