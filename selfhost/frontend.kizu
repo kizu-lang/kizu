@@ -9027,6 +9027,10 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
         try print_while_ir_ops(tokens, start);
         return void;
     }
+    if try has_selected_for_entry_jump(tokens, start) {
+        try print_for_ir_ops(tokens, start);
+        return void;
+    }
     if try has_selected_if_binary_condition(tokens, start) {
         try print_if_ir_ops(tokens, start);
         return void;
@@ -9043,10 +9047,10 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     print(try function_instruction_count(tokens, start));
     try print_literal_ops(tokens, start);
     try print_struct_literal_ops(tokens, start);
-    if try has_function_operator(tokens, start, TokenKind::Asterisk) {
+    if try has_function_binary_operator(tokens, start, TokenKind::Asterisk) {
         print_ir_binary_op("binary.*");
     }
-    if try has_function_operator(tokens, start, TokenKind::Plus) {
+    if try has_function_binary_operator(tokens, start, TokenKind::Plus) {
         print_ir_binary_op("binary.+");
     }
     try print_call_ops(tokens, start);
@@ -9089,6 +9093,23 @@ fn print_while_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     print(1);
     try print_const_value(TokenKind::Number, initializer);
     return void;
+}
+
+// print_for_ir_ops writes the selected range-for entry block constants.
+fn print_for_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    print("ops");
+    print(2);
+    try print_const_value(TokenKind::Number, try for_range_literal(tokens, start, 1));
+    try print_const_value(TokenKind::Number, try for_range_literal(tokens, start, 3));
+    return void;
+}
+
+// for_range_literal returns a numeric literal from a selected range-for header.
+fn for_range_literal(tokens: &std::array::Array<Token>, start: i64, offset: i64) -> ![]const u8 {
+    let for_index = try first_function_token_kind_index(tokens, start, TokenKind::For);
+    let literal = try tokens.at(for_index + offset);
+
+    return literal.literal;
 }
 
 // first_loop_initializer_literal returns the first local initializer before while.
@@ -9179,6 +9200,25 @@ fn has_selected_while_true_jump(tokens: &std::array::Array<Token>, start: i64) -
         return false;
     }
     return !try has_any_numeric_var_initializer_before(tokens, start, while_index);
+}
+
+// has_selected_for_entry_jump reports selected numeric range-for entry IR shape.
+fn has_selected_for_entry_jump(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    let for_index = try first_function_token_kind_index(tokens, start, TokenKind::For);
+    if for_index < 0 {
+        return false;
+    }
+    let lower = try tokens.at(for_index + 1);
+    let range = try tokens.at(for_index + 2);
+    let upper = try tokens.at(for_index + 3);
+
+    if lower.kind != TokenKind::Number {
+        return false;
+    }
+    if range.kind != TokenKind::Range {
+        return false;
+    }
+    return upper.kind == TokenKind::Number;
 }
 
 // has_any_numeric_var_initializer_before reports whether any numeric var starts before end.
@@ -9489,6 +9529,9 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
     if try has_selected_while_entry_jump(tokens, start) {
         return 1;
     }
+    if try has_selected_for_entry_jump(tokens, start) {
+        return 2;
+    }
     if try has_function_token(tokens, start, TokenKind::If) {
         return 3;
     }
@@ -9502,10 +9545,10 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
     count = count + try struct_literal_instruction_count(tokens, start);
     count = count + try print_field_access_instruction_count(tokens, start);
 
-    if try has_function_operator(tokens, start, TokenKind::Asterisk) {
+    if try has_function_binary_operator(tokens, start, TokenKind::Asterisk) {
         count = count + 1;
     }
-    if try has_function_operator(tokens, start, TokenKind::Plus) {
+    if try has_function_binary_operator(tokens, start, TokenKind::Plus) {
         count = count + 1;
     }
     return count + try call_instruction_count(tokens, start);
@@ -9902,8 +9945,12 @@ fn ir_literal_immediate(kind: TokenKind, literal: []const u8) -> []const u8 {
     return literal;
 }
 
-// has_function_operator reports whether one function body contains an operator.
-fn has_function_operator(tokens: &std::array::Array<Token>, start: i64, kind: TokenKind) -> !bool {
+// has_function_binary_operator reports whether one function body contains a binary operator.
+fn has_function_binary_operator(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    kind: TokenKind
+) -> !bool {
     var index = start;
 
     while index < tokens.len() {
@@ -9914,11 +9961,99 @@ fn has_function_operator(tokens: &std::array::Array<Token>, start: i64, kind: To
             }
         }
         if token.kind == kind {
-            return true;
+            if try is_binary_operator_at(tokens, index) {
+                return true;
+            }
         }
         index = index + 1;
     }
     return false;
+}
+
+// is_binary_operator_at rejects dereference and type spellings that reuse operator tokens.
+fn is_binary_operator_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index <= 0 {
+        return false;
+    }
+    if index + 1 >= tokens.len() {
+        return false;
+    }
+    let prev = try tokens.at(index - 1);
+    let next = try tokens.at(index + 1);
+
+    if prev.kind == TokenKind::Dot {
+        return false;
+    }
+    if prev.kind == TokenKind::Colon {
+        return false;
+    }
+    if next.kind == TokenKind::Dot {
+        return false;
+    }
+    if is_binary_operand_token(prev.kind) {
+        return is_binary_operand_token(next.kind);
+    }
+    return false;
+}
+
+// is_binary_operand_token reports selected operand tokens for binary IR rows.
+fn is_binary_operand_token(kind: TokenKind) -> bool {
+    if kind == TokenKind::Ident {
+        return true;
+    }
+    if kind == TokenKind::Number {
+        return true;
+    }
+    if kind == TokenKind::True {
+        return true;
+    }
+    return kind == TokenKind::False;
+}
+
+// is_deref_field_access_start reports whether index starts receiver.*.field.
+fn is_deref_field_access_start(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index + 4 >= tokens.len() {
+        return false;
+    }
+    let receiver = try tokens.at(index);
+    let first_dot = try tokens.at(index + 1);
+    let deref = try tokens.at(index + 2);
+    let second_dot = try tokens.at(index + 3);
+    let field = try tokens.at(index + 4);
+
+    if receiver.kind != TokenKind::Ident {
+        return false;
+    }
+    if first_dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if deref.kind != TokenKind::Asterisk {
+        return false;
+    }
+    if second_dot.kind != TokenKind::Dot {
+        return false;
+    }
+    return field.kind == TokenKind::Ident;
+}
+
+// print_deref_field_access_op writes selected field rows through a local borrow.
+fn print_deref_field_access_op(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let receiver = try tokens.at(start);
+    let field = try tokens.at(start + 4);
+    let receiver_type = try visible_binding_type(tokens, receiver.literal, start);
+    let field_type = try struct_field_type_by_name(tokens, receiver_type, field.literal);
+
+    print("op");
+    print(field_opcode(field.literal));
+    print("result");
+    print(field_type);
+    print("args");
+    print(1);
+    print("arg");
+    print(receiver_type);
+    print("immediate");
+    print("<none>");
+    return void;
 }
 
 // call_instruction_count counts call instructions in one function.
@@ -10018,8 +10153,12 @@ fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void 
                 try print_call_value_detail(tokens, start + 2, arg.literal);
             }
         } else {
+            if try is_deref_field_access_start(tokens, start + 2) {
+                try print_deref_field_access_op(tokens, start + 2);
+            } else {
             if try is_field_access_start(tokens, start + 2) {
                 try print_field_access_op(tokens, start + 2);
+            }
             }
         }
     }
@@ -10145,6 +10284,9 @@ fn call_opcode(name: []const u8) -> ![]const u8 {
     }
     if std::mem::equal_bytes(name, "take") {
         return "call.take";
+    }
+    if std::mem::equal_bytes(name, "inspect") {
+        return "call.inspect";
     }
     if std::mem::equal_bytes(name, "copy_value") {
         return "call.copy_value";
@@ -10294,6 +10436,11 @@ fn infer_ir_expression_type(tokens: &std::array::Array<Token>, start: i64) -> ![
         return "bool";
     }
     if token.kind == TokenKind::Ident {
+        if try is_deref_field_access_start(tokens, start) {
+            let receiver_type = try visible_binding_type(tokens, token.literal, start);
+            let field = try tokens.at(start + 4);
+            return try struct_field_type_by_name(tokens, receiver_type, field.literal);
+        }
         let next = try tokens.at(start + 1);
         if next.kind == TokenKind::Dot {
             let receiver_type = try visible_binding_type(tokens, token.literal, start);
@@ -10317,6 +10464,9 @@ fn is_print_field_access(tokens: &std::array::Array<Token>, index: i64) -> !bool
     let token = try tokens.at(index);
     if !std::mem::equal_bytes(token.literal, "print") {
         return false;
+    }
+    if try is_deref_field_access_start(tokens, index + 2) {
+        return true;
     }
     return try is_field_access_start(tokens, index + 2);
 }
@@ -10582,6 +10732,9 @@ fn function_terminator(tokens: &std::array::Array<Token>, start: i64) -> ![]cons
         return "jump";
     }
     if try has_selected_while_entry_jump(tokens, start) {
+        return "jump";
+    }
+    if try has_selected_for_entry_jump(tokens, start) {
         return "jump";
     }
     if try has_selected_if_binary_condition(tokens, start) {
