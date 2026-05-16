@@ -58,6 +58,32 @@ Before switching production behavior from Go to Kizu:
 | backend | Go-owned smoke fingerprint oracle | target/artifact summary facts and executable package component test are ported under `selfhost/src` | not a native production switch target |
 | cache | Go-owned switch contract oracle | cache input/rebuild reason summary facts and executable package component test are ported under `selfhost/src` | Go-owned filesystem and hashing primitives |
 
+## Production Ownership Decision
+
+As of #230, no production compiler phase is switched from Go-owned execution to
+Kizu-owned execution.
+
+The Kizu modules under `selfhost/src` are executable component boundaries and
+oracle-facing summaries. They prove the package shape, stdlib dependencies,
+and phase facts needed for self-host migration. They do not yet replace the Go
+compiler packages in the CLI path.
+
+| Component | Production owner | Decision |
+| --- | --- | --- |
+| token / lexer | Go | Keep Go-owned until the package runtime can execute the lexer as a production scanner, not only a component oracle. |
+| AST / parser | Go | Keep Go-owned until full AST construction, errors, and spans are produced by Kizu source for package and single-file inputs. |
+| diagnostics / resolver | Go | Keep Go-owned until Kizu owns full module graph loading, cycle detection, visibility checks, and multi-file diagnostic rendering. |
+| type checker | Go | Keep Go-owned until Kizu owns function signatures, local environments, call checking, stdlib boundaries, and diagnostics. |
+| ownership / borrow checker | Go | Keep Go-owned until Kizu owns scoped state, last-use borrow endings, field borrow tracking, and memory-safety diagnostics. |
+| IR | Go | Keep Go-owned until Kizu emits the normalized IR dump, not only summary facts. |
+| backend | Go | Keep Go-owned; native production switching is not a v0.3 target. LLVM/WASM smoke output remains Go-emitted. |
+| cache | Go | Keep Go-owned until Kizu owns filesystem walking, hashing, artifact layout, status, prune, and why-rebuild execution. |
+
+This is an explicit non-switch decision, not a hidden fallback. The current CLI
+continues to use the Go compiler path while `kizu check selfhost`,
+`kizu test selfhost`, and `KIZU_REQUIRE_1TO1=1 go test ./tests/bootstrap`
+guard the self-host package boundary.
+
 ## #192 Token / Lexer Readiness
 
 Target mapping:
