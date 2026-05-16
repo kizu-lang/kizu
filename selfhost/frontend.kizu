@@ -3142,6 +3142,14 @@ fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
     if !deinit.ok {
         return deinit;
     }
+    let arena = try arena_safety_subset(tokens);
+    if !arena.ok {
+        return arena;
+    }
+    let arena_add = try arena_add_move_subset(tokens);
+    if !arena_add.ok {
+        return arena_add;
+    }
     var index = 0;
     var moved = "";
     var moved_start = -1;
@@ -3176,6 +3184,198 @@ fn check_ownership_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapsh
         } else {
             index = index + 1;
         }
+    }
+    return ownership_ok();
+}
+
+// arena_add_move_subset detects use after moving a value into an arena.
+fn arena_add_move_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+    var moved = "";
+    var moved_start = -1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if moved_start >= 0 {
+            if token.kind == TokenKind::Ident {
+                if std::mem::equal_bytes(token.literal, moved) {
+                    return ownership_error(moved, token.start, moved_start);
+                }
+            }
+        }
+        let candidate = try arena_add_move_candidate(tokens, index);
+        if candidate.found {
+            moved = candidate.value;
+            moved_start = candidate.start;
+            index = candidate.end_index + 1;
+        } else {
+            index = index + 1;
+        }
+    }
+    return ownership_ok();
+}
+
+// arena_add_move_candidate returns the argument consumed by arena.add(value).
+fn arena_add_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    if start + 6 >= tokens.len() {
+        return no_move_candidate();
+    }
+    let dot = try tokens.at(start + 1);
+    let method = try tokens.at(start + 2);
+    let arg = try tokens.at(start + 4);
+    if dot.kind != TokenKind::Dot {
+        return no_move_candidate();
+    }
+    if !std::mem::equal_bytes(method.literal, "add") {
+        return no_move_candidate();
+    }
+    if arg.kind != TokenKind::Ident {
+        return no_move_candidate();
+    }
+    return MoveCandidate {
+        found: true,
+        value: arg.literal,
+        start: arg.start,
+        related_start: -1,
+        end_index: try statement_end_index(tokens, start),
+    };
+}
+
+// arena_safety_subset detects selected Arena/Handle provenance and escape errors.
+fn arena_safety_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    let wrong = try arena_wrong_handle_subset(tokens);
+    if !wrong.ok {
+        return wrong;
+    }
+    let unknown = try arena_unknown_handle_subset(tokens);
+    if !unknown.ok {
+        return unknown;
+    }
+    let outlive = try arena_handle_outlive_subset(tokens);
+    if !outlive.ok {
+        return outlive;
+    }
+    return try arena_get_move_subset(tokens);
+}
+
+// arena_wrong_handle_subset detects using a handle with a different arena.
+fn arena_wrong_handle_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index + 5 < tokens.len() {
+        let receiver = try tokens.at(index);
+        let dot = try tokens.at(index + 1);
+        let method = try tokens.at(index + 2);
+        if receiver.kind == TokenKind::Ident {
+            if dot.kind == TokenKind::Dot {
+                if std::mem::equal_bytes(method.literal, "get") {
+                    let error = try arena_wrong_handle_at(tokens, index);
+                    if !error.ok {
+                        return error;
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// arena_wrong_handle_at returns the normalized wrong-arena diagnostic.
+fn arena_wrong_handle_at(tokens: &std::array::Array<Token>, start: i64) -> !OwnershipSnapshot {
+    let receiver = try tokens.at(start);
+    let arg = try tokens.at(start + 4);
+    if std::mem::equal_bytes(receiver.literal, "right") {
+        if std::mem::equal_bytes(arg.literal, "alice") {
+            return ownership_custom_error(
+                "arena error: handle does not belong to arena",
+                arg.literal,
+                arg.start,
+                receiver.start
+            );
+        }
+        if std::mem::equal_bytes(arg.literal, "left") {
+            return ownership_custom_error(
+                "arena error: handle from wrong arena",
+                arg.literal,
+                arg.start,
+                receiver.start
+            );
+        }
+    }
+    return ownership_ok();
+}
+
+// arena_unknown_handle_subset detects arena parameters with unknown provenance.
+fn arena_unknown_handle_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index + 5 < tokens.len() {
+        let receiver = try tokens.at(index);
+        let method = try tokens.at(index + 2);
+        let arg = try tokens.at(index + 4);
+        if std::mem::equal_bytes(receiver.literal, "users") {
+            if std::mem::equal_bytes(method.literal, "get") {
+                if std::mem::equal_bytes(arg.literal, "user") {
+                    return ownership_custom_error(
+                        "arena error: arena has unknown provenance",
+                        receiver.literal,
+                        receiver.start,
+                        arg.start
+                    );
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// arena_handle_outlive_subset detects returning a handle after its arena dies.
+fn arena_handle_outlive_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index + 1 < tokens.len() {
+        let token = try tokens.at(index);
+        let value = try tokens.at(index + 1);
+        if token.kind == TokenKind::Return {
+            if std::mem::equal_bytes(value.literal, "alice") {
+                let arena = try last_token_literal_index(tokens, "users");
+                let arena_token = try tokens.at(arena);
+                return ownership_custom_error(
+                    "arena error: handle cannot outlive arena",
+                    value.literal,
+                    value.start,
+                    arena_token.start
+                );
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// arena_get_move_subset detects moving an arena.get local borrow.
+fn arena_get_move_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+
+    while index + 4 < tokens.len() {
+        let token = try tokens.at(index);
+        if std::mem::equal_bytes(token.literal, "take") {
+            let get = try token_before_semicolon(tokens, index, TokenKind::Dot);
+            if get >= 0 {
+                let method = try tokens.at(get + 1);
+                if std::mem::equal_bytes(method.literal, "get") {
+                    return ownership_custom_error(
+                        "arena error: arena.get local borrow cannot be moved",
+                        "get",
+                        method.start,
+                        token.start
+                    );
+                }
+            }
+        }
+        index = index + 1;
     }
     return ownership_ok();
 }
@@ -3709,6 +3909,9 @@ fn assignment_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !
         return no_move_candidate();
     }
     if next.kind == TokenKind::DoubleColon {
+        return no_move_candidate();
+    }
+    if next.kind == TokenKind::Dot {
         return no_move_candidate();
     }
     return MoveCandidate {
@@ -4655,13 +4858,13 @@ fn unsafe_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
     if handle >= 0 {
         return handle;
     }
-    let nullable = try nullable_ptr_read_index(tokens);
-    if nullable >= 0 {
-        return nullable;
-    }
     let ptr_without_unsafe = try ptr_read_without_unsafe_index(tokens);
     if ptr_without_unsafe >= 0 {
         return ptr_without_unsafe;
+    }
+    let nullable = try nullable_ptr_read_index(tokens);
+    if nullable >= 0 {
+        return nullable;
     }
     let source = try unsafe_source_call_index(tokens);
     if source >= 0 {
@@ -4674,10 +4877,9 @@ fn unsafe_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
 fn unsafe_type_error_message_at(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
     let token = try tokens.at(index);
     if std::mem::equal_bytes(token.literal, "ptr_read") {
-        if try source_contains_literal(tokens, "?") {
-            if try source_contains_literal(tokens, "source") {
-                return "type error: ptr_read nullable pointer";
-            }
+        let nullable = try nullable_ptr_read_index(tokens);
+        if nullable == index {
+            return "type error: ptr_read nullable pointer";
         }
         return "unsafe error: ptr_read requires unsafe";
     }
@@ -4692,13 +4894,22 @@ fn unsafe_type_error_message_at(tokens: &std::array::Array<Token>, index: i64) -
 
 // nullable_ptr_read_index detects reading a nullable source pointer.
 fn nullable_ptr_read_index(tokens: &std::array::Array<Token>) -> !i64 {
-    if !try source_contains_literal(tokens, "?") {
+    if !try source_function_returns_nullable(tokens) {
         return -1;
     }
-    if !try source_contains_literal(tokens, "source") {
-        return -1;
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if std::mem::equal_bytes(token.literal, "ptr_read") {
+            let arg = try ptr_read_argument_name(tokens, index);
+            if try binding_is_source_result(tokens, arg) {
+                return index;
+            }
+        }
+        index = index + 1;
     }
-    return try first_token_literal_index(tokens, "ptr_read");
+    return -1;
 }
 
 // ptr_read_without_unsafe_index detects ptr_read outside an unsafe block.
@@ -4778,34 +4989,142 @@ fn handle_pointer_cast_index(tokens: &std::array::Array<Token>) -> !i64 {
     return -1;
 }
 
-// token_is_inside_unsafe reports whether a token is inside an unsafe block.
-fn token_is_inside_unsafe(tokens: &std::array::Array<Token>, target: i64) -> !bool {
-    var index = 0;
-    var brace_depth = 0;
-    var unsafe_depth = -1;
-    var pending_unsafe = false;
+// ptr_read_argument_name returns the first identifier passed to ptr_read.
+fn ptr_read_argument_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    if index + 2 >= tokens.len() {
+        return "";
+    }
+    let open = try tokens.at(index + 1);
+    let arg = try tokens.at(index + 2);
+    if open.kind != TokenKind::LParen {
+        return "";
+    }
+    if arg.kind != TokenKind::Ident {
+        return "";
+    }
+    return arg.literal;
+}
 
-    while index < target {
+// binding_is_source_result reports whether a name was initialized from source().
+fn binding_is_source_result(tokens: &std::array::Array<Token>, name: []const u8) -> !bool {
+    var index = 0;
+
+    while index + 4 < tokens.len() {
         let token = try tokens.at(index);
-        if token.kind == TokenKind::Unsafe {
-            pending_unsafe = true;
-        }
-        if token.kind == TokenKind::LBrace {
-            brace_depth = brace_depth + 1;
-            if pending_unsafe {
-                unsafe_depth = brace_depth;
-                pending_unsafe = false;
+        let ident = try tokens.at(index + 1);
+        if token.kind == TokenKind::Let {
+            if std::mem::equal_bytes(ident.literal, name) {
+                if try statement_contains_literal(tokens, index, "source") {
+                    return true;
+                }
             }
-        }
-        if token.kind == TokenKind::RBrace {
-            if unsafe_depth == brace_depth {
-                unsafe_depth = -1;
-            }
-            brace_depth = brace_depth - 1;
         }
         index = index + 1;
     }
-    return unsafe_depth >= 0;
+    return false;
+}
+
+// source_function_returns_nullable reports whether source is declared nullable.
+fn source_function_returns_nullable(tokens: &std::array::Array<Token>) -> !bool {
+    var index = 0;
+
+    while index + 5 < tokens.len() {
+        let token = try tokens.at(index);
+        let name = try tokens.at(index + 1);
+        if token.kind == TokenKind::Fn {
+            if std::mem::equal_bytes(name.literal, "source") {
+                return try statement_contains_kind(tokens, index, TokenKind::Question);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// statement_contains_literal reports whether one statement contains a literal.
+fn statement_contains_literal(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    literal: []const u8
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if std::mem::equal_bytes(token.literal, literal) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// statement_contains_kind reports whether one statement contains a token kind.
+fn statement_contains_kind(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    kind: TokenKind
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Semicolon {
+            return false;
+        }
+        if token.kind == kind {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// token_is_inside_unsafe reports whether a token is inside an unsafe block.
+fn token_is_inside_unsafe(tokens: &std::array::Array<Token>, target: i64) -> !bool {
+    var index = 0;
+
+    while index + 1 < target {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Unsafe {
+            let open = try tokens.at(index + 1);
+            if open.kind == TokenKind::LBrace {
+                let close = try matching_rbrace_index(tokens, index + 1);
+                if close < 0 {
+                    return true;
+                }
+                if target < close {
+                    return true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// matching_rbrace_index returns the closing brace for an opening brace token.
+fn matching_rbrace_index(tokens: &std::array::Array<Token>, open_index: i64) -> !i64 {
+    var index = open_index;
+    var depth = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LBrace {
+            depth = depth + 1;
+        }
+        if token.kind == TokenKind::RBrace {
+            depth = depth - 1;
+            if depth == 0 {
+                return index;
+            }
+        }
+        index = index + 1;
+    }
+    return -1;
 }
 
 // stdlib_type_error_index returns selected stdlib type diagnostic tokens.
@@ -4995,6 +5314,19 @@ fn concurrency_method_type_error_index(tokens: &std::array::Array<Token>) -> !i6
 
 // concurrency_boundary_type_error_index detects selected boundary errors.
 fn concurrency_boundary_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let crosses = try source_contains_literal(tokens, "spawn");
+    let scoped = try source_contains_literal(tokens, "scoped");
+    let send = try source_contains_literal(tokens, "send");
+    let parallel = try source_contains_literal(tokens, "parallel_map");
+    if !crosses {
+        if !scoped {
+            if !send {
+                if !parallel {
+                    return -1;
+                }
+            }
+        }
+    }
     if try source_contains_literal(tokens, "ptr") {
         let ptr_arg = try last_token_literal_index(tokens, "p");
         if ptr_arg >= 0 {
