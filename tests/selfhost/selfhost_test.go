@@ -294,6 +294,18 @@ func TestSelfHostParserModuleUsesTokenSummary(t *testing.T) {
 	if declFn.ReturnType != "!i64" {
 		t.Fatalf("declaration_count return got %q", declFn.ReturnType)
 	}
+	snapshotFn := functionDeclByName(t, program, "parse_declarations")
+	if len(snapshotFn.Params) != 1 || !snapshotFn.Params[0].Borrow {
+		t.Fatalf("parse_declarations params got %#v", snapshotFn.Params)
+	}
+	wantSnapshots := "!std::array::Array<ast::DeclSnapshot>"
+	if snapshotFn.ReturnType != wantSnapshots {
+		t.Fatalf("parse_declarations return got %q", snapshotFn.ReturnType)
+	}
+	spanFn := functionDeclByName(t, program, "first_declaration_start")
+	if spanFn.ReturnType != "!i64" {
+		t.Fatalf("first_declaration_start return got %q", spanFn.ReturnType)
+	}
 }
 
 // TestSelfHostParserModuleExposesParseSummary checks the parser component API.
