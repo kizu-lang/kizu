@@ -318,6 +318,25 @@ func TestSelfHostParserModuleExposesParseSummary(t *testing.T) {
 	}
 }
 
+// TestSelfHostAstModuleExposesGoParserNodeShapes checks AST migration structs.
+func TestSelfHostAstModuleExposesGoParserNodeShapes(t *testing.T) {
+	program := parseSelfHostSource(t, filepath.Join(repoRoot(t), "selfhost", "src", "ast.kizu"))
+	tags := enumTagsByName(t, program, "NodeKind")
+	for _, tag := range expectedAstNodeKindTags() {
+		if !tags[tag] {
+			t.Fatalf("NodeKind is missing tag %s", tag)
+		}
+	}
+	for structName, expectedFields := range expectedAstNodeShapes() {
+		fields := structFieldNamesByName(t, program, structName)
+		for _, field := range expectedFields {
+			if !fields[field] {
+				t.Fatalf("%s is missing field %s", structName, field)
+			}
+		}
+	}
+}
+
 // TestSelfHostFrontendSmoke runs the current frontend skeleton entry point.
 func TestSelfHostFrontendSmoke(t *testing.T) {
 	fixture := filepath.Join(repoRoot(t), "selfhost", "fixtures", "simple.kizu")
@@ -4518,6 +4537,65 @@ func structFieldNamesByName(t *testing.T, program *ast.Program, name string) map
 	}
 	t.Fatalf("struct %s was not found", name)
 	return nil
+}
+
+// expectedAstNodeKindTags returns parser node kinds mirrored in selfhost AST.
+func expectedAstNodeKindTags() []string {
+	return []string{
+		"Import", "Function", "Struct", "Enum", "Union", "Contract", "Impl", "Satisfy",
+		"Block", "Let", "Assign", "Return", "If", "While", "For", "Break", "Continue",
+		"Match", "Unsafe", "ComptimeIf", "ExprStmt", "Ident", "Binary", "Call",
+		"StructLiteral", "FieldAccess", "Deref",
+	}
+}
+
+// expectedAstNodeShapes returns self-host AST structs and their required fields.
+func expectedAstNodeShapes() map[string][]string {
+	return map[string][]string{
+		"Span":              {"start", "end", "line", "column"},
+		"ImportDecl":        {"path", "span"},
+		"Param":             {"name", "type_name", "borrow", "mut_borrow", "is_comptime"},
+		"FunctionDecl":      {"name", "param_count", "return_type", "is_unsafe", "extern_abi"},
+		"Field":             {"name", "type_name", "borrow", "mut_borrow", "is_public"},
+		"StructDecl":        {"name", "field_count", "is_public", "span"},
+		"EnumDecl":          {"name", "tag_count", "is_public", "span"},
+		"UnionVariant":      {"name", "payload"},
+		"UnionDecl":         {"name", "variant_count", "is_public", "span"},
+		"ContractDecl":      {"name", "method_count", "is_public", "span"},
+		"ImplDecl":          {"type_name", "method_count"},
+		"SatisfyDecl":       {"contract_name", "type_name"},
+		"BlockStmt":         {"statement_count"},
+		"LetStmt":           {"mutable", "name"},
+		"AssignStmt":        {"has_target", "has_value"},
+		"ReturnStmt":        {"has_value", "span"},
+		"IfStmt":            {"has_alternative"},
+		"WhileStmt":         {"label"},
+		"ForStmt":           {"label", "name"},
+		"BreakStmt":         {"label"},
+		"ContinueStmt":      {"label"},
+		"MatchStmt":         {"arm_count"},
+		"MatchArm":          {"tag", "binding"},
+		"UnsafeStmt":        {"statement_count"},
+		"ComptimeIfStmt":    {"has_alternative"},
+		"ExprStmt":          {"has_expression"},
+		"IdentExpr":         {"name"},
+		"IntExpr":           {"value"},
+		"StringExpr":        {"value"},
+		"BoolExpr":          {"value"},
+		"IfExpr":            {"has_alternative"},
+		"ComptimeExpr":      {"has_expression"},
+		"PrefixExpr":        {"operator"},
+		"BinaryExpr":        {"operator"},
+		"CallExpr":          {"arg_count"},
+		"TypeApplyExpr":     {"type_arg"},
+		"CastExpr":          {"target_type"},
+		"TryExpr":           {"has_value"},
+		"ArenaNewExpr":      {"type_name"},
+		"StructLiteralExpr": {"type_name", "field_count", "span"},
+		"FieldValue":        {"name", "span"},
+		"FieldExpr":         {"name", "namespace", "span"},
+		"DerefExpr":         {"has_receiver"},
+	}
 }
 
 // functionDeclByName returns one function declaration by name.
