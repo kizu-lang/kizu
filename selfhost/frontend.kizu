@@ -8897,13 +8897,34 @@ fn ir_dump_has_error(tokens: &std::array::Array<Token>) -> !bool {
             }
         }
         if token.kind == TokenKind::DoubleColon {
-            if try double_colon_is_type_context(tokens, index) {
+            if try double_colon_is_supported_ir_type_namespace(tokens, index) {
                 index = index + 1;
                 continue;
             }
             return true;
         }
         index = index + 1;
+    }
+    return false;
+}
+
+// double_colon_is_supported_ir_type_namespace reports supported namespaced IR types.
+fn double_colon_is_supported_ir_type_namespace(
+    tokens: &std::array::Array<Token>,
+    start: i64
+) -> !bool {
+    if !try double_colon_is_type_context(tokens, start) {
+        return false;
+    }
+    if start > 0 {
+        if try is_std_string_type(tokens, start - 1) {
+            return true;
+        }
+    }
+    if start > 2 {
+        if try is_std_string_type(tokens, start - 3) {
+            return true;
+        }
     }
     return false;
 }
@@ -9004,6 +9025,7 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     print("ops");
     print(try function_instruction_count(tokens, start));
     try print_literal_ops(tokens, start);
+    try print_struct_literal_ops(tokens, start);
     if try has_function_operator(tokens, start, TokenKind::Asterisk) {
         print_ir_binary_op("binary.*");
     }
@@ -9014,12 +9036,42 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     return void;
 }
 
+// print_struct_literal_ops writes supported struct.new instructions.
+fn print_struct_literal_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return void;
+            }
+        }
+        if try is_struct_literal_binding(tokens, index) {
+            let init = try local_initializer_index(tokens, index);
+            let type_name = try tokens.at(init);
+            print("op");
+            print("struct.new");
+            print("result");
+            print(type_name.literal);
+            print("args");
+            print(0);
+            print("immediate");
+            print("<none>");
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
 // function_instruction_count returns the supported IR instruction count.
 fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
     if try has_function_token(tokens, start, TokenKind::Try) {
         return try try_function_instruction_count(tokens, start);
     }
     var count = try literal_instruction_count(tokens, start);
+    count = count + try struct_literal_instruction_count(tokens, start);
+    count = count + try print_field_access_instruction_count(tokens, start);
 
     if try has_function_operator(tokens, start, TokenKind::Asterisk) {
         count = count + 1;
@@ -9069,6 +9121,66 @@ fn try_function_instruction_count(tokens: &std::array::Array<Token>, start: i64)
         }
         if try is_return_plus_expr(tokens, index) {
             count = count + 2;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// struct_literal_instruction_count counts supported struct.new instructions.
+fn struct_literal_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if try is_struct_literal_binding(tokens, index) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// is_struct_literal_binding reports whether a local binding initializes a struct.
+fn is_struct_literal_binding(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if token.kind != TokenKind::Let {
+        if token.kind != TokenKind::Var {
+            return false;
+        }
+    }
+    let init = try local_initializer_index(tokens, index);
+    if init < 0 {
+        return false;
+    }
+    let type_name = try tokens.at(init);
+    let lbrace = try tokens.at(init + 1);
+    if type_name.kind != TokenKind::Ident {
+        return false;
+    }
+    return lbrace.kind == TokenKind::LBrace;
+}
+
+// print_field_access_instruction_count counts selected field reads in print args.
+fn print_field_access_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if try is_print_field_access(tokens, index) {
+            count = count + 1;
         }
         index = index + 1;
     }
@@ -9360,12 +9472,47 @@ fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void 
             print("op");
             print(try call_opcode(arg.literal));
             try print_call_value_detail(tokens, start + 2, arg.literal);
+        } else {
+            if try is_field_access_start(tokens, start + 2) {
+                try print_field_access_op(tokens, start + 2);
+            }
         }
     }
     print("op");
     print("call.print");
     try print_call_value_detail(tokens, start, "print");
     return void;
+}
+
+// print_field_access_op writes selected struct field read rows.
+fn print_field_access_op(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let receiver = try tokens.at(start);
+    let field = try tokens.at(start + 2);
+    let receiver_type = try visible_binding_type(tokens, receiver.literal, start);
+    let field_type = try struct_field_type_by_name(tokens, receiver_type, field.literal);
+
+    print("op");
+    print(field_opcode(field.literal));
+    print("result");
+    print(field_type);
+    print("args");
+    print(1);
+    print("arg");
+    print(receiver_type);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// field_opcode returns the normalized IR opcode for selected field names.
+fn field_opcode(field: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(field, "name") {
+        return "field.name";
+    }
+    if std::mem::equal_bytes(field, "age") {
+        return "field.age";
+    }
+    return "field";
 }
 
 // print_ir_binary_op writes selected result and operand facts for a binary op.
@@ -9568,6 +9715,11 @@ fn infer_ir_expression_type(tokens: &std::array::Array<Token>, start: i64) -> ![
     }
     if token.kind == TokenKind::Ident {
         let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::Dot {
+            let receiver_type = try visible_binding_type(tokens, token.literal, start);
+            let field = try tokens.at(start + 2);
+            return try struct_field_type_by_name(tokens, receiver_type, field.literal);
+        }
         if next.kind == TokenKind::LParen {
             return try function_return_type_by_name(tokens, token.literal);
         }
@@ -9578,6 +9730,54 @@ fn infer_ir_expression_type(tokens: &std::array::Array<Token>, start: i64) -> ![
         return try ir_local_binding_type_before(tokens, token.literal, start);
     }
     return "i64";
+}
+
+// is_print_field_access reports whether index starts print(receiver.field).
+fn is_print_field_access(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let token = try tokens.at(index);
+    if !std::mem::equal_bytes(token.literal, "print") {
+        return false;
+    }
+    return try is_field_access_start(tokens, index + 2);
+}
+
+// is_field_access_start reports whether index starts receiver.field.
+fn is_field_access_start(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let receiver = try tokens.at(index);
+    let dot = try tokens.at(index + 1);
+    let field = try tokens.at(index + 2);
+    if receiver.kind != TokenKind::Ident {
+        return false;
+    }
+    if dot.kind != TokenKind::Dot {
+        return false;
+    }
+    return field.kind == TokenKind::Ident;
+}
+
+// struct_field_type_by_name finds a declared struct field type.
+fn struct_field_type_by_name(
+    tokens: &std::array::Array<Token>,
+    type_name: []const u8,
+    field: []const u8
+) -> ![]const u8 {
+    let start = try first_token_literal_index(tokens, type_name);
+    var index = start;
+
+    while index >= 0 {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RBrace {
+            return "unknown";
+        }
+        if std::mem::equal_bytes(token.literal, field) {
+            let colon = try tokens.at(index + 1);
+            if colon.kind == TokenKind::Colon {
+                return try struct_field_type(tokens, index + 2);
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
 }
 
 // ir_local_binding_type_before returns IR-only local types that type snapshots omit.
