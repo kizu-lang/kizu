@@ -32,8 +32,8 @@ each row below.
 | type | self-host return/basic/control/variant and match/typed-error/unsafe/contract/Dyn/comptime/stdlib/concurrency/Io/fs/path/String/Map/Array resource/call/std-mem/task/channel/queue/thread/parallel boundary diagnostics plus local binding type environment snapshots for all parseable conformance manifest sources compare against Go facts | strong | none |
 | ownership | self-host ownership snapshots cover positive conformance sources plus all type-checkable ownership diagnostic fixtures, including moved-value, double-move, assignment-move, copy-preserving channel send, channel/task ownership-transfer moves, deinit use-after-move, Arena/Handle provenance/escape, String view invalidation, Array append move/element-borrow conflicts, task completion, if branch move, borrow escape, field borrow, mutable borrow conflict, and move-while-borrowed fixtures vs Go checker | strong | none |
 | IR | self-host IR summary plus normalized function/block/opcode/result/operand/immediate/terminator dump equality across all positive conformance manifest sources and selected lowerability failures vs Go IR facts | strong | none |
-| backend | self-host target/status/function/string/instruction/const/call/entry plus selected LLVM/WASM output-line fingerprints for all positive conformance manifest sources vs Go emitters, including target-specific emitter failures | strong | none |
-| cache | Go module-aware cache tests include std source hash, no-op rebuild, why-rebuild reasons, and isolated perf-cache smoke; self-host snapshot declares the documented Go-owned cache switch contract from `docs/bootstrap.md` and ADR-0051 | strong | none |
+| backend | self-host target/status/function/string/instruction/const/call/entry plus selected LLVM/WASM output lines vs Go emitters | weak | broaden to full output fingerprints for all backend-supported conformance fixtures |
+| cache | Go module-aware cache tests include std source hash; self-host snapshot declares Go-owned cache switch contract | medium | keep Go-owned until Kizu owns filesystem, hashing, module graph, and artifact layout |
 
 ## Required Issues
 
