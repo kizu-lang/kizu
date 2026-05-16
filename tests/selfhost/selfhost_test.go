@@ -4403,11 +4403,12 @@ func checkSelfHostSource(t *testing.T, pkg *project.Package, path string) {
 // checkSelfHostModule checks one self-host module with imported public types.
 func checkSelfHostModule(t *testing.T, pkg *project.Package, module project.ParsedModule) {
 	t.Helper()
-	if err := types.New().WithExternalTypes(project.ImportedPublicTypeNames(pkg, module)).
+	decls := project.ImportedPublicDecls(pkg, module)
+	if err := types.New().WithExternalDecls(decls).
 		Check(module.Program); err != nil {
 		t.Fatalf("type check failed: %v", err)
 	}
-	if err := ownership.New().Check(module.Program); err != nil {
+	if err := ownership.New().WithExternalDecls(decls).Check(module.Program); err != nil {
 		t.Fatalf("ownership check failed: %v", err)
 	}
 }

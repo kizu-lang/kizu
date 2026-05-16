@@ -170,11 +170,12 @@ func checkPackageTarget(path string) error {
 
 // checkPackageProgram checks one module with imported public type names visible.
 func checkPackageProgram(pkg *project.Package, module project.ParsedModule) error {
-	if err := types.New().WithExternalTypes(project.ImportedPublicTypeNames(pkg, module)).
+	decls := project.ImportedPublicDecls(pkg, module)
+	if err := types.New().WithExternalDecls(decls).
 		Check(module.Program); err != nil {
 		return err
 	}
-	return ownership.New().Check(module.Program)
+	return ownership.New().WithExternalDecls(decls).Check(module.Program)
 }
 
 // loadPackageTarget loads user packages and the compiler-owned std package.
