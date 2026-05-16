@@ -1038,6 +1038,7 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 		"selfhost/fixtures/ir_namespaced_type.kizu",
 		"examples/variables.kizu",
 		"examples/while.kizu",
+		"selfhost/fixtures/ir_while_true_break.kizu",
 		"examples/negative/missing_return.kizu",
 	}
 	for _, path := range cases {

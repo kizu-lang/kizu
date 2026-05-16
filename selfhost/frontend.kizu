@@ -9018,7 +9018,12 @@ fn print_ir_function_dump(tokens: &std::array::Array<Token>, start: i64) -> !voi
 
 // print_ir_ops writes a normalized instruction opcode sequence.
 fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
-    if try has_function_token(tokens, start, TokenKind::While) {
+    if try has_selected_while_true_jump(tokens, start) {
+        print("ops");
+        print(0);
+        return void;
+    }
+    if try has_selected_while_entry_jump(tokens, start) {
         try print_while_ir_ops(tokens, start);
         return void;
     }
@@ -9088,23 +9093,135 @@ fn print_while_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
 
 // first_loop_initializer_literal returns the first local initializer before while.
 fn first_loop_initializer_literal(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let while_index = try first_function_token_kind_index(tokens, start, TokenKind::While);
+    if while_index < 0 {
+        return "0";
+    }
+    let loop_var = try tokens.at(while_index + 1);
+    if loop_var.kind == TokenKind::True {
+        return try first_numeric_var_initializer_before(tokens, start, while_index);
+    }
     var index = start;
 
-    while index < tokens.len() {
+    while index < while_index {
         let token = try tokens.at(index);
-        if token.kind == TokenKind::While {
-            return "0";
-        }
         if token.kind == TokenKind::Var {
+            let name = try tokens.at(index + 1);
             let init = try local_initializer_index(tokens, index);
             if init >= 0 {
-                let literal = try tokens.at(init);
-                return literal.literal;
+                if std::mem::equal_bytes(name.literal, loop_var.literal) {
+                    let literal = try tokens.at(init);
+                    return literal.literal;
+                }
             }
         }
         index = index + 1;
     }
     return "0";
+}
+
+// first_numeric_var_initializer_before returns the first numeric var initializer.
+fn first_numeric_var_initializer_before(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    end: i64
+) -> ![]const u8 {
+    var index = start;
+
+    while index < end {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Var {
+            let init = try local_initializer_index(tokens, index);
+            if init >= 0 {
+                let literal = try tokens.at(init);
+                if literal.kind == TokenKind::Number {
+                    return literal.literal;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "0";
+}
+
+// has_selected_while_entry_jump reports selected var-initialized while loop IR shape.
+fn has_selected_while_entry_jump(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    let while_index = try first_function_token_kind_index(tokens, start, TokenKind::While);
+    if while_index < 0 {
+        return false;
+    }
+    let left = try tokens.at(while_index + 1);
+    let op = try tokens.at(while_index + 2);
+    let right = try tokens.at(while_index + 3);
+    if left.kind == TokenKind::True {
+        return try has_any_numeric_var_initializer_before(tokens, start, while_index);
+    }
+    if left.kind != TokenKind::Ident {
+        return false;
+    }
+    if !is_ir_comparison_operator(op.kind) {
+        return false;
+    }
+    if right.kind != TokenKind::Number {
+        return false;
+    }
+    return try has_num_init(tokens, start, while_index, left.literal);
+}
+
+// has_selected_while_true_jump reports selected while-true entry jump IR shape.
+fn has_selected_while_true_jump(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    let while_index = try first_function_token_kind_index(tokens, start, TokenKind::While);
+    if while_index < 0 {
+        return false;
+    }
+    let condition = try tokens.at(while_index + 1);
+    if condition.kind != TokenKind::True {
+        return false;
+    }
+    return !try has_any_numeric_var_initializer_before(tokens, start, while_index);
+}
+
+// has_any_numeric_var_initializer_before reports whether any numeric var starts before end.
+fn has_any_numeric_var_initializer_before(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    end: i64
+) -> !bool {
+    var index = start;
+
+    while index < end {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Var {
+            let init = try local_initializer_index(tokens, index);
+            if init >= 0 {
+                let literal = try tokens.at(init);
+                return literal.kind == TokenKind::Number;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_num_init reports whether a loop variable starts from a numeric const.
+fn has_num_init(xs: &std::array::Array<Token>, s: i64, e: i64, name_lit: []const u8) -> !bool {
+    var index = s;
+
+    while index < e {
+        let token = try xs.at(index);
+        if token.kind == TokenKind::Var {
+            let name = try xs.at(index + 1);
+            let init = try local_initializer_index(xs, index);
+            if init >= 0 {
+                if std::mem::equal_bytes(name.literal, name_lit) {
+                    let literal = try xs.at(init);
+                    return literal.kind == TokenKind::Number;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // print_if_ir_ops writes the selected entry-block if condition IR shape.
@@ -9127,6 +9244,12 @@ fn has_selected_if_binary_condition(tokens: &std::array::Array<Token>, start: i6
     let if_index = try first_function_token_kind_index(tokens, start, TokenKind::If);
     if if_index < 0 {
         return false;
+    }
+    let while_index = try first_function_token_kind_index(tokens, start, TokenKind::While);
+    if while_index >= 0 {
+        if while_index < if_index {
+            return false;
+        }
     }
     let left = try tokens.at(if_index + 1);
     let op = try tokens.at(if_index + 2);
@@ -9360,7 +9483,10 @@ fn print_arena_print_op() -> void {
 
 // function_instruction_count returns the supported IR instruction count.
 fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
-    if try has_function_token(tokens, start, TokenKind::While) {
+    if try has_selected_while_true_jump(tokens, start) {
+        return 0;
+    }
+    if try has_selected_while_entry_jump(tokens, start) {
         return 1;
     }
     if try has_function_token(tokens, start, TokenKind::If) {
@@ -10452,7 +10578,10 @@ fn is_std_string_type(tokens: &std::array::Array<Token>, start: i64) -> !bool {
 
 // function_terminator returns the normalized entry block terminator.
 fn function_terminator(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
-    if try has_function_token(tokens, start, TokenKind::While) {
+    if try has_selected_while_true_jump(tokens, start) {
+        return "jump";
+    }
+    if try has_selected_while_entry_jump(tokens, start) {
         return "jump";
     }
     if try has_selected_if_binary_condition(tokens, start) {
