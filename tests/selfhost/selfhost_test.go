@@ -1027,10 +1027,12 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 		"examples/arithmetic.kizu",
 		"examples/borrow.kizu",
 		"examples/copy_after_move.kizu",
+		"examples/error_union_try.kizu",
 		"examples/enum.kizu",
 		"examples/std_array.kizu",
 		"examples/std_mem.kizu",
 		"examples/std_path.kizu",
+		"selfhost/fixtures/ir_namespaced_type.kizu",
 		"examples/variables.kizu",
 		"examples/negative/missing_return.kizu",
 	}
