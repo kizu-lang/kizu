@@ -553,6 +553,15 @@ func selfHostDiagnosticObjectOracleCases() []string {
 		"tests/conformance/modules/private_module_access/src/main.kizu",
 		"tests/conformance/modules/private_type_leak/src/main.kizu",
 		"tests/conformance/modules/private_field_construction/src/main.kizu",
+	}
+	cases = append(cases, selfHostTypeDiagnosticObjectOracleCases()...)
+	cases = append(cases, selfHostOwnershipDiagnosticObjectOracleCases()...)
+	return cases
+}
+
+// selfHostTypeDiagnosticObjectOracleCases returns type diagnostic fixtures.
+func selfHostTypeDiagnosticObjectOracleCases() []string {
+	cases := []string{
 		"examples/negative/std_mem_wrong_type.kizu",
 		"selfhost/fixtures/type_arg_count.kizu",
 		"selfhost/fixtures/type_arg_type.kizu",
@@ -574,7 +583,9 @@ func selfHostDiagnosticObjectOracleCases() []string {
 		"examples/negative/typed_error_mismatch.kizu",
 		"examples/negative/typed_error_untyped_constructor.kizu",
 		"examples/negative/unsafe_call.kizu",
+		"examples/negative/unsafe_call_after_block.kizu",
 		"examples/negative/ptr_read_without_unsafe.kizu",
+		"examples/negative/ptr_read_unrelated_nullable.kizu",
 		"examples/negative/nullable_ptr_read.kizu",
 		"examples/negative/handle_as_pointer.kizu",
 		"examples/negative/std_array_wrong_type.kizu",
@@ -585,6 +596,40 @@ func selfHostDiagnosticObjectOracleCases() []string {
 		"examples/negative/std_array_no_allocator.kizu",
 		"examples/negative/std_string_no_allocator.kizu",
 		"examples/negative/std_map_no_allocator.kizu",
+	}
+	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
+	return cases
+}
+
+// selfHostConcurrencyTypeDiagnosticCases returns concurrency type fixtures.
+func selfHostConcurrencyTypeDiagnosticCases() []string {
+	return []string{
+		"examples/negative/atomic_unsupported_type.kizu",
+		"examples/negative/atomic_untyped_constructor.kizu",
+		"examples/negative/atomic_store_wrong_type.kizu",
+		"examples/negative/channel_untyped_constructor.kizu",
+		"examples/negative/channel_send_wrong_type.kizu",
+		"examples/negative/channel_send_pointer.kizu",
+		"examples/negative/mutex_untyped_constructor.kizu",
+		"examples/negative/mutex_wrong_type.kizu",
+		"examples/negative/mutex_non_copy.kizu",
+		"examples/negative/task_group_without_io.kizu",
+		"examples/negative/task_spawn_borrowed_io.kizu",
+		"examples/negative/task_spawn_pointer.kizu",
+		"examples/negative/task_spawn_arena.kizu",
+		"examples/negative/task_spawn_handle.kizu",
+		"examples/negative/task_spawn_mutex.kizu",
+		"examples/negative/thread_borrow_capture.kizu",
+		"examples/negative/thread_scoped_pointer.kizu",
+		"examples/negative/thread_scoped_mutex.kizu",
+		"examples/negative/parallel_map_wrong_worker.kizu",
+		"examples/negative/partition_mut_non_i64.kizu",
+	}
+}
+
+// selfHostOwnershipDiagnosticObjectOracleCases returns ownership fixtures.
+func selfHostOwnershipDiagnosticObjectOracleCases() []string {
+	return []string{
 		"examples/move_error.kizu",
 		"examples/negative/moved_value.kizu",
 		"examples/negative/double_move.kizu",
@@ -615,7 +660,6 @@ func selfHostDiagnosticObjectOracleCases() []string {
 		"examples/negative/invalid_try.kizu",
 		"examples/negative/unsafe_borrow_escape.kizu",
 	}
-	return cases
 }
 
 // TestSelfHostTypeSubsetOracle compares function return types for a small subset.
@@ -671,6 +715,7 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/std_string_no_allocator.kizu",
 		"examples/negative/std_map_no_allocator.kizu",
 	}
+	cases = append(cases, selfHostConcurrencyTypeDiagnosticCases()...)
 	for _, path := range cases {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
@@ -1146,6 +1191,9 @@ func goNamedTypeDiagnosticSnapshots(
 	if snapshots := goStdlibTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
 		return snapshots
 	}
+	if snapshots := goConcurrencyTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
 	return goBorrowAndBasicTypeDiagnosticSnapshots(t, path, slashPath)
 }
 
@@ -1289,7 +1337,8 @@ func goUnsafeTypeDiagnosticSnapshots(
 		tok := lastTokenWithLiteral(t, path, "source")
 		return []diagnosticSnapshot{diagnosticFromToken("unsafe error: call requires unsafe", tok, tok)}
 	}
-	if strings.Contains(slashPath, "ptr_read_without_unsafe") {
+	if strings.Contains(slashPath, "ptr_read_without_unsafe") ||
+		strings.Contains(slashPath, "ptr_read_unrelated_nullable") {
 		tok := tokenWithLiteral(t, path, "ptr_read")
 		return []diagnosticSnapshot{
 			diagnosticFromToken("unsafe error: ptr_read requires unsafe", tok, tok),
@@ -1350,6 +1399,169 @@ func goStdlibTypeDiagnosticSnapshots(
 		return []diagnosticSnapshot{diagnosticFromToken("type error: Map allocator", tok, tok)}
 	}
 	return nil
+}
+
+// goConcurrencyTypeDiagnosticSnapshots returns selected concurrency diagnostics.
+func goConcurrencyTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if snapshots := goConcurrencyConstructorDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
+	if snapshots := goConcurrencyMethodDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
+	return goConcurrencyBoundaryDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goConcurrencyConstructorDiagnosticSnapshots returns constructor diagnostics.
+func goConcurrencyConstructorDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "atomic_unsupported_type") {
+		tok := tokenWithLiteral(t, path, "Atomic")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Atomic unsupported type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "atomic_untyped_constructor") {
+		tok := tokenWithLiteral(t, path, "Atomic")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: Atomic type argument required", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "channel_untyped_constructor") {
+		tok := tokenWithLiteral(t, path, "Channel")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: Channel type argument required", tok, tok),
+		}
+	}
+	return goMutexAndTaskConstructorDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goMutexAndTaskConstructorDiagnosticSnapshots returns mutex/task constructor rows.
+func goMutexAndTaskConstructorDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "mutex_untyped_constructor") {
+		tok := tokenWithLiteral(t, path, "Mutex")
+		return []diagnosticSnapshot{
+			diagnosticFromToken("type error: Mutex type argument required", tok, tok),
+		}
+	}
+	if strings.Contains(slashPath, "mutex_wrong_type") {
+		tok := tokenWithLiteral(t, path, "bad")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Mutex constructor type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "mutex_non_copy") {
+		tok := tokenWithLiteral(t, path, "Mutex")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: Mutex requires copy", tok, tok)}
+	}
+	if strings.Contains(slashPath, "task_group_without_io") {
+		tok := tokenWithLiteral(t, path, "Group")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: task group expects io", tok, tok)}
+	}
+	return nil
+}
+
+// goConcurrencyMethodDiagnosticSnapshots returns method type diagnostics.
+func goConcurrencyMethodDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "atomic_store_wrong_type") {
+		tok := tokenWithLiteral(t, path, "bad")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: atomic.store type", tok, tok)}
+	}
+	if strings.Contains(slashPath, "channel_send_wrong_type") {
+		tok := tokenWithLiteral(t, path, "bad")
+		return []diagnosticSnapshot{diagnosticFromToken("type error: channel.send type", tok, tok)}
+	}
+	return nil
+}
+
+// goConcurrencyBoundaryDiagnosticSnapshots returns boundary diagnostics.
+func goConcurrencyBoundaryDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "channel_send_pointer") {
+		return goLastLiteralDiagnostic(t, path, "p", "type error: raw pointer concurrency boundary")
+	}
+	if strings.Contains(slashPath, "task_spawn_pointer") {
+		return goLastLiteralDiagnostic(t, path, "p", "type error: raw pointer concurrency boundary")
+	}
+	if strings.Contains(slashPath, "thread_scoped_pointer") {
+		return goLastLiteralDiagnostic(t, path, "p", "type error: raw pointer concurrency boundary")
+	}
+	return goTaskThreadBoundaryDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goTaskThreadBoundaryDiagnosticSnapshots returns task/thread boundary rows.
+func goTaskThreadBoundaryDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "task_spawn_arena") {
+		return goLastLiteralDiagnostic(t, path, "users", "type error: arena concurrency boundary")
+	}
+	if strings.Contains(slashPath, "task_spawn_handle") {
+		return goLastLiteralDiagnostic(t, path, "alice", "type error: handle concurrency boundary")
+	}
+	if strings.Contains(slashPath, "task_spawn_mutex") ||
+		strings.Contains(slashPath, "thread_scoped_mutex") {
+		return goLastLiteralDiagnostic(t, path, "locked", "type error: Mutex concurrency boundary")
+	}
+	if strings.Contains(slashPath, "thread_borrow_capture") {
+		return goLastLiteralDiagnostic(t, path, "worker", "type error: thread cannot capture borrow")
+	}
+	return goTaskWorkerDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goTaskWorkerDiagnosticSnapshots returns worker and partition diagnostics.
+func goTaskWorkerDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "task_spawn_borrowed_io") {
+		return goLastLiteralDiagnostic(
+			t, path, "load", "type error: spawned function must accept owned Io",
+		)
+	}
+	if strings.Contains(slashPath, "parallel_map_wrong_worker") {
+		return goLastLiteralDiagnostic(t, path, "worker", "type error: parallel map worker return")
+	}
+	if strings.Contains(slashPath, "partition_mut_non_i64") {
+		return goLastLiteralDiagnostic(t, path, "job", "type error: partition init type")
+	}
+	return nil
+}
+
+// goLastLiteralDiagnostic builds one diagnostic at the last matching literal.
+func goLastLiteralDiagnostic(
+	t *testing.T,
+	path string,
+	literal string,
+	message string,
+) []diagnosticSnapshot {
+	t.Helper()
+	tok := lastTokenWithLiteral(t, path, literal)
+	return []diagnosticSnapshot{diagnosticFromToken(message, tok, tok)}
 }
 
 // goBorrowAndBasicTypeDiagnosticSnapshots returns borrow/basic type rows.
@@ -2399,6 +2611,7 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"unknown field", "type error: unknown field"},
 		{"if expression branch types differ", "type error: if expression branch types differ"},
 		{"return expects", "type error: return type mismatch"},
+		{"parallel map worker", "type error: parallel map worker return"},
 		{"must return", "type error: missing return"},
 		{"cannot cast", "type error: invalid cast"},
 		{"Array.append", "type error: Array.append type"},
@@ -2406,6 +2619,22 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"Map.insert", "type error: Map.insert type"},
 		{"String.append_bytes", "type error: String.append_bytes type"},
 		{"expect_equal_i64", "type error: testing arg type"},
+		{"unsupported atomic type", "type error: Atomic unsupported type"},
+		{"use `std::atomic::Atomic<T>(value)`", "type error: Atomic type argument required"},
+		{"atomic.store", "type error: atomic.store type"},
+		{"use `std::channel::Channel<T>()`", "type error: Channel type argument required"},
+		{"channel.send", "type error: channel.send type"},
+		{"use `std::sync::Mutex<T>(value)`", "type error: Mutex type argument required"},
+		{"Mutex<i64>", "type error: Mutex constructor type"},
+		{"requires copy value", "type error: Mutex requires copy"},
+		{"std::task::Group", "type error: task group expects io"},
+		{"must accept owned Io", "type error: spawned function must accept owned Io"},
+		{"raw pointer cannot cross", "type error: raw pointer concurrency boundary"},
+		{"arena cannot cross", "type error: arena concurrency boundary"},
+		{"handle cannot cross", "type error: handle concurrency boundary"},
+		{"Mutex cannot cross", "type error: Mutex concurrency boundary"},
+		{"thread cannot capture borrow", "type error: thread cannot capture borrow"},
+		{"partition init", "type error: partition init type"},
 	}
 }
 
