@@ -9119,7 +9119,7 @@ fn print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
             } else {
                 print("op");
                 print(try call_opcode(callee.literal));
-                print_call_value_detail(callee.literal);
+                try print_call_value_detail(tokens, index, callee.literal);
             }
         }
         index = index + 1;
@@ -9135,12 +9135,12 @@ fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void 
         if try is_call_start(tokens, start + 2) {
             print("op");
             print(try call_opcode(arg.literal));
-            print_call_value_detail(arg.literal);
+            try print_call_value_detail(tokens, start + 2, arg.literal);
         }
     }
     print("op");
     print("call.print");
-    print_call_value_detail("print");
+    try print_call_value_detail(tokens, start, "print");
     return void;
 }
 
@@ -9162,25 +9162,20 @@ fn print_ir_binary_op(op: []const u8) {
 }
 
 // print_call_value_detail writes selected result and operand facts for a call.
-fn print_call_value_detail(name: []const u8) {
+fn print_call_value_detail(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    name: []const u8
+) -> !void {
     print("result");
     if std::mem::equal_bytes(name, "print") {
         print("void");
     } else {
-        print("i64");
+        print(try function_return_type_by_name(tokens, name));
     }
     print("args");
-    if std::mem::equal_bytes(name, "print") {
-        print(1);
-        print("arg");
-        print("i64");
-    } else {
-        print(2);
-        print("arg");
-        print("i64");
-        print("arg");
-        print("i64");
-    }
+    print(try call_argument_count(tokens, start));
+    try print_call_argument_types(tokens, start);
     print("immediate");
     print("<none>");
     return void;
@@ -9194,7 +9189,256 @@ fn call_opcode(name: []const u8) -> ![]const u8 {
     if std::mem::equal_bytes(name, "add") {
         return "call.add";
     }
+    if std::mem::equal_bytes(name, "show") {
+        return "call.show";
+    }
+    if std::mem::equal_bytes(name, "take") {
+        return "call.take";
+    }
+    if std::mem::equal_bytes(name, "copy_value") {
+        return "call.copy_value";
+    }
+    if std::mem::equal_bytes(name, "parse") {
+        return "call.parse";
+    }
+    if std::mem::equal_bytes(name, "step") {
+        return "call.step";
+    }
+    if std::mem::equal_bytes(name, "rename") {
+        return "call.rename";
+    }
+    if std::mem::equal_bytes(name, "done") {
+        return "call.done";
+    }
+    if std::mem::equal_bytes(name, "sized") {
+        return "call.sized";
+    }
+    if std::mem::equal_bytes(name, "source") {
+        return "call.source";
+    }
+    if std::mem::equal_bytes(name, "ptr_read") {
+        return "call.ptr_read";
+    }
+    if std::mem::equal_bytes(name, "raw_byte") {
+        return "call.raw_byte";
+    }
+    if std::mem::equal_bytes(name, "read_byte_raw") {
+        return "call.read_byte_raw";
+    }
     return "call";
+}
+
+// function_return_type_by_name returns a declared function result type.
+fn function_return_type_by_name(
+    tokens: &std::array::Array<Token>,
+    name: []const u8
+) -> ![]const u8 {
+    var index = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            let fn_name = try tokens.at(index + 1);
+            if std::mem::equal_bytes(fn_name.literal, name) {
+                return try function_return_type(tokens, index + 2);
+            }
+        }
+        index = index + 1;
+    }
+    return "void";
+}
+
+// call_argument_count returns the number of top-level call arguments.
+fn call_argument_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    let open = try call_open_paren_index(tokens, start);
+    let first = try tokens.at(open + 1);
+    if first.kind == TokenKind::RParen {
+        return 0;
+    }
+    var index = open + 1;
+    var depth = 1;
+    var count = 1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LParen {
+            depth = depth + 1;
+        }
+        if token.kind == TokenKind::RParen {
+            depth = depth - 1;
+            if depth == 0 {
+                return count;
+            }
+        }
+        if token.kind == TokenKind::Comma {
+            if depth == 1 {
+                count = count + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// print_call_argument_types writes top-level call argument type rows.
+fn print_call_argument_types(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let open = try call_open_paren_index(tokens, start);
+    var index = open + 1;
+    var depth = 1;
+    var is_arg_start = true;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            depth = depth - 1;
+            if depth == 0 {
+                return void;
+            }
+        }
+        if depth == 1 {
+            if is_arg_start {
+                print("arg");
+                print(try infer_ir_expression_type(tokens, index));
+                is_arg_start = false;
+            }
+            if token.kind == TokenKind::Comma {
+                is_arg_start = true;
+            }
+        }
+        if token.kind == TokenKind::LParen {
+            depth = depth + 1;
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// call_open_paren_index returns the call's opening parenthesis index.
+fn call_open_paren_index(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::LParen {
+            return index;
+        }
+        index = index + 1;
+    }
+    return start + 1;
+}
+
+// infer_ir_expression_type returns the normalized IR type for a simple expression.
+fn infer_ir_expression_type(tokens: &std::array::Array<Token>, start: i64) -> ![]const u8 {
+    let token = try tokens.at(start);
+    if token.kind == TokenKind::String {
+        return "[]const u8";
+    }
+    if token.kind == TokenKind::Number {
+        return "i64";
+    }
+    if token.kind == TokenKind::True {
+        return "bool";
+    }
+    if token.kind == TokenKind::False {
+        return "bool";
+    }
+    if token.kind == TokenKind::Ident {
+        let next = try tokens.at(start + 1);
+        if next.kind == TokenKind::LParen {
+            return try function_return_type_by_name(tokens, token.literal);
+        }
+        return try visible_binding_type(tokens, token.literal, start);
+    }
+    return "i64";
+}
+
+// visible_binding_type returns a local or parameter type visible before one token.
+fn visible_binding_type(
+    tokens: &std::array::Array<Token>,
+    name: []const u8,
+    end: i64
+) -> ![]const u8 {
+    let local = try local_binding_type_before(tokens, name, end);
+    if !std::mem::equal_bytes(local, "unknown") {
+        return local;
+    }
+    return try parameter_type_before(tokens, name, end);
+}
+
+// local_binding_type_before returns the latest local binding type before one token.
+fn local_binding_type_before(
+    tokens: &std::array::Array<Token>,
+    name: []const u8,
+    end: i64
+) -> ![]const u8 {
+    var index = 0;
+    var found = "unknown";
+
+    while index < end {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Let {
+            let local = try tokens.at(index + 1);
+            if std::mem::equal_bytes(local.literal, name) {
+                let init = try local_initializer_index(tokens, index);
+                if init >= 0 {
+                    found = try infer_local_type(tokens, init);
+                }
+            }
+        }
+        if token.kind == TokenKind::Var {
+            let local = try tokens.at(index + 1);
+            if std::mem::equal_bytes(local.literal, name) {
+                let init = try local_initializer_index(tokens, index);
+                if init >= 0 {
+                    found = try infer_local_type(tokens, init);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return found;
+}
+
+// parameter_type_before returns a parameter type visible before one token.
+fn parameter_type_before(
+    tokens: &std::array::Array<Token>,
+    name: []const u8,
+    end: i64
+) -> ![]const u8 {
+    let fn_start = try enclosing_function_start(tokens, end);
+    var index = fn_start + 3;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::RParen {
+            return "unknown";
+        }
+        if token.kind == TokenKind::Ident {
+            if std::mem::equal_bytes(token.literal, name) {
+                let colon = try tokens.at(index + 1);
+                if colon.kind == TokenKind::Colon {
+                    return try parameter_type(tokens, index + 2);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+// enclosing_function_start returns the nearest previous function token.
+fn enclosing_function_start(tokens: &std::array::Array<Token>, end: i64) -> !i64 {
+    var index = 0;
+    var found = 0;
+
+    while index < end {
+        let token = try tokens.at(index);
+        if token.kind == TokenKind::Fn {
+            found = index;
+        }
+        index = index + 1;
+    }
+    return found;
 }
 
 // function_param_count returns the number of function parameters.
