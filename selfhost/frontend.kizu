@@ -3186,6 +3186,14 @@ fn check_ownership_early_subset(tokens: &std::array::Array<Token>) -> !Ownership
     if !deinit.ok {
         return deinit;
     }
+    let array_conflict = try array_borrow_conflict_subset(tokens);
+    if !array_conflict.ok {
+        return array_conflict;
+    }
+    let array_append = try array_append_move_subset(tokens);
+    if !array_append.ok {
+        return array_append;
+    }
     let string_view = try string_view_conflict_subset(tokens);
     if !string_view.ok {
         return string_view;
@@ -3199,6 +3207,146 @@ fn check_ownership_early_subset(tokens: &std::array::Array<Token>) -> !Ownership
         return arena_add;
     }
     return ownership_ok();
+}
+
+// array_borrow_conflict_subset detects Array mutations while element borrows live.
+fn array_borrow_conflict_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+    var owner = "";
+    var related_start = -1;
+    var mutable = false;
+
+    while index + 2 < tokens.len() {
+        let token = try tokens.at(index);
+        if try array_borrow_starts_at(tokens, index) {
+            let receiver = try tokens.at(index);
+            let method = try tokens.at(index + 2);
+            owner = receiver.literal;
+            related_start = receiver.start;
+            mutable = std::mem::equal_bytes(method.literal, "at_mut");
+        }
+        if !std::mem::equal_bytes(owner, "") {
+            if token.kind == TokenKind::Ident {
+                if std::mem::equal_bytes(token.literal, owner) {
+                    let method = try method_name_after_receiver(tokens, index);
+                    let conflict = try array_method_conflicts_with_borrow(method, mutable);
+                    if conflict {
+                        let method_token = try tokens.at(index + 2);
+                        return try array_borrow_conflict_error(method, method_token.start,
+                            related_start);
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return ownership_ok();
+}
+
+// array_borrow_starts_at reports receiver.at/at_mut local element borrow.
+fn array_borrow_starts_at(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let receiver = try tokens.at(index);
+    let dot = try tokens.at(index + 1);
+    let method = try tokens.at(index + 2);
+    if receiver.kind != TokenKind::Ident {
+        return false;
+    }
+    if dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if std::mem::equal_bytes(method.literal, "at") {
+        return true;
+    }
+    return std::mem::equal_bytes(method.literal, "at_mut");
+}
+
+// array_method_conflicts_with_borrow reports whether a method invalidates a borrow.
+fn array_method_conflicts_with_borrow(method: []const u8, mutable: bool) -> !bool {
+    if mutable {
+        return std::mem::equal_bytes(method, "len");
+    }
+    if std::mem::equal_bytes(method, "append") {
+        return true;
+    }
+    if std::mem::equal_bytes(method, "deinit") {
+        return true;
+    }
+    return std::mem::equal_bytes(method, "set");
+}
+
+// array_borrow_conflict_error builds one normalized Array borrow diagnostic.
+fn array_borrow_conflict_error(
+    method: []const u8,
+    primary: i64,
+    related: i64
+) -> !OwnershipSnapshot {
+    if std::mem::equal_bytes(method, "append") {
+        return ownership_custom_error("array error: Array.append while borrowed", method,
+            primary, related);
+    }
+    if std::mem::equal_bytes(method, "deinit") {
+        return ownership_custom_error("array error: Array.deinit while borrowed", method,
+            primary, related);
+    }
+    if std::mem::equal_bytes(method, "len") {
+        return ownership_custom_error("array error: Array.len while mutably borrowed", method,
+            primary, related);
+    }
+    return ownership_custom_error("array error: Array.set while borrowed", method,
+        primary, related);
+}
+
+// array_append_move_subset detects use after Array.append consumes a value.
+fn array_append_move_subset(tokens: &std::array::Array<Token>) -> !OwnershipSnapshot {
+    var index = 0;
+    var moved = "";
+    var moved_start = -1;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if moved_start >= 0 {
+            if token.kind == TokenKind::Ident {
+                if std::mem::equal_bytes(token.literal, moved) {
+                    return ownership_error(moved, token.start, moved_start);
+                }
+            }
+        }
+        let candidate = try array_append_move_candidate(tokens, index);
+        if candidate.found {
+            moved = candidate.value;
+            moved_start = candidate.start;
+            index = candidate.end_index + 1;
+        } else {
+            index = index + 1;
+        }
+    }
+    return ownership_ok();
+}
+
+// array_append_move_candidate returns the argument consumed by Array.append(value).
+fn array_append_move_candidate(tokens: &std::array::Array<Token>, start: i64) -> !MoveCandidate {
+    if start + 6 >= tokens.len() {
+        return no_move_candidate();
+    }
+    let dot = try tokens.at(start + 1);
+    let method = try tokens.at(start + 2);
+    let arg = try tokens.at(start + 4);
+    if dot.kind != TokenKind::Dot {
+        return no_move_candidate();
+    }
+    if !std::mem::equal_bytes(method.literal, "append") {
+        return no_move_candidate();
+    }
+    if arg.kind != TokenKind::Ident {
+        return no_move_candidate();
+    }
+    return MoveCandidate {
+        found: true,
+        value: arg.literal,
+        start: arg.start,
+        related_start: -1,
+        end_index: try statement_end_index(tokens, start),
+    };
 }
 
 // string_view_conflict_subset detects mutating String while an as_bytes view lives.
@@ -5268,6 +5416,10 @@ fn stdlib_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
     if concurrency >= 0 {
         return concurrency;
     }
+    let array_resource = try array_resource_type_error_index(tokens);
+    if array_resource >= 0 {
+        return array_resource;
+    }
     let array = try array_append_type_error_index(tokens);
     if array >= 0 {
         return array;
@@ -5304,6 +5456,10 @@ fn stdlib_type_error_message_at(
     if !std::mem::equal_bytes(concurrency, "") {
         return concurrency;
     }
+    let array_resource = try array_resource_type_error_message_at(tokens, index);
+    if !std::mem::equal_bytes(array_resource, "") {
+        return array_resource;
+    }
     let resource = try std_resource_type_error_message_at(tokens, index);
     if !std::mem::equal_bytes(resource, "") {
         return resource;
@@ -5327,6 +5483,135 @@ fn stdlib_type_error_message_at(
         return try no_allocator_type_error_message_at(tokens, index);
     }
     return "";
+}
+
+// array_resource_type_error_index detects Array resource and element errors.
+fn array_resource_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    let method = try array_method_type_error_index(tokens);
+    if method >= 0 {
+        return method;
+    }
+    let boundary = try array_concurrency_boundary_index(tokens);
+    if boundary >= 0 {
+        return boundary;
+    }
+    return try array_element_type_error_index(tokens);
+}
+
+// array_resource_type_error_message_at returns normalized Array diagnostics.
+fn array_resource_type_error_message_at(
+    tokens: &std::array::Array<Token>,
+    index: i64
+) -> ![]const u8 {
+    let token = try tokens.at(index);
+    if std::mem::equal_bytes(token.literal, "at_mut") {
+        return "type error: Array.at_mut mutability";
+    }
+    if std::mem::equal_bytes(token.literal, "at") {
+        return "type error: Array.at bind required";
+    }
+    if std::mem::equal_bytes(token.literal, "get") {
+        return "type error: Array.get copy element";
+    }
+    if std::mem::equal_bytes(token.literal, "values") {
+        return "type error: Array concurrency boundary";
+    }
+    if std::mem::equal_bytes(token.literal, "Array") {
+        return try array_element_type_error_message(tokens);
+    }
+    return "";
+}
+
+// array_method_type_error_index detects selected Array method diagnostics.
+fn array_method_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if try source_contains_literal(tokens, "at_mut") {
+        if !try source_contains_literal(tokens, "var") {
+            return try last_token_literal_index(tokens, "at_mut");
+        }
+    }
+    if try source_contains_literal(tokens, "consume") {
+        return try last_token_literal_index(tokens, "at");
+    }
+    if try function_decl_name_exists(tokens, "first") {
+        return try last_token_literal_index(tokens, "at");
+    }
+    if try source_contains_literal(tokens, "Box") {
+        if try source_contains_literal(tokens, "get") {
+            return try last_token_literal_index(tokens, "get");
+        }
+    }
+    return -1;
+}
+
+// array_concurrency_boundary_index detects Array crossing task/channel boundaries.
+fn array_concurrency_boundary_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if !try source_contains_literal(tokens, "Array") {
+        return -1;
+    }
+    if try source_contains_literal(tokens, "spawn") {
+        return try last_token_literal_index(tokens, "values");
+    }
+    if try source_contains_literal(tokens, "send") {
+        return try last_token_literal_index(tokens, "values");
+    }
+    return -1;
+}
+
+// array_element_type_error_index detects unsupported Array element types.
+fn array_element_type_error_index(tokens: &std::array::Array<Token>) -> !i64 {
+    if !try source_contains_literal(tokens, "Array") {
+        return -1;
+    }
+    if try source_contains_literal(tokens, "Atomic") {
+        return try last_token_literal_index(tokens, "Array");
+    }
+    if try source_contains_literal(tokens, "handle") {
+        return try last_token_literal_index(tokens, "Array");
+    }
+    if try source_contains_literal(tokens, "Map") {
+        return try last_token_literal_index(tokens, "Array");
+    }
+    if try source_contains_literal(tokens, "ptr") {
+        return try last_token_literal_index(tokens, "Array");
+    }
+    if try source_contains_literal(tokens, "Channel") {
+        return try last_token_literal_index(tokens, "Array");
+    }
+    if try array_contains_nested_array(tokens) {
+        return try last_token_literal_index(tokens, "Array");
+    }
+    return -1;
+}
+
+// array_element_type_error_message returns the selected element safety message.
+fn array_element_type_error_message(tokens: &std::array::Array<Token>) -> ![]const u8 {
+    if try source_contains_literal(tokens, "Atomic") {
+        return "type error: Array element Atomic";
+    }
+    if try source_contains_literal(tokens, "handle") {
+        return "type error: Array element handle";
+    }
+    if try source_contains_literal(tokens, "Map") {
+        return "type error: Array element Map";
+    }
+    if try source_contains_literal(tokens, "ptr") {
+        return "type error: Array element raw pointer";
+    }
+    if try source_contains_literal(tokens, "Channel") {
+        return "type error: Array element Channel";
+    }
+    if try array_contains_nested_array(tokens) {
+        return "type error: Array element nested array";
+    }
+    return "";
+}
+
+// array_contains_nested_array reports whether a struct field stores Array.
+fn array_contains_nested_array(tokens: &std::array::Array<Token>) -> !bool {
+    if !try source_contains_literal(tokens, "Holder") {
+        return false;
+    }
+    return try source_contains_literal(tokens, "values");
 }
 
 // std_resource_type_error_index detects selected stdlib resource receiver errors.
@@ -5876,7 +6161,10 @@ fn is_array_append_type_error_at(tokens: &std::array::Array<Token>, index: i64) 
         return false;
     }
     let token = try tokens.at(index);
-    return token.kind == TokenKind::String;
+    if token.kind != TokenKind::String {
+        return false;
+    }
+    return std::mem::equal_bytes(token.literal, "no");
 }
 
 // map_key_type_error_index detects unsupported std::map key type.

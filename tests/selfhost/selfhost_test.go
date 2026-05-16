@@ -590,6 +590,20 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/nullable_ptr_read.kizu",
 		"examples/negative/handle_as_pointer.kizu",
 		"examples/negative/std_array_wrong_type.kizu",
+		"examples/negative/std_array_at_mut_immutable.kizu",
+		"examples/negative/std_array_at_pass_to_owned_param.kizu",
+		"examples/negative/std_array_at_return_escape.kizu",
+		"examples/negative/std_array_atomic_element.kizu",
+		"examples/negative/std_array_channel_send.kizu",
+		"examples/negative/std_array_get_non_copy.kizu",
+		"examples/negative/std_array_handle_element.kizu",
+		"examples/negative/std_array_map_element.kizu",
+		"examples/negative/std_array_raw_pointer_element.kizu",
+		"examples/negative/std_array_struct_channel_element.kizu",
+		"examples/negative/std_array_struct_nested_array_element.kizu",
+		"examples/negative/std_array_struct_raw_pointer_element.kizu",
+		"examples/negative/std_array_task_spawn.kizu",
+		"examples/negative/std_array_union_handle_element.kizu",
 		"examples/negative/std_map_wrong_key_type.kizu",
 		"examples/negative/std_map_wrong_insert_type.kizu",
 		"examples/negative/std_string_wrong_append_type.kizu",
@@ -663,6 +677,11 @@ func selfHostOwnershipDiagnosticObjectOracleCases() []string {
 		"examples/negative/mut_borrow_conflict.kizu",
 		"examples/negative/mut_borrow_deref_move.kizu",
 		"examples/negative/std_array_use_after_deinit.kizu",
+		"examples/negative/std_array_append_moves.kizu",
+		"examples/negative/std_array_append_while_borrowed.kizu",
+		"examples/negative/std_array_deinit_while_borrowed.kizu",
+		"examples/negative/std_array_read_while_mut_borrowed.kizu",
+		"examples/negative/std_array_set_while_borrowed.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
 		"examples/negative/std_string_append_while_viewed.kizu",
@@ -729,6 +748,20 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 		"examples/negative/missing_return.kizu",
 		"examples/negative/invalid_cast.kizu",
 		"examples/negative/std_array_wrong_type.kizu",
+		"examples/negative/std_array_at_mut_immutable.kizu",
+		"examples/negative/std_array_at_pass_to_owned_param.kizu",
+		"examples/negative/std_array_at_return_escape.kizu",
+		"examples/negative/std_array_atomic_element.kizu",
+		"examples/negative/std_array_channel_send.kizu",
+		"examples/negative/std_array_get_non_copy.kizu",
+		"examples/negative/std_array_handle_element.kizu",
+		"examples/negative/std_array_map_element.kizu",
+		"examples/negative/std_array_raw_pointer_element.kizu",
+		"examples/negative/std_array_struct_channel_element.kizu",
+		"examples/negative/std_array_struct_nested_array_element.kizu",
+		"examples/negative/std_array_struct_raw_pointer_element.kizu",
+		"examples/negative/std_array_task_spawn.kizu",
+		"examples/negative/std_array_union_handle_element.kizu",
 		"examples/negative/std_map_wrong_key_type.kizu",
 		"examples/negative/std_map_wrong_insert_type.kizu",
 		"examples/negative/std_string_wrong_append_type.kizu",
@@ -783,6 +816,11 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 		"examples/negative/mut_borrow_conflict.kizu",
 		"examples/negative/mut_borrow_deref_move.kizu",
 		"examples/negative/std_array_use_after_deinit.kizu",
+		"examples/negative/std_array_append_moves.kizu",
+		"examples/negative/std_array_append_while_borrowed.kizu",
+		"examples/negative/std_array_deinit_while_borrowed.kizu",
+		"examples/negative/std_array_read_while_mut_borrowed.kizu",
+		"examples/negative/std_array_set_while_borrowed.kizu",
 		"examples/negative/std_string_use_after_deinit.kizu",
 		"examples/negative/std_map_use_after_deinit.kizu",
 		"examples/negative/std_string_append_while_viewed.kizu",
@@ -1407,6 +1445,9 @@ func goStdlibTypeDiagnosticSnapshots(
 	slashPath string,
 ) []diagnosticSnapshot {
 	t.Helper()
+	if snapshots := goStdArrayTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
+		return snapshots
+	}
 	if strings.Contains(slashPath, "std_array_wrong_type") {
 		tok := tokenWithLiteral(t, path, "no")
 		return []diagnosticSnapshot{diagnosticFromToken("type error: Array.append type", tok, tok)}
@@ -1441,6 +1482,60 @@ func goStdlibTypeDiagnosticSnapshots(
 	}
 	if snapshots := goStdResourceTypeDiagnosticSnapshots(t, path, slashPath); snapshots != nil {
 		return snapshots
+	}
+	return nil
+}
+
+// goStdArrayTypeDiagnosticSnapshots returns selected Array resource diagnostics.
+func goStdArrayTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "std_array_at_mut_immutable") {
+		return goLastLiteralDiagnostic(t, path, "at_mut", "type error: Array.at_mut mutability")
+	}
+	if strings.Contains(slashPath, "std_array_at_pass_to_owned_param") ||
+		strings.Contains(slashPath, "std_array_at_return_escape") {
+		return goLastLiteralDiagnostic(t, path, "at", "type error: Array.at bind required")
+	}
+	if strings.Contains(slashPath, "std_array_get_non_copy") {
+		return goLastLiteralDiagnostic(t, path, "get", "type error: Array.get copy element")
+	}
+	if strings.Contains(slashPath, "std_array_channel_send") ||
+		strings.Contains(slashPath, "std_array_task_spawn") {
+		return goLastLiteralDiagnostic(t, path, "values", "type error: Array concurrency boundary")
+	}
+	return goStdArrayElementTypeDiagnosticSnapshots(t, path, slashPath)
+}
+
+// goStdArrayElementTypeDiagnosticSnapshots returns Array element safety rows.
+func goStdArrayElementTypeDiagnosticSnapshots(
+	t *testing.T,
+	path string,
+	slashPath string,
+) []diagnosticSnapshot {
+	t.Helper()
+	if strings.Contains(slashPath, "std_array_atomic_element") {
+		return goLastLiteralDiagnostic(t, path, "Array", "type error: Array element Atomic")
+	}
+	if strings.Contains(slashPath, "std_array_handle_element") ||
+		strings.Contains(slashPath, "std_array_union_handle_element") {
+		return goLastLiteralDiagnostic(t, path, "Array", "type error: Array element handle")
+	}
+	if strings.Contains(slashPath, "std_array_map_element") {
+		return goLastLiteralDiagnostic(t, path, "Array", "type error: Array element Map")
+	}
+	if strings.Contains(slashPath, "std_array_raw_pointer_element") ||
+		strings.Contains(slashPath, "std_array_struct_raw_pointer_element") {
+		return goLastLiteralDiagnostic(t, path, "Array", "type error: Array element raw pointer")
+	}
+	if strings.Contains(slashPath, "std_array_struct_channel_element") {
+		return goLastLiteralDiagnostic(t, path, "Array", "type error: Array element Channel")
+	}
+	if strings.Contains(slashPath, "std_array_struct_nested_array_element") {
+		return goLastLiteralDiagnostic(t, path, "Array", "type error: Array element nested array")
 	}
 	return nil
 }
@@ -1740,6 +1835,11 @@ func ownershipDiagnosticFixtures() []string {
 		"mut_borrow_conflict",
 		"mut_borrow_deref_move",
 		"std_array_use_after_deinit",
+		"std_array_append_moves",
+		"std_array_append_while_borrowed",
+		"std_array_deinit_while_borrowed",
+		"std_array_read_while_mut_borrowed",
+		"std_array_set_while_borrowed",
 		"std_string_use_after_deinit",
 		"std_map_use_after_deinit",
 		"std_string_append_while_viewed",
@@ -2723,6 +2823,16 @@ func typeErrorNormalizers() []typeErrorNormalizer {
 		{"parallel map worker", "type error: parallel map worker return"},
 		{"must return", "type error: missing return"},
 		{"cannot cast", "type error: invalid cast"},
+		{"`Array.at_mut` requires mutable array binding", "type error: Array.at_mut mutability"},
+		{"`Array.at` must be bound", "type error: Array.at bind required"},
+		{"`Array.get` requires copy element", "type error: Array.get copy element"},
+		{"Array element cannot be Atomic", "type error: Array element Atomic"},
+		{"Array element cannot be handle", "type error: Array element handle"},
+		{"Array element cannot be std::map::Map", "type error: Array element Map"},
+		{"Array element cannot be raw pointer", "type error: Array element raw pointer"},
+		{"Array element cannot be Channel", "type error: Array element Channel"},
+		{"Array element cannot be nested array", "type error: Array element nested array"},
+		{"Array cannot cross concurrency boundary", "type error: Array concurrency boundary"},
 		{"Array.append", "type error: Array.append type"},
 		{"Map key type", "type error: Map key type"},
 		{"String.append_byte`", "type error: String.append_byte type"},
@@ -2784,6 +2894,9 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	if strings.Contains(err.Error(), "arena error:") {
 		return arenaOwnershipSnapshot(t, path, err.Error())
 	}
+	if strings.Contains(err.Error(), "array error:") {
+		return arrayOwnershipSnapshot(t, path, err.Error())
+	}
 	if strings.Contains(err.Error(), "string error:") {
 		return stringViewOwnershipSnapshot(t, path, err.Error())
 	}
@@ -2792,6 +2905,46 @@ func goOwnershipSnapshot(t *testing.T, path string) ownershipSnapshot {
 	return ownershipSnapshot{
 		Status: "fail", Message: "move error: moved value was used",
 		Value: value, PrimaryStart: primary, RelatedStart: related,
+	}
+}
+
+// arrayOwnershipSnapshot normalizes Array borrow/resource diagnostics.
+func arrayOwnershipSnapshot(t *testing.T, path string, message string) ownershipSnapshot {
+	t.Helper()
+	if strings.Contains(message, "append") {
+		return arrayCustomSnapshot(t, path, "append", "tokens",
+			"array error: Array.append while borrowed")
+	}
+	if strings.Contains(message, "deinit") {
+		return arrayCustomSnapshot(t, path, "deinit", "tokens",
+			"array error: Array.deinit while borrowed")
+	}
+	if strings.Contains(message, "len") {
+		return arrayCustomSnapshot(t, path, "len", "tokens",
+			"array error: Array.len while mutably borrowed")
+	}
+	if strings.Contains(message, "set") {
+		return arrayCustomSnapshot(t, path, "set", "tokens",
+			"array error: Array.set while borrowed")
+	}
+	t.Fatalf("array diagnostic is outside oracle subset: %q", message)
+	return ownershipSnapshot{}
+}
+
+// arrayCustomSnapshot builds one normalized Array borrow diagnostic.
+func arrayCustomSnapshot(
+	t *testing.T,
+	path string,
+	method string,
+	related string,
+	message string,
+) ownershipSnapshot {
+	t.Helper()
+	primary := lastTokenWithLiteral(t, path, method)
+	relatedToken := tokenWithLiteralOccurrence(t, path, related, 3)
+	return ownershipSnapshot{
+		Status: "fail", Message: message, Value: method,
+		PrimaryStart: primary.Start, RelatedStart: relatedToken.Start,
 	}
 }
 
