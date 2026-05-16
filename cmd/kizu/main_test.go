@@ -84,6 +84,18 @@ func TestCheckCommandSelfHostPackage(t *testing.T) {
 	}
 }
 
+// TestTestCommandSelfHostPackage checks package component test discovery.
+func TestTestCommandSelfHostPackage(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "test", "../../selfhost")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if string(out) != "test: ok (1 component tests)\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
 func TestIRCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "ir", "../../examples/hello.kizu")

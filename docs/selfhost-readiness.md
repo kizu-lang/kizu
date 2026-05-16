@@ -49,7 +49,7 @@ Before switching production behavior from Go to Kizu:
 
 | Component | Go oracle status | Kizu module status | Next blocker |
 | --- | --- | --- | --- |
-| token / lexer | strong legacy oracle through `tests/selfhost` | token API and lexer scanner body are ported under `selfhost/src` | #197 package component test before production switch |
+| token / lexer | strong legacy oracle through `tests/selfhost` | token API, lexer scanner body, and package component test are ported under `selfhost/src` | production switch still blocked until package runtime execution is specified |
 | AST / parser | strong legacy oracle through `tests/selfhost` | scaffold only in `selfhost/src/ast.kizu` and `selfhost/src/parser.kizu` | #192 first, then parser data model decisions |
 | diagnostics / resolver | strong legacy oracle through `tests/selfhost` and module fixtures | scaffold only | token/parser modules first |
 | type checker | strong legacy oracle for selected conformance and diagnostics | scaffold only | parser/resolver modules first |

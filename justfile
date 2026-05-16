@@ -43,9 +43,13 @@ run file="examples/hello.kizu":
 run-arg file="examples/std_io_process.kizu" arg="input.kizu":
     KIZU_TEST_ENV=env-ok go run ./cmd/kizu run {{file}} -- {{arg}}
 
-# Run a single Kizu test source.
+# Run a single Kizu test source or package component test target.
 kizu-test file="examples/std_testing.kizu":
     go run ./cmd/kizu test {{file}}
+
+# Run self-host package component tests.
+selfhost-test:
+    go run ./cmd/kizu test selfhost
 
 # Dump typed SSA IR for a Kizu file.
 ir file="examples/hello.kizu":

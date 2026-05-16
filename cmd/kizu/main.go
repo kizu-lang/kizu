@@ -186,8 +186,11 @@ func loadPackageTarget(baseDir string) (*project.Package, error) {
 	return project.LoadPackage(baseDir)
 }
 
-// testFile runs a single Kizu test source and reports a minimal test result.
+// testFile runs a single Kizu test source or package component test target.
 func testFile(path string, args []string) error {
+	if packageTarget(path) {
+		return testPackageTarget(path)
+	}
 	program, errs, err := parsePath(path)
 	if err != nil {
 		return err
@@ -206,6 +209,45 @@ func testFile(path string, args []string) error {
 	}
 	_, _ = fmt.Println("test: ok")
 	return nil
+}
+
+// testPackageTarget checks a package and its explicit component test modules.
+func testPackageTarget(path string) error {
+	baseDir := path
+	if filepath.Base(path) == "kizu.toml" {
+		baseDir = filepath.Dir(path)
+	}
+	pkg, err := loadPackageTarget(baseDir)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for _, module := range pkg.Modules {
+		if err := checkPackageProgram(pkg, module); err != nil {
+			return err
+		}
+		count += componentTestCount(module)
+	}
+	if count == 0 {
+		return fmt.Errorf("test error: no package component tests found")
+	}
+	_, _ = fmt.Printf("test: ok (%d component tests)\n", count)
+	return nil
+}
+
+// componentTestCount returns explicitly named component test functions.
+func componentTestCount(module project.ParsedModule) int {
+	if !strings.HasSuffix(filepath.Base(module.Module.File), "_test.kizu") {
+		return 0
+	}
+	count := 0
+	for _, decl := range module.Program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if ok && strings.HasSuffix(fn.Name, "_test") {
+			count++
+		}
+	}
+	return count
 }
 
 // splitProgramArgs separates the source path from optional Kizu process args.

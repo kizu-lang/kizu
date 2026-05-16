@@ -71,3 +71,5 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0050: visibility and diagnostics](0050-visibility-diagnostics.md)
 - [ADR-0051: compiler outputs, build cache, and bootstrap criteria](0051-compiler-outputs-cache-bootstrap.md)
 - [ADR-0052: module-first self-host migration](0052-module-first-self-host-migration.md)
+- [ADR-0053: self-host readiness gate](0053-self-host-readiness-gate.md)
+- [ADR-0054: package component test command](0054-package-component-test-command.md)
