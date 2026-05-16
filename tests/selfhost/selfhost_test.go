@@ -287,6 +287,13 @@ func TestSelfHostParserModuleUsesTokenSummary(t *testing.T) {
 	if fn.ReturnType != "!ast::ParseSummary" {
 		t.Fatalf("parse_tokens return got %q", fn.ReturnType)
 	}
+	declFn := functionDeclByName(t, program, "declaration_count")
+	if len(declFn.Params) != 1 || !declFn.Params[0].Borrow {
+		t.Fatalf("declaration_count params got %#v", declFn.Params)
+	}
+	if declFn.ReturnType != "!i64" {
+		t.Fatalf("declaration_count return got %q", declFn.ReturnType)
+	}
 }
 
 // TestSelfHostParserModuleExposesParseSummary checks the parser component API.
@@ -4564,6 +4571,7 @@ func expectedAstNodeShapes() map[string][]string {
 		"ContractDecl":      {"name", "method_count", "is_public", "span"},
 		"ImplDecl":          {"type_name", "method_count"},
 		"SatisfyDecl":       {"contract_name", "type_name"},
+		"DeclSnapshot":      {"kind", "name", "span"},
 		"BlockStmt":         {"statement_count"},
 		"LetStmt":           {"mutable", "name"},
 		"AssignStmt":        {"has_target", "has_value"},
