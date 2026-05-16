@@ -534,6 +534,18 @@ func sourceParses(t *testing.T, path string) bool {
 	return len(p.Errors()) == 0
 }
 
+// sourceTypeChecks reports whether the production Go type checker accepts a source file.
+func sourceTypeChecks(t *testing.T, path string) bool {
+	t.Helper()
+	l := lexer.New(readSource(t, path))
+	p := parser.New(l)
+	program := p.ParseProgram()
+	if len(p.Errors()) > 0 {
+		return false
+	}
+	return types.New().Check(program) == nil
+}
+
 // astNodeDumpCaseName returns a stable, readable subtest name.
 func astNodeDumpCaseName(t *testing.T, path string) string {
 	t.Helper()
@@ -902,6 +914,23 @@ func TestSelfHostTypeCheckOracle(t *testing.T) {
 	}
 }
 
+// TestSelfHostTypeCheckOracleCoversTypeDiagnostics keeps parseable type cases listed.
+func TestSelfHostTypeCheckOracleCoversTypeDiagnostics(t *testing.T) {
+	covered := map[string]bool{}
+	for _, path := range selfHostTypeCheckOracleCases(t) {
+		covered[path] = true
+	}
+	for _, path := range selfHostTypeDiagnosticObjectOracleCases() {
+		fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+		if !sourceParses(t, fixture) {
+			continue
+		}
+		if !covered[path] {
+			t.Fatalf("parseable type diagnostic fixture is not covered: %s", path)
+		}
+	}
+}
+
 // selfHostTypeCheckOracleCases returns the type checker snapshot corpus.
 func selfHostTypeCheckOracleCases(t *testing.T) []string {
 	t.Helper()
@@ -927,56 +956,9 @@ func selfHostTypeCheckOracleCases(t *testing.T) []string {
 	return cases
 }
 
-// TestSelfHostOwnershipMemoryOracle compares minimal move/borrow safety facts.
+// TestSelfHostOwnershipMemoryOracle compares ownership and memory-safety facts.
 func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
-	cases := []string{
-		"examples/borrow.kizu",
-		"examples/channel_send_copy.kizu",
-		"examples/negative/moved_value.kizu",
-		"examples/negative/double_move.kizu",
-		"examples/negative/assignment_move.kizu",
-		"examples/negative/channel_send_move.kizu",
-		"examples/negative/if_branch_move.kizu",
-		"examples/negative/move_while_borrowed.kizu",
-		"examples/negative/if_expression_branch_move.kizu",
-		"examples/negative/borrow_before_last_use_move.kizu",
-		"examples/negative/borrow_loop_last_use.kizu",
-		"examples/negative/field_borrow_owner_move.kizu",
-		"examples/negative/field_borrow_same_field_assignment.kizu",
-		"examples/negative/borrow_escape.kizu",
-		"examples/negative/borrow_field.kizu",
-		"examples/negative/borrow_local_alias.kizu",
-		"examples/negative/borrow_to_owner.kizu",
-		"examples/negative/borrow_deref_move.kizu",
-		"examples/negative/mut_borrow_conflict.kizu",
-		"examples/negative/mut_borrow_deref_move.kizu",
-		"examples/negative/std_array_use_after_deinit.kizu",
-		"examples/negative/std_array_append_moves.kizu",
-		"examples/negative/std_array_append_while_borrowed.kizu",
-		"examples/negative/std_array_at_mut_append_while_borrowed.kizu",
-		"examples/negative/std_array_at_mut_deinit_while_borrowed.kizu",
-		"examples/negative/std_array_at_mut_set_while_borrowed.kizu",
-		"examples/negative/std_array_deinit_while_borrowed.kizu",
-		"examples/negative/std_array_read_while_mut_borrowed.kizu",
-		"examples/negative/std_array_set_while_borrowed.kizu",
-		"examples/negative/std_string_use_after_deinit.kizu",
-		"examples/negative/std_map_use_after_deinit.kizu",
-		"examples/negative/task_move.kizu",
-		"examples/negative/task_await_after_cancel.kizu",
-		"examples/negative/task_cancel_after_await.kizu",
-		"examples/negative/unawaited_task.kizu",
-		"examples/negative/std_string_append_while_viewed.kizu",
-		"examples/negative/std_string_clear_while_viewed.kizu",
-		"examples/negative/std_string_deinit_while_viewed.kizu",
-		"examples/negative/arena_wrong_handle.kizu",
-		"examples/negative/arena_inline_wrong_handle.kizu",
-		"examples/negative/arena_unknown_handle.kizu",
-		"examples/negative/arena_handle_outlive.kizu",
-		"examples/negative/arena_add_move.kizu",
-		"examples/negative/arena_get_move.kizu",
-		"examples/negative/unsafe_borrow_escape.kizu",
-	}
-	for _, path := range cases {
+	for _, path := range selfHostOwnershipMemoryOracleCases(t) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
 			got := extractMarkedSnapshot(
@@ -988,6 +970,36 @@ func TestSelfHostOwnershipMemoryOracle(t *testing.T) {
 			}
 		})
 	}
+}
+
+// selfHostOwnershipMemoryOracleCases returns the ownership snapshot corpus.
+func selfHostOwnershipMemoryOracleCases(t *testing.T) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	cases := []string{
+		"examples/borrow.kizu",
+		"examples/channel_send_copy.kizu",
+	}
+	for _, path := range cases {
+		seen[path] = true
+	}
+	for _, path := range selfHostPositiveConformanceSources(t) {
+		if !seen[path] {
+			seen[path] = true
+			cases = append(cases, path)
+		}
+	}
+	for _, path := range selfHostOwnershipDiagnosticObjectOracleCases() {
+		fixture := filepath.Join(repoRoot(t), filepath.FromSlash(path))
+		if !sourceTypeChecks(t, fixture) {
+			continue
+		}
+		if !seen[path] {
+			seen[path] = true
+			cases = append(cases, path)
+		}
+	}
+	return cases
 }
 
 // TestSelfHostIrDumpOracle compares minimal normalized IR dump facts.
@@ -3126,10 +3138,18 @@ func goTypeCheckSnapshot(t *testing.T, path string) []string {
 	if err == nil {
 		return []string{"status", "pass"}
 	}
+	message := normalizeTypeError(err.Error())
 	if snapshots := goTypeDiagnosticSnapshots(t, path); len(snapshots) > 0 {
-		return []string{"status", "fail", "message", snapshots[0].Message}
+		if snapshots[0].Message != message {
+			t.Fatalf(
+				"type diagnostic proxy mismatch for %s: checker %q, diagnostic %q",
+				path,
+				message,
+				snapshots[0].Message,
+			)
+		}
 	}
-	return []string{"status", "fail", "message", normalizeTypeError(err.Error())}
+	return []string{"status", "fail", "message", message}
 }
 
 // normalizeTypeError maps type checker diagnostics into the self-host subset.
@@ -3254,16 +3274,21 @@ func coreTypeErrorNormalizers() []typeErrorNormalizer {
 		{"duplicate match tag", "type error: duplicate match tag"},
 		{"unknown match tag", "type error: unknown match tag"},
 		{"try cannot propagate", "type error: typed error mismatch"},
+		{"cannot construct typed error", "type error: typed error cannot use untyped constructor"},
 		{
 			"typed error cannot use untyped constructor",
 			"type error: typed error cannot use untyped constructor",
 		},
-		{"call requires unsafe", "unsafe error: call requires unsafe"},
 		{"ptr_read requires unsafe", "unsafe error: ptr_read requires unsafe"},
+		{"ptr_read` requires unsafe block", "unsafe error: ptr_read requires unsafe"},
+		{"requires unsafe block", "unsafe error: call requires unsafe"},
+		{"call requires unsafe", "unsafe error: call requires unsafe"},
+		{"expects non-null raw pointer", "type error: ptr_read nullable pointer"},
 		{"ptr_read nullable pointer", "type error: ptr_read nullable pointer"},
 		{"cannot cast handle", "type error: handle cannot cast to pointer"},
 		{"return expects", "type error: return type mismatch"},
 		{"runtime value cannot be used", "comptime error: runtime value"},
+		{"parallel map worker", "type error: parallel map worker return"},
 		{"must return", "type error: missing return"},
 		{"cannot cast", "type error: invalid cast"},
 	}
@@ -3275,7 +3300,6 @@ func advancedTypeErrorNormalizers() []typeErrorNormalizer {
 		{"missing method", "type error: contract missing method"},
 		{"Dyn parameter", "type error: Dyn parameter borrowed"},
 		{"does not satisfy `Writer`", "type error: Dyn not satisfied"},
-		{"parallel map worker", "type error: parallel map worker return"},
 	}
 }
 
