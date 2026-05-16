@@ -306,6 +306,10 @@ func TestSelfHostParserModuleUsesTokenSummary(t *testing.T) {
 	if spanFn.ReturnType != "!i64" {
 		t.Fatalf("first_declaration_start return got %q", spanFn.ReturnType)
 	}
+	detailFn := functionDeclByName(t, program, "parse_detail_summary")
+	if detailFn.ReturnType != "!ast::ParserDetailSummary" {
+		t.Fatalf("parse_detail_summary return got %q", detailFn.ReturnType)
+	}
 }
 
 // TestSelfHostParserModuleExposesParseSummary checks the parser component API.
@@ -4615,6 +4619,10 @@ func expectedAstNodeShapes() map[string][]string {
 		"FieldValue":        {"name", "span"},
 		"FieldExpr":         {"name", "namespace", "span"},
 		"DerefExpr":         {"has_receiver"},
+		"ParserDetailSummary": {
+			"control_count", "expression_count", "call_count",
+			"field_access_count", "struct_literal_count", "binary_expression_count",
+		},
 	}
 }
 
