@@ -88,8 +88,10 @@ Cache ownership in v0.3:
 - build cache remains Go-owned until Kizu owns filesystem, hashing, module graph,
   and artifact layout APIs
 - self-host compiler must keep emitting the cache contract snapshot so a future
-  switch cannot silently drop compiler version, target, input kind, source hash,
-  or stdlib hash inputs
+  switch cannot silently drop compiler version, target, backend, optimization
+  mode, input kind, manifest hash, module graph hash, source hash, public
+  interface hash, stdlib hash, artifact layout, default limit, status, prune,
+  or why-rebuild behavior
 
 ## Switch Checklist
 

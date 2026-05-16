@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/interp"
 	kir "github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -4114,19 +4115,7 @@ func formatBackendFingerprints(fingerprints []backendFingerprint) string {
 
 // formatCacheContractSnapshot formats the current Go-owned cache contract.
 func formatCacheContractSnapshot() string {
-	lines := []string{
-		"owner", "go",
-		"switch", "blocked",
-		"required inputs",
-		"compiler version",
-		"target",
-		"input kind",
-		"source hash",
-		"stdlib hash",
-		"positive", "cache hit",
-		"negative", "source changed",
-	}
-	return strings.Join(lines, "\n") + "\n"
+	return strings.Join(buildcache.ContractSnapshotLines(), "\n") + "\n"
 }
 
 // extractSelfHostTokenKinds returns the token stream printed by frontend.kizu.
