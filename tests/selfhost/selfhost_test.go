@@ -1035,6 +1035,7 @@ func TestSelfHostIrDumpOracle(t *testing.T) {
 		"examples/enum.kizu",
 		"examples/for.kizu",
 		"examples/if.kizu",
+		"examples/if_expression.kizu",
 		"examples/std_array.kizu",
 		"examples/std_mem.kizu",
 		"examples/std_path.kizu",
