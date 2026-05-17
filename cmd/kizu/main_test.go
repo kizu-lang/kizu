@@ -653,6 +653,10 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.package_failure(ptr %report, ptr @.str.compiler.finish.missing_root)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "store i1 true, ptr %b_out")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.status_name(ptr %status)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define ptr @compiler.merge_status(ptr %left, ptr %right)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "icmp eq ptr %left, @.str.compiler.status.fail")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.check_source(ptr %source)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.compile_source(ptr %source, ptr @.str.compiler.target.llvm)")
