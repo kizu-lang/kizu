@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	goast "github.com/kizu-lang/kizu/internal/ast"
 	golexer "github.com/kizu-lang/kizu/internal/lexer"
+	goparser "github.com/kizu-lang/kizu/internal/parser"
 	gotoken "github.com/kizu-lang/kizu/internal/token"
 )
 
@@ -151,6 +153,28 @@ pub fn main() -> void { let name = "alice"; return void; }`
 	want := goLexerSnapshots(input)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selfhost lexer snapshots got %#v, want %#v", got, want)
+	}
+}
+
+// TestSelfHostParseCommandMatchesGoParser checks the parser bootstrap command.
+func TestSelfHostParseCommandMatchesGoParser(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.kizu")
+	input := `struct User { name: []const u8; }
+enum Color { Red Green }
+union MaybeUser { Some(User) None }
+fn main() -> void { return void; }`
+	if err := os.WriteFile(source, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "selfhost-parse", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	got := parseSelfHostParseOutput(t, string(out))
+	want := goParserDeclSnapshots(t, input)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selfhost parser snapshots got %#v, want %#v", got, want)
 	}
 }
 
@@ -380,6 +404,15 @@ type cliTokenSnapshot struct {
 	Column  int
 }
 
+type cliDeclSnapshot struct {
+	Kind   string
+	Name   string
+	Start  int
+	End    int
+	Line   int
+	Column int
+}
+
 // parseSelfHostLexOutput parses six-line token records from selfhost-lex.
 func parseSelfHostLexOutput(t *testing.T, output string) []cliTokenSnapshot {
 	t.Helper()
@@ -408,6 +441,34 @@ func parseSelfHostLexOutput(t *testing.T, output string) []cliTokenSnapshot {
 	return nil
 }
 
+// parseSelfHostParseOutput parses declaration records from selfhost-parse.
+func parseSelfHostParseOutput(t *testing.T, output string) []cliDeclSnapshot {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	if len(lines) < 2 || lines[0] != "selfhost parser declaration snapshots" {
+		t.Fatalf("missing selfhost parser snapshot header in %q", output)
+	}
+	snapshots := []cliDeclSnapshot{}
+	for index := 1; index < len(lines); index += 6 {
+		if lines[index] == "selfhost parser declaration snapshots end" {
+			return snapshots
+		}
+		if index+5 >= len(lines) {
+			t.Fatalf("truncated selfhost parser snapshot near %q", lines[index:])
+		}
+		snapshots = append(snapshots, cliDeclSnapshot{
+			Kind:   lines[index],
+			Name:   lines[index+1],
+			Start:  parseSnapshotInt(t, lines[index+2]),
+			End:    parseSnapshotInt(t, lines[index+3]),
+			Line:   parseSnapshotInt(t, lines[index+4]),
+			Column: parseSnapshotInt(t, lines[index+5]),
+		})
+	}
+	t.Fatal("missing selfhost parser snapshot end marker")
+	return nil
+}
+
 // parseSnapshotInt parses one numeric token snapshot field.
 func parseSnapshotInt(t *testing.T, value string) int {
 	t.Helper()
@@ -416,6 +477,53 @@ func parseSnapshotInt(t *testing.T, value string) int {
 		t.Fatalf("invalid snapshot integer %q: %v", value, err)
 	}
 	return parsed
+}
+
+// goParserDeclSnapshots returns Go parser facts in selfhost-parse schema.
+func goParserDeclSnapshots(t *testing.T, source string) []cliDeclSnapshot {
+	t.Helper()
+	parser := goparser.New(golexer.New(source))
+	program := parser.ParseProgram()
+	if len(parser.Errors()) > 0 {
+		t.Fatalf("go parser errors: %v", parser.Errors())
+	}
+	snapshots := []cliDeclSnapshot{}
+	for _, decl := range program.Decls {
+		if snapshot, ok := goParserDeclSnapshot(decl); ok {
+			snapshots = append(snapshots, snapshot)
+		}
+	}
+	return snapshots
+}
+
+// goParserDeclSnapshot returns one top-level declaration snapshot.
+func goParserDeclSnapshot(decl goast.Decl) (cliDeclSnapshot, bool) {
+	switch current := decl.(type) {
+	case *goast.FunctionDecl:
+		return goNamedDeclSnapshot("FunctionDecl", current.Name, current.Span), true
+	case *goast.StructDecl:
+		return goNamedDeclSnapshot("StructDecl", current.Name, current.Span), true
+	case *goast.EnumDecl:
+		return goNamedDeclSnapshot("EnumDecl", current.Name, current.Span), true
+	case *goast.UnionDecl:
+		return goNamedDeclSnapshot("UnionDecl", current.Name, current.Span), true
+	case *goast.ContractDecl:
+		return goNamedDeclSnapshot("ContractDecl", current.Name, current.Span), true
+	default:
+		return cliDeclSnapshot{}, false
+	}
+}
+
+// goNamedDeclSnapshot builds one declaration snapshot from a Go AST span.
+func goNamedDeclSnapshot(kind string, name string, span goast.Span) cliDeclSnapshot {
+	return cliDeclSnapshot{
+		Kind:   kind,
+		Name:   name,
+		Start:  span.Start,
+		End:    span.End,
+		Line:   span.Line,
+		Column: span.Column,
+	}
 }
 
 // goLexerSnapshots returns the Go oracle in the selfhost-lex output schema.
