@@ -4,6 +4,7 @@ package native
 func RuntimeLLVM() string {
 	return `; Kizu native runtime
 @.kizu.fmt.str = private unnamed_addr constant [6 x i8] c"%.*s\0A\00"
+@.kizu.fmt.bytes = private unnamed_addr constant [5 x i8] c"%.*s\00"
 @.kizu.fmt.i64 = private unnamed_addr constant [6 x i8] c"%lld\0A\00"
 @.kizu.true = private unnamed_addr constant [5 x i8] c"true\00"
 @.kizu.false = private unnamed_addr constant [6 x i8] c"false\00"
@@ -44,6 +45,13 @@ define void @kizu_print_string(ptr %text, i64 %len) {
 entry:
   %n = trunc i64 %len to i32
   call i32 (ptr, ...) @printf(ptr @.kizu.fmt.str, i32 %n, ptr %text)
+  ret void
+}
+
+define void @kizu_write_stdout(ptr %text, i64 %len) {
+entry:
+  %n = trunc i64 %len to i32
+  call i32 (ptr, ...) @printf(ptr @.kizu.fmt.bytes, i32 %n, ptr %text)
   ret void
 }
 

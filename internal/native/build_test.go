@@ -22,6 +22,7 @@ func TestRuntimeLLVMExportsPrintSymbols(t *testing.T) {
 	runtime := RuntimeLLVM()
 	for _, want := range []string{
 		"define void @kizu_print_string",
+		"define void @kizu_write_stdout",
 		"define void @kizu_print_int",
 		"define void @kizu_print_bool",
 		"declare i32 @printf",

@@ -569,7 +569,11 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 	runSelfHostPackageRebuildSmoke(t)
 	runSelfHostArtifact(t, "define void @main() { ret void }",
 		"./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
-	runSelfHostArtifact(t, "define void @kizu_backend_ready()",
+	runSelfHostLLVMArtifact(t, []string{
+		"define ptr @compiler.compile_source()",
+		"define ptr @compiler.compile_package()",
+		"define ptr @types.source_diagnostic()",
+	},
 		"./target/kizu-selfhost", "build", "--emit-llvm", "../../selfhost")
 }
 
@@ -584,6 +588,27 @@ func runSelfHostArtifact(t *testing.T, want string, args ...string) {
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q", out)
 	}
+}
+
+// runSelfHostLLVMArtifact checks generated LLVM text and validates it with llc.
+func runSelfHostLLVMArtifact(t *testing.T, wants []string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("selfhost artifact failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	for _, want := range wants {
+		if !strings.Contains(text, want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "selfhost-symbols.ll")
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatalf("write generated LLVM: %v", err)
+	}
+	requireLLVMLowers(t, path)
 }
 
 // runSelfHostArtifactFailure executes the compiler and checks a failing diagnostic.
