@@ -187,28 +187,6 @@ func (v Value) String() string {
 	return v.objectString()
 }
 
-// KindString returns a stable diagnostic name for the runtime value category.
-func (v Value) KindString() string {
-	switch v.kind {
-	case kindVoid:
-		return "void"
-	case kindInt:
-		return "i64"
-	case kindBool:
-		return "bool"
-	case kindString:
-		return "[]const u8"
-	case kindStruct:
-		return "struct"
-	case kindArray:
-		return "array"
-	case kindRef:
-		return "borrow"
-	default:
-		return "value"
-	}
-}
-
 // scalarString formats primitive runtime values.
 func (v Value) scalarString() (string, bool) {
 	switch v.kind {

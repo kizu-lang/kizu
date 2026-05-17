@@ -110,7 +110,6 @@ type Checker struct {
 	enums         map[string]*enumType
 	unions        map[string]*unionType
 	contracts     map[string]*contractType
-	externalTypes map[string]bool
 	impls         map[string]map[string]*functionType
 	satisfactions map[string]map[string]bool
 	currentReturn Type
@@ -163,65 +162,8 @@ func New() *Checker {
 		enums:         map[string]*enumType{},
 		unions:        map[string]*unionType{},
 		contracts:     map[string]*contractType{},
-		externalTypes: map[string]bool{},
 		impls:         map[string]map[string]*functionType{},
 		satisfactions: map[string]map[string]bool{},
-	}
-}
-
-// WithExternalTypes allows package checks to reference imported public types.
-func (c *Checker) WithExternalTypes(names []string) *Checker {
-	for _, name := range names {
-		c.externalTypes[name] = true
-	}
-	return c
-}
-
-// WithExternalDecls exposes imported public declarations to package module checks.
-func (c *Checker) WithExternalDecls(decls map[string]ast.Decl) *Checker {
-	for name, decl := range decls {
-		if _, ok := publicExternalTypeName(decl); ok {
-			c.externalTypes[name] = true
-		}
-	}
-	for _, decl := range decls {
-		c.addExternalDecl(decl)
-	}
-	return c
-}
-
-// publicExternalTypeName returns the name for a type declaration.
-func publicExternalTypeName(decl ast.Decl) (string, bool) {
-	switch d := decl.(type) {
-	case *ast.StructDecl:
-		return d.Name, true
-	case *ast.EnumDecl:
-		return d.Name, true
-	case *ast.UnionDecl:
-		return d.Name, true
-	case *ast.ContractDecl:
-		return d.Name, true
-	default:
-		return "", false
-	}
-}
-
-// addExternalDecl registers one imported public declaration.
-func (c *Checker) addExternalDecl(decl ast.Decl) {
-	switch d := decl.(type) {
-	case *ast.StructDecl:
-		c.structs[d.Name] = d
-	case *ast.EnumDecl:
-		enum := &enumType{name: d.Name, tags: map[string]bool{}, public: true}
-		for _, tag := range d.Tags {
-			enum.tags[tag] = true
-		}
-		c.enums[d.Name] = enum
-	case *ast.FunctionDecl:
-		fn, err := c.newFunctionType(d)
-		if err == nil {
-			c.functions[d.Name] = fn
-		}
 	}
 }
 
@@ -622,9 +564,6 @@ func (c *Checker) parseType(name string) (Type, error) {
 	}
 	typ := Type(name)
 	if typ == typeSelf {
-		return typ, nil
-	}
-	if c.externalTypes[name] {
 		return typ, nil
 	}
 	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil &&
@@ -1582,7 +1521,13 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type
 // checkCallExpr validates builtin and user function calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		return c.checkFieldCallExpr(field, expr.Args, env, unsafe)
+		if typ, ok, err := c.checkUnionConstructorCall(field, expr.Args, env, unsafe); ok || err != nil {
+			return typ, err
+		}
+		if typ, ok, err := c.checkQualifiedBuiltin(field, expr.Args, env, unsafe); ok || err != nil {
+			return typ, err
+		}
+		return c.checkMethodCallExpr(field, expr.Args, env, unsafe)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
 		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env, unsafe)
@@ -1610,43 +1555,6 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 		return "", fmt.Errorf("type error: use `std::task::Group(io)`")
 	}
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
-}
-
-// checkFieldCallExpr validates calls whose callee is a field expression.
-func (c *Checker) checkFieldCallExpr(
-	field *ast.FieldExpr,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, error) {
-	if typ, ok, err := c.checkUnionConstructorCall(field, args, env, unsafe); ok || err != nil {
-		return typ, err
-	}
-	if typ, ok, err := c.checkExternalFunctionCall(field, args, env, unsafe); ok || err != nil {
-		return typ, err
-	}
-	if typ, ok, err := c.checkQualifiedBuiltin(field, args, env, unsafe); ok || err != nil {
-		return typ, err
-	}
-	return c.checkMethodCallExpr(field, args, env, unsafe)
-}
-
-// checkExternalFunctionCall validates an imported public function call.
-func (c *Checker) checkExternalFunctionCall(
-	field *ast.FieldExpr,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	name, ok := namespaceName(field)
-	if !ok {
-		return "", false, nil
-	}
-	if c.functions[name] == nil {
-		return "", false, nil
-	}
-	typ, err := c.checkUserCall(name, args, env, unsafe)
-	return typ, true, err
 }
 
 // checkQualifiedBuiltin validates std:: namespace prototype calls.
@@ -2644,15 +2552,6 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 				unionType.name, expr.Name)
 		}
 		return Type(unionType.name), nil
-	}
-	name, ok := namespaceName(expr.Receiver)
-	if ok {
-		if enumType := c.enums[name]; enumType != nil {
-			if !enumType.tags[expr.Name] {
-				return "", fmt.Errorf("type error: unknown enum tag `%s::%s`", name, expr.Name)
-			}
-			return Type(name), nil
-		}
 	}
 	return "", fmt.Errorf("type error: unknown namespace `%s`", expr.Receiver.String())
 }
@@ -4141,15 +4040,6 @@ func qualifiedName(expr ast.Expression) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-// namespaceName renders a namespace chain using source-level :: separators.
-func namespaceName(expr ast.Expression) (string, bool) {
-	name, ok := qualifiedName(expr)
-	if !ok {
-		return "", false
-	}
-	return strings.ReplaceAll(name, ".", "::"), true
 }
 
 // dynContract extracts C from Dyn<C>.

@@ -43,13 +43,9 @@ run file="examples/hello.kizu":
 run-arg file="examples/std_io_process.kizu" arg="input.kizu":
     KIZU_TEST_ENV=env-ok go run ./cmd/kizu run {{file}} -- {{arg}}
 
-# Run a single Kizu test source or package component test target.
+# Run a single Kizu test source.
 kizu-test file="examples/std_testing.kizu":
     go run ./cmd/kizu test {{file}}
-
-# Run self-host package component tests.
-selfhost-test:
-    go run ./cmd/kizu test selfhost
 
 # Dump typed SSA IR for a Kizu file.
 ir file="examples/hello.kizu":
@@ -66,14 +62,6 @@ llvm file="examples/hello.kizu":
 # Emit LLVM IR from optimized typed SSA IR.
 llvm-opt file="examples/hello.kizu":
     go run ./cmd/kizu build --emit-llvm --opt {{file}}
-
-# Build a native macOS arm64 executable artifact.
-native file="examples/hello.kizu":
-    go run ./cmd/kizu build --target aarch64-apple-darwin {{file}}
-
-# Build a native macOS arm64 executable from optimized typed SSA IR.
-native-opt file="examples/hello.kizu":
-    go run ./cmd/kizu build --target aarch64-apple-darwin --opt {{file}}
 
 # Emit WASI WebAssembly text for a Kizu file.
 wasm file="examples/hello.kizu":
@@ -95,7 +83,7 @@ cache-status:
 cache-prune:
     go run ./cmd/kizu cache prune
 
-# Explain whether a file or package would rebuild.
+# Explain whether a file would rebuild.
 why file="examples/hello.kizu":
     go run ./cmd/kizu why-rebuild {{file}}
 
@@ -119,9 +107,6 @@ cache-smoke:
     trap 'rm -rf "$tmp"' EXIT; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --emit-llvm examples/hello.kizu >/dev/null; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu >/dev/null; \
-    if command -v llc >/dev/null && command -v ld64.lld >/dev/null; then \
-      KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu >/dev/null; \
-    fi; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --emit-llvm examples/hello.kizu >/dev/null; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu why-rebuild examples/hello.kizu; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu cache status; \

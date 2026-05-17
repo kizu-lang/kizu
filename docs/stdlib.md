@@ -70,72 +70,32 @@ behavior whenever possible.
 | `std::sync` | `Mutex<T>` | shared mutable state primitive and copy-value restrictions | trusted primitive; safe wrapper remains Kizu-facing |
 | `std::atomic` | `Atomic<T>` | atomic storage, seq_cst operations, supported type set | trusted primitive; ordering API should be designed before expanding |
 
-## Lexer Dependency Gate
+## Source Layout Target
 
-The self-host lexer may depend on this v0.2 stdlib surface before it is ported
-from Go to `selfhost/src/lexer.kizu`:
-
-- source buffers are `[]const u8`
-- string literals remain `[]const u8`, not primitive `string`
-- byte scanning uses `std::mem::len`, `std::mem::byte_at`,
-  `std::mem::equal_bytes`, `std::mem::starts_with`, `std::mem::slice`, and
-  `std::mem::trim_ascii`
-- token streams use `std::array::Array<token::Token>` with an explicit
-  `std::mem::page_allocator()` allocator
-- recoverable lexer failures use `!T`
-- not-found lookups use `?T`
-- token stream cleanup uses explicit `deinit`
-- `Array<Token>` must keep the existing borrow and cleanup rules: append, set,
-  and deinit are rejected while an element borrow is live; deinit moves the
-  array; `get` remains copy-only; non-copy token values are read through
-  `at` / `at_mut`
-
-The conformance suite already includes negative cases for Array use after
-`deinit`, append/set/deinit while borrowed, read while mutably borrowed,
-copy-only `get`, non-copy moves, and rejected raw pointer / handle / nested
-array / map / concurrency capability element types. New lexer work must reuse
-those cases instead of weakening Array rules for compiler convenience.
-
-## Source Layout
-
-The Kizu-written stdlib skeleton lives under `std/`:
+The eventual Kizu-written stdlib should live under `std/`:
 
 ```text
 std/
   kizu.toml
-  README.md
   src/
-    mod.kizu
     mem.kizu
+    array.kizu
+    string.kizu
+    map.kizu
+    testing.kizu
+    fs.kizu
     path.kizu
     io.kizu
     process.kizu
-    testing.kizu
+    task.kizu
+    channel.kizu
+    thread.kizu
+    sync.kizu
+    atomic.kizu
 ```
 
 The compiler still reserves the root namespace `std`. User packages cannot be
-named `std`. The compiler may load `std/kizu.toml` through the explicit
-compiler-owned std path; normal user manifest parsing still rejects the package
-name.
-
-The v0.3 std sources are declaration skeletons. They define the public wrapper
-surface and primitive ABI boundary, while runtime behavior remains in the
-current Go builtins. `std::mem` and `std::path` are the first pure-helper
-migration candidates because they do not need hidden runtime state.
-
-Current skeleton modules:
-
-- `std::mem`: allocator marker plus byte/slice helper primitive boundary
-- `std::path`: pure path helper primitive boundary
-- `std::io`: explicit `Io` capability constructors and host I/O boundary
-- `std::process`: explicit argv/env/exit boundary
-- `std::testing`: assertion helper boundary
-
-The skeleton is intentionally checkable:
-
-```sh
-go run ./cmd/kizu check std
-```
+named `std`.
 
 ## Acceptance Rules For New Std APIs
 

@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -36,475 +35,6 @@ func TestEmitSnapshots(t *testing.T) {
 				t.Fatalf("got:\n%s\nwant:\n%s", got, tt.want)
 			}
 		})
-	}
-}
-
-// TestEmitNativeStructAndArrayLowering checks the native selfhost layout blockers.
-func TestEmitNativeStructAndArrayLowering(t *testing.T) {
-	got, err := Emit(nativeStructArrayModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	for _, want := range []string{
-		"%struct.Token = type { ptr }",
-		"call ptr @malloc(i64 8)",
-		"call ptr @kizu_array_new()",
-		"call void @kizu_array_append",
-		"call ptr @kizu_array_at",
-		"getelementptr inbounds %struct.Token",
-		"load ptr",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("LLVM output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// TestEmitNativeTransparentAliases checks try and borrow define concrete SSA values.
-func TestEmitNativeTransparentAliases(t *testing.T) {
-	got, err := Emit(nativeAliasModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	for _, want := range []string{
-		"define i64 @count()",
-		"%v2 = add i64 %v1, 0",
-		"%v4 = select i1 true, ptr %v3, ptr null",
-		"call i1 @uses_ref(ptr %v4)",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("LLVM output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// TestEmitNativeUnaryMinus checks signed sentinel values stay negative.
-func TestEmitNativeUnaryMinus(t *testing.T) {
-	got, err := Emit(nativeUnaryMinusModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	if !strings.Contains(got, "%v2 = sub i64 0, 1") {
-		t.Fatalf("LLVM output missing unary minus:\n%s", got)
-	}
-}
-
-// TestEmitNativeWriteFile checks !void host calls can be tried without SSA.
-func TestEmitNativeWriteFile(t *testing.T) {
-	got, err := Emit(nativeWriteFileModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	for _, want := range []string{
-		"declare ptr @kizu_write_file(ptr, ptr)",
-		"call ptr @kizu_write_file(ptr %v1, ptr %v2)",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("LLVM output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// TestEmitNativeErrorReturn checks error(...) produces a non-null sentinel.
-func TestEmitNativeErrorReturn(t *testing.T) {
-	got, err := Emit(nativeErrorReturnModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	if !strings.Contains(got, "ret ptr inttoptr (i64 1 to ptr)") {
-		t.Fatalf("LLVM output missing error sentinel:\n%s", got)
-	}
-}
-
-// TestEmitNativeScalarErrorReturn checks scalar error unions remain well typed.
-func TestEmitNativeScalarErrorReturn(t *testing.T) {
-	got, err := Emit(nativeScalarErrorReturnModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	if !strings.Contains(got, "ret i1 false") {
-		t.Fatalf("LLVM output missing scalar error fallback:\n%s", got)
-	}
-}
-
-// TestEmitNativeScalarErrorOkReturn checks !bool success values are preserved.
-func TestEmitNativeScalarErrorOkReturn(t *testing.T) {
-	got, err := Emit(nativeScalarErrorOkReturnModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	if !strings.Contains(got, "ret i1 true") {
-		t.Fatalf("LLVM output missing scalar success payload:\n%s", got)
-	}
-}
-
-// TestEmitNativeFilesystemCapabilities checks filesystem calls lower concretely.
-func TestEmitNativeFilesystemCapabilities(t *testing.T) {
-	got, err := Emit(nativeFilesystemModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	for _, want := range []string{
-		"%struct.std__fs__Metadata = type { i64, i1 }",
-		"declare ptr @kizu_file_metadata(ptr)",
-		"call ptr @kizu_file_metadata",
-		"call ptr @kizu_create_dir",
-		"call ptr @kizu_remove_dir",
-		"call ptr @kizu_remove_file",
-		"getelementptr inbounds %struct.std__fs__Metadata",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("LLVM output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// TestEmitNativePathCapabilities checks all v0.2 path helpers have native ABIs.
-func TestEmitNativePathCapabilities(t *testing.T) {
-	got, err := Emit(nativePathModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	for _, want := range []string{
-		"call ptr @kizu_path_join",
-		"call ptr @kizu_path_clean",
-		"call ptr @kizu_path_basename",
-		"call ptr @kizu_path_dirname",
-		"call ptr @kizu_path_extension",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("LLVM output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// TestEmitNativeStringCapabilities checks owned String calls lower concretely.
-func TestEmitNativeStringCapabilities(t *testing.T) {
-	got, err := Emit(nativeStringModule())
-	if err != nil {
-		t.Fatalf("emit failed: %v", err)
-	}
-	for _, want := range []string{
-		"declare ptr @kizu_string_new()",
-		"call ptr @kizu_string_new()",
-		"call ptr @kizu_string_append_bytes",
-		"call ptr @kizu_string_as_bytes",
-		"call void @kizu_string_deinit",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("LLVM output missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// nativeFilesystemModule returns the host filesystem calls needed by selfhost.
-func nativeFilesystemModule() *ir.Module {
-	return &ir.Module{
-		Structs: map[string]ir.Struct{
-			"std::fs::Metadata": {
-				Name: "std::fs::Metadata",
-				Fields: []ir.Field{
-					{Name: "size", Type: "i64"},
-					{Name: "is_dir", Type: "bool"},
-				},
-			},
-		},
-		Functions: []*ir.Function{nativeFilesystemMainFunction()},
-	}
-}
-
-// nativeFilesystemMainFunction returns a filesystem-capability lowering shape.
-func nativeFilesystemMainFunction() *ir.Function {
-	return &ir.Function{Name: "main", Return: "void", Blocks: []*ir.Block{{Name: "entry",
-		Instrs: []*ir.Instr{
-			{Result: ir.Value{Name: "%1", Type: "[]const u8"},
-				Op: "const", Immediate: "\"examples/fixtures/config.txt\""},
-			{Result: ir.Value{Name: "%2", Type: "!std::fs::Metadata"},
-				Op:   "call.std.fs.metadata",
-				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%1", Type: "[]const u8"}}},
-			{Result: ir.Value{Name: "%3", Type: "std::fs::Metadata"},
-				Op: "error.try", Args: []ir.Value{{Name: "%2", Type: "!std::fs::Metadata"}}},
-			{Result: ir.Value{Name: "%4", Type: "i64"}, Op: "field.size",
-				Args: []ir.Value{{Name: "%3", Type: "std::fs::Metadata"}}},
-			{Result: ir.Value{Name: "%5", Type: "[]const u8"},
-				Op: "const", Immediate: "\"target/native-fs\""},
-			{Result: ir.Value{Name: "%6", Type: "!void"}, Op: "call.std.fs.create_dir",
-				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%5", Type: "[]const u8"}}},
-			{Result: ir.Value{Name: "%7", Type: "!void"}, Op: "call.std.fs.remove_dir",
-				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%5", Type: "[]const u8"}}},
-			{Result: ir.Value{Name: "%8", Type: "!void"}, Op: "call.std.fs.remove_file",
-				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%5", Type: "[]const u8"}}},
-		},
-		Terminator: ir.Terminator{Op: "return"},
-	}}}
-}
-
-// nativePathModule returns all native path helper lowering shapes.
-func nativePathModule() *ir.Module {
-	return &ir.Module{Functions: []*ir.Function{{Name: "main", Return: "void",
-		Blocks: []*ir.Block{{Name: "entry", Instrs: nativePathInstrs(),
-			Terminator: ir.Terminator{Op: "return"}}}}}}
-}
-
-// nativeStringModule returns the owned String calls needed by selfhost output.
-func nativeStringModule() *ir.Module {
-	return &ir.Module{Functions: []*ir.Function{{Name: "main", Return: "void",
-		Blocks: []*ir.Block{{Name: "entry", Instrs: nativeStringInstrs(),
-			Terminator: ir.Terminator{Op: "return"}}}}}}
-}
-
-// nativeStringInstrs returns constructor, append, view, and deinit calls.
-func nativeStringInstrs() []*ir.Instr {
-	return []*ir.Instr{
-		{Result: ir.Value{Name: "%1", Type: "Allocator"}, Op: "call.std.mem.page_allocator"},
-		{Result: ir.Value{Name: "%2", Type: "std::string::String"},
-			Op: "call.std.string.String", Args: []ir.Value{{Name: "%1", Type: "Allocator"}}},
-		{Result: ir.Value{Name: "%3", Type: "[]const u8"},
-			Op: "const", Immediate: "\"hello\""},
-		{Result: ir.Value{Name: "%4", Type: "!void"}, Op: "method.append_bytes",
-			Args: []ir.Value{
-				{Name: "%2", Type: "std::string::String"},
-				{Name: "%3", Type: "[]const u8"},
-			}},
-		{Result: ir.Value{Name: "%5", Type: "[]const u8"}, Op: "method.as_bytes",
-			Args: []ir.Value{{Name: "%2", Type: "std::string::String"}}},
-		{Result: ir.Value{Name: "%6", Type: "void"}, Op: "method.deinit",
-			Args: []ir.Value{{Name: "%2", Type: "std::string::String"}}},
-	}
-}
-
-// nativePathInstrs returns calls for every v0.2 path helper.
-func nativePathInstrs() []*ir.Instr {
-	return []*ir.Instr{
-		{Result: ir.Value{Name: "%1", Type: "[]const u8"},
-			Op: "const", Immediate: "\"examples\""},
-		{Result: ir.Value{Name: "%2", Type: "[]const u8"},
-			Op: "const", Immediate: "\"fixtures/config.txt\""},
-		{Result: ir.Value{Name: "%3", Type: "[]const u8"}, Op: "call.std.path.join",
-			Args: []ir.Value{{Name: "%1", Type: "[]const u8"}, {Name: "%2", Type: "[]const u8"}}},
-		{Result: ir.Value{Name: "%4", Type: "[]const u8"}, Op: "call.std.path.clean",
-			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
-		{Result: ir.Value{Name: "%5", Type: "[]const u8"}, Op: "call.std.path.basename",
-			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
-		{Result: ir.Value{Name: "%6", Type: "[]const u8"}, Op: "call.std.path.dirname",
-			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
-		{Result: ir.Value{Name: "%7", Type: "[]const u8"}, Op: "call.std.path.extension",
-			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
-	}
-}
-
-// nativeAliasModule returns scalar error-union and borrow alias operations.
-func nativeAliasModule() *ir.Module {
-	return &ir.Module{
-		Structs: map[string]ir.Struct{
-			"Token": {Name: "Token"},
-		},
-		Functions: []*ir.Function{
-			{
-				Name: "count", Return: "!i64",
-				Blocks: []*ir.Block{{Name: "entry",
-					Instrs: []*ir.Instr{{Result: ir.Value{Name: "%1", Type: "i64"},
-						Op: "const", Immediate: "3"}},
-					Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%1", Type: "i64"}},
-				}},
-			},
-			nativeAliasMainFunction(),
-			{Name: "uses_ref", Return: "bool", Params: []ir.Value{{Name: "%arg", Type: "Token"}}},
-		}}
-}
-
-// nativeUnaryMinusModule returns the sentinel shape used by manifest parsing.
-func nativeUnaryMinusModule() *ir.Module {
-	return &ir.Module{
-		Functions: []*ir.Function{
-			{
-				Name: "missing", Return: "i64",
-				Blocks: []*ir.Block{{Name: "entry",
-					Instrs: []*ir.Instr{
-						{Result: ir.Value{Name: "%1", Type: "i64"}, Op: "const", Immediate: "1"},
-						{Result: ir.Value{Name: "%2", Type: "i64"}, Op: "unary.-",
-							Args: []ir.Value{{Name: "%1", Type: "i64"}}},
-					},
-					Terminator: ir.Terminator{
-						Op:    "return",
-						Value: ir.Value{Name: "%2", Type: "i64"},
-					},
-				}},
-			},
-		},
-	}
-}
-
-// nativeWriteFileModule returns a std::fs::write_file and try-void shape.
-func nativeWriteFileModule() *ir.Module {
-	return &ir.Module{
-		Functions: []*ir.Function{
-			{
-				Name: "main", Return: "void",
-				Blocks: []*ir.Block{{Name: "entry",
-					Instrs: []*ir.Instr{
-						{Result: ir.Value{Name: "%1", Type: "[]const u8"},
-							Op: "const", Immediate: "\"target/native-write.txt\""},
-						{Result: ir.Value{Name: "%2", Type: "[]const u8"},
-							Op: "const", Immediate: "\"hello\""},
-						{Result: ir.Value{Name: "%3", Type: "!void"}, Op: "call.std.fs.write_file",
-							Args: []ir.Value{
-								{Name: "%io", Type: "Io"},
-								{Name: "%1", Type: "[]const u8"},
-								{Name: "%2", Type: "[]const u8"},
-							}},
-						{Result: ir.Value{Name: "%4", Type: "void"}, Op: "error.try",
-							Args: []ir.Value{{Name: "%3", Type: "!void"}}},
-					},
-					Terminator: ir.Terminator{Op: "return"},
-				},
-				},
-			},
-		},
-	}
-}
-
-// nativeErrorReturnModule returns the minimal error-union return shape.
-func nativeErrorReturnModule() *ir.Module {
-	return &ir.Module{
-		Functions: []*ir.Function{
-			{
-				Name: "main", Return: "!void",
-				Blocks: []*ir.Block{{Name: "entry",
-					Instrs: []*ir.Instr{
-						{Result: ir.Value{Name: "%1", Type: "!void"}, Op: "error.error"},
-					},
-					Terminator: ir.Terminator{Op: "return",
-						Value: ir.Value{Name: "%1", Type: "!void"}},
-				}},
-			},
-		},
-	}
-}
-
-// nativeScalarErrorReturnModule returns an error-union scalar return shape.
-func nativeScalarErrorReturnModule() *ir.Module {
-	return &ir.Module{
-		Functions: []*ir.Function{
-			{
-				Name: "has_marker", Return: "!bool",
-				Blocks: []*ir.Block{{Name: "entry",
-					Instrs: []*ir.Instr{
-						{Result: ir.Value{Name: "%1", Type: "!bool"}, Op: "error.error"},
-					},
-					Terminator: ir.Terminator{Op: "return",
-						Value: ir.Value{Name: "%1", Type: "!bool"}},
-				}},
-			},
-		},
-	}
-}
-
-// nativeScalarErrorOkReturnModule returns a scalar error-union success shape.
-func nativeScalarErrorOkReturnModule() *ir.Module {
-	return &ir.Module{
-		Functions: []*ir.Function{
-			{
-				Name: "has_marker", Return: "!bool",
-				Blocks: []*ir.Block{{Name: "entry",
-					Instrs: []*ir.Instr{
-						{Result: ir.Value{Name: "%1", Type: "bool"}, Op: "const", Immediate: "true"},
-						{Result: ir.Value{Name: "%2", Type: "!bool"}, Op: "error.ok",
-							Args: []ir.Value{{Name: "%1", Type: "bool"}}},
-					},
-					Terminator: ir.Terminator{Op: "return",
-						Value: ir.Value{Name: "%2", Type: "!bool"}},
-				}},
-			},
-		},
-	}
-}
-
-// nativeAliasMainFunction returns a function using try and borrow aliases.
-func nativeAliasMainFunction() *ir.Function {
-	return &ir.Function{Name: "main", Return: "void", Blocks: []*ir.Block{{Name: "entry",
-		Instrs: []*ir.Instr{
-			{Result: ir.Value{Name: "%1", Type: "!i64"}, Op: "call.count"},
-			{Result: ir.Value{Name: "%2", Type: "i64"}, Op: "error.try",
-				Args: []ir.Value{{Name: "%1", Type: "!i64"}}},
-			{Result: ir.Value{Name: "%3", Type: "Token"}, Op: "struct.new"},
-			{Result: ir.Value{Name: "%4", Type: "Token"}, Op: "unary.&",
-				Args: []ir.Value{{Name: "%3", Type: "Token"}}},
-			{Result: ir.Value{Name: "%5", Type: "bool"}, Op: "call.uses_ref",
-				Args: []ir.Value{{Name: "%4", Type: "Token"}}},
-		},
-		Terminator: ir.Terminator{Op: "return"},
-	}}}
-}
-
-// nativeStructArrayModule returns a minimal IR module for aggregate lowering.
-func nativeStructArrayModule() *ir.Module {
-	return &ir.Module{
-		Structs: map[string]ir.Struct{
-			"Token": {
-				Name: "Token",
-				Fields: []ir.Field{
-					{Name: "text", Type: "[]const u8"},
-				},
-			},
-		},
-		Functions: []*ir.Function{
-			{
-				Name:   "main",
-				Return: "void",
-				Blocks: []*ir.Block{
-					{
-						Name:       "entry",
-						Instrs:     nativeStructArrayInstrs(),
-						Terminator: ir.Terminator{Op: "return"},
-					},
-				},
-			},
-		},
-	}
-}
-
-// nativeStructArrayInstrs returns aggregate and array operations for one block.
-func nativeStructArrayInstrs() []*ir.Instr {
-	return []*ir.Instr{
-		{Result: ir.Value{Name: "%1", Type: "[]const u8"}, Op: "const", Immediate: `"let"`},
-		{
-			Result: ir.Value{Name: "%2", Type: "Token"},
-			Op:     "struct.new",
-			Fields: []ir.FieldArg{
-				{Name: "text", Value: ir.Value{Name: "%1", Type: "[]const u8"}},
-			},
-		},
-		{Result: ir.Value{Name: "%3", Type: "std.array.Array<Token>"},
-			Op: "call.std.array.Array<Token>"},
-		{
-			Result: ir.Value{Name: "%4", Type: "!void"},
-			Op:     "method.append",
-			Args: []ir.Value{
-				{Name: "%3", Type: "std.array.Array<Token>"},
-				{Name: "%2", Type: "Token"},
-			},
-		},
-		{Result: ir.Value{Name: "%5", Type: "i64"}, Op: "const", Immediate: "0"},
-		nativeArrayAtInstr(),
-		{Result: ir.Value{Name: "%7", Type: "Token"}, Op: "error.try",
-			Args: []ir.Value{{Name: "%6", Type: "!Token"}}},
-		{Result: ir.Value{Name: "%8", Type: "[]const u8"}, Op: "field.text",
-			Args: []ir.Value{{Name: "%7", Type: "Token"}}},
-		{Result: ir.Value{Name: "%9", Type: "void"}, Op: "call.print",
-			Args: []ir.Value{{Name: "%8", Type: "[]const u8"}}},
-	}
-}
-
-// nativeArrayAtInstr returns one Array.at instruction with receiver and index.
-func nativeArrayAtInstr() *ir.Instr {
-	return &ir.Instr{
-		Result: ir.Value{Name: "%6", Type: "!Token"},
-		Op:     "method.at",
-		Args: []ir.Value{
-			{Name: "%3", Type: "std.array.Array<Token>"},
-			{Name: "%5", Type: "i64"},
-		},
 	}
 }
 
@@ -564,87 +94,31 @@ const helloLLVM = `; Kizu LLVM IR
 @.str.0 = private unnamed_addr constant [12 x i8] c"hello, kizu\00"
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-declare i64 @kizu_process_arg_count()
-declare ptr @kizu_process_arg(i64)
-declare i1 @kizu_bytes_equal(ptr, ptr)
-declare i1 @kizu_bytes_starts_with(ptr, ptr)
-declare i64 @kizu_bytes_len(ptr)
-declare i8 @kizu_byte_at(ptr, i64)
-declare ptr @kizu_bytes_slice(ptr, i64, i64)
-declare ptr @kizu_read_file(ptr)
-declare ptr @kizu_write_file(ptr, ptr)
-declare i1 @kizu_file_exists(ptr)
-declare ptr @kizu_file_metadata(ptr)
-declare ptr @kizu_create_dir(ptr)
-declare ptr @kizu_remove_dir(ptr)
-declare ptr @kizu_remove_file(ptr)
-declare ptr @kizu_path_join(ptr, ptr)
-
-declare ptr @kizu_path_clean(ptr)
-declare ptr @kizu_path_basename(ptr)
-declare ptr @kizu_path_dirname(ptr)
-declare ptr @kizu_path_extension(ptr)
-
-declare ptr @malloc(i64)
-declare ptr @kizu_array_new()
-declare void @kizu_array_append(ptr, ptr)
-declare ptr @kizu_array_at(ptr, i64)
-declare i64 @kizu_array_len(ptr)
-
 define void @main() {
 entry:
-  %v1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %v1, i64 11)
+  %1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
+  call void @kizu_print_string(ptr %1, i64 11)
   ret void
 }`
 
 const functionsLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-declare i64 @kizu_process_arg_count()
-declare ptr @kizu_process_arg(i64)
-declare i1 @kizu_bytes_equal(ptr, ptr)
-declare i1 @kizu_bytes_starts_with(ptr, ptr)
-declare i64 @kizu_bytes_len(ptr)
-declare i8 @kizu_byte_at(ptr, i64)
-declare ptr @kizu_bytes_slice(ptr, i64, i64)
-declare ptr @kizu_read_file(ptr)
-declare ptr @kizu_write_file(ptr, ptr)
-declare i1 @kizu_file_exists(ptr)
-declare ptr @kizu_file_metadata(ptr)
-declare ptr @kizu_create_dir(ptr)
-declare ptr @kizu_remove_dir(ptr)
-declare ptr @kizu_remove_file(ptr)
-declare ptr @kizu_path_join(ptr, ptr)
-
-declare ptr @kizu_path_clean(ptr)
-declare ptr @kizu_path_basename(ptr)
-declare ptr @kizu_path_dirname(ptr)
-declare ptr @kizu_path_extension(ptr)
-
-declare ptr @malloc(i64)
-declare ptr @kizu_array_new()
-declare void @kizu_array_append(ptr, ptr)
-declare ptr @kizu_array_at(ptr, i64)
-declare i64 @kizu_array_len(ptr)
-
 define i64 @add(i64 %a, i64 %b) {
 entry:
-  %v1 = add i64 %a, %b
-  ret i64 %v1
+  %1 = add i64 %a, %b
+  ret i64 %1
 }
 
 define void @main() {
 entry:
-  %v3 = call i64 @add(i64 1, i64 2)
-  call void @kizu_print_int(i64 %v3)
+  %3 = call i64 @add(i64 1, i64 2)
+  call void @kizu_print_int(i64 %3)
   ret void
 }`
 
@@ -652,43 +126,15 @@ const variablesLLVM = `; Kizu LLVM IR
 @.str.0 = private unnamed_addr constant [6 x i8] c"alice\00"
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-declare i64 @kizu_process_arg_count()
-declare ptr @kizu_process_arg(i64)
-declare i1 @kizu_bytes_equal(ptr, ptr)
-declare i1 @kizu_bytes_starts_with(ptr, ptr)
-declare i64 @kizu_bytes_len(ptr)
-declare i8 @kizu_byte_at(ptr, i64)
-declare ptr @kizu_bytes_slice(ptr, i64, i64)
-declare ptr @kizu_read_file(ptr)
-declare ptr @kizu_write_file(ptr, ptr)
-declare i1 @kizu_file_exists(ptr)
-declare ptr @kizu_file_metadata(ptr)
-declare ptr @kizu_create_dir(ptr)
-declare ptr @kizu_remove_dir(ptr)
-declare ptr @kizu_remove_file(ptr)
-declare ptr @kizu_path_join(ptr, ptr)
-
-declare ptr @kizu_path_clean(ptr)
-declare ptr @kizu_path_basename(ptr)
-declare ptr @kizu_path_dirname(ptr)
-declare ptr @kizu_path_extension(ptr)
-
-declare ptr @malloc(i64)
-declare ptr @kizu_array_new()
-declare void @kizu_array_append(ptr, ptr)
-declare ptr @kizu_array_at(ptr, i64)
-declare i64 @kizu_array_len(ptr)
-
 define void @main() {
 entry:
-  %v1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-  %v4 = add i64 30, 1
-  call void @kizu_print_string(ptr %v1, i64 5)
-  call void @kizu_print_int(i64 %v4)
+  %1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %4 = add i64 30, 1
+  call void @kizu_print_string(ptr %1, i64 5)
+  call void @kizu_print_int(i64 %4)
   ret void
 }`
 
@@ -697,48 +143,20 @@ const ifLLVM = `; Kizu LLVM IR
 @.str.1 = private unnamed_addr constant [6 x i8] c"minor\00"
 
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-declare i64 @kizu_process_arg_count()
-declare ptr @kizu_process_arg(i64)
-declare i1 @kizu_bytes_equal(ptr, ptr)
-declare i1 @kizu_bytes_starts_with(ptr, ptr)
-declare i64 @kizu_bytes_len(ptr)
-declare i8 @kizu_byte_at(ptr, i64)
-declare ptr @kizu_bytes_slice(ptr, i64, i64)
-declare ptr @kizu_read_file(ptr)
-declare ptr @kizu_write_file(ptr, ptr)
-declare i1 @kizu_file_exists(ptr)
-declare ptr @kizu_file_metadata(ptr)
-declare ptr @kizu_create_dir(ptr)
-declare ptr @kizu_remove_dir(ptr)
-declare ptr @kizu_remove_file(ptr)
-declare ptr @kizu_path_join(ptr, ptr)
-
-declare ptr @kizu_path_clean(ptr)
-declare ptr @kizu_path_basename(ptr)
-declare ptr @kizu_path_dirname(ptr)
-declare ptr @kizu_path_extension(ptr)
-
-declare ptr @malloc(i64)
-declare ptr @kizu_array_new()
-declare void @kizu_array_append(ptr, ptr)
-declare ptr @kizu_array_at(ptr, i64)
-declare i64 @kizu_array_len(ptr)
-
 define void @main() {
 entry:
-  %v3 = icmp sge i64 20, 20
-  br i1 %v3, label %if.then.1, label %if.else.2
+  %3 = icmp sge i64 20, 20
+  br i1 %3, label %if.then.1, label %if.else.2
 if.then.1:
-  %v4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %v4, i64 5)
+  %4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  call void @kizu_print_string(ptr %4, i64 5)
   br label %if.end.3
 if.else.2:
-  %v6 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
-  call void @kizu_print_string(ptr %v6, i64 5)
+  %6 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+  call void @kizu_print_string(ptr %6, i64 5)
   br label %if.end.3
 if.end.3:
   ret void
@@ -746,47 +164,19 @@ if.end.3:
 
 const whileLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
-declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
-
-declare i64 @kizu_process_arg_count()
-declare ptr @kizu_process_arg(i64)
-declare i1 @kizu_bytes_equal(ptr, ptr)
-declare i1 @kizu_bytes_starts_with(ptr, ptr)
-declare i64 @kizu_bytes_len(ptr)
-declare i8 @kizu_byte_at(ptr, i64)
-declare ptr @kizu_bytes_slice(ptr, i64, i64)
-declare ptr @kizu_read_file(ptr)
-declare ptr @kizu_write_file(ptr, ptr)
-declare i1 @kizu_file_exists(ptr)
-declare ptr @kizu_file_metadata(ptr)
-declare ptr @kizu_create_dir(ptr)
-declare ptr @kizu_remove_dir(ptr)
-declare ptr @kizu_remove_file(ptr)
-declare ptr @kizu_path_join(ptr, ptr)
-
-declare ptr @kizu_path_clean(ptr)
-declare ptr @kizu_path_basename(ptr)
-declare ptr @kizu_path_dirname(ptr)
-declare ptr @kizu_path_extension(ptr)
-
-declare ptr @malloc(i64)
-declare ptr @kizu_array_new()
-declare void @kizu_array_append(ptr, ptr)
-declare ptr @kizu_array_at(ptr, i64)
-declare i64 @kizu_array_len(ptr)
 
 define void @main() {
 entry:
   br label %while.header.1
 while.header.1:
-  %v2 = phi i64 [ 0, %entry ], [ %v7, %while.body.2 ]
-  %v4 = icmp slt i64 %v2, 3
-  br i1 %v4, label %while.body.2, label %while.end.3
+  %2 = phi i64 [ 0, %entry ], [ %7, %while.body.2 ]
+  %4 = icmp slt i64 %2, 3
+  br i1 %4, label %while.body.2, label %while.end.3
 while.body.2:
-  call void @kizu_print_int(i64 %v2)
-  %v7 = add i64 %v2, 1
+  call void @kizu_print_int(i64 %2)
+  %7 = add i64 %2, 1
   br label %while.header.1
 while.end.3:
   ret void

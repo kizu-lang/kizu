@@ -2,8 +2,6 @@ package ir
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -18,7 +16,6 @@ type lowerer struct {
 	program    *ast.Program
 	module     *Module
 	signatures map[string]Signature
-	enumTags   map[string]map[string]int
 	current    *Function
 	block      *Block
 	env        map[string]Value
@@ -39,18 +36,6 @@ func newLowerer(program *ast.Program) *lowerer {
 		program:    program,
 		module:     &Module{Structs: map[string]Struct{}},
 		signatures: map[string]Signature{},
-		enumTags:   map[string]map[string]int{},
-	}
-}
-
-// addBuiltinStructs records concrete layouts for host capability return values.
-func addBuiltinStructs(module *Module) {
-	module.Structs["std::fs::Metadata"] = Struct{
-		Name: "std::fs::Metadata",
-		Fields: []Field{
-			{Name: "size", Type: "i64"},
-			{Name: "is_dir", Type: "bool"},
-		},
 	}
 }
 
@@ -77,59 +62,42 @@ func (l *lowerer) lower() (*Module, error) {
 // collectDecls records signatures and struct layouts.
 func (l *lowerer) collectDecls() {
 	for _, decl := range l.program.Decls {
-		if d, ok := decl.(*ast.EnumDecl); ok {
-			l.collectEnum(d)
-		}
-	}
-	for _, decl := range l.program.Decls {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
-			l.module.Structs[d.Name] = l.lowerStruct(d)
+			l.module.Structs[d.Name] = lowerStruct(d)
 		case *ast.FunctionDecl:
-			l.signatures[d.Name] = l.lowerSignature(d)
+			l.signatures[d.Name] = lowerSignature(d)
 		}
 	}
 }
 
 // lowerStruct converts an AST struct declaration to IR metadata.
-func (l *lowerer) lowerStruct(decl *ast.StructDecl) Struct {
+func lowerStruct(decl *ast.StructDecl) Struct {
 	fields := make([]Field, 0, len(decl.Fields))
 	for _, field := range decl.Fields {
-		fields = append(fields, Field{Name: field.Name, Type: l.lowerType(field.TypeName)})
+		fields = append(fields, Field{Name: field.Name, Type: field.TypeName})
 	}
 	return Struct{Name: decl.Name, Fields: fields}
 }
 
-// collectEnum records stable integer tags for one enum declaration.
-func (l *lowerer) collectEnum(decl *ast.EnumDecl) {
-	tags := map[string]int{}
-	for index, tag := range decl.Tags {
-		tags[tag] = index
-	}
-	l.enumTags[decl.Name] = tags
-	if idx := strings.LastIndex(decl.Name, "."); idx >= 0 && idx < len(decl.Name)-1 {
-		l.enumTags[decl.Name[idx+1:]] = tags
-	}
-}
-
 // lowerSignature extracts the callable type of a function declaration.
-func (l *lowerer) lowerSignature(fn *ast.FunctionDecl) Signature {
+func lowerSignature(fn *ast.FunctionDecl) Signature {
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, l.lowerType(param.TypeName))
+		params = append(params, param.TypeName)
 	}
-	return Signature{Params: params, Return: l.lowerReturnType(fn.ReturnType)}
+	return Signature{Params: params, Return: returnType(fn.ReturnType)}
 }
 
 // lowerFunction lowers one function into SSA blocks.
 func (l *lowerer) lowerFunction(fn *ast.FunctionDecl) (*Function, error) {
-	l.current = &Function{Name: fn.Name, Return: l.lowerReturnType(fn.ReturnType)}
+	l.current = &Function{Name: fn.Name, Return: returnType(fn.ReturnType)}
 	l.env = map[string]Value{}
 	l.nextValue = 0
 	l.nextBlock = 0
 	l.loops = nil
 	for _, param := range fn.Params {
-		value := Value{Name: "%" + param.Name, Type: l.lowerType(param.TypeName)}
+		value := Value{Name: "%" + param.Name, Type: param.TypeName}
 		l.current.Params = append(l.current.Params, value)
 		l.env[param.Name] = value
 	}
@@ -164,14 +132,18 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		l.env[s.Name] = value
 		return err
 	case *ast.AssignStmt:
-		return l.lowerAssignStmt(s)
+		value, err := l.lowerExpr(s.Value)
+		if ident, ok := s.Target.(*ast.IdentExpr); ok {
+			l.env[ident.Name] = value
+		}
+		return err
 	case *ast.ReturnStmt:
 		if s.Value == nil {
 			l.block.Terminator = Terminator{Op: "return", Value: Value{Name: "void", Type: "void"}}
 			return nil
 		}
 		value, err := l.lowerExpr(s.Value)
-		l.block.Terminator = Terminator{Op: "return", Value: l.returnValue(value)}
+		l.block.Terminator = Terminator{Op: "return", Value: value}
 		return err
 	case *ast.ExprStmt:
 		_, err := l.lowerExpr(s.Expr)
@@ -193,30 +165,6 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
 	}
-}
-
-// lowerAssignStmt lowers variable and field assignment targets.
-func (l *lowerer) lowerAssignStmt(stmt *ast.AssignStmt) error {
-	value, err := l.lowerExpr(stmt.Value)
-	if err != nil {
-		return err
-	}
-	if ident, ok := stmt.Target.(*ast.IdentExpr); ok {
-		l.env[ident.Name] = value
-		return nil
-	}
-	if field, ok := stmt.Target.(*ast.FieldExpr); ok {
-		return l.lowerFieldAssignStmt(field, value)
-	}
-	return nil
-}
-
-// returnValue wraps a successful !void return in an opaque error-union value.
-func (l *lowerer) returnValue(value Value) Value {
-	if strings.HasPrefix(l.current.Return, "!") && value.Type == "void" {
-		return l.emit("error.ok", l.current.Return, nil, "")
-	}
-	return value
 }
 
 // lowerExpr lowers an expression and returns its typed SSA value.
@@ -276,27 +224,7 @@ func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	if expr.Name == "void" {
 		return Value{Name: "void", Type: "void"}, nil
 	}
-	if typ, ok := namespaceConstType(expr.Name); ok {
-		if value, found := l.lowerEnumIdent(expr.Name, typ); found {
-			return value, nil
-		}
-		return l.emitConst(typ, expr.Name), nil
-	}
 	return Value{}, fmt.Errorf("ir error: undefined value `%s`", expr.Name)
-}
-
-// lowerEnumIdent lowers a flattened Enum.Tag identifier to a stable tag value.
-func (l *lowerer) lowerEnumIdent(name string, typ string) (Value, bool) {
-	tags, ok := l.enumTags[strings.ReplaceAll(typ, "::", ".")]
-	if !ok {
-		return Value{}, false
-	}
-	tag := name[strings.LastIndex(name, ".")+1:]
-	index, ok := tags[tag]
-	if !ok {
-		return Value{}, false
-	}
-	return l.emitConst("i64", strconv.Itoa(index)), true
 }
 
 // lowerCastExpr lowers an explicit cast as a typed conversion instruction.
@@ -335,13 +263,7 @@ func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 // lowerCallExpr lowers builtin, user, and method calls.
 func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		if field.Namespace {
-			return l.lowerNamespaceCallExpr(field, expr.Args)
-		}
 		return l.lowerMethodCallExpr(field, expr.Args)
-	}
-	if applied, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
-		return l.lowerTypeApplyCallExpr(applied, expr.Args)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
@@ -357,52 +279,8 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	ret := "void"
 	if sig, ok := l.signatures[name.Name]; ok {
 		ret = sig.Return
-	} else if builtin, ok := builtinReturnType(name.Name, args); ok {
-		ret = builtin
-	}
-	if strings.Contains(ret, "std::fs::Metadata") {
-		addBuiltinStructs(l.module)
 	}
 	return l.emit("call."+name.Name, ret, args, ""), nil
-}
-
-// lowerNamespaceCallExpr lowers calls written with `::` namespace lookup.
-func (l *lowerer) lowerNamespaceCallExpr(
-	field *ast.FieldExpr,
-	args []ast.Expression,
-) (Value, error) {
-	name := namespacePath(field)
-	loweredArgs, err := l.lowerArgs(args)
-	if err != nil {
-		return Value{}, err
-	}
-	ret := "void"
-	if sig, ok := l.signatures[name]; ok {
-		ret = sig.Return
-	} else if builtin, ok := builtinReturnType(name, loweredArgs); ok {
-		ret = builtin
-	}
-	if strings.Contains(ret, "std::fs::Metadata") {
-		addBuiltinStructs(l.module)
-	}
-	return l.emit("call."+name, ret, loweredArgs, ""), nil
-}
-
-// lowerTypeApplyCallExpr lowers generic-looking std constructors.
-func (l *lowerer) lowerTypeApplyCallExpr(
-	expr *ast.TypeApplyExpr,
-	args []ast.Expression,
-) (Value, error) {
-	name, ok := expr.Callee.(*ast.IdentExpr)
-	if !ok {
-		return Value{}, fmt.Errorf("ir error: type constructor must be a namespace name")
-	}
-	loweredArgs, err := l.lowerArgs(args)
-	if err != nil {
-		return Value{}, err
-	}
-	ret := fmt.Sprintf("%s<%s>", name.Name, expr.TypeArg)
-	return l.emit("call."+ret, ret, loweredArgs, ""), nil
 }
 
 // lowerTryExpr lowers error-union propagation as an explicit IR instruction.
@@ -433,20 +311,6 @@ func (l *lowerer) lowerMethodCallExpr(
 		return l.emit("arena.add", handleType(receiver.Type), allArgs, ""), nil
 	case "get":
 		return l.emit("arena.get", arenaElementType(receiver.Type), allArgs, ""), nil
-	case "append_bytes":
-		return l.emit("method.append_bytes", "!void", allArgs, ""), nil
-	case "append_byte":
-		return l.emit("method.append_byte", "!void", allArgs, ""), nil
-	case "as_bytes":
-		return l.emit("method.as_bytes", "[]const u8", allArgs, ""), nil
-	case "deinit":
-		return l.emit("method.deinit", "void", allArgs, ""), nil
-	case "append":
-		return l.emit("method.append", "!void", allArgs, ""), nil
-	case "at":
-		return l.emit("method.at", "!"+containerElementType(receiver.Type), allArgs, ""), nil
-	case "len":
-		return l.emit("method.len", "i64", allArgs, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
 	}
@@ -462,83 +326,19 @@ func (l *lowerer) lowerStructLiteralExpr(expr *ast.StructLiteralExpr) (Value, er
 		}
 		fields = append(fields, FieldArg{Name: field.Name, Value: value})
 	}
-	instr := &Instr{Result: l.next(l.lowerType(expr.TypeName)), Op: "struct.new", Fields: fields}
+	instr := &Instr{Result: l.next(expr.TypeName), Op: "struct.new", Fields: fields}
 	l.block.Instrs = append(l.block.Instrs, instr)
 	return instr.Result, nil
 }
 
 // lowerFieldExpr lowers struct field reads.
 func (l *lowerer) lowerFieldExpr(expr *ast.FieldExpr) (Value, error) {
-	if expr.Namespace {
-		if value, ok := l.lowerEnumTag(expr); ok {
-			return value, nil
-		}
-	}
 	receiver, err := l.lowerExpr(expr.Receiver)
 	if err != nil {
 		return Value{}, err
 	}
-	if receiver.Type == "std::fs::Metadata" {
-		addBuiltinStructs(l.module)
-	}
 	fieldType := l.fieldType(receiver.Type, expr.Name)
 	return l.emit("field."+expr.Name, fieldType, []Value{receiver}, ""), nil
-}
-
-// lowerEnumTag lowers Enum::Tag namespace constants to stable i64 values.
-func (l *lowerer) lowerEnumTag(expr *ast.FieldExpr) (Value, bool) {
-	name := namespacePath(expr.Receiver)
-	tags, ok := l.enumTags[name]
-	if !ok {
-		return Value{}, false
-	}
-	index, ok := tags[expr.Name]
-	if !ok {
-		return Value{}, false
-	}
-	return l.emitConst("i64", strconv.Itoa(index)), true
-}
-
-// namespacePath returns a flattened namespace path used after package lowering.
-func namespacePath(expr ast.Expression) string {
-	switch e := expr.(type) {
-	case *ast.IdentExpr:
-		return strings.ReplaceAll(e.Name, "::", ".")
-	case *ast.FieldExpr:
-		if e.Namespace {
-			return namespacePath(e.Receiver) + "." + e.Name
-		}
-	}
-	return strings.ReplaceAll(expr.String(), "::", ".")
-}
-
-// lowerType maps checked enum names to the runtime tag representation.
-func (l *lowerer) lowerType(name string) string {
-	if _, ok := l.enumTags[name]; ok {
-		return "i64"
-	}
-	return name
-}
-
-// lowerReturnType maps declared returns to IR returns.
-func (l *lowerer) lowerReturnType(name string) string {
-	if name == "" {
-		return "void"
-	}
-	if strings.HasPrefix(name, "!") {
-		return "!" + l.lowerType(strings.TrimPrefix(name, "!"))
-	}
-	return l.lowerType(name)
-}
-
-// lowerFieldAssignStmt stores a value into an already-lowered struct field.
-func (l *lowerer) lowerFieldAssignStmt(expr *ast.FieldExpr, value Value) error {
-	receiver, err := l.lowerExpr(expr.Receiver)
-	if err != nil {
-		return err
-	}
-	l.emit("field.store."+expr.Name, "void", []Value{receiver, value}, "")
-	return nil
 }
 
 // lowerArgs lowers call arguments from left to right.

@@ -11,21 +11,10 @@ type Manifest struct {
 	Version     string
 	Root        string
 	Paths       []string
-	Entries     []Module
 }
 
 // ParseManifest parses the declarative subset of kizu.toml used by Kizu.
 func ParseManifest(source string) (Manifest, error) {
-	return parseManifest(source, false)
-}
-
-// ParseStdManifest parses the compiler-owned std manifest.
-func ParseStdManifest(source string) (Manifest, error) {
-	return parseManifest(source, true)
-}
-
-// parseManifest parses kizu.toml with an optional std package exception.
-func parseManifest(source string, allowStd bool) (Manifest, error) {
 	var manifest Manifest
 	section := ""
 	for lineNo, raw := range strings.Split(source, "\n") {
@@ -49,7 +38,7 @@ func parseManifest(source string, allowStd bool) (Manifest, error) {
 			return manifest, err
 		}
 	}
-	return validateManifest(manifest, allowStd)
+	return validateManifest(manifest)
 }
 
 // stripComment removes a full-line or suffix TOML comment in the supported subset.
@@ -121,12 +110,6 @@ func assignManifestValue(
 			return err
 		}
 		manifest.Paths = parsed
-	case "modules.entries":
-		parsed, err := parseModuleEntries(value, lineNo)
-		if err != nil {
-			return err
-		}
-		manifest.Entries = parsed
 	default:
 		return fmt.Errorf("manifest error:%d: unsupported key `%s.%s`", lineNo, section, key)
 	}
@@ -161,33 +144,12 @@ func parseStringList(value string, lineNo int) ([]string, error) {
 	return values, nil
 }
 
-// parseModuleEntries parses module path and file entries as `module|file`.
-func parseModuleEntries(value string, lineNo int) ([]Module, error) {
-	values, err := parseStringList(value, lineNo)
-	if err != nil {
-		return nil, err
-	}
-	entries := make([]Module, 0, len(values))
-	for _, value := range values {
-		parts := strings.Split(value, "|")
-		if len(parts) < 2 || len(parts) > 3 || strings.TrimSpace(parts[0]) == "" ||
-			strings.TrimSpace(parts[1]) == "" {
-			return nil, fmt.Errorf("manifest error:%d: expected module entry `path|file`", lineNo)
-		}
-		if len(parts) == 3 && parts[2] != "test" {
-			return nil, fmt.Errorf("manifest error:%d: expected module entry marker `test`", lineNo)
-		}
-		entries = append(entries, Module{Path: parts[0], File: parts[1]})
-	}
-	return entries, nil
-}
-
 // validateManifest checks required fields and reserved package names.
-func validateManifest(manifest Manifest, allowStd bool) (Manifest, error) {
+func validateManifest(manifest Manifest) (Manifest, error) {
 	if manifest.PackageName == "" {
 		return manifest, fmt.Errorf("manifest error: missing [package].name")
 	}
-	if manifest.PackageName == "std" && !allowStd {
+	if manifest.PackageName == "std" {
 		return manifest, fmt.Errorf("manifest error: package name `std` is reserved")
 	}
 	if manifest.Root == "" {

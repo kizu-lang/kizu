@@ -61,60 +61,24 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 
 // Run registers top-level declarations and calls main.
 func (i *Interpreter) Run(program *ast.Program) error {
-	i.Register(program)
-	value, err := i.callFunction("main", nil)
-	if err != nil {
-		return err
-	}
-	if value.kind == kindErrorUnion {
-		return fmt.Errorf("runtime error: %s", errorUnionMessage(value))
-	}
-	return nil
-}
-
-// Register records top-level declarations without executing an entry point.
-func (i *Interpreter) Register(program *ast.Program) {
-	i.registerProgram(program, "")
-}
-
-// RegisterModule records module declarations with a qualified public namespace.
-func (i *Interpreter) RegisterModule(program *ast.Program, namespace string) {
-	i.registerProgram(program, namespace)
-}
-
-// registerProgram records declarations for single-file and package execution.
-func (i *Interpreter) registerProgram(program *ast.Program, namespace string) {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.EnumDecl:
 			i.enums[d.Name] = enumTags(d.Tags)
-			if namespace != "" && d.Public {
-				i.enums[namespace+"."+d.Name] = enumTags(d.Tags)
-			}
 		case *ast.UnionDecl:
 			i.unions[d.Name] = unionVariants(d.Variants)
-			if namespace != "" && d.Public {
-				i.unions[namespace+"."+d.Name] = unionVariants(d.Variants)
-			}
 		case *ast.FunctionDecl:
 			if d.ExternABI != "" {
 				continue
 			}
 			i.functions[d.Name] = d
-			if namespace != "" && d.Public {
-				i.functions[namespace+"."+d.Name] = d
-			}
 		case *ast.ImplDecl:
 			i.registerImpl(d)
 		default:
 			continue
 		}
 	}
-}
-
-// RunFunction invokes a registered function and checks unhandled !T errors.
-func (i *Interpreter) RunFunction(name string) error {
-	value, err := i.callFunction(name, nil)
+	value, err := i.callFunction("main", nil)
 	if err != nil {
 		return err
 	}
@@ -843,7 +807,13 @@ func evalModulo(left int64, right int64) (Value, error) {
 // evalCallExpr evaluates builtin and user-defined function calls.
 func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		return i.evalFieldCallExpr(field, expr.Args, env)
+		if value, ok, err := i.evalUnionConstructor(field, expr.Args, env); ok || err != nil {
+			return value, err
+		}
+		if value, ok, err := i.evalQualifiedBuiltin(field, expr.Args, env); ok || err != nil {
+			return value, err
+		}
+		return i.evalMethodCallExpr(field, expr.Args, env)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
 		return i.evalTypeApplyCallExpr(typeApply, expr.Args, env)
@@ -872,26 +842,6 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		return callTaskGroup(args)
 	}
 	return i.callFunction(name.Name, args)
-}
-
-// evalFieldCallExpr evaluates namespace calls and method calls.
-func (i *Interpreter) evalFieldCallExpr(
-	field *ast.FieldExpr,
-	args []ast.Expression,
-	env *Env,
-) (Value, error) {
-	if value, ok, err := i.evalUnionConstructor(field, args, env); ok || err != nil {
-		return value, err
-	}
-	if value, ok, err := i.evalQualifiedBuiltin(field, args, env); ok || err != nil {
-		return value, err
-	}
-	if name, ok := qualifiedName(field); ok {
-		if fn, exists := i.functions[name]; exists {
-			return i.callFunctionExpr(fn, args, env)
-		}
-	}
-	return i.evalMethodCallExpr(field, args, env)
 }
 
 // evalQualifiedBuiltin evaluates std:: namespace prototype calls without a module system.
@@ -1195,11 +1145,7 @@ func (i *Interpreter) evalMemOneBytes(
 		return "", err
 	}
 	if bytes.kind != kindString {
-		return "", fmt.Errorf(
-			"runtime error: %s expects []const u8, got %s",
-			name,
-			bytes.KindString(),
-		)
+		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
 	}
 	return bytes.s, nil
 }
@@ -1861,30 +1807,30 @@ func unwrapRefValue(value Value) Value {
 
 // evalNamespaceExpr evaluates enum and payload-free union namespace lookup.
 func (i *Interpreter) evalNamespaceExpr(expr *ast.FieldExpr) (Value, error) {
-	namespace, ok := qualifiedName(expr.Receiver)
+	ident, ok := expr.Receiver.(*ast.IdentExpr)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: invalid namespace lookup `%s`", expr.String())
 	}
-	if tags, exists := i.enums[namespace]; exists {
+	if tags, exists := i.enums[ident.Name]; exists {
 		if !tags[expr.Name] {
 			return voidValue(), fmt.Errorf("runtime error: unknown enum tag `%s::%s`",
-				namespace, expr.Name)
+				ident.Name, expr.Name)
 		}
-		return enumValue(namespace, expr.Name), nil
+		return enumValue(ident.Name, expr.Name), nil
 	}
-	if variants, exists := i.unions[namespace]; exists {
+	if variants, exists := i.unions[ident.Name]; exists {
 		payload, exists := variants[expr.Name]
 		if !exists {
 			return voidValue(), fmt.Errorf("runtime error: unknown union variant `%s::%s`",
-				namespace, expr.Name)
+				ident.Name, expr.Name)
 		}
 		if payload != "" {
 			return voidValue(), fmt.Errorf("runtime error: union variant `%s::%s` expects payload",
-				namespace, expr.Name)
+				ident.Name, expr.Name)
 		}
-		return unionValue(namespace, expr.Name, nil), nil
+		return unionValue(ident.Name, expr.Name, nil), nil
 	}
-	return voidValue(), fmt.Errorf("runtime error: unknown namespace `%s`", namespace)
+	return voidValue(), fmt.Errorf("runtime error: unknown namespace `%s`", ident.Name)
 }
 
 // evalDerefExpr reads the value behind a local borrow reference.

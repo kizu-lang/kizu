@@ -19,8 +19,6 @@
             pkgs.go_1_22
             pkgs.golangci-lint
             pkgs.just
-            pkgs.llvmPackages_16.lld
-            pkgs.llvmPackages_16.llvm
             pkgs.pre-commit
             pkgs.wasmtime
           ];

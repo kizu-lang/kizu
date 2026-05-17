@@ -3,149 +3,48 @@ package project
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/kizu-lang/kizu/internal/ownership"
-	"github.com/kizu-lang/kizu/internal/types"
+	"github.com/kizu-lang/kizu/internal/lexer"
+	"github.com/kizu-lang/kizu/internal/parser"
 )
 
-// TestModuleConformanceFixture resolves, parses, and checks the basic fixture.
+// TestModuleConformanceFixture resolves and parses the basic multi-file fixture.
 func TestModuleConformanceFixture(t *testing.T) {
 	root := filepath.Join("..", "..", "tests", "conformance", "modules", "basic")
-	pkg, err := LoadPackage(root)
+	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
 	if err != nil {
-		t.Fatalf("load failed: %v", err)
+		t.Fatal(err)
 	}
-	got := parsedModulePaths(pkg.Modules)
+	manifest, err := ParseManifest(string(source))
+	if err != nil {
+		t.Fatalf("parse manifest failed: %v", err)
+	}
+	graph, err := ResolveModules(root, manifest)
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	got := modulePaths(graph.Modules)
 	want := []string{"app", "app::lexer", "app::parser::ast"}
 	if !sameStrings(got, want) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
-	for _, module := range pkg.Modules {
-		checkParsedModule(t, pkg, module)
+	for _, module := range graph.Modules {
+		parseConformanceModule(t, module)
 	}
 }
 
-// TestResolvePackageRejectsMissingImport checks unknown module imports.
-func TestResolvePackageRejectsMissingImport(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu": `import app::missing;
-fn main() -> void { return; }`,
-	})
-	_, err := LoadPackage(root)
-	requireErrorContains(t, err, "missing module `app::missing`")
-}
-
-// TestResolvePackageRejectsDuplicateImportName checks same last-segment imports.
-func TestResolvePackageRejectsDuplicateImportName(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu": `import app::left::ast;
-import app::right::ast;
-fn main() -> void { return; }`,
-		"src/left/ast.kizu":  `pub fn left() -> void { return; }`,
-		"src/right/ast.kizu": `pub fn right() -> void { return; }`,
-	})
-	_, err := LoadPackage(root)
-	requireErrorContains(t, err, "imports `app::left::ast` and `app::right::ast` as `ast`")
-}
-
-// TestResolvePackageRejectsImportCycles checks direct import cycles.
-func TestResolvePackageRejectsImportCycles(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu":  `import app::lexer; fn main() -> void { return; }`,
-		"src/lexer.kizu": `import app; pub fn lex() -> void { return; }`,
-	})
-	_, err := LoadPackage(root)
-	requireErrorContains(t, err, "cyclic import")
-}
-
-// TestResolvePackageRejectsImportShadowing checks declaration/import name clashes.
-func TestResolvePackageRejectsImportShadowing(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu":  `import app::lexer; fn lexer() -> void { return; }`,
-		"src/lexer.kizu": `pub fn lex() -> void { return; }`,
-	})
-	_, err := LoadPackage(root)
-	requireErrorContains(t, err, "shadows an import")
-}
-
-// TestResolvePackageAcceptsPublicModuleAccess checks public namespace access.
-func TestResolvePackageAcceptsPublicModuleAccess(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu": `import app::lexer;
-fn main() -> void { lexer::lex(); return; }`,
-		"src/lexer.kizu": `pub fn lex() -> void { return; }`,
-	})
-	if _, err := LoadPackage(root); err != nil {
-		t.Fatalf("load failed: %v", err)
-	}
-}
-
-// TestLoadStdPackageAcceptsCompilerOwnedStd checks the std source skeleton.
-func TestLoadStdPackageAcceptsCompilerOwnedStd(t *testing.T) {
-	root := filepath.Join("..", "..", "std")
-	pkg, err := LoadStdPackage(root)
-	if err != nil {
-		t.Fatalf("load std failed: %v", err)
-	}
-	got := parsedModulePaths(pkg.Modules)
-	want := []string{"std", "std::io", "std::mem", "std::path", "std::process", "std::testing"}
-	if !sameStrings(got, want) {
-		t.Fatalf("got modules %#v, want %#v", got, want)
-	}
-}
-
-// TestResolvePackageRejectsPrivateModuleAccess checks top-level visibility.
-func TestResolvePackageRejectsPrivateModuleAccess(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu": `import app::lexer;
-fn main() -> void { lexer::hidden(); return; }`,
-		"src/lexer.kizu": `fn hidden() -> void { return; }`,
-	})
-	_, err := LoadPackage(root)
-	requireDiagnosticContains(t, err, "private declaration `lexer::hidden` is not visible")
-}
-
-// TestResolvePackageRejectsPrivateTypeLeak checks imported public signatures.
-func TestResolvePackageRejectsPrivateTypeLeak(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu": `import app::lexer;
-pub fn leak() -> lexer::Secret { return lexer::make_secret(); }`,
-		"src/lexer.kizu": `struct Secret { pub value: i64; }
-pub fn make_secret() -> Secret { return Secret { value: 1 }; }`,
-	})
-	_, err := LoadPackage(root)
-	requireDiagnosticContains(t, err, "public signature exposes private type `lexer::Secret`")
-}
-
-// TestResolvePackageRejectsPrivateFieldConstruction checks struct fields.
-func TestResolvePackageRejectsPrivateFieldConstruction(t *testing.T) {
-	root := packageFixture(t, map[string]string{
-		"src/main.kizu": `import app::lexer;
-fn main() -> void {
-    let token = lexer::Token { secret: 1, kind: 2 };
-    return;
-}`,
-		"src/lexer.kizu": `pub struct Token {
-    secret: i64;
-    pub kind: i64;
-}`,
-	})
-	_, err := LoadPackage(root)
-	requireDiagnosticContains(t, err, "private field `app::lexer::Token.secret` is not visible")
-}
-
-// checkParsedModule runs static checks for one parsed module.
-func checkParsedModule(t *testing.T, pkg *Package, module ParsedModule) {
+// parseConformanceModule checks that one fixture source is valid Kizu syntax.
+func parseConformanceModule(t *testing.T, module Module) {
 	t.Helper()
-	decls := ImportedPublicDecls(pkg, module)
-	if err := types.New().WithExternalDecls(decls).
-		Check(module.Program); err != nil {
-		t.Fatalf("type check failed in %s: %v", module.Module.Path, err)
+	source, err := os.ReadFile(module.File)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := ownership.New().WithExternalDecls(decls).Check(module.Program); err != nil {
-		t.Fatalf("ownership check failed in %s: %v", module.Module.Path, err)
+	p := parser.New(lexer.New(string(source)))
+	p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors in %s: %v", module.Path, p.Errors())
 	}
 }
 
@@ -189,49 +88,6 @@ func TestResolveModulesRejectsDuplicateModulePaths(t *testing.T) {
 	}
 }
 
-// TestResolveModulesUsesManifestEntries checks explicit manifest module graphs.
-func TestResolveModulesUsesManifestEntries(t *testing.T) {
-	root := t.TempDir()
-	graph, err := ResolveModules(root, Manifest{
-		PackageName: "app",
-		Root:        "src/main.kizu",
-		Paths:       []string{"src"},
-		Entries: []Module{
-			{Path: "app", File: "src/main.kizu"},
-			{Path: "app::lexer", File: "src/lexer.kizu"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("resolve failed: %v", err)
-	}
-	got := modulePaths(graph.Modules)
-	want := []string{"app", "app::lexer"}
-	if !sameStrings(got, want) {
-		t.Fatalf("got modules %#v, want %#v", got, want)
-	}
-	for _, module := range graph.Modules {
-		if !strings.HasPrefix(module.File, root) {
-			t.Fatalf("module file %q does not use package root %q", module.File, root)
-		}
-	}
-}
-
-// TestResolveModulesRejectsDuplicateManifestEntries checks duplicate entry paths.
-func TestResolveModulesRejectsDuplicateManifestEntries(t *testing.T) {
-	_, err := ResolveModules(t.TempDir(), Manifest{
-		PackageName: "app",
-		Root:        "src/main.kizu",
-		Paths:       []string{"src"},
-		Entries: []Module{
-			{Path: "app", File: "src/main.kizu"},
-			{Path: "app", File: "src/root.kizu"},
-		},
-	})
-	if err == nil {
-		t.Fatal("expected duplicate module error")
-	}
-}
-
 // writeFile creates an empty source file under root.
 func writeFile(t *testing.T, root string, rel string) {
 	t.Helper()
@@ -244,36 +100,6 @@ func writeFile(t *testing.T, root string, rel string) {
 	}
 }
 
-// packageFixture creates a manifest package with the supplied source files.
-func packageFixture(t *testing.T, files map[string]string) string {
-	t.Helper()
-	root := t.TempDir()
-	writeTextFile(t, root, "kizu.toml", `[package]
-name = "app"
-version = "0.3.0"
-
-[modules]
-root = "src/main.kizu"
-paths = ["src"]
-`)
-	for rel, source := range files {
-		writeTextFile(t, root, rel, source)
-	}
-	return root
-}
-
-// writeTextFile creates a source file with content under root.
-func writeTextFile(t *testing.T, root string, rel string, source string) {
-	t.Helper()
-	path := filepath.Join(root, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // modulePaths returns only module path strings.
 func modulePaths(modules []Module) []string {
 	paths := make([]string, 0, len(modules))
@@ -281,34 +107,6 @@ func modulePaths(modules []Module) []string {
 		paths = append(paths, module.Path)
 	}
 	return paths
-}
-
-// parsedModulePaths returns only parsed module path strings.
-func parsedModulePaths(modules []ParsedModule) []string {
-	paths := make([]string, 0, len(modules))
-	for _, module := range modules {
-		paths = append(paths, module.Module.Path)
-	}
-	return paths
-}
-
-// requireErrorContains checks the error includes a stable diagnostic fragment.
-func requireErrorContains(t *testing.T, err error, want string) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("expected error containing %q", want)
-	}
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("got error %q, want substring %q", err, want)
-	}
-}
-
-// requireDiagnosticContains checks stable message and span-related shape.
-func requireDiagnosticContains(t *testing.T, err error, want string) {
-	t.Helper()
-	requireErrorContains(t, err, want)
-	requireErrorContains(t, err, "  --> ")
-	requireErrorContains(t, err, "related: ")
 }
 
 // sameStrings reports whether two string slices match exactly.

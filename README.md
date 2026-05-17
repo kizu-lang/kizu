@@ -20,11 +20,10 @@ code, and less likely to grow heavy CI and build caches.
 
 Kizu is an early prototype implemented in Go.
 
-The v0.1 target is the interpreter-first language core. v0.2 added the minimal
-standard-library surface needed by the future self-host compiler. The current
-v0.3 target is a Kizu-only standalone self-host compiler. The authoritative
-behavior is still the Go interpreter plus `kizu check` until that standalone
-compiler can rebuild itself.
+The v0.1 target is the interpreter-first language core. The current v0.2 work
+adds the minimal standard-library surface needed by the future self-host
+compiler. The authoritative behavior is still the Go interpreter plus
+`kizu check`.
 
 Implemented language-core pieces:
 
@@ -53,7 +52,7 @@ Implemented language-core pieces:
 
 Experimental compiler and tooling pieces:
 
-- module-first self-host compiler package in `selfhost/`
+- self-host compiler skeleton in `selfhost/`
 - typed SSA IR
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations
@@ -62,17 +61,11 @@ Experimental compiler and tooling pieces:
 - opt-in IR optimization pipeline
 
 These experimental pieces are not the language oracle yet. LLVM and WASM
-currently support more limited target subsets than the interpreter. Native
-executable generation is limited to the v0.3 macOS arm64 path and requires
-`llc` plus `ld64.lld`.
+currently support more limited target subsets than the interpreter, and native
+executable generation is not implemented.
 
-The v0.3 standalone target is a native self-host compiler artifact. The planned
-path is Kizu-owned LLVM IR text, `llc` object emission, and `lld` linking for
-host macOS arm64 first. libc / libSystem is not part of the Kizu language core;
-it is allowed only as an explicit target stdlib backend boundary.
-
-The previous self-host transition work is a bootstrap milestone, not the v0.3
-release. v0.3 is tracked by GitHub Issues starting at #256.
+There are no open v0.2 issues at the time of writing. Remaining work is tracked
+as v0.3 self-host and module-boundary implementation issues in GitHub Issues.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -151,7 +144,6 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
-go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -167,11 +159,9 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
-- `kizu build --target aarch64-apple-darwin [--opt] <file>` writes a native
-  executable artifact using `llc` and `ld64.lld`.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
-- `kizu why-rebuild <file|package>` explains cache hit or rebuild reasons.
+- `kizu why-rebuild <file>` explains cache hit or rebuild reasons.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 
 `kizu lint` is not implemented.

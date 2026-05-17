@@ -37,6 +37,14 @@ func (l *lowerer) emit(op string, typ string, args []Value, immediate string) Va
 	return result
 }
 
+// returnType normalizes omitted function returns to void.
+func returnType(name string) string {
+	if name == "" {
+		return "void"
+	}
+	return name
+}
+
 // binaryResultType returns the type produced by a binary operator.
 func binaryResultType(op string, left string) string {
 	switch op {
@@ -78,121 +86,10 @@ func arenaElementType(arena string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(arena, "arena<"), ">")
 }
 
-// containerElementType returns T for std collection shapes such as Array<T>.
-func containerElementType(container string) string {
-	start := strings.Index(container, "<")
-	if start < 0 || !strings.HasSuffix(container, ">") {
-		return "unknown"
-	}
-	return strings.TrimSuffix(container[start+1:], ">")
-}
-
 // errorUnionElementType returns T for !T.
 func errorUnionElementType(result string) string {
 	if !strings.HasPrefix(result, "!") || len(result) == 1 {
 		return "unknown"
 	}
 	return strings.TrimPrefix(result, "!")
-}
-
-// namespaceConstType returns the enum-like type for a flattened namespace value.
-func namespaceConstType(name string) (string, bool) {
-	idx := strings.LastIndex(name, ".")
-	if idx <= 0 || idx == len(name)-1 {
-		return "", false
-	}
-	return name[:idx], true
-}
-
-// builtinReturnType returns the IR type of selected compiler-needed builtins.
-func builtinReturnType(name string, _ []Value) (string, bool) {
-	if typ, ok := builtinMemoryReturnType(name); ok {
-		return typ, true
-	}
-	if typ, ok := builtinFSReturnType(name); ok {
-		return typ, true
-	}
-	if typ, ok := builtinPathReturnType(name); ok {
-		return typ, true
-	}
-	if typ, ok := builtinProcessReturnType(name); ok {
-		return typ, true
-	}
-	switch name {
-	case "std.string.String":
-		return "std::string::String", true
-	case "std.io.write_stdout", "std.io.write_stderr":
-		return "!void", true
-	case "std.io.blocking", "std.io.threaded", "std.io.failing", "std.io.evented":
-		return "Io", true
-	case "std.testing.expect":
-		return "!void", true
-	}
-	if strings.HasPrefix(name, "std.") {
-		return "void", true
-	}
-	return "", false
-}
-
-// builtinMemoryReturnType returns IR types for std::mem builtins.
-func builtinMemoryReturnType(name string) (string, bool) {
-	switch name {
-	case "std.mem.page_allocator":
-		return "Allocator", true
-	case "std.mem.len":
-		return "i64", true
-	case "std.mem.byte_at":
-		return "!u8", true
-	case "std.mem.equal_bytes", "std.mem.starts_with":
-		return "bool", true
-	case "std.mem.slice":
-		return "![]const u8", true
-	case "std.mem.trim_ascii":
-		return "[]const u8", true
-	default:
-		return "", false
-	}
-}
-
-// builtinFSReturnType returns IR types for explicit filesystem builtins.
-func builtinFSReturnType(name string) (string, bool) {
-	switch name {
-	case "std.fs.read_file":
-		return "![]const u8", true
-	case "std.fs.write_file":
-		return "!void", true
-	case "std.fs.exists":
-		return "!bool", true
-	case "std.fs.metadata":
-		return "!std::fs::Metadata", true
-	case "std.fs.create_dir", "std.fs.remove_dir", "std.fs.remove_file":
-		return "!void", true
-	default:
-		return "", false
-	}
-}
-
-// builtinPathReturnType returns IR types for pure path helpers.
-func builtinPathReturnType(name string) (string, bool) {
-	switch name {
-	case "std.path.join", "std.path.clean", "std.path.basename", "std.path.dirname",
-		"std.path.extension":
-		return "[]const u8", true
-	default:
-		return "", false
-	}
-}
-
-// builtinProcessReturnType returns IR types for process capability builtins.
-func builtinProcessReturnType(name string) (string, bool) {
-	switch name {
-	case "std.process.arg_count":
-		return "i64", true
-	case "std.process.arg", "std.process.env":
-		return "![]const u8", true
-	case "std.process.exit_code":
-		return "i64", true
-	default:
-		return "", false
-	}
 }
