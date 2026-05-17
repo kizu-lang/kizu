@@ -572,6 +572,24 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 	if !strings.Contains(string(buildOut), "build\naarch64-apple-darwin\npass\ntrue") {
 		t.Fatalf("got %q", buildOut)
 	}
+	packageCheck := exec.Command("./target/kizu-selfhost", "check", "../../selfhost")
+	packageCheckOut, err := packageCheck.CombinedOutput()
+	if err != nil {
+		t.Fatalf("selfhost package check failed: %v\n%s", err, packageCheckOut)
+	}
+	if !strings.Contains(string(packageCheckOut), "check\nllvm\npass\ntrue") {
+		t.Fatalf("got %q", packageCheckOut)
+	}
+	packageBuild := exec.Command(
+		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost",
+	)
+	packageBuildOut, err := packageBuild.CombinedOutput()
+	if err != nil {
+		t.Fatalf("selfhost package build failed: %v\n%s", err, packageBuildOut)
+	}
+	if !strings.Contains(string(packageBuildOut), "build\naarch64-apple-darwin\npass\ntrue") {
+		t.Fatalf("got %q", packageBuildOut)
+	}
 }
 
 // TestBuildTargetRejectsUnsupportedNative checks unsupported targets fail clearly.
