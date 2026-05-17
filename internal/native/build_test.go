@@ -28,6 +28,8 @@ func TestRuntimeLLVMExportsPrintSymbols(t *testing.T) {
 		"declare ptr @fopen",
 		"define ptr @kizu_read_file",
 		"define i1 @kizu_file_exists",
+		"define ptr @kizu_path_join",
+		"define i1 @kizu_bytes_starts_with",
 		"define i64 @kizu_bytes_len",
 		"define i8 @kizu_byte_at",
 		"define ptr @kizu_array_new",

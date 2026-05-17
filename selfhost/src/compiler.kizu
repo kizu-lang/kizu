@@ -45,6 +45,16 @@ pub struct SourceModule {
     pub is_test: bool;
 }
 
+pub struct PackageManifest {
+    pub package_root: []const u8;
+    pub root_file: []const u8;
+}
+
+pub struct ModuleSpec {
+    pub path: []const u8;
+    pub file: []const u8;
+}
+
 pub struct PackageReport {
     pub status: CompileStatus;
     pub module_count: i64;
@@ -321,233 +331,252 @@ pub fn compile_selfhost_package_check() -> !PackageReport {
 
 // compile_selfhost_package_from_files loads the checked-in package through std::fs.
 pub fn compile_selfhost_package_from_files(io: Io) -> !PackageReport {
-    let manifest_path = try selfhost_manifest_path(io);
-    let manifest = try std::fs::read_file(io, manifest_path);
-    if std::mem::len(manifest) == 0 {
-        return error("empty selfhost manifest");
-    }
+    let manifest = try read_selfhost_manifest(io);
     let allocator = std::mem::page_allocator();
     var modules = std::array::Array<SourceModule>(allocator);
 
-    try append_selfhost_runtime_modules(io, modules);
+    try append_manifest_modules(io, &manifest, modules);
     return try compile_package(&modules, "llvm");
 }
 
 // load_selfhost_package_from_files validates filesystem-backed package discovery.
 pub fn load_selfhost_package_from_files(io: Io) -> !PackageReport {
-    let manifest_path = try selfhost_manifest_path(io);
-    let manifest = try std::fs::read_file(io, manifest_path);
-    if std::mem::len(manifest) == 0 {
-        return error("empty selfhost manifest");
-    }
+    let manifest = try read_selfhost_manifest(io);
     let allocator = std::mem::page_allocator();
     var modules = std::array::Array<SourceModule>(allocator);
 
-    try append_selfhost_runtime_modules(io, modules);
+    try append_manifest_modules(io, &manifest, modules);
     return try summarize_loaded_package(&modules);
 }
 
-// append_selfhost_runtime_modules loads non-test compiler modules from disk.
-fn append_selfhost_runtime_modules(
+// append_manifest_modules loads compiler modules described by the manifest roots.
+fn append_manifest_modules(
     io: Io,
+    manifest: &PackageManifest,
     modules: &mut std::array::Array<SourceModule>
 ) -> !void {
-    try modules.append(try selfhost_main_module(io));
-    try modules.append(try selfhost_ast_module(io));
-    try modules.append(try selfhost_backend_module(io));
-    try modules.append(try selfhost_cache_contract_module(io));
-    try modules.append(try selfhost_compiler_module(io));
-    try modules.append(try selfhost_diagnostics_module(io));
-    try modules.append(try selfhost_ir_module(io));
-    try modules.append(try selfhost_lexer_module(io));
-    try modules.append(try selfhost_ownership_module(io));
-    try modules.append(try selfhost_parser_module(io));
-    try modules.append(try selfhost_resolver_module(io));
-    try modules.append(try selfhost_token_module(io));
-    try modules.append(try selfhost_types_module(io));
+    let allocator = std::mem::page_allocator();
+    var specs = std::array::Array<ModuleSpec>(allocator);
+    try append_selfhost_module_specs(specs);
+
+    var index = 0;
+    while index < specs.len() {
+        let spec = try specs.at(index);
+        try modules.append(try read_manifest_module(io, manifest, &spec));
+        index = index + 1;
+    }
     return void;
 }
 
-// selfhost_manifest_path resolves the checked-in selfhost manifest from common CWDs.
-fn selfhost_manifest_path(io: Io) -> ![]const u8 {
-    return try existing_selfhost_path(io, "selfhost/kizu.toml", "../../selfhost/kizu.toml");
+// append_selfhost_module_specs records the current checked-in compiler modules.
+fn append_selfhost_module_specs(modules: &mut std::array::Array<ModuleSpec>) -> !void {
+    try modules.append(module_spec("selfhost::main", "main.kizu"));
+    try modules.append(module_spec("selfhost::ast", "ast.kizu"));
+    try modules.append(module_spec("selfhost::backend", "backend.kizu"));
+    try modules.append(module_spec("selfhost::cache_contract", "cache_contract.kizu"));
+    try modules.append(module_spec("selfhost::compiler", "compiler.kizu"));
+    try modules.append(module_spec("selfhost::diagnostics", "diagnostics.kizu"));
+    try modules.append(module_spec("selfhost::ir", "ir.kizu"));
+    try modules.append(module_spec("selfhost::lexer", "lexer.kizu"));
+    try modules.append(module_spec("selfhost::ownership", "ownership.kizu"));
+    try modules.append(module_spec("selfhost::parser", "parser.kizu"));
+    try modules.append(module_spec("selfhost::resolver", "resolver.kizu"));
+    try modules.append(module_spec("selfhost::token", "token.kizu"));
+    try modules.append(module_spec("selfhost::types", "types.kizu"));
+    return void;
 }
 
-// existing_selfhost_path selects a selfhost path for repo-root or cmd/kizu execution.
-fn existing_selfhost_path(
+// module_spec constructs one manifest graph candidate.
+fn module_spec(path: []const u8, file: []const u8) -> ModuleSpec {
+    return ModuleSpec {
+        path: path,
+        file: file,
+    };
+}
+
+// read_manifest_module loads one source file from the manifest source root.
+fn read_manifest_module(
     io: Io,
-    root_path: []const u8,
-    package_test_path: []const u8
-) -> ![]const u8 {
-    let root_exists = try std::fs::exists(io, root_path);
-    if root_exists {
-        return root_path;
+    manifest: &PackageManifest,
+    spec: &ModuleSpec
+) -> !SourceModule {
+    let path = try selfhost_module_file(manifest.package_root, spec.file);
+    let root = std::mem::equal_bytes(path, manifest.root_file);
+    return try read_source_file(io, spec.path, path, root);
+}
+
+// read_selfhost_manifest loads and validates the checked-in manifest subset.
+fn read_selfhost_manifest(io: Io) -> !PackageManifest {
+    let root = try selfhost_package_root(io);
+    let source = try std::fs::read_file(io, try selfhost_manifest_file(root));
+    if std::mem::len(source) == 0 {
+        return error("empty selfhost manifest");
     }
-    let package_test_exists = try std::fs::exists(io, package_test_path);
-    if package_test_exists {
-        return package_test_path;
+    let valid_name = try manifest_has_value(source, "name", "selfhost");
+    if !valid_name {
+        return error("invalid selfhost manifest package");
+    }
+    let valid_root = try manifest_has_value(source, "root", "src/main.kizu");
+    if !valid_root {
+        return error("invalid selfhost manifest root");
+    }
+    let valid_paths = try manifest_has_value(source, "paths", "src");
+    if !valid_paths {
+        return error("invalid selfhost manifest paths");
+    }
+    return PackageManifest {
+        package_root: root,
+        root_file: try selfhost_module_file(root, "main.kizu"),
+    };
+}
+
+// selfhost_manifest_file returns the manifest path for a selected package root.
+fn selfhost_manifest_file(root: []const u8) -> ![]const u8 {
+    if std::mem::equal_bytes(root, "selfhost") {
+        return "selfhost/kizu.toml";
+    }
+    if std::mem::equal_bytes(root, "../../selfhost") {
+        return "../../selfhost/kizu.toml";
     }
     return error("missing selfhost package file");
 }
 
-// selfhost_main_module loads the root compiler entry module.
-fn selfhost_main_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/main.kizu",
-        "../../selfhost/src/main.kizu"
-    );
-    return try read_source_file(io, "selfhost::main", path, true);
+// selfhost_module_file returns a source path below the selected manifest root.
+fn selfhost_module_file(root: []const u8, file: []const u8) -> ![]const u8 {
+    if std::mem::equal_bytes(root, "selfhost") {
+        return try selfhost_root_module_file(file);
+    }
+    if std::mem::equal_bytes(root, "../../selfhost") {
+        return try selfhost_package_test_module_file(file);
+    }
+    return error("missing selfhost package file");
 }
 
-// selfhost_ast_module loads AST model definitions.
-fn selfhost_ast_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/ast.kizu",
-        "../../selfhost/src/ast.kizu"
-    );
-    return try read_source_file(io, "selfhost::ast", path, false);
+// selfhost_root_module_file returns a repo-root relative source path.
+fn selfhost_root_module_file(file: []const u8) -> ![]const u8 {
+    if std::mem::equal_bytes(file, "main.kizu") { return "selfhost/src/main.kizu"; }
+    if std::mem::equal_bytes(file, "ast.kizu") { return "selfhost/src/ast.kizu"; }
+    if std::mem::equal_bytes(file, "backend.kizu") { return "selfhost/src/backend.kizu"; }
+    if std::mem::equal_bytes(file, "cache_contract.kizu") {
+        return "selfhost/src/cache_contract.kizu";
+    }
+    if std::mem::equal_bytes(file, "compiler.kizu") { return "selfhost/src/compiler.kizu"; }
+    if std::mem::equal_bytes(file, "diagnostics.kizu") {
+        return "selfhost/src/diagnostics.kizu";
+    }
+    if std::mem::equal_bytes(file, "ir.kizu") { return "selfhost/src/ir.kizu"; }
+    if std::mem::equal_bytes(file, "lexer.kizu") { return "selfhost/src/lexer.kizu"; }
+    if std::mem::equal_bytes(file, "ownership.kizu") {
+        return "selfhost/src/ownership.kizu";
+    }
+    if std::mem::equal_bytes(file, "parser.kizu") { return "selfhost/src/parser.kizu"; }
+    if std::mem::equal_bytes(file, "resolver.kizu") { return "selfhost/src/resolver.kizu"; }
+    if std::mem::equal_bytes(file, "token.kizu") { return "selfhost/src/token.kizu"; }
+    if std::mem::equal_bytes(file, "types.kizu") { return "selfhost/src/types.kizu"; }
+    return error("missing selfhost package file");
 }
 
-// selfhost_backend_module loads backend emission code.
-fn selfhost_backend_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/backend.kizu",
-        "../../selfhost/src/backend.kizu"
-    );
-    return try read_source_file(
-        io,
-        "selfhost::backend",
-        path,
-        false
-    );
+// selfhost_package_test_module_file returns a cmd/kizu relative source path.
+fn selfhost_package_test_module_file(file: []const u8) -> ![]const u8 {
+    if std::mem::equal_bytes(file, "main.kizu") { return "../../selfhost/src/main.kizu"; }
+    if std::mem::equal_bytes(file, "ast.kizu") { return "../../selfhost/src/ast.kizu"; }
+    if std::mem::equal_bytes(file, "backend.kizu") { return "../../selfhost/src/backend.kizu"; }
+    if std::mem::equal_bytes(file, "cache_contract.kizu") {
+        return "../../selfhost/src/cache_contract.kizu";
+    }
+    if std::mem::equal_bytes(file, "compiler.kizu") {
+        return "../../selfhost/src/compiler.kizu";
+    }
+    if std::mem::equal_bytes(file, "diagnostics.kizu") {
+        return "../../selfhost/src/diagnostics.kizu";
+    }
+    if std::mem::equal_bytes(file, "ir.kizu") { return "../../selfhost/src/ir.kizu"; }
+    if std::mem::equal_bytes(file, "lexer.kizu") { return "../../selfhost/src/lexer.kizu"; }
+    if std::mem::equal_bytes(file, "ownership.kizu") {
+        return "../../selfhost/src/ownership.kizu";
+    }
+    if std::mem::equal_bytes(file, "parser.kizu") { return "../../selfhost/src/parser.kizu"; }
+    if std::mem::equal_bytes(file, "resolver.kizu") {
+        return "../../selfhost/src/resolver.kizu";
+    }
+    if std::mem::equal_bytes(file, "token.kizu") { return "../../selfhost/src/token.kizu"; }
+    if std::mem::equal_bytes(file, "types.kizu") { return "../../selfhost/src/types.kizu"; }
+    return error("missing selfhost package file");
 }
 
-// selfhost_cache_contract_module loads cache contract checks.
-fn selfhost_cache_contract_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/cache_contract.kizu",
-        "../../selfhost/src/cache_contract.kizu"
-    );
-    return try read_source_file(
-        io,
-        "selfhost::cache_contract",
-        path,
-        false
-    );
+// selfhost_package_root selects the checked-in package root from common CWDs.
+fn selfhost_package_root(io: Io) -> ![]const u8 {
+    let root_exists = try std::fs::exists(io, "selfhost/kizu.toml");
+    if root_exists {
+        return "selfhost";
+    }
+    let package_test_exists = try std::fs::exists(io, "../../selfhost/kizu.toml");
+    if package_test_exists {
+        return "../../selfhost";
+    }
+    return error("missing selfhost package file");
 }
 
-// selfhost_compiler_module loads the compiler orchestration module.
-fn selfhost_compiler_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/compiler.kizu",
-        "../../selfhost/src/compiler.kizu"
-    );
-    return try read_source_file(
-        io,
-        "selfhost::compiler",
-        path,
-        false
-    );
+// manifest_has_value reports whether a manifest key has a quoted value.
+fn manifest_has_value(source: []const u8, key: []const u8, value: []const u8) -> !bool {
+    var start = 0;
+    let length = std::mem::len(source);
+
+    while start < length {
+        let end = try manifest_line_end(source, start);
+        let line = try std::mem::slice(source, start, end);
+        if std::mem::starts_with(line, key) {
+            if try manifest_line_value_matches(line, value) {
+                return true;
+            }
+        }
+        start = end + 1;
+    }
+    return false;
 }
 
-// selfhost_diagnostics_module loads diagnostic rendering code.
-fn selfhost_diagnostics_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/diagnostics.kizu",
-        "../../selfhost/src/diagnostics.kizu"
-    );
-    return try read_source_file(
-        io,
-        "selfhost::diagnostics",
-        path,
-        false
-    );
+// manifest_line_value_matches compares the first quoted value on a line.
+fn manifest_line_value_matches(line: []const u8, value: []const u8) -> !bool {
+    let first = try manifest_quote_after(line, 0);
+    if first < 0 {
+        return false;
+    }
+    let second = try manifest_quote_after(line, first + 1);
+    if second < 0 {
+        return false;
+    }
+    let parsed = try std::mem::slice(line, first + 1, second);
+    return std::mem::equal_bytes(parsed, value);
 }
 
-// selfhost_ir_module loads IR model and lowering code.
-fn selfhost_ir_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/ir.kizu",
-        "../../selfhost/src/ir.kizu"
-    );
-    return try read_source_file(io, "selfhost::ir", path, false);
+// manifest_quote_after returns the first quote offset at or after start.
+fn manifest_quote_after(line: []const u8, start: i64) -> !i64 {
+    var index = start;
+    let length = std::mem::len(line);
+
+    while index < length {
+        let byte = try std::mem::byte_at(line, index);
+        if byte == cast<u8>(34) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
 }
 
-// selfhost_lexer_module loads the self-host lexer.
-fn selfhost_lexer_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/lexer.kizu",
-        "../../selfhost/src/lexer.kizu"
-    );
-    return try read_source_file(io, "selfhost::lexer", path, false);
-}
+// manifest_line_end returns the end offset for one line without the newline.
+fn manifest_line_end(source: []const u8, start: i64) -> !i64 {
+    var end = start;
+    let length = std::mem::len(source);
 
-// selfhost_ownership_module loads ownership checks.
-fn selfhost_ownership_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/ownership.kizu",
-        "../../selfhost/src/ownership.kizu"
-    );
-    return try read_source_file(
-        io,
-        "selfhost::ownership",
-        path,
-        false
-    );
-}
-
-// selfhost_parser_module loads the self-host parser.
-fn selfhost_parser_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/parser.kizu",
-        "../../selfhost/src/parser.kizu"
-    );
-    return try read_source_file(io, "selfhost::parser", path, false);
-}
-
-// selfhost_resolver_module loads package resolver checks.
-fn selfhost_resolver_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/resolver.kizu",
-        "../../selfhost/src/resolver.kizu"
-    );
-    return try read_source_file(
-        io,
-        "selfhost::resolver",
-        path,
-        false
-    );
-}
-
-// selfhost_token_module loads token definitions.
-fn selfhost_token_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/token.kizu",
-        "../../selfhost/src/token.kizu"
-    );
-    return try read_source_file(io, "selfhost::token", path, false);
-}
-
-// selfhost_types_module loads type checking code.
-fn selfhost_types_module(io: Io) -> !SourceModule {
-    let path = try existing_selfhost_path(
-        io,
-        "selfhost/src/types.kizu",
-        "../../selfhost/src/types.kizu"
-    );
-    return try read_source_file(io, "selfhost::types", path, false);
+    while end < length {
+        let byte = try std::mem::byte_at(source, end);
+        if byte == cast<u8>(10) {
+            return end;
+        }
+        end = end + 1;
+    }
+    return end;
 }
 
 // read_source_file reads one package module from an explicit filesystem path.
