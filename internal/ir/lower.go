@@ -224,6 +224,9 @@ func (l *lowerer) lowerIdentExpr(expr *ast.IdentExpr) (Value, error) {
 	if expr.Name == "void" {
 		return Value{Name: "void", Type: "void"}, nil
 	}
+	if typ, ok := namespaceConstType(expr.Name); ok {
+		return l.emitConst(typ, expr.Name), nil
+	}
 	return Value{}, fmt.Errorf("ir error: undefined value `%s`", expr.Name)
 }
 
@@ -265,6 +268,9 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
 		return l.lowerMethodCallExpr(field, expr.Args)
 	}
+	if applied, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		return l.lowerTypeApplyCallExpr(applied, expr.Args)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: callee must be a function name")
@@ -279,8 +285,27 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	ret := "void"
 	if sig, ok := l.signatures[name.Name]; ok {
 		ret = sig.Return
+	} else if builtin, ok := builtinReturnType(name.Name, args); ok {
+		ret = builtin
 	}
 	return l.emit("call."+name.Name, ret, args, ""), nil
+}
+
+// lowerTypeApplyCallExpr lowers generic-looking std constructors.
+func (l *lowerer) lowerTypeApplyCallExpr(
+	expr *ast.TypeApplyExpr,
+	args []ast.Expression,
+) (Value, error) {
+	name, ok := expr.Callee.(*ast.IdentExpr)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: type constructor must be a namespace name")
+	}
+	loweredArgs, err := l.lowerArgs(args)
+	if err != nil {
+		return Value{}, err
+	}
+	ret := fmt.Sprintf("%s<%s>", name.Name, expr.TypeArg)
+	return l.emit("call."+ret, ret, loweredArgs, ""), nil
 }
 
 // lowerTryExpr lowers error-union propagation as an explicit IR instruction.
@@ -311,6 +336,12 @@ func (l *lowerer) lowerMethodCallExpr(
 		return l.emit("arena.add", handleType(receiver.Type), allArgs, ""), nil
 	case "get":
 		return l.emit("arena.get", arenaElementType(receiver.Type), allArgs, ""), nil
+	case "append":
+		return l.emit("method.append", "!void", allArgs, ""), nil
+	case "at":
+		return l.emit("method.at", "!"+containerElementType(receiver.Type), allArgs, ""), nil
+	case "len":
+		return l.emit("method.len", "i64", allArgs, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
 	}

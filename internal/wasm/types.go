@@ -16,6 +16,16 @@ func wasmType(typ string) string {
 	}
 }
 
+// zeroValueExpr returns a placeholder value for opaque prototype lowering.
+func zeroValueExpr(typ string) string {
+	switch wasmType(typ) {
+	case "i64":
+		return "(i64.const 0)"
+	default:
+		return "(i32.const 0)"
+	}
+}
+
 // wasmBinaryOp maps a Kizu binary operator to a WebAssembly integer operation.
 func wasmBinaryOp(op string) string {
 	switch op {

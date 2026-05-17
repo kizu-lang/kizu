@@ -297,6 +297,8 @@ func runtimeLocalNames(program *ast.Program) (map[string]bool, map[string]bool) 
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
 			functions[d.Name] = true
+		case *ast.StructDecl:
+			types[d.Name] = true
 		case *ast.EnumDecl:
 			types[d.Name] = true
 		case *ast.UnionDecl:
@@ -596,7 +598,7 @@ func emitLLVMFile(path string, opt bool) error {
 		return err
 	}
 	result, err := cache.GetOrBuild(path, cacheTarget("emit-llvm", opt), func() (string, error) {
-		module, err := lowerFile(path, opt)
+		module, err := lowerTarget(path, opt)
 		if err != nil {
 			return "", err
 		}
@@ -629,7 +631,7 @@ func emitWASMFile(path string, opt bool) error {
 		return err
 	}
 	result, err := cache.GetOrBuild(path, cacheTarget("wasm32-wasi", opt), func() (string, error) {
-		module, err := lowerFile(path, opt)
+		module, err := lowerTarget(path, opt)
 		if err != nil {
 			return "", err
 		}
@@ -640,6 +642,42 @@ func emitWASMFile(path string, opt bool) error {
 	}
 	_, _ = fmt.Println(result.Output)
 	return nil
+}
+
+// lowerTarget lowers either a single source file or a package directory.
+func lowerTarget(path string, opt bool) (*ir.Module, error) {
+	if packageTarget(path) {
+		return lowerPackageTarget(path, opt)
+	}
+	return lowerFile(path, opt)
+}
+
+// lowerPackageTarget resolves, checks, flattens, and lowers a package.
+func lowerPackageTarget(path string, opt bool) (*ir.Module, error) {
+	baseDir := path
+	if filepath.Base(path) == "kizu.toml" {
+		baseDir = filepath.Dir(path)
+	}
+	pkg, err := loadPackageTarget(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, module := range pkg.Modules {
+		if strings.HasSuffix(filepath.Base(module.Module.File), "_test.kizu") {
+			continue
+		}
+		if err := checkPackageProgram(pkg, module); err != nil {
+			return nil, fmt.Errorf("%s: %w", module.Module.Path, err)
+		}
+	}
+	module, err := ir.Lower(packageBuildProgram(pkg))
+	if err != nil {
+		return nil, err
+	}
+	if opt {
+		ir.Optimize(module)
+	}
+	return module, nil
 }
 
 // parseOptFileArgs parses an optional --opt flag followed by one file path.
@@ -718,6 +756,439 @@ func whyRebuildFile(path string) error {
 	}
 	_, _ = fmt.Println(reason)
 	return nil
+}
+
+// packageBuildProgram returns a single AST that the current IR lowerer accepts.
+func packageBuildProgram(pkg *project.Package) *ast.Program {
+	program := &ast.Program{}
+	for _, module := range pkg.Modules {
+		if strings.HasSuffix(filepath.Base(module.Module.File), "_test.kizu") {
+			continue
+		}
+		functions, types := runtimeLocalNames(module.Program)
+		imports := runtimeImportPrefixes(module)
+		prefix := runtimeModulePrefix(module)
+		for _, decl := range module.Program.Decls {
+			root := module.Module.Path == pkg.Graph.Root
+			clone := buildQualifiedDecl(decl, prefix, root, imports, functions, types)
+			if clone != nil {
+				program.Decls = append(program.Decls, clone)
+			}
+		}
+	}
+	return program
+}
+
+// runtimeImportPrefixes maps import aliases to flattened runtime prefixes.
+func runtimeImportPrefixes(module project.ParsedModule) map[string]string {
+	imports := map[string]string{}
+	for _, imported := range module.Imports {
+		imports[imported.Name] = runtimePathPrefix(imported.Path)
+	}
+	return imports
+}
+
+// runtimePathPrefix returns the flattened name prefix for one module path.
+func runtimePathPrefix(path string) string {
+	parts := strings.Split(path, "::")
+	return parts[len(parts)-1]
+}
+
+// buildQualifiedDecl returns a package-build declaration clone.
+func buildQualifiedDecl(
+	decl ast.Decl,
+	prefix string,
+	root bool,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Decl {
+	switch d := decl.(type) {
+	case *ast.FunctionDecl:
+		clone := *d
+		clone.Name = prefix + "." + d.Name
+		if root && d.Name == "main" {
+			clone.Name = "main"
+		}
+		clone.Params = buildParamsClone(d.Params, prefix, imports, types)
+		clone.ReturnType = buildTypeName(d.ReturnType, prefix, imports, types)
+		clone.Body = buildBlockClone(d.Body, prefix, imports, functions, types)
+		return &clone
+	case *ast.StructDecl:
+		clone := *d
+		clone.Name = prefix + "." + d.Name
+		clone.Fields = buildFieldsClone(d.Fields, prefix, imports, types)
+		return &clone
+	case *ast.EnumDecl:
+		clone := *d
+		clone.Name = prefix + "." + d.Name
+		return &clone
+	case *ast.UnionDecl:
+		clone := *d
+		clone.Name = prefix + "." + d.Name
+		clone.Variants = buildUnionVariantsClone(d.Variants, prefix, imports, types)
+		return &clone
+	default:
+		return nil
+	}
+}
+
+// buildParamsClone copies parameter type names into flattened package names.
+func buildParamsClone(
+	params []ast.Param,
+	prefix string,
+	imports map[string]string,
+	types map[string]bool,
+) []ast.Param {
+	clone := make([]ast.Param, 0, len(params))
+	for _, param := range params {
+		param.TypeName = buildTypeName(param.TypeName, prefix, imports, types)
+		clone = append(clone, param)
+	}
+	return clone
+}
+
+// buildFieldsClone copies struct field type names into flattened package names.
+func buildFieldsClone(
+	fields []ast.Field,
+	prefix string,
+	imports map[string]string,
+	types map[string]bool,
+) []ast.Field {
+	clone := make([]ast.Field, 0, len(fields))
+	for _, field := range fields {
+		field.TypeName = buildTypeName(field.TypeName, prefix, imports, types)
+		clone = append(clone, field)
+	}
+	return clone
+}
+
+// buildUnionVariantsClone copies union payload type names into flattened names.
+func buildUnionVariantsClone(
+	variants []ast.UnionVariant,
+	prefix string,
+	imports map[string]string,
+	types map[string]bool,
+) []ast.UnionVariant {
+	clone := make([]ast.UnionVariant, 0, len(variants))
+	for _, variant := range variants {
+		variant.Payload = buildTypeName(variant.Payload, prefix, imports, types)
+		clone = append(clone, variant)
+	}
+	return clone
+}
+
+// buildBlockClone copies a block and qualifies names for package build.
+func buildBlockClone(
+	block *ast.BlockStmt,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) *ast.BlockStmt {
+	if block == nil {
+		return nil
+	}
+	clone := &ast.BlockStmt{Statements: make([]ast.Statement, 0, len(block.Statements))}
+	for _, stmt := range block.Statements {
+		cloneStmt := buildStmtClone(stmt, prefix, imports, functions, types)
+		clone.Statements = append(clone.Statements, cloneStmt)
+	}
+	return clone
+}
+
+// buildStmtClone copies one statement and qualifies contained expressions.
+func buildStmtClone(
+	stmt ast.Statement,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Statement {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		clone := *s
+		clone.Value = buildExprClone(s.Value, prefix, imports, functions, types)
+		return &clone
+	case *ast.AssignStmt:
+		clone := *s
+		clone.Target = buildExprClone(s.Target, prefix, imports, functions, types)
+		clone.Value = buildExprClone(s.Value, prefix, imports, functions, types)
+		return &clone
+	case *ast.ReturnStmt:
+		clone := *s
+		clone.Value = buildExprClone(s.Value, prefix, imports, functions, types)
+		return &clone
+	case *ast.ExprStmt:
+		clone := *s
+		clone.Expr = buildExprClone(s.Expr, prefix, imports, functions, types)
+		return &clone
+	default:
+		return buildControlStmtClone(stmt, prefix, imports, functions, types)
+	}
+}
+
+// buildControlStmtClone copies control statements for package build.
+func buildControlStmtClone(
+	stmt ast.Statement,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Statement {
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		clone := *s
+		clone.Condition = buildExprClone(s.Condition, prefix, imports, functions, types)
+		clone.Consequence = buildBlockClone(s.Consequence, prefix, imports, functions, types)
+		clone.Alternative = buildBlockClone(s.Alternative, prefix, imports, functions, types)
+		return &clone
+	case *ast.WhileStmt:
+		clone := *s
+		clone.Condition = buildExprClone(s.Condition, prefix, imports, functions, types)
+		clone.Body = buildBlockClone(s.Body, prefix, imports, functions, types)
+		return &clone
+	case *ast.ForStmt:
+		clone := *s
+		clone.Start = buildExprClone(s.Start, prefix, imports, functions, types)
+		clone.End = buildExprClone(s.End, prefix, imports, functions, types)
+		clone.Body = buildBlockClone(s.Body, prefix, imports, functions, types)
+		return &clone
+	case *ast.UnsafeStmt:
+		clone := *s
+		clone.Body = buildBlockClone(s.Body, prefix, imports, functions, types)
+		return &clone
+	case *ast.ComptimeIfStmt:
+		clone := *s
+		clone.Condition = buildExprClone(s.Condition, prefix, imports, functions, types)
+		clone.Consequence = buildBlockClone(s.Consequence, prefix, imports, functions, types)
+		clone.Alternative = buildBlockClone(s.Alternative, prefix, imports, functions, types)
+		return &clone
+	default:
+		return stmt
+	}
+}
+
+// buildExprClone copies one expression and qualifies package names.
+func buildExprClone(
+	expr ast.Expression,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	switch e := expr.(type) {
+	case nil:
+		return nil
+	case *ast.CallExpr:
+		return buildCallClone(e, prefix, imports, functions, types)
+	case *ast.FieldExpr:
+		return buildFieldClone(e, prefix, imports, functions, types)
+	case *ast.BinaryExpr:
+		return buildBinaryClone(e, prefix, imports, functions, types)
+	case *ast.PrefixExpr:
+		clone := *e
+		clone.Right = buildExprClone(e.Right, prefix, imports, functions, types)
+		return &clone
+	case *ast.TryExpr:
+		clone := *e
+		clone.Value = buildExprClone(e.Value, prefix, imports, functions, types)
+		return &clone
+	case *ast.CastExpr:
+		clone := *e
+		clone.TargetType = buildTypeName(e.TargetType, prefix, imports, types)
+		clone.Value = buildExprClone(e.Value, prefix, imports, functions, types)
+		return &clone
+	case *ast.StructLiteralExpr:
+		return buildStructLiteralClone(e, prefix, imports, functions, types)
+	case *ast.IfExpr:
+		return buildIfExprClone(e, prefix, imports, functions, types)
+	case *ast.ComptimeExpr:
+		clone := *e
+		clone.Expr = buildExprClone(e.Expr, prefix, imports, functions, types)
+		return &clone
+	case *ast.TypeApplyExpr:
+		clone := *e
+		clone.Callee = buildExprClone(e.Callee, prefix, imports, functions, types)
+		clone.TypeArg = buildTypeName(e.TypeArg, prefix, imports, types)
+		return &clone
+	case *ast.ArenaNewExpr:
+		clone := *e
+		clone.TypeName = buildTypeName(e.TypeName, prefix, imports, types)
+		return &clone
+	default:
+		return expr
+	}
+}
+
+// buildBinaryClone copies a binary expression.
+func buildBinaryClone(
+	expr *ast.BinaryExpr,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	clone := *expr
+	clone.Left = buildExprClone(expr.Left, prefix, imports, functions, types)
+	clone.Right = buildExprClone(expr.Right, prefix, imports, functions, types)
+	return &clone
+}
+
+// buildIfExprClone copies an if expression.
+func buildIfExprClone(
+	expr *ast.IfExpr,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	clone := *expr
+	clone.Condition = buildExprClone(expr.Condition, prefix, imports, functions, types)
+	clone.Consequence = buildBlockClone(expr.Consequence, prefix, imports, functions, types)
+	clone.Alternative = buildBlockClone(expr.Alternative, prefix, imports, functions, types)
+	return &clone
+}
+
+// buildCallClone copies one call and qualifies package function callees.
+func buildCallClone(
+	expr *ast.CallExpr,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	clone := *expr
+	if ident, ok := expr.Callee.(*ast.IdentExpr); ok && functions[ident.Name] {
+		clone.Callee = &ast.IdentExpr{Name: prefix + "." + ident.Name}
+	} else if field, ok := expr.Callee.(*ast.FieldExpr); ok && field.Namespace {
+		if name, ok := buildNamespaceName(field, prefix, imports, types); ok {
+			clone.Callee = &ast.IdentExpr{Name: name}
+		} else {
+			clone.Callee = buildExprClone(expr.Callee, prefix, imports, functions, types)
+		}
+	} else {
+		clone.Callee = buildExprClone(expr.Callee, prefix, imports, functions, types)
+	}
+	clone.Args = buildExprsClone(expr.Args, prefix, imports, functions, types)
+	return &clone
+}
+
+// buildFieldClone copies field and namespace expressions.
+func buildFieldClone(
+	expr *ast.FieldExpr,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	if expr.Namespace {
+		if name, ok := buildNamespaceName(expr, prefix, imports, types); ok {
+			return &ast.IdentExpr{Name: name}
+		}
+	}
+	clone := *expr
+	clone.Receiver = buildExprClone(expr.Receiver, prefix, imports, functions, types)
+	return &clone
+}
+
+// buildStructLiteralClone copies one struct literal with flattened type names.
+func buildStructLiteralClone(
+	expr *ast.StructLiteralExpr,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) ast.Expression {
+	clone := *expr
+	clone.TypeName = buildTypeName(expr.TypeName, prefix, imports, types)
+	clone.Fields = make([]ast.FieldValue, 0, len(expr.Fields))
+	for _, field := range expr.Fields {
+		field.Value = buildExprClone(field.Value, prefix, imports, functions, types)
+		clone.Fields = append(clone.Fields, field)
+	}
+	return &clone
+}
+
+// buildExprsClone copies an expression list for package build.
+func buildExprsClone(
+	exprs []ast.Expression,
+	prefix string,
+	imports map[string]string,
+	functions map[string]bool,
+	types map[string]bool,
+) []ast.Expression {
+	clone := make([]ast.Expression, 0, len(exprs))
+	for _, expr := range exprs {
+		clone = append(clone, buildExprClone(expr, prefix, imports, functions, types))
+	}
+	return clone
+}
+
+// buildNamespaceName maps a namespace expression to its flattened name.
+func buildNamespaceName(
+	expr *ast.FieldExpr,
+	prefix string,
+	imports map[string]string,
+	types map[string]bool,
+) (string, bool) {
+	parts, ok := namespaceParts(expr)
+	if !ok || len(parts) == 0 {
+		return "", false
+	}
+	if mapped, ok := imports[parts[0]]; ok {
+		parts[0] = mapped
+		return strings.Join(parts, "."), true
+	}
+	if types[parts[0]] {
+		parts[0] = prefix + "." + parts[0]
+		return strings.Join(parts, "."), true
+	}
+	if parts[0] == "std" {
+		return strings.Join(parts, "."), true
+	}
+	return "", false
+}
+
+// namespaceParts returns every segment in a namespace expression.
+func namespaceParts(expr ast.Expression) ([]string, bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return []string{e.Name}, true
+	case *ast.FieldExpr:
+		if !e.Namespace {
+			return nil, false
+		}
+		parts, ok := namespaceParts(e.Receiver)
+		if !ok {
+			return nil, false
+		}
+		return append(parts, e.Name), true
+	default:
+		return nil, false
+	}
+}
+
+// buildTypeName rewrites package-local and imported type names for IR lowering.
+func buildTypeName(
+	name string,
+	prefix string,
+	imports map[string]string,
+	types map[string]bool,
+) string {
+	if name == "" {
+		return ""
+	}
+	if strings.HasPrefix(name, "!") || strings.HasPrefix(name, "?") {
+		return name[:1] + buildTypeName(name[1:], prefix, imports, types)
+	}
+	for alias, mapped := range imports {
+		name = strings.ReplaceAll(name, alias+"::", mapped+".")
+	}
+	if types[name] {
+		return prefix + "." + name
+	}
+	return name
 }
 
 // importCHeaderFile converts supported C prototypes into Kizu extern declarations.

@@ -218,6 +218,36 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildSelfHostPackageEmitLLVM checks package build can lower self-host sources.
+func TestBuildSelfHostPackageEmitLLVM(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "../../selfhost")
+	cmd.Env = append(os.Environ(), "KIZU_CACHE_DIR="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"define void @main()", "define i1 @token.ready()"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
+// TestBuildSelfHostPackageTargetWASI checks package build emits WAT for self-host.
+func TestBuildSelfHostPackageTargetWASI(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "build", "--target", "wasm32-wasi", "../../selfhost")
+	cmd.Env = append(os.Environ(), "KIZU_CACHE_DIR="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"(func $main", "(call $main)"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
 // TestCacheCommands checks cache status, why-rebuild, and prune.
 func TestCacheCommands(t *testing.T) {
 	cacheDir := t.TempDir()

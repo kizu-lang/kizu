@@ -129,6 +129,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	switch {
 	case instr.Op == "const":
 		return e.writeConst(instr)
+	case strings.HasPrefix(instr.Op, "unary."):
+		return e.writeOpaqueValue(instr)
 	case strings.HasPrefix(instr.Op, "binary."):
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "call."):
@@ -138,6 +140,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	case instr.Op == "phi":
 		return e.writePhi(instr)
 	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
+		return e.writeOpaqueValue(instr)
+	case strings.HasPrefix(instr.Op, "method."):
 		return e.writeOpaqueValue(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
 		return e.writeOpaqueValue(instr)
@@ -164,7 +168,7 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 			typ: "[]const u8", operand: instr.Result.Name, length: len(unquoted),
 		}
 	default:
-		return fmt.Errorf("llvm error: unsupported const type `%s`", instr.Result.Type)
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
 	}
 	return nil
 }
