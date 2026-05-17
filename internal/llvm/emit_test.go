@@ -78,6 +78,17 @@ func TestEmitNativeTransparentAliases(t *testing.T) {
 	}
 }
 
+// TestEmitNativeUnaryMinus checks signed sentinel values stay negative.
+func TestEmitNativeUnaryMinus(t *testing.T) {
+	got, err := Emit(nativeUnaryMinusModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if !strings.Contains(got, "%v2 = sub i64 0, 1") {
+		t.Fatalf("LLVM output missing unary minus:\n%s", got)
+	}
+}
+
 // nativeAliasModule returns scalar error-union and borrow alias operations.
 func nativeAliasModule() *ir.Module {
 	return &ir.Module{
@@ -96,6 +107,28 @@ func nativeAliasModule() *ir.Module {
 			nativeAliasMainFunction(),
 			{Name: "uses_ref", Return: "bool", Params: []ir.Value{{Name: "%arg", Type: "Token"}}},
 		}}
+}
+
+// nativeUnaryMinusModule returns the sentinel shape used by manifest parsing.
+func nativeUnaryMinusModule() *ir.Module {
+	return &ir.Module{
+		Functions: []*ir.Function{
+			{
+				Name: "missing", Return: "i64",
+				Blocks: []*ir.Block{{Name: "entry",
+					Instrs: []*ir.Instr{
+						{Result: ir.Value{Name: "%1", Type: "i64"}, Op: "const", Immediate: "1"},
+						{Result: ir.Value{Name: "%2", Type: "i64"}, Op: "unary.-",
+							Args: []ir.Value{{Name: "%1", Type: "i64"}}},
+					},
+					Terminator: ir.Terminator{
+						Op:    "return",
+						Value: ir.Value{Name: "%2", Type: "i64"},
+					},
+				}},
+			},
+		},
+	}
 }
 
 // nativeAliasMainFunction returns a function using try and borrow aliases.

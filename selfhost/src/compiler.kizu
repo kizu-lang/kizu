@@ -48,6 +48,7 @@ pub struct SourceModule {
 pub struct PackageManifest {
     pub package_root: []const u8;
     pub root_file: []const u8;
+    pub source: []const u8;
 }
 
 pub struct ModuleSpec {
@@ -339,7 +340,7 @@ fn append_manifest_modules(
 ) -> !void {
     let allocator = std::mem::page_allocator();
     var specs = std::array::Array<ModuleSpec>(allocator);
-    try append_selfhost_module_specs(specs);
+    try append_manifest_module_specs(manifest.source, specs);
 
     var index = 0;
     while index < specs.len() {
@@ -350,22 +351,102 @@ fn append_manifest_modules(
     return void;
 }
 
-// append_selfhost_module_specs records the current checked-in compiler modules.
-fn append_selfhost_module_specs(modules: &mut std::array::Array<ModuleSpec>) -> !void {
-    try modules.append(module_spec("selfhost::main", "main.kizu"));
-    try modules.append(module_spec("selfhost::ast", "ast.kizu"));
-    try modules.append(module_spec("selfhost::backend", "backend.kizu"));
-    try modules.append(module_spec("selfhost::cache_contract", "cache_contract.kizu"));
-    try modules.append(module_spec("selfhost::compiler", "compiler.kizu"));
-    try modules.append(module_spec("selfhost::diagnostics", "diagnostics.kizu"));
-    try modules.append(module_spec("selfhost::ir", "ir.kizu"));
-    try modules.append(module_spec("selfhost::lexer", "lexer.kizu"));
-    try modules.append(module_spec("selfhost::ownership", "ownership.kizu"));
-    try modules.append(module_spec("selfhost::parser", "parser.kizu"));
-    try modules.append(module_spec("selfhost::resolver", "resolver.kizu"));
-    try modules.append(module_spec("selfhost::token", "token.kizu"));
-    try modules.append(module_spec("selfhost::types", "types.kizu"));
+// append_manifest_module_specs records module specs declared in kizu.toml.
+fn append_manifest_module_specs(
+    source: []const u8,
+    modules: &mut std::array::Array<ModuleSpec>
+) -> !void {
+    var start = 0;
+    let length = std::mem::len(source);
+
+    while start < length {
+        let end = try manifest_line_end(source, start);
+        let line = try std::mem::slice(source, start, end);
+        if std::mem::starts_with(line, "entries") {
+            var cursor = 0;
+            let line_length = std::mem::len(line);
+            while cursor < line_length {
+                let first = try manifest_quote_after(line, cursor);
+                if first >= line_length {
+                    cursor = line_length;
+                } else {
+                    let second = try manifest_quote_after(line, first + 1);
+                    if second >= line_length {
+                        return error("invalid selfhost manifest entry");
+                    }
+                    let item = try std::mem::slice(line, first + 1, second);
+                    if !try manifest_module_is_test(item) {
+                        try modules.append(try manifest_module_spec(item));
+                    }
+                    cursor = second + 1;
+                }
+            }
+        }
+        start = end + 1;
+    }
+    if modules.len() == 0 {
+        return error("missing selfhost manifest entries");
+    }
     return void;
+}
+
+// manifest_module_spec parses one `module|file` manifest item.
+fn manifest_module_spec(item: []const u8) -> !ModuleSpec {
+    let sep = try manifest_pipe_offset(item);
+    let length = std::mem::len(item);
+    if sep >= length {
+        return error("invalid selfhost manifest entry");
+    }
+    let next = try manifest_pipe_offset_after(item, sep + 1);
+    let module_path = try std::mem::slice(item, 0, sep);
+    if next >= length {
+        let file_path = try std::mem::slice(item, sep + 1, length);
+        return module_spec(module_path, file_path);
+    }
+    let file_path = try std::mem::slice(item, sep + 1, next);
+    let marker = try std::mem::slice(item, next + 1, length);
+    if !std::mem::equal_bytes(marker, "test") {
+        return error("invalid selfhost manifest entry marker");
+    }
+    return module_spec(module_path, file_path);
+}
+
+// manifest_module_is_test reports whether one manifest item is test-only.
+fn manifest_module_is_test(item: []const u8) -> !bool {
+    let sep = try manifest_pipe_offset(item);
+    let length = std::mem::len(item);
+    if sep >= length {
+        return error("invalid selfhost manifest entry");
+    }
+    let next = try manifest_pipe_offset_after(item, sep + 1);
+    if next >= length {
+        return false;
+    }
+    let marker = try std::mem::slice(item, next + 1, length);
+    if std::mem::equal_bytes(marker, "test") {
+        return true;
+    }
+    return error("invalid selfhost manifest entry marker");
+}
+
+// manifest_pipe_offset returns the separator offset in one module item.
+fn manifest_pipe_offset(item: []const u8) -> !i64 {
+    return try manifest_pipe_offset_after(item, 0);
+}
+
+// manifest_pipe_offset_after returns the separator offset at or after start.
+fn manifest_pipe_offset_after(item: []const u8, start: i64) -> !i64 {
+    var index = start;
+    let length = std::mem::len(item);
+
+    while index < length {
+        let byte = try std::mem::byte_at(item, index);
+        if byte == cast<u8>(124) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return length;
 }
 
 // module_spec constructs one manifest graph candidate.
@@ -382,7 +463,7 @@ fn read_manifest_module(
     manifest: &PackageManifest,
     spec: &ModuleSpec
 ) -> !SourceModule {
-    let path = try selfhost_module_file(manifest.package_root, spec.file);
+    let path = std::path::join(manifest.package_root, spec.file);
     let root = std::mem::equal_bytes(path, manifest.root_file);
     return try read_source_file(io, spec.path, path, root);
 }
@@ -408,7 +489,8 @@ fn read_selfhost_manifest(io: Io) -> !PackageManifest {
     }
     return PackageManifest {
         package_root: root,
-        root_file: try selfhost_module_file(root, "main.kizu"),
+        root_file: std::path::join(root, "src/main.kizu"),
+        source: source,
     };
 }
 
@@ -420,69 +502,6 @@ fn selfhost_manifest_file(root: []const u8) -> ![]const u8 {
     if std::mem::equal_bytes(root, "../../selfhost") {
         return "../../selfhost/kizu.toml";
     }
-    return error("missing selfhost package file");
-}
-
-// selfhost_module_file returns a source path below the selected manifest root.
-fn selfhost_module_file(root: []const u8, file: []const u8) -> ![]const u8 {
-    if std::mem::equal_bytes(root, "selfhost") {
-        return try selfhost_root_module_file(file);
-    }
-    if std::mem::equal_bytes(root, "../../selfhost") {
-        return try selfhost_package_test_module_file(file);
-    }
-    return error("missing selfhost package file");
-}
-
-// selfhost_root_module_file returns a repo-root relative source path.
-fn selfhost_root_module_file(file: []const u8) -> ![]const u8 {
-    if std::mem::equal_bytes(file, "main.kizu") { return "selfhost/src/main.kizu"; }
-    if std::mem::equal_bytes(file, "ast.kizu") { return "selfhost/src/ast.kizu"; }
-    if std::mem::equal_bytes(file, "backend.kizu") { return "selfhost/src/backend.kizu"; }
-    if std::mem::equal_bytes(file, "cache_contract.kizu") {
-        return "selfhost/src/cache_contract.kizu";
-    }
-    if std::mem::equal_bytes(file, "compiler.kizu") { return "selfhost/src/compiler.kizu"; }
-    if std::mem::equal_bytes(file, "diagnostics.kizu") {
-        return "selfhost/src/diagnostics.kizu";
-    }
-    if std::mem::equal_bytes(file, "ir.kizu") { return "selfhost/src/ir.kizu"; }
-    if std::mem::equal_bytes(file, "lexer.kizu") { return "selfhost/src/lexer.kizu"; }
-    if std::mem::equal_bytes(file, "ownership.kizu") {
-        return "selfhost/src/ownership.kizu";
-    }
-    if std::mem::equal_bytes(file, "parser.kizu") { return "selfhost/src/parser.kizu"; }
-    if std::mem::equal_bytes(file, "resolver.kizu") { return "selfhost/src/resolver.kizu"; }
-    if std::mem::equal_bytes(file, "token.kizu") { return "selfhost/src/token.kizu"; }
-    if std::mem::equal_bytes(file, "types.kizu") { return "selfhost/src/types.kizu"; }
-    return error("missing selfhost package file");
-}
-
-// selfhost_package_test_module_file returns a cmd/kizu relative source path.
-fn selfhost_package_test_module_file(file: []const u8) -> ![]const u8 {
-    if std::mem::equal_bytes(file, "main.kizu") { return "../../selfhost/src/main.kizu"; }
-    if std::mem::equal_bytes(file, "ast.kizu") { return "../../selfhost/src/ast.kizu"; }
-    if std::mem::equal_bytes(file, "backend.kizu") { return "../../selfhost/src/backend.kizu"; }
-    if std::mem::equal_bytes(file, "cache_contract.kizu") {
-        return "../../selfhost/src/cache_contract.kizu";
-    }
-    if std::mem::equal_bytes(file, "compiler.kizu") {
-        return "../../selfhost/src/compiler.kizu";
-    }
-    if std::mem::equal_bytes(file, "diagnostics.kizu") {
-        return "../../selfhost/src/diagnostics.kizu";
-    }
-    if std::mem::equal_bytes(file, "ir.kizu") { return "../../selfhost/src/ir.kizu"; }
-    if std::mem::equal_bytes(file, "lexer.kizu") { return "../../selfhost/src/lexer.kizu"; }
-    if std::mem::equal_bytes(file, "ownership.kizu") {
-        return "../../selfhost/src/ownership.kizu";
-    }
-    if std::mem::equal_bytes(file, "parser.kizu") { return "../../selfhost/src/parser.kizu"; }
-    if std::mem::equal_bytes(file, "resolver.kizu") {
-        return "../../selfhost/src/resolver.kizu";
-    }
-    if std::mem::equal_bytes(file, "token.kizu") { return "../../selfhost/src/token.kizu"; }
-    if std::mem::equal_bytes(file, "types.kizu") { return "../../selfhost/src/types.kizu"; }
     return error("missing selfhost package file");
 }
 
@@ -519,12 +538,13 @@ fn manifest_has_value(source: []const u8, key: []const u8, value: []const u8) ->
 
 // manifest_line_value_matches compares the first quoted value on a line.
 fn manifest_line_value_matches(line: []const u8, value: []const u8) -> !bool {
+    let length = std::mem::len(line);
     let first = try manifest_quote_after(line, 0);
-    if first < 0 {
+    if first >= length {
         return false;
     }
     let second = try manifest_quote_after(line, first + 1);
-    if second < 0 {
+    if second >= length {
         return false;
     }
     let parsed = try std::mem::slice(line, first + 1, second);
@@ -543,7 +563,7 @@ fn manifest_quote_after(line: []const u8, start: i64) -> !i64 {
         }
         index = index + 1;
     }
-    return -1;
+    return length;
 }
 
 // manifest_line_end returns the end offset for one line without the newline.
@@ -600,7 +620,7 @@ fn module_is_root(module: &SourceModule) -> bool {
     if module.is_root {
         return true;
     }
-    return std::mem::equal_bytes(module.path, "selfhost::main");
+    return std::mem::equal_bytes(module.path, "selfhost");
 }
 
 // ready exposes the compiler module to package-level resolution checks.
