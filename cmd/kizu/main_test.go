@@ -703,6 +703,10 @@ func requireSelfHostReportMarkers(t *testing.T) {
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.merge_status(ptr %ls, ptr %rs)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define i1 @compiler.module_is_root(ptr %module)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"call i1 @kizu_bytes_equal(ptr %path, ptr @.str.compiler.module.root)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.package_failure(ptr %report, ptr @.str.compiler.finish.missing_root)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "store i1 true, ptr %b_out")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.status_name(ptr %status)")
@@ -726,6 +730,8 @@ func requireSelfHostReportMarkers(t *testing.T) {
 		"define ptr @compiler.compile_package(ptr %modules, ptr %target_name) { ret ptr null }")
 	requireFileNotContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.merge_package_report(ptr %current, ptr %next) { ret ptr null }")
+	requireFileNotContains(t, "target/kizu-selfhost.ll",
+		"define i1 @compiler.module_is_root(ptr %module) { ret i1 false }")
 }
 
 // requireSelfHostLexerMarkers checks remaining lexer and resolver body markers.

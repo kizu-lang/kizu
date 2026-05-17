@@ -953,6 +953,9 @@ fn build_named_or_fallback_function_symbol(
     if function_is_merge_package_report_body(module_path, name) {
         return build_merge_package_report_function_symbol();
     }
+    if function_is_module_is_root_body(module_path, name) {
+        return build_module_is_root_function_symbol();
+    }
     if function_is_command_report_body(module_path, name) {
         return build_command_report_function_symbol();
     }
@@ -1751,6 +1754,39 @@ fn append_merge_package_report_stores(text: &mut std::string::String) -> !void {
   store ptr %diag, ptr %d_out
 ");
     return void;
+}
+
+// build_module_is_root_function_symbol builds SourceModule root detection.
+fn build_module_is_root_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("@.str.compiler.module.root = private unnamed_addr constant ");
+    try text.append_bytes("[9 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("define i1 @compiler.module_is_root(ptr %module) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %flag_in = getelementptr inbounds %struct.compiler.SourceModule, ptr %module, i64 0, i32 2
+  %flag = load i1, ptr %flag_in
+  br i1 %flag, label %yes, label %path_check
+yes:
+  ret i1 true
+path_check:
+  %path_in = getelementptr inbounds %struct.compiler.SourceModule, ptr %module, i64 0, i32 0
+  %path = load ptr, ptr %path_in
+  %matches = call i1 @kizu_bytes_equal(ptr %path, ptr @.str.compiler.module.root)
+  ret i1 %matches
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
 }
 
 // build_command_report_function_symbol builds the CommandReport constructor body.
@@ -2592,6 +2628,14 @@ fn function_is_merge_package_report_body(module_path: []const u8, name: []const 
         return false;
     }
     return std::mem::equal_bytes(name, "merge_package_report");
+}
+
+// function_is_module_is_root_body identifies SourceModule root detection.
+fn function_is_module_is_root_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "module_is_root");
 }
 
 // function_is_lexer_lex_body identifies the lexer source boundary.
