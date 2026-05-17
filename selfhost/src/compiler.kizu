@@ -904,6 +904,12 @@ fn build_function_llvm_symbol(
     if try function_is_ident_continue_body(module_path, name, tokens, index) {
         return build_ident_continue_function_symbol(module_path, name);
     }
+    if function_is_lexer_lex_body(module_path, name) {
+        return build_lexer_lex_function_symbol();
+    }
+    if function_is_parser_parse_token_stream_body(module_path, name) {
+        return build_parser_parse_token_stream_function_symbol();
+    }
     return try build_named_or_fallback_function_symbol(module_path, name, tokens, index);
 }
 
@@ -1413,6 +1419,48 @@ fn build_types_source_diagnostic_function_symbol() -> !std::string::String {
     try text.append_bytes("define ptr @types.source_diagnostic(ptr %source) ");
     try text.append_byte(cast<u8>(123));
     try text.append_bytes(" ret ptr @.str.compiler.empty ");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_lexer_lex_function_symbol builds the current source-as-token-list shim.
+fn build_lexer_lex_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @lexer.lex(ptr %source) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes(" ret ptr %source ");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_parser_parse_token_stream_function_symbol builds a ParseSummary value.
+fn build_parser_parse_token_stream_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @parser.parse_token_stream(ptr %tokens) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %out = call ptr @malloc(i64 48)
+  %fn_out = getelementptr inbounds %struct.ast.ParseSummary, ptr %out, i64 0, i32 0
+  store i64 0, ptr %fn_out
+  %import_out = getelementptr inbounds %struct.ast.ParseSummary, ptr %out, i64 0, i32 1
+  store i64 0, ptr %import_out
+  %struct_out = getelementptr inbounds %struct.ast.ParseSummary, ptr %out, i64 0, i32 2
+  store i64 0, ptr %struct_out
+  %enum_out = getelementptr inbounds %struct.ast.ParseSummary, ptr %out, i64 0, i32 3
+  store i64 0, ptr %enum_out
+  %union_out = getelementptr inbounds %struct.ast.ParseSummary, ptr %out, i64 0, i32 4
+  store i64 0, ptr %union_out
+  %return_out = getelementptr inbounds %struct.ast.ParseSummary, ptr %out, i64 0, i32 5
+  store i64 0, ptr %return_out
+  ret ptr %out
+");
     try text.append_byte(cast<u8>(125));
     try text.append_byte(cast<u8>(10));
     return text;
@@ -2219,12 +2267,28 @@ fn function_is_lex_and_parse_source_body(module_path: []const u8, name: []const 
     return std::mem::equal_bytes(name, "lex_and_parse_source");
 }
 
+// function_is_parser_parse_token_stream_body identifies parser summary lowering.
+fn function_is_parser_parse_token_stream_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::parser") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "parse_token_stream");
+}
+
 // function_is_types_source_diagnostic_body identifies type diagnostic summary.
 fn function_is_types_source_diagnostic_body(module_path: []const u8, name: []const u8) -> bool {
     if !std::mem::equal_bytes(module_path, "selfhost::types") {
         return false;
     }
     return std::mem::equal_bytes(name, "source_diagnostic");
+}
+
+// function_is_lexer_lex_body identifies the lexer source boundary.
+fn function_is_lexer_lex_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::lexer") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "lex");
 }
 
 // function_is_command_report_body identifies the CommandReport constructor.
