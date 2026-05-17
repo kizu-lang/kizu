@@ -807,13 +807,7 @@ func evalModulo(left int64, right int64) (Value, error) {
 // evalCallExpr evaluates builtin and user-defined function calls.
 func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		if value, ok, err := i.evalUnionConstructor(field, expr.Args, env); ok || err != nil {
-			return value, err
-		}
-		if value, ok, err := i.evalQualifiedBuiltin(field, expr.Args, env); ok || err != nil {
-			return value, err
-		}
-		return i.evalMethodCallExpr(field, expr.Args, env)
+		return i.evalFieldCallExpr(field, expr.Args, env)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
 		return i.evalTypeApplyCallExpr(typeApply, expr.Args, env)
@@ -842,6 +836,42 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		return callTaskGroup(args)
 	}
 	return i.callFunction(name.Name, args)
+}
+
+// evalFieldCallExpr evaluates qualified, union, and method calls.
+func (i *Interpreter) evalFieldCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if value, ok, err := i.evalUnionConstructor(field, args, env); ok || err != nil {
+		return value, err
+	}
+	if value, ok, err := i.evalQualifiedUserCall(field, args, env); ok || err != nil {
+		return value, err
+	}
+	if value, ok, err := i.evalQualifiedBuiltin(field, args, env); ok || err != nil {
+		return value, err
+	}
+	return i.evalMethodCallExpr(field, args, env)
+}
+
+// evalQualifiedUserCall evaluates source-loaded qualified functions.
+func (i *Interpreter) evalQualifiedUserCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return voidValue(), false, nil
+	}
+	fn, ok := i.functions[name]
+	if !ok {
+		return voidValue(), false, nil
+	}
+	value, err := i.callFunctionExpr(fn, args, env)
+	return value, true, err
 }
 
 // evalQualifiedBuiltin evaluates std:: namespace prototype calls without a module system.
@@ -1278,16 +1308,16 @@ func (i *Interpreter) evalPathBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.path.join":
+	case "std.builtin.path_join":
 		value, err := i.evalPathJoin(args, env)
 		return value, true, err
-	case "std.path.clean":
+	case "std.builtin.path_clean":
 		return i.evalPathUnary(name, args, env, stdprim.PathClean)
-	case "std.path.basename":
+	case "std.builtin.path_basename":
 		return i.evalPathUnary(name, args, env, stdprim.PathBase)
-	case "std.path.dirname":
+	case "std.builtin.path_dirname":
 		return i.evalPathUnary(name, args, env, stdprim.PathDir)
-	case "std.path.extension":
+	case "std.builtin.path_extension":
 		return i.evalPathUnary(name, args, env, stdprim.PathExt)
 	default:
 		return voidValue(), false, nil

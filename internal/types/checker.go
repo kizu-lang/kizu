@@ -1521,13 +1521,7 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type
 // checkCallExpr validates builtin and user function calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		if typ, ok, err := c.checkUnionConstructorCall(field, expr.Args, env, unsafe); ok || err != nil {
-			return typ, err
-		}
-		if typ, ok, err := c.checkQualifiedBuiltin(field, expr.Args, env, unsafe); ok || err != nil {
-			return typ, err
-		}
-		return c.checkMethodCallExpr(field, expr.Args, env, unsafe)
+		return c.checkFieldCallExpr(field, expr.Args, env, unsafe)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
 		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env, unsafe)
@@ -1555,6 +1549,43 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 		return "", fmt.Errorf("type error: use `std::task::Group(io)`")
 	}
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
+}
+
+// checkFieldCallExpr validates qualified, union, and method calls.
+func (c *Checker) checkFieldCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if typ, ok, err := c.checkUnionConstructorCall(field, args, env, unsafe); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkQualifiedUserCall(field, args, env, unsafe); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkQualifiedBuiltin(field, args, env, unsafe); ok || err != nil {
+		return typ, err
+	}
+	return c.checkMethodCallExpr(field, args, env, unsafe)
+}
+
+// checkQualifiedUserCall validates module-qualified functions loaded from source.
+func (c *Checker) checkQualifiedUserCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return "", false, nil
+	}
+	if _, ok := c.functions[name]; !ok {
+		return "", false, nil
+	}
+	typ, err := c.checkUserCall(name, args, env, unsafe)
+	return typ, true, err
 }
 
 // checkQualifiedBuiltin validates std:: namespace prototype calls.
@@ -1784,9 +1815,10 @@ func (c *Checker) checkPathBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.path.join":
+	case "std.builtin.path_join":
 		return c.checkPathBytesArgs(name, args, env, unsafe, 2)
-	case "std.path.clean", "std.path.basename", "std.path.dirname", "std.path.extension":
+	case "std.builtin.path_clean", "std.builtin.path_basename",
+		"std.builtin.path_dirname", "std.builtin.path_extension":
 		return c.checkPathBytesArgs(name, args, env, unsafe, 1)
 	default:
 		return "", false, nil
