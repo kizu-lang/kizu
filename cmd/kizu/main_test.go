@@ -654,6 +654,9 @@ func requireSelfHostCompileSourceMarkers(t *testing.T) {
 		"define ptr @types.source_diagnostic(ptr %source)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"%parsed = call ptr @parser.parse_token_stream(ptr %tokens)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @lexer.lex(ptr %source)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define ptr @parser.parse_token_stream(ptr %tokens)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "store i1 %supported, ptr %backend")
 	requireFileNotContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_source(ptr %source, ptr %target_name) { ret ptr null }")
@@ -661,6 +664,10 @@ func requireSelfHostCompileSourceMarkers(t *testing.T) {
 		"define ptr @compiler.lex_and_parse_source(ptr %source) { ret ptr null }")
 	requireFileNotContains(t, "target/kizu-selfhost.ll",
 		"define ptr @types.source_diagnostic(ptr %source) { ret ptr null }")
+	requireFileNotContains(t, "target/kizu-selfhost.ll",
+		"define ptr @lexer.lex(ptr %source) { ret ptr null }")
+	requireFileNotContains(t, "target/kizu-selfhost.ll",
+		"define ptr @parser.parse_token_stream(ptr %tokens) { ret ptr null }")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"%struct.compiler.CompileReport = type")
 }
