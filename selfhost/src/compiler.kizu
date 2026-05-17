@@ -773,6 +773,8 @@ fn build_selfhost_struct_layouts() -> !std::string::String {
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("%struct.compiler.ModuleSpec = type { ptr, ptr }");
     try text.append_byte(cast<u8>(10));
+    try text.append_bytes("%struct.compiler.PackageManifest = type { ptr, ptr, ptr }");
+    try text.append_byte(cast<u8>(10));
     try text.append_bytes("%struct.ast.ParseSummary = type { i64, i64, i64, i64, i64, i64 }");
     try text.append_byte(cast<u8>(10));
     return text;
@@ -822,6 +824,22 @@ fn append_selfhost_status_constants(text: &mut std::string::String) -> !void {
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.empty = private unnamed_addr constant [1 x i8] c");
     try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.main.selfhost = private unnamed_addr constant ");
+    try text.append_bytes("[23 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost/src/main.kizu");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.main.parent = private unnamed_addr constant ");
+    try text.append_bytes("[29 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("../../selfhost/src/main.kizu");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
@@ -1002,6 +1020,9 @@ fn build_package_or_report_function_symbol(
     }
     if function_is_read_source_file_body(module_path, name) {
         return build_read_source_file_function_symbol();
+    }
+    if function_is_read_selfhost_manifest_body(module_path, name) {
+        return build_read_selfhost_manifest_function_symbol();
     }
     if function_is_command_report_body(module_path, name) {
         return build_command_report_function_symbol();
@@ -1960,6 +1981,63 @@ ok:
     return text;
 }
 
+// build_read_selfhost_manifest_function_symbol builds the manifest loader body.
+fn build_read_selfhost_manifest_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try append_read_selfhost_manifest_header(text);
+    try append_read_selfhost_manifest_root_file(text);
+    try append_read_selfhost_manifest_stores(text);
+    try text.append_bytes("  ret ptr %manifest");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("}");
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// append_read_selfhost_manifest_header appends root, file, and source loading.
+fn append_read_selfhost_manifest_header(text: &mut std::string::String) -> !void {
+    try text.append_bytes("define ptr @compiler.read_selfhost_manifest(ptr %io) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %root = call ptr @compiler.selfhost_package_root(ptr %io)
+  %manifest_file = call ptr @compiler.selfhost_manifest_file(ptr %root)
+  %source = call ptr @kizu_read_file(ptr %manifest_file)
+  %manifest = call ptr @malloc(i64 24)
+  %root_here = call i1 @kizu_bytes_equal(ptr %root, ptr @.str.compiler.root.selfhost)
+  br i1 %root_here, label %here, label %parent
+");
+    return void;
+}
+
+// append_read_selfhost_manifest_root_file appends root-file selection blocks.
+fn append_read_selfhost_manifest_root_file(text: &mut std::string::String) -> !void {
+    try text.append_bytes("here:
+  br label %store
+parent:
+  br label %store
+store:
+  %root_file = phi ptr [ @.str.compiler.main.selfhost, %here ], ");
+    try text.append_bytes("[ @.str.compiler.main.parent, %parent ]");
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_read_selfhost_manifest_stores appends PackageManifest field stores.
+fn append_read_selfhost_manifest_stores(text: &mut std::string::String) -> !void {
+    try text.append_bytes("
+  %root_out = getelementptr inbounds %struct.compiler.PackageManifest, ptr %manifest, i64 0, i32 0
+  store ptr %root, ptr %root_out
+  %file_out = getelementptr inbounds %struct.compiler.PackageManifest, ptr %manifest, i64 0, i32 1
+  store ptr %root_file, ptr %file_out
+  %source_out = getelementptr inbounds %struct.compiler.PackageManifest, ptr %manifest, i64 0, i32 2
+  store ptr %source, ptr %source_out
+");
+    return void;
+}
+
 // append_selfhost_manifest_path_constants appends shared manifest path globals.
 fn append_selfhost_manifest_path_constants(text: &mut std::string::String) -> !void {
     try text.append_bytes("@.str.compiler.root.selfhost = private unnamed_addr constant ");
@@ -2884,6 +2962,14 @@ fn function_is_read_source_file_body(module_path: []const u8, name: []const u8) 
         return false;
     }
     return std::mem::equal_bytes(name, "read_source_file");
+}
+
+// function_is_read_selfhost_manifest_body identifies manifest loading.
+fn function_is_read_selfhost_manifest_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "read_selfhost_manifest");
 }
 
 // function_is_lexer_lex_body identifies the lexer source boundary.
