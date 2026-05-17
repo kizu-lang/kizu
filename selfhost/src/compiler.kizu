@@ -1,0 +1,122 @@
+// Module: compiler pipeline boundary for the future self-host compiler.
+
+import selfhost::ast;
+import selfhost::backend;
+import selfhost::ir;
+import selfhost::lexer;
+import selfhost::ownership;
+import selfhost::parser;
+import selfhost::token;
+import selfhost::types;
+
+pub enum CompileStatus {
+    Pass
+    Fail
+}
+
+pub struct CompileReport {
+    pub status: CompileStatus;
+    pub token_count: i64;
+    pub function_count: i64;
+    pub type_count: i64;
+    pub ownership_checks: i64;
+    pub ir_function_count: i64;
+    pub backend_emitted: bool;
+    pub diagnostic: []const u8;
+}
+
+// compile_source runs the self-host phase order over one source buffer.
+pub fn compile_source(source: []const u8, target_name: []const u8) -> !CompileReport {
+    var tokens = try lexer::lex(source);
+    token::ready();
+    let parsed = try parser::parse_tokens(tokens);
+    let typed = try type_summary(&parsed);
+    let ownership_report = ownership_summary(&typed);
+    let lowered = ir::module(parsed.function_count, parsed.function_count, parsed.return_count);
+    let target_info = backend::target(target_name);
+    let artifact = backend::artifact(
+        &target_info,
+        lowered.function_count,
+        lowered.instruction_count
+    );
+
+    return CompileReport {
+        status: CompileStatus::Pass,
+        token_count: tokens.len(),
+        function_count: parsed.function_count,
+        type_count: typed.type_count,
+        ownership_checks: ownership_report.check_count,
+        ir_function_count: lowered.function_count,
+        backend_emitted: artifact.emitted,
+        diagnostic: "",
+    };
+}
+
+// compile_self_check compiles the minimal source shape used by bootstrap smoke.
+pub fn compile_self_check() -> !CompileReport {
+    return try compile_source("fn main() -> void { return void; }", "llvm");
+}
+
+// ready exposes the compiler module to package-level resolution checks.
+pub fn ready() -> bool {
+    return true;
+}
+
+pub struct TypeSummary {
+    pub type_count: i64;
+    pub copyable_scalar_count: i64;
+    pub noncopy_value_count: i64;
+}
+
+pub struct OwnershipSummary {
+    pub check_count: i64;
+    pub rejected_count: i64;
+}
+
+// type_summary mirrors the Go type checker phase at summary granularity.
+fn type_summary(parsed: &ast::ParseSummary) -> !TypeSummary {
+    let void_type = try types::classify("void");
+    let bool_type = try types::classify("bool");
+    let bytes_type = try types::classify("[]const u8");
+    var copyable = 0;
+    var noncopy = 0;
+
+    if types::can_copy(&void_type) {
+        copyable = copyable + 1;
+    }
+    if types::can_copy(&bool_type) {
+        copyable = copyable + 1;
+    }
+    if !types::can_copy(&bytes_type) {
+        noncopy = noncopy + 1;
+    }
+
+    return TypeSummary {
+        type_count: parsed.struct_count + parsed.enum_count + parsed.union_count,
+        copyable_scalar_count: copyable,
+        noncopy_value_count: noncopy,
+    };
+}
+
+// ownership_summary mirrors the Go ownership checker phase at summary granularity.
+fn ownership_summary(summary: &TypeSummary) -> OwnershipSummary {
+    let copy_state = ownership::owned(true);
+    let moved = ownership::move_value(&copy_state);
+    let owned_state = ownership::owned(false);
+    let borrowed = ownership::borrow_shared(&owned_state);
+    let restored = ownership::end_borrow(&borrowed.next);
+    let moved_owned = ownership::move_value(&restored);
+    var rejected = 0;
+
+    if !moved.allowed {
+        rejected = rejected + 1;
+    }
+    if !moved_owned.allowed {
+        rejected = rejected + 1;
+    }
+
+    return OwnershipSummary {
+        check_count: summary.copyable_scalar_count + summary.noncopy_value_count,
+        rejected_count: rejected,
+    };
+}

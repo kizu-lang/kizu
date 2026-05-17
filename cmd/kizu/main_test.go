@@ -91,7 +91,7 @@ func TestTestCommandSelfHostPackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if string(out) != "test: ok (8 component tests)\n" {
+	if string(out) != "test: ok (9 component tests)\n" {
 		t.Fatalf("got %q", out)
 	}
 }
@@ -226,7 +226,7 @@ func TestBuildSelfHostPackageEmitLLVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	for _, want := range []string{"define void @main()", "define i1 @token.ready()"} {
+	for _, want := range []string{"define ptr @main()", "define ptr @compiler.compile_source"} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("got %q, want substring %q", out, want)
 		}

@@ -9154,7 +9154,7 @@ fn print_cache_required_inputs() -> void {
     print("required input");
     print("compiler version");
     print("compiler version");
-    print("v0.3-module-cache-v2");
+    print("v0.3-module-cache-v3");
     print("required input");
     print("target");
     print("required input");
@@ -9437,6 +9437,7 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
         print_ir_binary_op("binary.+");
     }
     try print_call_ops(tokens, start);
+    try print_error_ok_ops(tokens, start);
     return void;
 }
 
@@ -10457,6 +10458,7 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
     count = count + try borrow_instruction_count(tokens, start);
     count = count + try struct_literal_instruction_count(tokens, start);
     count = count + try print_field_access_instruction_count(tokens, start);
+    count = count + try error_ok_instruction_count(tokens, start);
 
     if try has_function_binary_operator(tokens, start, TokenKind::Asterisk) {
         count = count + 1;
@@ -10674,7 +10676,55 @@ fn try_function_instruction_count(tokens: &std::array::Array<Token>, start: i64)
         }
         index = index + 1;
     }
+    count = count + try error_ok_instruction_count(tokens, start);
     return count;
+}
+
+// error_ok_instruction_count mirrors Go lowering for successful `!void` returns.
+fn error_ok_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    if !try function_returns_error_void(tokens, start) {
+        return 0;
+    }
+    if !try function_has_return_void(tokens, start) {
+        return 0;
+    }
+    return 1;
+}
+
+// function_returns_error_void reports whether the current function returns `!void`.
+fn function_returns_error_void(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    let return_type = try function_return_type(tokens, start + 2);
+    return std::mem::equal_bytes(return_type, "!void");
+}
+
+// function_has_return_void reports whether one function contains a successful void return.
+fn function_has_return_void(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if token.kind == TokenKind::Return {
+            if try return_is_void(tokens, index) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// return_is_void reports whether a return statement returns the void value.
+fn return_is_void(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let next = try tokens.at(index + 1);
+    if next.kind == TokenKind::Semicolon {
+        return true;
+    }
+    return std::mem::equal_bytes(next.literal, "void");
 }
 
 // struct_literal_instruction_count counts supported struct.new instructions.
@@ -10917,6 +10967,24 @@ fn print_try_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
         }
         index = index + 1;
     }
+    try print_error_ok_ops(tokens, start);
+    return void;
+}
+
+// print_error_ok_ops writes the opaque success value for `!void` returns.
+fn print_error_ok_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let count = try error_ok_instruction_count(tokens, start);
+    if count == 0 {
+        return void;
+    }
+    print("op");
+    print("error.ok");
+    print("result");
+    print("!void");
+    print("args");
+    print(0);
+    print("immediate");
+    print("<none>");
     return void;
 }
 
@@ -11875,11 +11943,10 @@ fn function_terminator(tokens: &std::array::Array<Token>, start: i64) -> ![]cons
             }
         }
         if token.kind == TokenKind::Return {
-            let next = try tokens.at(index + 1);
-            if next.kind == TokenKind::Semicolon {
-                return "return void";
-            }
-            if std::mem::equal_bytes(next.literal, "void") {
+            if try return_is_void(tokens, index) {
+                if try function_returns_error_void(tokens, start) {
+                    return "return";
+                }
                 return "return void";
             }
             return "return";
