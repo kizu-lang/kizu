@@ -57,7 +57,7 @@ Before switching production behavior from Go to Kizu:
 | IR | strong normalized dump oracle | IR module/function/block/instruction summary facts and executable package component test are ported under `selfhost/src` | expand to full normalized IR dump |
 | backend | Go-owned smoke fingerprint oracle plus `kizu build selfhost` package smoke | target/artifact summary facts and executable package component test are ported under `selfhost/src` | not a native production switch target |
 | cache | Go-owned switch contract oracle | cache input/rebuild reason summary facts and executable package component test are ported under `selfhost/src` | Go-owned filesystem and hashing primitives |
-| compiler pipeline | Go-owned CLI oracle | `selfhost/src/compiler.kizu` runs lexer, parser, type, ownership, IR, and backend summary phases as an executable package component test | expand from summary facts to full source/package compilation |
+| compiler pipeline | Go-owned CLI oracle | `selfhost/src/compiler.kizu` compiles explicit source buffers and a self-host package-shaped module set through lexer, parser, type, ownership, IR, and backend summary phases | expand from embedded package source buffers to filesystem-backed package compilation |
 
 ## Production Ownership Decision
 
@@ -95,6 +95,20 @@ kizu build --target wasm32-wasi selfhost
 
 This confirms that package-level module resolution is connected to the build
 path. It does not mean any production phase is Kizu-owned yet.
+
+`selfhost/src/compiler.kizu` also exposes a Kizu-owned package compile boundary:
+
+```text
+compiler::compile_package(modules, target)
+compiler::compile_selfhost_package_check()
+```
+
+The current input is an explicit `std::array::Array<compiler::SourceModule>`.
+This keeps I/O visible and avoids a hidden runtime while the stdlib filesystem
+capability is still Go-owned. It proves that the Kizu compiler package can feed
+multiple Kizu source buffers through the compiler phase order and skip test
+modules like the Go package build path. It is not yet filesystem-backed
+compilation of `selfhost/kizu.toml`.
 
 ## #192 Token / Lexer Readiness
 

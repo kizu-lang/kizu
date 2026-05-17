@@ -6,6 +6,7 @@ import selfhost::ir;
 import selfhost::lexer;
 import selfhost::ownership;
 import selfhost::parser;
+import selfhost::resolver;
 import selfhost::token;
 import selfhost::types;
 
@@ -22,6 +23,28 @@ pub struct CompileReport {
     pub ownership_checks: i64;
     pub ir_function_count: i64;
     pub backend_emitted: bool;
+    pub diagnostic: []const u8;
+}
+
+pub struct SourceModule {
+    pub path: []const u8;
+    pub source: []const u8;
+    pub is_root: bool;
+    pub is_test: bool;
+}
+
+pub struct PackageReport {
+    pub status: CompileStatus;
+    pub module_count: i64;
+    pub compiled_module_count: i64;
+    pub token_count: i64;
+    pub function_count: i64;
+    pub import_count: i64;
+    pub type_count: i64;
+    pub ownership_checks: i64;
+    pub ir_function_count: i64;
+    pub backend_emitted: bool;
+    pub root_found: bool;
     pub diagnostic: []const u8;
 }
 
@@ -52,9 +75,56 @@ pub fn compile_source(source: []const u8, target_name: []const u8) -> !CompileRe
     };
 }
 
-// compile_self_check compiles the minimal source shape used by bootstrap smoke.
-pub fn compile_self_check() -> !CompileReport {
-    return try compile_source("fn main() -> void { return void; }", "llvm");
+// compile_package runs the self-host package pipeline over explicit sources.
+pub fn compile_package(
+    modules: &std::array::Array<SourceModule>,
+    target_name: []const u8
+) -> !PackageReport {
+    var report = empty_package_report();
+    var index = 0;
+
+    while index < modules.len() {
+        let module = try modules.at(index);
+        report.module_count = report.module_count + 1;
+        if module.is_root {
+            report.root_found = true;
+        }
+        if !module.is_test {
+            let next = try compile_package_module(&module);
+            report = merge_package_report(report, &next);
+        }
+        index = index + 1;
+    }
+    return finish_package_report(report, target_name);
+}
+
+// compile_self_check compiles the explicit self-host package source shape.
+pub fn compile_self_check() -> !PackageReport {
+    return try compile_selfhost_package_check();
+}
+
+// compile_selfhost_package_check compiles the compiler package as source buffers.
+pub fn compile_selfhost_package_check() -> !PackageReport {
+    let allocator = std::mem::page_allocator();
+    var modules = std::array::Array<SourceModule>(allocator);
+
+    try modules.append(source_module("selfhost::main", selfhost_main_source(), true, false));
+    try modules.append(source_module(
+        "selfhost::compiler",
+        selfhost_compiler_source(),
+        false,
+        false
+    ));
+    try modules.append(source_module("selfhost::lexer", selfhost_lexer_source(), false, false));
+    try modules.append(source_module("selfhost::parser", selfhost_parser_source(), false, false));
+    try modules.append(source_module("selfhost::backend", selfhost_backend_source(), false, false));
+    try modules.append(source_module(
+        "selfhost::compiler_test",
+        selfhost_test_source(),
+        false,
+        true
+    ));
+    return try compile_package(&modules, "llvm");
 }
 
 // ready exposes the compiler module to package-level resolution checks.
@@ -71,6 +141,169 @@ pub struct TypeSummary {
 pub struct OwnershipSummary {
     pub check_count: i64;
     pub rejected_count: i64;
+}
+
+// source_module constructs one explicit package source input.
+fn source_module(
+    path: []const u8,
+    source: []const u8,
+    is_root: bool,
+    is_test: bool
+) -> SourceModule {
+    return SourceModule {
+        path: path,
+        source: source,
+        is_root: is_root,
+        is_test: is_test,
+    };
+}
+
+// empty_package_report creates the mutable aggregate used by package compile.
+fn empty_package_report() -> PackageReport {
+    return PackageReport {
+        status: CompileStatus::Pass,
+        module_count: 0,
+        compiled_module_count: 0,
+        token_count: 0,
+        function_count: 0,
+        import_count: 0,
+        type_count: 0,
+        ownership_checks: 0,
+        ir_function_count: 0,
+        backend_emitted: false,
+        root_found: false,
+        diagnostic: "",
+    };
+}
+
+// compile_package_module compiles one non-test module at summary granularity.
+fn compile_package_module(module: &SourceModule) -> !PackageReport {
+    try resolver::resolve_module_path(module.path);
+    let compiled = try compile_source(module.source, "llvm");
+    let imports = try module_import_count(module.source);
+
+    return PackageReport {
+        status: compiled.status,
+        module_count: 0,
+        compiled_module_count: 1,
+        token_count: compiled.token_count,
+        function_count: compiled.function_count,
+        import_count: imports,
+        type_count: compiled.type_count,
+        ownership_checks: compiled.ownership_checks,
+        ir_function_count: compiled.ir_function_count,
+        backend_emitted: compiled.backend_emitted,
+        root_found: false,
+        diagnostic: compiled.diagnostic,
+    };
+}
+
+// merge_package_report combines package aggregate counters.
+fn merge_package_report(current: PackageReport, next: &PackageReport) -> PackageReport {
+    return PackageReport {
+        status: merge_status(current.status, next.status),
+        module_count: current.module_count,
+        compiled_module_count: current.compiled_module_count + next.compiled_module_count,
+        token_count: current.token_count + next.token_count,
+        function_count: current.function_count + next.function_count,
+        import_count: current.import_count + next.import_count,
+        type_count: current.type_count + next.type_count,
+        ownership_checks: current.ownership_checks + next.ownership_checks,
+        ir_function_count: current.ir_function_count + next.ir_function_count,
+        backend_emitted: current.backend_emitted,
+        root_found: current.root_found,
+        diagnostic: next.diagnostic,
+    };
+}
+
+// merge_status keeps failures sticky across package module compilation.
+fn merge_status(left: CompileStatus, right: CompileStatus) -> CompileStatus {
+    if left == CompileStatus::Fail {
+        return CompileStatus::Fail;
+    }
+    return right;
+}
+
+// finish_package_report applies root and backend checks after all modules compile.
+fn finish_package_report(report: PackageReport, target_name: []const u8) -> PackageReport {
+    let target_info = backend::target(target_name);
+    let artifact = backend::artifact(&target_info, report.ir_function_count, report.function_count);
+
+    if !report.root_found {
+        return package_failure(&report, "missing package root");
+    }
+    if !artifact.emitted {
+        return package_failure(&report, "unsupported backend target");
+    }
+    return PackageReport {
+        status: report.status,
+        module_count: report.module_count,
+        compiled_module_count: report.compiled_module_count,
+        token_count: report.token_count,
+        function_count: report.function_count,
+        import_count: report.import_count,
+        type_count: report.type_count,
+        ownership_checks: report.ownership_checks,
+        ir_function_count: report.ir_function_count,
+        backend_emitted: artifact.emitted,
+        root_found: report.root_found,
+        diagnostic: report.diagnostic,
+    };
+}
+
+// package_failure marks a package report as failed without hiding diagnostics.
+fn package_failure(report: &PackageReport, diagnostic: []const u8) -> PackageReport {
+    return PackageReport {
+        status: CompileStatus::Fail,
+        module_count: report.module_count,
+        compiled_module_count: report.compiled_module_count,
+        token_count: report.token_count,
+        function_count: report.function_count,
+        import_count: report.import_count,
+        type_count: report.type_count,
+        ownership_checks: report.ownership_checks,
+        ir_function_count: report.ir_function_count,
+        backend_emitted: false,
+        root_found: report.root_found,
+        diagnostic: diagnostic,
+    };
+}
+
+// module_import_count counts imports through the same lexer/parser boundary.
+fn module_import_count(source: []const u8) -> !i64 {
+    var tokens = try lexer::lex(source);
+    let parsed = try parser::parse_tokens(tokens);
+    return parsed.import_count;
+}
+
+// selfhost_main_source is the root package source used by self-compile smoke.
+fn selfhost_main_source() -> []const u8 {
+    return "import selfhost::compiler; fn main() { return; }";
+}
+
+// selfhost_compiler_source is the compiler module source used by self-compile smoke.
+fn selfhost_compiler_source() -> []const u8 {
+    return "import selfhost::lexer; fn compile_self_check() { return; }";
+}
+
+// selfhost_lexer_source is the lexer module source used by self-compile smoke.
+fn selfhost_lexer_source() -> []const u8 {
+    return "import selfhost::token; fn lex() { return; } fn ready() { return; }";
+}
+
+// selfhost_parser_source is the parser module source used by self-compile smoke.
+fn selfhost_parser_source() -> []const u8 {
+    return "import selfhost::token; fn parse_tokens() { return; } fn ready() { return; }";
+}
+
+// selfhost_backend_source is the backend module source used by self-compile smoke.
+fn selfhost_backend_source() -> []const u8 {
+    return "pub fn ready() -> bool { return true; } pub fn artifact() -> !void { return void; }";
+}
+
+// selfhost_test_source is skipped like Go package build skips `_test.kizu`.
+fn selfhost_test_source() -> []const u8 {
+    return "import selfhost::compiler; pub fn compiler_component_test() -> !void { return void; }";
 }
 
 // type_summary mirrors the Go type checker phase at summary granularity.
