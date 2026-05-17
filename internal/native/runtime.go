@@ -14,6 +14,7 @@ func RuntimeLLVM() string {
 
 declare i32 @printf(ptr, ...)
 declare i32 @strcmp(ptr, ptr)
+declare i32 @strncmp(ptr, ptr, i64)
 declare i64 @strlen(ptr)
 declare ptr @fopen(ptr, ptr)
 declare i32 @fseek(ptr, i64, i32)
@@ -24,8 +25,8 @@ declare ptr @realloc(ptr, i64)
 declare i64 @fread(ptr, i64, i64, ptr)
 declare i32 @fclose(ptr)
 declare ptr @memcpy(ptr, ptr, i64)
-` + runtimePrintLLVM() + runtimeProcessLLVM() + runtimeMemoryLLVM() + runtimeFileLLVM() +
-		runtimeArrayLLVM()
+` + runtimePrintLLVM() + runtimeProcessLLVM() + runtimeMemoryLLVM() + runtimePathLLVM() +
+		runtimeFileLLVM() + runtimeArrayLLVM()
 }
 
 // runtimePrintLLVM returns print helpers for the native target.
@@ -93,6 +94,14 @@ entry:
   ret i1 %ok
 }
 
+define i1 @kizu_bytes_starts_with(ptr %text, ptr %prefix) {
+entry:
+  %prefix_len = call i64 @strlen(ptr %prefix)
+  %cmp = call i32 @strncmp(ptr %text, ptr %prefix, i64 %prefix_len)
+  %ok = icmp eq i32 %cmp, 0
+  ret i1 %ok
+}
+
 define i64 @kizu_bytes_len(ptr %text) {
 entry:
   %len = call i64 @strlen(ptr %text)
@@ -117,6 +126,34 @@ copy:
   %slot = getelementptr i8, ptr %text, i64 %start
   call ptr @memcpy(ptr %buffer, ptr %slot, i64 %len)
   %tail = getelementptr i8, ptr %buffer, i64 %len
+  store i8 0, ptr %tail
+  ret ptr %buffer
+fail:
+  ret ptr @.kizu.empty
+}
+`
+}
+
+// runtimePathLLVM returns path helpers for the native target.
+func runtimePathLLVM() string {
+	return `
+define ptr @kizu_path_join(ptr %left, ptr %right) {
+entry:
+  %left_len = call i64 @strlen(ptr %left)
+  %right_len = call i64 @strlen(ptr %right)
+  %with_sep = add i64 %left_len, 1
+  %text_len = add i64 %with_sep, %right_len
+  %alloc_size = add i64 %text_len, 1
+  %buffer = call ptr @malloc(i64 %alloc_size)
+  %missing = icmp eq ptr %buffer, null
+  br i1 %missing, label %fail, label %copy_left
+copy_left:
+  call ptr @memcpy(ptr %buffer, ptr %left, i64 %left_len)
+  %sep = getelementptr i8, ptr %buffer, i64 %left_len
+  store i8 47, ptr %sep
+  %right_start = getelementptr i8, ptr %buffer, i64 %with_sep
+  call ptr @memcpy(ptr %right_start, ptr %right, i64 %right_len)
+  %tail = getelementptr i8, ptr %buffer, i64 %text_len
   store i8 0, ptr %tail
   ret ptr %buffer
 fail:

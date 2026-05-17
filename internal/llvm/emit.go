@@ -107,8 +107,8 @@ func callDefinesLLVM(name string) bool {
 func stdCallDefinesLLVM(name string) bool {
 	switch name {
 	case "std.process.arg_count", "std.process.arg", "std.mem.equal_bytes",
-		"std.mem.len", "std.mem.byte_at", "std.mem.slice", "std.fs.read_file",
-		"std.fs.exists":
+		"std.mem.starts_with", "std.mem.len", "std.mem.byte_at", "std.mem.slice",
+		"std.fs.read_file", "std.fs.exists", "std.path.join":
 		return true
 	default:
 		return strings.HasPrefix(name, "std.array.Array<")
@@ -151,11 +151,13 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare i64 @kizu_process_arg_count()\n")
 	e.out.WriteString("declare ptr @kizu_process_arg(i64)\n")
 	e.out.WriteString("declare i1 @kizu_bytes_equal(ptr, ptr)\n")
+	e.out.WriteString("declare i1 @kizu_bytes_starts_with(ptr, ptr)\n")
 	e.out.WriteString("declare i64 @kizu_bytes_len(ptr)\n")
 	e.out.WriteString("declare i8 @kizu_byte_at(ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_bytes_slice(ptr, i64, i64)\n")
 	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n")
-	e.out.WriteString("declare i1 @kizu_file_exists(ptr)\n\n")
+	e.out.WriteString("declare i1 @kizu_file_exists(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_path_join(ptr, ptr)\n\n")
 	e.out.WriteString("declare ptr @malloc(i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_new()\n")
 	e.out.WriteString("declare void @kizu_array_append(ptr, ptr)\n")
@@ -387,11 +389,34 @@ func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
 	case "std.process.arg":
 		arg := e.callArg(instr, 0, "i64")
 		e.writeRuntimeValueCall(instr, "call ptr @kizu_process_arg(i64 "+arg+")", "[]const u8")
+	default:
+		if e.writeMemoryStdCall(name, instr) {
+			return true
+		}
+		if e.writeFileStdCall(name, instr) {
+			return true
+		}
+		if e.writePathStdCall(name, instr) {
+			return true
+		}
+		if strings.HasPrefix(name, "std.array.Array<") {
+			e.writeRuntimeValueCall(instr, "call ptr @kizu_array_new()", instr.Result.Type)
+			return true
+		}
+		return false
+	case "std.io.write_stdout", "std.io.write_stderr":
+		e.writeStdIOCall(instr)
+	}
+	return true
+}
+
+// writeMemoryStdCall lowers native byte-slice helpers.
+func (e *emitter) writeMemoryStdCall(name string, instr *ir.Instr) bool {
+	switch name {
 	case "std.mem.equal_bytes":
-		left := e.callArg(instr, 0, "[]const u8")
-		right := e.callArg(instr, 1, "[]const u8")
-		call := "call i1 @kizu_bytes_equal(ptr " + left + ", ptr " + right + ")"
-		e.writeRuntimeValueCall(instr, call, "bool")
+		e.writeStdMemCompare(instr, "@kizu_bytes_equal")
+	case "std.mem.starts_with":
+		e.writeStdMemCompare(instr, "@kizu_bytes_starts_with")
 	case "std.mem.len":
 		text := e.callArg(instr, 0, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call i64 @kizu_bytes_len(ptr "+text+")", "i64")
@@ -406,6 +431,15 @@ func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
 		end := e.callArg(instr, 2, "i64")
 		call := "call ptr @kizu_bytes_slice(ptr " + text + ", i64 " + start + ", i64 " + end + ")"
 		e.writeRuntimeValueCall(instr, call, "![]const u8")
+	default:
+		return false
+	}
+	return true
+}
+
+// writeFileStdCall lowers explicit filesystem capability helpers.
+func (e *emitter) writeFileStdCall(name string, instr *ir.Instr) bool {
+	switch name {
 	case "std.fs.read_file":
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call ptr @kizu_read_file(ptr "+path+")", "![]const u8")
@@ -413,15 +447,29 @@ func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call i1 @kizu_file_exists(ptr "+path+")", "!bool")
 	default:
-		if strings.HasPrefix(name, "std.array.Array<") {
-			e.writeRuntimeValueCall(instr, "call ptr @kizu_array_new()", instr.Result.Type)
-			return true
-		}
 		return false
-	case "std.io.write_stdout", "std.io.write_stderr":
-		e.writeStdIOCall(instr)
 	}
 	return true
+}
+
+// writePathStdCall lowers native path helpers needed before Kizu std is self-hosted.
+func (e *emitter) writePathStdCall(name string, instr *ir.Instr) bool {
+	if name != "std.path.join" {
+		return false
+	}
+	left := e.callArg(instr, 0, "[]const u8")
+	right := e.callArg(instr, 1, "[]const u8")
+	call := "call ptr @kizu_path_join(ptr " + left + ", ptr " + right + ")"
+	e.writeRuntimeValueCall(instr, call, "[]const u8")
+	return true
+}
+
+// writeStdMemCompare lowers two-slice byte predicates to runtime calls.
+func (e *emitter) writeStdMemCompare(instr *ir.Instr, runtime string) {
+	left := e.callArg(instr, 0, "[]const u8")
+	right := e.callArg(instr, 1, "[]const u8")
+	call := "call i1 " + runtime + "(ptr " + left + ", ptr " + right + ")"
+	e.writeRuntimeValueCall(instr, call, "bool")
 }
 
 // writeRuntimeValueCall writes a runtime call with one SSA result.

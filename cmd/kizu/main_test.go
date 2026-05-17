@@ -513,6 +513,7 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 
 // TestBuildTargetNativeCommandSmoke checks native build when LLVM tools exist.
 func TestBuildTargetNativeCommandSmoke(t *testing.T) {
+	t.Cleanup(func() { _ = os.RemoveAll("target") })
 	if _, err := exec.LookPath("llc"); err != nil {
 		t.Skip("llc is not available")
 	}
@@ -536,6 +537,7 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 
 // TestBuildTargetNativeSelfHostPath checks the selfhost artifact name.
 func TestBuildTargetNativeSelfHostPath(t *testing.T) {
+	t.Cleanup(func() { _ = os.RemoveAll("target") })
 	if _, err := exec.LookPath("llc"); err != nil {
 		t.Skip("llc is not available")
 	}
@@ -589,6 +591,14 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 	}
 	if !strings.Contains(string(packageBuildOut), "build\naarch64-apple-darwin\npass\ntrue") {
 		t.Fatalf("got %q", packageBuildOut)
+	}
+	emit := exec.Command("./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
+	emitOut, err := emit.CombinedOutput()
+	if err != nil {
+		t.Fatalf("selfhost emit llvm failed: %v\n%s", err, emitOut)
+	}
+	if !strings.Contains(string(emitOut), "build\nllvm\npass\ntrue") {
+		t.Fatalf("got %q", emitOut)
 	}
 }
 

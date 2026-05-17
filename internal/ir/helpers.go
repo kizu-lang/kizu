@@ -112,6 +112,9 @@ func builtinReturnType(name string, _ []Value) (string, bool) {
 	if typ, ok := builtinFSReturnType(name); ok {
 		return typ, true
 	}
+	if typ, ok := builtinPathReturnType(name); ok {
+		return typ, true
+	}
 	if typ, ok := builtinProcessReturnType(name); ok {
 		return typ, true
 	}
@@ -156,6 +159,17 @@ func builtinFSReturnType(name string) (string, bool) {
 		return "![]const u8", true
 	case "std.fs.exists":
 		return "!bool", true
+	default:
+		return "", false
+	}
+}
+
+// builtinPathReturnType returns IR types for pure path helpers.
+func builtinPathReturnType(name string) (string, bool) {
+	switch name {
+	case "std.path.join", "std.path.clean", "std.path.basename", "std.path.dirname",
+		"std.path.extension":
+		return "[]const u8", true
 	default:
 		return "", false
 	}
