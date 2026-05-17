@@ -93,7 +93,8 @@ func instrDefinesLLVM(instr *ir.Instr) bool {
 // stdCallDefinesLLVM reports std calls that the LLVM backend lowers concretely.
 func stdCallDefinesLLVM(name string) bool {
 	switch name {
-	case "std.process.arg_count", "std.process.arg", "std.mem.equal_bytes", "std.fs.read_file":
+	case "std.process.arg_count", "std.process.arg", "std.mem.equal_bytes",
+		"std.mem.len", "std.mem.byte_at", "std.mem.slice", "std.fs.read_file":
 		return true
 	default:
 		return false
@@ -135,6 +136,9 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare i64 @kizu_process_arg_count()\n")
 	e.out.WriteString("declare ptr @kizu_process_arg(i64)\n")
 	e.out.WriteString("declare i1 @kizu_bytes_equal(ptr, ptr)\n")
+	e.out.WriteString("declare i64 @kizu_bytes_len(ptr)\n")
+	e.out.WriteString("declare i8 @kizu_byte_at(ptr, i64)\n")
+	e.out.WriteString("declare ptr @kizu_bytes_slice(ptr, i64, i64)\n")
 	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n\n")
 }
 
@@ -304,6 +308,20 @@ func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
 		right := e.callArg(instr, 1, "[]const u8")
 		call := "call i1 @kizu_bytes_equal(ptr " + left + ", ptr " + right + ")"
 		e.writeRuntimeValueCall(instr, call, "bool")
+	case "std.mem.len":
+		text := e.callArg(instr, 0, "[]const u8")
+		e.writeRuntimeValueCall(instr, "call i64 @kizu_bytes_len(ptr "+text+")", "i64")
+	case "std.mem.byte_at":
+		text := e.callArg(instr, 0, "[]const u8")
+		index := e.callArg(instr, 1, "i64")
+		call := "call i8 @kizu_byte_at(ptr " + text + ", i64 " + index + ")"
+		e.writeRuntimeValueCall(instr, call, "!u8")
+	case "std.mem.slice":
+		text := e.callArg(instr, 0, "[]const u8")
+		start := e.callArg(instr, 1, "i64")
+		end := e.callArg(instr, 2, "i64")
+		call := "call ptr @kizu_bytes_slice(ptr " + text + ", i64 " + start + ", i64 " + end + ")"
+		e.writeRuntimeValueCall(instr, call, "![]const u8")
 	case "std.fs.read_file":
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call ptr @kizu_read_file(ptr "+path+")", "![]const u8")

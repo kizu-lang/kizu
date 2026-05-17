@@ -100,6 +100,9 @@ declare void @kizu_print_bool(i1)
 declare i64 @kizu_process_arg_count()
 declare ptr @kizu_process_arg(i64)
 declare i1 @kizu_bytes_equal(ptr, ptr)
+declare i64 @kizu_bytes_len(ptr)
+declare i8 @kizu_byte_at(ptr, i64)
+declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 
 define void @main() {
@@ -117,6 +120,9 @@ declare void @kizu_print_bool(i1)
 declare i64 @kizu_process_arg_count()
 declare ptr @kizu_process_arg(i64)
 declare i1 @kizu_bytes_equal(ptr, ptr)
+declare i64 @kizu_bytes_len(ptr)
+declare i8 @kizu_byte_at(ptr, i64)
+declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 
 define i64 @add(i64 %a, i64 %b) {
@@ -142,6 +148,9 @@ declare void @kizu_print_bool(i1)
 declare i64 @kizu_process_arg_count()
 declare ptr @kizu_process_arg(i64)
 declare i1 @kizu_bytes_equal(ptr, ptr)
+declare i64 @kizu_bytes_len(ptr)
+declare i8 @kizu_byte_at(ptr, i64)
+declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 
 define void @main() {
@@ -164,6 +173,9 @@ declare void @kizu_print_bool(i1)
 declare i64 @kizu_process_arg_count()
 declare ptr @kizu_process_arg(i64)
 declare i1 @kizu_bytes_equal(ptr, ptr)
+declare i64 @kizu_bytes_len(ptr)
+declare i8 @kizu_byte_at(ptr, i64)
+declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 
 define void @main() {
@@ -190,6 +202,9 @@ declare void @kizu_print_bool(i1)
 declare i64 @kizu_process_arg_count()
 declare ptr @kizu_process_arg(i64)
 declare i1 @kizu_bytes_equal(ptr, ptr)
+declare i64 @kizu_bytes_len(ptr)
+declare i8 @kizu_byte_at(ptr, i64)
+declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 
 define void @main() {

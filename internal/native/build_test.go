@@ -25,6 +25,10 @@ func TestRuntimeLLVMExportsPrintSymbols(t *testing.T) {
 		"define void @kizu_print_int",
 		"define void @kizu_print_bool",
 		"declare i32 @printf",
+		"declare ptr @fopen",
+		"define ptr @kizu_read_file",
+		"define i64 @kizu_bytes_len",
+		"define i8 @kizu_byte_at",
 	} {
 		if !strings.Contains(runtime, want) {
 			t.Fatalf("runtime missing %q:\n%s", want, runtime)
