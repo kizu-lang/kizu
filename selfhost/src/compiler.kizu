@@ -854,7 +854,7 @@ fn build_bool_function_symbol(
     return text;
 }
 
-// build_pointer_stub_function_symbol builds the fallback opaque function stub.
+// build_pointer_stub_function_symbol builds the fallback typed function stub.
 fn build_pointer_stub_function_symbol(
     module_path: []const u8,
     name: []const u8,
@@ -864,13 +864,24 @@ fn build_pointer_stub_function_symbol(
     let allocator = std::mem::page_allocator();
     var text = std::string::String(allocator);
     var params = try build_function_param_signature(tokens, start);
+    let result_type = try function_return_llvm_type(tokens, start);
 
-    try text.append_bytes("define ptr @");
+    try text.append_bytes("define ");
+    try text.append_bytes(result_type);
+    try text.append_bytes(" @");
     try text.append_bytes(module_symbol_prefix(module_path));
     try text.append_bytes(name);
     let param_bytes = params.as_bytes();
     try text.append_bytes(param_bytes);
-    try text.append_bytes(" { ret ptr null }");
+    if std::mem::equal_bytes(result_type, "void") {
+        try text.append_bytes(" { ret void }");
+    } else {
+        try text.append_bytes(" { ret ");
+        try text.append_bytes(result_type);
+        try text.append_bytes(" ");
+        try text.append_bytes(function_stub_return_value(result_type));
+        try text.append_bytes(" }");
+    }
     try text.append_byte(cast<u8>(10));
     params.deinit();
     return text;
@@ -919,6 +930,46 @@ fn build_function_param_signature(
     }
     try text.append_bytes(")");
     return text;
+}
+
+// function_return_llvm_type maps a function return type to the stub LLVM type.
+fn function_return_llvm_type(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> ![]const u8 {
+    if try function_returns_type(tokens, start, "bool") {
+        return "i1";
+    }
+    if try function_returns_type(tokens, start, "u8") {
+        return "i8";
+    }
+    if try function_returns_type(tokens, start, "i8") {
+        return "i8";
+    }
+    if try function_returns_type(tokens, start, "i64") {
+        return "i64";
+    }
+    if try function_returns_type(tokens, start, "void") {
+        return "void";
+    }
+    return "ptr";
+}
+
+// function_stub_return_value returns the neutral fallback value for one LLVM type.
+fn function_stub_return_value(result_type: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(result_type, "i1") {
+        return "false";
+    }
+    if std::mem::equal_bytes(result_type, "i8") {
+        return "0";
+    }
+    if std::mem::equal_bytes(result_type, "i64") {
+        return "0";
+    }
+    if std::mem::equal_bytes(result_type, "void") {
+        return "";
+    }
+    return "null";
 }
 
 // function_param_llvm_type maps a Kizu parameter type start token to LLVM.
