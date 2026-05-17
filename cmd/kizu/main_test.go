@@ -570,9 +570,9 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 	runSelfHostArtifact(t, "define void @main() { ret void }",
 		"./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
 	runSelfHostLLVMArtifact(t, []string{
-		"define ptr @compiler.compile_source()",
-		"define ptr @compiler.compile_package()",
-		"define ptr @types.source_diagnostic()",
+		"define ptr @compiler.compile_source(ptr %source, ptr %target_name)",
+		"define ptr @compiler.compile_package(ptr %modules, ptr %target_name)",
+		"define ptr @types.source_diagnostic(ptr %source)",
 	},
 		"./target/kizu-selfhost", "build", "--emit-llvm", "../../selfhost")
 }
@@ -629,7 +629,8 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	t.Helper()
 	runSelfHostArtifact(t, "build\naarch64-apple-darwin\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
-	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.compile_source()")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define ptr @compiler.compile_source(ptr %source, ptr %target_name)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.ready() { ret i1 true }")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define i64 @lexer.source_len(ptr %source)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "call i64 @kizu_bytes_len(ptr %source)")
@@ -639,7 +640,9 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.compile_self_check()")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.compile_selfhost_package_check()")
-	requireFileNotContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_digit()")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_digit(i8 %byte)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "icmp uge i8 %byte, 48")
+	requireFileNotContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_alpha()")
 	requireLLVMLowers(t, "target/kizu-selfhost.ll")
 	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
