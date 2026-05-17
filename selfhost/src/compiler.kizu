@@ -768,6 +768,8 @@ fn build_selfhost_struct_layouts() -> !std::string::String {
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("%struct.compiler.SourceModule = type { ptr, ptr, i1, i1 }");
     try text.append_byte(cast<u8>(10));
+    try text.append_bytes("%struct.compiler.ModuleSpec = type { ptr, ptr }");
+    try text.append_byte(cast<u8>(10));
     try text.append_bytes("%struct.ast.ParseSummary = type { i64, i64, i64, i64, i64, i64 }");
     try text.append_byte(cast<u8>(10));
     return text;
@@ -935,6 +937,16 @@ fn build_named_or_fallback_function_symbol(
     if function_is_types_source_diagnostic_body(module_path, name) {
         return build_types_source_diagnostic_function_symbol();
     }
+    return try build_package_or_report_function_symbol(module_path, name, tokens, index);
+}
+
+// build_package_or_report_function_symbol handles package/report body patterns.
+fn build_package_or_report_function_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    index: i64
+) -> !std::string::String {
     if function_is_compile_package_body(module_path, name) {
         return build_compile_package_function_symbol();
     }
@@ -958,6 +970,9 @@ fn build_named_or_fallback_function_symbol(
     }
     if function_is_source_module_body(module_path, name) {
         return build_source_module_function_symbol();
+    }
+    if function_is_module_spec_body(module_path, name) {
+        return build_module_spec_function_symbol();
     }
     if function_is_command_report_body(module_path, name) {
         return build_command_report_function_symbol();
@@ -1812,6 +1827,27 @@ entry:
   %test_out = getelementptr inbounds %struct.compiler.SourceModule, ptr %module, i64 0, i32 3
   store i1 %is_test, ptr %test_out
   ret ptr %module
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_module_spec_function_symbol builds the ModuleSpec constructor body.
+fn build_module_spec_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @compiler.module_spec(ptr %path, ptr %file) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %spec = call ptr @malloc(i64 16)
+  %path_out = getelementptr inbounds %struct.compiler.ModuleSpec, ptr %spec, i64 0, i32 0
+  store ptr %path, ptr %path_out
+  %file_out = getelementptr inbounds %struct.compiler.ModuleSpec, ptr %spec, i64 0, i32 1
+  store ptr %file, ptr %file_out
+  ret ptr %spec
 ");
     try text.append_byte(cast<u8>(125));
     try text.append_byte(cast<u8>(10));
@@ -2673,6 +2709,14 @@ fn function_is_source_module_body(module_path: []const u8, name: []const u8) -> 
         return false;
     }
     return std::mem::equal_bytes(name, "source_module");
+}
+
+// function_is_module_spec_body identifies the ModuleSpec constructor.
+fn function_is_module_spec_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "module_spec");
 }
 
 // function_is_lexer_lex_body identifies the lexer source boundary.
