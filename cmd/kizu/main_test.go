@@ -562,9 +562,13 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 		"../../examples/hello.kizu")
 	runSelfHostArtifact(t, "check\nllvm\npass\ntrue",
 		"./target/kizu-selfhost", "check", "../../selfhost")
+	runSelfHostArtifact(t, "type error: function `bad` must return i64",
+		"./target/kizu-selfhost", "check", "../../examples/negative/missing_return.kizu")
 	runSelfHostPackageRebuildSmoke(t)
 	runSelfHostArtifact(t, "define void @main() { ret void }",
 		"./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
+	runSelfHostArtifact(t, "define void @kizu_backend_ready()",
+		"./target/kizu-selfhost", "build", "--emit-llvm", "../../selfhost")
 }
 
 // runSelfHostArtifact executes the generated compiler and checks output facts.
@@ -585,7 +589,7 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	t.Helper()
 	runSelfHostArtifact(t, "build\naarch64-apple-darwin\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
-	requireFileContains(t, "target/kizu-selfhost.ll", "define void @main() { ret void }")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define void @kizu_backend_ready()")
 	requireLLVMLowers(t, "target/kizu-selfhost.ll")
 	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
