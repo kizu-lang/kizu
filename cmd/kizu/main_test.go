@@ -678,6 +678,7 @@ func requireSelfHostReportMarkers(t *testing.T) {
 	requireSelfHostCommandReportMarkers(t)
 	requireSelfHostPackagePipelineMarkers(t)
 	requireSelfHostPackageFallbackMarkers(t)
+	requireSelfHostPredicateMarkers(t)
 }
 
 // requireSelfHostCommandReportMarkers checks report constructor symbols.
@@ -768,6 +769,9 @@ func requireSelfHostPackagePipelineMarkers(t *testing.T) {
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"ptr @.str.compiler.pred.function_is_read_source_file_body")
 	requireFileContains(t, "target/kizu-selfhost.ll",
+		"@.str.compiler.pred.function_is_read_source_file_body = "+
+			"private unnamed_addr constant [17 x i8] c\"read_source_file\\00\"")
+	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_package(ptr %modules, ptr %target_name)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_selfhost_package_check()")
@@ -805,6 +809,23 @@ func requireSelfHostPackageFallbackMarkers(t *testing.T) {
 			"ptr %name) { ret i1 false }")
 	requireFileNotContains(t, "target/kizu-selfhost.ll",
 		"define i1 @compiler.function_is_read_selfhost_manifest_body(ptr %module_path, "+
+			"ptr %name) { ret i1 false }")
+}
+
+// requireSelfHostPredicateMarkers checks body-selection predicates.
+func requireSelfHostPredicateMarkers(t *testing.T) {
+	t.Helper()
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define i1 @compiler.function_is_compile_source_body(ptr %module_path, ptr %name)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define i1 @compiler.function_is_parser_parse_token_stream_body")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"ptr @.str.compiler.module.selfhost_parser")
+	requireFileNotContains(t, "target/kizu-selfhost.ll",
+		"define i1 @compiler.function_is_compile_source_body(ptr %module_path, "+
+			"ptr %name) { ret i1 false }")
+	requireFileNotContains(t, "target/kizu-selfhost.ll",
+		"define i1 @compiler.function_is_compile_package_body(ptr %module_path, "+
 			"ptr %name) { ret i1 false }")
 }
 

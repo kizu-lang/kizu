@@ -665,6 +665,7 @@ fn write_package_llvm_symbols(io: Io, modules: &std::array::Array<SourceModule>)
     print("declare ptr @kizu_read_file(ptr)");
     try write_selfhost_status_constants(io);
     try write_selfhost_manifest_path_constants(io);
+    try write_selfhost_predicate_module_constants(io);
     try write_selfhost_predicate_constants(io);
     try write_selfhost_struct_layouts(io);
     while index < modules.len() {
@@ -805,6 +806,18 @@ fn write_selfhost_manifest_path_constants(io: Io) -> !void {
     return void;
 }
 
+// write_selfhost_predicate_module_constants writes predicate module globals.
+fn write_selfhost_predicate_module_constants(io: Io) -> !void {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try append_selfhost_predicate_module_constants(text);
+    let bytes = text.as_bytes();
+    try std::io::write_stdout(io, bytes);
+    text.deinit();
+    return void;
+}
+
 // write_selfhost_predicate_constants writes predicate constants used by bodies.
 fn write_selfhost_predicate_constants(io: Io) -> !void {
     let allocator = std::mem::page_allocator();
@@ -812,6 +825,11 @@ fn write_selfhost_predicate_constants(io: Io) -> !void {
 
     try append_selfhost_predicate_core_constants(text);
     try append_selfhost_predicate_extra_constants(text);
+    try append_selfhost_predicate_frontend_constants(text);
+    try append_selfhost_predicate_report_constants(text);
+    try append_selfhost_predicate_package_constants(text);
+    try append_selfhost_predicate_status_constants(text);
+    try append_selfhost_predicate_finish_constants(text);
     let bytes = text.as_bytes();
     try std::io::write_stdout(io, bytes);
     text.deinit();
@@ -882,8 +900,14 @@ fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std
     try text.append_byte(cast<u8>(10));
     try append_selfhost_status_constants(text);
     try append_selfhost_manifest_path_constants(text);
+    try append_selfhost_predicate_module_constants(text);
     try append_selfhost_predicate_core_constants(text);
     try append_selfhost_predicate_extra_constants(text);
+    try append_selfhost_predicate_frontend_constants(text);
+    try append_selfhost_predicate_report_constants(text);
+    try append_selfhost_predicate_package_constants(text);
+    try append_selfhost_predicate_status_constants(text);
+    try append_selfhost_predicate_finish_constants(text);
     var layouts = try build_selfhost_struct_layouts();
     let layout_bytes = layouts.as_bytes();
     try text.append_bytes(layout_bytes);
@@ -1040,8 +1064,39 @@ fn build_package_or_report_function_symbol(
     if function_is_read_selfhost_manifest_body(module_path, name) {
         return build_read_selfhost_manifest_function_symbol();
     }
+    return try build_predicate_or_report_function_symbol(module_path, name, tokens, index);
+}
+
+// build_predicate_or_report_function_symbol handles predicate body patterns.
+fn build_predicate_or_report_function_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    index: i64
+) -> !std::string::String {
     if function_is_package_predicate_body(module_path, name) {
-        return build_package_predicate_function_symbol(name);
+        return build_module_predicate_function_symbol(
+            name,
+            "@.str.compiler.module.selfhost_compiler"
+        );
+    }
+    if function_is_selfhost_module_predicate_body(module_path, name) {
+        return build_module_predicate_function_symbol(name, "@.str.compiler.module.selfhost");
+    }
+    if function_is_lexer_module_predicate_body(module_path, name) {
+        return build_module_predicate_function_symbol(name, "@.str.compiler.module.selfhost_lexer");
+    }
+    if function_is_parser_module_predicate_body(module_path, name) {
+        return build_module_predicate_function_symbol(
+            name,
+            "@.str.compiler.module.selfhost_parser"
+        );
+    }
+    if function_is_types_module_predicate_body(module_path, name) {
+        return build_module_predicate_function_symbol(name, "@.str.compiler.module.selfhost_types");
+    }
+    if function_is_compile_command_wrapper_predicate_body(module_path, name) {
+        return build_compile_command_wrapper_predicate_function_symbol();
     }
     return try build_report_or_fallback_function_symbol(module_path, name, tokens, index);
 }
@@ -2025,8 +2080,11 @@ fn build_read_selfhost_manifest_function_symbol() -> !std::string::String {
     return text;
 }
 
-// build_package_predicate_function_symbol builds a module/name predicate body.
-fn build_package_predicate_function_symbol(function_name: []const u8) -> !std::string::String {
+// build_module_predicate_function_symbol builds one exact module/name predicate.
+fn build_module_predicate_function_symbol(
+    function_name: []const u8,
+    module_global: []const u8
+) -> !std::string::String {
     let allocator = std::mem::page_allocator();
     var text = std::string::String(allocator);
 
@@ -2037,10 +2095,37 @@ fn build_package_predicate_function_symbol(function_name: []const u8) -> !std::s
     try text.append_bytes("
 entry:
   %module_ok = call i1 @kizu_bytes_equal(ptr %module_path, ");
-    try text.append_bytes("ptr @.str.compiler.module.selfhost_compiler)
+    try text.append_bytes("ptr ");
+    try text.append_bytes(module_global);
+    try text.append_bytes(")
   %name_ok = call i1 @kizu_bytes_equal(ptr %name, ptr @.str.compiler.pred.");
     try text.append_bytes(function_name);
     try text.append_bytes(")
+  %ok = and i1 %module_ok, %name_ok
+  ret i1 %ok
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_compile_command_wrapper_predicate_function_symbol builds the wrapper predicate.
+fn build_compile_command_wrapper_predicate_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i1 @compiler.function_is_compile_command_wrapper");
+    try text.append_bytes("(ptr %module_path, ptr %name) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %module_ok = call i1 @kizu_bytes_equal(ptr %module_path, ");
+    try text.append_bytes("ptr @.str.compiler.module.selfhost_compiler)
+  %check_ok = call i1 @kizu_bytes_equal(ptr %name, ");
+    try text.append_bytes("ptr @.str.compiler.pred.check_source)
+  %build_ok = call i1 @kizu_bytes_equal(ptr %name, ");
+    try text.append_bytes("ptr @.str.compiler.pred.build_source)
+  %name_ok = or i1 %check_ok, %build_ok
   %ok = and i1 %module_ok, %name_ok
   ret i1 %ok
 ");
@@ -2140,33 +2225,33 @@ fn append_selfhost_predicate_core_constants(text: &mut std::string::String) -> !
     try text.append_byte(cast<u8>(34));
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.pred.function_is_selfhost_manifest_file_body = ");
-    try text.append_bytes("private unnamed_addr constant [40 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [23 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_selfhost_manifest_file_body");
+    try text.append_bytes("selfhost_manifest_file");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.pred.function_is_selfhost_package_root_body = ");
-    try text.append_bytes("private unnamed_addr constant [39 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [22 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_selfhost_package_root_body");
+    try text.append_bytes("selfhost_package_root");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.pred.function_is_read_source_file_body = ");
-    try text.append_bytes("private unnamed_addr constant [34 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [17 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_read_source_file_body");
+    try text.append_bytes("read_source_file");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.pred.function_is_read_selfhost_manifest_body = ");
-    try text.append_bytes("private unnamed_addr constant [40 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [23 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_read_selfhost_manifest_body");
+    try text.append_bytes("read_selfhost_manifest");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
@@ -2177,33 +2262,248 @@ fn append_selfhost_predicate_core_constants(text: &mut std::string::String) -> !
 // append_selfhost_predicate_extra_constants appends remaining predicate globals.
 fn append_selfhost_predicate_extra_constants(text: &mut std::string::String) -> !void {
     try text.append_bytes("@.str.compiler.pred.function_is_module_spec_body = ");
-    try text.append_bytes("private unnamed_addr constant [29 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [12 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_module_spec_body");
+    try text.append_bytes("module_spec");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.pred.function_is_source_module_body = ");
-    try text.append_bytes("private unnamed_addr constant [31 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [14 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_source_module_body");
+    try text.append_bytes("source_module");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.pred.function_is_module_is_root_body = ");
-    try text.append_bytes("private unnamed_addr constant [32 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [15 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_module_is_root_body");
+    try text.append_bytes("module_is_root");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("@.str.compiler.pred.function_is_merge_package_report_body = ");
-    try text.append_bytes("private unnamed_addr constant [38 x i8] c");
+    try text.append_bytes("private unnamed_addr constant [21 x i8] c");
     try text.append_byte(cast<u8>(34));
-    try text.append_bytes("function_is_merge_package_report_body");
+    try text.append_bytes("merge_package_report");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_selfhost_predicate_module_constants appends predicate module globals.
+fn append_selfhost_predicate_module_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.module.selfhost = private unnamed_addr constant ");
+    try text.append_bytes("[9 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.module.selfhost_lexer = private unnamed_addr constant ");
+    try text.append_bytes("[16 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost::lexer");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.module.selfhost_parser = private unnamed_addr constant ");
+    try text.append_bytes("[17 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost::parser");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.module.selfhost_types = private unnamed_addr constant ");
+    try text.append_bytes("[16 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost::types");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_selfhost_predicate_frontend_constants appends frontend predicate names.
+fn append_selfhost_predicate_frontend_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.pred.function_is_selfhost_package_target_body = ");
+    try text.append_bytes("private unnamed_addr constant [27 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("is_selfhost_package_target");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_lexer_lex_body = ");
+    try text.append_bytes("private unnamed_addr constant [4 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("lex");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_parser_parse_token_stream_body = ");
+    try text.append_bytes("private unnamed_addr constant [19 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("parse_token_stream");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_types_source_diagnostic_body = ");
+    try text.append_bytes("private unnamed_addr constant [18 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("source_diagnostic");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_selfhost_predicate_report_constants appends compiler predicate names.
+fn append_selfhost_predicate_report_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.pred.check_source = ");
+    try text.append_bytes("private unnamed_addr constant [13 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("check_source");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.build_source = ");
+    try text.append_bytes("private unnamed_addr constant [13 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("build_source");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_compile_source_body = ");
+    try text.append_bytes("private unnamed_addr constant [15 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("compile_source");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_lex_and_parse_source_body = ");
+    try text.append_bytes("private unnamed_addr constant [21 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("lex_and_parse_source");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_selfhost_predicate_package_constants appends package predicate names.
+fn append_selfhost_predicate_package_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.pred.function_is_compile_package_module_body = ");
+    try text.append_bytes("private unnamed_addr constant [23 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("compile_package_module");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_module_import_count_body = ");
+    try text.append_bytes("private unnamed_addr constant [20 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("module_import_count");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_compile_package_body = ");
+    try text.append_bytes("private unnamed_addr constant [16 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("compile_package");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_compile_selfhost_package_check_body = ");
+    try text.append_bytes("private unnamed_addr constant [31 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("compile_selfhost_package_check");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_selfhost_predicate_status_constants appends report predicate names.
+fn append_selfhost_predicate_status_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.pred.");
+    try text.append_bytes("function_is_compile_selfhost_package_from_files_body = ");
+    try text.append_bytes("private unnamed_addr constant [36 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("compile_selfhost_package_from_files");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_command_report_body = ");
+    try text.append_bytes("private unnamed_addr constant [15 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("command_report");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_empty_package_report_body = ");
+    try text.append_bytes("private unnamed_addr constant [21 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("empty_package_report");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_package_failure_body = ");
+    try text.append_bytes("private unnamed_addr constant [16 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("package_failure");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_selfhost_predicate_finish_constants appends final report predicate names.
+fn append_selfhost_predicate_finish_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.pred.function_is_finish_package_report_body = ");
+    try text.append_bytes("private unnamed_addr constant [22 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("finish_package_report");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_status_name_body = ");
+    try text.append_bytes("private unnamed_addr constant [12 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("status_name");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.pred.function_is_merge_status_body = ");
+    try text.append_bytes("private unnamed_addr constant [13 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("merge_status");
     try text.append_byte(cast<u8>(92));
     try text.append_bytes("00");
     try text.append_byte(cast<u8>(34));
@@ -3113,6 +3413,17 @@ fn function_is_package_predicate_body(module_path: []const u8, name: []const u8)
     if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
         return false;
     }
+    if function_is_package_loader_predicate_name(name) {
+        return true;
+    }
+    if function_is_package_entry_predicate_name(name) {
+        return true;
+    }
+    return function_is_report_predicate_name(name);
+}
+
+// function_is_package_loader_predicate_name matches package loader predicates.
+fn function_is_package_loader_predicate_name(name: []const u8) -> bool {
     if std::mem::equal_bytes(name, "function_is_selfhost_manifest_file_body") {
         return true;
     }
@@ -3125,6 +3436,11 @@ fn function_is_package_predicate_body(module_path: []const u8, name: []const u8)
     if std::mem::equal_bytes(name, "function_is_read_selfhost_manifest_body") {
         return true;
     }
+    return std::mem::equal_bytes(name, "function_is_compile_source_body");
+}
+
+// function_is_package_entry_predicate_name matches package entry predicates.
+fn function_is_package_entry_predicate_name(name: []const u8) -> bool {
     if std::mem::equal_bytes(name, "function_is_module_spec_body") {
         return true;
     }
@@ -3134,7 +3450,88 @@ fn function_is_package_predicate_body(module_path: []const u8, name: []const u8)
     if std::mem::equal_bytes(name, "function_is_module_is_root_body") {
         return true;
     }
-    return std::mem::equal_bytes(name, "function_is_merge_package_report_body");
+    if std::mem::equal_bytes(name, "function_is_merge_package_report_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_compile_package_module_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_module_import_count_body") {
+        return true;
+    }
+    return std::mem::equal_bytes(name, "function_is_lex_and_parse_source_body");
+}
+
+// function_is_report_predicate_name matches report and package status predicates.
+fn function_is_report_predicate_name(name: []const u8) -> bool {
+    if std::mem::equal_bytes(name, "function_is_compile_package_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_compile_selfhost_package_check_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_compile_selfhost_package_from_files_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_command_report_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_empty_package_report_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_package_failure_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_finish_package_report_body") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "function_is_status_name_body") {
+        return true;
+    }
+    return std::mem::equal_bytes(name, "function_is_merge_status_body");
+}
+
+// function_is_selfhost_module_predicate_body matches root-module predicates.
+fn function_is_selfhost_module_predicate_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "function_is_selfhost_package_target_body");
+}
+
+// function_is_lexer_module_predicate_body matches lexer-module predicates.
+fn function_is_lexer_module_predicate_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "function_is_lexer_lex_body");
+}
+
+// function_is_parser_module_predicate_body matches parser-module predicates.
+fn function_is_parser_module_predicate_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "function_is_parser_parse_token_stream_body");
+}
+
+// function_is_types_module_predicate_body matches types-module predicates.
+fn function_is_types_module_predicate_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "function_is_types_source_diagnostic_body");
+}
+
+// function_is_compile_command_wrapper_predicate_body matches wrapper predicates.
+fn function_is_compile_command_wrapper_predicate_body(
+    module_path: []const u8,
+    name: []const u8
+) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "function_is_compile_command_wrapper");
 }
 
 // function_is_lexer_lex_body identifies the lexer source boundary.
