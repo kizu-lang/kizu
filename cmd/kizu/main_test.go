@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	goast "github.com/kizu-lang/kizu/internal/ast"
+	gobuildcache "github.com/kizu-lang/kizu/internal/buildcache"
 	golexer "github.com/kizu-lang/kizu/internal/lexer"
 	goparser "github.com/kizu-lang/kizu/internal/parser"
 	goproject "github.com/kizu-lang/kizu/internal/project"
@@ -606,6 +607,23 @@ func TestBuildOptUsesSeparateCacheEntry(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "entries: 2") {
 		t.Fatalf("got %q", out)
+	}
+}
+
+// TestSelfHostCachePlanMatchesGoContract checks Kizu-owned cache planning facts.
+func TestSelfHostCachePlanMatchesGoContract(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "selfhost-cache-plan", "../../examples/hello.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	got := markedOutputLines(t, string(out),
+		"cache contract snapshot",
+		"cache contract snapshot end",
+	)
+	want := gobuildcache.ContractSnapshotLines()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selfhost cache plan got %#v, want %#v", got, want)
 	}
 }
 

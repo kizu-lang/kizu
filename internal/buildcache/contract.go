@@ -5,11 +5,10 @@ import "strconv"
 // ContractSnapshotLines returns the Go-owned cache switch contract oracle.
 func ContractSnapshotLines() []string {
 	return []string{
-		"owner", "go",
-		"switch", "blocked",
+		"owner", "kizu",
+		"switch", "planning-owned",
 		"blocked until", "filesystem APIs",
 		"blocked until", "hashing APIs",
-		"blocked until", "module graph APIs",
 		"blocked until", "artifact layout APIs",
 		"required input", "compiler version",
 		"compiler version", Version,

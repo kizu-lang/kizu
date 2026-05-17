@@ -93,6 +93,8 @@ func dispatchSelfHost(cmd string, args []string) error {
 		return selfHostIRFile(args[0])
 	case "selfhost-wat":
 		return selfHostWATFile(args[0])
+	case "selfhost-cache-plan":
+		return selfHostCachePlanFile(args[0])
 	default:
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
@@ -109,6 +111,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-ownership <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-ir <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-wat <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-cache-plan <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -326,6 +329,11 @@ func selfHostIRFile(path string) error {
 // selfHostWATFile runs the Kizu-owned WAT backend bootstrap command.
 func selfHostWATFile(path string) error {
 	return runSelfHostFrontendMode(path, "--wat")
+}
+
+// selfHostCachePlanFile runs the Kizu-owned cache planning bootstrap command.
+func selfHostCachePlanFile(path string) error {
+	return runSelfHostFrontendMode(path, "--cache")
 }
 
 // selfHostResolverSourcePath maps a package target to its configured root source.
