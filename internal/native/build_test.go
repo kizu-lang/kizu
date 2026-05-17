@@ -91,6 +91,24 @@ func TestWithNativeEntryWrapsVoidMain(t *testing.T) {
 	}
 }
 
+// TestWithNativeEntryWrapsErrorUnionMain maps !void failures to exit status.
+func TestWithNativeEntryWrapsErrorUnionMain(t *testing.T) {
+	got, err := withNativeEntry("define ptr @main() {\nentry:\n  ret ptr null\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"define ptr @kizu_user_main()",
+		"%kizu_status = call ptr @kizu_user_main()",
+		"%kizu_failed = icmp ne ptr %kizu_status, null",
+		"ret i32 1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("wrapped IR missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // TestWithNativeEntryIgnoresStringConstants avoids corrupting embedded LLVM text.
 func TestWithNativeEntryIgnoresStringConstants(t *testing.T) {
 	input := "@.str = private unnamed_addr constant [22 x i8] c\"define void @main() {\\00\"\n" +

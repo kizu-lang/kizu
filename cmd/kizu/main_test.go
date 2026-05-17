@@ -562,8 +562,10 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 		"../../examples/hello.kizu")
 	runSelfHostArtifact(t, "check\nllvm\npass\ntrue",
 		"./target/kizu-selfhost", "check", "../../selfhost")
-	runSelfHostArtifact(t, "type error: function `bad` must return i64",
+	runSelfHostArtifactFailure(t, "type error: function `bad` must return i64",
 		"./target/kizu-selfhost", "check", "../../examples/negative/missing_return.kizu")
+	runSelfHostArtifactFailure(t, "type error: function `bad` must return i64",
+		"./target/kizu-selfhost", "check", "../../examples/negative/missing_return_if.kizu")
 	runSelfHostPackageRebuildSmoke(t)
 	runSelfHostArtifact(t, "define void @main() { ret void }",
 		"./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
@@ -581,6 +583,19 @@ func runSelfHostArtifact(t *testing.T, want string, args ...string) {
 	}
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q", out)
+	}
+}
+
+// runSelfHostArtifactFailure executes the compiler and checks a failing diagnostic.
+func runSelfHostArtifactFailure(t *testing.T, want string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("selfhost artifact succeeded unexpectedly:\n%s", out)
+	}
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want diagnostic containing %q", out, want)
 	}
 }
 

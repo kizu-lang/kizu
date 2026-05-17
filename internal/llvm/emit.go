@@ -267,7 +267,7 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	case instr.Op == "error.try":
 		return e.writeErrorTry(instr)
 	case instr.Op == "error.error" || instr.Op == "error.ok":
-		return e.writeOpaqueValue(instr)
+		return e.writeErrorValue(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
@@ -897,6 +897,37 @@ func (e *emitter) writeOpaqueValue(instr *ir.Instr) error {
 		operand: llvmZero(instr.Result.Type),
 	}
 	return nil
+}
+
+// writeErrorValue lowers opaque error-union success and failure sentinels.
+func (e *emitter) writeErrorValue(instr *ir.Instr) error {
+	operand := llvmZero(instr.Result.Type)
+	if strings.HasPrefix(instr.Result.Type, "!") {
+		operand = e.errorUnionOperand(instr)
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: operand}
+	return nil
+}
+
+// errorUnionOperand returns the opaque payload used for v0 error-union lowering.
+func (e *emitter) errorUnionOperand(instr *ir.Instr) string {
+	success := strings.TrimPrefix(instr.Result.Type, "!")
+	if instr.Op == "error.error" {
+		return llvmErrorFailureOperand(instr.Result.Type)
+	}
+	if len(instr.Args) == 0 || success == "void" {
+		return llvmZero(instr.Result.Type)
+	}
+	value := e.value(instr.Args[0])
+	return llvmTypedOperand(value.operand, value.typ, success)
+}
+
+// llvmErrorFailureOperand returns a valid failure placeholder for one !T value.
+func llvmErrorFailureOperand(resultType string) string {
+	if llvmType(resultType) == "ptr" {
+		return "inttoptr (i64 1 to ptr)"
+	}
+	return llvmZero(strings.TrimPrefix(resultType, "!"))
 }
 
 // writeTerminator writes one LLVM terminator.
