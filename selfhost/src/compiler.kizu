@@ -678,31 +678,10 @@ fn write_module_llvm_symbols(io: Io, module: &SourceModule) -> !void {
         let current = try tokens.at(index);
         if current.kind == token::TokenKind::Fn {
             let name = try tokens.at(index + 1);
-            let returns_true = try function_has_single_bool_return(
-                tokens,
-                index,
-                token::TokenKind::True
-            );
-            let returns_false = try function_has_single_bool_return(
-                tokens,
-                index,
-                token::TokenKind::False
-            );
-            let returns_mem_len = try function_has_single_mem_len_return(tokens, index);
-            if returns_true {
-                try write_bool_function_symbol(io, module.path, name.literal, "true");
-            } else {
-                if returns_false {
-                    try write_bool_function_symbol(io, module.path, name.literal, "false");
-                } else {
-                    if returns_mem_len {
-                        let param = try function_first_param_name(tokens, index);
-                        try write_mem_len_function_symbol(io, module.path, name.literal, param);
-                    } else {
-                        try write_function_symbol(io, module.path, name.literal);
-                    }
-                }
-            }
+            var symbol = try build_function_llvm_symbol(module.path, name.literal, tokens, index);
+            let bytes = symbol.as_bytes();
+            try std::io::write_stdout(io, bytes);
+            symbol.deinit();
         }
         index = index + 1;
     }
@@ -825,6 +804,10 @@ fn build_function_llvm_symbol(
             return build_string_literal_function_symbol(module_path, name, literal);
         }
     }
+    if try function_has_single_try_call_return(tokens, index) {
+        let callee = try function_try_call_return_callee(tokens, index);
+        return build_try_call_function_symbol(module_path, name, callee);
+    }
     return build_pointer_stub_function_symbol(module_path, name);
 }
 
@@ -889,6 +872,32 @@ fn build_string_literal_function_symbol(
     try text.append_bytes("() { ret ptr ");
     try text.append_bytes(global);
     try text.append_bytes(" }");
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_try_call_function_symbol builds a no-arg `return try callee();` wrapper.
+fn build_try_call_function_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    callee: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @");
+    try text.append_bytes(module_symbol_prefix(module_path));
+    try text.append_bytes(name);
+    try text.append_bytes("() {");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %result = call ptr @");
+    try text.append_bytes(module_symbol_prefix(module_path));
+    try text.append_bytes(callee);
+    try text.append_bytes("()");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  ret ptr %result");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("}");
     try text.append_byte(cast<u8>(10));
     return text;
 }
@@ -1022,6 +1031,62 @@ fn string_literal_is_llvm_simple(literal: []const u8) -> !bool {
         index = index + 1;
     }
     return true;
+}
+
+// function_has_single_try_call_return detects `return try callee();`.
+fn function_has_single_try_call_return(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if !try function_returns_error_union(tokens, start) {
+        return false;
+    }
+    if !try function_has_no_params(tokens, start) {
+        return false;
+    }
+    let index = try function_body_start(tokens, start);
+    if index < 0 {
+        return false;
+    }
+    if index + 6 >= tokens.len() {
+        return false;
+    }
+    let ret = try tokens.at(index);
+    let try_token = try tokens.at(index + 1);
+    let callee = try tokens.at(index + 2);
+    let open = try tokens.at(index + 3);
+    let close_call = try tokens.at(index + 4);
+    let semi = try tokens.at(index + 5);
+    let close_body = try tokens.at(index + 6);
+    if ret.kind != token::TokenKind::Return {
+        return false;
+    }
+    if try_token.kind != token::TokenKind::Try {
+        return false;
+    }
+    if callee.kind != token::TokenKind::Ident {
+        return false;
+    }
+    if open.kind != token::TokenKind::LParen {
+        return false;
+    }
+    if close_call.kind != token::TokenKind::RParen {
+        return false;
+    }
+    if semi.kind != token::TokenKind::Semicolon {
+        return false;
+    }
+    return close_body.kind == token::TokenKind::RBrace;
+}
+
+// function_try_call_return_callee returns the callee from an exact try-call body.
+fn function_try_call_return_callee(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> ![]const u8 {
+    let index = try function_body_start(tokens, start);
+    let callee = try tokens.at(index + 2);
+    return callee.literal;
 }
 
 // function_has_single_mem_len_return detects `return std::mem::len(param);`.
@@ -1162,6 +1227,27 @@ fn function_first_param_name(tokens: &std::array::Array<token::Token>, start: i6
 // function_returns_bool reports whether a function declares `-> bool`.
 fn function_returns_bool(tokens: &std::array::Array<token::Token>, start: i64) -> !bool {
     return try function_returns_type(tokens, start, "bool");
+}
+
+// function_returns_error_union reports whether a function return type starts with `!`.
+fn function_returns_error_union(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    var index = start;
+
+    while index + 1 < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::LBrace {
+            return false;
+        }
+        if current.kind == token::TokenKind::Arrow {
+            let typ = try tokens.at(index + 1);
+            return typ.kind == token::TokenKind::Bang;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // function_returns_bytes reports whether a function declares `-> []const u8`.
