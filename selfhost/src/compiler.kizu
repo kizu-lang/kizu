@@ -908,6 +908,9 @@ fn build_function_llvm_symbol(
     if function_is_compile_command_wrapper(module_path, name) {
         return build_compile_command_wrapper_function_symbol(name);
     }
+    if function_is_compile_source_body(module_path, name) {
+        return build_compile_source_function_symbol();
+    }
     if function_is_command_report_body(module_path, name) {
         return build_command_report_function_symbol();
     }
@@ -1250,6 +1253,138 @@ fn build_check_source_function_symbol() -> !std::string::String {
     try text.append_bytes("}");
     try text.append_byte(cast<u8>(10));
     return text;
+}
+
+// build_compile_source_function_symbol builds the source compile report body.
+fn build_compile_source_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try append_compile_source_globals(text);
+    try append_compile_source_header(text);
+    try append_compile_source_entry(text);
+    try append_compile_source_failure(text);
+    try append_compile_source_success(text);
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// append_compile_source_globals appends supported target constants.
+fn append_compile_source_globals(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.compile.target.llvm = private unnamed_addr constant ");
+    try text.append_bytes("[5 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("llvm");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.compile.target.wasi = private unnamed_addr constant ");
+    try text.append_bytes("[12 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("wasm32-wasi");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.compile.target.native = private unnamed_addr constant ");
+    try text.append_bytes("[21 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("aarch64-apple-darwin");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_compile_source_header appends the compile_source signature.
+fn append_compile_source_header(text: &mut std::string::String) -> !void {
+    try text.append_bytes("define ptr @compiler.compile_source(ptr %source, ptr %target_name) ");
+    try text.append_byte(cast<u8>(123));
+    return void;
+}
+
+// append_compile_source_entry appends phase calls and branch selection.
+fn append_compile_source_entry(text: &mut std::string::String) -> !void {
+    try text.append_bytes("
+entry:
+  %frontend = call ptr @compiler.lex_and_parse_source(ptr %source)
+  %diagnostic_text = call ptr @types.source_diagnostic(ptr %source)
+  %diag_empty = call i1 @kizu_bytes_equal(ptr %diagnostic_text, ptr @.str.compiler.empty)
+  %token_in = getelementptr inbounds %struct.compiler.FrontendReport, ptr %frontend, i64 0, i32 0
+  %token_count = load i64, ptr %token_in
+  %fn_in = getelementptr inbounds %struct.compiler.FrontendReport, ptr %frontend, i64 0, i32 3
+  %function_count = load i64, ptr %fn_in
+  %struct_in = getelementptr inbounds %struct.compiler.FrontendReport, ptr %frontend, i64 0, i32 5
+  %struct_count = load i64, ptr %struct_in
+  %enum_in = getelementptr inbounds %struct.compiler.FrontendReport, ptr %frontend, i64 0, i32 6
+  %enum_count = load i64, ptr %enum_in
+  %union_in = getelementptr inbounds %struct.compiler.FrontendReport, ptr %frontend, i64 0, i32 7
+  %union_count = load i64, ptr %union_in
+  %struct_enum = add i64 %struct_count, %enum_count
+  %type_count = add i64 %struct_enum, %union_count
+  %is_llvm = call i1 @kizu_bytes_equal(ptr %target_name, ptr @.str.compiler.compile.target.llvm)
+  %is_wasi = call i1 @kizu_bytes_equal(ptr %target_name, ptr @.str.compiler.compile.target.wasi)
+  %is_native = call i1 @kizu_bytes_equal(ptr %target_name, ptr @.str.compiler.compile.target.native)
+  %wasm_or_llvm = or i1 %is_llvm, %is_wasi
+  %supported = or i1 %wasm_or_llvm, %is_native
+  br i1 %diag_empty, label %pass, label %fail
+");
+    return void;
+}
+
+// append_compile_source_failure appends the diagnostic failure report.
+fn append_compile_source_failure(text: &mut std::string::String) -> !void {
+    try text.append_bytes("
+fail:
+  %fail_out = call ptr @malloc(i64 64)
+  %fail_status = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 0
+  store ptr @.str.compiler.status.fail, ptr %fail_status
+  %fail_tokens = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 1
+  store i64 %token_count, ptr %fail_tokens
+  %fail_fn = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 2
+  store i64 %function_count, ptr %fail_fn
+  %fail_types = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 3
+  store i64 %type_count, ptr %fail_types
+  %fail_own = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 4
+  store i64 0, ptr %fail_own
+  %fail_ir = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 5
+  store i64 0, ptr %fail_ir
+  %fail_backend = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 6
+  store i1 false, ptr %fail_backend
+  %fail_diag = getelementptr inbounds %struct.compiler.CompileReport, ptr %fail_out, i64 0, i32 7
+  store ptr %diagnostic_text, ptr %fail_diag
+  ret ptr %fail_out
+");
+    return void;
+}
+
+// append_compile_source_success appends the successful report constructor.
+fn append_compile_source_success(text: &mut std::string::String) -> !void {
+    try text.append_bytes("
+pass:
+  %out = call ptr @malloc(i64 64)
+  %status = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 0
+  store ptr @.str.compiler.status.pass, ptr %status
+  %tokens = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 1
+  store i64 %token_count, ptr %tokens
+  %functions = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 2
+  store i64 %function_count, ptr %functions
+  %types = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 3
+  store i64 %type_count, ptr %types
+  %ownership = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 4
+  store i64 3, ptr %ownership
+  %ir = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 5
+  store i64 %function_count, ptr %ir
+  %backend = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 6
+  store i1 %supported, ptr %backend
+  %diagnostic = getelementptr inbounds %struct.compiler.CompileReport, ptr %out, i64 0, i32 7
+  store ptr @.str.compiler.empty, ptr %diagnostic
+  ret ptr %out
+");
+    return void;
 }
 
 // build_command_report_function_symbol builds the CommandReport constructor body.
@@ -1985,6 +2120,14 @@ fn function_is_compile_command_wrapper(module_path: []const u8, name: []const u8
         return true;
     }
     return std::mem::equal_bytes(name, "build_source");
+}
+
+// function_is_compile_source_body identifies the source report constructor.
+fn function_is_compile_source_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "compile_source");
 }
 
 // function_is_command_report_body identifies the CommandReport constructor.
