@@ -106,6 +106,31 @@ func namespaceConstType(name string) (string, bool) {
 
 // builtinReturnType returns the IR type of selected compiler-needed builtins.
 func builtinReturnType(name string, _ []Value) (string, bool) {
+	if typ, ok := builtinMemoryReturnType(name); ok {
+		return typ, true
+	}
+	if typ, ok := builtinFSReturnType(name); ok {
+		return typ, true
+	}
+	if typ, ok := builtinProcessReturnType(name); ok {
+		return typ, true
+	}
+	switch name {
+	case "std.io.write_stdout", "std.io.write_stderr":
+		return "!void", true
+	case "std.io.blocking", "std.io.threaded", "std.io.failing", "std.io.evented":
+		return "Io", true
+	case "std.testing.expect":
+		return "!void", true
+	}
+	if strings.HasPrefix(name, "std.") {
+		return "void", true
+	}
+	return "", false
+}
+
+// builtinMemoryReturnType returns IR types for std::mem builtins.
+func builtinMemoryReturnType(name string) (string, bool) {
 	switch name {
 	case "std.mem.page_allocator":
 		return "Allocator", true
@@ -119,23 +144,33 @@ func builtinReturnType(name string, _ []Value) (string, bool) {
 		return "![]const u8", true
 	case "std.mem.trim_ascii":
 		return "[]const u8", true
+	default:
+		return "", false
+	}
+}
+
+// builtinFSReturnType returns IR types for explicit filesystem builtins.
+func builtinFSReturnType(name string) (string, bool) {
+	switch name {
 	case "std.fs.read_file":
 		return "![]const u8", true
-	case "std.io.write_stdout", "std.io.write_stderr":
-		return "!void", true
-	case "std.io.blocking", "std.io.threaded", "std.io.failing", "std.io.evented":
-		return "Io", true
+	case "std.fs.exists":
+		return "!bool", true
+	default:
+		return "", false
+	}
+}
+
+// builtinProcessReturnType returns IR types for process capability builtins.
+func builtinProcessReturnType(name string) (string, bool) {
+	switch name {
 	case "std.process.arg_count":
 		return "i64", true
 	case "std.process.arg", "std.process.env":
 		return "![]const u8", true
 	case "std.process.exit_code":
 		return "i64", true
-	case "std.testing.expect":
-		return "!void", true
+	default:
+		return "", false
 	}
-	if strings.HasPrefix(name, "std.") {
-		return "void", true
-	}
-	return "", false
 }

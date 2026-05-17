@@ -107,7 +107,8 @@ func callDefinesLLVM(name string) bool {
 func stdCallDefinesLLVM(name string) bool {
 	switch name {
 	case "std.process.arg_count", "std.process.arg", "std.mem.equal_bytes",
-		"std.mem.len", "std.mem.byte_at", "std.mem.slice", "std.fs.read_file":
+		"std.mem.len", "std.mem.byte_at", "std.mem.slice", "std.fs.read_file",
+		"std.fs.exists":
 		return true
 	default:
 		return strings.HasPrefix(name, "std.array.Array<")
@@ -153,7 +154,8 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare i64 @kizu_bytes_len(ptr)\n")
 	e.out.WriteString("declare i8 @kizu_byte_at(ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_bytes_slice(ptr, i64, i64)\n")
-	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n\n")
+	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n")
+	e.out.WriteString("declare i1 @kizu_file_exists(ptr)\n\n")
 	e.out.WriteString("declare ptr @malloc(i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_new()\n")
 	e.out.WriteString("declare void @kizu_array_append(ptr, ptr)\n")
@@ -407,6 +409,9 @@ func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
 	case "std.fs.read_file":
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call ptr @kizu_read_file(ptr "+path+")", "![]const u8")
+	case "std.fs.exists":
+		path := e.callArg(instr, 1, "[]const u8")
+		e.writeRuntimeValueCall(instr, "call i1 @kizu_file_exists(ptr "+path+")", "!bool")
 	default:
 		if strings.HasPrefix(name, "std.array.Array<") {
 			e.writeRuntimeValueCall(instr, "call ptr @kizu_array_new()", instr.Result.Type)
