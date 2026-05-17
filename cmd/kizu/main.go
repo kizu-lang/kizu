@@ -55,6 +55,8 @@ func dispatch(cmd string, args []string) error {
 	case "test":
 		path, programArgs := splitProgramArgs(args)
 		return testFile(path, programArgs)
+	case "selfhost-lex":
+		return selfHostLexFile(args[0])
 	case "fmt":
 		return fmtFile(args[0])
 	case "ir":
@@ -76,6 +78,7 @@ func dispatch(cmd string, args []string) error {
 // usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-lex <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -242,6 +245,36 @@ func testPackageTarget(path string) error {
 	}
 	_, _ = fmt.Printf("test: ok (%d component tests)\n", count)
 	return nil
+}
+
+// selfHostLexFile runs the Kizu-owned lexer bootstrap command for one file.
+func selfHostLexFile(path string) error {
+	selfhostPath, err := selfHostPackagePath()
+	if err != nil {
+		return err
+	}
+	pkg, err := project.LoadPackage(selfhostPath)
+	if err != nil {
+		return err
+	}
+	for _, module := range pkg.Modules {
+		if err := checkPackageProgram(pkg, module); err != nil {
+			return fmt.Errorf("%s: %w", module.Module.Path, err)
+		}
+	}
+	runner := interp.NewWithProcessArgs(os.Stdout, []string{path})
+	runner.Register(packageRuntimeProgram(pkg))
+	return runner.RunFunction("compiler.lex_file_snapshot")
+}
+
+// selfHostPackagePath resolves the checked-in selfhost package from common CWDs.
+func selfHostPackagePath() (string, error) {
+	for _, path := range []string{"selfhost", "../../selfhost"} {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("selfhost package was not found")
 }
 
 // componentTestCount returns explicitly named component test functions.
