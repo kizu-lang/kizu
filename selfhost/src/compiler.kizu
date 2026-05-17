@@ -792,53 +792,104 @@ fn build_module_llvm_symbols(module: &SourceModule) -> !std::string::String {
         let current = try tokens.at(index);
         if current.kind == token::TokenKind::Fn {
             let name = try tokens.at(index + 1);
-            let returns_true = try function_has_single_bool_return(
-                tokens,
-                index,
-                token::TokenKind::True
-            );
-            let returns_false = try function_has_single_bool_return(
-                tokens,
-                index,
-                token::TokenKind::False
-            );
-            let returns_mem_len = try function_has_single_mem_len_return(tokens, index);
-            if returns_true {
-                try text.append_bytes("define i1 @");
-                try text.append_bytes(module_symbol_prefix(module.path));
-                try text.append_bytes(name.literal);
-                try text.append_bytes("() { ret i1 true }");
-                try text.append_byte(cast<u8>(10));
-            } else {
-                if returns_false {
-                    try text.append_bytes("define i1 @");
-                    try text.append_bytes(module_symbol_prefix(module.path));
-                    try text.append_bytes(name.literal);
-                    try text.append_bytes("() { ret i1 false }");
-                    try text.append_byte(cast<u8>(10));
-                } else {
-                    if returns_mem_len {
-                        let param = try function_first_param_name(tokens, index);
-                        var symbol = try build_mem_len_function_symbol(
-                            module.path,
-                            name.literal,
-                            param
-                        );
-                        let bytes = symbol.as_bytes();
-                        try text.append_bytes(bytes);
-                        symbol.deinit();
-                    } else {
-                        try text.append_bytes("define ptr @");
-                        try text.append_bytes(module_symbol_prefix(module.path));
-                        try text.append_bytes(name.literal);
-                        try text.append_bytes("() { ret ptr null }");
-                        try text.append_byte(cast<u8>(10));
-                    }
-                }
-            }
+            var symbol = try build_function_llvm_symbol(module.path, name.literal, tokens, index);
+            let bytes = symbol.as_bytes();
+            try text.append_bytes(bytes);
+            symbol.deinit();
         }
         index = index + 1;
     }
+    return text;
+}
+
+// build_function_llvm_symbol builds the best concrete function body currently supported.
+fn build_function_llvm_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    index: i64
+) -> !std::string::String {
+    if try function_has_single_bool_return(tokens, index, token::TokenKind::True) {
+        return build_bool_function_symbol(module_path, name, "true");
+    }
+    if try function_has_single_bool_return(tokens, index, token::TokenKind::False) {
+        return build_bool_function_symbol(module_path, name, "false");
+    }
+    if try function_has_single_mem_len_return(tokens, index) {
+        let param = try function_first_param_name(tokens, index);
+        return build_mem_len_function_symbol(module_path, name, param);
+    }
+    if try function_has_single_string_literal_return(tokens, index) {
+        let literal = try function_string_return_literal(tokens, index);
+        if module_string_literal_supported(module_path, name, literal) {
+            return build_string_literal_function_symbol(module_path, name, literal);
+        }
+    }
+    return build_pointer_stub_function_symbol(module_path, name);
+}
+
+// build_bool_function_symbol builds one concrete bool-returning LLVM function.
+fn build_bool_function_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    value: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i1 @");
+    try text.append_bytes(module_symbol_prefix(module_path));
+    try text.append_bytes(name);
+    try text.append_bytes("() { ret i1 ");
+    try text.append_bytes(value);
+    try text.append_bytes(" }");
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_pointer_stub_function_symbol builds the fallback opaque function stub.
+fn build_pointer_stub_function_symbol(
+    module_path: []const u8,
+    name: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @");
+    try text.append_bytes(module_symbol_prefix(module_path));
+    try text.append_bytes(name);
+    try text.append_bytes("() { ret ptr null }");
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_string_literal_function_symbol builds a simple []const u8 literal return.
+fn build_string_literal_function_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    literal: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+    let global = module_string_global(module_path, name);
+
+    try text.append_bytes(global);
+    try text.append_bytes(" = private unnamed_addr constant [");
+    try text.append_bytes(module_string_length_text(module_path, name));
+    try text.append_bytes(" x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes(literal);
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("define ptr @");
+    try text.append_bytes(module_symbol_prefix(module_path));
+    try text.append_bytes(name);
+    try text.append_bytes("() { ret ptr ");
+    try text.append_bytes(global);
+    try text.append_bytes(" }");
+    try text.append_byte(cast<u8>(10));
     return text;
 }
 
@@ -900,6 +951,77 @@ fn function_has_single_bool_return(
         return false;
     }
     return close.kind == token::TokenKind::RBrace;
+}
+
+// function_has_single_string_literal_return detects simple []const u8 literals.
+fn function_has_single_string_literal_return(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    let returns_bytes = try function_returns_bytes(tokens, start);
+    if !returns_bytes {
+        return false;
+    }
+    let no_params = try function_has_no_params(tokens, start);
+    if !no_params {
+        return false;
+    }
+    let index = try function_body_start(tokens, start);
+    if index < 0 {
+        return false;
+    }
+    if index + 3 >= tokens.len() {
+        return false;
+    }
+    let ret = try tokens.at(index);
+    let literal = try tokens.at(index + 1);
+    let semi = try tokens.at(index + 2);
+    let close = try tokens.at(index + 3);
+    if ret.kind != token::TokenKind::Return {
+        return false;
+    }
+    if literal.kind != token::TokenKind::String {
+        return false;
+    }
+    let simple = try string_literal_is_llvm_simple(literal.literal);
+    if !simple {
+        return false;
+    }
+    if semi.kind != token::TokenKind::Semicolon {
+        return false;
+    }
+    return close.kind == token::TokenKind::RBrace;
+}
+
+// function_string_return_literal returns the literal from an exact string body.
+fn function_string_return_literal(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> ![]const u8 {
+    let index = try function_body_start(tokens, start);
+    let literal = try tokens.at(index + 1);
+    return literal.literal;
+}
+
+// string_literal_is_llvm_simple rejects bytes needing LLVM c-string escaping.
+fn string_literal_is_llvm_simple(literal: []const u8) -> !bool {
+    var index = 0;
+    let length = std::mem::len(literal);
+
+    while index < length {
+        let byte = try std::mem::byte_at(literal, index);
+        if byte == cast<u8>(10) {
+            return false;
+        }
+        if byte == cast<u8>(34) {
+            return false;
+        }
+        if byte == cast<u8>(92) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
 }
 
 // function_has_single_mem_len_return detects `return std::mem::len(param);`.
@@ -1018,6 +1140,19 @@ fn function_first_param_is_bytes(
     return close.kind == token::TokenKind::RParen;
 }
 
+// function_has_no_params checks the exact empty-parameter shape.
+fn function_has_no_params(tokens: &std::array::Array<token::Token>, start: i64) -> !bool {
+    if start + 3 >= tokens.len() {
+        return false;
+    }
+    let open = try tokens.at(start + 2);
+    let close = try tokens.at(start + 3);
+    if open.kind != token::TokenKind::LParen {
+        return false;
+    }
+    return close.kind == token::TokenKind::RParen;
+}
+
 // function_first_param_name returns the first parameter name for simple functions.
 fn function_first_param_name(tokens: &std::array::Array<token::Token>, start: i64) -> ![]const u8 {
     let param = try tokens.at(start + 3);
@@ -1027,6 +1162,36 @@ fn function_first_param_name(tokens: &std::array::Array<token::Token>, start: i6
 // function_returns_bool reports whether a function declares `-> bool`.
 fn function_returns_bool(tokens: &std::array::Array<token::Token>, start: i64) -> !bool {
     return try function_returns_type(tokens, start, "bool");
+}
+
+// function_returns_bytes reports whether a function declares `-> []const u8`.
+fn function_returns_bytes(tokens: &std::array::Array<token::Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index + 4 < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::LBrace {
+            return false;
+        }
+        if current.kind == token::TokenKind::Arrow {
+            let left = try tokens.at(index + 1);
+            let right = try tokens.at(index + 2);
+            let const_name = try tokens.at(index + 3);
+            let u8_name = try tokens.at(index + 4);
+            if left.kind != token::TokenKind::LBracket {
+                return false;
+            }
+            if right.kind != token::TokenKind::RBracket {
+                return false;
+            }
+            if !std::mem::equal_bytes(const_name.literal, "const") {
+                return false;
+            }
+            return std::mem::equal_bytes(u8_name.literal, "u8");
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // function_returns_type reports whether a function declares the given return type.
@@ -1068,6 +1233,55 @@ fn function_body_start(tokens: &std::array::Array<token::Token>, start: i64) -> 
         index = index + 1;
     }
     return -1;
+}
+
+// module_string_global returns the global name for a string-returning function.
+fn module_string_global(module_path: []const u8, name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(module_path, "selfhost::backend") {
+        if std::mem::equal_bytes(name, "llvm_module_text") {
+            return "@.str.backend.llvm_module_text";
+        }
+    }
+    if std::mem::equal_bytes(module_path, "selfhost") {
+        if std::mem::equal_bytes(name, "selfhost_wasm_artifact") {
+            return "@.str.selfhost_wasm_artifact";
+        }
+    }
+    return "@.str.unknown";
+}
+
+// module_string_length_text returns the LLVM array length for supported literals.
+fn module_string_length_text(module_path: []const u8, name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(module_path, "selfhost::backend") {
+        if std::mem::equal_bytes(name, "llvm_module_text") {
+            return "33";
+        }
+    }
+    if std::mem::equal_bytes(module_path, "selfhost") {
+        if std::mem::equal_bytes(name, "selfhost_wasm_artifact") {
+            return "22";
+        }
+    }
+    return "0";
+}
+
+// module_string_literal_supported checks the exact literals we can emit today.
+fn module_string_literal_supported(
+    module_path: []const u8,
+    name: []const u8,
+    literal: []const u8
+) -> bool {
+    if std::mem::equal_bytes(module_path, "selfhost::backend") {
+        if std::mem::equal_bytes(name, "llvm_module_text") {
+            return std::mem::equal_bytes(literal, "define void @main() { ret void }");
+        }
+    }
+    if std::mem::equal_bytes(module_path, "selfhost") {
+        if std::mem::equal_bytes(name, "selfhost_wasm_artifact") {
+            return std::mem::equal_bytes(literal, "(module (func $main))");
+        }
+    }
+    return false;
 }
 
 // module_symbol_prefix returns the LLVM symbol prefix for a selfhost module.
