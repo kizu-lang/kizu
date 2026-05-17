@@ -10,6 +10,7 @@ func RuntimeLLVM() string {
 @.kizu.empty = private unnamed_addr constant [1 x i8] c"\00"
 @.kizu.mode.rb = private unnamed_addr constant [3 x i8] c"rb\00"
 @.kizu.mode.wb = private unnamed_addr constant [3 x i8] c"wb\00"
+@.kizu.dot = private unnamed_addr constant [2 x i8] c".\00"
 @kizu_argc = global i64 0
 @kizu_argv = global ptr null
 
@@ -27,6 +28,11 @@ declare i64 @fread(ptr, i64, i64, ptr)
 declare i64 @fwrite(ptr, i64, i64, ptr)
 declare i32 @fclose(ptr)
 declare ptr @memcpy(ptr, ptr, i64)
+declare ptr @opendir(ptr)
+declare i32 @closedir(ptr)
+declare i32 @mkdir(ptr, i16)
+declare i32 @rmdir(ptr)
+declare i32 @remove(ptr)
 ` + runtimePrintLLVM() + runtimeProcessLLVM() + runtimeMemoryLLVM() + runtimePathLLVM() +
 		runtimeFileLLVM() + runtimeArrayLLVM()
 }
@@ -138,6 +144,12 @@ fail:
 
 // runtimePathLLVM returns path helpers for the native target.
 func runtimePathLLVM() string {
+	return runtimePathJoinLLVM() + runtimePathCleanLLVM() + runtimePathBasenameLLVM() +
+		runtimePathDirnameLLVM() + runtimePathExtensionLLVM()
+}
+
+// runtimePathJoinLLVM returns path join support for the native target.
+func runtimePathJoinLLVM() string {
 	return `
 define ptr @kizu_path_join(ptr %left, ptr %right) {
 entry:
@@ -164,8 +176,213 @@ fail:
 `
 }
 
+// runtimePathCleanLLVM returns path clean support for the native target.
+func runtimePathCleanLLVM() string {
+	return runtimePathCleanScanLLVM() + runtimePathCleanCopyLLVM()
+}
+
+// runtimePathCleanScanLLVM returns the scan half of path clean support.
+func runtimePathCleanScanLLVM() string {
+	return `
+define ptr @kizu_path_clean(ptr %path) {
+entry:
+  %len = call i64 @strlen(ptr %path)
+  br label %scan
+scan:
+  %i = phi i64 [ 0, %entry ], [ %next_i, %advance ]
+  %room = icmp ult i64 %i, %len
+  br i1 %room, label %check_slash, label %done
+check_slash:
+  %slot = getelementptr i8, ptr %path, i64 %i
+  %ch = load i8, ptr %slot
+  %is_slash = icmp eq i8 %ch, 47
+  br i1 %is_slash, label %check_dot1, label %advance
+check_dot1:
+  %dot1_i = add i64 %i, 1
+  %dot1_in = icmp ult i64 %dot1_i, %len
+  br i1 %dot1_in, label %load_dot1, label %advance
+load_dot1:
+  %dot1_slot = getelementptr i8, ptr %path, i64 %dot1_i
+  %dot1 = load i8, ptr %dot1_slot
+  %is_dot1 = icmp eq i8 %dot1, 46
+  br i1 %is_dot1, label %check_dot2, label %advance
+check_dot2:
+  %dot2_i = add i64 %i, 2
+  %dot2_in = icmp ult i64 %dot2_i, %len
+  br i1 %dot2_in, label %load_dot2, label %advance
+load_dot2:
+  %dot2_slot = getelementptr i8, ptr %path, i64 %dot2_i
+  %dot2 = load i8, ptr %dot2_slot
+  %is_dot2 = icmp eq i8 %dot2, 46
+  br i1 %is_dot2, label %check_tail, label %advance
+check_tail:
+  %tail_slash_i = add i64 %i, 3
+  %tail_in = icmp ult i64 %tail_slash_i, %len
+  br i1 %tail_in, label %load_tail, label %advance
+load_tail:
+  %tail_slot = getelementptr i8, ptr %path, i64 %tail_slash_i
+  %tail = load i8, ptr %tail_slot
+  %is_tail_slash = icmp eq i8 %tail, 47
+  br i1 %is_tail_slash, label %find_prev, label %advance
+find_prev:
+  %prev_start = sub i64 %i, 1
+  br label %prev_scan
+prev_scan:
+  %j = phi i64 [ %prev_start, %find_prev ], [ %prev_next, %prev_step ]
+  %before_start = icmp slt i64 %j, 0
+  br i1 %before_start, label %copy_root, label %prev_check
+prev_check:
+  %prev_slot = getelementptr i8, ptr %path, i64 %j
+  %prev_ch = load i8, ptr %prev_slot
+  %prev_is_slash = icmp eq i8 %prev_ch, 47
+  br i1 %prev_is_slash, label %copy_join, label %prev_step
+prev_step:
+  %prev_next = sub i64 %j, 1
+  br label %prev_scan
+copy_join:
+  %prefix_len = add i64 %j, 1
+  br label %copy_clean
+copy_root:
+  br label %copy_clean
+`
+}
+
+// runtimePathCleanCopyLLVM returns the copy half of path clean support.
+func runtimePathCleanCopyLLVM() string {
+	return `
+copy_clean:
+  %prefix = phi i64 [ %prefix_len, %copy_join ], [ 0, %copy_root ]
+  %suffix_start = add i64 %i, 4
+  %suffix_len = sub i64 %len, %suffix_start
+  %result_len = add i64 %prefix, %suffix_len
+  %alloc_size = add i64 %result_len, 1
+  %buffer = call ptr @malloc(i64 %alloc_size)
+  %missing = icmp eq ptr %buffer, null
+  br i1 %missing, label %fail, label %copy_prefix
+copy_prefix:
+  call ptr @memcpy(ptr %buffer, ptr %path, i64 %prefix)
+  %suffix_ptr = getelementptr i8, ptr %path, i64 %suffix_start
+  %dst_suffix = getelementptr i8, ptr %buffer, i64 %prefix
+  call ptr @memcpy(ptr %dst_suffix, ptr %suffix_ptr, i64 %suffix_len)
+  %end = getelementptr i8, ptr %buffer, i64 %result_len
+  store i8 0, ptr %end
+  ret ptr %buffer
+advance:
+  %next_i = add i64 %i, 1
+  br label %scan
+done:
+  ret ptr %path
+fail:
+  ret ptr @.kizu.empty
+}
+`
+}
+
+// runtimePathBasenameLLVM returns path basename support for the native target.
+func runtimePathBasenameLLVM() string {
+	return `
+define ptr @kizu_path_basename(ptr %path) {
+entry:
+  %len = call i64 @strlen(ptr %path)
+  br label %scan
+scan:
+  %i = phi i64 [ %len, %entry ], [ %next, %step ]
+  %at_start = icmp eq i64 %i, 0
+  br i1 %at_start, label %whole, label %check
+check:
+  %next = sub i64 %i, 1
+  %slot = getelementptr i8, ptr %path, i64 %next
+  %ch = load i8, ptr %slot
+  %is_slash = icmp eq i8 %ch, 47
+  br i1 %is_slash, label %copy_tail, label %step
+step:
+  br label %scan
+copy_tail:
+  %start = add i64 %next, 1
+  %tail_len = sub i64 %len, %start
+  %tail = getelementptr i8, ptr %path, i64 %start
+  %result = call ptr @kizu_bytes_slice(ptr %tail, i64 0, i64 %tail_len)
+  ret ptr %result
+whole:
+  ret ptr %path
+}
+`
+}
+
+// runtimePathDirnameLLVM returns path dirname support for the native target.
+func runtimePathDirnameLLVM() string {
+	return `
+define ptr @kizu_path_dirname(ptr %path) {
+entry:
+  %len = call i64 @strlen(ptr %path)
+  br label %scan
+scan:
+  %i = phi i64 [ %len, %entry ], [ %next, %step ]
+  %at_start = icmp eq i64 %i, 0
+  br i1 %at_start, label %dot, label %check
+check:
+  %next = sub i64 %i, 1
+  %slot = getelementptr i8, ptr %path, i64 %next
+  %ch = load i8, ptr %slot
+  %is_slash = icmp eq i8 %ch, 47
+  br i1 %is_slash, label %copy_head, label %step
+step:
+  br label %scan
+copy_head:
+  %empty = icmp eq i64 %next, 0
+  br i1 %empty, label %root, label %copy
+copy:
+  %result = call ptr @kizu_bytes_slice(ptr %path, i64 0, i64 %next)
+  ret ptr %result
+root:
+  ret ptr @.kizu.empty
+dot:
+  ret ptr @.kizu.dot
+}
+`
+}
+
+// runtimePathExtensionLLVM returns path extension support for the native target.
+func runtimePathExtensionLLVM() string {
+	return `
+define ptr @kizu_path_extension(ptr %path) {
+entry:
+  %len = call i64 @strlen(ptr %path)
+  br label %scan
+scan:
+  %i = phi i64 [ %len, %entry ], [ %next, %step ]
+  %at_start = icmp eq i64 %i, 0
+  br i1 %at_start, label %none, label %check
+check:
+  %next = sub i64 %i, 1
+  %slot = getelementptr i8, ptr %path, i64 %next
+  %ch = load i8, ptr %slot
+  %is_dot = icmp eq i8 %ch, 46
+  br i1 %is_dot, label %copy_tail, label %slash_check
+slash_check:
+  %is_slash = icmp eq i8 %ch, 47
+  br i1 %is_slash, label %none, label %step
+step:
+  br label %scan
+copy_tail:
+  %tail_len = sub i64 %len, %next
+  %tail = getelementptr i8, ptr %path, i64 %next
+  %result = call ptr @kizu_bytes_slice(ptr %tail, i64 0, i64 %tail_len)
+  ret ptr %result
+none:
+  ret ptr @.kizu.empty
+}
+`
+}
+
 // runtimeFileLLVM returns filesystem helpers for the native target.
 func runtimeFileLLVM() string {
+	return runtimeReadFileLLVM() + runtimeFileExistsLLVM() + runtimeWriteFileLLVM() +
+		runtimeFileMetadataLLVM() + runtimeFileMutationLLVM()
+}
+
+// runtimeReadFileLLVM returns file read support for the native target.
+func runtimeReadFileLLVM() string {
 	return `
 define ptr @kizu_read_file(ptr %path) {
 entry:
@@ -192,7 +409,12 @@ close_fail:
 fail:
   ret ptr @.kizu.empty
 }
+`
+}
 
+// runtimeFileExistsLLVM returns file existence support for the native target.
+func runtimeFileExistsLLVM() string {
+	return `
 define i1 @kizu_file_exists(ptr %path) {
 entry:
   %file = call ptr @fopen(ptr %path, ptr @.kizu.mode.rb)
@@ -204,7 +426,12 @@ yes:
 no:
   ret i1 false
 }
+`
+}
 
+// runtimeWriteFileLLVM returns file write support for the native target.
+func runtimeWriteFileLLVM() string {
+	return `
 define ptr @kizu_write_file(ptr %path, ptr %bytes) {
 entry:
   %file = call ptr @fopen(ptr %path, ptr @.kizu.mode.wb)
@@ -216,6 +443,73 @@ opened:
   call i32 @fclose(ptr %file)
   ret ptr @.kizu.empty
 fail:
+  ret ptr @.kizu.empty
+}
+`
+}
+
+// runtimeFileMetadataLLVM returns file metadata support for the native target.
+func runtimeFileMetadataLLVM() string {
+	return `
+define ptr @kizu_file_metadata(ptr %path) {
+entry:
+  %metadata = call ptr @malloc(i64 16)
+  %missing_metadata = icmp eq ptr %metadata, null
+  br i1 %missing_metadata, label %fail, label %stat_file
+stat_file:
+  %file = call ptr @fopen(ptr %path, ptr @.kizu.mode.rb)
+  %missing_file = icmp eq ptr %file, null
+  br i1 %missing_file, label %stat_dir, label %opened
+opened:
+  call i32 @fseek(ptr %file, i64 0, i32 2)
+  %size = call i64 @ftell(ptr %file)
+  call i32 @fclose(ptr %file)
+  %size_slot = getelementptr i64, ptr %metadata, i64 0
+  store i64 %size, ptr %size_slot
+  %is_dir_slot = getelementptr i8, ptr %metadata, i64 8
+  store i1 false, ptr %is_dir_slot
+  ret ptr %metadata
+stat_dir:
+  %dir = call ptr @opendir(ptr %path)
+  %missing_dir = icmp eq ptr %dir, null
+  br i1 %missing_dir, label %zero, label %opened_dir
+opened_dir:
+  call i32 @closedir(ptr %dir)
+  %dir_size_slot = getelementptr i64, ptr %metadata, i64 0
+  store i64 0, ptr %dir_size_slot
+  %dir_flag_slot = getelementptr i8, ptr %metadata, i64 8
+  store i1 true, ptr %dir_flag_slot
+  ret ptr %metadata
+zero:
+  %zero_size_slot = getelementptr i64, ptr %metadata, i64 0
+  store i64 0, ptr %zero_size_slot
+  %zero_flag_slot = getelementptr i8, ptr %metadata, i64 8
+  store i1 false, ptr %zero_flag_slot
+  ret ptr %metadata
+fail:
+  ret ptr @.kizu.empty
+}
+`
+}
+
+// runtimeFileMutationLLVM returns file and directory mutation support.
+func runtimeFileMutationLLVM() string {
+	return `
+define ptr @kizu_create_dir(ptr %path) {
+entry:
+  call i32 @mkdir(ptr %path, i16 493)
+  ret ptr @.kizu.empty
+}
+
+define ptr @kizu_remove_dir(ptr %path) {
+entry:
+  call i32 @rmdir(ptr %path)
+  ret ptr @.kizu.empty
+}
+
+define ptr @kizu_remove_file(ptr %path) {
+entry:
+  call i32 @remove(ptr %path)
   ret ptr @.kizu.empty
 }
 `

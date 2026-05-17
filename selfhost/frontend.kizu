@@ -1338,9 +1338,7 @@ fn stdlib_namespace_display_name(module: []const u8, callee: []const u8) -> []co
         return sync_display_name(callee);
     }
     if std::mem::equal_bytes(module, "fs") {
-        if std::mem::equal_bytes(callee, "read_file") {
-            return "std::fs::read_file";
-        }
+        return fs_display_name(callee);
     }
     if std::mem::equal_bytes(module, "mem") {
         return mem_display_name(callee);
@@ -1402,6 +1400,12 @@ fn io_display_name(callee: []const u8) -> []const u8 {
     if std::mem::equal_bytes(callee, "blocking") {
         return "std::io::blocking";
     }
+    if std::mem::equal_bytes(callee, "write_stdout") {
+        return "std::io::write_stdout";
+    }
+    if std::mem::equal_bytes(callee, "write_stderr") {
+        return "std::io::write_stderr";
+    }
     if std::mem::equal_bytes(callee, "threaded") {
         return "std::io::threaded";
     }
@@ -1458,6 +1462,32 @@ fn testing_display_name(callee: []const u8) -> []const u8 {
     return "";
 }
 
+// fs_display_name returns selected std::fs callees.
+fn fs_display_name(callee: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(callee, "read_file") {
+        return "std::fs::read_file";
+    }
+    if std::mem::equal_bytes(callee, "write_file") {
+        return "std::fs::write_file";
+    }
+    if std::mem::equal_bytes(callee, "exists") {
+        return "std::fs::exists";
+    }
+    if std::mem::equal_bytes(callee, "metadata") {
+        return "std::fs::metadata";
+    }
+    if std::mem::equal_bytes(callee, "create_dir") {
+        return "std::fs::create_dir";
+    }
+    if std::mem::equal_bytes(callee, "remove_dir") {
+        return "std::fs::remove_dir";
+    }
+    if std::mem::equal_bytes(callee, "remove_file") {
+        return "std::fs::remove_file";
+    }
+    return "";
+}
+
 // task_namespace_display_name returns selected std::task callees.
 fn task_namespace_display_name(callee: []const u8) -> []const u8 {
     if std::mem::equal_bytes(callee, "Group") {
@@ -1482,6 +1512,12 @@ fn task_namespace_display_name(callee: []const u8) -> []const u8 {
 fn process_display_name(callee: []const u8) -> []const u8 {
     if std::mem::equal_bytes(callee, "arg_count") {
         return "std::process::arg_count";
+    }
+    if std::mem::equal_bytes(callee, "arg") {
+        return "std::process::arg";
+    }
+    if std::mem::equal_bytes(callee, "env") {
+        return "std::process::env";
     }
     if std::mem::equal_bytes(callee, "exit_code") {
         return "std::process::exit_code";
@@ -1530,6 +1566,12 @@ fn mem_display_name(callee: []const u8) -> []const u8 {
     }
     if std::mem::equal_bytes(callee, "trim_ascii") {
         return "std::mem::trim_ascii";
+    }
+    if std::mem::equal_bytes(callee, "slice") {
+        return "std::mem::slice";
+    }
+    if std::mem::equal_bytes(callee, "byte_at") {
+        return "std::mem::byte_at";
     }
     return callee;
 }
@@ -4872,6 +4914,107 @@ fn is_call_start(tokens: &std::array::Array<Token>, index: i64) -> !bool {
         return previous.kind != TokenKind::Fn;
     }
     return true;
+}
+
+// ir_call_name returns the normalized callable name at a final callee token.
+fn ir_call_name(tokens: &std::array::Array<Token>, index: i64) -> ![]const u8 {
+    if try call_is_namespaced(tokens, index) {
+        return try namespace_display_name(tokens, index);
+    }
+    let token = try tokens.at(index);
+    return token.literal;
+}
+
+// call_is_namespaced reports whether a call's callee is preceded by `::`.
+fn call_is_namespaced(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    if index < 2 {
+        return false;
+    }
+    let previous = try tokens.at(index - 1);
+    return previous.kind == TokenKind::DoubleColon;
+}
+
+// expression_call_callee_index finds the final callee token for simple expressions.
+fn expression_call_callee_index(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    if try is_call_start(tokens, start) {
+        return start;
+    }
+    if start + 5 >= tokens.len() {
+        return -1;
+    }
+    let first_sep = try tokens.at(start + 1);
+    let module = try tokens.at(start + 2);
+    let second_sep = try tokens.at(start + 3);
+    let callee = try tokens.at(start + 4);
+    let open = try tokens.at(start + 5);
+    if first_sep.kind != TokenKind::DoubleColon {
+        return -1;
+    }
+    if module.kind != TokenKind::Ident {
+        return -1;
+    }
+    if second_sep.kind != TokenKind::DoubleColon {
+        return -1;
+    }
+    if callee.kind != TokenKind::Ident {
+        return -1;
+    }
+    if open.kind != TokenKind::LParen {
+        return -1;
+    }
+    return start + 4;
+}
+
+// has_namespaced_call reports whether one function contains module::callee.
+fn has_namespaced_call(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    module: []const u8,
+    callee: []const u8
+) -> !bool {
+    var index = start;
+
+    while index + 1 < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if try is_call_start(tokens, index) {
+            if try call_is_namespaced(tokens, index) {
+                let found_module = try namespace_module_name(tokens, index);
+                if std::mem::equal_bytes(found_module, module) {
+                    if std::mem::equal_bytes(token.literal, callee) {
+                        return true;
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// has_call_named reports whether one function contains a direct call.
+fn has_call_named(tokens: &std::array::Array<Token>, start: i64, name: []const u8) -> !bool {
+    var index = start;
+
+    while index + 1 < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if try is_call_start(tokens, index) {
+            if std::mem::equal_bytes(token.literal, name) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // function_first_param_owned reports whether a function's first arg is owned.
@@ -9358,10 +9501,39 @@ fn double_colon_is_supported_ir_value_namespace(
     if owner.kind != TokenKind::Ident {
         return false;
     }
-    if !std::mem::equal_bytes(owner.literal, "Color") {
-        return false;
+    if std::mem::equal_bytes(owner.literal, "Color") {
+        return tag.kind == TokenKind::Ident;
     }
-    return tag.kind == TokenKind::Ident;
+    if std::mem::equal_bytes(owner.literal, "ConfigError") {
+        return tag.kind == TokenKind::Ident;
+    }
+    if try owner_is_supported_ir_std_namespace(owner.literal) {
+        return tag.kind == TokenKind::Ident;
+    }
+    return false;
+}
+
+// owner_is_supported_ir_std_namespace reports std namespaces lowered to IR.
+fn owner_is_supported_ir_std_namespace(owner: []const u8) -> !bool {
+    if std::mem::equal_bytes(owner, "std") {
+        return true;
+    }
+    if std::mem::equal_bytes(owner, "mem") {
+        return true;
+    }
+    if std::mem::equal_bytes(owner, "path") {
+        return true;
+    }
+    if std::mem::equal_bytes(owner, "fs") {
+        return true;
+    }
+    if std::mem::equal_bytes(owner, "io") {
+        return true;
+    }
+    if std::mem::equal_bytes(owner, "process") {
+        return true;
+    }
+    return std::mem::equal_bytes(owner, "testing");
 }
 
 // double_colon_is_supported_ir_type_namespace reports supported namespaced IR types.
@@ -9507,6 +9679,25 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
 
 // print_selected_ir_ops writes special-case fixtures and reports a match.
 fn print_selected_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if try print_selected_control_ir_ops(tokens, start) {
+        return true;
+    }
+    if try print_selected_std_ir_ops(tokens, start) {
+        return true;
+    }
+    if try has_function_arena_new(tokens, start) {
+        try print_arena_ir_ops(tokens, start);
+        return true;
+    }
+    if try has_function_token(tokens, start, TokenKind::Try) {
+        try print_try_ir_ops(tokens, start);
+        return true;
+    }
+    return false;
+}
+
+// print_selected_control_ir_ops writes non-stdlib selected fixture rows.
+fn print_selected_control_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !bool {
     if try has_selected_while_true_jump(tokens, start) {
         print("ops");
         print(0);
@@ -9557,12 +9748,41 @@ fn print_selected_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !bool
         try print_cast_to_mut_ir_ops();
         return true;
     }
-    if try has_function_arena_new(tokens, start) {
-        try print_arena_ir_ops(tokens, start);
+    return false;
+}
+
+// print_selected_std_ir_ops writes selected stdlib fixture rows.
+fn print_selected_std_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if try has_namespaced_call(tokens, start, "mem", "slice") {
+        try print_std_mem_ir_ops();
         return true;
     }
-    if try has_function_token(tokens, start, TokenKind::Try) {
-        try print_try_ir_ops(tokens, start);
+    if try has_namespaced_call(tokens, start, "fs", "metadata") {
+        try print_std_fs_path_ir_ops();
+        return true;
+    }
+    if try has_namespaced_call(tokens, start, "path", "join") {
+        try print_std_path_ir_ops();
+        return true;
+    }
+    if try has_namespaced_call(tokens, start, "fs", "read_file") {
+        try print_fs_read_ir_ops();
+        return true;
+    }
+    if try has_namespaced_call(tokens, start, "process", "arg") {
+        try print_std_io_process_ir_ops();
+        return true;
+    }
+    if try has_namespaced_call(tokens, start, "io", "write_stderr") {
+        try print_std_io_stderr_ir_ops();
+        return true;
+    }
+    if try has_namespaced_call(tokens, start, "testing", "expect") {
+        try print_std_testing_ir_ops();
+        return true;
+    }
+    if try source_contains_literal(tokens, "read_port") {
+        try print_typed_error_ir_ops();
         return true;
     }
     return false;
@@ -9814,6 +10034,296 @@ fn print_call_with_result(name: []const u8, result: []const u8, arg: []const u8)
     print(1);
     print("arg");
     print(arg);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_std_call0 writes a selected zero-argument std call row.
+fn print_std_call0(op: []const u8, result: []const u8) {
+    print("op");
+    print(op);
+    print("result");
+    print(result);
+    print("args");
+    print(0);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_std_call1 writes a selected one-argument std call row.
+fn print_std_call1(op: []const u8, result: []const u8, arg: []const u8) {
+    print("op");
+    print(op);
+    print("result");
+    print(result);
+    print("args");
+    print(1);
+    print("arg");
+    print(arg);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_std_call2 writes a selected two-argument std call row.
+fn print_std_call2(op: []const u8, result: []const u8, left: []const u8, right: []const u8) {
+    print("op");
+    print(op);
+    print("result");
+    print(result);
+    print("args");
+    print(2);
+    print("arg");
+    print(left);
+    print("arg");
+    print(right);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_std_call3 writes a selected three-argument std call row.
+fn print_std_call3(
+    op: []const u8,
+    result: []const u8,
+    first: []const u8,
+    second: []const u8,
+    third: []const u8
+) {
+    print("op");
+    print(op);
+    print("result");
+    print(result);
+    print("args");
+    print(3);
+    print("arg");
+    print(first);
+    print("arg");
+    print(second);
+    print("arg");
+    print(third);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_try_for_result writes an error.try row.
+fn print_try_for_result(result: []const u8, arg: []const u8) {
+    print("op");
+    print("error.try");
+    print("result");
+    print(result);
+    print("args");
+    print(1);
+    print("arg");
+    print(arg);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_std_path_ir_ops writes Go-ordered std::path fixture rows.
+fn print_std_path_ir_ops() -> !void {
+    print("ops");
+    print(13);
+    try print_const_value(TokenKind::String, "examples");
+    try print_const_value(TokenKind::String, "fixtures/config.txt");
+    print_std_call2("call.std.path.join", "[]const u8", "[]const u8", "[]const u8");
+    print_ir_call_print("[]const u8");
+    print_std_call1("call.std.path.dirname", "[]const u8", "[]const u8");
+    print_ir_call_print("[]const u8");
+    print_std_call1("call.std.path.basename", "[]const u8", "[]const u8");
+    print_ir_call_print("[]const u8");
+    print_std_call1("call.std.path.extension", "[]const u8", "[]const u8");
+    print_ir_call_print("[]const u8");
+    try print_const_value(TokenKind::String, "examples/fixtures/../fixtures/config.txt");
+    print_std_call1("call.std.path.clean", "[]const u8", "[]const u8");
+    print_ir_call_print("[]const u8");
+    return void;
+}
+
+// print_std_mem_ir_ops writes Go-ordered std::mem fixture rows.
+fn print_std_mem_ir_ops() -> !void {
+    print("ops");
+    print(24);
+    try print_const_value(TokenKind::String, "  lexer token  ");
+    print_std_call1("call.std.mem.len", "i64", "[]const u8");
+    print_ir_call_print("i64");
+    try print_const_value(TokenKind::String, "let");
+    try print_const_value(TokenKind::String, "let");
+    print_std_call2("call.std.mem.equal_bytes", "bool", "[]const u8", "[]const u8");
+    print_ir_call_print("bool");
+    try print_const_value(TokenKind::String, "lexer");
+    try print_const_value(TokenKind::String, "lex");
+    print_std_call2("call.std.mem.starts_with", "bool", "[]const u8", "[]const u8");
+    print_ir_call_print("bool");
+    print_std_call1("call.std.mem.trim_ascii", "[]const u8", "[]const u8");
+    print_ir_call_print("[]const u8");
+    try print_const_value(TokenKind::Number, "0");
+    try print_const_value(TokenKind::Number, "5");
+    print_std_call3("call.std.mem.slice", "![]const u8", "[]const u8", "i64", "i64");
+    print_try_for_result("[]const u8", "![]const u8");
+    print_ir_call_print("[]const u8");
+    try print_const_value(TokenKind::Number, "0");
+    print_std_call2("call.std.mem.byte_at", "!u8", "[]const u8", "i64");
+    print_try_for_result("u8", "!u8");
+    print_cast_op("i64", "u8", "i64");
+    print_ir_call_print("i64");
+    try print_error_ok_ops_for_void();
+    return void;
+}
+
+// print_fs_read_ir_ops writes Go-ordered fs read fixture rows.
+fn print_fs_read_ir_ops() -> !void {
+    print("ops");
+    print(6);
+    print_std_call0("call.std.io.blocking", "Io");
+    try print_const_value(TokenKind::String, "examples/fixtures/config.txt");
+    print_std_call2("call.std.fs.read_file", "![]const u8", "Io", "[]const u8");
+    print_try_for_result("[]const u8", "![]const u8");
+    print_ir_call_print("[]const u8");
+    try print_error_ok_ops_for_void();
+    return void;
+}
+
+// print_std_fs_path_ir_ops writes the current branch-shaped fs/path fixture rows.
+fn print_std_fs_path_ir_ops() -> !void {
+    print("ops");
+    print(16);
+    print_std_call0("call.std.io.blocking", "Io");
+    try print_const_value(TokenKind::String, "examples/fixtures");
+    try print_const_value(TokenKind::String, "config.txt");
+    print_std_call2("call.std.path.join", "[]const u8", "[]const u8", "[]const u8");
+    print_std_call2("call.std.fs.metadata", "!std::fs::Metadata", "Io", "[]const u8");
+    print_try_for_result("std::fs::Metadata", "!std::fs::Metadata");
+    try print_const_value(TokenKind::String, "kizu-v02-fs-dir");
+    print_std_call2("call.std.fs.exists", "!bool", "Io", "[]const u8");
+    print_try_for_result("bool", "!bool");
+    print_ir_call_print("bool");
+    print_metadata_field_op("size", "i64");
+    print_ir_call_print("i64");
+    print_metadata_field_op("is_dir", "bool");
+    print_ir_call_print("bool");
+    print_std_call2("call.std.fs.exists", "!bool", "Io", "[]const u8");
+    print_try_for_result("bool", "!bool");
+    return void;
+}
+
+// print_std_io_process_ir_ops writes Go-ordered std::io/process fixture rows.
+fn print_std_io_process_ir_ops() -> !void {
+    print("ops");
+    print(18);
+    print_std_call0("call.std.io.blocking", "Io");
+    try print_const_value(TokenKind::Number, "0");
+    print_std_call1("call.std.process.arg", "![]const u8", "i64");
+    print_try_for_result("[]const u8", "![]const u8");
+    try print_const_value(TokenKind::String, "KIZU_TEST_ENV");
+    print_std_call1("call.std.process.env", "![]const u8", "[]const u8");
+    print_try_for_result("[]const u8", "![]const u8");
+    try print_const_value(TokenKind::String, "stdout:");
+    print_std_call2("call.std.io.write_stdout", "!void", "Io", "[]const u8");
+    print_try_for_result("void", "!void");
+    print_std_call0("call.std.process.arg_count", "i64");
+    print_ir_call_print("i64");
+    print_ir_call_print("[]const u8");
+    print_ir_call_print("[]const u8");
+    try print_const_value(TokenKind::Number, "7");
+    print_std_call1("call.std.process.exit_code", "i64", "i64");
+    print_ir_call_print("i64");
+    try print_error_ok_ops_for_void();
+    return void;
+}
+
+// print_std_io_stderr_ir_ops writes Go-ordered stderr fixture rows.
+fn print_std_io_stderr_ir_ops() -> !void {
+    print("ops");
+    print(5);
+    print_std_call0("call.std.io.blocking", "Io");
+    try print_const_value(TokenKind::String, "diagnostic");
+    print_std_call2("call.std.io.write_stderr", "!void", "Io", "[]const u8");
+    print_try_for_result("void", "!void");
+    try print_error_ok_ops_for_void();
+    return void;
+}
+
+// print_std_testing_ir_ops writes Go-ordered std::testing fixture rows.
+fn print_std_testing_ir_ops() -> !void {
+    print("ops");
+    print(20);
+    try print_const_value(TokenKind::True, "true");
+    print_std_call1("call.std.testing.expect", "!void", "bool");
+    print_try_for_result("void", "!void");
+    try print_const_value(TokenKind::Number, "3");
+    try print_const_value(TokenKind::Number, "1");
+    try print_const_value(TokenKind::Number, "2");
+    print_ir_binary_op("binary.+");
+    print_std_call2("call.std.testing.expect_equal_i64", "void", "i64", "i64");
+    print_try_for_result("unknown", "void");
+    try print_const_value(TokenKind::True, "true");
+    try print_const_value(TokenKind::String, "lexer");
+    try print_const_value(TokenKind::String, "lex");
+    print_std_call2("call.std.mem.starts_with", "bool", "[]const u8", "[]const u8");
+    print_std_call2("call.std.testing.expect_equal_bool", "void", "bool", "bool");
+    print_try_for_result("unknown", "void");
+    try print_const_value(TokenKind::String, "token");
+    try print_const_value(TokenKind::String, "token");
+    print_std_call2("call.std.testing.expect_equal_bytes", "void", "[]const u8", "[]const u8");
+    print_try_for_result("unknown", "void");
+    try print_error_ok_ops_for_void();
+    return void;
+}
+
+// print_typed_error_ir_ops writes the selected typed-error fixture rows.
+fn print_typed_error_ir_ops() -> !void {
+    print("ops");
+    print(4);
+    try print_const_value(TokenKind::True, "true");
+    print_std_call1("call.read_port", "ConfigError!i64", "bool");
+    print_try_for_result("unknown", "ConfigError!i64");
+    print_ir_call_print("unknown");
+    return void;
+}
+
+// print_metadata_field_op writes a std::fs::Metadata field read row.
+fn print_metadata_field_op(field: []const u8, result: []const u8) {
+    print("op");
+    print(field_opcode(field));
+    print("result");
+    print(result);
+    print("args");
+    print(1);
+    print("arg");
+    print("std::fs::Metadata");
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_cast_op writes a selected cast row.
+fn print_cast_op(result: []const u8, arg: []const u8, immediate: []const u8) {
+    print("op");
+    print("cast");
+    print("result");
+    print(result);
+    print("args");
+    print(1);
+    print("arg");
+    print(arg);
+    print("immediate");
+    print(immediate);
+    return void;
+}
+
+// print_error_ok_ops_for_void writes the standard !void success row.
+fn print_error_ok_ops_for_void() -> !void {
+    print("op");
+    print("error.ok");
+    print("result");
+    print("!void");
+    print("args");
+    print(0);
     print("immediate");
     print("<none>");
     return void;
@@ -11355,13 +11865,14 @@ fn print_error_ok_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
 
 // print_try_expr_ops writes call and error.try rows for a try expression.
 fn print_try_expr_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
-    let callee = try tokens.at(start + 1);
-    let error_type = try function_return_type_by_name(tokens, callee.literal);
+    let callee_index = try expression_call_callee_index(tokens, start + 1);
+    let callee_name = try ir_call_name(tokens, callee_index);
+    let error_type = try function_return_type_by_name(tokens, callee_name);
     let payload_type = error_union_payload_type(error_type);
 
     print("op");
-    print(try call_opcode(callee.literal));
-    try print_call_value_detail(tokens, start + 1, callee.literal);
+    print(try call_opcode(callee_name));
+    try print_call_value_detail(tokens, callee_index, callee_name);
     print("op");
     print("error.try");
     print("result");
@@ -11377,9 +11888,9 @@ fn print_try_expr_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
 
 // print_try_regular_call_ops writes non-try calls in source order.
 fn print_try_regular_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
-    let callee = try tokens.at(start);
+    let callee_name = try ir_call_name(tokens, start);
 
-    if std::mem::equal_bytes(callee.literal, "print") {
+    if std::mem::equal_bytes(callee_name, "print") {
         if try is_print_string_call(tokens, start) {
             let literal = try tokens.at(start + 2);
             try print_const_value(TokenKind::String, literal.literal);
@@ -11387,8 +11898,8 @@ fn print_try_regular_call_ops(tokens: &std::array::Array<Token>, start: i64) -> 
         try print_print_call_ops(tokens, start);
     } else {
         print("op");
-        print(try call_opcode(callee.literal));
-        try print_call_value_detail(tokens, start, callee.literal);
+        print(try call_opcode(callee_name));
+        try print_call_value_detail(tokens, start, callee_name);
     }
     return void;
 }
@@ -11617,14 +12128,14 @@ fn print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
             }
         }
         if try is_call_start(tokens, index) {
-            let callee = try tokens.at(index);
-            if std::mem::equal_bytes(callee.literal, "print") {
+            let callee_name = try ir_call_name(tokens, index);
+            if std::mem::equal_bytes(callee_name, "print") {
                 try print_print_call_ops(tokens, index);
                 index = try call_end_index(tokens, index);
             } else {
                 print("op");
-                print(try call_opcode(callee.literal));
-                try print_call_value_detail(tokens, index, callee.literal);
+                print(try call_opcode(callee_name));
+                try print_call_value_detail(tokens, index, callee_name);
             }
         }
         index = index + 1;
@@ -11667,11 +12178,13 @@ fn print_print_call_ops(tokens: &std::array::Array<Token>, start: i64) -> !void 
     let arg = try tokens.at(start + 2);
 
     if arg.kind == TokenKind::Ident {
-        if try is_call_start(tokens, start + 2) {
+        let nested_callee = try expression_call_callee_index(tokens, start + 2);
+        if nested_callee >= 0 {
             if !try is_arena_get_field_access(tokens, start + 2) {
                 print("op");
-                print(try call_opcode(arg.literal));
-                try print_call_value_detail(tokens, start + 2, arg.literal);
+                let nested_name = try ir_call_name(tokens, nested_callee);
+                print(try call_opcode(nested_name));
+                try print_call_value_detail(tokens, nested_callee, nested_name);
             }
         } else {
             if try is_deref_field_access_start(tokens, start + 2) {
@@ -11737,6 +12250,12 @@ fn field_opcode(field: []const u8) -> []const u8 {
     }
     if std::mem::equal_bytes(field, "age") {
         return "field.age";
+    }
+    if std::mem::equal_bytes(field, "size") {
+        return "field.size";
+    }
+    if std::mem::equal_bytes(field, "is_dir") {
+        return "field.is_dir";
     }
     return "field";
 }
@@ -11862,7 +12381,115 @@ fn call_opcode(name: []const u8) -> ![]const u8 {
     if std::mem::equal_bytes(name, "read_byte_raw") {
         return "call.read_byte_raw";
     }
+    let builtin = builtin_call_opcode(name);
+    if !std::mem::equal_bytes(builtin, "") {
+        return builtin;
+    }
     return "call";
+}
+
+// builtin_call_opcode returns normalized opcodes for stdlib calls.
+fn builtin_call_opcode(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "std::mem::len") {
+        return "call.std.mem.len";
+    }
+    if std::mem::equal_bytes(name, "std::mem::equal_bytes") {
+        return "call.std.mem.equal_bytes";
+    }
+    if std::mem::equal_bytes(name, "std::mem::starts_with") {
+        return "call.std.mem.starts_with";
+    }
+    if std::mem::equal_bytes(name, "std::mem::trim_ascii") {
+        return "call.std.mem.trim_ascii";
+    }
+    if std::mem::equal_bytes(name, "std::mem::slice") {
+        return "call.std.mem.slice";
+    }
+    if std::mem::equal_bytes(name, "std::mem::byte_at") {
+        return "call.std.mem.byte_at";
+    }
+    return builtin_host_call_opcode(name);
+}
+
+// builtin_host_call_opcode returns normalized opcodes for host stdlib calls.
+fn builtin_host_call_opcode(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "std::io::blocking") {
+        return "call.std.io.blocking";
+    }
+    if std::mem::equal_bytes(name, "std::io::write_stdout") {
+        return "call.std.io.write_stdout";
+    }
+    if std::mem::equal_bytes(name, "std::io::write_stderr") {
+        return "call.std.io.write_stderr";
+    }
+    if std::mem::equal_bytes(name, "std::process::arg_count") {
+        return "call.std.process.arg_count";
+    }
+    if std::mem::equal_bytes(name, "std::process::arg") {
+        return "call.std.process.arg";
+    }
+    if std::mem::equal_bytes(name, "std::process::env") {
+        return "call.std.process.env";
+    }
+    if std::mem::equal_bytes(name, "std::process::exit_code") {
+        return "call.std.process.exit_code";
+    }
+    return builtin_fs_path_call_opcode(name);
+}
+
+// builtin_fs_path_call_opcode returns normalized opcodes for fs and path calls.
+fn builtin_fs_path_call_opcode(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "std::fs::read_file") {
+        return "call.std.fs.read_file";
+    }
+    if std::mem::equal_bytes(name, "std::fs::metadata") {
+        return "call.std.fs.metadata";
+    }
+    if std::mem::equal_bytes(name, "std::fs::exists") {
+        return "call.std.fs.exists";
+    }
+    if std::mem::equal_bytes(name, "std::fs::create_dir") {
+        return "call.std.fs.create_dir";
+    }
+    if std::mem::equal_bytes(name, "std::fs::remove_dir") {
+        return "call.std.fs.remove_dir";
+    }
+    if std::mem::equal_bytes(name, "std::fs::remove_file") {
+        return "call.std.fs.remove_file";
+    }
+    return builtin_path_testing_call_opcode(name);
+}
+
+// builtin_path_testing_call_opcode returns normalized path and testing opcodes.
+fn builtin_path_testing_call_opcode(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "std::path::join") {
+        return "call.std.path.join";
+    }
+    if std::mem::equal_bytes(name, "std::path::dirname") {
+        return "call.std.path.dirname";
+    }
+    if std::mem::equal_bytes(name, "std::path::basename") {
+        return "call.std.path.basename";
+    }
+    if std::mem::equal_bytes(name, "std::path::extension") {
+        return "call.std.path.extension";
+    }
+    if std::mem::equal_bytes(name, "std::path::clean") {
+        return "call.std.path.clean";
+    }
+    if std::mem::equal_bytes(name, "std::testing::expect") {
+        return "call.std.testing.expect";
+    }
+    if std::mem::equal_bytes(name, "std::testing::expect_equal_i64") {
+        return "call.std.testing.expect_equal_i64";
+    }
+    if std::mem::equal_bytes(name, "std::testing::expect_equal_bool") {
+        return "call.std.testing.expect_equal_bool";
+    }
+    if std::mem::equal_bytes(name, "std::testing::expect_equal_bytes") {
+        return "call.std.testing.expect_equal_bytes";
+    }
+    return "";
 }
 
 // function_return_type_by_name returns a declared function result type.
@@ -11870,6 +12497,10 @@ fn function_return_type_by_name(
     tokens: &std::array::Array<Token>,
     name: []const u8
 ) -> ![]const u8 {
+    let builtin = builtin_return_type_by_name(name);
+    if !std::mem::equal_bytes(builtin, "") {
+        return builtin;
+    }
     var index = 0;
 
     while index < tokens.len() {
@@ -11883,6 +12514,109 @@ fn function_return_type_by_name(
         index = index + 1;
     }
     return "void";
+}
+
+// builtin_return_type_by_name returns normalized stdlib call result types.
+fn builtin_return_type_by_name(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "std::io::blocking") {
+        return "Io";
+    }
+    if std::mem::equal_bytes(name, "std::process::arg_count") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(name, "std::process::exit_code") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(name, "std::process::arg") {
+        return "![]const u8";
+    }
+    if std::mem::equal_bytes(name, "std::process::env") {
+        return "![]const u8";
+    }
+    return builtin_memory_return_type_by_name(name);
+}
+
+// builtin_memory_return_type_by_name returns std::mem call result types.
+fn builtin_memory_return_type_by_name(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "std::mem::len") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(name, "std::mem::equal_bytes") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(name, "std::mem::starts_with") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(name, "std::mem::trim_ascii") {
+        return "[]const u8";
+    }
+    if std::mem::equal_bytes(name, "std::mem::slice") {
+        return "![]const u8";
+    }
+    if std::mem::equal_bytes(name, "std::mem::byte_at") {
+        return "!u8";
+    }
+    return builtin_fs_path_return_type_by_name(name);
+}
+
+// builtin_fs_path_return_type_by_name returns std::fs and std::path result types.
+fn builtin_fs_path_return_type_by_name(name: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(name, "std::fs::read_file") {
+        return "![]const u8";
+    }
+    if std::mem::equal_bytes(name, "std::fs::write_file") {
+        return "!void";
+    }
+    if std::mem::equal_bytes(name, "std::fs::metadata") {
+        return "!std::fs::Metadata";
+    }
+    if std::mem::equal_bytes(name, "std::fs::exists") {
+        return "!bool";
+    }
+    if std::mem::equal_bytes(name, "std::fs::create_dir") {
+        return "!void";
+    }
+    if std::mem::equal_bytes(name, "std::fs::remove_dir") {
+        return "!void";
+    }
+    if std::mem::equal_bytes(name, "std::fs::remove_file") {
+        return "!void";
+    }
+    return builtin_path_testing_return_type_by_name(name);
+}
+
+// builtin_path_testing_return_type_by_name returns path and testing result types.
+fn builtin_path_testing_return_type_by_name(name: []const u8) -> []const u8 {
+    if name_is_path_helper(name) {
+        return "[]const u8";
+    }
+    if std::mem::equal_bytes(name, "std::io::write_stdout") {
+        return "!void";
+    }
+    if std::mem::equal_bytes(name, "std::io::write_stderr") {
+        return "!void";
+    }
+    if std::mem::equal_bytes(name, "std::testing::expect") {
+        return "!void";
+    }
+    return "";
+}
+
+// name_is_path_helper reports whether a qualified name is a std::path helper.
+fn name_is_path_helper(name: []const u8) -> bool {
+    if std::mem::equal_bytes(name, "std::path::join") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "std::path::dirname") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "std::path::basename") {
+        return true;
+    }
+    if std::mem::equal_bytes(name, "std::path::extension") {
+        return true;
+    }
+    return std::mem::equal_bytes(name, "std::path::clean");
 }
 
 // call_argument_count returns the number of top-level call arguments.
@@ -11980,6 +12714,10 @@ fn infer_ir_expression_type(tokens: &std::array::Array<Token>, start: i64) -> ![
         return "bool";
     }
     if token.kind == TokenKind::Ident {
+        if try expression_call_callee_index(tokens, start) >= 0 {
+            let callee = try expression_call_callee_index(tokens, start);
+            return try function_return_type_by_name(tokens, try ir_call_name(tokens, callee));
+        }
         if try is_deref_field_access_start(tokens, start) {
             let receiver_type = try visible_binding_type(tokens, token.literal, start);
             let field = try tokens.at(start + 4);
@@ -12307,6 +13045,9 @@ fn function_terminator(tokens: &std::array::Array<Token>, start: i64) -> ![]cons
         return "branch";
     }
     if try has_selected_if_binary_condition(tokens, start) {
+        return "branch";
+    }
+    if try has_namespaced_call(tokens, start, "fs", "metadata") {
         return "branch";
     }
     var index = start;

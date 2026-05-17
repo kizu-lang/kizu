@@ -108,7 +108,9 @@ func stdCallDefinesLLVM(name string) bool {
 	switch name {
 	case "std.process.arg_count", "std.process.arg", "std.mem.equal_bytes",
 		"std.mem.starts_with", "std.mem.len", "std.mem.byte_at", "std.mem.slice",
-		"std.fs.read_file", "std.fs.write_file", "std.fs.exists", "std.path.join":
+		"std.fs.read_file", "std.fs.write_file", "std.fs.exists", "std.fs.metadata",
+		"std.fs.create_dir", "std.fs.remove_dir", "std.fs.remove_file", "std.path.join",
+		"std.path.clean", "std.path.basename", "std.path.dirname", "std.path.extension":
 		return true
 	default:
 		return strings.HasPrefix(name, "std.array.Array<")
@@ -158,7 +160,15 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n")
 	e.out.WriteString("declare ptr @kizu_write_file(ptr, ptr)\n")
 	e.out.WriteString("declare i1 @kizu_file_exists(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_file_metadata(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_create_dir(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_remove_dir(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_remove_file(ptr)\n")
 	e.out.WriteString("declare ptr @kizu_path_join(ptr, ptr)\n\n")
+	e.out.WriteString("declare ptr @kizu_path_clean(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_path_basename(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_path_dirname(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_path_extension(ptr)\n\n")
 	e.out.WriteString("declare ptr @malloc(i64)\n")
 	e.out.WriteString("declare ptr @kizu_array_new()\n")
 	e.out.WriteString("declare void @kizu_array_append(ptr, ptr)\n")
@@ -455,6 +465,19 @@ func (e *emitter) writeFileStdCall(name string, instr *ir.Instr) bool {
 	case "std.fs.exists":
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call i1 @kizu_file_exists(ptr "+path+")", "!bool")
+	case "std.fs.metadata":
+		path := e.callArg(instr, 1, "[]const u8")
+		e.writeRuntimeValueCall(instr, "call ptr @kizu_file_metadata(ptr "+path+")",
+			"!std::fs::Metadata")
+	case "std.fs.create_dir":
+		path := e.callArg(instr, 1, "[]const u8")
+		e.writeRuntimeValueCall(instr, "call ptr @kizu_create_dir(ptr "+path+")", "!void")
+	case "std.fs.remove_dir":
+		path := e.callArg(instr, 1, "[]const u8")
+		e.writeRuntimeValueCall(instr, "call ptr @kizu_remove_dir(ptr "+path+")", "!void")
+	case "std.fs.remove_file":
+		path := e.callArg(instr, 1, "[]const u8")
+		e.writeRuntimeValueCall(instr, "call ptr @kizu_remove_file(ptr "+path+")", "!void")
 	default:
 		return false
 	}
@@ -463,14 +486,30 @@ func (e *emitter) writeFileStdCall(name string, instr *ir.Instr) bool {
 
 // writePathStdCall lowers native path helpers needed before Kizu std is self-hosted.
 func (e *emitter) writePathStdCall(name string, instr *ir.Instr) bool {
-	if name != "std.path.join" {
+	switch name {
+	case "std.path.join":
+		left := e.callArg(instr, 0, "[]const u8")
+		right := e.callArg(instr, 1, "[]const u8")
+		call := "call ptr @kizu_path_join(ptr " + left + ", ptr " + right + ")"
+		e.writeRuntimeValueCall(instr, call, "[]const u8")
+	case "std.path.clean":
+		e.writeUnaryPathCall(instr, "@kizu_path_clean")
+	case "std.path.basename":
+		e.writeUnaryPathCall(instr, "@kizu_path_basename")
+	case "std.path.dirname":
+		e.writeUnaryPathCall(instr, "@kizu_path_dirname")
+	case "std.path.extension":
+		e.writeUnaryPathCall(instr, "@kizu_path_extension")
+	default:
 		return false
 	}
-	left := e.callArg(instr, 0, "[]const u8")
-	right := e.callArg(instr, 1, "[]const u8")
-	call := "call ptr @kizu_path_join(ptr " + left + ", ptr " + right + ")"
-	e.writeRuntimeValueCall(instr, call, "[]const u8")
 	return true
+}
+
+// writeUnaryPathCall lowers one-argument path helpers to runtime calls.
+func (e *emitter) writeUnaryPathCall(instr *ir.Instr, runtime string) {
+	path := e.callArg(instr, 0, "[]const u8")
+	e.writeRuntimeValueCall(instr, "call ptr "+runtime+"(ptr "+path+")", "[]const u8")
 }
 
 // writeStdMemCompare lowers two-slice byte predicates to runtime calls.
