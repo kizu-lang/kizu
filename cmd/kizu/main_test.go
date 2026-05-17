@@ -675,6 +675,14 @@ func requireSelfHostCompileSourceMarkers(t *testing.T) {
 // requireSelfHostReportMarkers checks command and package report constructors.
 func requireSelfHostReportMarkers(t *testing.T) {
 	t.Helper()
+	requireSelfHostCommandReportMarkers(t)
+	requireSelfHostPackagePipelineMarkers(t)
+	requireSelfHostPackageFallbackMarkers(t)
+}
+
+// requireSelfHostCommandReportMarkers checks report constructor symbols.
+func requireSelfHostCommandReportMarkers(t *testing.T) {
+	t.Helper()
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"%struct.compiler.CommandReport = type")
 	requireFileContains(t, "target/kizu-selfhost.ll",
@@ -692,6 +700,23 @@ func requireSelfHostReportMarkers(t *testing.T) {
 		"store ptr @.str.compiler.status.fail, ptr %s_out")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.finish_package_report(ptr %report, ptr %target_name)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"call ptr @compiler.package_failure(ptr %report, ptr @.str.compiler.finish.missing_root)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "store i1 true, ptr %b_out")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.status_name(ptr %status)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define ptr @compiler.merge_status(ptr %left, ptr %right)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "icmp eq ptr %left, @.str.compiler.status.fail")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.check_source(ptr %source)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"call ptr @compiler.compile_source(ptr %source, ptr @.str.compiler.target.llvm)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define ptr @compiler.build_source(ptr %source, ptr %target_name)")
+}
+
+// requireSelfHostPackagePipelineMarkers checks package pipeline symbols.
+func requireSelfHostPackagePipelineMarkers(t *testing.T) {
+	t.Helper()
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_package_module(ptr %module)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
@@ -711,17 +736,11 @@ func requireSelfHostReportMarkers(t *testing.T) {
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"store ptr %source, ptr %source_out")
 	requireFileContains(t, "target/kizu-selfhost.ll",
-		"call ptr @compiler.package_failure(ptr %report, ptr @.str.compiler.finish.missing_root)")
-	requireFileContains(t, "target/kizu-selfhost.ll", "store i1 true, ptr %b_out")
-	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.status_name(ptr %status)")
+		"%struct.compiler.ModuleSpec = type { ptr, ptr }")
 	requireFileContains(t, "target/kizu-selfhost.ll",
-		"define ptr @compiler.merge_status(ptr %left, ptr %right)")
-	requireFileContains(t, "target/kizu-selfhost.ll", "icmp eq ptr %left, @.str.compiler.status.fail")
-	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.check_source(ptr %source)")
+		"define ptr @compiler.module_spec(ptr %path, ptr %file)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
-		"call ptr @compiler.compile_source(ptr %source, ptr @.str.compiler.target.llvm)")
-	requireFileContains(t, "target/kizu-selfhost.ll",
-		"define ptr @compiler.build_source(ptr %source, ptr %target_name)")
+		"store ptr %file, ptr %file_out")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_package(ptr %modules, ptr %target_name)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
@@ -730,6 +749,11 @@ func requireSelfHostReportMarkers(t *testing.T) {
 		"define ptr @compiler.compile_selfhost_package_from_files(ptr %io)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.finish_package_report(ptr %report, ptr %target_name)")
+}
+
+// requireSelfHostPackageFallbackMarkers checks eliminated package fallbacks.
+func requireSelfHostPackageFallbackMarkers(t *testing.T) {
+	t.Helper()
 	requireFileNotContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_package(ptr %modules, ptr %target_name) { ret ptr null }")
 	requireFileNotContains(t, "target/kizu-selfhost.ll",
@@ -739,6 +763,8 @@ func requireSelfHostReportMarkers(t *testing.T) {
 	requireFileNotContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.source_module(ptr %path, ptr %source, "+
 			"i1 %is_root, i1 %is_test) { ret ptr null }")
+	requireFileNotContains(t, "target/kizu-selfhost.ll",
+		"define ptr @compiler.module_spec(ptr %path, ptr %file) { ret ptr null }")
 }
 
 // requireSelfHostLexerMarkers checks remaining lexer and resolver body markers.
