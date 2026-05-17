@@ -23,7 +23,8 @@ declare ptr @malloc(i64)
 declare i64 @fread(ptr, i64, i64, ptr)
 declare i32 @fclose(ptr)
 declare ptr @memcpy(ptr, ptr, i64)
-` + runtimePrintLLVM() + runtimeProcessLLVM() + runtimeMemoryLLVM() + runtimeFileLLVM()
+` + runtimePrintLLVM() + runtimeProcessLLVM() + runtimeMemoryLLVM() + runtimeFileLLVM() +
+		runtimeArrayLLVM()
 }
 
 // runtimePrintLLVM returns print helpers for the native target.
@@ -150,6 +151,53 @@ close_fail:
   ret ptr @.kizu.empty
 fail:
   ret ptr @.kizu.empty
+}
+`
+}
+
+// runtimeArrayLLVM returns growable pointer-array helpers for the native target.
+func runtimeArrayLLVM() string {
+	return `
+define ptr @kizu_array_new() {
+entry:
+  %array = call ptr @malloc(i64 24)
+  %len_slot = getelementptr i64, ptr %array, i64 0
+  store i64 0, ptr %len_slot
+  %cap_slot = getelementptr i64, ptr %array, i64 1
+  store i64 1024, ptr %cap_slot
+  %data = call ptr @malloc(i64 8192)
+  %data_slot = getelementptr ptr, ptr %array, i64 2
+  store ptr %data, ptr %data_slot
+  ret ptr %array
+}
+
+define void @kizu_array_append(ptr %array, ptr %value) {
+entry:
+  %len_slot = getelementptr i64, ptr %array, i64 0
+  %len = load i64, ptr %len_slot
+  %data_slot = getelementptr ptr, ptr %array, i64 2
+  %data = load ptr, ptr %data_slot
+  %slot = getelementptr ptr, ptr %data, i64 %len
+  store ptr %value, ptr %slot
+  %next = add i64 %len, 1
+  store i64 %next, ptr %len_slot
+  ret void
+}
+
+define ptr @kizu_array_at(ptr %array, i64 %index) {
+entry:
+  %data_slot = getelementptr ptr, ptr %array, i64 2
+  %data = load ptr, ptr %data_slot
+  %slot = getelementptr ptr, ptr %data, i64 %index
+  %value = load ptr, ptr %slot
+  ret ptr %value
+}
+
+define i64 @kizu_array_len(ptr %array) {
+entry:
+  %len_slot = getelementptr i64, ptr %array, i64 0
+  %len = load i64, ptr %len_slot
+  ret i64 %len
 }
 `
 }
