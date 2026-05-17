@@ -92,6 +92,9 @@ func usage() {
 
 // parseFile parses a source file and prints its AST summary.
 func parseFile(path string) error {
+	if os.Getenv("KIZU_SELFHOST_PARSER") == "1" {
+		return selfHostParseFile(path)
+	}
 	program, errs, err := parsePath(path)
 	if err != nil {
 		return err
