@@ -661,7 +661,9 @@ fn write_package_llvm_symbols(io: Io, modules: &std::array::Array<SourceModule>)
     print("declare ptr @malloc(i64)");
     print("declare i64 @kizu_bytes_len(ptr)");
     print("declare i1 @kizu_bytes_equal(ptr, ptr)");
+    print("declare i1 @kizu_file_exists(ptr)");
     try write_selfhost_status_constants(io);
+    try write_selfhost_manifest_path_constants(io);
     try write_selfhost_struct_layouts(io);
     while index < modules.len() {
         let module = try modules.at(index);
@@ -787,6 +789,18 @@ fn write_selfhost_status_constants(io: Io) -> !void {
     return void;
 }
 
+// write_selfhost_manifest_path_constants writes path globals used by loaders.
+fn write_selfhost_manifest_path_constants(io: Io) -> !void {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try append_selfhost_manifest_path_constants(text);
+    let bytes = text.as_bytes();
+    try std::io::write_stdout(io, bytes);
+    text.deinit();
+    return void;
+}
+
 // append_selfhost_status_constants appends shared status string constants.
 fn append_selfhost_status_constants(text: &mut std::string::String) -> !void {
     try text.append_bytes("@.str.compiler.status.pass = private unnamed_addr constant ");
@@ -829,7 +843,10 @@ fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("declare i1 @kizu_bytes_equal(ptr, ptr)");
     try text.append_byte(cast<u8>(10));
+    try text.append_bytes("declare i1 @kizu_file_exists(ptr)");
+    try text.append_byte(cast<u8>(10));
     try append_selfhost_status_constants(text);
+    try append_selfhost_manifest_path_constants(text);
     var layouts = try build_selfhost_struct_layouts();
     let layout_bytes = layouts.as_bytes();
     try text.append_bytes(layout_bytes);
@@ -973,6 +990,12 @@ fn build_package_or_report_function_symbol(
     }
     if function_is_module_spec_body(module_path, name) {
         return build_module_spec_function_symbol();
+    }
+    if function_is_selfhost_manifest_file_body(module_path, name) {
+        return build_selfhost_manifest_file_function_symbol();
+    }
+    if function_is_selfhost_package_root_body(module_path, name) {
+        return build_selfhost_package_root_function_symbol();
     }
     if function_is_command_report_body(module_path, name) {
         return build_command_report_function_symbol();
@@ -1854,6 +1877,95 @@ entry:
     return text;
 }
 
+// build_selfhost_manifest_file_function_symbol builds manifest path selection.
+fn build_selfhost_manifest_file_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @compiler.selfhost_manifest_file(ptr %root) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %root_here = call i1 @kizu_bytes_equal(ptr %root, ptr @.str.compiler.root.selfhost)
+  br i1 %root_here, label %here, label %parent_check
+here:
+  ret ptr @.str.compiler.manifest.selfhost
+parent_check:
+  %root_parent = call i1 @kizu_bytes_equal(ptr %root, ptr @.str.compiler.root.parent)
+  br i1 %root_parent, label %parent, label %missing
+parent:
+  ret ptr @.str.compiler.manifest.parent
+missing:
+  ret ptr null
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_selfhost_package_root_function_symbol builds checked-in root detection.
+fn build_selfhost_package_root_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @compiler.selfhost_package_root(ptr %io) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %here_exists = call i1 @kizu_file_exists(ptr @.str.compiler.manifest.selfhost)
+  br i1 %here_exists, label %here, label %parent_check
+here:
+  ret ptr @.str.compiler.root.selfhost
+parent_check:
+  %parent_exists = call i1 @kizu_file_exists(ptr @.str.compiler.manifest.parent)
+  br i1 %parent_exists, label %parent, label %missing
+parent:
+  ret ptr @.str.compiler.root.parent
+missing:
+  ret ptr null
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// append_selfhost_manifest_path_constants appends shared manifest path globals.
+fn append_selfhost_manifest_path_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.root.selfhost = private unnamed_addr constant ");
+    try text.append_bytes("[9 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.root.parent = private unnamed_addr constant ");
+    try text.append_bytes("[15 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("../../selfhost");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.manifest.selfhost = private unnamed_addr constant ");
+    try text.append_bytes("[19 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost/kizu.toml");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.manifest.parent = private unnamed_addr constant ");
+    try text.append_bytes("[25 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("../../selfhost/kizu.toml");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
 // build_command_report_function_symbol builds the CommandReport constructor body.
 fn build_command_report_function_symbol() -> !std::string::String {
     let allocator = std::mem::page_allocator();
@@ -2717,6 +2829,22 @@ fn function_is_module_spec_body(module_path: []const u8, name: []const u8) -> bo
         return false;
     }
     return std::mem::equal_bytes(name, "module_spec");
+}
+
+// function_is_selfhost_manifest_file_body identifies manifest path selection.
+fn function_is_selfhost_manifest_file_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "selfhost_manifest_file");
+}
+
+// function_is_selfhost_package_root_body identifies package root detection.
+fn function_is_selfhost_package_root_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "selfhost_package_root");
 }
 
 // function_is_lexer_lex_body identifies the lexer source boundary.
