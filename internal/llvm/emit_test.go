@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -35,6 +36,98 @@ func TestEmitSnapshots(t *testing.T) {
 				t.Fatalf("got:\n%s\nwant:\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestEmitNativeStructAndArrayLowering checks the native selfhost layout blockers.
+func TestEmitNativeStructAndArrayLowering(t *testing.T) {
+	got, err := Emit(nativeStructArrayModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"%struct.Token = type { ptr }",
+		"call ptr @malloc(i64 8)",
+		"call ptr @kizu_array_new()",
+		"call void @kizu_array_append",
+		"call ptr @kizu_array_at",
+		"getelementptr inbounds %struct.Token",
+		"load ptr",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("LLVM output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// nativeStructArrayModule returns a minimal IR module for aggregate lowering.
+func nativeStructArrayModule() *ir.Module {
+	return &ir.Module{
+		Structs: map[string]ir.Struct{
+			"Token": {
+				Name: "Token",
+				Fields: []ir.Field{
+					{Name: "text", Type: "[]const u8"},
+				},
+			},
+		},
+		Functions: []*ir.Function{
+			{
+				Name:   "main",
+				Return: "void",
+				Blocks: []*ir.Block{
+					{
+						Name:       "entry",
+						Instrs:     nativeStructArrayInstrs(),
+						Terminator: ir.Terminator{Op: "return"},
+					},
+				},
+			},
+		},
+	}
+}
+
+// nativeStructArrayInstrs returns aggregate and array operations for one block.
+func nativeStructArrayInstrs() []*ir.Instr {
+	return []*ir.Instr{
+		{Result: ir.Value{Name: "%1", Type: "[]const u8"}, Op: "const", Immediate: `"let"`},
+		{
+			Result: ir.Value{Name: "%2", Type: "Token"},
+			Op:     "struct.new",
+			Fields: []ir.FieldArg{
+				{Name: "text", Value: ir.Value{Name: "%1", Type: "[]const u8"}},
+			},
+		},
+		{Result: ir.Value{Name: "%3", Type: "std.array.Array<Token>"},
+			Op: "call.std.array.Array<Token>"},
+		{
+			Result: ir.Value{Name: "%4", Type: "!void"},
+			Op:     "method.append",
+			Args: []ir.Value{
+				{Name: "%3", Type: "std.array.Array<Token>"},
+				{Name: "%2", Type: "Token"},
+			},
+		},
+		{Result: ir.Value{Name: "%5", Type: "i64"}, Op: "const", Immediate: "0"},
+		nativeArrayAtInstr(),
+		{Result: ir.Value{Name: "%7", Type: "Token"}, Op: "error.try",
+			Args: []ir.Value{{Name: "%6", Type: "!Token"}}},
+		{Result: ir.Value{Name: "%8", Type: "[]const u8"}, Op: "field.text",
+			Args: []ir.Value{{Name: "%7", Type: "Token"}}},
+		{Result: ir.Value{Name: "%9", Type: "void"}, Op: "call.print",
+			Args: []ir.Value{{Name: "%8", Type: "[]const u8"}}},
+	}
+}
+
+// nativeArrayAtInstr returns one Array.at instruction with receiver and index.
+func nativeArrayAtInstr() *ir.Instr {
+	return &ir.Instr{
+		Result: ir.Value{Name: "%6", Type: "!Token"},
+		Op:     "method.at",
+		Args: []ir.Value{
+			{Name: "%3", Type: "std.array.Array<Token>"},
+			{Name: "%5", Type: "i64"},
+		},
 	}
 }
 
@@ -105,6 +198,12 @@ declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 
+declare ptr @malloc(i64)
+declare ptr @kizu_array_new()
+declare void @kizu_array_append(ptr, ptr)
+declare ptr @kizu_array_at(ptr, i64)
+declare i64 @kizu_array_len(ptr)
+
 define void @main() {
 entry:
   %v1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
@@ -124,6 +223,12 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+
+declare ptr @malloc(i64)
+declare ptr @kizu_array_new()
+declare void @kizu_array_append(ptr, ptr)
+declare ptr @kizu_array_at(ptr, i64)
+declare i64 @kizu_array_len(ptr)
 
 define i64 @add(i64 %a, i64 %b) {
 entry:
@@ -153,6 +258,12 @@ declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 
+declare ptr @malloc(i64)
+declare ptr @kizu_array_new()
+declare void @kizu_array_append(ptr, ptr)
+declare ptr @kizu_array_at(ptr, i64)
+declare i64 @kizu_array_len(ptr)
+
 define void @main() {
 entry:
   %v1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
@@ -177,6 +288,12 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+
+declare ptr @malloc(i64)
+declare ptr @kizu_array_new()
+declare void @kizu_array_append(ptr, ptr)
+declare ptr @kizu_array_at(ptr, i64)
+declare i64 @kizu_array_len(ptr)
 
 define void @main() {
 entry:
@@ -206,6 +323,12 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+
+declare ptr @malloc(i64)
+declare ptr @kizu_array_new()
+declare void @kizu_array_append(ptr, ptr)
+declare ptr @kizu_array_at(ptr, i64)
+declare i64 @kizu_array_len(ptr)
 
 define void @main() {
 entry:

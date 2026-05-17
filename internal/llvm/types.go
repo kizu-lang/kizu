@@ -18,6 +18,12 @@ func llvmType(typ string) string {
 	}
 }
 
+// structLLVMName returns a stable LLVM identified struct name.
+func structLLVMName(name string) string {
+	replacer := strings.NewReplacer(".", "_", ":", "_", "<", "_", ">", "_", " ", "_")
+	return "%struct." + replacer.Replace(name)
+}
+
 // integerLLVMType maps Kizu integer spellings to LLVM integer widths.
 func integerLLVMType(typ string) string {
 	switch typ {

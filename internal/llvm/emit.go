@@ -32,6 +32,7 @@ type emitter struct {
 	retType string
 	block   *ir.Block
 	preds   map[string]map[string]bool
+	temp    int
 }
 
 type valueInfo struct {
@@ -83,6 +84,10 @@ func instrDefinesLLVM(instr *ir.Instr) bool {
 			return false
 		}
 		return !strings.HasPrefix(name, "std.") || stdCallDefinesLLVM(name)
+	case instr.Op == "struct.new" || strings.HasPrefix(instr.Op, "field."):
+		return true
+	case instr.Op == "method.at" || instr.Op == "method.len":
+		return true
 	case instr.Op == "phi":
 		return true
 	default:
@@ -97,7 +102,7 @@ func stdCallDefinesLLVM(name string) bool {
 		"std.mem.len", "std.mem.byte_at", "std.mem.slice", "std.fs.read_file":
 		return true
 	default:
-		return false
+		return strings.HasPrefix(name, "std.array.Array<")
 	}
 }
 
@@ -121,6 +126,7 @@ func (e *emitter) collectStrings() {
 // writeHeader writes globals and runtime declarations.
 func (e *emitter) writeHeader() {
 	e.out.WriteString("; Kizu LLVM IR\n")
+	e.writeStructTypes()
 	for _, lit := range e.sortedStringLiterals() {
 		name := e.strings[lit]
 		unquoted, _ := strconv.Unquote(lit)
@@ -140,6 +146,31 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare i8 @kizu_byte_at(ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_bytes_slice(ptr, i64, i64)\n")
 	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n\n")
+	e.out.WriteString("declare ptr @malloc(i64)\n")
+	e.out.WriteString("declare ptr @kizu_array_new()\n")
+	e.out.WriteString("declare void @kizu_array_append(ptr, ptr)\n")
+	e.out.WriteString("declare ptr @kizu_array_at(ptr, i64)\n")
+	e.out.WriteString("declare i64 @kizu_array_len(ptr)\n\n")
+}
+
+// writeStructTypes writes LLVM identified struct layouts.
+func (e *emitter) writeStructTypes() {
+	names := make([]string, 0, len(e.module.Structs))
+	for name := range e.module.Structs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		st := e.module.Structs[name]
+		fields := make([]string, 0, len(st.Fields))
+		for _, field := range st.Fields {
+			fields = append(fields, llvmType(field.Type))
+		}
+		fmt.Fprintf(&e.out, "%s = type { %s }\n", structLLVMName(name), strings.Join(fields, ", "))
+	}
+	if len(names) > 0 {
+		e.out.WriteByte('\n')
+	}
 }
 
 // sortedStringLiterals returns string constants in global-name order.
@@ -157,6 +188,7 @@ func (e *emitter) sortedStringLiterals() []string {
 // writeFunction writes one LLVM function.
 func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
+	e.temp = 0
 	e.collectDefinedValues(fn)
 	e.preds = functionPredecessors(fn)
 	e.retType = fn.Return
@@ -191,6 +223,9 @@ func (e *emitter) writeBlock(block *ir.Block) error {
 
 // writeInstr writes one LLVM instruction.
 func (e *emitter) writeInstr(instr *ir.Instr) error {
+	if ok, err := e.writeNativeValueInstr(instr); ok {
+		return err
+	}
 	switch {
 	case instr.Op == "const":
 		return e.writeConst(instr)
@@ -204,10 +239,6 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCast(instr)
 	case instr.Op == "phi":
 		return e.writePhi(instr)
-	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
-		return e.writeOpaqueValue(instr)
-	case strings.HasPrefix(instr.Op, "method."):
-		return e.writeOpaqueValue(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
 		return e.writeOpaqueValue(instr)
 	case instr.Op == "error.try":
@@ -216,6 +247,20 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeOpaqueValue(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
+	}
+}
+
+// writeNativeValueInstr handles concrete aggregate and receiver operations.
+func (e *emitter) writeNativeValueInstr(instr *ir.Instr) (bool, error) {
+	switch {
+	case instr.Op == "struct.new":
+		return true, e.writeStructNew(instr)
+	case strings.HasPrefix(instr.Op, "field."):
+		return true, e.writeField(instr)
+	case strings.HasPrefix(instr.Op, "method."):
+		return true, e.writeMethod(instr)
+	default:
+		return false, nil
 	}
 }
 
@@ -325,10 +370,14 @@ func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
 	case "std.fs.read_file":
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call ptr @kizu_read_file(ptr "+path+")", "![]const u8")
+	default:
+		if strings.HasPrefix(name, "std.array.Array<") {
+			e.writeRuntimeValueCall(instr, "call ptr @kizu_array_new()", instr.Result.Type)
+			return true
+		}
+		return false
 	case "std.io.write_stdout", "std.io.write_stderr":
 		e.writeStdIOCall(instr)
-	default:
-		return false
 	}
 	return true
 }
@@ -380,6 +429,114 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 		operand: llvmTypedOperand(value.operand, value.typ, instr.Result.Type),
 		length:  value.length,
 	}
+	return nil
+}
+
+// writeStructNew allocates and initializes one Kizu struct value.
+func (e *emitter) writeStructNew(instr *ir.Instr) error {
+	st, ok := e.module.Structs[instr.Result.Type]
+	if !ok {
+		return e.writeOpaqueValue(instr)
+	}
+	result := llvmLocal(instr.Result.Name)
+	size := len(st.Fields) * 8
+	if size == 0 {
+		size = 8
+	}
+	fmt.Fprintf(&e.out, "  %s = call ptr @malloc(i64 %d)\n", result, size)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
+	for _, field := range instr.Fields {
+		if err := e.writeStructFieldStore(result, instr.Result.Type, field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeStructFieldStore stores one initialized struct field.
+func (e *emitter) writeStructFieldStore(base string, structType string, field ir.FieldArg) error {
+	index, typ, ok := e.structField(structType, field.Name)
+	if !ok {
+		return fmt.Errorf("llvm error: unknown field `%s.%s`", structType, field.Name)
+	}
+	value := e.value(field.Value)
+	slot := e.nextTemp("field")
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 0, i32 %d\n",
+		slot, structLLVMName(structType), base, index)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		llvmType(typ), llvmTypedOperand(value.operand, value.typ, typ), slot)
+	return nil
+}
+
+// writeField loads one field from a struct pointer.
+func (e *emitter) writeField(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: field expects receiver")
+	}
+	receiver := instr.Args[0]
+	name := strings.TrimPrefix(instr.Op, "field.")
+	index, typ, ok := e.structField(receiver.Type, name)
+	if !ok {
+		return e.writeOpaqueValue(instr)
+	}
+	base := e.value(receiver)
+	slot := e.nextTemp("field")
+	result := llvmLocal(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 0, i32 %d\n",
+		slot, structLLVMName(receiver.Type), llvmOperand(base.operand, receiver.Type), index)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", result, llvmType(typ), slot)
+	e.values[instr.Result.Name] = valueInfo{typ: typ, operand: result}
+	return nil
+}
+
+// writeMethod lowers the minimal Array receiver methods needed by selfhost.
+func (e *emitter) writeMethod(instr *ir.Instr) error {
+	switch instr.Op {
+	case "method.append":
+		return e.writeArrayAppend(instr)
+	case "method.at":
+		return e.writeArrayAt(instr)
+	case "method.len":
+		return e.writeArrayLen(instr)
+	default:
+		return e.writeOpaqueValue(instr)
+	}
+}
+
+// writeArrayAppend stores a pointer-like element in the growable runtime array.
+func (e *emitter) writeArrayAppend(instr *ir.Instr) error {
+	if len(instr.Args) < 2 {
+		return fmt.Errorf("llvm error: append expects receiver and value")
+	}
+	array := e.callArg(instr, 0, instr.Args[0].Type)
+	value := e.callArg(instr, 1, instr.Args[1].Type)
+	fmt.Fprintf(&e.out, "  call void @kizu_array_append(ptr %s, ptr %s)\n", array, value)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+	return nil
+}
+
+// writeArrayAt loads one pointer-like element from the runtime array.
+func (e *emitter) writeArrayAt(instr *ir.Instr) error {
+	if len(instr.Args) < 2 {
+		return fmt.Errorf("llvm error: at expects receiver and index")
+	}
+	array := e.callArg(instr, 0, instr.Args[0].Type)
+	index := e.callArg(instr, 1, "i64")
+	result := llvmLocal(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_array_at(ptr %s, i64 %s)\n", result, array, index)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
+	return nil
+}
+
+// writeArrayLen loads the runtime array length.
+func (e *emitter) writeArrayLen(instr *ir.Instr) error {
+	if len(instr.Args) < 1 {
+		return fmt.Errorf("llvm error: len expects receiver")
+	}
+	array := e.callArg(instr, 0, instr.Args[0].Type)
+	result := llvmLocal(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_array_len(ptr %s)\n", result, array)
+	e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: result}
 	return nil
 }
 
@@ -457,6 +614,26 @@ func addPred(preds map[string]map[string]bool, target string, pred string) {
 		preds[target] = map[string]bool{}
 	}
 	preds[target][pred] = true
+}
+
+// structField returns the field index and type for a struct member.
+func (e *emitter) structField(structType string, name string) (int, string, bool) {
+	st, ok := e.module.Structs[structType]
+	if !ok {
+		return 0, "", false
+	}
+	for index, field := range st.Fields {
+		if field.Name == name {
+			return index, field.Type, true
+		}
+	}
+	return 0, "", false
+}
+
+// nextTemp creates an instruction-local temporary name.
+func (e *emitter) nextTemp(prefix string) string {
+	e.temp++
+	return fmt.Sprintf("%%.%s.%d", prefix, e.temp)
 }
 
 // writeOpaqueValue represents values not lowered to concrete LLVM layout in phase 9.
