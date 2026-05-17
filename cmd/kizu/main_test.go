@@ -939,6 +939,11 @@ func selfHostV2ParserParitySources() []string {
 		"../../examples/negative/nullable_ptr_read.kizu",
 		"../../examples/negative/arena_handle_outlive.kizu",
 		"../../examples/negative/arena_unknown_handle.kizu",
+		"../../examples/negative/channel_send_borrow.kizu",
+		"../../examples/negative/field_borrow_owner_move.kizu",
+		"../../examples/negative/if_expression_missing_else.kizu",
+		"../../examples/negative/label_on_non_loop.kizu",
+		"../../examples/negative/task_spawn_struct_pointer.kizu",
 		"../../tests/conformance/modules/basic/src/main.kizu",
 		"../../tests/conformance/modules/imported_types/src/main.kizu",
 	}
