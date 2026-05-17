@@ -52,6 +52,8 @@ Implemented language-core pieces:
 
 Experimental compiler and tooling pieces:
 
+- Kizu stdlib migration layout in `std/`
+- future Kizu compiler migration layout in `compiler/`
 - typed SSA IR
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations

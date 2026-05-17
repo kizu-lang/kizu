@@ -75,6 +75,9 @@ internal/parser
 internal/interp
 internal/types
 internal/ownership
+internal/stdprim
+std
+compiler
 examples
 tests
 ```

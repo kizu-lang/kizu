@@ -50,6 +50,8 @@ v0.1 の対象は interpreter-first の language core です。
 
 実験的な compiler / tooling:
 
+- `std/` の Kizu stdlib 移行用 layout
+- `compiler/` の将来の Kizu compiler 移行用 layout
 - typed SSA IR
 - LLVM IR text backend
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
