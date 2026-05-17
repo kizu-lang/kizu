@@ -65,6 +65,11 @@ These experimental pieces are not the language oracle yet. LLVM and WASM
 currently support more limited target subsets than the interpreter, and native
 executable generation is not implemented.
 
+The v0.3 standalone target is a native self-host compiler artifact. The planned
+path is Kizu-owned LLVM IR text, `llc` object emission, and `lld` linking for
+host macOS arm64 first. libc / libSystem is not part of the Kizu language core;
+it is allowed only as an explicit target stdlib backend boundary.
+
 The previous self-host transition work is a bootstrap milestone, not the v0.3
 release. v0.3 is tracked by GitHub Issues starting at #256.
 

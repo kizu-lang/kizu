@@ -63,6 +63,11 @@ Go 製 interpreter と `kizu check` です。
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
 LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
 
+v0.3 の standalone target は native self-host compiler artifact です。
+最初は host macOS arm64 向けに、Kizu-owned LLVM IR text、`llc` による object emission、
+`lld` による linking で進めます。libc / libSystem は Kizu language core ではなく、
+明示的な target stdlib backend boundary としてのみ許可します。
+
 これまでの self-host transition work は bootstrap milestone であり、v0.3 release
 ではありません。v0.3 は #256 以降の GitHub Issues で管理します。
 

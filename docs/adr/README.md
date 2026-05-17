@@ -73,3 +73,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0052: module-first self-host migration](0052-module-first-self-host-migration.md)
 - [ADR-0053: self-host readiness gate](0053-self-host-readiness-gate.md)
 - [ADR-0054: package component test command](0054-package-component-test-command.md)
+- [ADR-0055: v0.3 native compiler uses explicit target libc boundary](0055-v0-3-native-libc-boundary.md)
