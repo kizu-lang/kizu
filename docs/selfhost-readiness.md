@@ -135,6 +135,53 @@ kind, literal, byte span, line, and column against the Go lexer oracle.
 source spans. Tests compare those parser facts against the Go parser oracle for
 the selected single-file declaration path.
 
+## #242 Backend / Cache Switch Boundary Decision
+
+Target mapping:
+
+```text
+internal/llvm and internal/wasm  -> selfhost/src/backend.kizu
+internal/buildcache              -> selfhost/src/cache_contract.kizu
+```
+
+Decision:
+
+- The first Kizu-owned backend emitter should be WAT / `wasm32-wasi` text
+  emission after the Kizu IR production path is selected.
+- LLVM text emission remains Go-owned until the WAT switch proves the IR to
+  backend boundary and until LLVM-specific text details are worth porting.
+- Native executable generation is not a v0.4 switch target.
+- The first Kizu-owned cache unit should be cache key composition and
+  why-rebuild reason planning.
+- Filesystem walking, hashing, status output, prune deletion, artifact writes,
+  stdout/stderr, and process exit behavior remain explicit host primitives
+  until the stdlib has stable APIs for those capabilities.
+
+Required stdlib / host APIs before implementation:
+
+- `std::fs`: deterministic file reads, directory traversal, metadata, create,
+  remove, and write primitives through explicit `Io`.
+- `std::path`: clean, join, basename, dirname, extension, and target artifact
+  path composition helpers.
+- `std::hash`: stable source, manifest, module graph, public interface, stdlib,
+  and compiler-version hashing. This module does not exist yet and must be
+  designed before cache ownership expands.
+- `std::io`: explicit stdout/stderr writes for artifact and status output.
+- `std::process`: explicit exit-code reporting and argument access.
+
+Follow-up implementation issues:
+
+- #246 implements the first Kizu-owned WAT backend emitter.
+- #247 implements Kizu-owned cache key and why-rebuild planning.
+
+Completion evidence for #242:
+
+- Backend and cache production switch boundaries are explicit.
+- Remaining Go-owned host primitives are listed instead of hidden as fallback.
+- Follow-up implementation issues exist for the selected switch units.
+- `selfhost/src/backend.kizu` and `selfhost/src/cache_contract.kizu` remain
+  executable summary boundaries until #246 and #247 are implemented.
+
 ## #192 Token / Lexer Readiness
 
 Target mapping:
