@@ -658,6 +658,7 @@ fn write_package_llvm_symbols(io: Io, modules: &std::array::Array<SourceModule>)
     var index = 0;
 
     print("; Kizu selfhost package LLVM symbols");
+    print("declare i64 @kizu_bytes_len(ptr)");
     while index < modules.len() {
         let module = try modules.at(index);
         if !module.is_test {
@@ -687,13 +688,19 @@ fn write_module_llvm_symbols(io: Io, module: &SourceModule) -> !void {
                 index,
                 token::TokenKind::False
             );
+            let returns_mem_len = try function_has_single_mem_len_return(tokens, index);
             if returns_true {
                 try write_bool_function_symbol(io, module.path, name.literal, "true");
             } else {
                 if returns_false {
                     try write_bool_function_symbol(io, module.path, name.literal, "false");
                 } else {
-                    try write_function_symbol(io, module.path, name.literal);
+                    if returns_mem_len {
+                        let param = try function_first_param_name(tokens, index);
+                        try write_mem_len_function_symbol(io, module.path, name.literal, param);
+                    } else {
+                        try write_function_symbol(io, module.path, name.literal);
+                    }
                 }
             }
         }
@@ -729,6 +736,27 @@ fn write_bool_function_symbol(
     return void;
 }
 
+// write_mem_len_function_symbol emits one concrete std::mem::len wrapper.
+fn write_mem_len_function_symbol(
+    io: Io,
+    module_path: []const u8,
+    name: []const u8,
+    param: []const u8
+) -> !void {
+    try std::io::write_stdout(io, "define i64 @");
+    try std::io::write_stdout(io, module_symbol_prefix(module_path));
+    try std::io::write_stdout(io, name);
+    try std::io::write_stdout(io, "(ptr %");
+    try std::io::write_stdout(io, param);
+    print(") {");
+    try std::io::write_stdout(io, "  %len = call i64 @kizu_bytes_len(ptr %");
+    try std::io::write_stdout(io, param);
+    print(")");
+    print("  ret i64 %len");
+    print("}");
+    return void;
+}
+
 // append_package_llvm_symbols appends valid LLVM stubs for compiled functions.
 // build_package_llvm_symbols builds valid LLVM stubs for compiled functions.
 fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std::string::String {
@@ -737,6 +765,8 @@ fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std
     var index = 0;
 
     try text.append_bytes("; Kizu selfhost package LLVM symbols");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("declare i64 @kizu_bytes_len(ptr)");
     try text.append_byte(cast<u8>(10));
     while index < modules.len() {
         let module = try modules.at(index);
@@ -772,6 +802,7 @@ fn build_module_llvm_symbols(module: &SourceModule) -> !std::string::String {
                 index,
                 token::TokenKind::False
             );
+            let returns_mem_len = try function_has_single_mem_len_return(tokens, index);
             if returns_true {
                 try text.append_bytes("define i1 @");
                 try text.append_bytes(module_symbol_prefix(module.path));
@@ -786,16 +817,55 @@ fn build_module_llvm_symbols(module: &SourceModule) -> !std::string::String {
                     try text.append_bytes("() { ret i1 false }");
                     try text.append_byte(cast<u8>(10));
                 } else {
-                    try text.append_bytes("define ptr @");
-                    try text.append_bytes(module_symbol_prefix(module.path));
-                    try text.append_bytes(name.literal);
-                    try text.append_bytes("() { ret ptr null }");
-                    try text.append_byte(cast<u8>(10));
+                    if returns_mem_len {
+                        let param = try function_first_param_name(tokens, index);
+                        var symbol = try build_mem_len_function_symbol(
+                            module.path,
+                            name.literal,
+                            param
+                        );
+                        let bytes = symbol.as_bytes();
+                        try text.append_bytes(bytes);
+                        symbol.deinit();
+                    } else {
+                        try text.append_bytes("define ptr @");
+                        try text.append_bytes(module_symbol_prefix(module.path));
+                        try text.append_bytes(name.literal);
+                        try text.append_bytes("() { ret ptr null }");
+                        try text.append_byte(cast<u8>(10));
+                    }
                 }
             }
         }
         index = index + 1;
     }
+    return text;
+}
+
+// build_mem_len_function_symbol builds one concrete std::mem::len wrapper.
+fn build_mem_len_function_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    param: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i64 @");
+    try text.append_bytes(module_symbol_prefix(module_path));
+    try text.append_bytes(name);
+    try text.append_bytes("(ptr %");
+    try text.append_bytes(param);
+    try text.append_bytes(") {");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %len = call i64 @kizu_bytes_len(ptr %");
+    try text.append_bytes(param);
+    try text.append_bytes(")");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  ret i64 %len");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("}");
+    try text.append_byte(cast<u8>(10));
     return text;
 }
 
@@ -830,6 +900,128 @@ fn function_has_single_bool_return(
         return false;
     }
     return close.kind == token::TokenKind::RBrace;
+}
+
+// function_has_single_mem_len_return detects `return std::mem::len(param);`.
+fn function_has_single_mem_len_return(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    let returns_i64 = try function_returns_type(tokens, start, "i64");
+    if !returns_i64 {
+        return false;
+    }
+    let has_bytes_param = try function_first_param_is_bytes(tokens, start);
+    if !has_bytes_param {
+        return false;
+    }
+    let index = try function_body_start(tokens, start);
+    if index < 0 {
+        return false;
+    }
+    if index + 10 >= tokens.len() {
+        return false;
+    }
+    return try function_mem_len_return_matches(tokens, start, index);
+}
+
+// function_mem_len_return_matches checks the exact std::mem::len return body.
+fn function_mem_len_return_matches(
+    tokens: &std::array::Array<token::Token>,
+    start: i64,
+    index: i64
+) -> !bool {
+    let param = try function_first_param_name(tokens, start);
+    let ret = try tokens.at(index);
+    let std_name = try tokens.at(index + 1);
+    let first_sep = try tokens.at(index + 2);
+    let mem_name = try tokens.at(index + 3);
+    let second_sep = try tokens.at(index + 4);
+    let len_name = try tokens.at(index + 5);
+    let open = try tokens.at(index + 6);
+    let arg = try tokens.at(index + 7);
+    let close_call = try tokens.at(index + 8);
+    let semi = try tokens.at(index + 9);
+    let close_body = try tokens.at(index + 10);
+
+    if ret.kind != token::TokenKind::Return {
+        return false;
+    }
+    if !std::mem::equal_bytes(std_name.literal, "std") {
+        return false;
+    }
+    if first_sep.kind != token::TokenKind::DoubleColon {
+        return false;
+    }
+    if !std::mem::equal_bytes(mem_name.literal, "mem") {
+        return false;
+    }
+    if second_sep.kind != token::TokenKind::DoubleColon {
+        return false;
+    }
+    if !std::mem::equal_bytes(len_name.literal, "len") {
+        return false;
+    }
+    if open.kind != token::TokenKind::LParen {
+        return false;
+    }
+    if !std::mem::equal_bytes(arg.literal, param) {
+        return false;
+    }
+    if close_call.kind != token::TokenKind::RParen {
+        return false;
+    }
+    if semi.kind != token::TokenKind::Semicolon {
+        return false;
+    }
+    return close_body.kind == token::TokenKind::RBrace;
+}
+
+// function_first_param_is_bytes checks for one leading `[]const u8` parameter.
+fn function_first_param_is_bytes(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if start + 9 >= tokens.len() {
+        return false;
+    }
+    let open = try tokens.at(start + 2);
+    let name = try tokens.at(start + 3);
+    let colon = try tokens.at(start + 4);
+    let left = try tokens.at(start + 5);
+    let right = try tokens.at(start + 6);
+    let const_name = try tokens.at(start + 7);
+    let u8_name = try tokens.at(start + 8);
+    let close = try tokens.at(start + 9);
+
+    if open.kind != token::TokenKind::LParen {
+        return false;
+    }
+    if name.kind != token::TokenKind::Ident {
+        return false;
+    }
+    if colon.kind != token::TokenKind::Colon {
+        return false;
+    }
+    if left.kind != token::TokenKind::LBracket {
+        return false;
+    }
+    if right.kind != token::TokenKind::RBracket {
+        return false;
+    }
+    if !std::mem::equal_bytes(const_name.literal, "const") {
+        return false;
+    }
+    if !std::mem::equal_bytes(u8_name.literal, "u8") {
+        return false;
+    }
+    return close.kind == token::TokenKind::RParen;
+}
+
+// function_first_param_name returns the first parameter name for simple functions.
+fn function_first_param_name(tokens: &std::array::Array<token::Token>, start: i64) -> ![]const u8 {
+    let param = try tokens.at(start + 3);
+    return param.literal;
 }
 
 // function_returns_bool reports whether a function declares `-> bool`.
