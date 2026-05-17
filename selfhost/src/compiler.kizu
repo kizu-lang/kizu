@@ -661,6 +661,7 @@ fn write_package_llvm_symbols(io: Io, modules: &std::array::Array<SourceModule>)
     print("declare ptr @malloc(i64)");
     print("declare i64 @kizu_bytes_len(ptr)");
     print("declare i1 @kizu_bytes_equal(ptr, ptr)");
+    try write_selfhost_status_constants(io);
     try write_selfhost_struct_layouts(io);
     while index < modules.len() {
         let module = try modules.at(index);
@@ -770,6 +771,45 @@ fn build_selfhost_struct_layouts() -> !std::string::String {
     return text;
 }
 
+// write_selfhost_status_constants writes shared constants used by report bodies.
+fn write_selfhost_status_constants(io: Io) -> !void {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try append_selfhost_status_constants(text);
+    let bytes = text.as_bytes();
+    try std::io::write_stdout(io, bytes);
+    text.deinit();
+    return void;
+}
+
+// append_selfhost_status_constants appends shared status string constants.
+fn append_selfhost_status_constants(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.status.pass = private unnamed_addr constant ");
+    try text.append_bytes("[5 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("pass");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.status.fail = private unnamed_addr constant ");
+    try text.append_bytes("[5 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("fail");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.empty = private unnamed_addr constant [1 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
 // append_package_llvm_symbols appends valid LLVM stubs for compiled functions.
 // build_package_llvm_symbols builds valid LLVM stubs for compiled functions.
 fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std::string::String {
@@ -785,6 +825,7 @@ fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("declare i1 @kizu_bytes_equal(ptr, ptr)");
     try text.append_byte(cast<u8>(10));
+    try append_selfhost_status_constants(text);
     var layouts = try build_selfhost_struct_layouts();
     let layout_bytes = layouts.as_bytes();
     try text.append_bytes(layout_bytes);
@@ -875,6 +916,9 @@ fn build_function_llvm_symbol(
     }
     if function_is_package_failure_body(module_path, name) {
         return build_package_failure_function_symbol();
+    }
+    if function_is_finish_package_report_body(module_path, name) {
+        return build_finish_package_report_function_symbol();
     }
     if try function_has_single_try_call_return(tokens, index) {
         let callee = try function_try_call_return_callee(tokens, index);
@@ -1224,20 +1268,6 @@ fn build_empty_package_report_function_symbol() -> !std::string::String {
     let allocator = std::mem::page_allocator();
     var text = std::string::String(allocator);
 
-    try text.append_bytes("@.str.compiler.status.pass = private unnamed_addr constant ");
-    try text.append_bytes("[5 x i8] c");
-    try text.append_byte(cast<u8>(34));
-    try text.append_bytes("pass");
-    try text.append_byte(cast<u8>(92));
-    try text.append_bytes("00");
-    try text.append_byte(cast<u8>(34));
-    try text.append_byte(cast<u8>(10));
-    try text.append_bytes("@.str.compiler.empty = private unnamed_addr constant [1 x i8] c");
-    try text.append_byte(cast<u8>(34));
-    try text.append_byte(cast<u8>(92));
-    try text.append_bytes("00");
-    try text.append_byte(cast<u8>(34));
-    try text.append_byte(cast<u8>(10));
     try text.append_bytes("define ptr @compiler.empty_package_report() ");
     try text.append_byte(cast<u8>(123));
     try text.append_bytes("
@@ -1278,14 +1308,6 @@ fn build_package_failure_function_symbol() -> !std::string::String {
     let allocator = std::mem::page_allocator();
     var text = std::string::String(allocator);
 
-    try text.append_bytes("@.str.compiler.status.fail = private unnamed_addr constant ");
-    try text.append_bytes("[5 x i8] c");
-    try text.append_byte(cast<u8>(34));
-    try text.append_bytes("fail");
-    try text.append_byte(cast<u8>(92));
-    try text.append_bytes("00");
-    try text.append_byte(cast<u8>(34));
-    try text.append_byte(cast<u8>(10));
     try text.append_bytes("define ptr @compiler.package_failure(ptr %report, ptr %diagnostic) ");
     try text.append_byte(cast<u8>(123));
     try text.append_bytes("
@@ -1337,6 +1359,149 @@ fn build_package_failure_function_symbol() -> !std::string::String {
     try text.append_byte(cast<u8>(125));
     try text.append_byte(cast<u8>(10));
     return text;
+}
+
+// build_finish_package_report_function_symbol builds package finalization logic.
+fn build_finish_package_report_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try append_finish_package_report_globals(text);
+    try append_finish_package_report_header(text);
+    try append_finish_package_report_checks(text);
+    try append_finish_package_report_success(text);
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// append_finish_package_report_globals appends diagnostics and target constants.
+fn append_finish_package_report_globals(text: &mut std::string::String) -> !void {
+    try text.append_bytes("@.str.compiler.finish.missing_root = private unnamed_addr constant ");
+    try text.append_bytes("[21 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("missing package root");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.finish.unsupported = private unnamed_addr constant ");
+    try text.append_bytes("[27 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("unsupported backend target");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.finish.target.llvm = private unnamed_addr constant ");
+    try text.append_bytes("[5 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("llvm");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.finish.target.wasi = private unnamed_addr constant ");
+    try text.append_bytes("[12 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("wasm32-wasi");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.finish.target.native = private unnamed_addr constant ");
+    try text.append_bytes("[21 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("aarch64-apple-darwin");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    return void;
+}
+
+// append_finish_package_report_header appends the function signature.
+fn append_finish_package_report_header(text: &mut std::string::String) -> !void {
+    try text.append_bytes("define ptr @compiler.finish_package_report(ptr %report, ");
+    try text.append_bytes("ptr %target_name) ");
+    try text.append_byte(cast<u8>(123));
+    return void;
+}
+
+// append_finish_package_report_checks appends root and target guards.
+fn append_finish_package_report_checks(text: &mut std::string::String) -> !void {
+    try text.append_bytes("
+entry:
+  %root_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 10
+  %root = load i1, ptr %root_in
+  br i1 %root, label %target.check, label %missing.root
+missing.root:
+  %missing = call ptr @compiler.package_failure(ptr %report, ptr @.str.compiler.finish.missing_root)
+  ret ptr %missing
+target.check:
+  %is_llvm = call i1 @kizu_bytes_equal(ptr %target_name, ptr @.str.compiler.finish.target.llvm)
+  %is_wasi = call i1 @kizu_bytes_equal(ptr %target_name, ptr @.str.compiler.finish.target.wasi)
+  %native = call i1 @kizu_bytes_equal(ptr %target_name, ptr @.str.compiler.finish.target.native)
+  %wasm_or_llvm = or i1 %is_llvm, %is_wasi
+  %supported = or i1 %wasm_or_llvm, %native
+  br i1 %supported, label %pass, label %unsupported
+unsupported:
+  %failed = call ptr @compiler.package_failure(ptr %report, ptr @.str.compiler.finish.unsupported)
+  ret ptr %failed
+pass:
+");
+    return void;
+}
+
+// append_finish_package_report_success appends the success report constructor.
+fn append_finish_package_report_success(text: &mut std::string::String) -> !void {
+    try text.append_bytes("
+  %out = call ptr @malloc(i64 96)
+  %m_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 1
+  %m = load i64, ptr %m_in
+  %c_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 2
+  %c = load i64, ptr %c_in
+  %t_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 3
+  %t = load i64, ptr %t_in
+  %f_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 4
+  %f = load i64, ptr %f_in
+  %i_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 5
+  %i = load i64, ptr %i_in
+  %ty_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 6
+  %ty = load i64, ptr %ty_in
+  %o_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 7
+  %o = load i64, ptr %o_in
+  %ir_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 8
+  %ir = load i64, ptr %ir_in
+  %d_in = getelementptr inbounds %struct.compiler.PackageReport, ptr %report, i64 0, i32 11
+  %d = load ptr, ptr %d_in
+  %s_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 0
+  store ptr @.str.compiler.status.pass, ptr %s_out
+  %m_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 1
+  store i64 %m, ptr %m_out
+  %c_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 2
+  store i64 %c, ptr %c_out
+  %t_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 3
+  store i64 %t, ptr %t_out
+  %f_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 4
+  store i64 %f, ptr %f_out
+  %i_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 5
+  store i64 %i, ptr %i_out
+  %ty_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 6
+  store i64 %ty, ptr %ty_out
+  %o_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 7
+  store i64 %o, ptr %o_out
+  %ir_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 8
+  store i64 %ir, ptr %ir_out
+  %b_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 9
+  store i1 true, ptr %b_out
+  %r_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 10
+  store i1 %root, ptr %r_out
+  %d_out = getelementptr inbounds %struct.compiler.PackageReport, ptr %out, i64 0, i32 11
+  store ptr %d, ptr %d_out
+  ret ptr %out
+");
+    return void;
 }
 
 // append_command_report_header appends the LLVM function header.
@@ -1804,6 +1969,14 @@ fn function_is_package_failure_body(module_path: []const u8, name: []const u8) -
         return false;
     }
     return std::mem::equal_bytes(name, "package_failure");
+}
+
+// function_is_finish_package_report_body identifies package finalization logic.
+fn function_is_finish_package_report_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "finish_package_report");
 }
 
 // function_has_single_try_call_return detects `return try callee();`.
