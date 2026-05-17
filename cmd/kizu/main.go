@@ -89,6 +89,8 @@ func dispatchSelfHost(cmd string, args []string) error {
 		return selfHostTypeFile(args[0])
 	case "selfhost-ownership":
 		return selfHostOwnershipFile(args[0])
+	case "selfhost-ir":
+		return selfHostIRFile(args[0])
 	default:
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
@@ -103,6 +105,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-resolve <file|package>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-type <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-ownership <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-ir <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -310,6 +313,11 @@ func selfHostTypeFile(path string) error {
 // selfHostOwnershipFile runs the Kizu-owned ownership checker bootstrap command.
 func selfHostOwnershipFile(path string) error {
 	return runSelfHostFrontendMode(path, "--ownership")
+}
+
+// selfHostIRFile runs the Kizu-owned IR bootstrap command.
+func selfHostIRFile(path string) error {
+	return runSelfHostFrontendMode(path, "--ir")
 }
 
 // selfHostResolverSourcePath maps a package target to its configured root source.
@@ -708,6 +716,9 @@ func irCommand(args []string) error {
 	path, opt, err := parseOptFileArgs(args)
 	if err != nil {
 		return err
+	}
+	if os.Getenv("KIZU_SELFHOST_IR") == "1" {
+		return selfHostIRFile(path)
 	}
 	module, err := lowerFile(path, opt)
 	if err != nil {

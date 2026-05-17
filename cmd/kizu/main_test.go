@@ -361,6 +361,36 @@ func TestCheckCommandSelfHostOwnershipSwitch(t *testing.T) {
 	}
 }
 
+// TestSelfHostIRCommandDumpsNormalizedIR checks the IR switch command.
+func TestSelfHostIRCommandDumpsNormalizedIR(t *testing.T) {
+	source := "../../examples/functions.kizu"
+	cmd := exec.Command("go", "run", ".", "selfhost-ir", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "ir snapshot\nfunctions\n2\n") {
+		t.Fatalf("got %q", out)
+	}
+	if !strings.Contains(string(out), "ir dump snapshot\nstatus\npass\nfn\nadd\n") {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestIRCommandSelfHostSwitch checks the opt-in IR switch.
+func TestIRCommandSelfHostSwitch(t *testing.T) {
+	source := "../../examples/functions.kizu"
+	cmd := exec.Command("go", "run", ".", "ir", source)
+	cmd.Env = append(os.Environ(), "KIZU_SELFHOST_IR=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "ir dump snapshot\nstatus\npass\n") {
+		t.Fatalf("got %q", out)
+	}
+}
+
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
 func TestIRCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "ir", "../../examples/hello.kizu")

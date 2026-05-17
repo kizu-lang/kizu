@@ -167,6 +167,13 @@ Arena/Handle provenance, and task/channel ownership-transfer cases.
 boundary. The default production checker remains Go-owned until the IR switch
 can consume Kizu-owned ownership facts without a hidden fallback.
 
+`kizu selfhost-ir <file>` is the bootstrap command for #241. It runs the
+Kizu-owned frontend IR path and prints normalized IR summary and dump facts for
+the selected lowerable source-program oracle scope, including function, block,
+opcode, result, operand, immediate, and terminator rows. `KIZU_SELFHOST_IR=1
+kizu ir <file>` is the opt-in switch for this boundary. Backend emission and
+cache artifact decisions remain separate switch units.
+
 ## #242 Backend / Cache Switch Boundary Decision
 
 Target mapping:
