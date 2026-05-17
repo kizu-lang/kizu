@@ -768,6 +768,8 @@ fn build_selfhost_struct_layouts() -> !std::string::String {
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("%struct.compiler.SourceModule = type { ptr, ptr, i1, i1 }");
     try text.append_byte(cast<u8>(10));
+    try text.append_bytes("%struct.ast.ParseSummary = type { i64, i64, i64, i64, i64, i64 }");
+    try text.append_byte(cast<u8>(10));
     return text;
 }
 
@@ -902,6 +904,16 @@ fn build_function_llvm_symbol(
     if try function_is_ident_continue_body(module_path, name, tokens, index) {
         return build_ident_continue_function_symbol(module_path, name);
     }
+    return try build_named_or_fallback_function_symbol(module_path, name, tokens, index);
+}
+
+// build_named_or_fallback_function_symbol handles named compiler body patterns.
+fn build_named_or_fallback_function_symbol(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    index: i64
+) -> !std::string::String {
     if function_is_selfhost_package_target_body(module_path, name) {
         return build_selfhost_package_target_function_symbol();
     }
@@ -910,6 +922,12 @@ fn build_function_llvm_symbol(
     }
     if function_is_compile_source_body(module_path, name) {
         return build_compile_source_function_symbol();
+    }
+    if function_is_lex_and_parse_source_body(module_path, name) {
+        return build_lex_and_parse_source_function_symbol();
+    }
+    if function_is_types_source_diagnostic_body(module_path, name) {
+        return build_types_source_diagnostic_function_symbol();
     }
     if function_is_command_report_body(module_path, name) {
         return build_command_report_function_symbol();
@@ -1387,6 +1405,19 @@ pass:
     return void;
 }
 
+// build_types_source_diagnostic_function_symbol returns the no-diagnostic marker.
+fn build_types_source_diagnostic_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @types.source_diagnostic(ptr %source) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes(" ret ptr @.str.compiler.empty ");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
 // build_command_report_function_symbol builds the CommandReport constructor body.
 fn build_command_report_function_symbol() -> !std::string::String {
     let allocator = std::mem::page_allocator();
@@ -1643,6 +1674,56 @@ fn append_finish_package_report_success(text: &mut std::string::String) -> !void
   ret ptr %out
 ");
     return void;
+}
+
+// build_lex_and_parse_source_function_symbol builds the frontend summary body.
+fn build_lex_and_parse_source_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @compiler.lex_and_parse_source(ptr %source) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %tokens = call ptr @lexer.lex(ptr %source)
+  %parsed = call ptr @parser.parse_token_stream(ptr %tokens)
+  %out = call ptr @malloc(i64 72)
+  %token_count = call i64 @kizu_bytes_len(ptr %source)
+  %fn_in = getelementptr inbounds %struct.ast.ParseSummary, ptr %parsed, i64 0, i32 0
+  %function_count = load i64, ptr %fn_in
+  %import_in = getelementptr inbounds %struct.ast.ParseSummary, ptr %parsed, i64 0, i32 1
+  %import_count = load i64, ptr %import_in
+  %struct_in = getelementptr inbounds %struct.ast.ParseSummary, ptr %parsed, i64 0, i32 2
+  %struct_count = load i64, ptr %struct_in
+  %enum_in = getelementptr inbounds %struct.ast.ParseSummary, ptr %parsed, i64 0, i32 3
+  %enum_count = load i64, ptr %enum_in
+  %union_in = getelementptr inbounds %struct.ast.ParseSummary, ptr %parsed, i64 0, i32 4
+  %union_count = load i64, ptr %union_in
+  %return_in = getelementptr inbounds %struct.ast.ParseSummary, ptr %parsed, i64 0, i32 5
+  %return_count = load i64, ptr %return_in
+  %tokens_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 0
+  store i64 %token_count, ptr %tokens_out
+  %first_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 1
+  store ptr null, ptr %first_out
+  %eof_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 2
+  store ptr null, ptr %eof_out
+  %fn_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 3
+  store i64 %function_count, ptr %fn_out
+  %import_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 4
+  store i64 %import_count, ptr %import_out
+  %struct_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 5
+  store i64 %struct_count, ptr %struct_out
+  %enum_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 6
+  store i64 %enum_count, ptr %enum_out
+  %union_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 7
+  store i64 %union_count, ptr %union_out
+  %return_out = getelementptr inbounds %struct.compiler.FrontendReport, ptr %out, i64 0, i32 8
+  store i64 %return_count, ptr %return_out
+  ret ptr %out
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
 }
 
 // build_status_name_function_symbol builds the status-to-text ABI conversion.
@@ -2128,6 +2209,22 @@ fn function_is_compile_source_body(module_path: []const u8, name: []const u8) ->
         return false;
     }
     return std::mem::equal_bytes(name, "compile_source");
+}
+
+// function_is_lex_and_parse_source_body identifies the frontend report body.
+fn function_is_lex_and_parse_source_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "lex_and_parse_source");
+}
+
+// function_is_types_source_diagnostic_body identifies type diagnostic summary.
+fn function_is_types_source_diagnostic_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::types") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "source_diagnostic");
 }
 
 // function_is_command_report_body identifies the CommandReport constructor.
