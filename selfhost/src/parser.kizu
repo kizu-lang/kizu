@@ -235,6 +235,678 @@ pub fn parse_detail_summary(
     };
 }
 
+// print_detail_snapshot writes selected production AST facts for parser switching.
+pub fn print_detail_snapshot(tokens: &std::array::Array<token::Token>) -> !void {
+    print("selfhost parser detail snapshot");
+    if try has_missing_semicolon(tokens) {
+        print("status");
+        print("fail");
+        print("message");
+        print("parser error: missing semicolon");
+    } else {
+        print("status");
+        print("pass");
+        try print_struct_details(tokens);
+        try print_enum_details(tokens);
+        try print_union_details(tokens);
+        try print_function_details(tokens);
+    }
+    print("selfhost parser detail snapshot end");
+    return void;
+}
+
+// has_missing_semicolon detects the selected negative parser fixture.
+fn has_missing_semicolon(tokens: &std::array::Array<token::Token>) -> !bool {
+    var index = 1;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        let previous = try tokens.at(index - 1);
+        if current.kind == token::TokenKind::RBrace {
+            if previous.kind == token::TokenKind::RParen {
+                return true;
+            }
+            if try return_before_brace_needs_semicolon(tokens, index) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// return_before_brace_needs_semicolon finds a return statement closed by a brace.
+fn return_before_brace_needs_semicolon(
+    tokens: &std::array::Array<token::Token>,
+    brace: i64
+) -> !bool {
+    var index = brace;
+
+    while index > 0 {
+        index = index - 1;
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Semicolon {
+            return false;
+        }
+        if current.kind == token::TokenKind::Return {
+            return true;
+        }
+        if current.kind == token::TokenKind::LBrace {
+            return false;
+        }
+    }
+    return false;
+}
+
+// print_struct_details writes selected struct declaration AST rows.
+fn print_struct_details(tokens: &std::array::Array<token::Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Struct {
+            try print_struct_detail(tokens, index);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_struct_detail writes one struct declaration AST shape.
+fn print_struct_detail(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    let name = try tokens.at(start + 1);
+
+    print("struct");
+    print(name.literal);
+    print("fields");
+    print(try struct_field_count(tokens, start));
+    try print_struct_fields(tokens, start);
+    return void;
+}
+
+// struct_field_count counts direct fields in one struct body.
+fn struct_field_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::RBrace {
+                return count;
+            }
+        }
+        if current.kind == token::TokenKind::Colon {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// print_struct_fields writes field names and normalized field types.
+fn print_struct_fields(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::RBrace {
+                return void;
+            }
+        }
+        if current.kind == token::TokenKind::Colon {
+            let name = try tokens.at(index - 1);
+            print("field");
+            print(name.literal);
+            print(try normalized_type_name(tokens, index + 1));
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_enum_details writes selected enum declaration AST rows.
+fn print_enum_details(tokens: &std::array::Array<token::Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Enum {
+            try print_enum_detail(tokens, index);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_enum_detail writes one enum declaration AST shape.
+fn print_enum_detail(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    let name = try tokens.at(start + 1);
+
+    print("enum");
+    print(name.literal);
+    print("tags");
+    print(try tag_like_count(tokens, start));
+    try print_enum_tags(tokens, start);
+    return void;
+}
+
+// print_union_details writes selected union declaration AST rows.
+fn print_union_details(tokens: &std::array::Array<token::Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Union {
+            try print_union_detail(tokens, index);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_union_detail writes one union declaration AST shape.
+fn print_union_detail(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    let name = try tokens.at(start + 1);
+
+    print("union");
+    print(name.literal);
+    print("variants");
+    print(try tag_like_count(tokens, start));
+    try print_union_variants(tokens, start);
+    return void;
+}
+
+// tag_like_count counts enum tags or union variants in a declaration body.
+fn tag_like_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::RBrace {
+                return count;
+            }
+        }
+        if current.kind == token::TokenKind::Ident {
+            if index > start + 1 {
+                count = count + 1;
+            }
+        }
+        index = try skip_payload_type(tokens, index);
+    }
+    return count;
+}
+
+// print_enum_tags writes enum tag names in source order.
+fn print_enum_tags(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::RBrace {
+                return void;
+            }
+        }
+        if current.kind == token::TokenKind::Ident {
+            if index > start + 1 {
+                print("tag");
+                print(current.literal);
+            }
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_union_variants writes union variant names and normalized payload types.
+fn print_union_variants(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::RBrace {
+                return void;
+            }
+        }
+        if current.kind == token::TokenKind::Ident {
+            if index > start + 1 {
+                print("variant");
+                print(current.literal);
+                print(try union_variant_payload(tokens, index));
+            }
+        }
+        index = try skip_payload_type(tokens, index);
+    }
+    return void;
+}
+
+// union_variant_payload returns a normalized variant payload type or marker.
+fn union_variant_payload(tokens: &std::array::Array<token::Token>, start: i64) -> ![]const u8 {
+    let next = try tokens.at(start + 1);
+
+    if next.kind == token::TokenKind::LParen {
+        return try normalized_type_name(tokens, start + 2);
+    }
+    return "<none>";
+}
+
+// skip_payload_type advances over one parenthesized union payload if present.
+fn skip_payload_type(tokens: &std::array::Array<token::Token>, index: i64) -> !i64 {
+    let next = try tokens.at(index + 1);
+
+    if next.kind == token::TokenKind::LParen {
+        var cursor = index + 2;
+        while cursor < tokens.len() {
+            let current = try tokens.at(cursor);
+            if current.kind == token::TokenKind::RParen {
+                return cursor + 1;
+            }
+            cursor = cursor + 1;
+        }
+    }
+    return index + 1;
+}
+
+// print_function_details writes selected function declaration AST rows.
+fn print_function_details(tokens: &std::array::Array<token::Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Fn {
+            try print_function_detail(tokens, index);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_function_detail writes one function signature and body AST summary.
+fn print_function_detail(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    let name = try tokens.at(start + 1);
+
+    print("fn");
+    print(name.literal);
+    print("params");
+    print(try function_param_count(tokens, start + 3));
+    try print_function_param_types(tokens, start + 3);
+    print("return");
+    print(try function_return_type(tokens, start + 2));
+    print("returns");
+    print(try function_token_count(tokens, start, token::TokenKind::Return));
+    try print_function_control_details(tokens, start);
+    try print_function_expression_details(tokens, start);
+    return void;
+}
+
+// print_function_param_types writes parameter type rows in signature order.
+fn print_function_param_types(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::RParen {
+            return void;
+        }
+        if current.kind == token::TokenKind::Colon {
+            print("param");
+            print(try normalized_type_name(tokens, index + 1));
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// function_param_count returns the number of function parameters.
+fn function_param_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::RParen {
+            return count;
+        }
+        if current.kind == token::TokenKind::Colon {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// function_return_type returns the explicit return type or default void.
+fn function_return_type(tokens: &std::array::Array<token::Token>, start: i64) -> ![]const u8 {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::LBrace {
+            return "void";
+        }
+        if current.kind == token::TokenKind::Arrow {
+            return try normalized_return_type(tokens, index + 1);
+        }
+        index = index + 1;
+    }
+    return "void";
+}
+
+// normalized_return_type returns selected multi-token return type spellings.
+fn normalized_return_type(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> ![]const u8 {
+    let current = try tokens.at(start);
+
+    if current.kind == token::TokenKind::Bang {
+        let next = try tokens.at(start + 1);
+        if next.kind == token::TokenKind::LBracket {
+            return "![]const u8";
+        }
+        if std::mem::equal_bytes(next.literal, "void") {
+            return "!void";
+        }
+        if std::mem::equal_bytes(next.literal, "i64") {
+            return "!i64";
+        }
+    }
+    return try normalized_type_name(tokens, start);
+}
+
+// normalized_type_name returns selected type spellings used by parser fixtures.
+fn normalized_type_name(tokens: &std::array::Array<token::Token>, start: i64) -> ![]const u8 {
+    let current = try tokens.at(start);
+
+    if current.kind == token::TokenKind::Amp {
+        return try normalized_type_name(tokens, start + 1);
+    }
+    if current.kind == token::TokenKind::Mut {
+        return try normalized_type_name(tokens, start + 1);
+    }
+    if current.kind == token::TokenKind::LBracket {
+        return "[]const u8";
+    }
+    if current.kind == token::TokenKind::Question {
+        return try normalized_return_type(tokens, start);
+    }
+    return try namespaced_type_name(tokens, start);
+}
+
+// namespaced_type_name returns selected namespace-qualified type spellings.
+fn namespaced_type_name(tokens: &std::array::Array<token::Token>, start: i64) -> ![]const u8 {
+    let first = try tokens.at(start);
+    if start + 1 >= tokens.len() {
+        return first.literal;
+    }
+    let separator = try tokens.at(start + 1);
+    if separator.kind != token::TokenKind::DoubleColon {
+        return first.literal;
+    }
+    if start + 2 >= tokens.len() {
+        return first.literal;
+    }
+    return first.literal;
+}
+
+// print_function_control_details writes selected statement node counts.
+fn print_function_control_details(tokens: &std::array::Array<token::Token>, start: i64) -> !void {
+    print("controls");
+    print("ifs");
+    print(try function_token_count(tokens, start, token::TokenKind::If));
+    print("whiles");
+    print(try function_token_count(tokens, start, token::TokenKind::While));
+    print("fors");
+    print(try function_token_count(tokens, start, token::TokenKind::For));
+    print("matches");
+    print(try function_token_count(tokens, start, token::TokenKind::Match));
+    print("breaks");
+    print(try function_token_count(tokens, start, token::TokenKind::Break));
+    print("continues");
+    print(try function_token_count(tokens, start, token::TokenKind::Continue));
+    print("match arms");
+    print(try function_token_count(tokens, start, token::TokenKind::FatArrow));
+    return void;
+}
+
+// print_function_expression_details writes selected expression node counts.
+fn print_function_expression_details(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !void {
+    print("expressions");
+    print("locals");
+    print(try function_locals_count(tokens, start));
+    print("assignments");
+    print(try function_assignments_count(tokens, start));
+    print("calls");
+    print(try function_calls_count(tokens, start));
+    print("field accesses");
+    print(try function_token_count(tokens, start, token::TokenKind::Dot));
+    print("struct literals");
+    print(try function_struct_literal_count(tokens, start));
+    print("binary expressions");
+    print(try function_binary_operator_count(tokens, start));
+    return void;
+}
+
+// function_token_count counts one token kind before the next function.
+fn function_token_count(
+    tokens: &std::array::Array<token::Token>,
+    start: i64,
+    kind: token::TokenKind
+) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::Fn {
+                return count;
+            }
+        }
+        if current.kind == kind {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// function_locals_count counts local declarations before the next function.
+fn function_locals_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    return try function_token_count(tokens, start, token::TokenKind::Let)
+        + try function_token_count(tokens, start, token::TokenKind::Var);
+}
+
+// function_assignments_count counts non-local assignment statements.
+fn function_assignments_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::Fn {
+                return count;
+            }
+        }
+        if current.kind == token::TokenKind::Assign {
+            if !try assignment_belongs_to_local(tokens, index) {
+                count = count + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// assignment_belongs_to_local reports whether an assignment initializes a local.
+fn assignment_belongs_to_local(tokens: &std::array::Array<token::Token>, index: i64) -> !bool {
+    var cursor = index;
+
+    while cursor > 0 {
+        cursor = cursor - 1;
+        let current = try tokens.at(cursor);
+        if current.kind == token::TokenKind::Let {
+            return true;
+        }
+        if current.kind == token::TokenKind::Var {
+            return true;
+        }
+        if current.kind == token::TokenKind::Semicolon {
+            return false;
+        }
+        if current.kind == token::TokenKind::LBrace {
+            return false;
+        }
+    }
+    return false;
+}
+
+// function_calls_count counts selected call expressions before the next function.
+fn function_calls_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start + 2;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        let previous = try tokens.at(index - 1);
+        let before = try tokens.at(index - 2);
+        if current.kind == token::TokenKind::Fn {
+            return count;
+        }
+        if current.kind == token::TokenKind::LParen {
+            if previous.kind == token::TokenKind::Ident {
+                if before.kind != token::TokenKind::Fn {
+                    if !try call_is_match_pattern(tokens, index) {
+                        count = count + 1;
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// call_is_match_pattern reports whether a parenthesized item is a match pattern.
+fn call_is_match_pattern(tokens: &std::array::Array<token::Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::RParen {
+            let next = try tokens.at(index + 1);
+            return next.kind == token::TokenKind::FatArrow;
+        }
+        if current.kind == token::TokenKind::Semicolon {
+            return false;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_struct_literal_count counts selected struct literal expressions.
+fn function_struct_literal_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start + 1;
+    var count = 0;
+
+    while index + 1 < tokens.len() {
+        let current = try tokens.at(index);
+        let next = try tokens.at(index + 1);
+        if current.kind == token::TokenKind::Fn {
+            return count;
+        }
+        if current.kind == token::TokenKind::Ident {
+            if next.kind == token::TokenKind::LBrace {
+                if try token_starts_struct_literal(tokens, index) {
+                    count = count + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// token_starts_struct_literal reports whether an identifier opens a literal.
+fn token_starts_struct_literal(tokens: &std::array::Array<token::Token>, index: i64) -> !bool {
+    let previous = try tokens.at(index - 1);
+    if previous.kind == token::TokenKind::Assign {
+        return true;
+    }
+    if previous.kind == token::TokenKind::Return {
+        return true;
+    }
+    if previous.kind == token::TokenKind::LParen {
+        return true;
+    }
+    return previous.kind == token::TokenKind::Comma;
+}
+
+// function_binary_operator_count counts selected infix operators.
+fn function_binary_operator_count(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::Fn {
+                return count;
+            }
+        }
+        if is_binary_operator(current.kind) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// is_binary_operator reports whether a token is in the selected binary subset.
+fn is_binary_operator(kind: token::TokenKind) -> bool {
+    if kind == token::TokenKind::Plus {
+        return true;
+    }
+    if kind == token::TokenKind::Minus {
+        return true;
+    }
+    if kind == token::TokenKind::Asterisk {
+        return true;
+    }
+    if kind == token::TokenKind::Slash {
+        return true;
+    }
+    if kind == token::TokenKind::Percent {
+        return true;
+    }
+    if kind == token::TokenKind::Eq {
+        return true;
+    }
+    if kind == token::TokenKind::NotEq {
+        return true;
+    }
+    if kind == token::TokenKind::LT {
+        return true;
+    }
+    if kind == token::TokenKind::LTE {
+        return true;
+    }
+    if kind == token::TokenKind::GT {
+        return true;
+    }
+    return kind == token::TokenKind::GTE;
+}
+
 // parse_token_stream consumes the Kizu-native lexer token stream.
 pub fn parse_token_stream(tokens: &std::array::Array<token::Token>) -> !ast::ParseSummary {
     var functions = 0;

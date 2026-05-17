@@ -176,6 +176,51 @@ fn main() -> void { return void; }`
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selfhost parser snapshots got %#v, want %#v", got, want)
 	}
+	gotDetail := parseSelfHostParserDetailOutput(t, string(out))
+	wantDetail := goParserDetailSnapshot(t, input)
+	if !reflect.DeepEqual(gotDetail, wantDetail) {
+		t.Fatalf("selfhost parser detail got %#v, want %#v", gotDetail, wantDetail)
+	}
+}
+
+// TestSelfHostParseCommandMatchesGoParserError checks negative parser parity.
+func TestSelfHostParseCommandMatchesGoParserError(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.kizu")
+	input := `fn main() -> void { return void }`
+	if err := os.WriteFile(source, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "selfhost-parse", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	got := parseSelfHostParserDetailOutput(t, string(out))
+	want := goParserDetailSnapshot(t, input)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selfhost parser error detail got %#v, want %#v", got, want)
+	}
+}
+
+// TestParseCommandSelfHostParserSwitch checks the opt-in parser switch.
+func TestParseCommandSelfHostParserSwitch(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.kizu")
+	input := `fn main() -> void { return void; }`
+	if err := os.WriteFile(source, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "parse", source)
+	cmd.Env = append(os.Environ(), "KIZU_SELFHOST_PARSER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "selfhost parser declaration snapshots") {
+		t.Fatalf("got %q", out)
+	}
+	if !strings.Contains(string(out), "selfhost parser detail snapshot") {
+		t.Fatalf("got %q", out)
+	}
 }
 
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
@@ -469,6 +514,33 @@ func parseSelfHostParseOutput(t *testing.T, output string) []cliDeclSnapshot {
 	return nil
 }
 
+// parseSelfHostParserDetailOutput returns the selected detail snapshot section.
+func parseSelfHostParserDetailOutput(t *testing.T, output string) []string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	for index, line := range lines {
+		if line == "selfhost parser detail snapshot" {
+			return collectParserDetailLines(t, lines[index+1:])
+		}
+	}
+	t.Fatalf("missing selfhost parser detail snapshot in %q", output)
+	return nil
+}
+
+// collectParserDetailLines collects detail rows until the end marker.
+func collectParserDetailLines(t *testing.T, lines []string) []string {
+	t.Helper()
+	snapshot := []string{}
+	for _, line := range lines {
+		if line == "selfhost parser detail snapshot end" {
+			return snapshot
+		}
+		snapshot = append(snapshot, line)
+	}
+	t.Fatal("missing selfhost parser detail snapshot end marker")
+	return nil
+}
+
 // parseSnapshotInt parses one numeric token snapshot field.
 func parseSnapshotInt(t *testing.T, value string) int {
 	t.Helper()
@@ -494,6 +566,296 @@ func goParserDeclSnapshots(t *testing.T, source string) []cliDeclSnapshot {
 		}
 	}
 	return snapshots
+}
+
+// goParserDetailSnapshot returns selected Go AST facts in selfhost schema.
+func goParserDetailSnapshot(t *testing.T, source string) []string {
+	t.Helper()
+	parser := goparser.New(golexer.New(source))
+	program := parser.ParseProgram()
+	if len(parser.Errors()) > 0 {
+		return []string{"status", "fail", "message", normalizeParserError(parser.Errors())}
+	}
+	lines := []string{"status", "pass"}
+	for _, decl := range program.Decls {
+		lines = append(lines, goParserDeclDetail(decl)...)
+	}
+	return lines
+}
+
+// goParserDeclDetail returns selected declaration details for parser parity.
+func goParserDeclDetail(decl goast.Decl) []string {
+	switch current := decl.(type) {
+	case *goast.StructDecl:
+		return goStructDeclDetail(current)
+	case *goast.EnumDecl:
+		return goEnumDeclDetail(current)
+	case *goast.UnionDecl:
+		return goUnionDeclDetail(current)
+	case *goast.FunctionDecl:
+		return goFunctionDeclDetail(current)
+	default:
+		return nil
+	}
+}
+
+// goStructDeclDetail returns selected struct field facts.
+func goStructDeclDetail(decl *goast.StructDecl) []string {
+	lines := []string{"struct", decl.Name, "fields", strconv.Itoa(len(decl.Fields))}
+	for _, field := range decl.Fields {
+		lines = append(lines, "field", field.Name, field.TypeName)
+	}
+	return lines
+}
+
+// goEnumDeclDetail returns selected enum tag facts.
+func goEnumDeclDetail(decl *goast.EnumDecl) []string {
+	lines := []string{"enum", decl.Name, "tags", strconv.Itoa(len(decl.Tags))}
+	for _, tag := range decl.Tags {
+		lines = append(lines, "tag", tag)
+	}
+	return lines
+}
+
+// goUnionDeclDetail returns selected union variant facts.
+func goUnionDeclDetail(decl *goast.UnionDecl) []string {
+	lines := []string{"union", decl.Name, "variants", strconv.Itoa(len(decl.Variants))}
+	for _, variant := range decl.Variants {
+		payload := variant.Payload
+		if payload == "" {
+			payload = "<none>"
+		}
+		lines = append(lines, "variant", variant.Name, payload)
+	}
+	return lines
+}
+
+// goFunctionDeclDetail returns selected function signature and body facts.
+func goFunctionDeclDetail(fn *goast.FunctionDecl) []string {
+	lines := []string{"fn", fn.Name, "params", strconv.Itoa(len(fn.Params))}
+	for _, param := range fn.Params {
+		lines = append(lines, "param", param.TypeName)
+	}
+	lines = append(lines,
+		"return", normalizeGoReturnType(fn.ReturnType),
+		"returns", strconv.Itoa(countGoReturnsInBlock(fn.Body)),
+	)
+	lines = append(lines, goFunctionControlDetail(fn.Body)...)
+	lines = append(lines, goFunctionExpressionDetail(fn.Body)...)
+	return lines
+}
+
+// normalizeGoReturnType maps omitted function returns to Kizu void.
+func normalizeGoReturnType(returnType string) string {
+	if returnType == "" {
+		return "void"
+	}
+	return returnType
+}
+
+// countGoReturnsInBlock counts direct return statements in one block.
+func countGoReturnsInBlock(block *goast.BlockStmt) int {
+	if block == nil {
+		return 0
+	}
+	count := 0
+	for _, stmt := range block.Statements {
+		if _, ok := stmt.(*goast.ReturnStmt); ok {
+			count++
+		}
+	}
+	return count
+}
+
+// goFunctionControlDetail returns selected statement counts.
+func goFunctionControlDetail(block *goast.BlockStmt) []string {
+	counts := countGoControlsInBlock(block)
+	return []string{
+		"controls",
+		"ifs", strconv.Itoa(counts.Ifs),
+		"whiles", strconv.Itoa(counts.Whiles),
+		"fors", strconv.Itoa(counts.Fors),
+		"matches", strconv.Itoa(counts.Matches),
+		"breaks", strconv.Itoa(counts.Breaks),
+		"continues", strconv.Itoa(counts.Continues),
+		"match arms", strconv.Itoa(counts.MatchArms),
+	}
+}
+
+type goControlCounts struct {
+	Ifs       int
+	Whiles    int
+	Fors      int
+	Matches   int
+	Breaks    int
+	Continues int
+	MatchArms int
+}
+
+// countGoControlsInBlock recursively counts selected control statements.
+func countGoControlsInBlock(block *goast.BlockStmt) goControlCounts {
+	counts := goControlCounts{}
+	if block == nil {
+		return counts
+	}
+	for _, stmt := range block.Statements {
+		counts.add(countGoControlsInStatement(stmt))
+	}
+	return counts
+}
+
+// add accumulates control counts.
+func (c *goControlCounts) add(other goControlCounts) {
+	c.Ifs += other.Ifs
+	c.Whiles += other.Whiles
+	c.Fors += other.Fors
+	c.Matches += other.Matches
+	c.Breaks += other.Breaks
+	c.Continues += other.Continues
+	c.MatchArms += other.MatchArms
+}
+
+// countGoControlsInStatement recursively counts selected control statements.
+func countGoControlsInStatement(stmt goast.Statement) goControlCounts {
+	counts := goControlCounts{}
+	switch current := stmt.(type) {
+	case *goast.IfStmt:
+		counts.Ifs++
+		counts.add(countGoControlsInBlock(current.Consequence))
+		counts.add(countGoControlsInBlock(current.Alternative))
+	case *goast.WhileStmt:
+		counts.Whiles++
+		counts.add(countGoControlsInBlock(current.Body))
+	case *goast.ForStmt:
+		counts.Fors++
+		counts.add(countGoControlsInBlock(current.Body))
+	case *goast.MatchStmt:
+		counts.Matches++
+		counts.MatchArms += len(current.Arms)
+	case *goast.BreakStmt:
+		counts.Breaks++
+	case *goast.ContinueStmt:
+		counts.Continues++
+	}
+	return counts
+}
+
+// goFunctionExpressionDetail returns selected expression counts.
+func goFunctionExpressionDetail(block *goast.BlockStmt) []string {
+	counts := countGoExpressionsInBlock(block)
+	return []string{
+		"expressions",
+		"locals", strconv.Itoa(counts.Locals),
+		"assignments", strconv.Itoa(counts.Assignments),
+		"calls", strconv.Itoa(counts.Calls),
+		"field accesses", strconv.Itoa(counts.FieldAccesses),
+		"struct literals", strconv.Itoa(counts.StructLiterals),
+		"binary expressions", strconv.Itoa(counts.BinaryExpressions),
+	}
+}
+
+type goExpressionCounts struct {
+	Locals            int
+	Assignments       int
+	Calls             int
+	FieldAccesses     int
+	StructLiterals    int
+	BinaryExpressions int
+}
+
+// countGoExpressionsInBlock recursively counts selected expression nodes.
+func countGoExpressionsInBlock(block *goast.BlockStmt) goExpressionCounts {
+	counts := goExpressionCounts{}
+	if block == nil {
+		return counts
+	}
+	for _, stmt := range block.Statements {
+		counts.add(countGoExpressionsInStatement(stmt))
+	}
+	return counts
+}
+
+// add accumulates expression counts.
+func (c *goExpressionCounts) add(other goExpressionCounts) {
+	c.Locals += other.Locals
+	c.Assignments += other.Assignments
+	c.Calls += other.Calls
+	c.FieldAccesses += other.FieldAccesses
+	c.StructLiterals += other.StructLiterals
+	c.BinaryExpressions += other.BinaryExpressions
+}
+
+// countGoExpressionsInStatement recursively counts selected expressions.
+func countGoExpressionsInStatement(stmt goast.Statement) goExpressionCounts {
+	counts := goExpressionCounts{}
+	switch current := stmt.(type) {
+	case *goast.LetStmt:
+		counts.Locals++
+		counts.add(countGoExpressionsInExpr(current.Value))
+	case *goast.AssignStmt:
+		counts.Assignments++
+		counts.add(countGoExpressionsInExpr(current.Target))
+		counts.add(countGoExpressionsInExpr(current.Value))
+	case *goast.ExprStmt:
+		counts.add(countGoExpressionsInExpr(current.Expr))
+	case *goast.ReturnStmt:
+		counts.add(countGoExpressionsInExpr(current.Value))
+	case *goast.IfStmt:
+		counts.add(countGoExpressionsInExpr(current.Condition))
+		counts.add(countGoExpressionsInBlock(current.Consequence))
+		counts.add(countGoExpressionsInBlock(current.Alternative))
+	case *goast.WhileStmt:
+		counts.add(countGoExpressionsInExpr(current.Condition))
+		counts.add(countGoExpressionsInBlock(current.Body))
+	case *goast.ForStmt:
+		counts.add(countGoExpressionsInExpr(current.Start))
+		counts.add(countGoExpressionsInExpr(current.End))
+		counts.add(countGoExpressionsInBlock(current.Body))
+	case *goast.MatchStmt:
+		counts.add(countGoExpressionsInExpr(current.Value))
+		for _, arm := range current.Arms {
+			counts.add(countGoExpressionsInStatement(arm.Body))
+		}
+	}
+	return counts
+}
+
+// countGoExpressionsInExpr recursively counts selected expressions.
+func countGoExpressionsInExpr(expr goast.Expression) goExpressionCounts {
+	counts := goExpressionCounts{}
+	switch current := expr.(type) {
+	case *goast.BinaryExpr:
+		counts.BinaryExpressions++
+		counts.add(countGoExpressionsInExpr(current.Left))
+		counts.add(countGoExpressionsInExpr(current.Right))
+	case *goast.CallExpr:
+		counts.Calls++
+		counts.add(countGoExpressionsInExpr(current.Callee))
+		for _, arg := range current.Args {
+			counts.add(countGoExpressionsInExpr(arg))
+		}
+	case *goast.FieldExpr:
+		if !current.Namespace {
+			counts.FieldAccesses++
+		}
+		counts.add(countGoExpressionsInExpr(current.Receiver))
+	case *goast.StructLiteralExpr:
+		counts.StructLiterals++
+		for _, field := range current.Fields {
+			counts.add(countGoExpressionsInExpr(field.Value))
+		}
+	}
+	return counts
+}
+
+// normalizeParserError maps parser diagnostics into the selected self-host subset.
+func normalizeParserError(errors []string) string {
+	for _, item := range errors {
+		if strings.Contains(item, "expected `;`") {
+			return "parser error: missing semicolon"
+		}
+	}
+	return "parser error"
 }
 
 // goParserDeclSnapshot returns one top-level declaration snapshot.

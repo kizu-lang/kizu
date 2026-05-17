@@ -129,11 +129,19 @@ argument. Go is only the bootstrap runner and oracle host here; tokenization is
 performed by `selfhost/src/lexer.kizu`, and tests compare every emitted token
 kind, literal, byte span, line, and column against the Go lexer oracle.
 
-`kizu selfhost-parse <file>` is the next bootstrap command for #237. It invokes
+`kizu selfhost-parse <file>` is the bootstrap command for #237. It invokes
 `compiler::parse_file_snapshot`, which feeds the Kizu lexer token stream into
-`parser::parse_declarations` and prints top-level declaration AST facts with
-source spans. Tests compare those parser facts against the Go parser oracle for
-the selected single-file declaration path.
+Kizu-owned parser functions and prints:
+
+- top-level declaration AST facts with source spans
+- selected declaration details for structs, enums, unions, and functions
+- selected parser diagnostics for negative fixtures
+
+Tests compare those parser facts against the Go parser oracle for the selected
+single-file declaration path. `KIZU_SELFHOST_PARSER=1 kizu parse <file>` is the
+explicit opt-in parser switch for this boundary; without that flag, production
+CLI commands stay Go-owned until downstream resolver, type, ownership, and IR
+switch units are ready.
 
 ## #242 Backend / Cache Switch Boundary Decision
 
