@@ -14,6 +14,7 @@ import (
 	goparser "github.com/kizu-lang/kizu/internal/parser"
 	goproject "github.com/kizu-lang/kizu/internal/project"
 	gotoken "github.com/kizu-lang/kizu/internal/token"
+	gotypes "github.com/kizu-lang/kizu/internal/types"
 )
 
 // TestRunCommandSmoke checks the CLI can execute the hello example.
@@ -270,6 +271,61 @@ func TestCheckCommandSelfHostResolverSwitch(t *testing.T) {
 		t.Fatalf("got %q", out)
 	}
 	if !strings.Contains(string(out), "selfhost resolver diagnostic snapshot") {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestSelfHostTypeCommandMatchesGoChecker checks selected type checker parity.
+func TestSelfHostTypeCommandMatchesGoChecker(t *testing.T) {
+	cases := []string{
+		"../../examples/functions.kizu",
+		"../../examples/variables.kizu",
+		"../../examples/struct.kizu",
+		"../../examples/negative/std_mem_wrong_type.kizu",
+		"../../examples/negative/invalid_field.kizu",
+	}
+	for _, source := range cases {
+		t.Run(filepath.Base(source), func(t *testing.T) {
+			cmd := exec.Command("go", "run", ".", "selfhost-type", source)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("command failed: %v\n%s", err, out)
+			}
+			gotTypes := markedOutputLines(t, string(out),
+				"selfhost type snapshot",
+				"selfhost type snapshot end",
+			)
+			if want := goTypeSnapshot(t, source); !reflect.DeepEqual(gotTypes, want) {
+				t.Fatalf("selfhost type snapshot got %#v, want %#v", gotTypes, want)
+			}
+			gotEnv := markedOutputLines(t, string(out),
+				"selfhost type env snapshot",
+				"selfhost type env snapshot end",
+			)
+			if want := goTypeEnvSnapshot(t, source); !reflect.DeepEqual(gotEnv, want) {
+				t.Fatalf("selfhost type env got %#v, want %#v", gotEnv, want)
+			}
+			gotCheck := markedOutputLines(t, string(out),
+				"selfhost type check snapshot",
+				"selfhost type check snapshot end",
+			)
+			if want := goTypeCheckSnapshot(t, source); !reflect.DeepEqual(gotCheck, want) {
+				t.Fatalf("selfhost type check got %#v, want %#v", gotCheck, want)
+			}
+		})
+	}
+}
+
+// TestCheckCommandSelfHostTypeSwitch checks the opt-in type checker switch.
+func TestCheckCommandSelfHostTypeSwitch(t *testing.T) {
+	source := "../../examples/functions.kizu"
+	cmd := exec.Command("go", "run", ".", "check", source)
+	cmd.Env = append(os.Environ(), "KIZU_SELFHOST_TYPES=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "selfhost type check snapshot") {
 		t.Fatalf("got %q", out)
 	}
 }
@@ -1144,6 +1200,103 @@ func tokenWithLiteral(t *testing.T, path string, literal string) gotoken.Token {
 // resolverRootSource returns the configured root source for module fixtures.
 func resolverRootSource(root string) string {
 	return filepath.Join(root, "src", "main.kizu")
+}
+
+// goTypeSnapshot returns function return type facts from the Go AST.
+func goTypeSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	program := parseGoProgram(t, path)
+	lines := []string{}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*goast.FunctionDecl)
+		if !ok {
+			continue
+		}
+		lines = append(lines, "fn", fn.Name, "return", normalizeGoReturnType(fn.ReturnType))
+	}
+	return lines
+}
+
+// goTypeEnvSnapshot returns selected local binding type facts from the Go AST.
+func goTypeEnvSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	program := parseGoProgram(t, path)
+	lines := []string{}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*goast.FunctionDecl)
+		if ok && fn.Body != nil {
+			lines = appendGoLocalTypeEnv(lines, fn.Body)
+		}
+	}
+	return lines
+}
+
+// appendGoLocalTypeEnv appends direct block local type facts.
+func appendGoLocalTypeEnv(lines []string, block *goast.BlockStmt) []string {
+	for _, stmt := range block.Statements {
+		local, ok := stmt.(*goast.LetStmt)
+		if !ok {
+			continue
+		}
+		mutability := "let"
+		if local.Mutable {
+			mutability = "var"
+		}
+		lines = append(lines, mutability, local.Name, goLocalValueType(local.Value))
+	}
+	return lines
+}
+
+// goLocalValueType returns the selected local initializer type.
+func goLocalValueType(expr goast.Expression) string {
+	switch current := expr.(type) {
+	case *goast.StringExpr:
+		return "[]const u8"
+	case *goast.IntExpr:
+		return "i64"
+	case *goast.BoolExpr:
+		return "bool"
+	case *goast.StructLiteralExpr:
+		return current.TypeName
+	default:
+		return "unknown"
+	}
+}
+
+// goTypeCheckSnapshot returns selected Go type checker pass/fail facts.
+func goTypeCheckSnapshot(t *testing.T, path string) []string {
+	t.Helper()
+	err := gotypes.New().Check(parseGoProgram(t, path))
+	if err == nil {
+		return []string{"status", "pass"}
+	}
+	return []string{"status", "fail", "message", normalizeGoTypeError(err.Error())}
+}
+
+// normalizeGoTypeError maps Go type diagnostics into the selected subset.
+func normalizeGoTypeError(message string) string {
+	if strings.Contains(message, "equal_bytes") {
+		return "type error: `std::mem::equal_bytes` arg 2 expects []const u8"
+	}
+	if strings.Contains(message, "unknown field") {
+		return "type error: unknown field"
+	}
+	return "type error"
+}
+
+// parseGoProgram parses a source file with the Go-owned parser.
+func parseGoProgram(t *testing.T, path string) *goast.Program {
+	t.Helper()
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parser := goparser.New(golexer.New(string(source)))
+	program := parser.ParseProgram()
+	if len(parser.Errors()) > 0 {
+		t.Fatalf("go parser errors: %v", parser.Errors())
+	}
+	return program
 }
 
 // goParserDeclSnapshot returns one top-level declaration snapshot.

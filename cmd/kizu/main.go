@@ -61,6 +61,8 @@ func dispatch(cmd string, args []string) error {
 		return selfHostParseFile(args[0])
 	case "selfhost-resolve":
 		return selfHostResolveTarget(args[0])
+	case "selfhost-type":
+		return selfHostTypeFile(args[0])
 	case "fmt":
 		return fmtFile(args[0])
 	case "ir":
@@ -85,6 +87,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-lex <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-parse <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-resolve <file|package>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-type <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -134,6 +137,9 @@ func runFile(path string, args []string) error {
 func checkFile(path string) error {
 	if os.Getenv("KIZU_SELFHOST_RESOLVER") == "1" {
 		return selfHostResolveTarget(path)
+	}
+	if os.Getenv("KIZU_SELFHOST_TYPES") == "1" {
+		return selfHostTypeFile(path)
 	}
 	if packageTarget(path) {
 		return checkPackageTarget(path)
@@ -276,6 +282,11 @@ func selfHostResolveTarget(path string) error {
 		return err
 	}
 	return runSelfHostFunction("compiler.resolve_file_snapshot", source)
+}
+
+// selfHostTypeFile runs the Kizu-owned type checker bootstrap command.
+func selfHostTypeFile(path string) error {
+	return runSelfHostFunction("compiler.type_file_snapshot", path)
 }
 
 // selfHostResolverSourcePath maps a package target to its configured root source.

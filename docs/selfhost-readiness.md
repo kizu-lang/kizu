@@ -151,6 +151,13 @@ span, line, column, message, and related span fields. `KIZU_SELFHOST_RESOLVER=1
 kizu check <file|package>` is the opt-in resolver switch; without it, production
 checking remains Go-owned until type and ownership switch units are ready.
 
+`kizu selfhost-type <file>` is the bootstrap command for #239. It runs the
+Kizu-owned type checker boundary for selected single-file inputs and prints
+function return types, local binding type environments, and pass/fail type
+diagnostics. `KIZU_SELFHOST_TYPES=1 kizu check <file>` is the opt-in switch for
+this boundary; package-wide production checking remains Go-owned until ownership
+and IR switch units are ready.
+
 ## #242 Backend / Cache Switch Boundary Decision
 
 Target mapping:
