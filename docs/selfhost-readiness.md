@@ -143,6 +143,14 @@ explicit opt-in parser switch for this boundary; without that flag, production
 CLI commands stay Go-owned until downstream resolver, type, ownership, and IR
 switch units are ready.
 
+`kizu selfhost-resolve <file|package>` is the bootstrap command for #238. For
+package inputs, Go remains the explicit host primitive for reading `kizu.toml`
+and locating the configured root source file. Kizu-owned resolver code then
+prints selected module graph facts and structured diagnostics with file, byte
+span, line, column, message, and related span fields. `KIZU_SELFHOST_RESOLVER=1
+kizu check <file|package>` is the opt-in resolver switch; without it, production
+checking remains Go-owned until type and ownership switch units are ready.
+
 ## #242 Backend / Cache Switch Boundary Decision
 
 Target mapping:
