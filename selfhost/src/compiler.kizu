@@ -662,6 +662,7 @@ fn write_package_llvm_symbols(io: Io, modules: &std::array::Array<SourceModule>)
     print("declare i64 @kizu_bytes_len(ptr)");
     print("declare i1 @kizu_bytes_equal(ptr, ptr)");
     print("declare i1 @kizu_file_exists(ptr)");
+    print("declare ptr @kizu_read_file(ptr)");
     try write_selfhost_status_constants(io);
     try write_selfhost_manifest_path_constants(io);
     try write_selfhost_struct_layouts(io);
@@ -845,6 +846,8 @@ fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("declare i1 @kizu_file_exists(ptr)");
     try text.append_byte(cast<u8>(10));
+    try text.append_bytes("declare ptr @kizu_read_file(ptr)");
+    try text.append_byte(cast<u8>(10));
     try append_selfhost_status_constants(text);
     try append_selfhost_manifest_path_constants(text);
     var layouts = try build_selfhost_struct_layouts();
@@ -996,6 +999,9 @@ fn build_package_or_report_function_symbol(
     }
     if function_is_selfhost_package_root_body(module_path, name) {
         return build_selfhost_package_root_function_symbol();
+    }
+    if function_is_read_source_file_body(module_path, name) {
+        return build_read_source_file_function_symbol();
     }
     if function_is_command_report_body(module_path, name) {
         return build_command_report_function_symbol();
@@ -1929,6 +1935,31 @@ missing:
     return text;
 }
 
+// build_read_source_file_function_symbol builds filesystem source loading.
+fn build_read_source_file_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @compiler.read_source_file");
+    try text.append_bytes("(ptr %io, ptr %module_path, ptr %file_path, i1 %is_root) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %source = call ptr @kizu_read_file(ptr %file_path)
+  %length = call i64 @kizu_bytes_len(ptr %source)
+  %empty = icmp eq i64 %length, 0
+  br i1 %empty, label %fail, label %ok
+fail:
+  ret ptr null
+ok:
+  %module = call ptr @compiler.source_module(ptr %module_path, ptr %source, i1 %is_root, i1 false)
+  ret ptr %module
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
 // append_selfhost_manifest_path_constants appends shared manifest path globals.
 fn append_selfhost_manifest_path_constants(text: &mut std::string::String) -> !void {
     try text.append_bytes("@.str.compiler.root.selfhost = private unnamed_addr constant ");
@@ -2845,6 +2876,14 @@ fn function_is_selfhost_package_root_body(module_path: []const u8, name: []const
         return false;
     }
     return std::mem::equal_bytes(name, "selfhost_package_root");
+}
+
+// function_is_read_source_file_body identifies filesystem source loading.
+fn function_is_read_source_file_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "read_source_file");
 }
 
 // function_is_lexer_lex_body identifies the lexer source boundary.
