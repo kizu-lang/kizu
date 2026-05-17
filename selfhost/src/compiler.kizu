@@ -804,11 +804,14 @@ fn build_function_llvm_symbol(
             return build_string_literal_function_symbol(module_path, name, literal);
         }
     }
+    if try function_is_ascii_digit_body(module_path, name, tokens, index) {
+        return build_ascii_digit_function_symbol(module_path, name);
+    }
     if try function_has_single_try_call_return(tokens, index) {
         let callee = try function_try_call_return_callee(tokens, index);
         return build_try_call_function_symbol(module_path, name, callee);
     }
-    return build_pointer_stub_function_symbol(module_path, name);
+    return build_pointer_stub_function_symbol(module_path, name, tokens, index);
 }
 
 // build_bool_function_symbol builds one concrete bool-returning LLVM function.
@@ -833,17 +836,112 @@ fn build_bool_function_symbol(
 // build_pointer_stub_function_symbol builds the fallback opaque function stub.
 fn build_pointer_stub_function_symbol(
     module_path: []const u8,
-    name: []const u8
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    start: i64
 ) -> !std::string::String {
     let allocator = std::mem::page_allocator();
     var text = std::string::String(allocator);
+    var params = try build_function_param_signature(tokens, start);
 
     try text.append_bytes("define ptr @");
     try text.append_bytes(module_symbol_prefix(module_path));
     try text.append_bytes(name);
-    try text.append_bytes("() { ret ptr null }");
+    let param_bytes = params.as_bytes();
+    try text.append_bytes(param_bytes);
+    try text.append_bytes(" { ret ptr null }");
     try text.append_byte(cast<u8>(10));
+    params.deinit();
     return text;
+}
+
+// build_function_param_signature builds the LLVM parameter list for stubs.
+fn build_function_param_signature(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+    var index = start + 2;
+    var first = true;
+    var done = false;
+
+    try text.append_bytes("(");
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if done {
+            index = tokens.len();
+        } else {
+            if current.kind == token::TokenKind::RParen {
+                done = true;
+            } else {
+                if current.kind == token::TokenKind::Ident {
+                    if !first {
+                        try text.append_bytes(", ");
+                    }
+                    let colon = try tokens.at(index + 1);
+                    if colon.kind == token::TokenKind::Colon {
+                        let llvm_type = try function_param_llvm_type(tokens, index + 2);
+                        try text.append_bytes(llvm_type);
+                        try text.append_bytes(" %");
+                        try text.append_bytes(current.literal);
+                        first = false;
+                        index = try next_function_param(tokens, index + 2);
+                    } else {
+                        index = index + 1;
+                    }
+                } else {
+                    index = index + 1;
+                }
+            }
+        }
+    }
+    try text.append_bytes(")");
+    return text;
+}
+
+// function_param_llvm_type maps a Kizu parameter type start token to LLVM.
+fn function_param_llvm_type(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> ![]const u8 {
+    let typ = try tokens.at(start);
+    if typ.kind == token::TokenKind::LBracket {
+        return "ptr";
+    }
+    if typ.kind == token::TokenKind::Amp {
+        return "ptr";
+    }
+    if std::mem::equal_bytes(typ.literal, "bool") {
+        return "i1";
+    }
+    if std::mem::equal_bytes(typ.literal, "u8") {
+        return "i8";
+    }
+    if std::mem::equal_bytes(typ.literal, "i8") {
+        return "i8";
+    }
+    if std::mem::equal_bytes(typ.literal, "i64") {
+        return "i64";
+    }
+    return "ptr";
+}
+
+// next_function_param skips one source parameter type.
+fn next_function_param(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Comma {
+            return index + 1;
+        }
+        if current.kind == token::TokenKind::RParen {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
 }
 
 // build_string_literal_function_symbol builds a simple []const u8 literal return.
@@ -873,6 +971,24 @@ fn build_string_literal_function_symbol(
     try text.append_bytes(global);
     try text.append_bytes(" }");
     try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_ascii_digit_function_symbol builds the lexer byte range check body.
+fn build_ascii_digit_function_symbol(
+    module_path: []const u8,
+    name: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i1 @lexer.is_ascii_digit(i8 %byte) {
+  %ge = icmp uge i8 %byte, 48
+  %le = icmp ule i8 %byte, 57
+  %ok = and i1 %ge, %le
+  ret i1 %ok
+}
+");
     return text;
 }
 
@@ -1031,6 +1147,25 @@ fn string_literal_is_llvm_simple(literal: []const u8) -> !bool {
         index = index + 1;
     }
     return true;
+}
+
+// function_is_ascii_digit_body detects the canonical lexer digit range check.
+fn function_is_ascii_digit_body(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::lexer") {
+        return false;
+    }
+    if !std::mem::equal_bytes(name, "is_ascii_digit") {
+        return false;
+    }
+    if !try function_returns_bool(tokens, start) {
+        return false;
+    }
+    return try function_first_param_is_u8(tokens, start);
 }
 
 // function_has_single_try_call_return detects `return try callee();`.
@@ -1197,6 +1332,35 @@ fn function_first_param_is_bytes(
         return false;
     }
     if !std::mem::equal_bytes(const_name.literal, "const") {
+        return false;
+    }
+    if !std::mem::equal_bytes(u8_name.literal, "u8") {
+        return false;
+    }
+    return close.kind == token::TokenKind::RParen;
+}
+
+// function_first_param_is_u8 checks for one leading `u8` parameter.
+fn function_first_param_is_u8(
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if start + 6 >= tokens.len() {
+        return false;
+    }
+    let open = try tokens.at(start + 2);
+    let name = try tokens.at(start + 3);
+    let colon = try tokens.at(start + 4);
+    let u8_name = try tokens.at(start + 5);
+    let close = try tokens.at(start + 6);
+
+    if open.kind != token::TokenKind::LParen {
+        return false;
+    }
+    if name.kind != token::TokenKind::Ident {
+        return false;
+    }
+    if colon.kind != token::TokenKind::Colon {
         return false;
     }
     if !std::mem::equal_bytes(u8_name.literal, "u8") {
