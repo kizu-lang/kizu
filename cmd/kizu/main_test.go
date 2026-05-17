@@ -642,7 +642,14 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 		"call ptr @compiler.compile_selfhost_package_check()")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_digit(i8 %byte)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "icmp uge i8 %byte, 48")
-	requireFileNotContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_alpha()")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_space(i8 %byte)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_alpha(i8 %byte)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ident_start(i8 %byte)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ident_continue(i8 %byte)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define i1 @is_selfhost_package_target(ptr %path)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "call i1 @kizu_bytes_equal")
+	requireFileNotContains(t, "target/kizu-selfhost.ll", "define ptr @lexer.is_ascii_alpha")
 	requireLLVMLowers(t, "target/kizu-selfhost.ll")
 	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")

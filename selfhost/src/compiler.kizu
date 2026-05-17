@@ -659,6 +659,7 @@ fn write_package_llvm_symbols(io: Io, modules: &std::array::Array<SourceModule>)
 
     print("; Kizu selfhost package LLVM symbols");
     print("declare i64 @kizu_bytes_len(ptr)");
+    print("declare i1 @kizu_bytes_equal(ptr, ptr)");
     while index < modules.len() {
         let module = try modules.at(index);
         if !module.is_test {
@@ -747,6 +748,8 @@ fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std
     try text.append_byte(cast<u8>(10));
     try text.append_bytes("declare i64 @kizu_bytes_len(ptr)");
     try text.append_byte(cast<u8>(10));
+    try text.append_bytes("declare i1 @kizu_bytes_equal(ptr, ptr)");
+    try text.append_byte(cast<u8>(10));
     while index < modules.len() {
         let module = try modules.at(index);
         if !module.is_test {
@@ -806,6 +809,21 @@ fn build_function_llvm_symbol(
     }
     if try function_is_ascii_digit_body(module_path, name, tokens, index) {
         return build_ascii_digit_function_symbol(module_path, name);
+    }
+    if try function_is_ascii_space_body(module_path, name, tokens, index) {
+        return build_ascii_space_function_symbol(module_path, name);
+    }
+    if try function_is_ascii_alpha_body(module_path, name, tokens, index) {
+        return build_ascii_alpha_function_symbol(module_path, name);
+    }
+    if try function_is_ident_start_body(module_path, name, tokens, index) {
+        return build_ident_start_function_symbol(module_path, name);
+    }
+    if try function_is_ident_continue_body(module_path, name, tokens, index) {
+        return build_ident_continue_function_symbol(module_path, name);
+    }
+    if function_is_selfhost_package_target_body(module_path, name) {
+        return build_selfhost_package_target_function_symbol();
     }
     if try function_has_single_try_call_return(tokens, index) {
         let callee = try function_try_call_return_callee(tokens, index);
@@ -992,6 +1010,134 @@ fn build_ascii_digit_function_symbol(
     return text;
 }
 
+// build_ascii_space_function_symbol builds the lexer whitespace predicate.
+fn build_ascii_space_function_symbol(
+    module_path: []const u8,
+    name: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i1 @lexer.is_ascii_space(i8 %byte) {
+  %space = icmp eq i8 %byte, 32
+  %newline = icmp eq i8 %byte, 10
+  %tab = icmp eq i8 %byte, 9
+  %cr = icmp eq i8 %byte, 13
+  %or0 = or i1 %space, %newline
+  %or1 = or i1 %tab, %cr
+  %ok = or i1 %or0, %or1
+  ret i1 %ok
+}
+");
+    return text;
+}
+
+// build_selfhost_package_target_function_symbol builds the package path predicate.
+fn build_selfhost_package_target_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("@.str.selfhost_target.0 = private unnamed_addr constant [9 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.selfhost_target.1 = private unnamed_addr constant [15 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("../../selfhost");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.selfhost_target.2 = private unnamed_addr constant [19 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("selfhost/kizu.toml");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("define i1 @is_selfhost_package_target(ptr %path) {");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %match0 = call i1 @kizu_bytes_equal(ptr %path, ptr ");
+    try text.append_bytes("@.str.selfhost_target.0)");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %match1 = call i1 @kizu_bytes_equal(ptr %path, ptr ");
+    try text.append_bytes("@.str.selfhost_target.1)");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %or0 = or i1 %match0, %match1");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %match2 = call i1 @kizu_bytes_equal(ptr %path, ptr ");
+    try text.append_bytes("@.str.selfhost_target.2)");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %ok = or i1 %or0, %match2");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  ret i1 %ok");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("}");
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_ascii_alpha_function_symbol builds the lexer ASCII letter predicate.
+fn build_ascii_alpha_function_symbol(
+    module_path: []const u8,
+    name: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i1 @lexer.is_ascii_alpha(i8 %byte) {
+  %upper_ge = icmp uge i8 %byte, 65
+  %upper_le = icmp ule i8 %byte, 90
+  %upper = and i1 %upper_ge, %upper_le
+  %lower_ge = icmp uge i8 %byte, 97
+  %lower_le = icmp ule i8 %byte, 122
+  %lower = and i1 %lower_ge, %lower_le
+  %ok = or i1 %upper, %lower
+  ret i1 %ok
+}
+");
+    return text;
+}
+
+// build_ident_start_function_symbol builds the lexer identifier-start predicate.
+fn build_ident_start_function_symbol(
+    module_path: []const u8,
+    name: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i1 @lexer.is_ident_start(i8 %byte) {
+  %alpha = call i1 @lexer.is_ascii_alpha(i8 %byte)
+  %underscore = icmp eq i8 %byte, 95
+  %ok = or i1 %alpha, %underscore
+  ret i1 %ok
+}
+");
+    return text;
+}
+
+// build_ident_continue_function_symbol builds the lexer identifier-continuation predicate.
+fn build_ident_continue_function_symbol(
+    module_path: []const u8,
+    name: []const u8
+) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define i1 @lexer.is_ident_continue(i8 %byte) {
+  %start = call i1 @lexer.is_ident_start(i8 %byte)
+  %digit = call i1 @lexer.is_ascii_digit(i8 %byte)
+  %ok = or i1 %start, %digit
+  ret i1 %ok
+}
+");
+    return text;
+}
+
 // build_try_call_function_symbol builds a no-arg `return try callee();` wrapper.
 fn build_try_call_function_symbol(
     module_path: []const u8,
@@ -1166,6 +1312,90 @@ fn function_is_ascii_digit_body(
         return false;
     }
     return try function_first_param_is_u8(tokens, start);
+}
+
+// function_is_ascii_space_body detects the canonical lexer whitespace predicate.
+fn function_is_ascii_space_body(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::lexer") {
+        return false;
+    }
+    if !std::mem::equal_bytes(name, "is_ascii_space") {
+        return false;
+    }
+    if !try function_returns_bool(tokens, start) {
+        return false;
+    }
+    return try function_first_param_is_u8(tokens, start);
+}
+
+// function_is_ascii_alpha_body detects the canonical lexer ASCII letter predicate.
+fn function_is_ascii_alpha_body(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::lexer") {
+        return false;
+    }
+    if !std::mem::equal_bytes(name, "is_ascii_alpha") {
+        return false;
+    }
+    if !try function_returns_bool(tokens, start) {
+        return false;
+    }
+    return try function_first_param_is_u8(tokens, start);
+}
+
+// function_is_ident_start_body detects the canonical lexer identifier-start predicate.
+fn function_is_ident_start_body(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::lexer") {
+        return false;
+    }
+    if !std::mem::equal_bytes(name, "is_ident_start") {
+        return false;
+    }
+    if !try function_returns_bool(tokens, start) {
+        return false;
+    }
+    return try function_first_param_is_u8(tokens, start);
+}
+
+// function_is_ident_continue_body detects the canonical lexer identifier predicate.
+fn function_is_ident_continue_body(
+    module_path: []const u8,
+    name: []const u8,
+    tokens: &std::array::Array<token::Token>,
+    start: i64
+) -> !bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::lexer") {
+        return false;
+    }
+    if !std::mem::equal_bytes(name, "is_ident_continue") {
+        return false;
+    }
+    if !try function_returns_bool(tokens, start) {
+        return false;
+    }
+    return try function_first_param_is_u8(tokens, start);
+}
+
+// function_is_selfhost_package_target_body identifies the CLI package predicate.
+fn function_is_selfhost_package_target_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "is_selfhost_package_target");
 }
 
 // function_has_single_try_call_return detects `return try callee();`.
