@@ -102,31 +102,9 @@ std/
 The compiler still reserves the root namespace `std`. User packages cannot be
 named `std`.
 
-The future Kizu compiler migration target mirrors Go compiler packages:
-
-```text
-compiler/
-  README.md
-  kizu.toml
-  src/
-    main.kizu
-    token.kizu
-    lexer.kizu
-    ast.kizu
-    parser.kizu
-    types.kizu
-    ownership.kizu
-    interp.kizu
-    ir.kizu
-    llvm.kizu
-    wasm.kizu
-    buildcache.kizu
-    project.kizu
-    cimport.kizu
-```
-
-Keep `compiler/src/*.kizu` names aligned with `internal/*` Go packages so the
-compiler can be ported one module at a time without inventing new boundaries.
+Do not create a Kizu compiler tree until the Go implementation is ready to be
+ported. The compiler migration should happen later as a deliberate 1:1 port from
+the Go packages, not as a long-lived parallel scaffold.
 
 ## Acceptance Rules For New Std APIs
 
