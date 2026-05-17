@@ -523,6 +523,14 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 	if strings.TrimSpace(string(out)) != "target/kizu-selfhost" {
 		t.Fatalf("got %q", out)
 	}
+	check := exec.Command("./target/kizu-selfhost", "check", "../../examples/hello.kizu")
+	checkOut, err := check.CombinedOutput()
+	if err != nil {
+		t.Fatalf("selfhost check failed: %v\n%s", err, checkOut)
+	}
+	if !strings.Contains(string(checkOut), "check\nllvm\npass\ntrue") {
+		t.Fatalf("got %q", checkOut)
+	}
 }
 
 // TestBuildTargetRejectsUnsupportedNative checks unsupported targets fail clearly.

@@ -152,8 +152,14 @@ func withNativeEntry(llvmText string) (string, error) {
 // nativeMainWrapper returns the C ABI entry point for a Kizu main.
 func nativeMainWrapper(call string) string {
 	return `
-define i32 @main() {
+@kizu_argc = external global i64
+@kizu_argv = external global ptr
+
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
+  %wide_argc = sext i32 %argc to i64
+  store i64 %wide_argc, ptr @kizu_argc
+  store ptr %argv, ptr @kizu_argv
   ` + call + `
   ret i32 0
 }

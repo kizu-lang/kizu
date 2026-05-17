@@ -100,10 +100,15 @@ func llvmOperand(operand string, typ string) string {
 
 // llvmReturnOperand coerces opaque placeholder returns to the function result type.
 func llvmReturnOperand(operand string, valueType string, returnType string) string {
-	if llvmType(valueType) == llvmType(returnType) {
-		return llvmOperand(operand, returnType)
+	return llvmTypedOperand(operand, valueType, returnType)
+}
+
+// llvmTypedOperand coerces placeholder or mismatched opaque values to wantType.
+func llvmTypedOperand(operand string, valueType string, wantType string) string {
+	if llvmType(valueType) == llvmType(wantType) {
+		return llvmOperand(operand, wantType)
 	}
-	return llvmZero(returnType)
+	return llvmZero(wantType)
 }
 
 // llvmLocal maps Kizu SSA names to LLVM local identifiers.
