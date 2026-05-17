@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,6 +203,35 @@ func TestSelfHostParseCommandMatchesGoParserError(t *testing.T) {
 	want := goParserDetailSnapshot(t, input)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selfhost parser error detail got %#v, want %#v", got, want)
+	}
+}
+
+// TestSelfHostV2LexerMatchesGoForConformance checks module-first lexer parity.
+func TestSelfHostV2LexerMatchesGoForConformance(t *testing.T) {
+	for _, sourcePath := range selfHostV2ConformanceSources(t) {
+		t.Run(filepath.ToSlash(sourcePath), func(t *testing.T) {
+			out := runSelfHostV2Function(t, "compiler.lex_file_snapshot", sourcePath)
+			got := parseSelfHostLexOutput(t, out)
+			want := goLexerSnapshots(readTestSource(t, sourcePath))
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("selfhost v2 lexer got %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+// TestSelfHostV2ParserMatchesGoForCoreCorpus checks module-first parser parity.
+func TestSelfHostV2ParserMatchesGoForCoreCorpus(t *testing.T) {
+	for _, sourcePath := range selfHostV2ParserParitySources() {
+		t.Run(filepath.ToSlash(sourcePath), func(t *testing.T) {
+			source := readTestSource(t, sourcePath)
+			out := runSelfHostV2Function(t, "compiler.parse_file_snapshot", sourcePath)
+			got := parseSelfHostParserDetailOutput(t, out)
+			want := goParserDetailSnapshot(t, source)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("selfhost v2 parser detail got %#v, want %#v", got, want)
+			}
+		})
 	}
 }
 
@@ -858,6 +888,73 @@ func collectParserDetailLines(t *testing.T, lines []string) []string {
 	}
 	t.Fatal("missing selfhost parser detail snapshot end marker")
 	return nil
+}
+
+// runSelfHostV2Function runs one module-first self-host compiler function.
+func runSelfHostV2Function(t *testing.T, name string, sourcePath string) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := runSelfHostFunctionWithOutput(&out, name, sourcePath); err != nil {
+		t.Fatalf("selfhost v2 function %s failed: %v\n%s", name, err, out.String())
+	}
+	return out.String()
+}
+
+// selfHostV2ConformanceSources returns unique corpus sources for v2 parity.
+func selfHostV2ConformanceSources(t *testing.T) []string {
+	t.Helper()
+	paths := map[string]bool{}
+	for _, manifest := range loadConformanceManifests(t) {
+		for _, item := range manifest.Cases {
+			paths[item.Path] = true
+		}
+	}
+	for _, item := range loadModuleConformanceManifest(t).Cases {
+		if item.RootSource != "" {
+			paths[item.RootSource] = true
+		}
+	}
+	out := make([]string, 0, len(paths))
+	for path := range paths {
+		out = append(out, filepath.Join("..", "..", filepath.FromSlash(path)))
+	}
+	sortStrings(out)
+	return out
+}
+
+// selfHostV2ParserParitySources returns the parser corpus currently ported 1:1.
+func selfHostV2ParserParitySources() []string {
+	return []string{
+		"../../examples/functions.kizu",
+		"../../examples/struct.kizu",
+		"../../examples/enum.kizu",
+		"../../examples/union.kizu",
+		"../../examples/if.kizu",
+		"../../examples/while.kizu",
+		"../../examples/for.kizu",
+		"../../examples/variables.kizu",
+		"../../examples/negative/missing_semicolon.kizu",
+		"../../tests/conformance/modules/basic/src/main.kizu",
+	}
+}
+
+// readTestSource reads a source path used by parity tests.
+func readTestSource(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// sortStrings keeps test corpus order deterministic without importing sort twice.
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
 }
 
 // parseSelfHostResolverGraphOutput parses the resolver graph snapshot section.

@@ -65,6 +65,20 @@ are built. It should not be treated as the production self-host compiler source.
 Once the new module tree covers the same oracle surface, the legacy harness can
 be deleted.
 
+## Reset Rule
+
+The self-host compiler is rebuilt from the Go compiler structure, not extracted
+from `selfhost/frontend.kizu`.
+
+`selfhost/src` is the canonical Kizu implementation tree. Each module should be
+ported from the corresponding Go package with a 1:1 oracle test before it is
+allowed to replace any production path.
+
+The legacy `frontend.kizu` file may still provide historical fixture knowledge,
+but fixture-shaped branches must not be copied into the new compiler modules.
+When a behavior is missing in `selfhost/src`, the next step is to add a Go
+oracle comparison and then implement the equivalent Kizu module behavior.
+
 ## Migration Order
 
 1. Finish the Go-owned multi-file package path and keep it as the oracle.
@@ -89,4 +103,3 @@ before it can replace any production path.
   have equivalent tests.
 - Bootstrap work remains issue-driven. The tracking issue for this reset is
   #190.
-

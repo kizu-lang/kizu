@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -360,6 +361,11 @@ func selfHostResolverSourcePath(path string) (string, error) {
 
 // runSelfHostFunction runs a named self-host package function with one path arg.
 func runSelfHostFunction(name string, path string) error {
+	return runSelfHostFunctionWithOutput(os.Stdout, name, path)
+}
+
+// runSelfHostFunctionWithOutput runs a self-host package function for tests and CLI paths.
+func runSelfHostFunctionWithOutput(out io.Writer, name string, path string) error {
 	selfhostPath, err := selfHostPackagePath()
 	if err != nil {
 		return err
@@ -373,7 +379,7 @@ func runSelfHostFunction(name string, path string) error {
 			return fmt.Errorf("%s: %w", module.Module.Path, err)
 		}
 	}
-	runner := interp.NewWithProcessArgs(os.Stdout, []string{path})
+	runner := interp.NewWithProcessArgs(out, []string{path})
 	runner.Register(packageRuntimeProgram(pkg))
 	return runner.RunFunction(name)
 }

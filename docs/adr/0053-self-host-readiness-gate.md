@@ -52,6 +52,27 @@ component ごとに次を満たすまで production path を置き換えない�
 各 component の Pull Request は、該当 Issue に readiness checklist を持ち、PR 本文に
 実行した oracle test と conformance test を記録する。
 
+## v2 Parity Gate
+
+`selfhost/src` is treated as self-host v2. A component is considered v2-ready
+only when the Kizu module output is compared directly with the Go implementation
+for the same corpus.
+
+Current gates:
+
+- lexer: all reusable conformance and module root sources must match Go token
+  snapshots exactly.
+- parser: the core parser corpus must match Go declaration and detail snapshots.
+- parser full conformance coverage remains a follow-up gate; failures here are
+  migration blockers, not acceptable fixture exceptions.
+
+The tests carrying this gate are:
+
+```text
+TestSelfHostV2LexerMatchesGoForConformance
+TestSelfHostV2ParserMatchesGoForCoreCorpus
+```
+
 ## Consequences
 
 - Go compiler は self-host が十分になるまで production path であり続ける。
@@ -60,4 +81,3 @@ component ごとに次を満たすまで production path を置き換えない�
   `selfhost/src` に置く。
 - self-host で不足した stdlib API は local TODO ではなく GitHub Issue と docs に戻す。
 - readiness gate を満たさない component は移植せず、まず Go oracle または仕様を強化する。
-
