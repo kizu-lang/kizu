@@ -142,5 +142,6 @@ v0.3 の backend smoke は Go 実装を oracle とし、次を明示的に測る
 go test ./tests/selfhost
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu
 just perf-cache-isolated
 ```

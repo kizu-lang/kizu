@@ -62,8 +62,9 @@ Experimental compiler and tooling pieces:
 - opt-in IR optimization pipeline
 
 These experimental pieces are not the language oracle yet. LLVM and WASM
-currently support more limited target subsets than the interpreter, and native
-executable generation is not implemented.
+currently support more limited target subsets than the interpreter. Native
+executable generation is limited to the v0.3 macOS arm64 path and requires
+`llc` plus `ld64.lld`.
 
 The v0.3 standalone target is a native self-host compiler artifact. The planned
 path is Kizu-owned LLVM IR text, `llc` object emission, and `lld` linking for
@@ -150,6 +151,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -165,6 +167,8 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
+- `kizu build --target aarch64-apple-darwin [--opt] <file>` writes a native
+  executable artifact using `llc` and `ld64.lld`.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
 - `kizu why-rebuild <file|package>` explains cache hit or rebuild reasons.

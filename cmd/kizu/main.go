@@ -13,6 +13,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/llvm"
+	"github.com/kizu-lang/kizu/internal/native"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/project"
@@ -115,6 +116,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target aarch64-apple-darwin [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file|package>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
@@ -787,13 +789,16 @@ func emitLLVMFile(path string, opt bool) error {
 
 // emitTargetFile lowers a checked source file to the requested target.
 func emitTargetFile(target string, args []string) error {
-	if target != "wasm32-wasi" {
+	if target != "wasm32-wasi" && !native.SupportedTarget(target) {
 		usage()
 		return fmt.Errorf("invalid build target `%s`", target)
 	}
 	path, opt, err := parseOptFileArgs(args)
 	if err != nil {
 		return err
+	}
+	if native.SupportedTarget(target) {
+		return emitNativeFile(path, target, opt)
 	}
 	return emitWASMFile(path, opt)
 }
@@ -818,6 +823,30 @@ func emitWASMFile(path string, opt bool) error {
 		return err
 	}
 	_, _ = fmt.Println(result.Output)
+	return nil
+}
+
+// emitNativeFile lowers a checked source file to a native executable artifact.
+func emitNativeFile(path string, target string, opt bool) error {
+	cache, err := buildcache.New()
+	if err != nil {
+		return err
+	}
+	result, err := cache.GetOrBuild(path, cacheTarget(target, opt), func() (string, error) {
+		module, err := lowerTarget(path, opt)
+		if err != nil {
+			return "", err
+		}
+		return llvm.Emit(module)
+	})
+	if err != nil {
+		return err
+	}
+	artifact, err := native.Build(path, target, result.Output)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Println(artifact.Executable)
 	return nil
 }
 

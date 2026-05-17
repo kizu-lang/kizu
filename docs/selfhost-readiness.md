@@ -55,7 +55,7 @@ Before switching production behavior from Go to Kizu:
 | type checker | strong legacy oracle for selected conformance and diagnostics | core type-name classification and executable package component test are ported under `selfhost/src` | expand to function/local type environment snapshots |
 | ownership / borrow checker | strong legacy memory-safety oracle | move/copy/borrow transition facts and executable package component test are ported under `selfhost/src` | expand to scoped environment snapshots |
 | IR | strong normalized dump oracle | IR module/function/block/instruction summary facts and executable package component test are ported under `selfhost/src` | expand to full normalized IR dump |
-| backend | Go-owned smoke fingerprint oracle plus `kizu build selfhost` package smoke | target/artifact summary facts and executable package component test are ported under `selfhost/src` | not a native production switch target |
+| backend | Go-owned smoke fingerprint oracle plus `kizu build selfhost` package smoke | target/artifact summary facts and executable package component test are ported under `selfhost/src` | native executable generation is the v0.3 switch target |
 | cache | Go-owned switch contract oracle | cache input/rebuild reason summary facts and executable package component test are ported under `selfhost/src` | Go-owned filesystem and hashing primitives |
 | compiler pipeline | Go-owned CLI oracle | `selfhost/src/compiler.kizu` compiles explicit source buffers and a self-host package-shaped module set through lexer, parser, type, ownership, IR, and backend summary phases | expand from embedded package source buffers to filesystem-backed package compilation |
 
@@ -77,7 +77,7 @@ compiler packages in the CLI path.
 | type checker | Go | Keep Go-owned until Kizu owns function signatures, local environments, call checking, stdlib boundaries, and diagnostics. |
 | ownership / borrow checker | Go | Keep Go-owned until Kizu owns scoped state, last-use borrow endings, field borrow tracking, and memory-safety diagnostics. |
 | IR | Go | Keep Go-owned until Kizu emits the normalized IR dump, not only summary facts. |
-| backend | Go | Keep Go-owned; native production switching is not a v0.3 target. LLVM/WASM smoke output remains Go-emitted. |
+| backend | Go | Keep Go-owned until Kizu can emit LLVM text and drive native artifact creation. Native executable generation is the v0.3 switch target. |
 | cache | Go | Keep Go-owned until Kizu owns filesystem walking, hashing, artifact layout, status, prune, and why-rebuild execution. |
 
 This is an explicit non-switch decision, not a hidden fallback. The current CLI

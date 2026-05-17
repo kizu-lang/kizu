@@ -481,6 +481,64 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetNativeCommandSmoke checks native build when LLVM tools exist.
+func TestBuildTargetNativeCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("llc"); err != nil {
+		t.Skip("llc is not available")
+	}
+	if _, err := exec.LookPath("ld64.lld"); err != nil {
+		t.Skip("ld64.lld is not available")
+	}
+	cmd := exec.Command(
+		"go", "run", ".", "build", "--target", "aarch64-apple-darwin",
+		"../../examples/hello.kizu",
+	)
+	cmd.Env = append(os.Environ(), "KIZU_CACHE_DIR="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "target/native/aarch64-apple-darwin/debug/hello"
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestBuildTargetNativeSelfHostPath checks the selfhost artifact name.
+func TestBuildTargetNativeSelfHostPath(t *testing.T) {
+	if _, err := exec.LookPath("llc"); err != nil {
+		t.Skip("llc is not available")
+	}
+	if _, err := exec.LookPath("ld64.lld"); err != nil {
+		t.Skip("ld64.lld is not available")
+	}
+	cmd := exec.Command(
+		"go", "run", ".", "build", "--target", "aarch64-apple-darwin", "../../selfhost",
+	)
+	cmd.Env = append(os.Environ(), "KIZU_CACHE_DIR="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "target/kizu-selfhost" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestBuildTargetRejectsUnsupportedNative checks unsupported targets fail clearly.
+func TestBuildTargetRejectsUnsupportedNative(t *testing.T) {
+	cmd := exec.Command(
+		"go", "run", ".", "build", "--target", "x86_64-linux-gnu", "../../examples/hello.kizu",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected command to fail\n%s", out)
+	}
+	if !strings.Contains(string(out), "invalid build target `x86_64-linux-gnu`") {
+		t.Fatalf("got %q", out)
+	}
+}
+
 // TestSelfHostWATCommandSmoke checks the Kizu-owned WAT backend command.
 func TestSelfHostWATCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "selfhost-wat", "../../examples/hello.kizu")
