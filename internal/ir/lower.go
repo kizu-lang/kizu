@@ -433,6 +433,14 @@ func (l *lowerer) lowerMethodCallExpr(
 		return l.emit("arena.add", handleType(receiver.Type), allArgs, ""), nil
 	case "get":
 		return l.emit("arena.get", arenaElementType(receiver.Type), allArgs, ""), nil
+	case "append_bytes":
+		return l.emit("method.append_bytes", "!void", allArgs, ""), nil
+	case "append_byte":
+		return l.emit("method.append_byte", "!void", allArgs, ""), nil
+	case "as_bytes":
+		return l.emit("method.as_bytes", "[]const u8", allArgs, ""), nil
+	case "deinit":
+		return l.emit("method.deinit", "void", allArgs, ""), nil
 	case "append":
 		return l.emit("method.append", "!void", allArgs, ""), nil
 	case "at":

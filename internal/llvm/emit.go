@@ -88,6 +88,8 @@ func instrDefinesLLVM(instr *ir.Instr) bool {
 		return true
 	case instr.Op == "method.at" || instr.Op == "method.len":
 		return true
+	case strings.HasPrefix(instr.Op, "method.append_byte") || instr.Op == "method.as_bytes":
+		return true
 	case instr.Op == "phi":
 		return true
 	default:
@@ -175,6 +177,33 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_array_append(ptr, ptr)\n")
 	e.out.WriteString("declare ptr @kizu_array_at(ptr, i64)\n")
 	e.out.WriteString("declare i64 @kizu_array_len(ptr)\n\n")
+	if e.needsStringRuntime() {
+		e.out.WriteString("declare ptr @kizu_string_new()\n")
+		e.out.WriteString("declare ptr @kizu_string_append_bytes(ptr, ptr)\n")
+		e.out.WriteString("declare ptr @kizu_string_append_byte(ptr, i8)\n")
+		e.out.WriteString("declare ptr @kizu_string_as_bytes(ptr)\n")
+		e.out.WriteString("declare void @kizu_string_deinit(ptr)\n\n")
+	}
+}
+
+// needsStringRuntime reports whether the module uses owned String helpers.
+func (e *emitter) needsStringRuntime() bool {
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if strings.Contains(instr.Op, "std.string.String") {
+					return true
+				}
+				if strings.HasPrefix(instr.Op, "method.append_byte") {
+					return true
+				}
+				if instr.Op == "method.as_bytes" || instr.Op == "method.deinit" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // writeStructTypes writes LLVM identified struct layouts.
@@ -416,6 +445,10 @@ func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
 		}
 		if strings.HasPrefix(name, "std.array.Array<") {
 			e.writeRuntimeValueCall(instr, "call ptr @kizu_array_new()", instr.Result.Type)
+			return true
+		}
+		if name == "std.string.String" {
+			e.writeRuntimeValueCall(instr, "call ptr @kizu_string_new()", instr.Result.Type)
 			return true
 		}
 		return false
@@ -753,9 +786,65 @@ func (e *emitter) writeMethod(instr *ir.Instr) error {
 		return e.writeArrayAt(instr)
 	case "method.len":
 		return e.writeArrayLen(instr)
+	case "method.append_bytes":
+		return e.writeStringAppendBytes(instr)
+	case "method.append_byte":
+		return e.writeStringAppendByte(instr)
+	case "method.as_bytes":
+		return e.writeStringAsBytes(instr)
+	case "method.deinit":
+		return e.writeStringDeinit(instr)
 	default:
 		return e.writeOpaqueValue(instr)
 	}
+}
+
+// writeStringAppendBytes appends bytes to an owned std::string::String value.
+func (e *emitter) writeStringAppendBytes(instr *ir.Instr) error {
+	if len(instr.Args) < 2 {
+		return fmt.Errorf("llvm error: String.append_bytes expects receiver and bytes")
+	}
+	receiver := e.value(instr.Args[0])
+	bytes := e.value(instr.Args[1])
+	call := "call ptr @kizu_string_append_bytes(ptr " + receiver.operand +
+		", ptr " + llvmOperand(bytes.operand, "[]const u8") + ")"
+	e.writeRuntimeValueCall(instr, call, "!void")
+	return nil
+}
+
+// writeStringAppendByte appends one byte to an owned std::string::String value.
+func (e *emitter) writeStringAppendByte(instr *ir.Instr) error {
+	if len(instr.Args) < 2 {
+		return fmt.Errorf("llvm error: String.append_byte expects receiver and byte")
+	}
+	receiver := e.value(instr.Args[0])
+	value := e.value(instr.Args[1])
+	byte := llvmTypedOperand(value.operand, value.typ, "u8")
+	call := "call ptr @kizu_string_append_byte(ptr " + receiver.operand + ", i8 " + byte + ")"
+	e.writeRuntimeValueCall(instr, call, "!void")
+	return nil
+}
+
+// writeStringAsBytes returns the current byte view for an owned String.
+func (e *emitter) writeStringAsBytes(instr *ir.Instr) error {
+	if len(instr.Args) < 1 {
+		return fmt.Errorf("llvm error: String.as_bytes expects receiver")
+	}
+	receiver := e.value(instr.Args[0])
+	call := "call ptr @kizu_string_as_bytes(ptr " + receiver.operand + ")"
+	e.writeRuntimeValueCall(instr, call, "[]const u8")
+	return nil
+}
+
+// writeStringDeinit releases an owned String buffer.
+func (e *emitter) writeStringDeinit(instr *ir.Instr) error {
+	if len(instr.Args) < 1 {
+		return fmt.Errorf("llvm error: String.deinit expects receiver")
+	}
+	receiver := e.value(instr.Args[0])
+	fmt.Fprintf(&e.out, "  call void @kizu_string_deinit(ptr %s)\n", receiver.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+	return nil
 }
 
 // writeArrayAppend stores a pointer-like element in the growable runtime array.
