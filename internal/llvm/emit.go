@@ -145,7 +145,7 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeOpaqueValue(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
 		return e.writeOpaqueValue(instr)
-	case instr.Op == "error.error" || instr.Op == "error.try":
+	case instr.Op == "error.error" || instr.Op == "error.ok" || instr.Op == "error.try":
 		return e.writeOpaqueValue(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)

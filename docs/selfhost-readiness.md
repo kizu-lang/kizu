@@ -57,6 +57,7 @@ Before switching production behavior from Go to Kizu:
 | IR | strong normalized dump oracle | IR module/function/block/instruction summary facts and executable package component test are ported under `selfhost/src` | expand to full normalized IR dump |
 | backend | Go-owned smoke fingerprint oracle plus `kizu build selfhost` package smoke | target/artifact summary facts and executable package component test are ported under `selfhost/src` | not a native production switch target |
 | cache | Go-owned switch contract oracle | cache input/rebuild reason summary facts and executable package component test are ported under `selfhost/src` | Go-owned filesystem and hashing primitives |
+| compiler pipeline | Go-owned CLI oracle | `selfhost/src/compiler.kizu` runs lexer, parser, type, ownership, IR, and backend summary phases as an executable package component test | expand from summary facts to full source/package compilation |
 
 ## Production Ownership Decision
 

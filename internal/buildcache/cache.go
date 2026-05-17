@@ -11,7 +11,7 @@ import (
 
 const (
 	// Version is included in cache keys so incompatible formats do not collide.
-	Version = "v0.3-module-cache-v2"
+	Version = "v0.3-module-cache-v3"
 
 	// DefaultMaxBytes bounds the local cache to 256 MiB by default.
 	DefaultMaxBytes int64 = 256 * 1024 * 1024

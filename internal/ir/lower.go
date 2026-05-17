@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -143,7 +144,7 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 			return nil
 		}
 		value, err := l.lowerExpr(s.Value)
-		l.block.Terminator = Terminator{Op: "return", Value: value}
+		l.block.Terminator = Terminator{Op: "return", Value: l.returnValue(value)}
 		return err
 	case *ast.ExprStmt:
 		_, err := l.lowerExpr(s.Expr)
@@ -165,6 +166,14 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
 	}
+}
+
+// returnValue wraps a successful !void return in an opaque error-union value.
+func (l *lowerer) returnValue(value Value) Value {
+	if strings.HasPrefix(l.current.Return, "!") && value.Type == "void" {
+		return l.emit("error.ok", l.current.Return, nil, "")
+	}
+	return value
 }
 
 // lowerExpr lowers an expression and returns its typed SSA value.
