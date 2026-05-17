@@ -226,7 +226,12 @@ func TestBuildSelfHostPackageEmitLLVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	for _, want := range []string{"define ptr @main()", "define ptr @compiler.compile_source"} {
+	for _, want := range []string{
+		"define ptr @main()",
+		"define ptr @compiler.compile_source",
+		"define ptr @compiler.compile_package",
+		"define ptr @compiler.compile_selfhost_package_check",
+	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("got %q, want substring %q", out, want)
 		}
