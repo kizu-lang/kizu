@@ -27,6 +27,7 @@ func TestRuntimeLLVMExportsPrintSymbols(t *testing.T) {
 		"declare i32 @printf",
 		"declare ptr @fopen",
 		"define ptr @kizu_read_file",
+		"define ptr @kizu_write_file",
 		"define i1 @kizu_file_exists",
 		"define ptr @kizu_path_join",
 		"define i1 @kizu_bytes_starts_with",
@@ -79,6 +80,22 @@ func TestWithNativeEntryWrapsVoidMain(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("wrapped IR missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestWithNativeEntryIgnoresStringConstants avoids corrupting embedded LLVM text.
+func TestWithNativeEntryIgnoresStringConstants(t *testing.T) {
+	input := "@.str = private unnamed_addr constant [22 x i8] c\"define void @main() {\\00\"\n" +
+		"define void @main() {\nentry:\n  ret void\n}\n"
+	got, err := withNativeEntry(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "c\"define void @kizu_user_main() {\\00\"") {
+		t.Fatalf("string constant was rewritten:\n%s", got)
+	}
+	if !strings.Contains(got, "define void @kizu_user_main()") {
+		t.Fatalf("main definition was not rewritten:\n%s", got)
 	}
 }
 

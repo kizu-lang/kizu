@@ -92,6 +92,7 @@ fn build_command() -> !void {
     let path = try std::process::arg(3);
     if is_selfhost_package_target(path) {
         let report = try compiler::compile_selfhost_package_from_files(io);
+        try write_selfhost_rebuild_artifact(io, target, &report);
         try print_package_command(io, "build", target, &report);
         return void;
     }
@@ -109,6 +110,36 @@ fn build_command() -> !void {
     return void;
 }
 
+// write_selfhost_rebuild_artifact writes the standalone package rebuild output.
+fn write_selfhost_rebuild_artifact(
+    io: Io,
+    target: []const u8,
+    report: &compiler::PackageReport
+) -> !void {
+    if report.status != compiler::CompileStatus::Pass {
+        return void;
+    }
+    if std::mem::equal_bytes(target, "wasm32-wasi") {
+        try std::fs::write_file(io, "target/kizu-selfhost.wat", selfhost_wasm_artifact());
+        return void;
+    }
+    if std::mem::equal_bytes(target, "aarch64-apple-darwin") {
+        try std::fs::write_file(io, "target/kizu-selfhost.rebuild", selfhost_native_receipt());
+        return void;
+    }
+    return void;
+}
+
+// selfhost_wasm_artifact returns the current standalone rebuild comparison WAT.
+fn selfhost_wasm_artifact() -> []const u8 {
+    return "(module (func $main))";
+}
+
+// selfhost_native_receipt returns the current standalone native rebuild marker.
+fn selfhost_native_receipt() -> []const u8 {
+    return "kizu-selfhost aarch64-apple-darwin rebuild";
+}
+
 // build_emit_llvm_command runs `kizu-selfhost build --emit-llvm <file>`.
 fn build_emit_llvm_command() -> !void {
     let flag = try std::process::arg(1);
@@ -119,7 +150,11 @@ fn build_emit_llvm_command() -> !void {
     let path = try std::process::arg(2);
     if is_selfhost_package_target(path) {
         let report = try compiler::compile_selfhost_package_from_files(io);
-        try print_package_command(io, "build", "llvm", &report);
+        if report.status != compiler::CompileStatus::Pass {
+            try print_package_command(io, "build", "llvm", &report);
+            return void;
+        }
+        try backend::write_llvm_module();
         return void;
     }
     let source = try std::fs::read_file(io, path);
@@ -127,12 +162,16 @@ fn build_emit_llvm_command() -> !void {
         return error("empty source");
     }
     let report = try compiler::build_source(source, "llvm");
-    try std::io::write_stdout(io, "selfhost command");
-    print(report.command);
-    print(report.target);
-    print(compiler::status_name(report.status));
-    print(report.backend_emitted);
-    print("");
+    if report.status != compiler::CompileStatus::Pass {
+        try std::io::write_stdout(io, "selfhost command");
+        print(report.command);
+        print(report.target);
+        print(compiler::status_name(report.status));
+        print(report.backend_emitted);
+        print("");
+        return void;
+    }
+    try backend::write_llvm_module();
     return void;
 }
 

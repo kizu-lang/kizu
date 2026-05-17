@@ -157,6 +157,8 @@ func builtinFSReturnType(name string) (string, bool) {
 	switch name {
 	case "std.fs.read_file":
 		return "![]const u8", true
+	case "std.fs.write_file":
+		return "!void", true
 	case "std.fs.exists":
 		return "!bool", true
 	default:
