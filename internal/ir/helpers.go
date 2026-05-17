@@ -161,6 +161,10 @@ func builtinFSReturnType(name string) (string, bool) {
 		return "!void", true
 	case "std.fs.exists":
 		return "!bool", true
+	case "std.fs.metadata":
+		return "!std::fs::Metadata", true
+	case "std.fs.create_dir", "std.fs.remove_dir", "std.fs.remove_file":
+		return "!void", true
 	default:
 		return "", false
 	}

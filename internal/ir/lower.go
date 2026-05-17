@@ -43,6 +43,17 @@ func newLowerer(program *ast.Program) *lowerer {
 	}
 }
 
+// addBuiltinStructs records concrete layouts for host capability return values.
+func addBuiltinStructs(module *Module) {
+	module.Structs["std::fs::Metadata"] = Struct{
+		Name: "std::fs::Metadata",
+		Fields: []Field{
+			{Name: "size", Type: "i64"},
+			{Name: "is_dir", Type: "bool"},
+		},
+	}
+}
+
 // lower performs declaration collection and function lowering.
 func (l *lowerer) lower() (*Module, error) {
 	l.collectDecls()
@@ -324,6 +335,9 @@ func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 // lowerCallExpr lowers builtin, user, and method calls.
 func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		if field.Namespace {
+			return l.lowerNamespaceCallExpr(field, expr.Args)
+		}
 		return l.lowerMethodCallExpr(field, expr.Args)
 	}
 	if applied, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
@@ -346,7 +360,32 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	} else if builtin, ok := builtinReturnType(name.Name, args); ok {
 		ret = builtin
 	}
+	if strings.Contains(ret, "std::fs::Metadata") {
+		addBuiltinStructs(l.module)
+	}
 	return l.emit("call."+name.Name, ret, args, ""), nil
+}
+
+// lowerNamespaceCallExpr lowers calls written with `::` namespace lookup.
+func (l *lowerer) lowerNamespaceCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+) (Value, error) {
+	name := namespacePath(field)
+	loweredArgs, err := l.lowerArgs(args)
+	if err != nil {
+		return Value{}, err
+	}
+	ret := "void"
+	if sig, ok := l.signatures[name]; ok {
+		ret = sig.Return
+	} else if builtin, ok := builtinReturnType(name, loweredArgs); ok {
+		ret = builtin
+	}
+	if strings.Contains(ret, "std::fs::Metadata") {
+		addBuiltinStructs(l.module)
+	}
+	return l.emit("call."+name, ret, loweredArgs, ""), nil
 }
 
 // lowerTypeApplyCallExpr lowers generic-looking std constructors.
@@ -430,6 +469,9 @@ func (l *lowerer) lowerFieldExpr(expr *ast.FieldExpr) (Value, error) {
 	receiver, err := l.lowerExpr(expr.Receiver)
 	if err != nil {
 		return Value{}, err
+	}
+	if receiver.Type == "std::fs::Metadata" {
+		addBuiltinStructs(l.module)
 	}
 	fieldType := l.fieldType(receiver.Type, expr.Name)
 	return l.emit("field."+expr.Name, fieldType, []Value{receiver}, ""), nil

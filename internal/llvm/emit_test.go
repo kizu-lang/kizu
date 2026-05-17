@@ -105,6 +105,115 @@ func TestEmitNativeWriteFile(t *testing.T) {
 	}
 }
 
+// TestEmitNativeFilesystemCapabilities checks filesystem calls lower concretely.
+func TestEmitNativeFilesystemCapabilities(t *testing.T) {
+	got, err := Emit(nativeFilesystemModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"%struct.std__fs__Metadata = type { i64, i1 }",
+		"declare ptr @kizu_file_metadata(ptr)",
+		"call ptr @kizu_file_metadata",
+		"call ptr @kizu_create_dir",
+		"call ptr @kizu_remove_dir",
+		"call ptr @kizu_remove_file",
+		"getelementptr inbounds %struct.std__fs__Metadata",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("LLVM output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestEmitNativePathCapabilities checks all v0.2 path helpers have native ABIs.
+func TestEmitNativePathCapabilities(t *testing.T) {
+	got, err := Emit(nativePathModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"call ptr @kizu_path_join",
+		"call ptr @kizu_path_clean",
+		"call ptr @kizu_path_basename",
+		"call ptr @kizu_path_dirname",
+		"call ptr @kizu_path_extension",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("LLVM output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// nativeFilesystemModule returns the host filesystem calls needed by selfhost.
+func nativeFilesystemModule() *ir.Module {
+	return &ir.Module{
+		Structs: map[string]ir.Struct{
+			"std::fs::Metadata": {
+				Name: "std::fs::Metadata",
+				Fields: []ir.Field{
+					{Name: "size", Type: "i64"},
+					{Name: "is_dir", Type: "bool"},
+				},
+			},
+		},
+		Functions: []*ir.Function{nativeFilesystemMainFunction()},
+	}
+}
+
+// nativeFilesystemMainFunction returns a filesystem-capability lowering shape.
+func nativeFilesystemMainFunction() *ir.Function {
+	return &ir.Function{Name: "main", Return: "void", Blocks: []*ir.Block{{Name: "entry",
+		Instrs: []*ir.Instr{
+			{Result: ir.Value{Name: "%1", Type: "[]const u8"},
+				Op: "const", Immediate: "\"examples/fixtures/config.txt\""},
+			{Result: ir.Value{Name: "%2", Type: "!std::fs::Metadata"},
+				Op:   "call.std.fs.metadata",
+				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%1", Type: "[]const u8"}}},
+			{Result: ir.Value{Name: "%3", Type: "std::fs::Metadata"},
+				Op: "error.try", Args: []ir.Value{{Name: "%2", Type: "!std::fs::Metadata"}}},
+			{Result: ir.Value{Name: "%4", Type: "i64"}, Op: "field.size",
+				Args: []ir.Value{{Name: "%3", Type: "std::fs::Metadata"}}},
+			{Result: ir.Value{Name: "%5", Type: "[]const u8"},
+				Op: "const", Immediate: "\"target/native-fs\""},
+			{Result: ir.Value{Name: "%6", Type: "!void"}, Op: "call.std.fs.create_dir",
+				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%5", Type: "[]const u8"}}},
+			{Result: ir.Value{Name: "%7", Type: "!void"}, Op: "call.std.fs.remove_dir",
+				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%5", Type: "[]const u8"}}},
+			{Result: ir.Value{Name: "%8", Type: "!void"}, Op: "call.std.fs.remove_file",
+				Args: []ir.Value{{Name: "%io", Type: "Io"}, {Name: "%5", Type: "[]const u8"}}},
+		},
+		Terminator: ir.Terminator{Op: "return"},
+	}}}
+}
+
+// nativePathModule returns all native path helper lowering shapes.
+func nativePathModule() *ir.Module {
+	return &ir.Module{Functions: []*ir.Function{{Name: "main", Return: "void",
+		Blocks: []*ir.Block{{Name: "entry", Instrs: nativePathInstrs(),
+			Terminator: ir.Terminator{Op: "return"}}}}}}
+}
+
+// nativePathInstrs returns calls for every v0.2 path helper.
+func nativePathInstrs() []*ir.Instr {
+	return []*ir.Instr{
+		{Result: ir.Value{Name: "%1", Type: "[]const u8"},
+			Op: "const", Immediate: "\"examples\""},
+		{Result: ir.Value{Name: "%2", Type: "[]const u8"},
+			Op: "const", Immediate: "\"fixtures/config.txt\""},
+		{Result: ir.Value{Name: "%3", Type: "[]const u8"}, Op: "call.std.path.join",
+			Args: []ir.Value{{Name: "%1", Type: "[]const u8"}, {Name: "%2", Type: "[]const u8"}}},
+		{Result: ir.Value{Name: "%4", Type: "[]const u8"}, Op: "call.std.path.clean",
+			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
+		{Result: ir.Value{Name: "%5", Type: "[]const u8"}, Op: "call.std.path.basename",
+			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
+		{Result: ir.Value{Name: "%6", Type: "[]const u8"}, Op: "call.std.path.dirname",
+			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
+		{Result: ir.Value{Name: "%7", Type: "[]const u8"}, Op: "call.std.path.extension",
+			Args: []ir.Value{{Name: "%3", Type: "[]const u8"}}},
+	}
+}
+
 // nativeAliasModule returns scalar error-union and borrow alias operations.
 func nativeAliasModule() *ir.Module {
 	return &ir.Module{
@@ -333,7 +442,16 @@ declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
+declare ptr @kizu_file_metadata(ptr)
+declare ptr @kizu_create_dir(ptr)
+declare ptr @kizu_remove_dir(ptr)
+declare ptr @kizu_remove_file(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
+
+declare ptr @kizu_path_clean(ptr)
+declare ptr @kizu_path_basename(ptr)
+declare ptr @kizu_path_dirname(ptr)
+declare ptr @kizu_path_extension(ptr)
 
 declare ptr @malloc(i64)
 declare ptr @kizu_array_new()
@@ -363,7 +481,16 @@ declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
+declare ptr @kizu_file_metadata(ptr)
+declare ptr @kizu_create_dir(ptr)
+declare ptr @kizu_remove_dir(ptr)
+declare ptr @kizu_remove_file(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
+
+declare ptr @kizu_path_clean(ptr)
+declare ptr @kizu_path_basename(ptr)
+declare ptr @kizu_path_dirname(ptr)
+declare ptr @kizu_path_extension(ptr)
 
 declare ptr @malloc(i64)
 declare ptr @kizu_array_new()
@@ -401,7 +528,16 @@ declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
+declare ptr @kizu_file_metadata(ptr)
+declare ptr @kizu_create_dir(ptr)
+declare ptr @kizu_remove_dir(ptr)
+declare ptr @kizu_remove_file(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
+
+declare ptr @kizu_path_clean(ptr)
+declare ptr @kizu_path_basename(ptr)
+declare ptr @kizu_path_dirname(ptr)
+declare ptr @kizu_path_extension(ptr)
 
 declare ptr @malloc(i64)
 declare ptr @kizu_array_new()
@@ -436,7 +572,16 @@ declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
+declare ptr @kizu_file_metadata(ptr)
+declare ptr @kizu_create_dir(ptr)
+declare ptr @kizu_remove_dir(ptr)
+declare ptr @kizu_remove_file(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
+
+declare ptr @kizu_path_clean(ptr)
+declare ptr @kizu_path_basename(ptr)
+declare ptr @kizu_path_dirname(ptr)
+declare ptr @kizu_path_extension(ptr)
 
 declare ptr @malloc(i64)
 declare ptr @kizu_array_new()
@@ -475,7 +620,16 @@ declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
 declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
+declare ptr @kizu_file_metadata(ptr)
+declare ptr @kizu_create_dir(ptr)
+declare ptr @kizu_remove_dir(ptr)
+declare ptr @kizu_remove_file(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
+
+declare ptr @kizu_path_clean(ptr)
+declare ptr @kizu_path_basename(ptr)
+declare ptr @kizu_path_dirname(ptr)
+declare ptr @kizu_path_extension(ptr)
 
 declare ptr @malloc(i64)
 declare ptr @kizu_array_new()

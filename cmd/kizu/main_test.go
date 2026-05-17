@@ -563,7 +563,7 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 	runSelfHostArtifact(t, "check\nllvm\npass\ntrue",
 		"./target/kizu-selfhost", "check", "../../selfhost")
 	runSelfHostPackageRebuildSmoke(t)
-	runSelfHostArtifact(t, "; Kizu LLVM IR\ndefine dso_local void @main()",
+	runSelfHostArtifact(t, "define void @main() { ret void }",
 		"./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
 }
 
@@ -585,8 +585,8 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	t.Helper()
 	runSelfHostArtifact(t, "build\naarch64-apple-darwin\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
-	requireFileContains(t, "target/kizu-selfhost.rebuild",
-		"kizu-selfhost aarch64-apple-darwin rebuild")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define void @main() { ret void }")
+	requireLLVMLowers(t, "target/kizu-selfhost.ll")
 	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
 	requireFileContains(t, "target/kizu-selfhost.wat", "(module (func $main))")
@@ -601,6 +601,20 @@ func requireFileContains(t *testing.T, path string, want string) {
 	}
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("got artifact %s: %q", path, data)
+	}
+}
+
+// requireLLVMLowers checks a standalone-emitted LLVM artifact is toolchain-valid.
+func requireLLVMLowers(t *testing.T, path string) {
+	t.Helper()
+	object := filepath.Join(t.TempDir(), "selfhost.o")
+	cmd := exec.Command("llc", "-mtriple=aarch64-apple-darwin", "-filetype=obj", "-o", object, path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llc failed for %s: %v\n%s", path, err, out)
+	}
+	if _, err := os.Stat(object); err != nil {
+		t.Fatalf("llc did not write object %s: %v", object, err)
 	}
 }
 
