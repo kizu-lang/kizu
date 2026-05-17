@@ -1,7 +1,8 @@
 # Compiler Specification Decisions
 
 This document tracks compiler-facing language and toolchain decisions that are
-specified for the Go compiler and the Kizu self-host compiler migration path.
+specified but still need implementation work before the self-host compiler can
+replace the Go implementation.
 
 ## Accepted Decisions
 
@@ -99,45 +100,22 @@ Required user-facing commands:
 ### Bootstrap
 
 Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
-Operational contract: [docs/bootstrap.md](bootstrap.md).
-Self-host migration strategy:
-[ADR-0052](adr/0052-module-first-self-host-migration.md).
-Readiness gate:
-[ADR-0053](adr/0053-self-host-readiness-gate.md) and
-[`docs/selfhost-readiness.md`](selfhost-readiness.md).
 
 The Go implementation remains the oracle until the Kizu compiler matches it for
 lexer, parser, diagnostics, type checking, ownership checking, IR, backend smoke
 tests, and self-check/build.
 
-The self-host compiler replacement path is module-first. The legacy
-`selfhost/frontend.kizu` file remains an oracle harness while new compiler
-modules are ported under `selfhost/src`.
+## Implementation Work Still Needed
 
-## Completed Bootstrap Work
-
-The current compiler completion tracks are closed:
-
-- Connect explicit build outputs to a package artifact layout under `target/`: #100.
-- Complete the Kizu self-host compiler oracle surface: #31.
-- Reset self-host migration around a multi-file Kizu package: #190.
-- Scaffold `selfhost/kizu.toml` and `selfhost/src/*.kizu`: #191.
-- Review component readiness gate before porting self-host modules: #196.
-- Port `internal/token` and `internal/lexer` to Kizu modules: #192.
-- Port `internal/ast` and `internal/parser` to Kizu modules: #193.
-- Port diagnostics, resolver, and type-summary package boundaries: #218 and #220.
-- Prove the Go/Kizu 1:1 completion gate: #111.
-
-Current completion evidence lives in
-[`docs/bootstrap-1to1-audit.md`](bootstrap-1to1-audit.md). The strict gate is:
-
-```sh
-KIZU_REQUIRE_1TO1=1 go test ./tests/bootstrap
-```
-
-At the time this document was updated, there are no open GitHub Issues for the
-tracked compiler completion work. New work must be opened as GitHub Issues
-instead of being added as a Markdown TODO list.
+- Connect parsed imports to multi-file checking: #88.
+- Add resolver phase between parser and type checker: #88.
+- Enforce visibility across module boundaries: #89.
+- Preserve byte spans and file IDs through compiler phases: #89.
+- Render multi-file diagnostics: #89.
+- Add artifact layout under `target/`: #90.
+- Extend build cache keys with module graph and public interface hashes: #90.
+- Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
+  IR, backend outputs, and module fixtures: #91.
 
 ## Implemented Groundwork
 
@@ -147,34 +125,9 @@ instead of being added as a Markdown TODO list.
 - Minimal `kizu.toml` parsing for `[package]` and `[modules]`.
 - File path to module path graph resolution.
 - Single-program public API checks for private type leaks.
-- Module-boundary visibility checks reject private namespace access, imported
-  private type leaks in public signatures, and private field construction.
-- AST declarations and visibility-sensitive expressions carry byte spans with
-  line/column origins for multi-file diagnostics.
-- Visibility diagnostics render a primary location and related declaration or
-  field location.
-- `std/` source skeleton records the Kizu wrapper surface for `std::mem`,
-  `std::path`, `std::io`, `std::process`, and `std::testing`.
-- Build cache stdlib invalidation hashes the checked-in `std/` manifest and
-  Kizu source skeleton.
-- Self-host parser oracle compares normalized AST snapshots against the Go
-  parser for representative parseable sources and module fixtures.
-- Self-host semantic oracle compares symbol/diagnostic snapshots for selected
-  positive fixtures and keeps memory-safety negative fixtures paired with Go
-  checker diagnostics.
-- Module-aware build cache keys include manifest, module graph, source, public
-  interface, target/backend/optimization, and stdlib hashes.
-- `why-rebuild` explains package input changes for manifest, module graph,
-  public interface, source-only, stdlib, and cache version changes.
 - Multi-file module conformance fixture at `tests/conformance/modules/basic`.
 - Go project tests resolve the module fixture graph and parse every fixture
   source file.
-- Resolver phase parses package modules, validates explicit imports, rejects
-  missing imports, same-name import collisions, import shadowing, and cycles.
-- `kizu check <package-dir>` and `kizu check <package-dir>/kizu.toml` run
-  multi-file package smoke checks.
-- The self-host frontend can read the module fixture source path through the
-  same explicit `std::fs` / `std::path` / `std::process` APIs.
 
 ## Postponed
 

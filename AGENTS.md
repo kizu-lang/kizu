@@ -5,8 +5,7 @@
 ## プロジェクト目標
 
 Kizu v0.1 は Go 製の interpreter-first language core です。
-v0.2 は self-host compiler に必要な stdlib prototype です。
-現在の v0.3 目標は Kizu-only standalone self-host compiler の完成です。
+現在は v0.2 stdlib prototype と v0.3 self-host compiler preparation を進めます。
 
 Kizu は Rust clone ではありません。
 
@@ -50,10 +49,6 @@ v0.2 の中心は、self-host compiler に必要な最小 stdlib と tooling で
 - `std::testing`
 - explicit-Io `std::fs` / `std::path` / `std::io` / `std::process`
 - `kizu test <file>`
-
-v0.3 の中心は、Go CLI/interpreter を compiler execution path として使わない
-standalone self-host compiler です。bootstrap 境界や parity test だけでは v0.3
-完了ではありません。
 
 active work は GitHub Issues を正として管理します。
 Markdown の phase TODO 文書は使いません。

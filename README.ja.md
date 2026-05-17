@@ -20,10 +20,8 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 Kizu は Go 製の初期プロトタイプです。
 
 v0.1 の対象は interpreter-first の language core です。
-v0.2 では、将来の self-host compiler に必要な最小 stdlib surface を追加しました。
-現在の v0.3 の目標は、Kizu-only standalone self-host compiler の完成です。
-その standalone compiler が自分自身を再ビルドできるまでは、正となる挙動は引き続き
-Go 製 interpreter と `kizu check` です。
+現在の v0.2 作業では、将来の self-host compiler に必要な最小 stdlib surface を追加しています。
+正となる挙動は引き続き Go 製 interpreter と `kizu check` です。
 
 実装済み language core:
 
@@ -52,7 +50,7 @@ Go 製 interpreter と `kizu check` です。
 
 実験的な compiler / tooling:
 
-- `selfhost/` の module-first self-host compiler package
+- `selfhost/` の self-host compiler skeleton
 - typed SSA IR
 - LLVM IR text backend
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
@@ -61,17 +59,10 @@ Go 製 interpreter と `kizu check` です。
 - opt-in の IR optimization pipeline
 
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
-LLVM と WASM は interpreter より限定された subset だけを扱います。
-native executable generation は v0.3 の macOS arm64 path に限定され、
-`llc` と `ld64.lld` を必要とします。
+LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
 
-v0.3 の standalone target は native self-host compiler artifact です。
-最初は host macOS arm64 向けに、Kizu-owned LLVM IR text、`llc` による object emission、
-`lld` による linking で進めます。libc / libSystem は Kizu language core ではなく、
-明示的な target stdlib backend boundary としてのみ許可します。
-
-これまでの self-host transition work は bootstrap milestone であり、v0.3 release
-ではありません。v0.3 は #256 以降の GitHub Issues で管理します。
+現時点で open な v0.2 Issue はありません。残作業は GitHub Issues 上の v0.3 self-host /
+module-boundary 実装 Issue として管理しています。
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -148,7 +139,6 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
-go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -164,8 +154,6 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
 - `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
-- `kizu build --target aarch64-apple-darwin [--opt] <file>` は `llc` と
-  `ld64.lld` で native executable artifact を書き出します。
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。

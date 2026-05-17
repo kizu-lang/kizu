@@ -68,7 +68,6 @@ go test ./...
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
-| single-element array get | `std_array_single_get.kizu` | keeps in-bounds `Array.get(0)` diagnostic-clean |
 | self-host token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes and exposes local byte views |
@@ -129,7 +128,6 @@ go test ./...
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
-| one-sided `if` returns do not satisfy non-`void` functions | `negative/missing_return_if.kizu` | `must return` |
 | `try` requires an error-union-returning function | `negative/invalid_try.kizu` | `try requires` |
 | typed errors must match across `try` | `negative/typed_error_mismatch.kizu` | `cannot propagate` |
 | `error(message)` cannot build typed errors | `negative/typed_error_untyped_constructor.kizu` | `cannot construct typed error` |

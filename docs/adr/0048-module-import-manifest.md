@@ -32,27 +32,6 @@ root = "src/main.kizu"
 paths = ["src"]
 ```
 
-Packages may also provide an explicit declarative module graph:
-
-```toml
-[modules]
-root = "src/main.kizu"
-paths = ["src"]
-entries = [
-  "app|src/main.kizu",
-  "app::lexer|src/lexer.kizu",
-  "app::lexer_test|src/lexer_test.kizu|test",
-]
-```
-
-`entries` is a list of `module_path|file_path` records. An optional third
-`|test` marker identifies component test modules that are loaded for
-`kizu test` but skipped by normal package build lowering. It is not executable
-logic and must not contain conditions, plugins, or build steps. When present,
-the compiler uses it as the package module graph instead of walking `paths`.
-This keeps bootstrap compiler inputs deterministic while `std::fs` directory
-traversal is still becoming a Kizu-owned host capability.
-
 The package name is the root user namespace. If `name = "app"`, files under the
 configured module paths are imported with paths such as `app::lexer` and
 `app::parser::ast`.

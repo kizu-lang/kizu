@@ -76,8 +76,6 @@ const (
 type Token struct {
 	Type    Type
 	Literal string
-	Start   int
-	End     int
 	Line    int
 	Column  int
 }
