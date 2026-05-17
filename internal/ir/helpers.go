@@ -37,14 +37,6 @@ func (l *lowerer) emit(op string, typ string, args []Value, immediate string) Va
 	return result
 }
 
-// returnType normalizes omitted function returns to void.
-func returnType(name string) string {
-	if name == "" {
-		return "void"
-	}
-	return name
-}
-
 // binaryResultType returns the type produced by a binary operator.
 func binaryResultType(op string, left string) string {
 	switch op {

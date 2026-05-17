@@ -287,7 +287,7 @@ pub fn compile_self_check() -> !PackageReport {
     return try compile_selfhost_package_check();
 }
 
-// compile_selfhost_package_check compiles the compiler package as source buffers.
+// compile_selfhost_package_check keeps the legacy embedded smoke entry explicit.
 pub fn compile_selfhost_package_check() -> !PackageReport {
     let allocator = std::mem::page_allocator();
     var modules = std::array::Array<SourceModule>(allocator);
@@ -309,6 +309,182 @@ pub fn compile_selfhost_package_check() -> !PackageReport {
         true
     ));
     return try compile_package(&modules, "llvm");
+}
+
+// compile_selfhost_package_from_files loads the checked-in package through std::fs.
+pub fn compile_selfhost_package_from_files(io: Io) -> !PackageReport {
+    let manifest = try std::fs::read_file(io, "../../selfhost/kizu.toml");
+    if std::mem::len(manifest) == 0 {
+        return error("empty selfhost manifest");
+    }
+    let allocator = std::mem::page_allocator();
+    var modules = std::array::Array<SourceModule>(allocator);
+
+    try append_selfhost_runtime_modules(io, modules);
+    return try compile_package(&modules, "llvm");
+}
+
+// load_selfhost_package_from_files validates filesystem-backed package discovery.
+pub fn load_selfhost_package_from_files(io: Io) -> !PackageReport {
+    let manifest = try std::fs::read_file(io, "../../selfhost/kizu.toml");
+    if std::mem::len(manifest) == 0 {
+        return error("empty selfhost manifest");
+    }
+    let allocator = std::mem::page_allocator();
+    var modules = std::array::Array<SourceModule>(allocator);
+
+    try append_selfhost_runtime_modules(io, modules);
+    return try summarize_loaded_package(&modules);
+}
+
+// append_selfhost_runtime_modules loads non-test compiler modules from disk.
+fn append_selfhost_runtime_modules(
+    io: Io,
+    modules: &mut std::array::Array<SourceModule>
+) -> !void {
+    try modules.append(try selfhost_main_module(io));
+    try modules.append(try selfhost_ast_module(io));
+    try modules.append(try selfhost_backend_module(io));
+    try modules.append(try selfhost_cache_contract_module(io));
+    try modules.append(try selfhost_compiler_module(io));
+    try modules.append(try selfhost_diagnostics_module(io));
+    try modules.append(try selfhost_ir_module(io));
+    try modules.append(try selfhost_lexer_module(io));
+    try modules.append(try selfhost_ownership_module(io));
+    try modules.append(try selfhost_parser_module(io));
+    try modules.append(try selfhost_resolver_module(io));
+    try modules.append(try selfhost_token_module(io));
+    try modules.append(try selfhost_types_module(io));
+    return void;
+}
+
+// selfhost_main_module loads the root compiler entry module.
+fn selfhost_main_module(io: Io) -> !SourceModule {
+    return try read_source_file(io, "selfhost::main", "../../selfhost/src/main.kizu", true);
+}
+
+// selfhost_ast_module loads AST model definitions.
+fn selfhost_ast_module(io: Io) -> !SourceModule {
+    return try read_source_file(io, "selfhost::ast", "../../selfhost/src/ast.kizu", false);
+}
+
+// selfhost_backend_module loads backend emission code.
+fn selfhost_backend_module(io: Io) -> !SourceModule {
+    return try read_source_file(
+        io,
+        "selfhost::backend",
+        "../../selfhost/src/backend.kizu",
+        false
+    );
+}
+
+// selfhost_cache_contract_module loads cache contract checks.
+fn selfhost_cache_contract_module(io: Io) -> !SourceModule {
+    return try read_source_file(
+        io,
+        "selfhost::cache_contract",
+        "../../selfhost/src/cache_contract.kizu",
+        false
+    );
+}
+
+// selfhost_compiler_module loads the compiler orchestration module.
+fn selfhost_compiler_module(io: Io) -> !SourceModule {
+    return try read_source_file(
+        io,
+        "selfhost::compiler",
+        "../../selfhost/src/compiler.kizu",
+        false
+    );
+}
+
+// selfhost_diagnostics_module loads diagnostic rendering code.
+fn selfhost_diagnostics_module(io: Io) -> !SourceModule {
+    return try read_source_file(
+        io,
+        "selfhost::diagnostics",
+        "../../selfhost/src/diagnostics.kizu",
+        false
+    );
+}
+
+// selfhost_ir_module loads IR model and lowering code.
+fn selfhost_ir_module(io: Io) -> !SourceModule {
+    return try read_source_file(io, "selfhost::ir", "../../selfhost/src/ir.kizu", false);
+}
+
+// selfhost_lexer_module loads the self-host lexer.
+fn selfhost_lexer_module(io: Io) -> !SourceModule {
+    return try read_source_file(io, "selfhost::lexer", "../../selfhost/src/lexer.kizu", false);
+}
+
+// selfhost_ownership_module loads ownership checks.
+fn selfhost_ownership_module(io: Io) -> !SourceModule {
+    return try read_source_file(
+        io,
+        "selfhost::ownership",
+        "../../selfhost/src/ownership.kizu",
+        false
+    );
+}
+
+// selfhost_parser_module loads the self-host parser.
+fn selfhost_parser_module(io: Io) -> !SourceModule {
+    return try read_source_file(io, "selfhost::parser", "../../selfhost/src/parser.kizu", false);
+}
+
+// selfhost_resolver_module loads package resolver checks.
+fn selfhost_resolver_module(io: Io) -> !SourceModule {
+    return try read_source_file(
+        io,
+        "selfhost::resolver",
+        "../../selfhost/src/resolver.kizu",
+        false
+    );
+}
+
+// selfhost_token_module loads token definitions.
+fn selfhost_token_module(io: Io) -> !SourceModule {
+    return try read_source_file(io, "selfhost::token", "../../selfhost/src/token.kizu", false);
+}
+
+// selfhost_types_module loads type checking code.
+fn selfhost_types_module(io: Io) -> !SourceModule {
+    return try read_source_file(io, "selfhost::types", "../../selfhost/src/types.kizu", false);
+}
+
+// read_source_file reads one package module from an explicit filesystem path.
+fn read_source_file(
+    io: Io,
+    module_path: []const u8,
+    file_path: []const u8,
+    is_root: bool
+) -> !SourceModule {
+    let source = try std::fs::read_file(io, file_path);
+    if std::mem::len(source) == 0 {
+        return error("empty package module");
+    }
+    return source_module(module_path, source, is_root, false);
+}
+
+// summarize_loaded_package reports source loading without running full lowering.
+fn summarize_loaded_package(modules: &std::array::Array<SourceModule>) -> !PackageReport {
+    var report = empty_package_report();
+    var index = 0;
+
+    report.status = CompileStatus::Pass;
+    while index < modules.len() {
+        let module = try modules.at(index);
+        report.module_count = report.module_count + 1;
+        if !module.is_test {
+            report.compiled_module_count = report.compiled_module_count + 1;
+        }
+        if module.is_root {
+            report.root_found = true;
+        }
+        index = index + 1;
+    }
+    return report;
 }
 
 // ready exposes the compiler module to package-level resolution checks.

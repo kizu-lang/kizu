@@ -20,6 +20,7 @@ declare i32 @fseek(ptr, i64, i32)
 declare i64 @ftell(ptr)
 declare void @rewind(ptr)
 declare ptr @malloc(i64)
+declare ptr @realloc(ptr, i64)
 declare i64 @fread(ptr, i64, i64, ptr)
 declare i32 @fclose(ptr)
 declare ptr @memcpy(ptr, ptr, i64)
@@ -175,6 +176,20 @@ define void @kizu_array_append(ptr %array, ptr %value) {
 entry:
   %len_slot = getelementptr i64, ptr %array, i64 0
   %len = load i64, ptr %len_slot
+  %cap_slot = getelementptr i64, ptr %array, i64 1
+  %cap = load i64, ptr %cap_slot
+  %full = icmp sge i64 %len, %cap
+  br i1 %full, label %grow, label %store
+grow:
+  %next_cap = mul i64 %cap, 2
+  %next_bytes = mul i64 %next_cap, 8
+  %old_data_slot = getelementptr ptr, ptr %array, i64 2
+  %old_data = load ptr, ptr %old_data_slot
+  %next_data = call ptr @realloc(ptr %old_data, i64 %next_bytes)
+  store ptr %next_data, ptr %old_data_slot
+  store i64 %next_cap, ptr %cap_slot
+  br label %store
+store:
   %data_slot = getelementptr ptr, ptr %array, i64 2
   %data = load ptr, ptr %data_slot
   %slot = getelementptr ptr, ptr %data, i64 %len
