@@ -86,6 +86,8 @@ Backend smoke scope in v0.3:
 
 - LLVM text emission remains Go-owned and smoke-tested through `kizu build --emit-llvm`
 - WASM WAT emission remains Go-owned and smoke-tested through `kizu build --target wasm32-wasi`
+- package build smoke includes `kizu build --emit-llvm selfhost` and
+  `kizu build --target wasm32-wasi selfhost`
 - native executable generation is not a v0.3 self-host switch target
 
 Cache ownership in v0.3:

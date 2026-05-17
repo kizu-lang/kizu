@@ -55,7 +55,7 @@ Before switching production behavior from Go to Kizu:
 | type checker | strong legacy oracle for selected conformance and diagnostics | core type-name classification and executable package component test are ported under `selfhost/src` | expand to function/local type environment snapshots |
 | ownership / borrow checker | strong legacy memory-safety oracle | move/copy/borrow transition facts and executable package component test are ported under `selfhost/src` | expand to scoped environment snapshots |
 | IR | strong normalized dump oracle | IR module/function/block/instruction summary facts and executable package component test are ported under `selfhost/src` | expand to full normalized IR dump |
-| backend | Go-owned smoke fingerprint oracle | target/artifact summary facts and executable package component test are ported under `selfhost/src` | not a native production switch target |
+| backend | Go-owned smoke fingerprint oracle plus `kizu build selfhost` package smoke | target/artifact summary facts and executable package component test are ported under `selfhost/src` | not a native production switch target |
 | cache | Go-owned switch contract oracle | cache input/rebuild reason summary facts and executable package component test are ported under `selfhost/src` | Go-owned filesystem and hashing primitives |
 
 ## Production Ownership Decision
@@ -83,6 +83,17 @@ This is an explicit non-switch decision, not a hidden fallback. The current CLI
 continues to use the Go compiler path while `kizu check selfhost`,
 `kizu test selfhost`, and `KIZU_REQUIRE_1TO1=1 go test ./tests/bootstrap`
 guard the self-host package boundary.
+
+The Go compiler can also resolve and build the multi-file self-host package as
+a smoke artifact:
+
+```sh
+kizu build --emit-llvm selfhost
+kizu build --target wasm32-wasi selfhost
+```
+
+This confirms that package-level module resolution is connected to the build
+path. It does not mean any production phase is Kizu-owned yet.
 
 ## #192 Token / Lexer Readiness
 

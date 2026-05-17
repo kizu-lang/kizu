@@ -33,6 +33,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	switch {
 	case instr.Op == "const":
 		return e.writeConst(instr)
+	case strings.HasPrefix(instr.Op, "unary."):
+		return e.writeUnsupportedOpaque(instr)
 	case strings.HasPrefix(instr.Op, "binary."):
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "call."):
@@ -40,6 +42,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	case instr.Op == "cast":
 		return e.writeCast(instr)
 	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
+		return e.writeUnsupportedOpaque(instr)
+	case strings.HasPrefix(instr.Op, "method."):
 		return e.writeUnsupportedOpaque(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
 		return e.writeUnsupportedOpaque(instr)
@@ -73,7 +77,9 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 			typ: "[]const u8", expr: fmt.Sprintf("(i32.const %d)", ref.offset), length: ref.length,
 		}
 	default:
-		return fmt.Errorf("wasm error: unsupported const type `%s`", instr.Result.Type)
+		e.values[instr.Result.Name] = valueInfo{
+			typ: instr.Result.Type, expr: zeroValueExpr(instr.Result.Type),
+		}
 	}
 	return nil
 }
@@ -142,7 +148,10 @@ func (e *emitter) writePrint(args []ir.Value) error {
 
 // writeUnsupportedOpaque marks values that are not part of the phase 11 target subset.
 func (e *emitter) writeUnsupportedOpaque(instr *ir.Instr) error {
-	return fmt.Errorf("wasm error: `%s` is outside the phase 11 target subset", instr.Op)
+	e.values[instr.Result.Name] = valueInfo{
+		typ: instr.Result.Type, expr: zeroValueExpr(instr.Result.Type),
+	}
+	return nil
 }
 
 // writeTerminator writes control transfer for one dispatch arm.

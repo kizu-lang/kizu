@@ -86,10 +86,52 @@ func arenaElementType(arena string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(arena, "arena<"), ">")
 }
 
+// containerElementType returns T for std collection shapes such as Array<T>.
+func containerElementType(container string) string {
+	start := strings.Index(container, "<")
+	if start < 0 || !strings.HasSuffix(container, ">") {
+		return "unknown"
+	}
+	return strings.TrimSuffix(container[start+1:], ">")
+}
+
 // errorUnionElementType returns T for !T.
 func errorUnionElementType(result string) string {
 	if !strings.HasPrefix(result, "!") || len(result) == 1 {
 		return "unknown"
 	}
 	return strings.TrimPrefix(result, "!")
+}
+
+// namespaceConstType returns the enum-like type for a flattened namespace value.
+func namespaceConstType(name string) (string, bool) {
+	idx := strings.LastIndex(name, ".")
+	if idx <= 0 || idx == len(name)-1 {
+		return "", false
+	}
+	return name[:idx], true
+}
+
+// builtinReturnType returns the IR type of selected compiler-needed builtins.
+func builtinReturnType(name string, _ []Value) (string, bool) {
+	switch name {
+	case "std.mem.page_allocator":
+		return "Allocator", true
+	case "std.mem.len":
+		return "i64", true
+	case "std.mem.byte_at":
+		return "!u8", true
+	case "std.mem.equal_bytes", "std.mem.starts_with":
+		return "bool", true
+	case "std.mem.slice":
+		return "![]const u8", true
+	case "std.mem.trim_ascii":
+		return "[]const u8", true
+	case "std.testing.expect":
+		return "!void", true
+	}
+	if strings.HasPrefix(name, "std.") {
+		return "void", true
+	}
+	return "", false
 }
