@@ -158,6 +158,15 @@ diagnostics. `KIZU_SELFHOST_TYPES=1 kizu check <file>` is the opt-in switch for
 this boundary; package-wide production checking remains Go-owned until ownership
 and IR switch units are ready.
 
+`kizu selfhost-ownership <file>` is the bootstrap command for #240. It runs the
+Kizu-owned frontend ownership snapshot path and prints normalized memory-safety
+facts for the selected source-program oracle scope, including moved values,
+borrow conflicts, field borrows, Array/String resource invalidation,
+Arena/Handle provenance, and task/channel ownership-transfer cases.
+`KIZU_SELFHOST_OWNERSHIP=1 kizu check <file>` is the opt-in switch for this
+boundary. The default production checker remains Go-owned until the IR switch
+can consume Kizu-owned ownership facts without a hidden fallback.
+
 ## #242 Backend / Cache Switch Boundary Decision
 
 Target mapping:

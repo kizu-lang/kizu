@@ -330,6 +330,37 @@ func TestCheckCommandSelfHostTypeSwitch(t *testing.T) {
 	}
 }
 
+// TestSelfHostOwnershipCommandChecksMemorySafety checks the ownership switch command.
+func TestSelfHostOwnershipCommandChecksMemorySafety(t *testing.T) {
+	source := "../../examples/negative/moved_value.kizu"
+	cmd := exec.Command("go", "run", ".", "selfhost-ownership", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	got := markedOutputLines(t, string(out), "ownership snapshot", "ownership snapshot end")
+	want := []string{"status", "fail", "move error: moved value was used", "name", "166", "149"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selfhost ownership snapshot got %#v, want %#v", got, want)
+	}
+}
+
+// TestCheckCommandSelfHostOwnershipSwitch checks the opt-in ownership switch.
+func TestCheckCommandSelfHostOwnershipSwitch(t *testing.T) {
+	source := "../../examples/borrow.kizu"
+	cmd := exec.Command("go", "run", ".", "check", source)
+	cmd.Env = append(os.Environ(), "KIZU_SELFHOST_OWNERSHIP=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	got := markedOutputLines(t, string(out), "ownership snapshot", "ownership snapshot end")
+	want := []string{"status", "pass"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selfhost ownership switch got %#v, want %#v", got, want)
+	}
+}
+
 // TestIRCommandSmoke checks the CLI can dump typed SSA IR.
 func TestIRCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "ir", "../../examples/hello.kizu")
