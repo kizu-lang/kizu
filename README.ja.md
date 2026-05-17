@@ -20,7 +20,7 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 Kizu は Go 製の初期プロトタイプです。
 
 v0.1 の対象は interpreter-first の language core です。
-現在の v0.2 作業では、将来の self-host compiler に必要な最小 stdlib surface を追加しています。
+現在の v0.2 baseline では、言語挙動を検証し続けるための最小 stdlib surface と tooling を追加しています。
 正となる挙動は引き続き Go 製 interpreter と `kizu check` です。
 
 実装済み language core:
@@ -50,7 +50,6 @@ v0.1 の対象は interpreter-first の language core です。
 
 実験的な compiler / tooling:
 
-- `selfhost/` の self-host compiler skeleton
 - typed SSA IR
 - LLVM IR text backend
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
@@ -61,8 +60,8 @@ v0.1 の対象は interpreter-first の language core です。
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
 LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
 
-現時点で open な v0.2 Issue はありません。残作業は GitHub Issues 上の v0.3 self-host /
-module-boundary 実装 Issue として管理しています。
+現時点で open な v0.2 Issue はありません。将来の compiler migration work は、
+明確な受け入れ条件を持つ新しい GitHub Issues から開始します。
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 

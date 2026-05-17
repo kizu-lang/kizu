@@ -1,8 +1,8 @@
 # Compiler Specification Decisions
 
 This document tracks compiler-facing language and toolchain decisions that are
-specified but still need implementation work before the self-host compiler can
-replace the Go implementation.
+specified but still need implementation work before another compiler
+implementation can replace the Go implementation.
 
 ## Accepted Decisions
 

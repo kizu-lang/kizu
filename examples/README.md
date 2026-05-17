@@ -4,7 +4,7 @@ This directory is the user-visible catalog for Kizu language behavior.
 
 Executable and negative examples are listed in
 [`tests/conformance/`](../tests/conformance/). The Go test runner reads the
-versioned manifests, and the future self-host compiler should reuse them as the
+versioned manifests so future compiler implementations can reuse them as the
 compatibility corpus.
 
 Run the full catalog through the normal project gate:
@@ -68,7 +68,7 @@ go test ./...
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
-| self-host token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
+| token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes and exposes local byte views |
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |

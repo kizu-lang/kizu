@@ -20,8 +20,7 @@ The implementation is intentionally split by compiler responsibility:
 - `internal/ownership`: move, borrow, arena, concurrency, and std safety rules.
 - `internal/interp`: runtime behavior for the interpreter.
 - `examples`: positive and negative user-facing behavior.
-- `tests/conformance`: reusable behavior corpus for the future self-host compiler.
-- `selfhost/STDLIB.md`: std APIs currently exercised by the self-host skeleton.
+- `tests/conformance`: reusable behavior corpus for future compiler implementations.
 
 This is acceptable for v0.2, but new `std` APIs must not be added only as local
 Go branches. They need a row in this document, examples, and conformance tests.
@@ -107,8 +106,6 @@ New std APIs require all of the following in the same change:
 - Negative example when the API has safety or error boundaries.
 - `tests/conformance/v0_1.json` entry while that manifest remains the active
   reusable corpus.
-- Self-host usage note in `selfhost/STDLIB.md` if the API exists to support the
-  compiler.
 - No hidden global allocator, hidden global runtime, implicit blocking I/O, or
   silent fallback behavior.
 
@@ -118,7 +115,7 @@ Before replacing a Go builtin with Kizu source, the following must be true:
 
 - module resolver can load `std` sources deterministically
 - diagnostics can report spans in both user source and std source
-- conformance tests pass through both Go and self-host paths
+- conformance tests pass through the Go implementation and any future compiler path
 - cache keys include std source hashes and public interface hashes
 - host primitives remain explicit and small
 - safe wrappers preserve the memory-safety contract in `docs/memory-safety.md`
