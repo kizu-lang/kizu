@@ -631,6 +631,10 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_source(ptr %source, ptr %target_name)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"%struct.compiler.CompileReport = type")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"%struct.compiler.CommandReport = type")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.check_source(ptr %source)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.compile_source(ptr %source, ptr @.str.compiler.target.llvm)")
