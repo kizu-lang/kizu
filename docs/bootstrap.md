@@ -37,12 +37,22 @@ execution path.
 Required v0.3 smoke shape:
 
 ```sh
-kizu build --target wasm32-wasi selfhost
+kizu build --target aarch64-apple-darwin selfhost
 ./target/kizu-selfhost check examples/hello.kizu
-./target/kizu-selfhost build --target wasm32-wasi examples/hello.kizu
+./target/kizu-selfhost build --target aarch64-apple-darwin examples/hello.kizu
 ./target/kizu-selfhost check selfhost
-./target/kizu-selfhost build --target wasm32-wasi selfhost
+./target/kizu-selfhost build --target aarch64-apple-darwin selfhost
+./target/kizu-selfhost build --emit-llvm examples/hello.kizu
 ```
+
+The v0.3 standalone artifact is a native executable. The required native backend
+path is Kizu-owned LLVM IR text, `llc` object emission, and `lld` native linking.
+The initial supported native target is host macOS arm64
+(`aarch64-apple-darwin`). The target model must still preserve explicit arch,
+OS, ABI, and object-format fields so later targets do not require a redesign.
+libc / libSystem is allowed only as an explicit target stdlib backend boundary;
+the Kizu language core must not depend on libc. See
+[`docs/adr/0055-v0-3-native-libc-boundary.md`](adr/0055-v0-3-native-libc-boundary.md).
 
 The previous bridge work already implemented:
 
@@ -102,11 +112,13 @@ memory-safety boundary, and switch criteria.
 
 Backend smoke scope before standalone v0.3:
 
-- LLVM text emission remains Go-owned and smoke-tested through `kizu build --emit-llvm`
-- WASM WAT emission remains Go-owned and smoke-tested through `kizu build --target wasm32-wasi`
+- LLVM text emission remains Go-owned until the Kizu-owned self-host backend
+  reaches parity through `kizu build --emit-llvm`
+- WASM WAT emission remains experimental and is not the v0.3 standalone artifact
+  path
 - package build smoke includes `kizu build --emit-llvm selfhost` and
-  `kizu build --target wasm32-wasi selfhost`
-- native executable generation is not a v0.3 self-host switch target
+  `kizu build --target aarch64-apple-darwin selfhost`
+- native executable generation is required for the v0.3 self-host switch target
 
 Cache ownership before standalone v0.3:
 
@@ -142,6 +154,12 @@ go test ./internal/buildcache -run 'Package(Cache|Why)'
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
 just perf-cache-isolated
+```
+
+After the native v0.3 path lands, add this smoke to the same gate:
+
+```sh
+go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu
 ```
 
 Use the strict completion gate only when claiming Go/Kizu 1:1 completion:
