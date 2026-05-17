@@ -4,8 +4,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+
+	golexer "github.com/kizu-lang/kizu/internal/lexer"
+	gotoken "github.com/kizu-lang/kizu/internal/token"
 )
 
 // TestRunCommandSmoke checks the CLI can execute the hello example.
@@ -126,6 +131,26 @@ pub fn failing_test() -> !void {
 	want := "test error: main_test.failing_test"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
+// TestSelfHostLexCommandMatchesGoLexer checks the bootstrap lexer command.
+func TestSelfHostLexCommandMatchesGoLexer(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.kizu")
+	input := `import app::lexer;
+pub fn main() -> void { let name = "alice"; return void; }`
+	if err := os.WriteFile(source, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "selfhost-lex", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	got := parseSelfHostLexOutput(t, string(out))
+	want := goLexerSnapshots(input)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selfhost lexer snapshots got %#v, want %#v", got, want)
 	}
 }
 
@@ -344,6 +369,144 @@ func TestImportCHeaderCommandRejectsUnsupportedSyntax(t *testing.T) {
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
 	}
+}
+
+type cliTokenSnapshot struct {
+	Kind    string
+	Literal string
+	Start   int
+	End     int
+	Line    int
+	Column  int
+}
+
+// parseSelfHostLexOutput parses six-line token records from selfhost-lex.
+func parseSelfHostLexOutput(t *testing.T, output string) []cliTokenSnapshot {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	if len(lines) < 2 || lines[0] != "selfhost lexer token snapshots" {
+		t.Fatalf("missing selfhost lexer snapshot header in %q", output)
+	}
+	snapshots := []cliTokenSnapshot{}
+	for index := 1; index < len(lines); index += 6 {
+		if lines[index] == "selfhost lexer token snapshots end" {
+			return snapshots
+		}
+		if index+5 >= len(lines) {
+			t.Fatalf("truncated selfhost lexer snapshot near %q", lines[index:])
+		}
+		snapshots = append(snapshots, cliTokenSnapshot{
+			Kind:    lines[index],
+			Literal: lines[index+1],
+			Start:   parseSnapshotInt(t, lines[index+2]),
+			End:     parseSnapshotInt(t, lines[index+3]),
+			Line:    parseSnapshotInt(t, lines[index+4]),
+			Column:  parseSnapshotInt(t, lines[index+5]),
+		})
+	}
+	t.Fatal("missing selfhost lexer snapshot end marker")
+	return nil
+}
+
+// parseSnapshotInt parses one numeric token snapshot field.
+func parseSnapshotInt(t *testing.T, value string) int {
+	t.Helper()
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatalf("invalid snapshot integer %q: %v", value, err)
+	}
+	return parsed
+}
+
+// goLexerSnapshots returns the Go oracle in the selfhost-lex output schema.
+func goLexerSnapshots(source string) []cliTokenSnapshot {
+	lexer := golexer.New(source)
+	snapshots := []cliTokenSnapshot{}
+	for {
+		current := lexer.NextToken()
+		snapshots = append(snapshots, cliTokenSnapshot{
+			Kind:    selfHostTokenKind(current.Type),
+			Literal: current.Literal,
+			Start:   current.Start,
+			End:     current.End,
+			Line:    current.Line,
+			Column:  current.Column,
+		})
+		if current.Type == gotoken.EOF {
+			return snapshots
+		}
+	}
+}
+
+// selfHostTokenKind maps Go lexer token types to Kizu enum display names.
+func selfHostTokenKind(kind gotoken.Type) string {
+	names := map[gotoken.Type]string{
+		gotoken.Illegal:     "Illegal",
+		gotoken.EOF:         "Eof",
+		gotoken.Ident:       "Ident",
+		gotoken.Int:         "Number",
+		gotoken.String:      "String",
+		gotoken.Assign:      "Assign",
+		gotoken.Plus:        "Plus",
+		gotoken.Minus:       "Minus",
+		gotoken.Bang:        "Bang",
+		gotoken.Question:    "Question",
+		gotoken.Amp:         "Amp",
+		gotoken.Asterisk:    "Asterisk",
+		gotoken.Slash:       "Slash",
+		gotoken.Percent:     "Percent",
+		gotoken.Eq:          "Eq",
+		gotoken.FatArrow:    "FatArrow",
+		gotoken.NotEq:       "NotEq",
+		gotoken.LT:          "LT",
+		gotoken.LTE:         "LTE",
+		gotoken.GT:          "GT",
+		gotoken.GTE:         "GTE",
+		gotoken.Arrow:       "Arrow",
+		gotoken.Dot:         "Dot",
+		gotoken.Range:       "Range",
+		gotoken.DoubleColon: "DoubleColon",
+		gotoken.Comma:       "Comma",
+		gotoken.Colon:       "Colon",
+		gotoken.Semicolon:   "Semicolon",
+		gotoken.Pipe:        "Pipe",
+		gotoken.LParen:      "LParen",
+		gotoken.RParen:      "RParen",
+		gotoken.LBrace:      "LBrace",
+		gotoken.RBrace:      "RBrace",
+		gotoken.LBracket:    "LBracket",
+		gotoken.RBracket:    "RBracket",
+		gotoken.Import:      "Import",
+		gotoken.Public:      "Public",
+		gotoken.Function:    "Fn",
+		gotoken.Let:         "Let",
+		gotoken.Var:         "Var",
+		gotoken.Return:      "Return",
+		gotoken.If:          "If",
+		gotoken.Else:        "Else",
+		gotoken.While:       "While",
+		gotoken.Break:       "Break",
+		gotoken.Continue:    "Continue",
+		gotoken.Match:       "Match",
+		gotoken.Struct:      "Struct",
+		gotoken.Enum:        "Enum",
+		gotoken.Union:       "Union",
+		gotoken.Contract:    "Contract",
+		gotoken.Satisfy:     "Satisfy",
+		gotoken.For:         "For",
+		gotoken.Impl:        "Impl",
+		gotoken.True:        "True",
+		gotoken.False:       "False",
+		gotoken.Mut:         "Mut",
+		gotoken.Unsafe:      "Unsafe",
+		gotoken.Extern:      "Extern",
+		gotoken.Comptime:    "Comptime",
+		gotoken.Try:         "Try",
+	}
+	if name, ok := names[kind]; ok {
+		return "token.TokenKind::" + name
+	}
+	return "token.TokenKind::Illegal"
 }
 
 // writePackageTestFile writes one file in a temporary package fixture.

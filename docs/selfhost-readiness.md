@@ -116,6 +116,18 @@ frontend boundary. It runs `lexer::lex(source)` and feeds the resulting
 `std::array::Array<token::Token>` directly into `parser::parse_token_stream`
 inside Kizu source. This is intentionally not a Go token-stream adapter.
 
+The bootstrap command for this boundary is:
+
+```sh
+kizu selfhost-lex <file>
+```
+
+The command loads the self-host package and invokes
+`compiler::lex_file_snapshot` with the file path as an explicit process
+argument. Go is only the bootstrap runner and oracle host here; tokenization is
+performed by `selfhost/src/lexer.kizu`, and tests compare every emitted token
+kind, literal, byte span, line, and column against the Go lexer oracle.
+
 ## #192 Token / Lexer Readiness
 
 Target mapping:
