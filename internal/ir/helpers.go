@@ -127,6 +127,18 @@ func builtinReturnType(name string, _ []Value) (string, bool) {
 		return "![]const u8", true
 	case "std.mem.trim_ascii":
 		return "[]const u8", true
+	case "std.fs.read_file":
+		return "![]const u8", true
+	case "std.io.write_stdout", "std.io.write_stderr":
+		return "!void", true
+	case "std.io.blocking", "std.io.threaded", "std.io.failing", "std.io.evented":
+		return "Io", true
+	case "std.process.arg_count":
+		return "i64", true
+	case "std.process.arg", "std.process.env":
+		return "![]const u8", true
+	case "std.process.exit_code":
+		return "i64", true
 	case "std.testing.expect":
 		return "!void", true
 	}

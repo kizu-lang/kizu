@@ -13,8 +13,30 @@ import selfhost::resolver;
 import selfhost::token;
 import selfhost::types;
 
-// main is a package-level scaffold entry point for module resolution checks.
+// main is the self-host compiler CLI entry point.
 pub fn main() -> !void {
+    if std::process::arg_count() == 0 {
+        try scaffold_check();
+        return void;
+    }
+
+    let command = try std::process::arg(0);
+    if std::mem::equal_bytes(command, "check") {
+        try check_command();
+        return void;
+    }
+    if std::mem::equal_bytes(command, "build") {
+        try build_command();
+        return void;
+    }
+
+    let io = std::io::blocking();
+    try std::io::write_stderr(io, "error: unknown selfhost command");
+    return error("unknown selfhost command");
+}
+
+// scaffold_check keeps package-level resolution smoke behavior deterministic.
+fn scaffold_check() -> !void {
     token::ready();
     ast::ready();
     lexer::ready();
@@ -23,5 +45,51 @@ pub fn main() -> !void {
     lexer::source_len("");
     lexer::eof_token("");
     try compiler::compile_self_check();
+    return void;
+}
+
+// check_command runs `kizu-selfhost check <file>`.
+fn check_command() -> !void {
+    if std::process::arg_count() != 2 {
+        return error("usage: kizu-selfhost check <file>");
+    }
+    let io = std::io::blocking();
+    let path = try std::process::arg(1);
+    let source = try std::fs::read_file(io, path);
+    let report = try compiler::check_source(source);
+    try print_command_report(io, report);
+    return void;
+}
+
+// build_command runs `kizu-selfhost build --target <target> <file>`.
+fn build_command() -> !void {
+    if std::process::arg_count() != 4 {
+        return error("usage: kizu-selfhost build --target <target> <file>");
+    }
+    let flag = try std::process::arg(1);
+    if !std::mem::equal_bytes(flag, "--target") {
+        return error("usage: kizu-selfhost build --target <target> <file>");
+    }
+    let io = std::io::blocking();
+    let target = try std::process::arg(2);
+    let path = try std::process::arg(3);
+    let source = try std::fs::read_file(io, path);
+    let report = try compiler::build_source(source, target);
+    try print_command_report(io, report);
+    return void;
+}
+
+// print_command_report writes stable self-host CLI command facts.
+fn print_command_report(io: Io, report: compiler::CommandReport) -> !void {
+    try std::io::write_stdout(io, "selfhost command");
+    print(report.command);
+    print(report.target);
+    if report.status == compiler::CompileStatus::Pass {
+        print("pass");
+    } else {
+        print("fail");
+    }
+    print(report.backend_emitted);
+    print(report.diagnostic);
     return void;
 }
