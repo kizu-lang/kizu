@@ -44,6 +44,9 @@ func printError(err error) {
 
 // dispatch runs one CLI command.
 func dispatch(cmd string, args []string) error {
+	if strings.HasPrefix(cmd, "selfhost-") {
+		return dispatchSelfHost(cmd, args)
+	}
 	switch cmd {
 	case "parse":
 		return parseFile(args[0])
@@ -55,14 +58,6 @@ func dispatch(cmd string, args []string) error {
 	case "test":
 		path, programArgs := splitProgramArgs(args)
 		return testFile(path, programArgs)
-	case "selfhost-lex":
-		return selfHostLexFile(args[0])
-	case "selfhost-parse":
-		return selfHostParseFile(args[0])
-	case "selfhost-resolve":
-		return selfHostResolveTarget(args[0])
-	case "selfhost-type":
-		return selfHostTypeFile(args[0])
 	case "fmt":
 		return fmtFile(args[0])
 	case "ir":
@@ -81,6 +76,25 @@ func dispatch(cmd string, args []string) error {
 	}
 }
 
+// dispatchSelfHost runs bootstrap commands for Kizu-owned compiler phases.
+func dispatchSelfHost(cmd string, args []string) error {
+	switch cmd {
+	case "selfhost-lex":
+		return selfHostLexFile(args[0])
+	case "selfhost-parse":
+		return selfHostParseFile(args[0])
+	case "selfhost-resolve":
+		return selfHostResolveTarget(args[0])
+	case "selfhost-type":
+		return selfHostTypeFile(args[0])
+	case "selfhost-ownership":
+		return selfHostOwnershipFile(args[0])
+	default:
+		usage()
+		return fmt.Errorf("unknown command `%s`", cmd)
+	}
+}
+
 // usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
@@ -88,6 +102,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-parse <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-resolve <file|package>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-type <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-ownership <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -140,6 +155,9 @@ func checkFile(path string) error {
 	}
 	if os.Getenv("KIZU_SELFHOST_TYPES") == "1" {
 		return selfHostTypeFile(path)
+	}
+	if os.Getenv("KIZU_SELFHOST_OWNERSHIP") == "1" {
+		return selfHostOwnershipFile(path)
 	}
 	if packageTarget(path) {
 		return checkPackageTarget(path)
@@ -289,6 +307,11 @@ func selfHostTypeFile(path string) error {
 	return runSelfHostFunction("compiler.type_file_snapshot", path)
 }
 
+// selfHostOwnershipFile runs the Kizu-owned ownership checker bootstrap command.
+func selfHostOwnershipFile(path string) error {
+	return runSelfHostFrontendMode(path, "--ownership")
+}
+
 // selfHostResolverSourcePath maps a package target to its configured root source.
 func selfHostResolverSourcePath(path string) (string, error) {
 	if !packageTarget(path) {
@@ -329,6 +352,25 @@ func runSelfHostFunction(name string, path string) error {
 	return runner.RunFunction(name)
 }
 
+// runSelfHostFrontendMode runs the monolithic self-host frontend with one mode.
+func runSelfHostFrontendMode(path string, mode string) error {
+	frontendPath, err := selfHostFrontendPath()
+	if err != nil {
+		return err
+	}
+	program, errs, err := parsePath(frontendPath)
+	if err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("selfhost frontend parse failed: %s", strings.Join(errs, "; "))
+	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	return interp.NewWithProcessArgs(os.Stdout, []string{path, mode}).Run(program)
+}
+
 // selfHostPackagePath resolves the checked-in selfhost package from common CWDs.
 func selfHostPackagePath() (string, error) {
 	for _, path := range []string{"selfhost", "../../selfhost"} {
@@ -337,6 +379,16 @@ func selfHostPackagePath() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("selfhost package was not found")
+}
+
+// selfHostFrontendPath resolves the checked-in monolithic selfhost frontend.
+func selfHostFrontendPath() (string, error) {
+	for _, path := range []string{"selfhost/frontend.kizu", "../../selfhost/frontend.kizu"} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("selfhost frontend was not found")
 }
 
 // componentTestCount returns explicitly named component test functions.
