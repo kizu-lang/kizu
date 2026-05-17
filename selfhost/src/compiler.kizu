@@ -920,6 +920,12 @@ fn build_function_llvm_symbol(
     if function_is_finish_package_report_body(module_path, name) {
         return build_finish_package_report_function_symbol();
     }
+    if function_is_status_name_body(module_path, name) {
+        return build_status_name_function_symbol();
+    }
+    if function_is_merge_status_body(module_path, name) {
+        return build_merge_status_function_symbol();
+    }
     if try function_has_single_try_call_return(tokens, index) {
         let callee = try function_try_call_return_callee(tokens, index);
         return build_try_call_function_symbol(module_path, name, callee);
@@ -1504,6 +1510,40 @@ fn append_finish_package_report_success(text: &mut std::string::String) -> !void
     return void;
 }
 
+// build_status_name_function_symbol builds the status-to-text ABI conversion.
+fn build_status_name_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @compiler.status_name(ptr %status) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes(" ret ptr %status ");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_merge_status_function_symbol builds sticky failure status merging.
+fn build_merge_status_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("define ptr @compiler.merge_status(ptr %left, ptr %right) ");
+    try text.append_byte(cast<u8>(123));
+    try text.append_bytes("
+entry:
+  %left_failed = icmp eq ptr %left, @.str.compiler.status.fail
+  br i1 %left_failed, label %failed, label %right_status
+failed:
+  ret ptr @.str.compiler.status.fail
+right_status:
+  ret ptr %right
+");
+    try text.append_byte(cast<u8>(125));
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
 // append_command_report_header appends the LLVM function header.
 fn append_command_report_header(text: &mut std::string::String) -> !void {
     try text.append_bytes("define ptr @compiler.command_report(ptr %command, ptr %target_name, ");
@@ -1977,6 +2017,22 @@ fn function_is_finish_package_report_body(module_path: []const u8, name: []const
         return false;
     }
     return std::mem::equal_bytes(name, "finish_package_report");
+}
+
+// function_is_status_name_body identifies the status text conversion helper.
+fn function_is_status_name_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "status_name");
+}
+
+// function_is_merge_status_body identifies sticky status merge logic.
+fn function_is_merge_status_body(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    return std::mem::equal_bytes(name, "merge_status");
 }
 
 // function_has_single_try_call_return detects `return try callee();`.
