@@ -61,7 +61,9 @@ Go 製 interpreter と `kizu check` です。
 - opt-in の IR optimization pipeline
 
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
-LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
+LLVM と WASM は interpreter より限定された subset だけを扱います。
+native executable generation は v0.3 の macOS arm64 path に限定され、
+`llc` と `ld64.lld` を必要とします。
 
 v0.3 の standalone target は native self-host compiler artifact です。
 最初は host macOS arm64 向けに、Kizu-owned LLVM IR text、`llc` による object emission、
@@ -146,6 +148,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -161,6 +164,8 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
 - `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
+- `kizu build --target aarch64-apple-darwin [--opt] <file>` は `llc` と
+  `ld64.lld` で native executable artifact を書き出します。
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。

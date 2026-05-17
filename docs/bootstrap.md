@@ -153,13 +153,8 @@ go test ./tests/bootstrap
 go test ./internal/buildcache -run 'Package(Cache|Why)'
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
-just perf-cache-isolated
-```
-
-After the native v0.3 path lands, add this smoke to the same gate:
-
-```sh
 go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu
+just perf-cache-isolated
 ```
 
 Use the strict completion gate only when claiming Go/Kizu 1:1 completion:

@@ -78,6 +78,55 @@ func llvmBool(value string) string {
 	return "false"
 }
 
+// llvmZero returns a valid placeholder operand for an omitted value.
+func llvmZero(typ string) string {
+	switch llvmType(typ) {
+	case "i1":
+		return "false"
+	case "i8", "i16", "i32", "i64":
+		return "0"
+	default:
+		return "null"
+	}
+}
+
+// llvmOperand coerces an opaque placeholder into a valid operand for typ.
+func llvmOperand(operand string, typ string) string {
+	if operand != "null" {
+		return operand
+	}
+	return llvmZero(typ)
+}
+
+// llvmReturnOperand coerces opaque placeholder returns to the function result type.
+func llvmReturnOperand(operand string, valueType string, returnType string) string {
+	if llvmType(valueType) == llvmType(returnType) {
+		return llvmOperand(operand, returnType)
+	}
+	return llvmZero(returnType)
+}
+
+// llvmLocal maps Kizu SSA names to LLVM local identifiers.
+func llvmLocal(name string) string {
+	if len(name) > 1 && name[0] == '%' && isDecimal(name[1:]) {
+		return "%v" + name[1:]
+	}
+	return name
+}
+
+// isDecimal reports whether text only contains ASCII decimal digits.
+func isDecimal(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, ch := range text {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // escapeString emits a minimal LLVM string literal escape.
 func escapeString(value string) string {
 	var out strings.Builder

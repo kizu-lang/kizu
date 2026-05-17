@@ -67,6 +67,14 @@ llvm file="examples/hello.kizu":
 llvm-opt file="examples/hello.kizu":
     go run ./cmd/kizu build --emit-llvm --opt {{file}}
 
+# Build a native macOS arm64 executable artifact.
+native file="examples/hello.kizu":
+    go run ./cmd/kizu build --target aarch64-apple-darwin {{file}}
+
+# Build a native macOS arm64 executable from optimized typed SSA IR.
+native-opt file="examples/hello.kizu":
+    go run ./cmd/kizu build --target aarch64-apple-darwin --opt {{file}}
+
 # Emit WASI WebAssembly text for a Kizu file.
 wasm file="examples/hello.kizu":
     go run ./cmd/kizu build --target wasm32-wasi {{file}}
@@ -111,6 +119,9 @@ cache-smoke:
     trap 'rm -rf "$tmp"' EXIT; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --emit-llvm examples/hello.kizu >/dev/null; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu >/dev/null; \
+    if command -v llc >/dev/null && command -v ld64.lld >/dev/null; then \
+      KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --target aarch64-apple-darwin examples/hello.kizu >/dev/null; \
+    fi; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu build --emit-llvm examples/hello.kizu >/dev/null; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu why-rebuild examples/hello.kizu; \
     KIZU_CACHE_DIR="$tmp/cache" go run ./cmd/kizu cache status; \

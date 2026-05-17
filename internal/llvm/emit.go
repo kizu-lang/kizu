@@ -28,6 +28,10 @@ type emitter struct {
 	out     bytes.Buffer
 	strings map[string]string
 	values  map[string]valueInfo
+	defined map[string]bool
+	retType string
+	block   *ir.Block
+	preds   map[string]map[string]bool
 }
 
 type valueInfo struct {
@@ -46,6 +50,41 @@ func (e *emitter) emit() error {
 		}
 	}
 	return nil
+}
+
+// collectDefinedValues records SSA names that are produced in one function.
+func (e *emitter) collectDefinedValues(fn *ir.Function) {
+	e.defined = map[string]bool{}
+	for _, param := range fn.Params {
+		e.defined[param.Name] = true
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if instrDefinesLLVM(instr) {
+				e.defined[instr.Result.Name] = true
+			}
+		}
+	}
+}
+
+// instrDefinesLLVM reports whether an instruction prints a local definition.
+func instrDefinesLLVM(instr *ir.Instr) bool {
+	if instr.Result.Type == "void" {
+		return false
+	}
+	switch {
+	case instr.Op == "const":
+		return instr.Result.Type == "[]const u8"
+	case strings.HasPrefix(instr.Op, "binary."):
+		return true
+	case strings.HasPrefix(instr.Op, "call."):
+		name := strings.TrimPrefix(instr.Op, "call.")
+		return name != "print" && !strings.HasPrefix(name, "std.")
+	case instr.Op == "phi":
+		return true
+	default:
+		return false
+	}
 }
 
 // collectStrings assigns stable global names to string constants.
@@ -97,10 +136,14 @@ func (e *emitter) sortedStringLiterals() []string {
 // writeFunction writes one LLVM function.
 func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
+	e.collectDefinedValues(fn)
+	e.preds = functionPredecessors(fn)
+	e.retType = fn.Return
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, llvmType(param.Type)+" "+param.Name)
-		e.values[param.Name] = valueInfo{typ: param.Type, operand: param.Name}
+		operand := llvmLocal(param.Name)
+		params = append(params, llvmType(param.Type)+" "+operand)
+		e.values[param.Name] = valueInfo{typ: param.Type, operand: operand}
 	}
 	fmt.Fprintf(&e.out, "define %s @%s(%s) {\n",
 		llvmType(fn.Return), fn.Name, strings.Join(params, ", "))
@@ -115,6 +158,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 
 // writeBlock writes one LLVM basic block.
 func (e *emitter) writeBlock(block *ir.Block) error {
+	e.block = block
 	fmt.Fprintf(&e.out, "%s:\n", block.Name)
 	for _, instr := range block.Instrs {
 		if err := e.writeInstr(instr); err != nil {
@@ -162,10 +206,11 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 	case "[]const u8":
 		unquoted, _ := strconv.Unquote(instr.Immediate)
 		global := e.strings[instr.Immediate]
+		result := llvmLocal(instr.Result.Name)
 		fmt.Fprintf(&e.out, "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0\n",
-			instr.Result.Name, len(unquoted)+1, global)
+			result, len(unquoted)+1, global)
 		e.values[instr.Result.Name] = valueInfo{
-			typ: "[]const u8", operand: instr.Result.Name, length: len(unquoted),
+			typ: "[]const u8", operand: result, length: len(unquoted),
 		}
 	default:
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
@@ -181,16 +226,21 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	left := e.value(instr.Args[0])
 	right := e.value(instr.Args[1])
 	op := strings.TrimPrefix(instr.Op, "binary.")
+	leftOperand := llvmOperand(left.operand, instr.Args[0].Type)
+	rightOperand := llvmOperand(right.operand, instr.Args[1].Type)
+	operandType := llvmType(instr.Args[0].Type)
 	if instr.Result.Type == "bool" {
 		pred := llvmPredicate(op)
-		fmt.Fprintf(&e.out, "  %s = icmp %s i64 %s, %s\n",
-			instr.Result.Name, pred, left.operand, right.operand)
-		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: instr.Result.Name}
+		result := llvmLocal(instr.Result.Name)
+		fmt.Fprintf(&e.out, "  %s = icmp %s %s %s, %s\n",
+			result, pred, operandType, leftOperand, rightOperand)
+		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: result}
 		return nil
 	}
-	fmt.Fprintf(&e.out, "  %s = %s i64 %s, %s\n",
-		instr.Result.Name, llvmBinaryOp(op), left.operand, right.operand)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Result.Name}
+	result := llvmLocal(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s %s %s, %s\n",
+		result, llvmBinaryOp(op), operandType, leftOperand, rightOperand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
 	return nil
 }
 
@@ -199,6 +249,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	name := strings.TrimPrefix(instr.Op, "call.")
 	if name == "print" {
 		return e.writePrint(instr.Args)
+	}
+	if strings.HasPrefix(name, "std.") {
+		return e.writeOpaqueValue(instr)
 	}
 	args := make([]string, 0, len(instr.Args))
 	for _, arg := range instr.Args {
@@ -210,8 +263,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		fmt.Fprintf(&e.out, "  %s\n", call)
 		return nil
 	}
-	fmt.Fprintf(&e.out, "  %s = %s\n", instr.Result.Name, call)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Result.Name}
+	result := llvmLocal(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s\n", result, call)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
 	return nil
 }
 
@@ -249,19 +303,64 @@ func (e *emitter) writePrint(args []ir.Value) error {
 func (e *emitter) writePhi(instr *ir.Instr) error {
 	parts := make([]string, 0, len(instr.Incoming))
 	for _, incoming := range instr.Incoming {
+		if !e.blockHasPredecessor(incoming.Block) {
+			continue
+		}
 		value := e.value(incoming.Value)
 		parts = append(parts, fmt.Sprintf("[ %s, %%%s ]", value.operand, incoming.Block))
 	}
+	if len(parts) == 0 {
+		e.values[instr.Result.Name] = valueInfo{
+			typ:     instr.Result.Type,
+			operand: llvmZero(instr.Result.Type),
+		}
+		return nil
+	}
+	result := llvmLocal(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = phi %s %s\n",
-		instr.Result.Name, llvmType(instr.Result.Type), strings.Join(parts, ", "))
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Result.Name}
+		result, llvmType(instr.Result.Type), strings.Join(parts, ", "))
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
 	return nil
+}
+
+// blockHasPredecessor checks phi incoming blocks against the lowered CFG.
+func (e *emitter) blockHasPredecessor(name string) bool {
+	return e.block == nil || e.preds[e.block.Name] == nil || e.preds[e.block.Name][name]
+}
+
+// functionPredecessors computes basic-block predecessors from terminators.
+func functionPredecessors(fn *ir.Function) map[string]map[string]bool {
+	preds := map[string]map[string]bool{}
+	for _, block := range fn.Blocks {
+		switch block.Terminator.Op {
+		case "jump":
+			addPred(preds, block.Terminator.Target, block.Name)
+		case "branch":
+			addPred(preds, block.Terminator.Target, block.Name)
+			addPred(preds, block.Terminator.Else, block.Name)
+		}
+	}
+	return preds
+}
+
+// addPred records one predecessor edge.
+func addPred(preds map[string]map[string]bool, target string, pred string) {
+	if target == "" {
+		return
+	}
+	if preds[target] == nil {
+		preds[target] = map[string]bool{}
+	}
+	preds[target][pred] = true
 }
 
 // writeOpaqueValue represents values not lowered to concrete LLVM layout in phase 9.
 func (e *emitter) writeOpaqueValue(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  ; %s omitted in phase 9\n", instr.Op)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+	e.values[instr.Result.Name] = valueInfo{
+		typ:     instr.Result.Type,
+		operand: llvmZero(instr.Result.Type),
+	}
 	return nil
 }
 
@@ -274,13 +373,15 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 			return nil
 		}
 		value := e.value(term.Value)
-		fmt.Fprintf(&e.out, "  ret %s %s\n", llvmType(term.Value.Type), value.operand)
+		typ := llvmType(e.retType)
+		operand := llvmReturnOperand(value.operand, term.Value.Type, e.retType)
+		fmt.Fprintf(&e.out, "  ret %s %s\n", typ, operand)
 	case "jump":
 		fmt.Fprintf(&e.out, "  br label %%%s\n", term.Target)
 	case "branch":
 		cond := e.value(term.Cond)
 		fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n",
-			cond.operand, term.Target, term.Else)
+			llvmOperand(cond.operand, "bool"), term.Target, term.Else)
 	default:
 		return fmt.Errorf("llvm error: unsupported terminator `%s`", term.Op)
 	}
@@ -292,5 +393,8 @@ func (e *emitter) value(value ir.Value) valueInfo {
 	if found, ok := e.values[value.Name]; ok {
 		return found
 	}
-	return valueInfo{typ: value.Type, operand: value.Name}
+	if strings.HasPrefix(value.Name, "%") && !e.defined[value.Name] {
+		return valueInfo{typ: value.Type, operand: llvmZero(value.Type)}
+	}
+	return valueInfo{typ: value.Type, operand: llvmLocal(value.Name)}
 }
