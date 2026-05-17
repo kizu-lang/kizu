@@ -4,6 +4,9 @@ import "strings"
 
 // llvmType maps Kizu IR types to LLVM IR types.
 func llvmType(typ string) string {
+	if strings.HasPrefix(typ, "!") && typ != "!void" {
+		return llvmType(strings.TrimPrefix(typ, "!"))
+	}
 	switch typ {
 	case "void":
 		return "void"
@@ -111,6 +114,9 @@ func llvmReturnOperand(operand string, valueType string, returnType string) stri
 
 // llvmTypedOperand coerces placeholder or mismatched opaque values to wantType.
 func llvmTypedOperand(operand string, valueType string, wantType string) string {
+	if strings.HasPrefix(valueType, "!") && strings.TrimPrefix(valueType, "!") == wantType {
+		return llvmOperand(operand, wantType)
+	}
 	if llvmType(valueType) == llvmType(wantType) {
 		return llvmOperand(operand, wantType)
 	}

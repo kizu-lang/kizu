@@ -76,14 +76,14 @@ func instrDefinesLLVM(instr *ir.Instr) bool {
 	switch {
 	case instr.Op == "const":
 		return instr.Result.Type == "[]const u8"
+	case strings.HasPrefix(instr.Op, "unary."):
+		return true
 	case strings.HasPrefix(instr.Op, "binary."):
 		return true
 	case strings.HasPrefix(instr.Op, "call."):
-		name := strings.TrimPrefix(instr.Op, "call.")
-		if name == "print" || strings.HasPrefix(name, "std.io.write_") {
-			return false
-		}
-		return !strings.HasPrefix(name, "std.") || stdCallDefinesLLVM(name)
+		return callDefinesLLVM(strings.TrimPrefix(instr.Op, "call."))
+	case instr.Op == "cast" || instr.Op == "error.try":
+		return true
 	case instr.Op == "struct.new" || isFieldLoad(instr.Op):
 		return true
 	case instr.Op == "method.at" || instr.Op == "method.len":
@@ -93,6 +93,14 @@ func instrDefinesLLVM(instr *ir.Instr) bool {
 	default:
 		return false
 	}
+}
+
+// callDefinesLLVM reports whether a call instruction has a concrete result.
+func callDefinesLLVM(name string) bool {
+	if name == "print" || strings.HasPrefix(name, "std.io.write_") {
+		return false
+	}
+	return !strings.HasPrefix(name, "std.") || stdCallDefinesLLVM(name)
 }
 
 // stdCallDefinesLLVM reports std calls that the LLVM backend lowers concretely.
@@ -230,7 +238,7 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	case instr.Op == "const":
 		return e.writeConst(instr)
 	case strings.HasPrefix(instr.Op, "unary."):
-		return e.writeOpaqueValue(instr)
+		return e.writeUnary(instr)
 	case strings.HasPrefix(instr.Op, "binary."):
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "call."):
@@ -310,6 +318,33 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	result := llvmLocal(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = %s %s %s, %s\n",
 		result, llvmBinaryOp(op), operandType, leftOperand, rightOperand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
+	return nil
+}
+
+// writeUnary lowers native-safe unary operators used by selfhost code.
+func (e *emitter) writeUnary(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: unary expects 1 arg")
+	}
+	op := strings.TrimPrefix(instr.Op, "unary.")
+	value := e.value(instr.Args[0])
+	result := llvmLocal(instr.Result.Name)
+	switch op {
+	case "!":
+		operand := llvmOperand(value.operand, "bool")
+		fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", result, operand)
+	case "&", "*":
+		operand := llvmOperand(value.operand, instr.Result.Type)
+		if err := e.writeCoercedAlias(result, operand, value.typ, instr.Result.Type); err != nil {
+			return err
+		}
+	default:
+		operand := llvmOperand(value.operand, instr.Result.Type)
+		if err := e.writeCoercedAlias(result, operand, value.typ, instr.Result.Type); err != nil {
+			return err
+		}
+	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
 	return nil
 }
@@ -415,7 +450,12 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: cast expects 1 arg")
 	}
 	value := e.value(instr.Args[0])
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+	result := llvmLocal(instr.Result.Name)
+	operand := llvmOperand(value.operand, instr.Args[0].Type)
+	if err := e.writeCoercedAlias(result, operand, instr.Args[0].Type, instr.Result.Type); err != nil {
+		return err
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: result}
 	return nil
 }
 
@@ -425,12 +465,80 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: try expects 1 arg")
 	}
 	value := e.value(instr.Args[0])
+	result := llvmLocal(instr.Result.Name)
+	operand := llvmTypedOperand(value.operand, value.typ, instr.Result.Type)
+	if err := e.writeCoercedAlias(result, operand, value.typ, instr.Result.Type); err != nil {
+		return err
+	}
 	e.values[instr.Result.Name] = valueInfo{
 		typ:     instr.Result.Type,
-		operand: llvmTypedOperand(value.operand, value.typ, instr.Result.Type),
+		operand: result,
 		length:  value.length,
 	}
 	return nil
+}
+
+// writeCoercedAlias emits a concrete SSA value for transparent conversions.
+func (e *emitter) writeCoercedAlias(
+	result string,
+	operand string,
+	fromType string,
+	toType string,
+) error {
+	from := llvmType(fromType)
+	to := llvmType(toType)
+	if from == to {
+		e.writeSameTypeAlias(result, operand, to)
+		return nil
+	}
+	if isLLVMInteger(from) && isLLVMInteger(to) {
+		fmt.Fprintf(&e.out, "  %s = %s %s %s to %s\n",
+			result, llvmIntCastOp(from, to), from, operand, to)
+		return nil
+	}
+	e.writeSameTypeAlias(result, llvmZero(toType), to)
+	return nil
+}
+
+// writeSameTypeAlias emits a no-op instruction that still defines result.
+func (e *emitter) writeSameTypeAlias(result string, operand string, typ string) {
+	switch typ {
+	case "i1":
+		fmt.Fprintf(&e.out, "  %s = xor i1 %s, false\n", result, operand)
+	case "i8", "i16", "i32", "i64":
+		fmt.Fprintf(&e.out, "  %s = add %s %s, 0\n", result, typ, operand)
+	default:
+		fmt.Fprintf(&e.out, "  %s = select i1 true, ptr %s, ptr null\n", result, operand)
+	}
+}
+
+// isLLVMInteger reports whether typ is an integer scalar LLVM type.
+func isLLVMInteger(typ string) bool {
+	return typ == "i1" || typ == "i8" || typ == "i16" || typ == "i32" || typ == "i64"
+}
+
+// llvmIntCastOp selects an integer cast for native scalar conversions.
+func llvmIntCastOp(from string, to string) string {
+	if llvmIntWidth(from) < llvmIntWidth(to) {
+		return "zext"
+	}
+	return "trunc"
+}
+
+// llvmIntWidth returns the bit width of an integer LLVM type.
+func llvmIntWidth(typ string) int {
+	switch typ {
+	case "i1":
+		return 1
+	case "i8":
+		return 8
+	case "i16":
+		return 16
+	case "i32":
+		return 32
+	default:
+		return 64
+	}
 }
 
 // writeStructNew allocates and initializes one Kizu struct value.

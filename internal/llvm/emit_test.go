@@ -60,6 +60,61 @@ func TestEmitNativeStructAndArrayLowering(t *testing.T) {
 	}
 }
 
+// TestEmitNativeTransparentAliases checks try and borrow define concrete SSA values.
+func TestEmitNativeTransparentAliases(t *testing.T) {
+	got, err := Emit(nativeAliasModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"define i64 @count()",
+		"%v2 = add i64 %v1, 0",
+		"%v4 = select i1 true, ptr %v3, ptr null",
+		"call i1 @uses_ref(ptr %v4)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("LLVM output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// nativeAliasModule returns scalar error-union and borrow alias operations.
+func nativeAliasModule() *ir.Module {
+	return &ir.Module{
+		Structs: map[string]ir.Struct{
+			"Token": {Name: "Token"},
+		},
+		Functions: []*ir.Function{
+			{
+				Name: "count", Return: "!i64",
+				Blocks: []*ir.Block{{Name: "entry",
+					Instrs: []*ir.Instr{{Result: ir.Value{Name: "%1", Type: "i64"},
+						Op: "const", Immediate: "3"}},
+					Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%1", Type: "i64"}},
+				}},
+			},
+			nativeAliasMainFunction(),
+			{Name: "uses_ref", Return: "bool", Params: []ir.Value{{Name: "%arg", Type: "Token"}}},
+		}}
+}
+
+// nativeAliasMainFunction returns a function using try and borrow aliases.
+func nativeAliasMainFunction() *ir.Function {
+	return &ir.Function{Name: "main", Return: "void", Blocks: []*ir.Block{{Name: "entry",
+		Instrs: []*ir.Instr{
+			{Result: ir.Value{Name: "%1", Type: "!i64"}, Op: "call.count"},
+			{Result: ir.Value{Name: "%2", Type: "i64"}, Op: "error.try",
+				Args: []ir.Value{{Name: "%1", Type: "!i64"}}},
+			{Result: ir.Value{Name: "%3", Type: "Token"}, Op: "struct.new"},
+			{Result: ir.Value{Name: "%4", Type: "Token"}, Op: "unary.&",
+				Args: []ir.Value{{Name: "%3", Type: "Token"}}},
+			{Result: ir.Value{Name: "%5", Type: "bool"}, Op: "call.uses_ref",
+				Args: []ir.Value{{Name: "%4", Type: "Token"}}},
+		},
+		Terminator: ir.Terminator{Op: "return"},
+	}}}
+}
+
 // nativeStructArrayModule returns a minimal IR module for aggregate lowering.
 func nativeStructArrayModule() *ir.Module {
 	return &ir.Module{
