@@ -14,11 +14,10 @@ import (
 func TestContractSnapshotCoversSwitchBoundary(t *testing.T) {
 	lines := strings.Join(ContractSnapshotLines(), "\n")
 	required := []string{
-		"owner\ngo",
-		"switch\nblocked",
+		"owner\nkizu",
+		"switch\nplanning-owned",
 		"blocked until\nfilesystem APIs",
 		"blocked until\nhashing APIs",
-		"blocked until\nmodule graph APIs",
 		"blocked until\nartifact layout APIs",
 		"compiler version\n" + Version,
 		"default max bytes\n" + strconv.FormatInt(DefaultMaxBytes, 10),

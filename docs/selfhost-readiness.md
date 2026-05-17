@@ -181,6 +181,13 @@ selected fixture matrix. `KIZU_SELFHOST_WAT=1 kizu build --target wasm32-wasi
 only for invoking the Kizu function and writing stdout; LLVM and native
 emission remain out of scope.
 
+`kizu selfhost-cache-plan <file>` is the bootstrap command for #247. It runs the
+Kizu-owned cache planning snapshot and keeps filesystem walking, hashing, cache
+status, prune deletion, and artifact writes as explicit Go host primitives.
+Kizu owns the planned cache inputs and why-rebuild reason selection; Go remains
+responsible for durable cache storage until stdlib hashing and filesystem APIs
+are ready.
+
 ## #242 Backend / Cache Switch Boundary Decision
 
 Target mapping:
