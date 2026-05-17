@@ -654,6 +654,9 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define i1 @is_selfhost_package_target(ptr %path)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "call i1 @kizu_bytes_equal")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define i1 @diagnostics.is_error(ptr %diagnostic)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @types.can_copy(ptr %info)")
 	requireFileNotContains(t, "target/kizu-selfhost.ll", "define ptr @lexer.is_ascii_alpha")
 	requireLLVMLowers(t, "target/kizu-selfhost.ll")
 	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
