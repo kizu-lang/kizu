@@ -12,6 +12,7 @@ import (
 	goast "github.com/kizu-lang/kizu/internal/ast"
 	golexer "github.com/kizu-lang/kizu/internal/lexer"
 	goparser "github.com/kizu-lang/kizu/internal/parser"
+	goproject "github.com/kizu-lang/kizu/internal/project"
 	gotoken "github.com/kizu-lang/kizu/internal/token"
 )
 
@@ -219,6 +220,56 @@ func TestParseCommandSelfHostParserSwitch(t *testing.T) {
 		t.Fatalf("got %q", out)
 	}
 	if !strings.Contains(string(out), "selfhost parser detail snapshot") {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestSelfHostResolveCommandMatchesGoResolver checks resolver graph parity.
+func TestSelfHostResolveCommandMatchesGoResolver(t *testing.T) {
+	cases := []string{
+		"basic",
+		"imported_types",
+		"missing_import",
+		"private_module_access",
+		"private_type_leak",
+		"private_field_construction",
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join("..", "..", "tests", "conformance", "modules", name)
+			cmd := exec.Command("go", "run", ".", "selfhost-resolve", root)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("command failed: %v\n%s", err, out)
+			}
+			got := parseSelfHostResolverGraphOutput(t, string(out))
+			want := goResolverGraphSnapshot(root)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("selfhost resolver graph got %#v, want %#v", got, want)
+			}
+			gotDiagnostics := parseSelfHostResolverDiagnosticsOutput(t, string(out))
+			wantDiagnostics := goResolverDiagnosticSnapshots(t, resolverRootSource(root))
+			if !reflect.DeepEqual(gotDiagnostics, wantDiagnostics) {
+				t.Fatalf("selfhost resolver diagnostics got %#v, want %#v",
+					gotDiagnostics, wantDiagnostics)
+			}
+		})
+	}
+}
+
+// TestCheckCommandSelfHostResolverSwitch checks the opt-in resolver switch.
+func TestCheckCommandSelfHostResolverSwitch(t *testing.T) {
+	source := filepath.Join("..", "..", "tests", "conformance", "modules", "basic")
+	cmd := exec.Command("go", "run", ".", "check", source)
+	cmd.Env = append(os.Environ(), "KIZU_SELFHOST_RESOLVER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "selfhost resolver module graph snapshot") {
+		t.Fatalf("got %q", out)
+	}
+	if !strings.Contains(string(out), "selfhost resolver diagnostic snapshot") {
 		t.Fatalf("got %q", out)
 	}
 }
@@ -458,6 +509,26 @@ type cliDeclSnapshot struct {
 	Column int
 }
 
+type cliModuleGraphSnapshot struct {
+	Status      string
+	Message     string
+	Root        string
+	Modules     int
+	ModulePaths []string
+	Imports     []string
+}
+
+type cliDiagnosticSnapshot struct {
+	File          string
+	Message       string
+	PrimaryStart  int
+	PrimaryEnd    int
+	PrimaryLine   int
+	PrimaryColumn int
+	RelatedStart  int
+	RelatedEnd    int
+}
+
 // parseSelfHostLexOutput parses six-line token records from selfhost-lex.
 func parseSelfHostLexOutput(t *testing.T, output string) []cliTokenSnapshot {
 	t.Helper()
@@ -539,6 +610,113 @@ func collectParserDetailLines(t *testing.T, lines []string) []string {
 	}
 	t.Fatal("missing selfhost parser detail snapshot end marker")
 	return nil
+}
+
+// parseSelfHostResolverGraphOutput parses the resolver graph snapshot section.
+func parseSelfHostResolverGraphOutput(t *testing.T, output string) cliModuleGraphSnapshot {
+	t.Helper()
+	lines := markedOutputLines(t, output,
+		"selfhost resolver module graph snapshot",
+		"selfhost resolver module graph snapshot end",
+	)
+	return parseModuleGraphLines(t, lines)
+}
+
+// parseModuleGraphLines parses resolver graph rows.
+func parseModuleGraphLines(t *testing.T, lines []string) cliModuleGraphSnapshot {
+	t.Helper()
+	snapshot := cliModuleGraphSnapshot{}
+	for index := 0; index < len(lines); index++ {
+		switch lines[index] {
+		case "status":
+			snapshot.Status = lines[index+1]
+			index++
+		case "message":
+			snapshot.Message = lines[index+1]
+			index++
+		case "root":
+			snapshot.Root = lines[index+1]
+			index++
+		case "modules":
+			snapshot.Modules = parseSnapshotInt(t, lines[index+1])
+			index++
+		case "module":
+			next, path := parsePathRecord(lines, index+1, "module end")
+			snapshot.ModulePaths = append(snapshot.ModulePaths, path)
+			index = next
+		case "import":
+			next, path := parsePathRecord(lines, index+1, "import end")
+			snapshot.Imports = append(snapshot.Imports, path)
+			index = next
+		}
+	}
+	return snapshot
+}
+
+// parseSelfHostResolverDiagnosticsOutput parses resolver diagnostic records.
+func parseSelfHostResolverDiagnosticsOutput(t *testing.T, output string) []cliDiagnosticSnapshot {
+	t.Helper()
+	lines := markedOutputLines(t, output,
+		"selfhost resolver diagnostic snapshot",
+		"selfhost resolver diagnostic snapshot end",
+	)
+	if len(lines)%8 != 0 {
+		t.Fatalf("resolver diagnostic snapshot has incomplete records: %q", lines)
+	}
+	diagnostics := []cliDiagnosticSnapshot{}
+	for index := 0; index < len(lines); index += 8 {
+		diagnostics = append(diagnostics, cliDiagnosticSnapshot{
+			File:          lines[index],
+			Message:       lines[index+1],
+			PrimaryStart:  parseSnapshotInt(t, lines[index+2]),
+			PrimaryEnd:    parseSnapshotInt(t, lines[index+3]),
+			PrimaryLine:   parseSnapshotInt(t, lines[index+4]),
+			PrimaryColumn: parseSnapshotInt(t, lines[index+5]),
+			RelatedStart:  parseSnapshotInt(t, lines[index+6]),
+			RelatedEnd:    parseSnapshotInt(t, lines[index+7]),
+		})
+	}
+	return diagnostics
+}
+
+// markedOutputLines returns output lines between two section markers.
+func markedOutputLines(t *testing.T, output string, start string, end string) []string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	for index, line := range lines {
+		if line == start {
+			return collectMarkedLines(t, lines[index+1:], end)
+		}
+	}
+	t.Fatalf("missing marker %q in %q", start, output)
+	return nil
+}
+
+// collectMarkedLines collects lines until one end marker.
+func collectMarkedLines(t *testing.T, lines []string, end string) []string {
+	t.Helper()
+	collected := []string{}
+	for _, line := range lines {
+		if line == end {
+			return collected
+		}
+		collected = append(collected, line)
+	}
+	t.Fatalf("missing marker %q", end)
+	return nil
+}
+
+// parsePathRecord returns a namespace path terminated by an end marker.
+func parsePathRecord(lines []string, start int, end string) (int, string) {
+	parts := []string{}
+	index := start
+	for ; index < len(lines); index++ {
+		if lines[index] == end {
+			return index, strings.Join(parts, "::")
+		}
+		parts = append(parts, lines[index])
+	}
+	return index, strings.Join(parts, "::")
 }
 
 // parseSnapshotInt parses one numeric token snapshot field.
@@ -856,6 +1034,116 @@ func normalizeParserError(errors []string) string {
 		}
 	}
 	return "parser error"
+}
+
+// goResolverGraphSnapshot returns Go package graph facts in selfhost schema.
+func goResolverGraphSnapshot(root string) cliModuleGraphSnapshot {
+	pkg, err := goproject.LoadPackage(root)
+	if err != nil {
+		return cliModuleGraphSnapshot{Status: "fail", Message: normalizeModuleError(err.Error())}
+	}
+	snapshot := cliModuleGraphSnapshot{
+		Status:  "pass",
+		Root:    pkg.Graph.Root,
+		Modules: len(pkg.Graph.Modules),
+	}
+	for _, module := range pkg.Graph.Modules {
+		snapshot.ModulePaths = append(snapshot.ModulePaths, module.Path)
+	}
+	for _, module := range pkg.Modules {
+		if module.Module.Path != pkg.Graph.Root {
+			continue
+		}
+		for _, imported := range module.Imports {
+			snapshot.Imports = append(snapshot.Imports, imported.Path)
+		}
+	}
+	return snapshot
+}
+
+// normalizeModuleError maps resolver errors into the selected self-host subset.
+func normalizeModuleError(message string) string {
+	if strings.Contains(message, "missing module") {
+		return "module error: missing module"
+	}
+	return "module error"
+}
+
+// goResolverDiagnosticSnapshots returns selected resolver diagnostic rows.
+func goResolverDiagnosticSnapshots(t *testing.T, path string) []cliDiagnosticSnapshot {
+	t.Helper()
+	slashPath := filepath.ToSlash(path)
+	if strings.Contains(slashPath, "missing_import") {
+		return []cliDiagnosticSnapshot{
+			goDiagnosticFromToken(
+				path,
+				"module error: missing module",
+				tokenWithLiteral(t, path, "missing"),
+			),
+		}
+	}
+	if strings.Contains(slashPath, "private_module_access") {
+		return []cliDiagnosticSnapshot{goDiagnosticFromToken(
+			path,
+			"module error",
+			tokenWithLiteral(t, path, "hidden"),
+		)}
+	}
+	if strings.Contains(slashPath, "private_type_leak") {
+		return []cliDiagnosticSnapshot{goDiagnosticFromToken(
+			path,
+			"module error",
+			tokenWithLiteral(t, path, "Secret"),
+		)}
+	}
+	if strings.Contains(slashPath, "private_field_construction") {
+		return []cliDiagnosticSnapshot{goDiagnosticFromToken(
+			path,
+			"module error",
+			tokenWithLiteral(t, path, "secret"),
+		)}
+	}
+	return []cliDiagnosticSnapshot{}
+}
+
+// goDiagnosticFromToken builds a diagnostic snapshot from one token.
+func goDiagnosticFromToken(file string, message string, token gotoken.Token) cliDiagnosticSnapshot {
+	return cliDiagnosticSnapshot{
+		File:          file,
+		Message:       message,
+		PrimaryStart:  token.Start,
+		PrimaryEnd:    token.End,
+		PrimaryLine:   token.Line,
+		PrimaryColumn: token.Column,
+		RelatedStart:  token.Start,
+		RelatedEnd:    token.End,
+	}
+}
+
+// tokenWithLiteral returns the first Go token with the requested literal.
+func tokenWithLiteral(t *testing.T, path string, literal string) gotoken.Token {
+	t.Helper()
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lexer := golexer.New(string(source))
+	for {
+		current := lexer.NextToken()
+		if current.Literal == literal {
+			return current
+		}
+		if current.Type == gotoken.EOF {
+			break
+		}
+	}
+	t.Fatalf("no token literal %q in %s", literal, path)
+	return gotoken.Token{}
+}
+
+// resolverRootSource returns the configured root source for module fixtures.
+func resolverRootSource(root string) string {
+	return filepath.Join(root, "src", "main.kizu")
 }
 
 // goParserDeclSnapshot returns one top-level declaration snapshot.

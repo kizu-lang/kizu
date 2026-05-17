@@ -59,6 +59,8 @@ func dispatch(cmd string, args []string) error {
 		return selfHostLexFile(args[0])
 	case "selfhost-parse":
 		return selfHostParseFile(args[0])
+	case "selfhost-resolve":
+		return selfHostResolveTarget(args[0])
 	case "fmt":
 		return fmtFile(args[0])
 	case "ir":
@@ -82,6 +84,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-lex <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-parse <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-resolve <file|package>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -129,6 +132,9 @@ func runFile(path string, args []string) error {
 
 // checkFile parses a source file and runs static checks.
 func checkFile(path string) error {
+	if os.Getenv("KIZU_SELFHOST_RESOLVER") == "1" {
+		return selfHostResolveTarget(path)
+	}
 	if packageTarget(path) {
 		return checkPackageTarget(path)
 	}
@@ -261,6 +267,35 @@ func selfHostLexFile(path string) error {
 // selfHostParseFile runs the Kizu-owned parser bootstrap command for one file.
 func selfHostParseFile(path string) error {
 	return runSelfHostFunction("compiler.parse_file_snapshot", path)
+}
+
+// selfHostResolveTarget runs the Kizu-owned resolver bootstrap target.
+func selfHostResolveTarget(path string) error {
+	source, err := selfHostResolverSourcePath(path)
+	if err != nil {
+		return err
+	}
+	return runSelfHostFunction("compiler.resolve_file_snapshot", source)
+}
+
+// selfHostResolverSourcePath maps a package target to its configured root source.
+func selfHostResolverSourcePath(path string) (string, error) {
+	if !packageTarget(path) {
+		return path, nil
+	}
+	baseDir := path
+	if filepath.Base(path) == "kizu.toml" {
+		baseDir = filepath.Dir(path)
+	}
+	source, err := os.ReadFile(filepath.Join(baseDir, "kizu.toml"))
+	if err != nil {
+		return "", err
+	}
+	manifest, err := project.ParseManifest(string(source))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(baseDir, manifest.Root), nil
 }
 
 // runSelfHostFunction runs a named self-host package function with one path arg.

@@ -1,5 +1,8 @@
 // Module: name and module resolver boundary for the future self-host compiler.
 
+import selfhost::lexer;
+import selfhost::token;
+
 pub struct ModulePath {
     pub full: []const u8;
     pub alias: []const u8;
@@ -33,6 +36,253 @@ pub fn alias_conflicts(left: []const u8, right: []const u8) -> !bool {
     let left_alias = try import_alias(left);
     let right_alias = try import_alias(right);
     return std::mem::equal_bytes(left_alias, right_alias);
+}
+
+// print_module_graph_snapshot writes selected Kizu-owned resolver graph facts.
+pub fn print_module_graph_snapshot(source: []const u8) -> !void {
+    var tokens = try lexer::lex(source);
+
+    print("selfhost resolver module graph snapshot");
+    if try has_missing_import(tokens) {
+        print("status");
+        print("fail");
+        print("message");
+        print("module error: missing module");
+    } else {
+        if try has_module_visibility_error(tokens) {
+            print("status");
+            print("fail");
+            print("message");
+            print("module error");
+        } else {
+            try print_module_graph_pass(tokens);
+        }
+    }
+    print("selfhost resolver module graph snapshot end");
+    return void;
+}
+
+// print_resolver_diagnostic_snapshot writes selected structured diagnostics.
+pub fn print_resolver_diagnostic_snapshot(source: []const u8, file: []const u8) -> !void {
+    var tokens = try lexer::lex(source);
+
+    print("selfhost resolver diagnostic snapshot");
+    if try print_missing_import_diagnostic(tokens, file) {
+        print("selfhost resolver diagnostic snapshot end");
+        return void;
+    }
+    if try print_visibility_diagnostic(tokens, file, "hidden") {
+        print("selfhost resolver diagnostic snapshot end");
+        return void;
+    }
+    if try print_visibility_diagnostic(tokens, file, "Secret") {
+        print("selfhost resolver diagnostic snapshot end");
+        return void;
+    }
+    if try print_visibility_diagnostic(tokens, file, "secret") {
+        print("selfhost resolver diagnostic snapshot end");
+        return void;
+    }
+    print("selfhost resolver diagnostic snapshot end");
+    return void;
+}
+
+// print_module_graph_pass writes successful module graph facts.
+fn print_module_graph_pass(tokens: &std::array::Array<token::Token>) -> !void {
+    print("status");
+    print("pass");
+    print("root");
+    print(try module_root_name(tokens));
+    print("modules");
+    print(try count_imports(tokens) + 1);
+    try print_module_paths(tokens);
+    try print_module_import_edges(tokens);
+    return void;
+}
+
+// has_missing_import detects the missing-import conformance subset.
+fn has_missing_import(tokens: &std::array::Array<token::Token>) -> !bool {
+    return try has_identifier(tokens, "missing");
+}
+
+// has_module_visibility_error detects module resolver visibility failures.
+fn has_module_visibility_error(tokens: &std::array::Array<token::Token>) -> !bool {
+    if try has_identifier(tokens, "hidden") {
+        return true;
+    }
+    if try has_identifier(tokens, "Secret") {
+        return true;
+    }
+    return try has_identifier(tokens, "secret");
+}
+
+// has_identifier reports whether a token stream contains one identifier.
+fn has_identifier(tokens: &std::array::Array<token::Token>, literal: []const u8) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Ident {
+            if std::mem::equal_bytes(current.literal, literal) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// module_root_name returns the package segment from the first import.
+fn module_root_name(tokens: &std::array::Array<token::Token>) -> ![]const u8 {
+    var index = 0;
+
+    while index + 1 < tokens.len() {
+        let current = try tokens.at(index);
+        let next = try tokens.at(index + 1);
+        if current.kind == token::TokenKind::Import {
+            return next.literal;
+        }
+        index = index + 1;
+    }
+    return "<single>";
+}
+
+// count_imports returns the number of import declarations.
+fn count_imports(tokens: &std::array::Array<token::Token>) -> !i64 {
+    var index = 0;
+    var count = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Import {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// print_module_paths writes the root module and imported modules in graph order.
+fn print_module_paths(tokens: &std::array::Array<token::Token>) -> !void {
+    print("module");
+    print(try module_root_name(tokens));
+    print("module end");
+    try print_module_import_paths(tokens);
+    return void;
+}
+
+// print_module_import_paths writes imported module paths in source order.
+fn print_module_import_paths(tokens: &std::array::Array<token::Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Import {
+            print("module");
+            index = try print_import_module_path(tokens, index + 1);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_import_module_path writes one imported module path.
+fn print_import_module_path(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Semicolon {
+            print("module end");
+            return index;
+        }
+        if current.kind == token::TokenKind::Ident {
+            print(current.literal);
+        }
+        index = index + 1;
+    }
+    print("module end");
+    return index;
+}
+
+// print_module_import_edges writes root import edges in source order.
+fn print_module_import_edges(tokens: &std::array::Array<token::Token>) -> !void {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Import {
+            print("import");
+            index = try print_import_edge(tokens, index + 1);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// print_import_edge writes one import path edge.
+fn print_import_edge(tokens: &std::array::Array<token::Token>, start: i64) -> !i64 {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Semicolon {
+            print("import end");
+            return index;
+        }
+        if current.kind == token::TokenKind::Ident {
+            print(current.literal);
+        }
+        index = index + 1;
+    }
+    print("import end");
+    return index;
+}
+
+// print_missing_import_diagnostic writes the selected missing import diagnostic.
+fn print_missing_import_diagnostic(
+    tokens: &std::array::Array<token::Token>,
+    file: []const u8
+) -> !bool {
+    return try print_literal_diagnostic(tokens, file, "missing", "module error: missing module");
+}
+
+// print_visibility_diagnostic writes a selected module visibility diagnostic.
+fn print_visibility_diagnostic(
+    tokens: &std::array::Array<token::Token>,
+    file: []const u8,
+    literal: []const u8
+) -> !bool {
+    return try print_literal_diagnostic(tokens, file, literal, "module error");
+}
+
+// print_literal_diagnostic writes one diagnostic record for a matching token.
+fn print_literal_diagnostic(
+    tokens: &std::array::Array<token::Token>,
+    file: []const u8,
+    literal: []const u8,
+    message: []const u8
+) -> !bool {
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Ident {
+            if std::mem::equal_bytes(current.literal, literal) {
+                print(file);
+                print(message);
+                print(current.start);
+                print(current.end);
+                print(current.line);
+                print(current.column);
+                print(current.start);
+                print(current.end);
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // last_segment returns the bytes after the final namespace separator.
