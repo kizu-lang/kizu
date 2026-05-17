@@ -677,20 +677,24 @@ fn write_module_llvm_symbols(io: Io, module: &SourceModule) -> !void {
         let current = try tokens.at(index);
         if current.kind == token::TokenKind::Fn {
             let name = try tokens.at(index + 1);
-            let is_ready = std::mem::equal_bytes(name.literal, "ready");
-            let ready_returns_true = try function_has_direct_bool_return(
+            let returns_true = try function_has_single_bool_return(
                 tokens,
                 index,
                 token::TokenKind::True
             );
-            if is_ready {
-                if ready_returns_true {
-                    try write_bool_function_symbol(io, module.path, name.literal, "true");
+            let returns_false = try function_has_single_bool_return(
+                tokens,
+                index,
+                token::TokenKind::False
+            );
+            if returns_true {
+                try write_bool_function_symbol(io, module.path, name.literal, "true");
+            } else {
+                if returns_false {
+                    try write_bool_function_symbol(io, module.path, name.literal, "false");
                 } else {
                     try write_function_symbol(io, module.path, name.literal);
                 }
-            } else {
-                try write_function_symbol(io, module.path, name.literal);
             }
         }
         index = index + 1;
@@ -758,18 +762,28 @@ fn build_module_llvm_symbols(module: &SourceModule) -> !std::string::String {
         let current = try tokens.at(index);
         if current.kind == token::TokenKind::Fn {
             let name = try tokens.at(index + 1);
-            let is_ready = std::mem::equal_bytes(name.literal, "ready");
-            let ready_returns_true = try function_has_direct_bool_return(
+            let returns_true = try function_has_single_bool_return(
                 tokens,
                 index,
                 token::TokenKind::True
             );
-            if is_ready {
-                if ready_returns_true {
+            let returns_false = try function_has_single_bool_return(
+                tokens,
+                index,
+                token::TokenKind::False
+            );
+            if returns_true {
+                try text.append_bytes("define i1 @");
+                try text.append_bytes(module_symbol_prefix(module.path));
+                try text.append_bytes(name.literal);
+                try text.append_bytes("() { ret i1 true }");
+                try text.append_byte(cast<u8>(10));
+            } else {
+                if returns_false {
                     try text.append_bytes("define i1 @");
                     try text.append_bytes(module_symbol_prefix(module.path));
                     try text.append_bytes(name.literal);
-                    try text.append_bytes("() { ret i1 true }");
+                    try text.append_bytes("() { ret i1 false }");
                     try text.append_byte(cast<u8>(10));
                 } else {
                     try text.append_bytes("define ptr @");
@@ -778,12 +792,6 @@ fn build_module_llvm_symbols(module: &SourceModule) -> !std::string::String {
                     try text.append_bytes("() { ret ptr null }");
                     try text.append_byte(cast<u8>(10));
                 }
-            } else {
-                try text.append_bytes("define ptr @");
-                try text.append_bytes(module_symbol_prefix(module.path));
-                try text.append_bytes(name.literal);
-                try text.append_bytes("() { ret ptr null }");
-                try text.append_byte(cast<u8>(10));
             }
         }
         index = index + 1;
@@ -791,8 +799,8 @@ fn build_module_llvm_symbols(module: &SourceModule) -> !std::string::String {
     return text;
 }
 
-// function_has_direct_bool_return detects `fn ... -> bool { return true|false; }`.
-fn function_has_direct_bool_return(
+// function_has_single_bool_return detects a body containing only one bool return.
+fn function_has_single_bool_return(
     tokens: &std::array::Array<token::Token>,
     start: i64,
     value: token::TokenKind
@@ -801,34 +809,27 @@ fn function_has_direct_bool_return(
     if !returns_bool {
         return false;
     }
-    var index = try function_body_start(tokens, start);
-    var depth = 1;
-
+    let index = try function_body_start(tokens, start);
     if index < 0 {
         return false;
     }
-    while index + 1 < tokens.len() {
-        let current = try tokens.at(index);
-        if current.kind == token::TokenKind::LBrace {
-            depth = depth + 1;
-        } else {
-            if current.kind == token::TokenKind::RBrace {
-                depth = depth - 1;
-                if depth == 0 {
-                    return false;
-                }
-            } else {
-                if current.kind == token::TokenKind::Return {
-                    let next = try tokens.at(index + 1);
-                    if depth == 1 {
-                        return next.kind == value;
-                    }
-                }
-            }
-        }
-        index = index + 1;
+    if index + 3 >= tokens.len() {
+        return false;
     }
-    return false;
+    let ret = try tokens.at(index);
+    let literal = try tokens.at(index + 1);
+    let semicolon = try tokens.at(index + 2);
+    let close = try tokens.at(index + 3);
+    if ret.kind != token::TokenKind::Return {
+        return false;
+    }
+    if literal.kind != value {
+        return false;
+    }
+    if semicolon.kind != token::TokenKind::Semicolon {
+        return false;
+    }
+    return close.kind == token::TokenKind::RBrace;
 }
 
 // function_returns_bool reports whether a function declares `-> bool`.

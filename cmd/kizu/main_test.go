@@ -631,6 +631,7 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.compile_source()")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.ready() { ret i1 true }")
+	requireFileNotContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.is_ascii_digit()")
 	requireLLVMLowers(t, "target/kizu-selfhost.ll")
 	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
@@ -646,6 +647,18 @@ func requireFileContains(t *testing.T, path string, want string) {
 	}
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("got artifact %s: %q", path, data)
+	}
+}
+
+// requireFileNotContains checks an artifact file does not contain an unstable marker.
+func requireFileNotContains(t *testing.T, path string, deny string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("artifact missing %s: %v", path, err)
+	}
+	if strings.Contains(string(data), deny) {
+		t.Fatalf("got artifact %s containing denied marker %q", path, deny)
 	}
 }
 
