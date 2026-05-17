@@ -27,6 +27,7 @@ func TestRuntimeLLVMExportsPrintSymbols(t *testing.T) {
 		"declare i32 @printf",
 		"declare ptr @fopen",
 		"define ptr @kizu_read_file",
+		"define i1 @kizu_file_exists",
 		"define i64 @kizu_bytes_len",
 		"define i8 @kizu_byte_at",
 		"define ptr @kizu_array_new",

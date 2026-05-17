@@ -153,6 +153,18 @@ close_fail:
 fail:
   ret ptr @.kizu.empty
 }
+
+define i1 @kizu_file_exists(ptr %path) {
+entry:
+  %file = call ptr @fopen(ptr %path, ptr @.kizu.mode.rb)
+  %missing = icmp eq ptr %file, null
+  br i1 %missing, label %no, label %yes
+yes:
+  call i32 @fclose(ptr %file)
+  ret i1 true
+no:
+  ret i1 false
+}
 `
 }
 
