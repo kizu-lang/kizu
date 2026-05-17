@@ -555,50 +555,52 @@ func TestBuildTargetNativeSelfHostPath(t *testing.T) {
 	if strings.TrimSpace(string(out)) != "target/kizu-selfhost" {
 		t.Fatalf("got %q", out)
 	}
-	check := exec.Command("./target/kizu-selfhost", "check", "../../examples/hello.kizu")
-	checkOut, err := check.CombinedOutput()
-	if err != nil {
-		t.Fatalf("selfhost check failed: %v\n%s", err, checkOut)
-	}
-	if !strings.Contains(string(checkOut), "check\nllvm\npass\ntrue") {
-		t.Fatalf("got %q", checkOut)
-	}
-	build := exec.Command(
+	runSelfHostArtifact(t, "check\nllvm\npass\ntrue",
+		"./target/kizu-selfhost", "check", "../../examples/hello.kizu")
+	runSelfHostArtifact(t, "build\naarch64-apple-darwin\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin",
-		"../../examples/hello.kizu",
-	)
-	buildOut, err := build.CombinedOutput()
+		"../../examples/hello.kizu")
+	runSelfHostArtifact(t, "check\nllvm\npass\ntrue",
+		"./target/kizu-selfhost", "check", "../../selfhost")
+	runSelfHostPackageRebuildSmoke(t)
+	runSelfHostArtifact(t, "; Kizu LLVM IR\ndefine dso_local void @main()",
+		"./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
+}
+
+// runSelfHostArtifact executes the generated compiler and checks output facts.
+func runSelfHostArtifact(t *testing.T, want string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(args[0], args[1:]...)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("selfhost build failed: %v\n%s", err, buildOut)
+		t.Fatalf("selfhost artifact failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(buildOut), "build\naarch64-apple-darwin\npass\ntrue") {
-		t.Fatalf("got %q", buildOut)
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q", out)
 	}
-	packageCheck := exec.Command("./target/kizu-selfhost", "check", "../../selfhost")
-	packageCheckOut, err := packageCheck.CombinedOutput()
+}
+
+// runSelfHostPackageRebuildSmoke checks package rebuild artifacts.
+func runSelfHostPackageRebuildSmoke(t *testing.T) {
+	t.Helper()
+	runSelfHostArtifact(t, "build\naarch64-apple-darwin\npass\ntrue",
+		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
+	requireFileContains(t, "target/kizu-selfhost.rebuild",
+		"kizu-selfhost aarch64-apple-darwin rebuild")
+	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
+		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
+	requireFileContains(t, "target/kizu-selfhost.wat", "(module (func $main))")
+}
+
+// requireFileContains checks an artifact file contains a stable marker.
+func requireFileContains(t *testing.T, path string, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("selfhost package check failed: %v\n%s", err, packageCheckOut)
+		t.Fatalf("artifact missing %s: %v", path, err)
 	}
-	if !strings.Contains(string(packageCheckOut), "check\nllvm\npass\ntrue") {
-		t.Fatalf("got %q", packageCheckOut)
-	}
-	packageBuild := exec.Command(
-		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost",
-	)
-	packageBuildOut, err := packageBuild.CombinedOutput()
-	if err != nil {
-		t.Fatalf("selfhost package build failed: %v\n%s", err, packageBuildOut)
-	}
-	if !strings.Contains(string(packageBuildOut), "build\naarch64-apple-darwin\npass\ntrue") {
-		t.Fatalf("got %q", packageBuildOut)
-	}
-	emit := exec.Command("./target/kizu-selfhost", "build", "--emit-llvm", "../../examples/hello.kizu")
-	emitOut, err := emit.CombinedOutput()
-	if err != nil {
-		t.Fatalf("selfhost emit llvm failed: %v\n%s", err, emitOut)
-	}
-	if !strings.Contains(string(emitOut), "build\nllvm\npass\ntrue") {
-		t.Fatalf("got %q", emitOut)
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("got artifact %s: %q", path, data)
 	}
 }
 

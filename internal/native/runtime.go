@@ -9,6 +9,7 @@ func RuntimeLLVM() string {
 @.kizu.false = private unnamed_addr constant [6 x i8] c"false\00"
 @.kizu.empty = private unnamed_addr constant [1 x i8] c"\00"
 @.kizu.mode.rb = private unnamed_addr constant [3 x i8] c"rb\00"
+@.kizu.mode.wb = private unnamed_addr constant [3 x i8] c"wb\00"
 @kizu_argc = global i64 0
 @kizu_argv = global ptr null
 
@@ -23,6 +24,7 @@ declare void @rewind(ptr)
 declare ptr @malloc(i64)
 declare ptr @realloc(ptr, i64)
 declare i64 @fread(ptr, i64, i64, ptr)
+declare i64 @fwrite(ptr, i64, i64, ptr)
 declare i32 @fclose(ptr)
 declare ptr @memcpy(ptr, ptr, i64)
 ` + runtimePrintLLVM() + runtimeProcessLLVM() + runtimeMemoryLLVM() + runtimePathLLVM() +
@@ -201,6 +203,20 @@ yes:
   ret i1 true
 no:
   ret i1 false
+}
+
+define ptr @kizu_write_file(ptr %path, ptr %bytes) {
+entry:
+  %file = call ptr @fopen(ptr %path, ptr @.kizu.mode.wb)
+  %missing = icmp eq ptr %file, null
+  br i1 %missing, label %fail, label %opened
+opened:
+  %size = call i64 @strlen(ptr %bytes)
+  call i64 @fwrite(ptr %bytes, i64 1, i64 %size, ptr %file)
+  call i32 @fclose(ptr %file)
+  ret ptr @.kizu.empty
+fail:
+  ret ptr @.kizu.empty
 }
 `
 }

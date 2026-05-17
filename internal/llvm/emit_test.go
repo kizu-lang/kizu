@@ -89,6 +89,22 @@ func TestEmitNativeUnaryMinus(t *testing.T) {
 	}
 }
 
+// TestEmitNativeWriteFile checks !void host calls can be tried without SSA.
+func TestEmitNativeWriteFile(t *testing.T) {
+	got, err := Emit(nativeWriteFileModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"declare ptr @kizu_write_file(ptr, ptr)",
+		"call ptr @kizu_write_file(ptr %v1, ptr %v2)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("LLVM output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // nativeAliasModule returns scalar error-union and borrow alias operations.
 func nativeAliasModule() *ir.Module {
 	return &ir.Module{
@@ -126,6 +142,35 @@ func nativeUnaryMinusModule() *ir.Module {
 						Value: ir.Value{Name: "%2", Type: "i64"},
 					},
 				}},
+			},
+		},
+	}
+}
+
+// nativeWriteFileModule returns a std::fs::write_file and try-void shape.
+func nativeWriteFileModule() *ir.Module {
+	return &ir.Module{
+		Functions: []*ir.Function{
+			{
+				Name: "main", Return: "void",
+				Blocks: []*ir.Block{{Name: "entry",
+					Instrs: []*ir.Instr{
+						{Result: ir.Value{Name: "%1", Type: "[]const u8"},
+							Op: "const", Immediate: "\"target/native-write.txt\""},
+						{Result: ir.Value{Name: "%2", Type: "[]const u8"},
+							Op: "const", Immediate: "\"hello\""},
+						{Result: ir.Value{Name: "%3", Type: "!void"}, Op: "call.std.fs.write_file",
+							Args: []ir.Value{
+								{Name: "%io", Type: "Io"},
+								{Name: "%1", Type: "[]const u8"},
+								{Name: "%2", Type: "[]const u8"},
+							}},
+						{Result: ir.Value{Name: "%4", Type: "void"}, Op: "error.try",
+							Args: []ir.Value{{Name: "%3", Type: "!void"}}},
+					},
+					Terminator: ir.Terminator{Op: "return"},
+				},
+				},
 			},
 		},
 	}
@@ -286,6 +331,7 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
 
@@ -315,6 +361,7 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
 
@@ -352,6 +399,7 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
 
@@ -386,6 +434,7 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
 
@@ -424,6 +473,7 @@ declare i64 @kizu_bytes_len(ptr)
 declare i8 @kizu_byte_at(ptr, i64)
 declare ptr @kizu_bytes_slice(ptr, i64, i64)
 declare ptr @kizu_read_file(ptr)
+declare ptr @kizu_write_file(ptr, ptr)
 declare i1 @kizu_file_exists(ptr)
 declare ptr @kizu_path_join(ptr, ptr)
 

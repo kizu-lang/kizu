@@ -140,13 +140,26 @@ func withNativeEntry(llvmText string) (string, error) {
 		{returnType: "ptr", prefix: "define ptr @main(", call: "call ptr @kizu_user_main()"},
 	}
 	for _, shape := range shapes {
-		if strings.Contains(llvmText, shape.prefix) {
-			renamed := strings.Replace(llvmText, shape.prefix,
-				"define "+shape.returnType+" @kizu_user_main(", 1)
+		if strings.Contains(llvmText, "\n"+shape.prefix) ||
+			strings.HasPrefix(llvmText, shape.prefix) {
+			renamed := replaceMainDefinitionLine(llvmText, shape.prefix,
+				"define "+shape.returnType+" @kizu_user_main(")
 			return renamed + nativeMainWrapper(shape.call), nil
 		}
 	}
 	return "", fmt.Errorf("native error: missing main function")
+}
+
+// replaceMainDefinitionLine renames only an LLVM function definition line.
+func replaceMainDefinitionLine(llvmText string, oldPrefix string, newPrefix string) string {
+	lines := strings.Split(llvmText, "\n")
+	for idx, line := range lines {
+		if strings.HasPrefix(line, oldPrefix) {
+			lines[idx] = strings.Replace(line, oldPrefix, newPrefix, 1)
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // nativeMainWrapper returns the C ABI entry point for a Kizu main.

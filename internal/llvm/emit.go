@@ -108,7 +108,7 @@ func stdCallDefinesLLVM(name string) bool {
 	switch name {
 	case "std.process.arg_count", "std.process.arg", "std.mem.equal_bytes",
 		"std.mem.starts_with", "std.mem.len", "std.mem.byte_at", "std.mem.slice",
-		"std.fs.read_file", "std.fs.exists", "std.path.join":
+		"std.fs.read_file", "std.fs.write_file", "std.fs.exists", "std.path.join":
 		return true
 	default:
 		return strings.HasPrefix(name, "std.array.Array<")
@@ -156,6 +156,7 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare i8 @kizu_byte_at(ptr, i64)\n")
 	e.out.WriteString("declare ptr @kizu_bytes_slice(ptr, i64, i64)\n")
 	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n")
+	e.out.WriteString("declare ptr @kizu_write_file(ptr, ptr)\n")
 	e.out.WriteString("declare i1 @kizu_file_exists(ptr)\n")
 	e.out.WriteString("declare ptr @kizu_path_join(ptr, ptr)\n\n")
 	e.out.WriteString("declare ptr @malloc(i64)\n")
@@ -446,6 +447,11 @@ func (e *emitter) writeFileStdCall(name string, instr *ir.Instr) bool {
 	case "std.fs.read_file":
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call ptr @kizu_read_file(ptr "+path+")", "![]const u8")
+	case "std.fs.write_file":
+		path := e.callArg(instr, 1, "[]const u8")
+		bytes := e.callArg(instr, 2, "[]const u8")
+		call := "call ptr @kizu_write_file(ptr " + path + ", ptr " + bytes + ")"
+		e.writeRuntimeValueCall(instr, call, "!void")
 	case "std.fs.exists":
 		path := e.callArg(instr, 1, "[]const u8")
 		e.writeRuntimeValueCall(instr, "call i1 @kizu_file_exists(ptr "+path+")", "!bool")
@@ -522,6 +528,10 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	}
 	value := e.value(instr.Args[0])
 	result := llvmLocal(instr.Result.Name)
+	if instr.Result.Type == "void" {
+		e.values[instr.Result.Name] = valueInfo{typ: "void", operand: "null"}
+		return nil
+	}
 	operand := llvmTypedOperand(value.operand, value.typ, instr.Result.Type)
 	if err := e.writeCoercedAlias(result, operand, value.typ, instr.Result.Type); err != nil {
 		return err
