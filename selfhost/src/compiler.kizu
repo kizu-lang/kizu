@@ -825,6 +825,9 @@ fn build_function_llvm_symbol(
     if function_is_selfhost_package_target_body(module_path, name) {
         return build_selfhost_package_target_function_symbol();
     }
+    if function_is_compile_command_wrapper(module_path, name) {
+        return build_compile_command_wrapper_function_symbol(name);
+    }
     if try function_has_single_try_call_return(tokens, index) {
         let callee = try function_try_call_return_callee(tokens, index);
         return build_try_call_function_symbol(module_path, name, callee);
@@ -1029,6 +1032,74 @@ fn build_ascii_space_function_symbol(
   ret i1 %ok
 }
 ");
+    return text;
+}
+
+// build_compile_command_wrapper_function_symbol builds check/build source wrappers.
+fn build_compile_command_wrapper_function_symbol(name: []const u8) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    if std::mem::equal_bytes(name, "check_source") {
+        return build_check_source_function_symbol();
+    }
+    try text.append_bytes("@.str.compiler.command.build = private unnamed_addr constant ");
+    try text.append_bytes("[6 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("build");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("define ptr @compiler.build_source(ptr %source, ptr %target_name) {");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %report = call ptr @compiler.compile_source(ptr %source, ptr ");
+    try text.append_bytes("%target_name)");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %command = call ptr @compiler.command_report(ptr ");
+    try text.append_bytes("@.str.compiler.command.build, ptr %target_name, ptr %report)");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  ret ptr %command");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("}");
+    try text.append_byte(cast<u8>(10));
+    return text;
+}
+
+// build_check_source_function_symbol builds the check command wrapper.
+fn build_check_source_function_symbol() -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+
+    try text.append_bytes("@.str.compiler.command.check = private unnamed_addr constant ");
+    try text.append_bytes("[6 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("check");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("@.str.compiler.target.llvm = private unnamed_addr constant ");
+    try text.append_bytes("[5 x i8] c");
+    try text.append_byte(cast<u8>(34));
+    try text.append_bytes("llvm");
+    try text.append_byte(cast<u8>(92));
+    try text.append_bytes("00");
+    try text.append_byte(cast<u8>(34));
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("define ptr @compiler.check_source(ptr %source) {");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %report = call ptr @compiler.compile_source(ptr %source, ptr ");
+    try text.append_bytes("@.str.compiler.target.llvm)");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  %command = call ptr @compiler.command_report(ptr ");
+    try text.append_bytes("@.str.compiler.command.check, ptr ");
+    try text.append_bytes("@.str.compiler.target.llvm, ptr %report)");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("  ret ptr %command");
+    try text.append_byte(cast<u8>(10));
+    try text.append_bytes("}");
+    try text.append_byte(cast<u8>(10));
     return text;
 }
 
@@ -1396,6 +1467,17 @@ fn function_is_selfhost_package_target_body(module_path: []const u8, name: []con
         return false;
     }
     return std::mem::equal_bytes(name, "is_selfhost_package_target");
+}
+
+// function_is_compile_command_wrapper identifies source-to-command wrappers.
+fn function_is_compile_command_wrapper(module_path: []const u8, name: []const u8) -> bool {
+    if !std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return false;
+    }
+    if std::mem::equal_bytes(name, "check_source") {
+        return true;
+    }
+    return std::mem::equal_bytes(name, "build_source");
 }
 
 // function_has_single_try_call_return detects `return try callee();`.
