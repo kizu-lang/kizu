@@ -97,6 +97,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
+declare i64 @kizu_process_arg_count()
+declare ptr @kizu_process_arg(i64)
+declare i1 @kizu_bytes_equal(ptr, ptr)
+declare ptr @kizu_read_file(ptr)
+
 define void @main() {
 entry:
   %v1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
@@ -108,6 +113,11 @@ const functionsLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+
+declare i64 @kizu_process_arg_count()
+declare ptr @kizu_process_arg(i64)
+declare i1 @kizu_bytes_equal(ptr, ptr)
+declare ptr @kizu_read_file(ptr)
 
 define i64 @add(i64 %a, i64 %b) {
 entry:
@@ -129,6 +139,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
+declare i64 @kizu_process_arg_count()
+declare ptr @kizu_process_arg(i64)
+declare i1 @kizu_bytes_equal(ptr, ptr)
+declare ptr @kizu_read_file(ptr)
+
 define void @main() {
 entry:
   %v1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
@@ -145,6 +160,11 @@ const ifLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+
+declare i64 @kizu_process_arg_count()
+declare ptr @kizu_process_arg(i64)
+declare i1 @kizu_bytes_equal(ptr, ptr)
+declare ptr @kizu_read_file(ptr)
 
 define void @main() {
 entry:
@@ -166,6 +186,11 @@ const whileLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
+
+declare i64 @kizu_process_arg_count()
+declare ptr @kizu_process_arg(i64)
+declare i1 @kizu_bytes_equal(ptr, ptr)
+declare ptr @kizu_read_file(ptr)
 
 define void @main() {
 entry:

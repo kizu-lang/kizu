@@ -59,7 +59,8 @@ func TestWithNativeEntryWrapsVoidMain(t *testing.T) {
 	}
 	for _, want := range []string{
 		"define void @kizu_user_main()",
-		"define i32 @main()",
+		"define i32 @main(i32 %argc, ptr %argv)",
+		"store i64 %wide_argc, ptr @kizu_argc",
 		"call void @kizu_user_main()",
 		"ret i32 0",
 	} {

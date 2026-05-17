@@ -79,8 +79,21 @@ func instrDefinesLLVM(instr *ir.Instr) bool {
 		return true
 	case strings.HasPrefix(instr.Op, "call."):
 		name := strings.TrimPrefix(instr.Op, "call.")
-		return name != "print" && !strings.HasPrefix(name, "std.")
+		if name == "print" || strings.HasPrefix(name, "std.io.write_") {
+			return false
+		}
+		return !strings.HasPrefix(name, "std.") || stdCallDefinesLLVM(name)
 	case instr.Op == "phi":
+		return true
+	default:
+		return false
+	}
+}
+
+// stdCallDefinesLLVM reports std calls that the LLVM backend lowers concretely.
+func stdCallDefinesLLVM(name string) bool {
+	switch name {
+	case "std.process.arg_count", "std.process.arg", "std.mem.equal_bytes", "std.fs.read_file":
 		return true
 	default:
 		return false
@@ -119,6 +132,10 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_print_int(i64)\n")
 	e.out.WriteString("declare void @kizu_print_bool(i1)\n\n")
+	e.out.WriteString("declare i64 @kizu_process_arg_count()\n")
+	e.out.WriteString("declare ptr @kizu_process_arg(i64)\n")
+	e.out.WriteString("declare i1 @kizu_bytes_equal(ptr, ptr)\n")
+	e.out.WriteString("declare ptr @kizu_read_file(ptr)\n\n")
 }
 
 // sortedStringLiterals returns string constants in global-name order.
@@ -189,7 +206,9 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeOpaqueValue(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
 		return e.writeOpaqueValue(instr)
-	case instr.Op == "error.error" || instr.Op == "error.ok" || instr.Op == "error.try":
+	case instr.Op == "error.try":
+		return e.writeErrorTry(instr)
+	case instr.Op == "error.error" || instr.Op == "error.ok":
 		return e.writeOpaqueValue(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
@@ -250,6 +269,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if name == "print" {
 		return e.writePrint(instr.Args)
 	}
+	if e.writeKnownStdCall(name, instr) {
+		return nil
+	}
 	if strings.HasPrefix(name, "std.") {
 		return e.writeOpaqueValue(instr)
 	}
@@ -269,6 +291,56 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	return nil
 }
 
+// writeKnownStdCall lowers native host capability calls used by selfhost CLI.
+func (e *emitter) writeKnownStdCall(name string, instr *ir.Instr) bool {
+	switch name {
+	case "std.process.arg_count":
+		e.writeRuntimeValueCall(instr, "call i64 @kizu_process_arg_count()", "i64")
+	case "std.process.arg":
+		arg := e.callArg(instr, 0, "i64")
+		e.writeRuntimeValueCall(instr, "call ptr @kizu_process_arg(i64 "+arg+")", "[]const u8")
+	case "std.mem.equal_bytes":
+		left := e.callArg(instr, 0, "[]const u8")
+		right := e.callArg(instr, 1, "[]const u8")
+		call := "call i1 @kizu_bytes_equal(ptr " + left + ", ptr " + right + ")"
+		e.writeRuntimeValueCall(instr, call, "bool")
+	case "std.fs.read_file":
+		path := e.callArg(instr, 1, "[]const u8")
+		e.writeRuntimeValueCall(instr, "call ptr @kizu_read_file(ptr "+path+")", "![]const u8")
+	case "std.io.write_stdout", "std.io.write_stderr":
+		e.writeStdIOCall(instr)
+	default:
+		return false
+	}
+	return true
+}
+
+// writeRuntimeValueCall writes a runtime call with one SSA result.
+func (e *emitter) writeRuntimeValueCall(instr *ir.Instr, call string, typ string) {
+	result := llvmLocal(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s\n", result, call)
+	e.values[instr.Result.Name] = valueInfo{typ: typ, operand: result}
+}
+
+// writeStdIOCall lowers explicit stdout/stderr helpers to the print runtime.
+func (e *emitter) writeStdIOCall(instr *ir.Instr) {
+	if len(instr.Args) >= 2 {
+		value := e.value(instr.Args[1])
+		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n",
+			llvmOperand(value.operand, "[]const u8"), value.length)
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+}
+
+// callArg returns a valid operand for one runtime call argument.
+func (e *emitter) callArg(instr *ir.Instr, index int, typ string) string {
+	if index >= len(instr.Args) {
+		return llvmZero(typ)
+	}
+	value := e.value(instr.Args[index])
+	return llvmOperand(value.operand, typ)
+}
+
 // writeCast emits a no-op value conversion for the Phase 16 low-level subset.
 func (e *emitter) writeCast(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
@@ -276,6 +348,20 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 	}
 	value := e.value(instr.Args[0])
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+	return nil
+}
+
+// writeErrorTry forwards the successful payload for the opaque v0 error union.
+func (e *emitter) writeErrorTry(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: try expects 1 arg")
+	}
+	value := e.value(instr.Args[0])
+	e.values[instr.Result.Name] = valueInfo{
+		typ:     instr.Result.Type,
+		operand: llvmTypedOperand(value.operand, value.typ, instr.Result.Type),
+		length:  value.length,
+	}
 	return nil
 }
 
@@ -307,7 +393,8 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 			continue
 		}
 		value := e.value(incoming.Value)
-		parts = append(parts, fmt.Sprintf("[ %s, %%%s ]", value.operand, incoming.Block))
+		operand := llvmTypedOperand(value.operand, value.typ, instr.Result.Type)
+		parts = append(parts, fmt.Sprintf("[ %s, %%%s ]", operand, incoming.Block))
 	}
 	if len(parts) == 0 {
 		e.values[instr.Result.Name] = valueInfo{
