@@ -120,6 +120,7 @@ The bootstrap command for this boundary is:
 
 ```sh
 kizu selfhost-lex <file>
+kizu selfhost-parse <file>
 ```
 
 The command loads the self-host package and invokes
@@ -127,6 +128,12 @@ The command loads the self-host package and invokes
 argument. Go is only the bootstrap runner and oracle host here; tokenization is
 performed by `selfhost/src/lexer.kizu`, and tests compare every emitted token
 kind, literal, byte span, line, and column against the Go lexer oracle.
+
+`kizu selfhost-parse <file>` is the next bootstrap command for #237. It invokes
+`compiler::parse_file_snapshot`, which feeds the Kizu lexer token stream into
+`parser::parse_declarations` and prints top-level declaration AST facts with
+source spans. Tests compare those parser facts against the Go parser oracle for
+the selected single-file declaration path.
 
 ## #192 Token / Lexer Readiness
 

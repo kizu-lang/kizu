@@ -57,6 +57,8 @@ func dispatch(cmd string, args []string) error {
 		return testFile(path, programArgs)
 	case "selfhost-lex":
 		return selfHostLexFile(args[0])
+	case "selfhost-parse":
+		return selfHostParseFile(args[0])
 	case "fmt":
 		return fmtFile(args[0])
 	case "ir":
@@ -79,6 +81,7 @@ func dispatch(cmd string, args []string) error {
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-lex <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-parse <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -249,6 +252,16 @@ func testPackageTarget(path string) error {
 
 // selfHostLexFile runs the Kizu-owned lexer bootstrap command for one file.
 func selfHostLexFile(path string) error {
+	return runSelfHostFunction("compiler.lex_file_snapshot", path)
+}
+
+// selfHostParseFile runs the Kizu-owned parser bootstrap command for one file.
+func selfHostParseFile(path string) error {
+	return runSelfHostFunction("compiler.parse_file_snapshot", path)
+}
+
+// runSelfHostFunction runs a named self-host package function with one path arg.
+func runSelfHostFunction(name string, path string) error {
 	selfhostPath, err := selfHostPackagePath()
 	if err != nil {
 		return err
@@ -264,7 +277,7 @@ func selfHostLexFile(path string) error {
 	}
 	runner := interp.NewWithProcessArgs(os.Stdout, []string{path})
 	runner.Register(packageRuntimeProgram(pkg))
-	return runner.RunFunction("compiler.lex_file_snapshot")
+	return runner.RunFunction(name)
 }
 
 // selfHostPackagePath resolves the checked-in selfhost package from common CWDs.
