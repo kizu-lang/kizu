@@ -345,6 +345,17 @@ pub fn load_selfhost_package_from_files(io: Io) -> !PackageReport {
     return try summarize_loaded_package(&modules);
 }
 
+// write_selfhost_package_llvm_from_files emits function symbols from real modules.
+pub fn write_selfhost_package_llvm_from_files(io: Io) -> !void {
+    let manifest = try read_selfhost_manifest(io);
+    let allocator = std::mem::page_allocator();
+    var modules = std::array::Array<SourceModule>(allocator);
+
+    try append_manifest_modules(io, &manifest, modules);
+    try write_package_llvm_symbols(io, &modules);
+    return void;
+}
+
 // append_manifest_modules loads compiler modules described by the manifest roots.
 fn append_manifest_modules(
     io: Io,
@@ -626,6 +637,91 @@ fn summarize_loaded_package(modules: &std::array::Array<SourceModule>) -> !Packa
         index = index + 1;
     }
     return report;
+}
+
+// write_package_llvm_symbols emits one valid LLVM stub per compiled function.
+fn write_package_llvm_symbols(io: Io, modules: &std::array::Array<SourceModule>) -> !void {
+    var index = 0;
+
+    print("; Kizu selfhost package LLVM symbols");
+    while index < modules.len() {
+        let module = try modules.at(index);
+        if !module.is_test {
+            try write_module_llvm_symbols(io, &module);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// write_module_llvm_symbols emits stubs for all functions in one module.
+fn write_module_llvm_symbols(io: Io, module: &SourceModule) -> !void {
+    var tokens = try lexer::lex(module.source);
+    var index = 0;
+
+    while index + 1 < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Fn {
+            let name = try tokens.at(index + 1);
+            try write_function_symbol(io, module.path, name.literal);
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// write_function_symbol emits one opaque LLVM function stub.
+fn write_function_symbol(io: Io, module_path: []const u8, name: []const u8) -> !void {
+    try std::io::write_stdout(io, "define ptr @");
+    try std::io::write_stdout(io, module_symbol_prefix(module_path));
+    try std::io::write_stdout(io, name);
+    try std::io::write_stdout(io, "() { ret ptr null }");
+    print("");
+    return void;
+}
+
+// module_symbol_prefix returns the LLVM symbol prefix for a selfhost module.
+fn module_symbol_prefix(module_path: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(module_path, "selfhost") {
+        return "";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::ast") {
+        return "ast.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::backend") {
+        return "backend.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::cache_contract") {
+        return "cache_contract.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::compiler") {
+        return "compiler.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::diagnostics") {
+        return "diagnostics.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::ir") {
+        return "ir.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::lexer") {
+        return "lexer.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::ownership") {
+        return "ownership.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::parser") {
+        return "parser.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::resolver") {
+        return "resolver.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::token") {
+        return "token.";
+    }
+    if std::mem::equal_bytes(module_path, "selfhost::types") {
+        return "types.";
+    }
+    return "unknown.";
 }
 
 // module_is_root reports whether a source module is the package entry module.

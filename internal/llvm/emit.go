@@ -148,6 +148,7 @@ func (e *emitter) writeHeader() {
 		e.out.WriteByte('\n')
 	}
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
+	e.out.WriteString("declare void @kizu_write_stdout(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_print_int(i64)\n")
 	e.out.WriteString("declare void @kizu_print_bool(i1)\n\n")
 	e.out.WriteString("declare i64 @kizu_process_arg_count()\n")
@@ -527,13 +528,25 @@ func (e *emitter) writeRuntimeValueCall(instr *ir.Instr, call string, typ string
 	e.values[instr.Result.Name] = valueInfo{typ: typ, operand: result}
 }
 
-// writeStdIOCall lowers explicit stdout/stderr helpers to the print runtime.
+// writeStdIOCall lowers explicit stdout/stderr helpers to byte writes.
 func (e *emitter) writeStdIOCall(instr *ir.Instr) {
 	if len(instr.Args) >= 2 {
 		value := e.value(instr.Args[1])
-		e.writePrintString(value)
+		e.writeStdoutBytes(value)
 	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+}
+
+// writeStdoutBytes writes bytes without adding print's newline.
+func (e *emitter) writeStdoutBytes(value valueInfo) {
+	text := value.operand
+	if value.length > 0 {
+		fmt.Fprintf(&e.out, "  call void @kizu_write_stdout(ptr %s, i64 %d)\n", text, value.length)
+		return
+	}
+	length := e.nextTemp("len")
+	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_bytes_len(ptr %s)\n", length, text)
+	fmt.Fprintf(&e.out, "  call void @kizu_write_stdout(ptr %s, i64 %s)\n", text, length)
 }
 
 // callArg returns a valid operand for one runtime call argument.

@@ -518,6 +518,7 @@ const helloLLVM = `; Kizu LLVM IR
 @.str.0 = private unnamed_addr constant [12 x i8] c"hello, kizu\00"
 
 declare void @kizu_print_string(ptr, i64)
+declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
@@ -557,6 +558,7 @@ entry:
 
 const functionsLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
+declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
@@ -604,6 +606,7 @@ const variablesLLVM = `; Kizu LLVM IR
 @.str.0 = private unnamed_addr constant [6 x i8] c"alice\00"
 
 declare void @kizu_print_string(ptr, i64)
+declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
@@ -648,6 +651,7 @@ const ifLLVM = `; Kizu LLVM IR
 @.str.1 = private unnamed_addr constant [6 x i8] c"minor\00"
 
 declare void @kizu_print_string(ptr, i64)
+declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
@@ -696,6 +700,7 @@ if.end.3:
 
 const whileLLVM = `; Kizu LLVM IR
 declare void @kizu_print_string(ptr, i64)
+declare void @kizu_write_stdout(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
