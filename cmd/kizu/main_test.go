@@ -640,6 +640,10 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"getelementptr inbounds %struct.compiler.CommandReport")
 	requireFileContains(t, "target/kizu-selfhost.ll", "store ptr %command, ptr %command_slot")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"define ptr @compiler.empty_package_report()")
+	requireFileContains(t, "target/kizu-selfhost.ll", "store i64 0, ptr %m")
+	requireFileContains(t, "target/kizu-selfhost.ll", "store ptr @.str.compiler.empty, ptr %d")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.check_source(ptr %source)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"call ptr @compiler.compile_source(ptr %source, ptr @.str.compiler.target.llvm)")
