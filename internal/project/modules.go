@@ -24,17 +24,53 @@ type Graph struct {
 func ResolveModules(baseDir string, manifest Manifest) (Graph, error) {
 	rootFile := filepath.Clean(filepath.Join(baseDir, manifest.Root))
 	modules := map[string]string{}
+	if len(manifest.Entries) > 0 {
+		if err := collectManifestEntries(modules, baseDir, manifest); err != nil {
+			return Graph{}, err
+		}
+		return resolvedGraph(manifest, modules)
+	}
 	for _, sourceRoot := range manifest.Paths {
 		root := filepath.Clean(filepath.Join(baseDir, sourceRoot))
 		if err := collectSourceRoot(modules, manifest, rootFile, root); err != nil {
 			return Graph{}, err
 		}
 	}
+	return resolvedGraph(manifest, modules)
+}
+
+// resolvedGraph validates and sorts a resolved module map.
+func resolvedGraph(manifest Manifest, modules map[string]string) (Graph, error) {
 	rootModule := manifest.PackageName
 	if _, ok := modules[rootModule]; !ok {
 		return Graph{}, fmt.Errorf("module error: root module `%s` was not found", manifest.Root)
 	}
 	return Graph{Root: rootModule, Modules: sortedModules(modules)}, nil
+}
+
+// collectManifestEntries records explicit module entries from a manifest.
+func collectManifestEntries(
+	modules map[string]string,
+	baseDir string,
+	manifest Manifest,
+) error {
+	for _, entry := range manifest.Entries {
+		if err := recordManifestEntry(modules, baseDir, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordManifestEntry adds one manifest-defined module to the module map.
+func recordManifestEntry(modules map[string]string, baseDir string, entry Module) error {
+	file := filepath.Clean(filepath.Join(baseDir, entry.File))
+	if previous, exists := modules[entry.Path]; exists {
+		return fmt.Errorf("module error: duplicate module `%s`: %s and %s",
+			entry.Path, previous, file)
+	}
+	modules[entry.Path] = file
+	return nil
 }
 
 // collectSourceRoot walks one source root and records Kizu source modules.

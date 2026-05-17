@@ -338,6 +338,9 @@ func (e *emitter) writeUnary(instr *ir.Instr) error {
 	case "!":
 		operand := llvmOperand(value.operand, "bool")
 		fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", result, operand)
+	case "-":
+		operand := llvmOperand(value.operand, instr.Result.Type)
+		fmt.Fprintf(&e.out, "  %s = sub %s 0, %s\n", result, llvmType(instr.Result.Type), operand)
 	case "&", "*":
 		operand := llvmOperand(value.operand, instr.Result.Type)
 		if err := e.writeCoercedAlias(result, operand, value.typ, instr.Result.Type); err != nil {

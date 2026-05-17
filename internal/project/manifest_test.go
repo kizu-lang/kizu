@@ -11,6 +11,8 @@ version = "0.1.0"
 [modules]
 root = "src/main.kizu"
 paths = ["src", "lib"]
+` + `entries = ["app|src/main.kizu", "app::lexer|src/lexer.kizu", ` +
+		`"app::lexer_test|src/lexer_test.kizu|test"]
 `
 	manifest, err := ParseManifest(source)
 	if err != nil {
@@ -24,6 +26,40 @@ paths = ["src", "lib"]
 	}
 	if len(manifest.Paths) != 2 || manifest.Paths[0] != "src" || manifest.Paths[1] != "lib" {
 		t.Fatalf("got paths %#v", manifest.Paths)
+	}
+	if len(manifest.Entries) != 3 {
+		t.Fatalf("got entries %#v", manifest.Entries)
+	}
+	if manifest.Entries[1].Path != "app::lexer" || manifest.Entries[1].File != "src/lexer.kizu" {
+		t.Fatalf("got entry %#v", manifest.Entries[1])
+	}
+}
+
+// TestParseManifestRejectsInvalidModuleEntry checks explicit entry validation.
+func TestParseManifestRejectsInvalidModuleEntry(t *testing.T) {
+	_, err := ParseManifest(`[package]
+name = "app"
+
+[modules]
+root = "src/main.kizu"
+entries = ["app src/main.kizu"]
+`)
+	if err == nil {
+		t.Fatal("expected invalid module entry error")
+	}
+}
+
+// TestParseManifestRejectsUnknownModuleEntryMarker checks entry marker validation.
+func TestParseManifestRejectsUnknownModuleEntryMarker(t *testing.T) {
+	_, err := ParseManifest(`[package]
+name = "app"
+
+[modules]
+root = "src/main.kizu"
+entries = ["app|src/main.kizu|bench"]
+`)
+	if err == nil {
+		t.Fatal("expected invalid module marker error")
 	}
 }
 

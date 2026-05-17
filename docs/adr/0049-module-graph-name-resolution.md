@@ -27,6 +27,24 @@ src/parser/ast.kizu -> app::parser::ast
 The root module is `[modules].root`. Additional source roots come from
 `[modules].paths`.
 
+If `[modules].entries` is present, it is the resolved module graph for the
+package. Each entry is a declarative `module_path|file_path` record, for example:
+
+```toml
+entries = [
+  "app|src/main.kizu",
+  "app::parser|src/parser/mod.kizu",
+  "app::parser::ast|src/parser/ast.kizu",
+  "app::parser_test|src/parser_test.kizu|test",
+]
+```
+
+Explicit entries are used for bootstrap packages that need deterministic module
+graphs before Kizu-owned directory traversal is complete. They follow the same
+duplicate, root, import, cycle, and visibility checks as path-discovered
+modules. The optional `|test` marker keeps component test modules visible to
+`kizu test` while excluding them from normal package build lowering.
+
 The compiler rejects:
 
 - duplicate module paths

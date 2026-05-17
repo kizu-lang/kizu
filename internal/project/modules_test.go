@@ -189,6 +189,49 @@ func TestResolveModulesRejectsDuplicateModulePaths(t *testing.T) {
 	}
 }
 
+// TestResolveModulesUsesManifestEntries checks explicit manifest module graphs.
+func TestResolveModulesUsesManifestEntries(t *testing.T) {
+	root := t.TempDir()
+	graph, err := ResolveModules(root, Manifest{
+		PackageName: "app",
+		Root:        "src/main.kizu",
+		Paths:       []string{"src"},
+		Entries: []Module{
+			{Path: "app", File: "src/main.kizu"},
+			{Path: "app::lexer", File: "src/lexer.kizu"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	got := modulePaths(graph.Modules)
+	want := []string{"app", "app::lexer"}
+	if !sameStrings(got, want) {
+		t.Fatalf("got modules %#v, want %#v", got, want)
+	}
+	for _, module := range graph.Modules {
+		if !strings.HasPrefix(module.File, root) {
+			t.Fatalf("module file %q does not use package root %q", module.File, root)
+		}
+	}
+}
+
+// TestResolveModulesRejectsDuplicateManifestEntries checks duplicate entry paths.
+func TestResolveModulesRejectsDuplicateManifestEntries(t *testing.T) {
+	_, err := ResolveModules(t.TempDir(), Manifest{
+		PackageName: "app",
+		Root:        "src/main.kizu",
+		Paths:       []string{"src"},
+		Entries: []Module{
+			{Path: "app", File: "src/main.kizu"},
+			{Path: "app", File: "src/root.kizu"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected duplicate module error")
+	}
+}
+
 // writeFile creates an empty source file under root.
 func writeFile(t *testing.T, root string, rel string) {
 	t.Helper()
