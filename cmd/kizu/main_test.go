@@ -630,6 +630,7 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	runSelfHostArtifact(t, "build\naarch64-apple-darwin\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define ptr @compiler.compile_source()")
+	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.ready() { ret i1 true }")
 	requireLLVMLowers(t, "target/kizu-selfhost.ll")
 	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
