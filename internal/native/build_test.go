@@ -46,6 +46,10 @@ func TestRuntimeLLVMExportsPrintSymbols(t *testing.T) {
 		"define void @kizu_array_append",
 		"define ptr @kizu_array_at",
 		"define i64 @kizu_array_len",
+		"define ptr @kizu_string_new",
+		"define ptr @kizu_string_append_bytes",
+		"define ptr @kizu_string_as_bytes",
+		"define void @kizu_string_deinit",
 		"declare ptr @realloc",
 	} {
 		if !strings.Contains(runtime, want) {

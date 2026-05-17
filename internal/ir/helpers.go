@@ -119,6 +119,8 @@ func builtinReturnType(name string, _ []Value) (string, bool) {
 		return typ, true
 	}
 	switch name {
+	case "std.string.String":
+		return "std::string::String", true
 	case "std.io.write_stdout", "std.io.write_stderr":
 		return "!void", true
 	case "std.io.blocking", "std.io.threaded", "std.io.failing", "std.io.evented":

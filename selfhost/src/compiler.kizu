@@ -356,6 +356,20 @@ pub fn write_selfhost_package_llvm_from_files(io: Io) -> !void {
     return void;
 }
 
+// write_selfhost_package_llvm_file_from_files writes module-derived LLVM text.
+pub fn write_selfhost_package_llvm_file_from_files(io: Io, path: []const u8) -> !void {
+    let manifest = try read_selfhost_manifest(io);
+    let allocator = std::mem::page_allocator();
+    var modules = std::array::Array<SourceModule>(allocator);
+
+    try append_manifest_modules(io, &manifest, modules);
+    var text = try build_package_llvm_symbols(&modules);
+    let bytes = text.as_bytes();
+    try std::fs::write_file(io, path, bytes);
+    text.deinit();
+    return void;
+}
+
 // append_manifest_modules loads compiler modules described by the manifest roots.
 fn append_manifest_modules(
     io: Io,
@@ -678,6 +692,50 @@ fn write_function_symbol(io: Io, module_path: []const u8, name: []const u8) -> !
     try std::io::write_stdout(io, "() { ret ptr null }");
     print("");
     return void;
+}
+
+// append_package_llvm_symbols appends valid LLVM stubs for compiled functions.
+// build_package_llvm_symbols builds valid LLVM stubs for compiled functions.
+fn build_package_llvm_symbols(modules: &std::array::Array<SourceModule>) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+    var index = 0;
+
+    try text.append_bytes("; Kizu selfhost package LLVM symbols");
+    try text.append_byte(cast<u8>(10));
+    while index < modules.len() {
+        let module = try modules.at(index);
+        if !module.is_test {
+            var module_text = try build_module_llvm_symbols(&module);
+            let bytes = module_text.as_bytes();
+            try text.append_bytes(bytes);
+            module_text.deinit();
+        }
+        index = index + 1;
+    }
+    return text;
+}
+
+// build_module_llvm_symbols builds stubs for all functions in one module.
+fn build_module_llvm_symbols(module: &SourceModule) -> !std::string::String {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+    var tokens = try lexer::lex(module.source);
+    var index = 0;
+
+    while index + 1 < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Fn {
+            let name = try tokens.at(index + 1);
+            try text.append_bytes("define ptr @");
+            try text.append_bytes(module_symbol_prefix(module.path));
+            try text.append_bytes(name.literal);
+            try text.append_bytes("() { ret ptr null }");
+            try text.append_byte(cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    return text;
 }
 
 // module_symbol_prefix returns the LLVM symbol prefix for a selfhost module.

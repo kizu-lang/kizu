@@ -14,6 +14,7 @@ func RuntimeLLVM() string {
 @.kizu.dot = private unnamed_addr constant [2 x i8] c".\00"
 @kizu_argc = global i64 0
 @kizu_argv = global ptr null
+%kizu.String = type { ptr, i64 }
 
 declare i32 @printf(ptr, ...)
 declare i32 @strcmp(ptr, ptr)
@@ -35,7 +36,7 @@ declare i32 @mkdir(ptr, i16)
 declare i32 @rmdir(ptr)
 declare i32 @remove(ptr)
 ` + runtimePrintLLVM() + runtimeProcessLLVM() + runtimeMemoryLLVM() + runtimePathLLVM() +
-		runtimeFileLLVM() + runtimeArrayLLVM()
+		runtimeFileLLVM() + runtimeArrayLLVM() + runtimeStringLLVM()
 }
 
 // runtimePrintLLVM returns print helpers for the native target.
@@ -69,6 +70,113 @@ is_true:
   ret void
 is_false:
   call void @kizu_print_string(ptr @.kizu.false, i64 5)
+  ret void
+}
+`
+}
+
+// runtimeStringLLVM returns owned String helpers for the native target.
+func runtimeStringLLVM() string {
+	return runtimeStringNewLLVM() + runtimeStringAppendLLVM() + runtimeStringViewLLVM()
+}
+
+// runtimeStringNewLLVM returns String allocation helpers.
+func runtimeStringNewLLVM() string {
+	return `
+define ptr @kizu_string_new() {
+entry:
+  %str = call ptr @malloc(i64 16)
+  %missing = icmp eq ptr %str, null
+  br i1 %missing, label %fail, label %init
+init:
+  %bytes_slot = getelementptr inbounds %kizu.String, ptr %str, i64 0, i32 0
+  store ptr @.kizu.empty, ptr %bytes_slot
+  %len_slot = getelementptr inbounds %kizu.String, ptr %str, i64 0, i32 1
+  store i64 0, ptr %len_slot
+  ret ptr %str
+fail:
+  ret ptr null
+}
+`
+}
+
+// runtimeStringAppendLLVM returns String mutation helpers.
+func runtimeStringAppendLLVM() string {
+	return `
+define ptr @kizu_string_append_bytes(ptr %str, ptr %bytes) {
+entry:
+  %missing = icmp eq ptr %str, null
+  br i1 %missing, label %fail, label %append
+append:
+  %bytes_len = call i64 @strlen(ptr %bytes)
+  %len_slot = getelementptr inbounds %kizu.String, ptr %str, i64 0, i32 1
+  %old_len = load i64, ptr %len_slot
+  %new_len = add i64 %old_len, %bytes_len
+  %alloc_size = add i64 %new_len, 1
+  %data = call ptr @malloc(i64 %alloc_size)
+  %data_missing = icmp eq ptr %data, null
+  br i1 %data_missing, label %fail, label %copy_old
+copy_old:
+  %bytes_slot = getelementptr inbounds %kizu.String, ptr %str, i64 0, i32 0
+  %old_bytes = load ptr, ptr %bytes_slot
+  call ptr @memcpy(ptr %data, ptr %old_bytes, i64 %old_len)
+  %tail = getelementptr i8, ptr %data, i64 %old_len
+  call ptr @memcpy(ptr %tail, ptr %bytes, i64 %bytes_len)
+  %zero = getelementptr i8, ptr %data, i64 %new_len
+  store i8 0, ptr %zero
+  store ptr %data, ptr %bytes_slot
+  store i64 %new_len, ptr %len_slot
+  ret ptr null
+fail:
+  ret ptr inttoptr (i64 1 to ptr)
+}
+
+define ptr @kizu_string_append_byte(ptr %str, i8 %byte) {
+entry:
+  %missing = icmp eq ptr %str, null
+  br i1 %missing, label %fail, label %append
+append:
+  %len_slot = getelementptr inbounds %kizu.String, ptr %str, i64 0, i32 1
+  %old_len = load i64, ptr %len_slot
+  %new_len = add i64 %old_len, 1
+  %alloc_size = add i64 %new_len, 1
+  %data = call ptr @malloc(i64 %alloc_size)
+  %data_missing = icmp eq ptr %data, null
+  br i1 %data_missing, label %fail, label %copy_old
+copy_old:
+  %bytes_slot = getelementptr inbounds %kizu.String, ptr %str, i64 0, i32 0
+  %old_bytes = load ptr, ptr %bytes_slot
+  call ptr @memcpy(ptr %data, ptr %old_bytes, i64 %old_len)
+  %slot = getelementptr i8, ptr %data, i64 %old_len
+  store i8 %byte, ptr %slot
+  %zero = getelementptr i8, ptr %data, i64 %new_len
+  store i8 0, ptr %zero
+  store ptr %data, ptr %bytes_slot
+  store i64 %new_len, ptr %len_slot
+  ret ptr null
+fail:
+  ret ptr inttoptr (i64 1 to ptr)
+}
+`
+}
+
+// runtimeStringViewLLVM returns String view and cleanup helpers.
+func runtimeStringViewLLVM() string {
+	return `
+define ptr @kizu_string_as_bytes(ptr %str) {
+entry:
+  %missing = icmp eq ptr %str, null
+  br i1 %missing, label %fail, label %load
+load:
+  %bytes_slot = getelementptr inbounds %kizu.String, ptr %str, i64 0, i32 0
+  %bytes = load ptr, ptr %bytes_slot
+  ret ptr %bytes
+fail:
+  ret ptr @.kizu.empty
+}
+
+define void @kizu_string_deinit(ptr %str) {
+entry:
   ret void
 }
 `

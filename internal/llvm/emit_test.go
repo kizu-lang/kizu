@@ -178,6 +178,25 @@ func TestEmitNativePathCapabilities(t *testing.T) {
 	}
 }
 
+// TestEmitNativeStringCapabilities checks owned String calls lower concretely.
+func TestEmitNativeStringCapabilities(t *testing.T) {
+	got, err := Emit(nativeStringModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"declare ptr @kizu_string_new()",
+		"call ptr @kizu_string_new()",
+		"call ptr @kizu_string_append_bytes",
+		"call ptr @kizu_string_as_bytes",
+		"call void @kizu_string_deinit",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("LLVM output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // nativeFilesystemModule returns the host filesystem calls needed by selfhost.
 func nativeFilesystemModule() *ir.Module {
 	return &ir.Module{
@@ -225,6 +244,33 @@ func nativePathModule() *ir.Module {
 	return &ir.Module{Functions: []*ir.Function{{Name: "main", Return: "void",
 		Blocks: []*ir.Block{{Name: "entry", Instrs: nativePathInstrs(),
 			Terminator: ir.Terminator{Op: "return"}}}}}}
+}
+
+// nativeStringModule returns the owned String calls needed by selfhost output.
+func nativeStringModule() *ir.Module {
+	return &ir.Module{Functions: []*ir.Function{{Name: "main", Return: "void",
+		Blocks: []*ir.Block{{Name: "entry", Instrs: nativeStringInstrs(),
+			Terminator: ir.Terminator{Op: "return"}}}}}}
+}
+
+// nativeStringInstrs returns constructor, append, view, and deinit calls.
+func nativeStringInstrs() []*ir.Instr {
+	return []*ir.Instr{
+		{Result: ir.Value{Name: "%1", Type: "Allocator"}, Op: "call.std.mem.page_allocator"},
+		{Result: ir.Value{Name: "%2", Type: "std::string::String"},
+			Op: "call.std.string.String", Args: []ir.Value{{Name: "%1", Type: "Allocator"}}},
+		{Result: ir.Value{Name: "%3", Type: "[]const u8"},
+			Op: "const", Immediate: "\"hello\""},
+		{Result: ir.Value{Name: "%4", Type: "!void"}, Op: "method.append_bytes",
+			Args: []ir.Value{
+				{Name: "%2", Type: "std::string::String"},
+				{Name: "%3", Type: "[]const u8"},
+			}},
+		{Result: ir.Value{Name: "%5", Type: "[]const u8"}, Op: "method.as_bytes",
+			Args: []ir.Value{{Name: "%2", Type: "std::string::String"}}},
+		{Result: ir.Value{Name: "%6", Type: "void"}, Op: "method.deinit",
+			Args: []ir.Value{{Name: "%2", Type: "std::string::String"}}},
+	}
 }
 
 // nativePathInstrs returns calls for every v0.2 path helper.
