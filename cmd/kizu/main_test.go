@@ -629,10 +629,34 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 	t.Helper()
 	runSelfHostArtifact(t, "build\naarch64-apple-darwin\npass\ntrue",
 		"./target/kizu-selfhost", "build", "--target", "aarch64-apple-darwin", "../../selfhost")
+	requireSelfHostCompileSourceMarkers(t)
+	requireSelfHostReportMarkers(t)
+	requireSelfHostLexerMarkers(t)
+	requireLLVMLowers(t, "target/kizu-selfhost.ll")
+	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
+		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
+	requireFileContains(t, "target/kizu-selfhost.wat", "(module (func $main))")
+}
+
+// requireSelfHostCompileSourceMarkers checks source compile report emission.
+func requireSelfHostCompileSourceMarkers(t *testing.T) {
+	t.Helper()
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.compile_source(ptr %source, ptr %target_name)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
+		"%frontend = call ptr @compiler.lex_and_parse_source(ptr %source)")
+	requireFileContains(t, "target/kizu-selfhost.ll",
+		"%diagnostic_text = call ptr @types.source_diagnostic(ptr %source)")
+	requireFileContains(t, "target/kizu-selfhost.ll", "store i1 %supported, ptr %backend")
+	requireFileNotContains(t, "target/kizu-selfhost.ll",
+		"define ptr @compiler.compile_source(ptr %source, ptr %target_name) { ret ptr null }")
+	requireFileContains(t, "target/kizu-selfhost.ll",
 		"%struct.compiler.CompileReport = type")
+}
+
+// requireSelfHostReportMarkers checks command and package report constructors.
+func requireSelfHostReportMarkers(t *testing.T) {
+	t.Helper()
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"%struct.compiler.CommandReport = type")
 	requireFileContains(t, "target/kizu-selfhost.ll",
@@ -662,6 +686,11 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 		"call ptr @compiler.compile_source(ptr %source, ptr @.str.compiler.target.llvm)")
 	requireFileContains(t, "target/kizu-selfhost.ll",
 		"define ptr @compiler.build_source(ptr %source, ptr %target_name)")
+}
+
+// requireSelfHostLexerMarkers checks remaining lexer and resolver body markers.
+func requireSelfHostLexerMarkers(t *testing.T) {
+	t.Helper()
 	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @lexer.ready() { ret i1 true }")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define i64 @lexer.source_len(ptr %source)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "call i64 @kizu_bytes_len(ptr %source)")
@@ -684,10 +713,6 @@ func runSelfHostPackageRebuildSmoke(t *testing.T) {
 		"define i1 @diagnostics.is_error(ptr %diagnostic)")
 	requireFileContains(t, "target/kizu-selfhost.ll", "define i1 @types.can_copy(ptr %info)")
 	requireFileNotContains(t, "target/kizu-selfhost.ll", "define ptr @lexer.is_ascii_alpha")
-	requireLLVMLowers(t, "target/kizu-selfhost.ll")
-	runSelfHostArtifact(t, "build\nwasm32-wasi\npass\ntrue",
-		"./target/kizu-selfhost", "build", "--target", "wasm32-wasi", "../../selfhost")
-	requireFileContains(t, "target/kizu-selfhost.wat", "(module (func $main))")
 }
 
 // requireFileContains checks an artifact file contains a stable marker.
