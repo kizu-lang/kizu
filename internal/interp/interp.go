@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
 // Interpreter executes a parsed Kizu program.
@@ -1282,13 +1282,13 @@ func (i *Interpreter) evalPathBuiltin(
 		value, err := i.evalPathJoin(args, env)
 		return value, true, err
 	case "std.path.clean":
-		return i.evalPathUnary(name, args, env, path.Clean)
+		return i.evalPathUnary(name, args, env, stdprim.PathClean)
 	case "std.path.basename":
-		return i.evalPathUnary(name, args, env, path.Base)
+		return i.evalPathUnary(name, args, env, stdprim.PathBase)
 	case "std.path.dirname":
-		return i.evalPathUnary(name, args, env, path.Dir)
+		return i.evalPathUnary(name, args, env, stdprim.PathDir)
 	case "std.path.extension":
-		return i.evalPathUnary(name, args, env, path.Ext)
+		return i.evalPathUnary(name, args, env, stdprim.PathExt)
 	default:
 		return voidValue(), false, nil
 	}
@@ -1505,7 +1505,7 @@ func (i *Interpreter) evalPathJoin(args []ast.Expression, env *Env) (Value, erro
 	if err != nil {
 		return voidValue(), err
 	}
-	return stringValue(path.Join(left, right)), nil
+	return stringValue(stdprim.PathJoin(left, right)), nil
 }
 
 // evalPathUnary evaluates one-argument path helpers.

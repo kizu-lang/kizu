@@ -50,6 +50,10 @@ Kizu source should wrap these primitives with safe APIs. The safe wrapper owns
 argument validation, error shaping, capability visibility, and conformance
 behavior whenever possible.
 
+Trusted Go primitives live under `internal/stdprim`. New host or runtime
+boundaries should be added there first, then exposed through Kizu `std` wrappers
+under `std/src`.
+
 ## Builtin Registry
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
@@ -60,7 +64,7 @@ behavior whenever possible.
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; move wrapper and symbol-table shape to Kizu first |
 | `std::testing` | `expect`, `expect_equal_i64`, `expect_equal_bool`, `expect_equal_bytes`, `fail` | assertion failure formatting and `!void` error behavior | move most helpers to Kizu after `std::string` and diagnostics helpers are available |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | host filesystem calls through explicit `Io` | keep host calls primitive; move path/type validation and error shaping to Kizu wrappers |
-| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | pure path string operations | early Kizu migration candidate after `std::string`/byte helpers are usable |
+| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | pure path primitives in `internal/stdprim` | early Kizu migration candidate after `std::string`/byte helpers are usable |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | host I/O and explicit Io capability construction | keep host I/O primitive; Kizu wrappers select capabilities and shape errors |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | host process access and bounds checks | keep host reads primitive; move validation wrappers to Kizu |
 | `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | structured task state, runtime scheduling, safety boundaries | keep scheduling primitives trusted; move high-level structured wrappers once module and borrow diagnostics are mature |
@@ -75,8 +79,10 @@ The eventual Kizu-written stdlib should live under `std/`:
 
 ```text
 std/
+  README.md
   kizu.toml
   src/
+    builtin.kizu
     mem.kizu
     array.kizu
     string.kizu
@@ -95,6 +101,32 @@ std/
 
 The compiler still reserves the root namespace `std`. User packages cannot be
 named `std`.
+
+The future Kizu compiler migration target mirrors Go compiler packages:
+
+```text
+compiler/
+  README.md
+  kizu.toml
+  src/
+    main.kizu
+    token.kizu
+    lexer.kizu
+    ast.kizu
+    parser.kizu
+    types.kizu
+    ownership.kizu
+    interp.kizu
+    ir.kizu
+    llvm.kizu
+    wasm.kizu
+    buildcache.kizu
+    project.kizu
+    cimport.kizu
+```
+
+Keep `compiler/src/*.kizu` names aligned with `internal/*` Go packages so the
+compiler can be ported one module at a time without inventing new boundaries.
 
 ## Acceptance Rules For New Std APIs
 
