@@ -51,7 +51,7 @@ func TestConformanceManifestsCoverExamples(t *testing.T) {
 	}
 }
 
-// TestConformanceManifestShape validates fields needed by self-host runners.
+// TestConformanceManifestShape validates reusable conformance manifest fields.
 func TestConformanceManifestShape(t *testing.T) {
 	seen := map[string]bool{}
 	for _, manifest := range loadConformanceManifests(t) {

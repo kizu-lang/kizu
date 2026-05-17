@@ -20,10 +20,10 @@ code, and less likely to grow heavy CI and build caches.
 
 Kizu is an early prototype implemented in Go.
 
-The v0.1 target is the interpreter-first language core. The current v0.2 work
-adds the minimal standard-library surface needed by the future self-host
-compiler. The authoritative behavior is still the Go interpreter plus
-`kizu check`.
+The v0.1 target is the interpreter-first language core. The current v0.2
+baseline adds the minimal standard-library surface and tooling needed to keep
+language behavior testable. The authoritative behavior is still the Go
+interpreter plus `kizu check`.
 
 Implemented language-core pieces:
 
@@ -52,7 +52,6 @@ Implemented language-core pieces:
 
 Experimental compiler and tooling pieces:
 
-- self-host compiler skeleton in `selfhost/`
 - typed SSA IR
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations
@@ -64,8 +63,8 @@ These experimental pieces are not the language oracle yet. LLVM and WASM
 currently support more limited target subsets than the interpreter, and native
 executable generation is not implemented.
 
-There are no open v0.2 issues at the time of writing. Remaining work is tracked
-as v0.3 self-host and module-boundary implementation issues in GitHub Issues.
+There are no open v0.2 issues at the time of writing. Future compiler migration
+work should start from new GitHub Issues with explicit acceptance criteria.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
