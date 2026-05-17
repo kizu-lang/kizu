@@ -105,6 +105,39 @@ func TestEmitNativeWriteFile(t *testing.T) {
 	}
 }
 
+// TestEmitNativeErrorReturn checks error(...) produces a non-null sentinel.
+func TestEmitNativeErrorReturn(t *testing.T) {
+	got, err := Emit(nativeErrorReturnModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if !strings.Contains(got, "ret ptr inttoptr (i64 1 to ptr)") {
+		t.Fatalf("LLVM output missing error sentinel:\n%s", got)
+	}
+}
+
+// TestEmitNativeScalarErrorReturn checks scalar error unions remain well typed.
+func TestEmitNativeScalarErrorReturn(t *testing.T) {
+	got, err := Emit(nativeScalarErrorReturnModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if !strings.Contains(got, "ret i1 false") {
+		t.Fatalf("LLVM output missing scalar error fallback:\n%s", got)
+	}
+}
+
+// TestEmitNativeScalarErrorOkReturn checks !bool success values are preserved.
+func TestEmitNativeScalarErrorOkReturn(t *testing.T) {
+	got, err := Emit(nativeScalarErrorOkReturnModule())
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if !strings.Contains(got, "ret i1 true") {
+		t.Fatalf("LLVM output missing scalar success payload:\n%s", got)
+	}
+}
+
 // TestEmitNativeFilesystemCapabilities checks filesystem calls lower concretely.
 func TestEmitNativeFilesystemCapabilities(t *testing.T) {
 	got, err := Emit(nativeFilesystemModule())
@@ -280,6 +313,62 @@ func nativeWriteFileModule() *ir.Module {
 					Terminator: ir.Terminator{Op: "return"},
 				},
 				},
+			},
+		},
+	}
+}
+
+// nativeErrorReturnModule returns the minimal error-union return shape.
+func nativeErrorReturnModule() *ir.Module {
+	return &ir.Module{
+		Functions: []*ir.Function{
+			{
+				Name: "main", Return: "!void",
+				Blocks: []*ir.Block{{Name: "entry",
+					Instrs: []*ir.Instr{
+						{Result: ir.Value{Name: "%1", Type: "!void"}, Op: "error.error"},
+					},
+					Terminator: ir.Terminator{Op: "return",
+						Value: ir.Value{Name: "%1", Type: "!void"}},
+				}},
+			},
+		},
+	}
+}
+
+// nativeScalarErrorReturnModule returns an error-union scalar return shape.
+func nativeScalarErrorReturnModule() *ir.Module {
+	return &ir.Module{
+		Functions: []*ir.Function{
+			{
+				Name: "has_marker", Return: "!bool",
+				Blocks: []*ir.Block{{Name: "entry",
+					Instrs: []*ir.Instr{
+						{Result: ir.Value{Name: "%1", Type: "!bool"}, Op: "error.error"},
+					},
+					Terminator: ir.Terminator{Op: "return",
+						Value: ir.Value{Name: "%1", Type: "!bool"}},
+				}},
+			},
+		},
+	}
+}
+
+// nativeScalarErrorOkReturnModule returns a scalar error-union success shape.
+func nativeScalarErrorOkReturnModule() *ir.Module {
+	return &ir.Module{
+		Functions: []*ir.Function{
+			{
+				Name: "has_marker", Return: "!bool",
+				Blocks: []*ir.Block{{Name: "entry",
+					Instrs: []*ir.Instr{
+						{Result: ir.Value{Name: "%1", Type: "bool"}, Op: "const", Immediate: "true"},
+						{Result: ir.Value{Name: "%2", Type: "!bool"}, Op: "error.ok",
+							Args: []ir.Value{{Name: "%1", Type: "bool"}}},
+					},
+					Terminator: ir.Terminator{Op: "return",
+						Value: ir.Value{Name: "%2", Type: "!bool"}},
+				}},
 			},
 		},
 	}

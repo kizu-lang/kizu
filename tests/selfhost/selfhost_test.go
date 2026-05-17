@@ -790,6 +790,7 @@ func selfHostTypeDiagnosticObjectOracleCases() []string {
 		"examples/negative/if_expression_missing_else.kizu",
 		"examples/negative/empty_return_value.kizu",
 		"examples/negative/missing_return.kizu",
+		"examples/negative/missing_return_if.kizu",
 		"examples/negative/invalid_cast.kizu",
 		"examples/negative/break_outside_loop.kizu",
 		"examples/negative/continue_outside_loop.kizu",

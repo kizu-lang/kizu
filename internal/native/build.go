@@ -133,18 +133,24 @@ func withNativeEntry(llvmText string) (string, error) {
 		returnType string
 		prefix     string
 		call       string
+		checkError bool
 	}
 	shapes := []mainShape{
 		{returnType: "void", prefix: "define void @main(", call: "call void @kizu_user_main()"},
 		{returnType: "i64", prefix: "define i64 @main(", call: "call i64 @kizu_user_main()"},
-		{returnType: "ptr", prefix: "define ptr @main(", call: "call ptr @kizu_user_main()"},
+		{
+			returnType: "ptr",
+			prefix:     "define ptr @main(",
+			call:       "call ptr @kizu_user_main()",
+			checkError: true,
+		},
 	}
 	for _, shape := range shapes {
 		if strings.Contains(llvmText, "\n"+shape.prefix) ||
 			strings.HasPrefix(llvmText, shape.prefix) {
 			renamed := replaceMainDefinitionLine(llvmText, shape.prefix,
 				"define "+shape.returnType+" @kizu_user_main(")
-			return renamed + nativeMainWrapper(shape.call), nil
+			return renamed + nativeMainWrapper(shape.call, shape.checkError), nil
 		}
 	}
 	return "", fmt.Errorf("native error: missing main function")
@@ -163,7 +169,10 @@ func replaceMainDefinitionLine(llvmText string, oldPrefix string, newPrefix stri
 }
 
 // nativeMainWrapper returns the C ABI entry point for a Kizu main.
-func nativeMainWrapper(call string) string {
+func nativeMainWrapper(call string, checkError bool) string {
+	if checkError {
+		return nativeErrorMainWrapper(call)
+	}
 	return `
 @kizu_argc = external global i64
 @kizu_argv = external global ptr
@@ -175,6 +184,28 @@ entry:
   store ptr %argv, ptr @kizu_argv
   ` + call + `
   ret i32 0
+}
+`
+}
+
+// nativeErrorMainWrapper maps a non-null !void sentinel to process exit 1.
+func nativeErrorMainWrapper(call string) string {
+	return `
+@kizu_argc = external global i64
+@kizu_argv = external global ptr
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %wide_argc = sext i32 %argc to i64
+  store i64 %wide_argc, ptr @kizu_argc
+  store ptr %argv, ptr @kizu_argv
+  %kizu_status = ` + call + `
+  %kizu_failed = icmp ne ptr %kizu_status, null
+  br i1 %kizu_failed, label %error, label %ok
+ok:
+  ret i32 0
+error:
+  ret i32 1
 }
 `
 }

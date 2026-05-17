@@ -129,6 +129,7 @@ go test ./...
 | unknown fields are rejected | `negative/invalid_field.kizu` | `unknown field` |
 | non-`void` functions need returned values | `negative/empty_return_value.kizu` | `got void` |
 | non-`void` functions require explicit return | `negative/missing_return.kizu` | `must return` |
+| one-sided `if` returns do not satisfy non-`void` functions | `negative/missing_return_if.kizu` | `must return` |
 | `try` requires an error-union-returning function | `negative/invalid_try.kizu` | `try requires` |
 | typed errors must match across `try` | `negative/typed_error_mismatch.kizu` | `cannot propagate` |
 | `error(message)` cannot build typed errors | `negative/typed_error_untyped_constructor.kizu` | `cannot construct typed error` |
