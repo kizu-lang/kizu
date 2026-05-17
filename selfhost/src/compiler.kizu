@@ -26,6 +26,18 @@ pub struct CompileReport {
     pub diagnostic: []const u8;
 }
 
+pub struct FrontendReport {
+    pub token_count: i64;
+    pub first_kind: token::TokenKind;
+    pub eof_kind: token::TokenKind;
+    pub function_count: i64;
+    pub import_count: i64;
+    pub struct_count: i64;
+    pub enum_count: i64;
+    pub union_count: i64;
+    pub return_count: i64;
+}
+
 pub struct SourceModule {
     pub path: []const u8;
     pub source: []const u8;
@@ -50,9 +62,15 @@ pub struct PackageReport {
 
 // compile_source runs the self-host phase order over one source buffer.
 pub fn compile_source(source: []const u8, target_name: []const u8) -> !CompileReport {
-    var tokens = try lexer::lex(source);
-    token::ready();
-    let parsed = try parser::parse_tokens(tokens);
+    let frontend = try lex_and_parse_source(source);
+    let parsed = ast::ParseSummary {
+        function_count: frontend.function_count,
+        import_count: frontend.import_count,
+        struct_count: frontend.struct_count,
+        enum_count: frontend.enum_count,
+        union_count: frontend.union_count,
+        return_count: frontend.return_count,
+    };
     let typed = try type_summary(&parsed);
     let ownership_report = ownership_summary(&typed);
     let lowered = ir::module(parsed.function_count, parsed.function_count, parsed.return_count);
@@ -65,13 +83,34 @@ pub fn compile_source(source: []const u8, target_name: []const u8) -> !CompileRe
 
     return CompileReport {
         status: CompileStatus::Pass,
-        token_count: tokens.len(),
+        token_count: frontend.token_count,
         function_count: parsed.function_count,
         type_count: typed.type_count,
         ownership_checks: ownership_report.check_count,
         ir_function_count: lowered.function_count,
         backend_emitted: artifact.emitted,
         diagnostic: "",
+    };
+}
+
+// lex_and_parse_source runs the Kizu-native lexer token stream into the parser.
+pub fn lex_and_parse_source(source: []const u8) -> !FrontendReport {
+    var tokens = try lexer::lex(source);
+    token::ready();
+    let parsed = try parser::parse_token_stream(tokens);
+    let first = try tokens.at(0);
+    let eof = try tokens.at(tokens.len() - 1);
+
+    return FrontendReport {
+        token_count: tokens.len(),
+        first_kind: first.kind,
+        eof_kind: eof.kind,
+        function_count: parsed.function_count,
+        import_count: parsed.import_count,
+        struct_count: parsed.struct_count,
+        enum_count: parsed.enum_count,
+        union_count: parsed.union_count,
+        return_count: parsed.return_count,
     };
 }
 

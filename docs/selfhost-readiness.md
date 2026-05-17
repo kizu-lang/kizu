@@ -99,6 +99,7 @@ path. It does not mean any production phase is Kizu-owned yet.
 `selfhost/src/compiler.kizu` also exposes a Kizu-owned package compile boundary:
 
 ```text
+compiler::lex_and_parse_source(source)
 compiler::compile_package(modules, target)
 compiler::compile_selfhost_package_check()
 ```
@@ -109,6 +110,11 @@ capability is still Go-owned. It proves that the Kizu compiler package can feed
 multiple Kizu source buffers through the compiler phase order and skip test
 modules like the Go package build path. It is not yet filesystem-backed
 compilation of `selfhost/kizu.toml`.
+
+As part of #236, `compiler::lex_and_parse_source` is the first Kizu-native
+frontend boundary. It runs `lexer::lex(source)` and feeds the resulting
+`std::array::Array<token::Token>` directly into `parser::parse_token_stream`
+inside Kizu source. This is intentionally not a Go token-stream adapter.
 
 ## #192 Token / Lexer Readiness
 
