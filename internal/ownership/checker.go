@@ -853,20 +853,29 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
 		return result, err
 	}
-	fn, ok := c.functions[name.Name]
+	return c.checkUserCall(name.Name, expr.Args, env)
+}
+
+// checkUserCall validates ownership effects for a declared function call.
+func (c *Checker) checkUserCall(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	fn, ok := c.functions[name]
 	if !ok {
-		return "", fmt.Errorf("move error: undefined function `%s`", name.Name)
+		return "", fmt.Errorf("move error: undefined function `%s`", name)
 	}
-	if len(expr.Args) != len(fn.params) {
+	if len(args) != len(fn.params) {
 		return "", fmt.Errorf("move error: `%s` expects %d args, got %d",
-			name.Name, len(fn.params), len(expr.Args))
+			name, len(fn.params), len(args))
 	}
-	borrowed, err := c.activateBorrowArgs(fn, expr.Args, env)
+	borrowed, err := c.activateBorrowArgs(fn, args, env)
 	if err != nil {
 		return "", err
 	}
 	defer releaseBorrows(borrowed)
-	for idx, arg := range expr.Args {
+	for idx, arg := range args {
 		if fn.params[idx].comptime {
 			_, err = c.readExpr(arg, env)
 		} else if fn.params[idx].borrow {
@@ -890,10 +899,30 @@ func (c *Checker) checkFieldCallExpr(
 	if typ, ok, err := c.checkUnionConstructor(field, args, env); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkQualifiedUserCall(field, args, env); ok || err != nil {
+		return typ, err
+	}
 	if typ, ok, err := c.checkQualifiedBuiltin(field, args, env); ok || err != nil {
 		return typ, err
 	}
 	return c.checkMethodCallExpr(field, args, env)
+}
+
+// checkQualifiedUserCall validates ownership for source-loaded qualified calls.
+func (c *Checker) checkQualifiedUserCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return "", false, nil
+	}
+	if _, ok := c.functions[name]; !ok {
+		return "", false, nil
+	}
+	typ, err := c.checkUserCall(name, args, env)
+	return typ, true, err
 }
 
 // checkQualifiedBuiltin validates ownership for std:: namespace prototype calls.
@@ -1170,9 +1199,10 @@ func (c *Checker) checkPathBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.path.join":
+	case "std.builtin.path_join":
 		return c.checkPathArgs(name, args, env, 2)
-	case "std.path.clean", "std.path.basename", "std.path.dirname", "std.path.extension":
+	case "std.builtin.path_clean", "std.builtin.path_basename",
+		"std.builtin.path_dirname", "std.builtin.path_extension":
 		return c.checkPathArgs(name, args, env, 1)
 	default:
 		return "", false, nil

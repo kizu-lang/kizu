@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -100,7 +101,7 @@ func parseFile(path string) error {
 
 // runFile parses a source file and executes it with the interpreter.
 func runFile(path string, args []string) error {
-	program, errs, err := parsePath(path)
+	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return err
 	}
@@ -118,7 +119,7 @@ func runFile(path string, args []string) error {
 
 // checkFile parses a source file and runs static checks.
 func checkFile(path string) error {
-	program, errs, err := parsePath(path)
+	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return err
 	}
@@ -137,7 +138,7 @@ func checkFile(path string) error {
 
 // testFile runs a single Kizu test source and reports a minimal test result.
 func testFile(path string, args []string) error {
-	program, errs, err := parsePath(path)
+	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return err
 	}
@@ -366,7 +367,7 @@ func importCHeaderFile(path string) error {
 
 // lowerFile parses, checks, lowers, and optionally optimizes source to typed SSA IR.
 func lowerFile(path string, opt bool) (*ir.Module, error) {
-	program, errs, err := parsePath(path)
+	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return nil, err
 	}
@@ -409,4 +410,76 @@ func parsePath(path string) (*ast.Program, []string, error) {
 	p := parser.New(lexer.New(string(b)))
 	program := p.ParseProgram()
 	return program, p.Errors(), nil
+}
+
+// parsePathWithStd parses a source file and appends Kizu std wrappers.
+func parsePathWithStd(path string) (*ast.Program, []string, error) {
+	program, errs, err := parsePath(path)
+	if err != nil || len(errs) > 0 {
+		return program, errs, err
+	}
+	usesStdPath, err := sourceUsesStdPath(path)
+	if err != nil {
+		return program, nil, err
+	}
+	if !usesStdPath {
+		return program, nil, nil
+	}
+	stdDecls, stdErrs, err := parseStdPathDecls()
+	if err != nil || len(stdErrs) > 0 {
+		return program, stdErrs, err
+	}
+	program.Decls = append(stdDecls, program.Decls...)
+	return program, nil, nil
+}
+
+// sourceUsesStdPath reports whether a source file references std::path wrappers.
+func sourceUsesStdPath(path string) (bool, error) {
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(string(source), "std::path::"), nil
+}
+
+// parseStdPathDecls loads std::path wrappers from Kizu source.
+func parseStdPathDecls() ([]ast.Decl, []string, error) {
+	path, err := findRepoFile("std/src/path.kizu")
+	if err != nil {
+		return nil, nil, err
+	}
+	program, errs, err := parsePath(path)
+	if err != nil || len(errs) > 0 {
+		return nil, errs, err
+	}
+	decls := make([]ast.Decl, 0, len(program.Decls))
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*ast.FunctionDecl)
+		if !ok {
+			return nil, nil, fmt.Errorf("std path error: unsupported declaration %T", decl)
+		}
+		fn.Name = "std.path." + fn.Name
+		fn.Public = false
+		decls = append(decls, fn)
+	}
+	return decls, nil, nil
+}
+
+// findRepoFile searches upward for a repository-relative file.
+func findRepoFile(name string) (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		candidate := filepath.Join(dir, name)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("open %s: no such file or directory", name)
+		}
+		dir = parent
+	}
 }
