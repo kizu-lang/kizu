@@ -174,6 +174,13 @@ opcode, result, operand, immediate, and terminator rows. `KIZU_SELFHOST_IR=1
 kizu ir <file>` is the opt-in switch for this boundary. Backend emission and
 cache artifact decisions remain separate switch units.
 
+`kizu selfhost-wat <file>` is the bootstrap command for #246. It runs the
+Kizu-owned backend module and emits deterministic `wasm32-wasi` WAT text for the
+selected fixture matrix. `KIZU_SELFHOST_WAT=1 kizu build --target wasm32-wasi
+<file>` is the opt-in switch for this boundary. The Go host remains responsible
+only for invoking the Kizu function and writing stdout; LLVM and native
+emission remain out of scope.
+
 ## #242 Backend / Cache Switch Boundary Decision
 
 Target mapping:

@@ -480,6 +480,42 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 	}
 }
 
+// TestSelfHostWATCommandSmoke checks the Kizu-owned WAT backend command.
+func TestSelfHostWATCommandSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "selfhost-wat", "../../examples/hello.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"(module",
+		"(import \"wasi_snapshot_preview1\" \"fd_write\"",
+		"(func $_start (export \"_start\")",
+		"(call $main)",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
+// TestBuildTargetWASISelfHostSwitch checks the opt-in Kizu-owned WAT switch.
+func TestBuildTargetWASISelfHostSwitch(t *testing.T) {
+	cmd := exec.Command(
+		"go", "run", ".", "build", "--target", "wasm32-wasi", "../../examples/functions.kizu",
+	)
+	cmd.Env = append(os.Environ(), "KIZU_SELFHOST_WAT=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"(func $add)", "(func $main)", "(func $_start"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
 // TestBuildSelfHostPackageEmitLLVM checks package build can lower self-host sources.
 func TestBuildSelfHostPackageEmitLLVM(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", "../../selfhost")

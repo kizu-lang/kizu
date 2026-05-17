@@ -91,6 +91,8 @@ func dispatchSelfHost(cmd string, args []string) error {
 		return selfHostOwnershipFile(args[0])
 	case "selfhost-ir":
 		return selfHostIRFile(args[0])
+	case "selfhost-wat":
+		return selfHostWATFile(args[0])
 	default:
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
@@ -106,6 +108,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-type <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-ownership <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-ir <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu selfhost-wat <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
@@ -318,6 +321,11 @@ func selfHostOwnershipFile(path string) error {
 // selfHostIRFile runs the Kizu-owned IR bootstrap command.
 func selfHostIRFile(path string) error {
 	return runSelfHostFrontendMode(path, "--ir")
+}
+
+// selfHostWATFile runs the Kizu-owned WAT backend bootstrap command.
+func selfHostWATFile(path string) error {
+	return runSelfHostFrontendMode(path, "--wat")
 }
 
 // selfHostResolverSourcePath maps a package target to its configured root source.
@@ -784,6 +792,9 @@ func emitTargetFile(target string, args []string) error {
 
 // emitWASMFile lowers a checked source file to WASI WebAssembly text.
 func emitWASMFile(path string, opt bool) error {
+	if os.Getenv("KIZU_SELFHOST_WAT") == "1" {
+		return selfHostWATFile(path)
+	}
 	cache, err := buildcache.New()
 	if err != nil {
 		return err
