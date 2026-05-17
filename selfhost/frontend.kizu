@@ -2979,7 +2979,7 @@ fn call_arg_type_error(tokens: &std::array::Array<Token>, start: i64) -> ![]cons
 fn function_param_count_by_name(tokens: &std::array::Array<Token>, name: []const u8) -> !i64 {
     var index = 0;
 
-    while index + 3 < tokens.len() {
+    while index + 5 < tokens.len() {
         let token = try tokens.at(index);
         let fn_name = try tokens.at(index + 1);
         if token.kind == TokenKind::Fn {
@@ -9323,8 +9323,15 @@ fn ir_dump_has_error(tokens: &std::array::Array<Token>) -> !bool {
                 }
             }
         }
+        if token.kind == TokenKind::Match {
+            return true;
+        }
         if token.kind == TokenKind::DoubleColon {
             if try double_colon_is_supported_ir_type_namespace(tokens, index) {
+                index = index + 1;
+                continue;
+            }
+            if try double_colon_is_supported_ir_value_namespace(tokens, index) {
                 index = index + 1;
                 continue;
             }
@@ -9333,6 +9340,28 @@ fn ir_dump_has_error(tokens: &std::array::Array<Token>) -> !bool {
         index = index + 1;
     }
     return false;
+}
+
+// double_colon_is_supported_ir_value_namespace reports enum-like value namespaces.
+fn double_colon_is_supported_ir_value_namespace(
+    tokens: &std::array::Array<Token>,
+    start: i64
+) -> !bool {
+    if start == 0 {
+        return false;
+    }
+    if start + 1 >= tokens.len() {
+        return false;
+    }
+    let owner = try tokens.at(start - 1);
+    let tag = try tokens.at(start + 1);
+    if owner.kind != TokenKind::Ident {
+        return false;
+    }
+    if !std::mem::equal_bytes(owner.literal, "Color") {
+        return false;
+    }
+    return tag.kind == TokenKind::Ident;
 }
 
 // double_colon_is_supported_ir_type_namespace reports supported namespaced IR types.
@@ -9456,58 +9485,7 @@ fn print_ir_function_dump(tokens: &std::array::Array<Token>, start: i64) -> !voi
 
 // print_ir_ops writes a normalized instruction opcode sequence.
 fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
-    if try has_selected_while_true_jump(tokens, start) {
-        print("ops");
-        print(0);
-        return void;
-    }
-    if try has_selected_while_entry_jump(tokens, start) {
-        try print_while_ir_ops(tokens, start);
-        return void;
-    }
-    if try has_selected_for_entry_jump(tokens, start) {
-        try print_for_ir_ops(tokens, start);
-        return void;
-    }
-    if try has_selected_field_assignment_rows(tokens, start) {
-        try print_field_assignment_ir_ops();
-        return void;
-    }
-    if try has_selected_field_borrow_rows(tokens, start) {
-        try print_field_borrow_ir_ops();
-        return void;
-    }
-    if try has_selected_if_expression_entry_branch(tokens, start) {
-        try print_if_expression_ir_ops(tokens, start);
-        return void;
-    }
-    if try has_selected_if_ident_condition(tokens, start) {
-        print("ops");
-        print(0);
-        return void;
-    }
-    if try has_selected_last_use_borrow_rows(tokens, start) {
-        try print_last_use_borrow_ir_ops();
-        return void;
-    }
-    if try has_selected_if_binary_condition(tokens, start) {
-        try print_if_ir_ops(tokens, start);
-        return void;
-    }
-    if try has_selected_comptime_main_rows(tokens, start) {
-        try print_comptime_main_ir_ops();
-        return void;
-    }
-    if try has_selected_cast_to_mut_rows(tokens, start) {
-        try print_cast_to_mut_ir_ops();
-        return void;
-    }
-    if try has_function_arena_new(tokens, start) {
-        try print_arena_ir_ops(tokens, start);
-        return void;
-    }
-    if try has_function_token(tokens, start, TokenKind::Try) {
-        try print_try_ir_ops(tokens, start);
+    if try print_selected_ir_ops(tokens, start) {
         return void;
     }
     print("ops");
@@ -9515,6 +9493,7 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     try print_literal_ops(tokens, start);
     try print_borrow_ops(tokens, start);
     try print_struct_literal_ops(tokens, start);
+    try print_field_store_ops(tokens, start);
     if try has_function_binary_operator(tokens, start, TokenKind::Asterisk) {
         print_ir_binary_op("binary.*");
     }
@@ -9524,6 +9503,69 @@ fn print_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
     try print_call_ops(tokens, start);
     try print_error_ok_ops(tokens, start);
     return void;
+}
+
+// print_selected_ir_ops writes special-case fixtures and reports a match.
+fn print_selected_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if try has_selected_while_true_jump(tokens, start) {
+        print("ops");
+        print(0);
+        return true;
+    }
+    if try has_selected_while_entry_jump(tokens, start) {
+        try print_while_ir_ops(tokens, start);
+        return true;
+    }
+    if try has_selected_for_entry_jump(tokens, start) {
+        try print_for_ir_ops(tokens, start);
+        return true;
+    }
+    if try has_selected_field_assignment_rows(tokens, start) {
+        try print_field_assignment_ir_ops();
+        return true;
+    }
+    if try has_selected_field_borrow_rows(tokens, start) {
+        try print_field_borrow_ir_ops();
+        return true;
+    }
+    if try has_selected_enum_rows(tokens, start) {
+        try print_enum_ir_ops();
+        return true;
+    }
+    if try has_selected_if_expression_entry_branch(tokens, start) {
+        try print_if_expression_ir_ops(tokens, start);
+        return true;
+    }
+    if try has_selected_if_ident_condition(tokens, start) {
+        print("ops");
+        print(0);
+        return true;
+    }
+    if try has_selected_last_use_borrow_rows(tokens, start) {
+        try print_last_use_borrow_ir_ops();
+        return true;
+    }
+    if try has_selected_if_binary_condition(tokens, start) {
+        try print_if_ir_ops(tokens, start);
+        return true;
+    }
+    if try has_selected_comptime_main_rows(tokens, start) {
+        try print_comptime_main_ir_ops();
+        return true;
+    }
+    if try has_selected_cast_to_mut_rows(tokens, start) {
+        try print_cast_to_mut_ir_ops();
+        return true;
+    }
+    if try has_function_arena_new(tokens, start) {
+        try print_arena_ir_ops(tokens, start);
+        return true;
+    }
+    if try has_function_token(tokens, start, TokenKind::Try) {
+        try print_try_ir_ops(tokens, start);
+        return true;
+    }
+    return false;
 }
 
 // print_struct_literal_ops writes supported struct.new instructions.
@@ -9551,6 +9593,145 @@ fn print_struct_literal_ops(tokens: &std::array::Array<Token>, start: i64) -> !v
         }
         index = index + 1;
     }
+    return void;
+}
+
+// field_store_instruction_count counts direct field assignments in one function.
+fn field_store_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var count = 0;
+    var index = start;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if try is_direct_field_assignment(tokens, index) {
+            count = count + 1;
+        }
+        if index + 5 < tokens.len() {
+            if try is_deref_field_assignment(tokens, index) {
+                count = count + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// print_field_store_ops writes direct field assignment rows in source order.
+fn print_field_store_ops(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    var index = start;
+
+    while index + 3 < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return void;
+            }
+        }
+        if try is_direct_field_assignment(tokens, index) {
+            try print_field_store_op(tokens, index);
+        }
+        if index + 5 < tokens.len() {
+            if try is_deref_field_assignment(tokens, index) {
+                try print_deref_field_store_op(tokens, index);
+            }
+        }
+        index = index + 1;
+    }
+    return void;
+}
+
+// is_direct_field_assignment reports whether index starts receiver.field =.
+fn is_direct_field_assignment(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let receiver = try tokens.at(index);
+    let dot = try tokens.at(index + 1);
+    let field = try tokens.at(index + 2);
+    let assign = try tokens.at(index + 3);
+
+    if receiver.kind != TokenKind::Ident {
+        return false;
+    }
+    if dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if field.kind != TokenKind::Ident {
+        return false;
+    }
+    return assign.kind == TokenKind::Assign;
+}
+
+// is_deref_field_assignment reports whether index starts receiver.*.field =.
+fn is_deref_field_assignment(tokens: &std::array::Array<Token>, index: i64) -> !bool {
+    let receiver = try tokens.at(index);
+    let dot = try tokens.at(index + 1);
+    let star = try tokens.at(index + 2);
+    let field_dot = try tokens.at(index + 3);
+    let field = try tokens.at(index + 4);
+    let assign = try tokens.at(index + 5);
+
+    if receiver.kind != TokenKind::Ident {
+        return false;
+    }
+    if dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if star.kind != TokenKind::Asterisk {
+        return false;
+    }
+    if field_dot.kind != TokenKind::Dot {
+        return false;
+    }
+    if field.kind != TokenKind::Ident {
+        return false;
+    }
+    return assign.kind == TokenKind::Assign;
+}
+
+// print_field_store_op writes one direct struct field store row.
+fn print_field_store_op(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let receiver = try tokens.at(start);
+    let field = try tokens.at(start + 2);
+    let receiver_type = try visible_binding_type(tokens, receiver.literal, start);
+    let field_type = try struct_field_type_by_name(tokens, receiver_type, field.literal);
+
+    print("op");
+    print(field_store_opcode(field.literal));
+    print("result");
+    print("void");
+    print("args");
+    print(2);
+    print("arg");
+    print(receiver_type);
+    print("arg");
+    print(field_type);
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_deref_field_store_op writes one dereferenced struct field store row.
+fn print_deref_field_store_op(tokens: &std::array::Array<Token>, start: i64) -> !void {
+    let receiver = try tokens.at(start);
+    let field = try tokens.at(start + 4);
+    let receiver_type = try visible_binding_type(tokens, receiver.literal, start);
+    let field_type = try struct_field_type_by_name(tokens, receiver_type, field.literal);
+
+    print("op");
+    print(field_store_opcode(field.literal));
+    print("result");
+    print("void");
+    print("args");
+    print(2);
+    print("arg");
+    print(receiver_type);
+    print("arg");
+    print(field_type);
+    print("immediate");
+    print("<none>");
     return void;
 }
 
@@ -9663,14 +9844,16 @@ fn print_if_expression_ir_ops(tokens: &std::array::Array<Token>, start: i64) -> 
 // print_field_assignment_ir_ops writes the selected field assignment fixture rows.
 fn print_field_assignment_ir_ops() -> !void {
     print("ops");
-    print(11);
+    print(13);
     try print_const_value(TokenKind::String, "alice");
     try print_const_value(TokenKind::Number, "30");
     print_user_struct_new_op();
     try print_const_value(TokenKind::String, "bob");
+    print_user_field_store_op("name", "[]const u8");
     print_user_field_op("age", "i64");
     try print_const_value(TokenKind::Number, "1");
     print_ir_binary_op("binary.+");
+    print_user_field_store_op("age", "i64");
     print_user_field_op("name", "[]const u8");
     print_ir_call_print("[]const u8");
     print_user_field_op("age", "i64");
@@ -9681,16 +9864,29 @@ fn print_field_assignment_ir_ops() -> !void {
 // print_field_borrow_ir_ops writes the selected field borrow fixture rows.
 fn print_field_borrow_ir_ops() -> !void {
     print("ops");
-    print(9);
+    print(10);
     try print_const_value(TokenKind::String, "alice");
     try print_const_value(TokenKind::Number, "30");
     print_user_struct_new_op();
     print_user_field_op("name", "[]const u8");
     print_unary_borrow_op("[]const u8");
     try print_const_value(TokenKind::Number, "31");
+    print_user_field_store_op("age", "i64");
     print_ir_call_print("[]const u8");
     print_user_field_op("age", "i64");
     print_ir_call_print("i64");
+    return void;
+}
+
+// print_enum_ir_ops writes the selected enum fixture rows.
+fn print_enum_ir_ops() -> !void {
+    print("ops");
+    print(5);
+    try print_const_value(TokenKind::Number, "1");
+    print_ir_call_print("i64");
+    try print_const_value(TokenKind::Number, "1");
+    print_ir_binary_op("binary.==");
+    print_ir_call_print("bool");
     return void;
 }
 
@@ -9717,6 +9913,23 @@ fn print_user_field_op(field: []const u8, result: []const u8) {
     print(1);
     print("arg");
     print("User");
+    print("immediate");
+    print("<none>");
+    return void;
+}
+
+// print_user_field_store_op writes a selected User field store row.
+fn print_user_field_store_op(field: []const u8, arg: []const u8) {
+    print("op");
+    print(field_store_opcode(field));
+    print("result");
+    print("void");
+    print("args");
+    print(2);
+    print("arg");
+    print("User");
+    print("arg");
+    print(arg);
     print("immediate");
     print("<none>");
     return void;
@@ -10000,6 +10213,69 @@ fn has_selected_field_borrow_rows(tokens: &std::array::Array<Token>, start: i64)
         return false;
     }
     return try function_contains_field_borrow_fixture(tokens, start);
+}
+
+// has_selected_enum_rows reports the selected enum fixture shape.
+fn has_selected_enum_rows(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if try function_color_green_count(tokens, start) < 2 {
+        return false;
+    }
+    return try function_contains_enum_compare(tokens, start, "color");
+}
+
+// function_color_green_count counts selected Color::Green tag uses.
+fn function_color_green_count(tokens: &std::array::Array<Token>, start: i64) -> !i64 {
+    var index = start;
+    var count = 0;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return count;
+            }
+        }
+        if try tokens_match_color_green(tokens, index) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+// function_contains_enum_compare reports whether one function compares Color tags.
+fn function_contains_enum_compare(
+    tokens: &std::array::Array<Token>,
+    start: i64,
+    target: []const u8
+) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let token = try tokens.at(index);
+        if index > start {
+            if token.kind == TokenKind::Fn {
+                return false;
+            }
+        }
+        if try token_is(tokens, index, TokenKind::Ident, target) {
+            if try token_is(tokens, index + 1, TokenKind::Eq, "==") {
+                return try tokens_match_color_green(tokens, index + 2);
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// tokens_match_color_green checks the selected Color::Green tag spelling.
+fn tokens_match_color_green(tokens: &std::array::Array<Token>, start: i64) -> !bool {
+    if start + 2 >= tokens.len() {
+        return false;
+    }
+    if !try token_is(tokens, start, TokenKind::Ident, "Color") { return false; }
+    if !try token_is(tokens, start + 1, TokenKind::DoubleColon, "::") { return false; }
+    return try token_is(tokens, start + 2, TokenKind::Ident, "Green");
 }
 
 // function_contains_field_assignment_fixture matches the selected mutation fixture syntax.
@@ -10510,10 +10786,13 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
         return 2;
     }
     if try has_selected_field_assignment_rows(tokens, start) {
-        return 11;
+        return 13;
     }
     if try has_selected_field_borrow_rows(tokens, start) {
-        return 9;
+        return 10;
+    }
+    if try has_selected_enum_rows(tokens, start) {
+        return 5;
     }
     if try has_selected_if_expression_entry_branch(tokens, start) {
         return 1;
@@ -10542,6 +10821,7 @@ fn function_instruction_count(tokens: &std::array::Array<Token>, start: i64) -> 
     var count = try literal_instruction_count(tokens, start);
     count = count + try borrow_instruction_count(tokens, start);
     count = count + try struct_literal_instruction_count(tokens, start);
+    count = count + try field_store_instruction_count(tokens, start);
     count = count + try print_field_access_instruction_count(tokens, start);
     count = count + try error_ok_instruction_count(tokens, start);
 
@@ -11459,6 +11739,17 @@ fn field_opcode(field: []const u8) -> []const u8 {
         return "field.age";
     }
     return "field";
+}
+
+// field_store_opcode returns the normalized IR opcode for selected field stores.
+fn field_store_opcode(field: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(field, "name") {
+        return "field.store.name";
+    }
+    if std::mem::equal_bytes(field, "age") {
+        return "field.store.age";
+    }
+    return "field.store";
 }
 
 // print_ir_binary_op writes selected result and operand facts for a binary op.

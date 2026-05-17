@@ -33,6 +33,7 @@ func TestRuntimeLLVMExportsPrintSymbols(t *testing.T) {
 		"define void @kizu_array_append",
 		"define ptr @kizu_array_at",
 		"define i64 @kizu_array_len",
+		"declare ptr @realloc",
 	} {
 		if !strings.Contains(runtime, want) {
 			t.Fatalf("runtime missing %q:\n%s", want, runtime)

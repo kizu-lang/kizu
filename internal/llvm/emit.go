@@ -84,7 +84,7 @@ func instrDefinesLLVM(instr *ir.Instr) bool {
 			return false
 		}
 		return !strings.HasPrefix(name, "std.") || stdCallDefinesLLVM(name)
-	case instr.Op == "struct.new" || strings.HasPrefix(instr.Op, "field."):
+	case instr.Op == "struct.new" || isFieldLoad(instr.Op):
 		return true
 	case instr.Op == "method.at" || instr.Op == "method.len":
 		return true
@@ -255,8 +255,10 @@ func (e *emitter) writeNativeValueInstr(instr *ir.Instr) (bool, error) {
 	switch {
 	case instr.Op == "struct.new":
 		return true, e.writeStructNew(instr)
-	case strings.HasPrefix(instr.Op, "field."):
+	case isFieldLoad(instr.Op):
 		return true, e.writeField(instr)
+	case strings.HasPrefix(instr.Op, "field.store."):
+		return true, e.writeFieldStore(instr)
 	case strings.HasPrefix(instr.Op, "method."):
 		return true, e.writeMethod(instr)
 	default:
@@ -393,8 +395,7 @@ func (e *emitter) writeRuntimeValueCall(instr *ir.Instr, call string, typ string
 func (e *emitter) writeStdIOCall(instr *ir.Instr) {
 	if len(instr.Args) >= 2 {
 		value := e.value(instr.Args[1])
-		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n",
-			llvmOperand(value.operand, "[]const u8"), value.length)
+		e.writePrintString(value)
 	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
 }
@@ -489,6 +490,34 @@ func (e *emitter) writeField(instr *ir.Instr) error {
 	return nil
 }
 
+// writeFieldStore stores into one field of a struct pointer.
+func (e *emitter) writeFieldStore(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: field store expects receiver and value")
+	}
+	receiver := instr.Args[0]
+	valueArg := instr.Args[1]
+	name := strings.TrimPrefix(instr.Op, "field.store.")
+	index, typ, ok := e.structField(receiver.Type, name)
+	if !ok {
+		return e.writeOpaqueValue(instr)
+	}
+	base := e.value(receiver)
+	value := e.value(valueArg)
+	slot := e.nextTemp("field")
+	fmt.Fprintf(&e.out, "  %s = getelementptr inbounds %s, ptr %s, i64 0, i32 %d\n",
+		slot, structLLVMName(receiver.Type), llvmOperand(base.operand, receiver.Type), index)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n",
+		llvmType(typ), llvmTypedOperand(value.operand, value.typ, typ), slot)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+	return nil
+}
+
+// isFieldLoad reports whether op is a non-mutating field access instruction.
+func isFieldLoad(op string) bool {
+	return strings.HasPrefix(op, "field.") && !strings.HasPrefix(op, "field.store.")
+}
+
 // writeMethod lowers the minimal Array receiver methods needed by selfhost.
 func (e *emitter) writeMethod(instr *ir.Instr) error {
 	switch instr.Op {
@@ -548,8 +577,7 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	value := e.value(args[0])
 	switch args[0].Type {
 	case "[]const u8":
-		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n",
-			value.operand, value.length)
+		e.writePrintString(value)
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", value.operand)
 	case "bool":
@@ -558,6 +586,18 @@ func (e *emitter) writePrint(args []ir.Value) error {
 		fmt.Fprintf(&e.out, "  ; unsupported print type %s\n", args[0].Type)
 	}
 	return nil
+}
+
+// writePrintString writes a string print with static or runtime length.
+func (e *emitter) writePrintString(value valueInfo) {
+	text := llvmOperand(value.operand, "[]const u8")
+	if value.length > 0 {
+		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n", text, value.length)
+		return
+	}
+	length := e.nextTemp("len")
+	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_bytes_len(ptr %s)\n", length, text)
+	fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %s)\n", text, length)
 }
 
 // writePhi writes an LLVM phi instruction.
