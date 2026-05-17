@@ -68,16 +68,21 @@ The default smoke input is `selfhost/fixtures/simple.kizu`. Passing a path after
 `selfhost/fixtures/simple_tokens.kizu` is a wider lexer corpus used by Go tests
 to compare the full self-host token-kind stream against the production lexer.
 
-## v0.3 Handoff
+## v0.3 Target
 
-The v0.2 standard-library bridge is complete for the current self-host package
-surface: `tests/selfhost` parses, checks, and runs the harness and the package
-component tests through the same APIs the self-host compiler needs. New compiler
-implementation work should build from the module-first package tree, not by
-adding more production logic to `frontend.kizu`.
+v0.3 is the Kizu-only standalone self-host compiler milestone. This directory is
+not v0.3 complete until the compiler package can be built into a standalone
+artifact that can check/build Kizu programs and rebuild `selfhost` without using
+the Go CLI/interpreter as the compiler execution path.
+
+The current standard-library bridge and component tests are bootstrap inputs for
+v0.3. New compiler implementation work should build from the module-first
+package tree, not by adding more production logic to `frontend.kizu`.
 
 `frontend.kizu` can be deleted after the module tree owns the same oracle
-surface with package-level tests and the production switch is explicit.
+surface with package-level tests and the standalone compiler path is explicit.
+
+The v0.3 umbrella is #256.
 
 ## Conformance Reuse
 

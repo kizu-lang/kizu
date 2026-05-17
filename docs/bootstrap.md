@@ -27,9 +27,24 @@ The snapshots are intentionally normalized. They are not a compatibility layer:
 when Kizu gains a richer phase output, Go must expose the same shape or the
 switch is blocked.
 
-## Current v0.3 Scope
+## v0.3 Target
 
-Implemented oracle bridges:
+v0.3 is not the existing oracle bridge state. v0.3 means a Kizu-only standalone
+self-host compiler artifact that can check/build user programs and rebuild the
+selfhost compiler package without using the Go CLI/interpreter as the compiler
+execution path.
+
+Required v0.3 smoke shape:
+
+```sh
+kizu build --target wasm32-wasi selfhost
+./target/kizu-selfhost check examples/hello.kizu
+./target/kizu-selfhost build --target wasm32-wasi examples/hello.kizu
+./target/kizu-selfhost check selfhost
+./target/kizu-selfhost build --target wasm32-wasi selfhost
+```
+
+The previous bridge work already implemented:
 
 - lexer token snapshots
 - parser AST snapshots
@@ -37,6 +52,9 @@ Implemented oracle bridges:
 - selected memory-safety negative fixtures through the Go checker oracle
 - minimal IR/backend snapshots
 - module-aware cache measurement through `internal/buildcache`
+
+Those bridges are required inputs for v0.3, but they are not the v0.3 release.
+The v0.3 umbrella is #256.
 
 ## Self-Host Migration Strategy
 
@@ -82,7 +100,7 @@ Before starting a port, use [`docs/selfhost-readiness.md`](selfhost-readiness.md
 to confirm the component's Go oracle, fixture coverage, stdlib dependencies,
 memory-safety boundary, and switch criteria.
 
-Backend smoke scope in v0.3:
+Backend smoke scope before standalone v0.3:
 
 - LLVM text emission remains Go-owned and smoke-tested through `kizu build --emit-llvm`
 - WASM WAT emission remains Go-owned and smoke-tested through `kizu build --target wasm32-wasi`
@@ -90,7 +108,7 @@ Backend smoke scope in v0.3:
   `kizu build --target wasm32-wasi selfhost`
 - native executable generation is not a v0.3 self-host switch target
 
-Cache ownership in v0.3:
+Cache ownership before standalone v0.3:
 
 - build cache remains Go-owned until Kizu owns filesystem, hashing, module graph,
   and artifact layout APIs
