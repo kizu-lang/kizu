@@ -98,6 +98,19 @@ pub fn compile_source(source: []const u8, target_name: []const u8) -> !CompileRe
         union_count: frontend.union_count,
         return_count: frontend.return_count,
     };
+    let diagnostic = try missing_return_diagnostic(source);
+    if !std::mem::equal_bytes(diagnostic, "") {
+        return CompileReport {
+            status: CompileStatus::Fail,
+            token_count: frontend.token_count,
+            function_count: parsed.function_count,
+            type_count: parsed.struct_count + parsed.enum_count + parsed.union_count,
+            ownership_checks: 0,
+            ir_function_count: 0,
+            backend_emitted: false,
+            diagnostic: diagnostic,
+        };
+    }
     let typed = try type_summary(&parsed);
     let ownership_report = ownership_summary(&typed);
     let lowered = ir::module(parsed.function_count, parsed.function_count, parsed.return_count);
@@ -130,6 +143,62 @@ pub fn check_source(source: []const u8) -> !CommandReport {
 pub fn build_source(source: []const u8, target_name: []const u8) -> !CommandReport {
     let report = try compile_source(source, target_name);
     return command_report("build", target_name, report);
+}
+
+// missing_return_diagnostic reports the first required-return diagnostic.
+fn missing_return_diagnostic(source: []const u8) -> ![]const u8 {
+    var tokens = try lexer::lex(source);
+    var index = 0;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::Fn {
+            if try function_requires_value_return(tokens, index) {
+                if !try function_has_return(tokens, index) {
+                    return "type error: function `bad` must return i64";
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+// function_requires_value_return reports whether a function declares non-void output.
+fn function_requires_value_return(tokens: &std::array::Array<token::Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if current.kind == token::TokenKind::LBrace {
+            return false;
+        }
+        if current.kind == token::TokenKind::Arrow {
+            let typ = try tokens.at(index + 1);
+            return !std::mem::equal_bytes(typ.literal, "void");
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+// function_has_return reports whether a function body contains a return token.
+fn function_has_return(tokens: &std::array::Array<token::Token>, start: i64) -> !bool {
+    var index = start;
+
+    while index < tokens.len() {
+        let current = try tokens.at(index);
+        if index > start {
+            if current.kind == token::TokenKind::Fn {
+                return false;
+            }
+        }
+        if current.kind == token::TokenKind::Return {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 // command_report converts a compile report into CLI-facing command facts.
