@@ -201,6 +201,8 @@ slice, raw storage provenance, and generic container rules are specified.
 The migration path is:
 
 - keep `String` public behavior in Kizu source over `std::builtin::string_*`
+- keep `std::builtin::string_*` reserved to std source so user code cannot
+  bypass wrapper borrow and move checks
 - add regression coverage for each storage safety rule before expanding the
   primitive set
 - use `String` for diagnostic and byte-building needs in the self-host frontend

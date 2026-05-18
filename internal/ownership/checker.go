@@ -9,12 +9,13 @@ import (
 
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
-	functions map[string]*functionInfo
-	structs   map[string]map[string]string
-	enums     map[string]map[string]bool
-	unions    map[string]map[string]string
-	nextID    int
-	loopDepth int
+	functions  map[string]*functionInfo
+	structs    map[string]map[string]string
+	enums      map[string]map[string]bool
+	unions     map[string]map[string]string
+	nextID     int
+	loopDepth  int
+	currentStd bool
 }
 
 type functionInfo struct {
@@ -172,8 +173,11 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		env.define(value)
 	}
 	previousLoopDepth := c.loopDepth
+	previousStd := c.currentStd
 	c.loopDepth = 0
+	c.currentStd = fn.decl.Std
 	defer func() { c.loopDepth = previousLoopDepth }()
+	defer func() { c.currentStd = previousStd }()
 	return c.checkBlock(fn.decl.Body, env)
 }
 
@@ -1594,6 +1598,9 @@ func (c *Checker) checkStringStorageBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	if strings.HasPrefix(name, "std.builtin.string_") && !c.currentStd {
+		return "", true, fmt.Errorf("move error: `%s` is reserved for std::string", name)
+	}
 	switch name {
 	case "std.builtin.string_new":
 		return c.checkStringConstructor(args, env)

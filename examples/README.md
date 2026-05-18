@@ -74,6 +74,7 @@ go test ./...
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
+| owned string storage boundary | `std_string_storage_boundary.kizu` | asserts reserve, append, truncate, clear, view, and deinit rules |
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
 | diagnostic formatting | `std_fmt.kizu` | appends deterministic i64, bool, and byte literal output |
 | diagnostic byte escaping | `std_fmt_escapes.kizu` | escapes newline, tab, and backslash bytes |
@@ -201,13 +202,19 @@ go test ./...
 | array elements reject channels through structs | `negative/std_array_struct_channel_element.kizu` | `Channel` |
 | array elements reject atomics | `negative/std_array_atomic_element.kizu` | `Atomic` |
 | string construction requires explicit allocator | `negative/std_string_no_allocator.kizu` | `expects allocator` |
+| string storage builtins stay reserved | `negative/std_string_builtin_direct_call.kizu` | `reserved for std::string` |
+| string view builtin stays reserved | `negative/std_string_builtin_as_bytes_direct_call.kizu` | `reserved for std::string` |
 | string append bytes requires `[]const u8` | `negative/std_string_wrong_append_type.kizu` | `expects []const u8` |
 | string append byte requires `u8` | `negative/std_string_append_byte_wrong_type.kizu` | `expects u8` |
 | string reserve requires `i64` | `negative/std_string_reserve_wrong_type.kizu` | `expects i64` |
+| string truncate requires `i64` | `negative/std_string_truncate_wrong_type.kizu` | `expects i64` |
+| string truncate checks bounds | `negative/std_string_truncate_out_of_bounds.kizu` | `length out of bounds` |
 | strings cannot be used after `deinit` | `negative/std_string_use_after_deinit.kizu` | `moved value` |
 | string byte views block append | `negative/std_string_append_while_viewed.kizu` | `cannot run while string is borrowed` |
+| string byte views block append byte | `negative/std_string_append_byte_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views block clear | `negative/std_string_clear_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views block reserve | `negative/std_string_reserve_while_viewed.kizu` | `cannot run while string is borrowed` |
+| string byte views block truncate | `negative/std_string_truncate_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views block deinit | `negative/std_string_deinit_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views cannot escape through return | `negative/std_string_as_bytes_return_escape.kizu` | `String.as_bytes` must be bound |
 | string byte views cannot be used directly | `negative/std_string_as_bytes_direct_use.kizu` | `String.as_bytes` must be bound |
