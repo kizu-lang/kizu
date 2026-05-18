@@ -544,15 +544,15 @@ branch 内で move された値は、`if` expression の外側でも moved と�
 
 ### 6.9.1 bool 演算
 
-Kizu は boolean logic に `&&` と `||` を使います。
+Kizu は boolean logic に `and` と `or` を使います。
 両辺は `bool` でなければなりません。
-`&&` と `||` は短絡評価します。
+`and` と `or` は短絡評価します。
 
 優先順位は低い順に次の通りです。
 
 ```text
-||
-&&
+or
+and
 == !=
 < <= > >=
 ```
@@ -560,7 +560,7 @@ Kizu は boolean logic に `&&` と `||` を使います。
 例:
 
 ```kizu
-if age >= 20 && age < 130 || admin {
+if age >= 20 and age < 130 or admin {
     print("ok");
 }
 ```

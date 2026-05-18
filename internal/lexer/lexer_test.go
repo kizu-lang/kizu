@@ -74,9 +74,9 @@ func TestNextToken(t *testing.T) {
 	}
 }
 
-// TestLogicalTokens checks && and || without changing pipe and borrow tokens.
+// TestLogicalTokens checks and and or without changing identifiers.
 func TestLogicalTokens(t *testing.T) {
-	input := `age >= 20 && age < 130 || false
+	input := `age >= 20 and age < 130 or false
 for 0..1 |i| { update(&value); }`
 	tests := []struct {
 		typ token.Type
@@ -85,11 +85,11 @@ for 0..1 |i| { update(&value); }`
 		{token.Ident, "age"},
 		{token.GTE, ">="},
 		{token.Int, "20"},
-		{token.AndAnd, "&&"},
+		{token.And, "and"},
 		{token.Ident, "age"},
 		{token.LT, "<"},
 		{token.Int, "130"},
-		{token.OrOr, "||"},
+		{token.Or, "or"},
 		{token.False, "false"},
 		{token.For, "for"},
 		{token.Int, "0"},

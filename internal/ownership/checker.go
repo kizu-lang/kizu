@@ -852,7 +852,7 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 	if _, err := c.readExpr(expr.Right, env); err != nil {
 		return "", err
 	}
-	if expr.Operator == "&&" || expr.Operator == "||" {
+	if expr.Operator == "and" || expr.Operator == "or" {
 		return "bool", nil
 	}
 	if isBooleanBinaryOperator(expr.Operator) {

@@ -74,7 +74,7 @@ func (l *lowerer) lowerLogicalExpr(expr *ast.BinaryExpr) (Value, error) {
 	rightBlock := l.newBlock(l.nextBlockName("logical.right"))
 	constBlock := l.newBlock(l.nextBlockName("logical.const"))
 	mergeBlock := l.newBlock(l.nextBlockName("logical.end"))
-	if expr.Operator == "&&" {
+	if expr.Operator == "and" {
 		l.block.Terminator = Terminator{
 			Op: "branch", Cond: left, Target: rightBlock.Name, Else: constBlock.Name,
 		}
@@ -117,7 +117,7 @@ func (l *lowerer) lowerLogicalBranch(
 func (l *lowerer) lowerLogicalConst(block *Block, op string, target string) (Value, string) {
 	l.block = block
 	immediate := "true"
-	if op == "&&" {
+	if op == "and" {
 		immediate = "false"
 	}
 	value := l.emitConst("bool", immediate)

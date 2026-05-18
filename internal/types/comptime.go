@@ -105,7 +105,7 @@ func evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error) {
 
 // evalComptimeBinary evaluates compile-time binary operators.
 func evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error) {
-	if expr.Operator == "&&" || expr.Operator == "||" {
+	if expr.Operator == "and" || expr.Operator == "or" {
 		return evalComptimeLogical(expr)
 	}
 	left, err := evalComptime(expr.Left)
@@ -137,10 +137,10 @@ func evalComptimeLogical(expr *ast.BinaryExpr) (comptimeValue, error) {
 	if left.typ != typeBool {
 		return comptimeValue{}, fmt.Errorf("comptime error: operator `%s` expects bools", expr.Operator)
 	}
-	if expr.Operator == "&&" && !left.b {
+	if expr.Operator == "and" && !left.b {
 		return comptimeValue{typ: typeBool, b: false}, nil
 	}
-	if expr.Operator == "||" && left.b {
+	if expr.Operator == "or" && left.b {
 		return comptimeValue{typ: typeBool, b: true}, nil
 	}
 	right, err := evalComptime(expr.Right)

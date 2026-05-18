@@ -133,7 +133,7 @@ func comptimeBool(expr ast.Expression) (bool, bool) {
 		value, ok := comptimeBool(e.Right)
 		return !value, ok && e.Operator == "!"
 	case *ast.BinaryExpr:
-		if e.Operator == "&&" || e.Operator == "||" {
+		if e.Operator == "and" || e.Operator == "or" {
 			return comptimeLogicalBool(e)
 		}
 		left, leftOK := intLiteral(e.Left)
@@ -151,17 +151,17 @@ func comptimeLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
 	if !leftOK {
 		return false, false
 	}
-	if expr.Operator == "&&" && !left {
+	if expr.Operator == "and" && !left {
 		return false, true
 	}
-	if expr.Operator == "||" && left {
+	if expr.Operator == "or" && left {
 		return true, true
 	}
 	right, rightOK := comptimeBool(expr.Right)
 	if !rightOK {
 		return false, false
 	}
-	if expr.Operator == "&&" {
+	if expr.Operator == "and" {
 		return left && right, true
 	}
 	return left || right, true
