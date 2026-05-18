@@ -73,3 +73,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0052: Zig-style native build policy](0052-zig-style-native-build-policy.md)
 - [ADR-0053: checked index and slice syntax](0053-checked-index-and-slice-syntax.md)
 - [ADR-0054: self-host migration readiness gate](0054-self-host-readiness-gate.md)
+- [ADR-0055: std::fmt diagnostic formatting](0055-std-fmt-diagnostic-formatting.md)
