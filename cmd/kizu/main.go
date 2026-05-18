@@ -575,6 +575,9 @@ func sourceStdModules(path string) ([]string, error) {
 		modules = appendStdModule(modules, "process")
 	}
 	if strings.Contains(text, "std::testing::") {
+		modules = appendStdModule(modules, "mem")
+		modules = appendStdModule(modules, "string")
+		modules = appendStdModule(modules, "fmt")
 		modules = appendStdModule(modules, "testing")
 	}
 	return modules, nil

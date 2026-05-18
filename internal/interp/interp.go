@@ -1024,7 +1024,7 @@ func (i *Interpreter) evalQualifiedCoreBuiltin(
 	return voidValue(), false, nil
 }
 
-// evalQualifiedRuntimeBuiltin evaluates constructors, tasks, tests, and misc calls.
+// evalQualifiedRuntimeBuiltin evaluates constructors, tasks, and misc calls.
 func (i *Interpreter) evalQualifiedRuntimeBuiltin(
 	name string,
 	args []ast.Expression,
@@ -1039,115 +1039,7 @@ func (i *Interpreter) evalQualifiedRuntimeBuiltin(
 	if value, ok, err := i.evalTaskBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
-	if value, ok, err := i.evalTestingBuiltin(name, args, env); ok || err != nil {
-		return value, ok, err
-	}
 	return i.evalMiscQualifiedBuiltin(name, args, env)
-}
-
-// evalTestingBuiltin evaluates minimal std::testing assertion helpers.
-func (i *Interpreter) evalTestingBuiltin(
-	name string,
-	args []ast.Expression,
-	env *Env,
-) (Value, bool, error) {
-	switch name {
-	case "std.builtin.testing_expect":
-		value, err := i.evalTestingOne(name, args, env, kindBool)
-		if err != nil || value.b {
-			return voidValue(), true, err
-		}
-		return errorUnionValue("expected condition to be true"), true, nil
-	case "std.builtin.testing_expect_equal_i64":
-		return i.evalTestingEqual(name, args, env, kindInt)
-	case "std.builtin.testing_expect_equal_bool":
-		return i.evalTestingEqual(name, args, env, kindBool)
-	case "std.builtin.testing_expect_equal_bytes":
-		return i.evalTestingEqual(name, args, env, kindString)
-	case "std.builtin.testing_fail":
-		value, err := i.evalTestingOne(name, args, env, kindString)
-		if err != nil {
-			return voidValue(), true, err
-		}
-		return errorUnionValue(value.s), true, nil
-	default:
-		return voidValue(), false, nil
-	}
-}
-
-// evalTestingOne evaluates one assertion argument and checks its runtime kind.
-func (i *Interpreter) evalTestingOne(
-	name string,
-	args []ast.Expression,
-	env *Env,
-	kind valueKind,
-) (Value, error) {
-	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: %s expects 1 arg", name)
-	}
-	value, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), err
-	}
-	if value.kind != kind {
-		return voidValue(), fmt.Errorf("runtime error: %s arg has wrong type", name)
-	}
-	return value, nil
-}
-
-// evalTestingEqual evaluates expected/actual assertion values.
-func (i *Interpreter) evalTestingEqual(
-	name string,
-	args []ast.Expression,
-	env *Env,
-	kind valueKind,
-) (Value, bool, error) {
-	if len(args) != 2 {
-		return voidValue(), true, fmt.Errorf("runtime error: %s expects 2 args", name)
-	}
-	expected, actual, err := i.evalTestingPair(args, env, kind)
-	if err != nil {
-		return voidValue(), true, err
-	}
-	if testingValuesEqual(expected, actual) {
-		return voidValue(), true, nil
-	}
-	message := fmt.Sprintf("expected %s, got %s", expected.String(), actual.String())
-	return errorUnionValue(message), true, nil
-}
-
-// evalTestingPair evaluates and validates one expected/actual pair.
-func (i *Interpreter) evalTestingPair(
-	args []ast.Expression,
-	env *Env,
-	kind valueKind,
-) (Value, Value, error) {
-	expected, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), voidValue(), err
-	}
-	actual, err := i.evalExpr(args[1], env)
-	if err != nil {
-		return voidValue(), voidValue(), err
-	}
-	if expected.kind != kind || actual.kind != kind {
-		return voidValue(), voidValue(), fmt.Errorf("runtime error: testing arg has wrong type")
-	}
-	return expected, actual, nil
-}
-
-// testingValuesEqual compares scalar values supported by std::testing v0.2.
-func testingValuesEqual(left Value, right Value) bool {
-	switch left.kind {
-	case kindInt:
-		return left.i == right.i
-	case kindBool:
-		return left.b == right.b
-	case kindString:
-		return left.s == right.s
-	default:
-		return false
-	}
 }
 
 // evalMiscQualifiedBuiltin evaluates remaining qualified std constructor stubs.

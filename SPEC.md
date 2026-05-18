@@ -1410,6 +1410,12 @@ std::testing::fail(message: []const u8) -> !void
 ```
 
 assertion failure は panic ではなく `!void` の error として返します。
+`std::testing` は Kizu source で実装し、`std::builtin::testing_*` は持ちません。
+`expect` は condition failure を fixed message の `!void` error として返します。
+`fail` は caller-provided `[]const u8` を error message として返します。
+Equality helpers は `std::mem` で比較し、失敗時だけ明示 allocator-backed
+`std::string::String` に `std::fmt` で deterministic な expected / actual
+diagnostic を構築して `!void` error として返します。
 `kizu test <file>` は v0.2 では discovery なしの single-file runner です。
 file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示します。
 generic equality、test discovery、location-aware diagnostics は後続で扱います。

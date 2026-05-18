@@ -229,6 +229,10 @@ go test ./...
 | maps cannot cross channel boundaries | `negative/std_map_channel_send.kizu` | `Map cannot cross concurrency boundary` |
 | arrays cannot store maps in v0.2 | `negative/std_array_map_element.kizu` | `std::map::Map` |
 | testing assertion failure is readable | `negative/std_testing_failure.kizu` | `expected 4, got 3` |
+| testing expect failure is readable | `negative/std_testing_expect_failure.kizu` | `expected condition to be true` |
+| testing bool equality failure is readable | `negative/std_testing_bool_failure.kizu` | `expected true, got false` |
+| testing bytes equality failure is readable | `negative/std_testing_bytes_failure.kizu` | `expected "token", got "lexer"` |
+| testing fail uses caller message | `negative/std_testing_fail.kizu` | `custom failure` |
 | testing helpers enforce argument types | `negative/std_testing_wrong_type.kizu` | `expects i64` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
