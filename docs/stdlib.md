@@ -99,6 +99,7 @@ Current builtin thinning candidates:
 | `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
+| `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer` | Host primitive | Public constructors live in `std/src/task.kizu`; direct user calls are rejected |
 
 `std::testing` now performs assertion checks and message construction in
 `std/src/testing.kizu`. Equality diagnostics are built with `std::fmt` into an
@@ -106,12 +107,16 @@ explicit allocator-backed `std::string::String`; Go remains only the test runner
 and error-union reporting boundary, not the assertion implementation.
 
 Stateful runtime APIs such as `std::array::Array`, `std::map::Map`,
-`std::task::*`, `std::channel::Channel`, `std::thread::scoped`,
+`std::task::parallel_for`, `std::task::parallel_map`, `std::channel::Channel`, `std::thread::scoped`,
 `std::sync::Mutex`, and `std::atomic::Atomic` still use public `std.*` Go
 branches while they own runtime storage, scheduler, synchronization, and
 borrow-safety rules. Treat those branches as explicit runtime boundaries, not
 ordinary stdlib logic. Splitting their ergonomic public wrappers into Kizu
-source is tracked by #360 and must not leave dual public paths behind.
+source is tracked by #360 and must not leave dual public paths behind. The
+task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
+Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
+and `parallel_map` remain public Go branches until Kizu can pass function names
+through wrapper functions without losing the original task body identity.
 
 ## Builtin Registry
 
@@ -127,7 +132,7 @@ source is tracked by #360 and must not leave dual public paths behind.
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
-| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | structured task state, runtime scheduling, safety boundaries | keep scheduling primitives trusted; wrapper split tracked by #360 |
+| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; finish `parallel_for` / `parallel_map` wrapper split after function-name parameters are representable |
 | `std::channel` | `Channel<T>`, `send`, `recv` | owned message queue and boundary checks | keep queue primitive; wrapper split tracked by #360 |
 | `std::thread` | `scoped` | host thread boundary and join semantics | trusted primitive; wrapper split tracked by #360 |
 | `std::sync` | `Mutex<T>` | shared mutable state primitive and copy-value restrictions | trusted primitive; wrapper split tracked by #360 |
