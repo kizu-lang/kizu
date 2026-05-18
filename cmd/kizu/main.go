@@ -550,51 +550,93 @@ func sourceStdModules(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	text := string(source)
-	modules := []string{}
-	if strings.Contains(text, "std::mem::") {
-		modules = appendStdModule(modules, "mem")
-	}
-	if strings.Contains(text, "std::path::") {
-		modules = appendStdModule(modules, "mem")
-		modules = appendStdModule(modules, "string")
-		modules = appendStdModule(modules, "path")
-	}
-	if strings.Contains(text, "std::string::") {
-		modules = appendStdModule(modules, "mem")
-		modules = appendStdModule(modules, "string")
-	}
-	if strings.Contains(text, "std::fmt::") {
-		modules = appendStdModule(modules, "mem")
-		modules = appendStdModule(modules, "string")
-		modules = appendStdModule(modules, "fmt")
-	}
-	if strings.Contains(text, "std::fs::") {
-		modules = appendStdModule(modules, "fs")
-	}
-	if strings.Contains(text, "std::io::") {
-		modules = appendStdModule(modules, "io")
-	}
-	if strings.Contains(text, "std::process::") {
-		modules = appendStdModule(modules, "process")
-	}
-	if strings.Contains(text, "std::testing::") {
-		modules = appendStdModule(modules, "mem")
-		modules = appendStdModule(modules, "string")
-		modules = appendStdModule(modules, "fmt")
-		modules = appendStdModule(modules, "testing")
-	}
-	return modules, nil
+	return resolveStdModules(string(source))
 }
 
-// appendStdModule appends a std wrapper module once while preserving order.
-func appendStdModule(modules []string, module string) []string {
-	for _, existing := range modules {
-		if existing == module {
-			return modules
+// resolveStdModules returns std modules in dependency-before-dependent order.
+func resolveStdModules(source string) ([]string, error) {
+	resolver := &stdModuleResolver{
+		visited:  map[string]bool{},
+		visiting: map[string]bool{},
+	}
+	for _, module := range referencedStdModules(source) {
+		if err := resolver.visit(module); err != nil {
+			return nil, err
 		}
 	}
-	return append(modules, module)
+	return resolver.modules, nil
+}
+
+type stdModuleResolver struct {
+	modules  []string
+	visited  map[string]bool
+	visiting map[string]bool
+}
+
+// visit adds one std module after recursively adding its std-source dependencies.
+func (r *stdModuleResolver) visit(module string) error {
+	if r.visited[module] {
+		return nil
+	}
+	if r.visiting[module] {
+		return nil
+	}
+	r.visiting[module] = true
+	source, err := readStdModuleSource(module)
+	if err != nil {
+		return err
+	}
+	for _, dependency := range referencedStdModules(source) {
+		if err := r.visit(dependency); err != nil {
+			return err
+		}
+	}
+	r.visiting[module] = false
+	r.visited[module] = true
+	r.modules = append(r.modules, module)
+	return nil
+}
+
+// readStdModuleSource reads one std source module by its short module name.
+func readStdModuleSource(module string) (string, error) {
+	path, err := findRepoFile("std/src/" + module + ".kizu")
+	if err != nil {
+		return "", err
+	}
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(source), nil
+}
+
+// referencedStdModules scans source text for std module namespace references.
+func referencedStdModules(source string) []string {
+	modules := []string{}
+	for _, module := range stdSourceModuleOrder {
+		if strings.Contains(source, "std::"+module+"::") {
+			modules = append(modules, module)
+		}
+	}
+	return modules
+}
+
+var stdSourceModuleOrder = []string{
+	"mem",
+	"array",
+	"string",
+	"fmt",
+	"testing",
+	"fs",
+	"path",
+	"io",
+	"process",
+	"map",
+	"task",
+	"channel",
+	"thread",
+	"sync",
+	"atomic",
 }
 
 // parseStdDecls loads selected std wrappers from Kizu source.
