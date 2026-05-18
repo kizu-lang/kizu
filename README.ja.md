@@ -143,7 +143,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
-go run ./cmd/kizu build --target native --libc on --runtime hosted examples/hello.kizu
+go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -159,7 +159,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
 - `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
-- `kizu build --target native [--opt] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [-o <out>] <file>` は native executable を link します。
+- `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。

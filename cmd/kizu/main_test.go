@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,6 +155,7 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	if strings.TrimSpace(string(out)) != output {
 		t.Fatalf("got %q, want output path %q", out, output)
 	}
+	assertNativeMetadata(t, output+".kizu-build.json", output)
 	run := exec.Command(output)
 	out, err = run.CombinedOutput()
 	if err != nil {
@@ -187,6 +189,21 @@ func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 			args: []string{"build", "--target", "native", "--emit", "obj", "../../examples/hello.kizu"},
 			want: "native error: --emit obj is not implemented yet",
 		},
+		{
+			name: "cpu",
+			args: []string{"build", "--target", "native", "--cpu", "baseline", "../../examples/hello.kizu"},
+			want: "native error: --cpu is not implemented yet",
+		},
+		{
+			name: "abi",
+			args: []string{"build", "--target", "native", "--abi", "gnu", "../../examples/hello.kizu"},
+			want: "native error: --abi is not implemented yet",
+		},
+		{
+			name: "linker",
+			args: []string{"build", "--target", "native", "--linker", "lld", "../../examples/hello.kizu"},
+			want: "native error: --linker lld is not implemented yet",
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -199,6 +216,36 @@ func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 				t.Fatalf("got %q, want substring %q", out, tt.want)
 			}
 		})
+	}
+}
+
+// assertNativeMetadata checks native artifact metadata records explicit build inputs.
+func assertNativeMetadata(t *testing.T, path string, output string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Target  string   `json:"target"`
+		LibC    string   `json:"libc"`
+		Runtime string   `json:"runtime"`
+		Emit    string   `json:"emit"`
+		Linker  string   `json:"linker"`
+		Output  string   `json:"output"`
+		Command []string `json:"command"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Target != "native" || got.LibC != "on" || got.Runtime != "hosted" {
+		t.Fatalf("unexpected metadata: %+v", got)
+	}
+	if got.Emit != "exe" || got.Linker != "clang" || got.Output != output {
+		t.Fatalf("unexpected metadata: %+v", got)
+	}
+	if len(got.Command) == 0 || got.Command[0] != "clang" {
+		t.Fatalf("unexpected command metadata: %+v", got.Command)
 	}
 }
 
