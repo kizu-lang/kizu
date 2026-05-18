@@ -108,14 +108,14 @@ blocker:
 
 ## Current Bootstrap Evidence
 
-最終更新: `feat/selfhost-bootstrap-chain` の `b1e1c87` に keyword-boundary parser
+最終更新: `feat/selfhost-bootstrap-chain` の `e749464` に lexer-backed parser
 metric 変更を重ねた working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
 pipeline ではなく、Go が生成した source-scanning LLVM template に依存している。
-parser metric は単純な部分文字列ではなく、identifier boundary を見る keyword token
-count に寄せているが、まだ AST parser ではない。
+parser metric は parser-local な部分文字列 scan ではなく、selfhost lexer の identifier
+scan helper で keyword token count に寄せているが、まだ AST parser ではない。
 
 実行した command:
 
@@ -169,9 +169,9 @@ stage3_vs_stage4_bytes=0
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 1038
-; kizu stage source bytes 1032883
-; kizu stage source fn count 64
+; kizu stage source metric 1032
+; kizu stage source bytes 1032987
+; kizu stage source fn count 62
 ```
 
 remaining Go / template dependency:

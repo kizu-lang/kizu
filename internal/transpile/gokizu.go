@@ -750,6 +750,7 @@ func lexerSource(info lexerPackage) string {
 	out.WriteString(firstTokenSource())
 	out.WriteString(lexerTokenAtSource())
 	out.WriteString(firstTokenCodeSource())
+	out.WriteString(lexerTokenCounterSource())
 	out.WriteString(lexerPunctuationSource(info.punctuation))
 	out.WriteString(lexerPositionPunctuationSource(info.punctuation))
 	out.WriteString(lexerHelpersSource())
@@ -878,6 +879,127 @@ func firstTokenCodeSource() string {
 `
 }
 
+// lexerTokenCounterSource returns a lexer-backed token counter for parser metrics.
+func lexerTokenCounterSource() string {
+	return lexerTokenCounterEntrySource() + lexerTokenCounterKeywordSource() +
+		lexerTokenCounterAdvanceSource()
+}
+
+// lexerTokenCounterEntrySource returns public token-count entry points.
+func lexerTokenCounterEntrySource() string {
+	return `pub fn CountFunction(input: []const u8) -> i64 {
+    return count_keyword(input, 1);
+}
+
+pub fn CountImport(input: []const u8) -> i64 {
+    return count_keyword(input, 2);
+}
+
+pub fn CountStruct(input: []const u8) -> i64 {
+    return count_keyword(input, 3);
+}
+
+pub fn CountEnum(input: []const u8) -> i64 {
+    return count_keyword(input, 4);
+}
+
+fn count_keyword(input: []const u8, want: i64) -> i64 {
+    let length = std::builtin::mem_len(input);
+    var index = 0;
+    var count = 0;
+    while index < length {
+        while index < length and is_space(input[index]) {
+            index = index + 1;
+        }
+        if index >= length {
+            return count;
+        }
+        if is_letter(input[index]) {
+            let end = ident_end(input, index, length);
+            if keyword_code(input, index, end, want) {
+                count = count + 1;
+            }
+            index = end;
+        } else {
+            if is_digit(input[index]) {
+                index = digit_end(input, index, length);
+            } else {
+                index = punctuation_end(input, index, length);
+            }
+        }
+    }
+    return count;
+}
+
+`
+}
+
+// lexerTokenCounterKeywordSource returns byte-level keyword matching helpers.
+func lexerTokenCounterKeywordSource() string {
+	return `fn keyword_code(input: []const u8, start: i64, end: i64, want: i64) -> bool {
+    let width = end - start;
+    if want == 1 and width == 2 {
+        return input[start] == cast<u8>(102) and input[start + 1] == cast<u8>(110);
+    }
+    if want == 2 and width == 6 {
+        return input[start] == cast<u8>(105) and input[start + 1] == cast<u8>(109) and
+            input[start + 2] == cast<u8>(112) and input[start + 3] == cast<u8>(111) and
+            input[start + 4] == cast<u8>(114) and input[start + 5] == cast<u8>(116);
+    }
+    if want == 3 and width == 6 {
+        return input[start] == cast<u8>(115) and input[start + 1] == cast<u8>(116) and
+            input[start + 2] == cast<u8>(114) and input[start + 3] == cast<u8>(117) and
+            input[start + 4] == cast<u8>(99) and input[start + 5] == cast<u8>(116);
+    }
+    if want == 4 and width == 4 {
+        return input[start] == cast<u8>(101) and input[start + 1] == cast<u8>(110) and
+            input[start + 2] == cast<u8>(117) and input[start + 3] == cast<u8>(109);
+    }
+    return false;
+}
+
+`
+}
+
+// lexerTokenCounterAdvanceSource returns scanner advancement helpers.
+func lexerTokenCounterAdvanceSource() string {
+	return `fn ident_end(input: []const u8, start: i64, length: i64) -> i64 {
+    var end = start;
+    while end < length and is_ident_byte(input[end]) {
+        end = end + 1;
+    }
+    return end;
+}
+
+fn digit_end(input: []const u8, start: i64, length: i64) -> i64 {
+    var end = start;
+    while end < length and is_digit(input[end]) {
+        end = end + 1;
+    }
+    return end;
+}
+
+fn punctuation_end(input: []const u8, start: i64, length: i64) -> i64 {
+    if start + 1 < length {
+        let ch = input[start];
+        let next = input[start + 1];
+        if (ch == cast<u8>(33) and next == cast<u8>(61)) or
+            (ch == cast<u8>(45) and next == cast<u8>(62)) or
+            (ch == cast<u8>(46) and next == cast<u8>(46)) or
+            (ch == cast<u8>(58) and next == cast<u8>(58)) or
+            (ch == cast<u8>(60) and next == cast<u8>(61)) or
+            (ch == cast<u8>(61) and next == cast<u8>(61)) or
+            (ch == cast<u8>(61) and next == cast<u8>(62)) or
+            (ch == cast<u8>(62) and next == cast<u8>(61)) {
+            return start + 2;
+        }
+    }
+    return start + 1;
+}
+
+`
+}
+
 // lexerPunctuationSource returns Kizu punctuation scanning helpers.
 func lexerPunctuationSource(rules []punctuationRule) string {
 	var out bytes.Buffer
@@ -984,8 +1106,7 @@ fn is_space(ch: u8) -> bool {
 
 // parserSource renders a compileable parser bootstrap module.
 func parserSource(info parserPackage) string {
-	return parserHeaderSource(info) + parserMetricSource() + parserWordCountSource() +
-		parserBraceSource() + parserMatchSource()
+	return parserHeaderSource(info) + parserBraceSource()
 }
 
 // parserHeaderSource renders parser entry points and public scoring functions.
@@ -1018,12 +1139,12 @@ pub fn first_token_code(source: []const u8) -> i64 {
 }
 
 pub fn function_count(source: []const u8) -> i64 {
-    return count_word_fn(source);
+    return lexer::CountFunction(source);
 }
 
 pub fn declaration_score(source: []const u8) -> i64 {
-    return count_word_fn(source) * 5 + count_word_import(source) * 3 +
-        count_word_struct(source) * 2 + count_word_enum(source) * 2;
+    return lexer::CountFunction(source) * 5 + lexer::CountImport(source) * 3 +
+        lexer::CountStruct(source) * 2 + lexer::CountEnum(source) * 2;
 }
 
 pub fn brace_score(source: []const u8) -> i64 {
@@ -1058,69 +1179,6 @@ func parserPrecedenceSource(rules []precedenceRule) string {
 	return out.String()
 }
 
-// parserMetricSource renders byte-scanning declaration counters.
-func parserMetricSource() string {
-	return `
-fn count_word_fn(source: []const u8) -> i64 {
-    let length = std::builtin::mem_len(source);
-    var index = 0;
-    var count = 0;
-    while index + 1 < length {
-        if matches_fn(source, index) {
-            count = count + 1;
-        }
-        index = index + 1;
-    }
-    return count;
-}
-
-`
-}
-
-// parserWordCountSource renders longer keyword counter helpers.
-func parserWordCountSource() string {
-	return `fn count_word_import(source: []const u8) -> i64 {
-    let length = std::builtin::mem_len(source);
-    var index = 0;
-    var count = 0;
-    while index + 5 < length {
-        if matches_import(source, index) {
-            count = count + 1;
-        }
-        index = index + 1;
-    }
-    return count;
-}
-
-fn count_word_struct(source: []const u8) -> i64 {
-    let length = std::builtin::mem_len(source);
-    var index = 0;
-    var count = 0;
-    while index + 5 < length {
-        if matches_struct(source, index) {
-            count = count + 1;
-        }
-        index = index + 1;
-    }
-    return count;
-}
-
-fn count_word_enum(source: []const u8) -> i64 {
-    let length = std::builtin::mem_len(source);
-    var index = 0;
-    var count = 0;
-    while index + 3 < length {
-        if matches_enum(source, index) {
-            count = count + 1;
-        }
-        index = index + 1;
-    }
-    return count;
-}
-
-`
-}
-
 // parserBraceSource renders balanced-brace metrics for the checker input.
 func parserBraceSource() string {
 	return `fn brace_balance(source: []const u8) -> i64 {
@@ -1152,64 +1210,6 @@ fn brace_count(source: []const u8) -> i64 {
     return count;
 }
 
-`
-}
-
-// parserMatchSource renders fixed byte-pattern recognizers for Kizu keywords.
-func parserMatchSource() string {
-	return `fn matches_fn(source: []const u8, index: i64) -> bool {
-    return keyword_start(source, index) and keyword_end(source, index, 2) and
-        source[index] == cast<u8>(102) and source[index + 1] == cast<u8>(110);
-}
-
-fn matches_import(source: []const u8, index: i64) -> bool {
-    return keyword_start(source, index) and keyword_end(source, index, 6) and
-        source[index] == cast<u8>(105) and source[index + 1] == cast<u8>(109) and
-        source[index + 2] == cast<u8>(112) and source[index + 3] == cast<u8>(111) and
-        source[index + 4] == cast<u8>(114) and source[index + 5] == cast<u8>(116);
-}
-
-fn matches_struct(source: []const u8, index: i64) -> bool {
-    return keyword_start(source, index) and keyword_end(source, index, 6) and
-        source[index] == cast<u8>(115) and source[index + 1] == cast<u8>(116) and
-        source[index + 2] == cast<u8>(114) and source[index + 3] == cast<u8>(117) and
-        source[index + 4] == cast<u8>(99) and source[index + 5] == cast<u8>(116);
-}
-
-fn matches_enum(source: []const u8, index: i64) -> bool {
-    return keyword_start(source, index) and keyword_end(source, index, 4) and
-        source[index] == cast<u8>(101) and source[index + 1] == cast<u8>(110) and
-        source[index + 2] == cast<u8>(117) and source[index + 3] == cast<u8>(109);
-}
-
-fn keyword_start(source: []const u8, index: i64) -> bool {
-    if index == 0 {
-        return true;
-    }
-    if is_ident_byte(source[index - 1]) {
-        return false;
-    }
-    return true;
-}
-
-fn keyword_end(source: []const u8, index: i64, width: i64) -> bool {
-    let end = index + width;
-    let length = std::builtin::mem_len(source);
-    if end >= length {
-        return true;
-    }
-    if is_ident_byte(source[end]) {
-        return false;
-    }
-    return true;
-}
-
-fn is_ident_byte(ch: u8) -> bool {
-    return (ch >= cast<u8>(97) and ch <= cast<u8>(122)) or
-        (ch >= cast<u8>(65) and ch <= cast<u8>(90)) or
-        (ch >= cast<u8>(48) and ch <= cast<u8>(57)) or
-        ch == cast<u8>(95);
-}
 `
 }
 
