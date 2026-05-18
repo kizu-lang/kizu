@@ -67,7 +67,7 @@ go test ./...
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
-| checked index / slice syntax | `slice_syntax.kizu` | asserts `[]const u8` indexing and slicing through `try bytes[...]` |
+| checked index / slice syntax | `slice_syntax.kizu` | asserts trapping `[]const u8` indexing and slicing through `bytes[...]` |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
