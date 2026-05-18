@@ -687,6 +687,34 @@ func (e *TryExpr) String() string {
 	return "try " + e.Value.String()
 }
 
+// IndexExpr represents checked byte indexing or one-dimensional slicing.
+type IndexExpr struct {
+	Target Expression
+	Index  Expression
+	Start  Expression
+	End    Expression
+	Slice  bool
+}
+
+// expressionNode marks IndexExpr as an expression node.
+func (*IndexExpr) expressionNode() {}
+
+// String returns a compact debug representation of checked access.
+func (e *IndexExpr) String() string {
+	if !e.Slice {
+		return fmt.Sprintf("%s[%s]", e.Target.String(), e.Index.String())
+	}
+	start := ""
+	if e.Start != nil {
+		start = e.Start.String()
+	}
+	end := ""
+	if e.End != nil {
+		end = e.End.String()
+	}
+	return fmt.Sprintf("%s[%s..%s]", e.Target.String(), start, end)
+}
+
 // ArenaNewExpr represents arena<T>() construction.
 type ArenaNewExpr struct {
 	TypeName string

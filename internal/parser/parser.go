@@ -806,6 +806,7 @@ var precedences = map[token.Type]int{
 	token.Slash:       product,
 	token.Percent:     product,
 	token.LParen:      call,
+	token.LBracket:    call,
 	token.Dot:         field,
 	token.DoubleColon: field,
 }
@@ -822,6 +823,9 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 		case token.LParen:
 			p.nextToken()
 			left = p.parseCallExpr(left)
+		case token.LBracket:
+			p.nextToken()
+			left = p.parseIndexExpr(left)
 		case token.LT:
 			if !canTypeApply(left) {
 				p.nextToken()
@@ -841,6 +845,50 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 		}
 	}
 	return left
+}
+
+// parseIndexExpr parses checked index and one-dimensional slice expressions.
+func (p *Parser) parseIndexExpr(target ast.Expression) ast.Expression {
+	expr := &ast.IndexExpr{Target: target}
+	p.nextToken()
+	if p.cur.Type == token.Range {
+		expr.Slice = true
+		return p.parseOpenStartSlice(expr)
+	}
+	expr.Start = p.parseExpression(lowest)
+	if p.peek.Type == token.Range {
+		p.nextToken()
+		expr.Slice = true
+		return p.parseClosedStartSlice(expr)
+	}
+	expr.Index = expr.Start
+	expr.Start = nil
+	p.expectPeek(token.RBracket)
+	return expr
+}
+
+// parseOpenStartSlice parses `[ ..end ]` after the range token.
+func (p *Parser) parseOpenStartSlice(expr *ast.IndexExpr) ast.Expression {
+	if p.peek.Type == token.RBracket {
+		p.errorf("slice expression requires at least one bound")
+		return expr
+	}
+	p.nextToken()
+	expr.End = p.parseExpression(lowest)
+	p.expectPeek(token.RBracket)
+	return expr
+}
+
+// parseClosedStartSlice parses `[ start..end ]` or `[ start.. ]`.
+func (p *Parser) parseClosedStartSlice(expr *ast.IndexExpr) ast.Expression {
+	if p.peek.Type == token.RBracket {
+		p.nextToken()
+		return expr
+	}
+	p.nextToken()
+	expr.End = p.parseExpression(lowest)
+	p.expectPeek(token.RBracket)
+	return expr
 }
 
 // parsePrefixExpression parses literals, identifiers, and unary expressions.

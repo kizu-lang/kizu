@@ -1299,6 +1299,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 		return c.checkCastExpr(e, env, unsafe)
 	case *ast.TryExpr:
 		return c.checkTryExpr(e, env, unsafe)
+	case *ast.IndexExpr:
+		return c.checkIndexExpr(e, env, unsafe)
 	case *ast.ArenaNewExpr:
 		return c.checkArenaNewExpr(e)
 	case *ast.StructLiteralExpr:
@@ -1310,6 +1312,54 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 	default:
 		return "", fmt.Errorf("type error: unsupported expression %T", expr)
 	}
+}
+
+// checkIndexExpr validates checked one-dimensional byte indexing and slicing.
+func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe bool) (Type, error) {
+	target, err := c.checkExpr(expr.Target, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if target != typeByteString {
+		return "", fmt.Errorf("type error: index/slice target expects []const u8, got %s", target)
+	}
+	if !expr.Slice {
+		if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!u8", nil
+	}
+	if expr.Start != nil {
+		if err := c.checkIndexBound("slice start", expr.Start, env, unsafe); err != nil {
+			return "", err
+		}
+	}
+	if expr.End != nil {
+		if err := c.checkIndexBound("slice end", expr.End, env, unsafe); err != nil {
+			return "", err
+		}
+	}
+	return "![]const u8", nil
+}
+
+// checkIndexBound validates one i64 index or slice bound.
+func (c *Checker) checkIndexBound(
+	name string,
+	expr ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if expr == nil {
+		return fmt.Errorf("type error: %s is missing", name)
+	}
+	got, err := c.checkExpr(expr, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeI64 {
+		return fmt.Errorf("type error: %s expects i64, got %s", name, got)
+	}
+	return nil
 }
 
 // literalType returns the static type of scalar literals.
@@ -1924,12 +1974,8 @@ func (c *Checker) checkMemBuiltin(
 		return typ, true, err
 	case "std.builtin.mem_len":
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeI64)
-	case "std.builtin.mem_byte_at":
-		return c.checkMemByteIndex(name, args, env, unsafe, "!u8")
 	case "std.builtin.mem_equal_bytes", "std.builtin.mem_starts_with":
 		return c.checkMemByteArgs(name, args, env, unsafe, 2, typeBool)
-	case "std.builtin.mem_slice":
-		return c.checkMemSlice(args, env, unsafe)
 	case "std.builtin.mem_trim_ascii":
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeByteString)
 	default:
@@ -1961,71 +2007,6 @@ func (c *Checker) checkMemByteArgs(
 		}
 	}
 	return result, true, nil
-}
-
-// checkMemByteIndex validates std::mem helpers that read one byte by index.
-func (c *Checker) checkMemByteIndex(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	result Type,
-) (Type, bool, error) {
-	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `%s` expects bytes and index", name)
-	}
-	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
-		return "", true, err
-	} else if got != typeByteString {
-		return "", true, fmt.Errorf("type error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	got, err := c.checkExpr(args[1], env, unsafe)
-	if err != nil {
-		return "", true, err
-	}
-	if got != typeI64 {
-		return "", true, fmt.Errorf("type error: `%s` expects i64 index, got %s", name, got)
-	}
-	return result, true, nil
-}
-
-// checkMemSlice validates safe checked slicing of []const u8.
-func (c *Checker) checkMemSlice(
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env, unsafe); err != nil {
-		return "", true, err
-	}
-	return "![]const u8", true, nil
-}
-
-// checkMemSliceShape validates bytes, start, and end/index arguments.
-func (c *Checker) checkMemSliceShape(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) error {
-	if len(args) != 3 {
-		return fmt.Errorf("type error: `%s` expects bytes, start, and end", name)
-	}
-	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
-		return err
-	} else if got != typeByteString {
-		return fmt.Errorf("type error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	for idx, label := range []string{"start", "end"} {
-		got, err := c.checkExpr(args[idx+1], env, unsafe)
-		if err != nil {
-			return err
-		}
-		if got != typeI64 {
-			return fmt.Errorf("type error: `%s` expects i64 %s, got %s", name, label, got)
-		}
-	}
-	return nil
 }
 
 // checkFsBuiltin validates std::fs calls with explicit Io.
