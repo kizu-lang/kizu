@@ -1454,15 +1454,15 @@ func (c *Checker) checkArrayConstructor(
 	return fmt.Sprintf("std::array::Array<%s>", elem), nil
 }
 
-// checkMapConstructor validates std::map::Map<[]const u8, V>(allocator) ownership.
-func (c *Checker) checkMapConstructor(
+// checkMapConstructorAllowTypeParams validates std source Map wrapper construction.
+func (c *Checker) checkMapConstructorAllowTypeParams(
 	argsText string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	mapArgs, err := c.checkedMapArgs(argsText)
-	if err != nil {
-		return "", err
+	mapArgs, ok := splitGenericArgs(argsText)
+	if !ok || len(mapArgs) != 2 {
+		return "", fmt.Errorf("map error: std::map::Map expects 2 type arguments")
 	}
 	if len(args) != 1 {
 		return "", fmt.Errorf("map error: `std::map::Map` expects allocator")
@@ -1474,7 +1474,7 @@ func (c *Checker) checkMapConstructor(
 	if got != "Allocator" {
 		return "", fmt.Errorf("map error: `std::map::Map` expects Allocator, got %s", got)
 	}
-	return fmt.Sprintf("std::map::Map<[]const u8, %s>", mapArgs[1]), nil
+	return fmt.Sprintf("std::map::Map<%s, %s>", mapArgs[0], mapArgs[1]), nil
 }
 
 // rejectArrayElementType rejects element types with unresolved ownership hazards.
@@ -1596,8 +1596,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	}
 	switch name {
-	case "std.map.Map":
-		return c.checkMapConstructor(expr.TypeArg, args, env)
 	case "std.builtin.channel":
 		if !c.currentStd {
 			return "", fmt.Errorf("move error: `%s` is reserved; use std::channel", name)
@@ -1624,12 +1622,17 @@ func (c *Checker) checkTypeApplyCallExpr(
 			return "", fmt.Errorf("move error: `%s` is reserved; use std::array", name)
 		}
 		return c.checkArrayConstructor(expr.TypeArg, args, env)
+	case "std.builtin.map":
+		if !c.currentStd {
+			return "", fmt.Errorf("move error: `%s` is reserved; use std::map", name)
+		}
+		return c.checkMapConstructorAllowTypeParams(expr.TypeArg, args, env)
 	default:
 		return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
 	}
 }
 
-// checkGenericUserTypeApply validates ownership for source generic wrappers.
+// checkGenericUserTypeApply validates ownership for source std generic wrappers.
 func (c *Checker) checkGenericUserTypeApply(
 	name string,
 	typeArg string,
@@ -1640,17 +1643,22 @@ func (c *Checker) checkGenericUserTypeApply(
 	if fn == nil || len(fn.decl.TypeParams) == 0 {
 		return "", false, nil
 	}
-	if len(fn.decl.TypeParams) != 1 {
-		return "", true, fmt.Errorf("move error: `%s` supports one type argument in v0.2", name)
-	}
 	if len(args) != len(fn.params) {
 		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
-	if err := c.checkGenericWrapperTypeArg(name, typeArg); err != nil {
+	typeArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(typeArgs) != len(fn.decl.TypeParams) {
+		return "", true, fmt.Errorf("move error: `%s` expects %d type arguments",
+			name, len(fn.decl.TypeParams))
+	}
+	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
 		return "", true, err
 	}
-	subst := map[string]string{fn.decl.TypeParams[0]: typeArg}
+	subst := map[string]string{}
+	for idx, param := range fn.decl.TypeParams {
+		subst[param] = typeArgs[idx]
+	}
 	for idx, arg := range args {
 		if err := c.checkGenericUserArg(name, fn, subst, idx, arg, env); err != nil {
 			return "", true, err
@@ -1659,19 +1667,24 @@ func (c *Checker) checkGenericUserTypeApply(
 	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
 }
 
-// checkGenericWrapperTypeArg validates std wrapper-specific ownership contracts.
-func (c *Checker) checkGenericWrapperTypeArg(name string, typeArg string) error {
+// checkGenericWrapperTypeArgs validates std wrapper-specific ownership contracts.
+func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) error {
 	switch name {
 	case "std.array.Array":
-		return c.rejectArrayElementType(typeArg)
+		return c.rejectArrayElementType(typeArgs[0])
 	case "std.atomic.Atomic":
-		if !isAtomicSupportedType(typeArg) {
-			return fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArg)
+		if !isAtomicSupportedType(typeArgs[0]) {
+			return fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArgs[0])
 		}
 	case "std.sync.Mutex":
-		if !c.isCopyType(typeArg) {
+		if !c.isCopyType(typeArgs[0]) {
 			return fmt.Errorf(
-				"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1", typeArg)
+				"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1",
+				typeArgs[0])
+		}
+	case "std.map.Map":
+		if _, err := c.checkedMapArgs(strings.Join(typeArgs, ", ")); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -3193,6 +3206,8 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 	out := typeName
 	for name, replacement := range subst {
 		out = strings.ReplaceAll(out, "<"+name+">", "<"+replacement+">")
+		out = strings.ReplaceAll(out, "<"+name+",", "<"+replacement+",")
+		out = strings.ReplaceAll(out, ", "+name+",", ", "+replacement+",")
 		out = strings.ReplaceAll(out, ", "+name+">", ", "+replacement+">")
 	}
 	return out
