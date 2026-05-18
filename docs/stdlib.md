@@ -82,9 +82,9 @@ Current builtin thinning candidates:
 
 | Builtin | Class | Next action |
 | --- | --- | --- |
-| `std::builtin::mem_equal_bytes` | Kizu-movable | Move after byte indexing / loops are sufficient in std source |
-| `std::builtin::mem_starts_with` | Kizu-movable | Move after byte indexing / loops are sufficient in std source |
-| `std::builtin::mem_trim_ascii` | Kizu-movable | Move after slice construction and byte loops are sufficient |
+| `std::builtin::mem_equal_bytes` | Removed | Implemented in `std/src/mem.kizu` |
+| `std::builtin::mem_starts_with` | Removed | Implemented in `std/src/mem.kizu` |
+| `std::builtin::mem_trim_ascii` | Removed | Implemented in `std/src/mem.kizu` |
 | `std::builtin::path_basename` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
 | `std::builtin::path_dirname` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
 | `std::builtin::path_extension` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
@@ -102,7 +102,7 @@ Current builtin thinning candidates:
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
-| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu wrappers in `std/src/mem.kizu`; byte_at/slice use checked syntax | migrated wrapper module; keep allocator and remaining byte predicates trusted until loops/indexing are sufficient |
+| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, len, byte_at, and slice use trusted primitives | keep only capability, metadata, and recoverable-bounds primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; move ergonomic wrappers and tests to `std/array.kizu` after module resolver supports std sources |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `clear`, `len`, `as_bytes`, `deinit` | owned byte storage, view borrow tracking, deinit state | build on Array/slice primitives; keep raw allocation hidden |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; move wrapper and symbol-table shape to Kizu first |

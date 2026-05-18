@@ -1161,19 +1161,8 @@ func (i *Interpreter) evalMemBuiltin(
 	case "std.builtin.mem_byte_at":
 		value, err := i.evalMemByteAt(args, env)
 		return value, true, err
-	case "std.builtin.mem_equal_bytes":
-		value, err := i.evalMemCompare(args, env, func(left string, right string) bool {
-			return left == right
-		})
-		return value, true, err
-	case "std.builtin.mem_starts_with":
-		value, err := i.evalMemStartsWith(args, env)
-		return value, true, err
 	case "std.builtin.mem_slice":
 		value, err := i.evalMemSlice(args, env)
-		return value, true, err
-	case "std.builtin.mem_trim_ascii":
-		value, err := i.evalMemTrimASCII(args, env)
 		return value, true, err
 	default:
 		return voidValue(), false, nil
@@ -1199,28 +1188,6 @@ func (i *Interpreter) evalMemByteAt(args []ast.Expression, env *Env) (Value, err
 	return i.evalByteIndex(bytes, expr, env, false)
 }
 
-// evalMemCompare evaluates two-byte-slice boolean predicates.
-func (i *Interpreter) evalMemCompare(
-	args []ast.Expression,
-	env *Env,
-	predicate func(string, string) bool,
-) (Value, error) {
-	left, right, err := i.evalMemTwoBytes("std::mem::equal_bytes", args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	return boolValue(predicate(left, right)), nil
-}
-
-// evalMemStartsWith reports whether bytes starts with prefix.
-func (i *Interpreter) evalMemStartsWith(args []ast.Expression, env *Env) (Value, error) {
-	bytes, prefix, err := i.evalMemTwoBytes("std::mem::starts_with", args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	return boolValue(strings.HasPrefix(bytes, prefix)), nil
-}
-
 // evalMemSlice returns a checked byte sub-slice without allocating.
 func (i *Interpreter) evalMemSlice(args []ast.Expression, env *Env) (Value, error) {
 	bytes, start, end, err := i.evalMemSliceArgs("std::mem::slice", args, env)
@@ -1233,15 +1200,6 @@ func (i *Interpreter) evalMemSlice(args []ast.Expression, env *Env) (Value, erro
 		Slice: true,
 	}
 	return i.evalByteSlice(bytes, expr, env, false)
-}
-
-// evalMemTrimASCII trims ASCII whitespace from both ends of a byte slice.
-func (i *Interpreter) evalMemTrimASCII(args []ast.Expression, env *Env) (Value, error) {
-	bytes, err := i.evalMemOneBytes("std::mem::trim_ascii", args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	return stringValue(strings.Trim(bytes, " \t\n\r\v\f")), nil
 }
 
 // evalMemOneBytes evaluates one []const u8 argument.
@@ -1261,29 +1219,6 @@ func (i *Interpreter) evalMemOneBytes(
 		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
 	}
 	return bytes.s, nil
-}
-
-// evalMemTwoBytes evaluates two []const u8 arguments.
-func (i *Interpreter) evalMemTwoBytes(
-	name string,
-	args []ast.Expression,
-	env *Env,
-) (string, string, error) {
-	if len(args) != 2 {
-		return "", "", fmt.Errorf("runtime error: %s expects 2 args", name)
-	}
-	left, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return "", "", err
-	}
-	right, err := i.evalExpr(args[1], env)
-	if err != nil {
-		return "", "", err
-	}
-	if left.kind != kindString || right.kind != kindString {
-		return "", "", fmt.Errorf("runtime error: %s expects []const u8 args", name)
-	}
-	return left.s, right.s, nil
 }
 
 // evalMemBytesIndex evaluates byte-slice and i64 index arguments.

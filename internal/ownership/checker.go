@@ -1114,15 +1114,11 @@ func (c *Checker) checkMemBuiltin(
 		return c.checkMemByteArgs(name, args, env, 1, "i64")
 	case "std.builtin.mem_byte_at":
 		return c.checkMemByteIndex(name, args, env, "!u8")
-	case "std.builtin.mem_equal_bytes", "std.builtin.mem_starts_with":
-		return c.checkMemByteArgs(name, args, env, 2, "bool")
 	case "std.builtin.mem_slice":
 		if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env); err != nil {
 			return "", true, err
 		}
 		return "![]const u8", true, nil
-	case "std.builtin.mem_trim_ascii":
-		return c.checkMemByteArgs(name, args, env, 1, "[]const u8")
 	default:
 		return "", false, nil
 	}
