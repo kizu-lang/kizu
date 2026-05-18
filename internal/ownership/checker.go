@@ -1020,9 +1020,6 @@ func (c *Checker) checkQualifiedStdRuntimeStateBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if name == "std.string.String" {
-		return c.checkStringConstructor(args, env)
-	}
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
@@ -1598,6 +1595,8 @@ func (c *Checker) checkStringStorageBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
+	case "std.builtin.string_new":
+		return c.checkStringConstructor(args, env)
 	case "std.builtin.string_append_bytes":
 		return c.checkStringStorageArgs(name, args, env, "!void", "[]const u8")
 	case "std.builtin.string_append_byte":

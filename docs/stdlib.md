@@ -96,7 +96,7 @@ Current builtin thinning candidates:
 | `std::builtin::mem_byte_at` | Host primitive for now | Recoverable alternative to trapping index syntax |
 | `std::builtin::mem_slice` | Host primitive for now | Recoverable alternative to trapping slice syntax |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
-| `std::builtin::string_*` | Host storage primitive for now | Keep owned byte storage, capacity, view, and cleanup boundary trusted; constructor migration tracked by #359 |
+| `std::builtin::string_*` | Host storage primitive for now | Keep owned byte storage, capacity, view, constructor, and cleanup boundary trusted; public wrappers live in `std/src/string.kizu` |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
 
@@ -119,7 +119,7 @@ source is tracked by #360 and must not leave dual public paths behind.
 | --- | --- | --- | --- |
 | `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, len, byte_at, and slice use trusted primitives | keep only capability, metadata, and recoverable-bounds primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; wrapper split tracked by #360 |
-| `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | owned byte storage, capacity management, view borrow tracking, deinit state; methods are wrapped by `std::builtin::string_*`, constructor remains a public Go branch | use as the explicit owned byte buffer for path construction and diagnostics; constructor wrapper split tracked by #359 |
+| `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu wrappers in `std/src/string.kizu` over `std::builtin::string_*` owned byte storage primitives | use as the explicit owned byte buffer for path construction and diagnostics; keep storage/capacity/view/deinit rules trusted |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; wrapper split tracked by #360 |
 | `std::testing` | `expect`, equality helpers, `fail` | Kizu source over `std::fmt` and `String` | keep Go limited to the runner and error-union reporting boundary |

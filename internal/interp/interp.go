@@ -1030,10 +1030,10 @@ func (i *Interpreter) evalQualifiedRuntimeBuiltin(
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
-	if value, ok, err := i.evalStringStorageBuiltin(name, args, env); ok || err != nil {
+	if value, ok, err := i.evalStringConstructorBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
-	if value, ok, err := i.evalStringConstructor(name, args, env); ok || err != nil {
+	if value, ok, err := i.evalStringStorageBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
 	if value, ok, err := i.evalTaskBuiltin(name, args, env); ok || err != nil {
@@ -2338,13 +2338,13 @@ func (i *Interpreter) evalLocalBufferMethod(
 	return buffer.localBuf.values[int(index.i)], nil
 }
 
-// evalStringConstructor creates an owned String with an explicit allocator.
-func (i *Interpreter) evalStringConstructor(
+// evalStringConstructorBuiltin creates an owned String with an explicit allocator.
+func (i *Interpreter) evalStringConstructorBuiltin(
 	name string,
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
-	if name != "std.string.String" {
+	if name != "std.builtin.string_new" {
 		return voidValue(), false, nil
 	}
 	if len(args) != 1 {

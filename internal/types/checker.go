@@ -1722,7 +1722,7 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
 	case "std.map.Map":
 		return "", true, fmt.Errorf("type error: use `std::map::Map<K, V>(allocator)`")
-	case "std.string.String":
+	case "std.builtin.string_new":
 		return c.checkStringConstructor(args, env, unsafe)
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
@@ -2364,8 +2364,7 @@ func (c *Checker) checkUserCall(
 		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name)
 	}
 	if len(args) != len(fn.params) {
-		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
-			name, len(fn.params), len(args))
+		return "", userCallArityError(name, len(fn.params), len(args))
 	}
 	for idx, arg := range args {
 		if fn.mutBorrowParams[idx] {
@@ -2395,6 +2394,14 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	return fn.returnType, nil
+}
+
+// userCallArityError preserves stable diagnostics for std wrapper constructors.
+func userCallArityError(name string, want int, got int) error {
+	if name == "std.string.String" {
+		return fmt.Errorf("type error: `std::string::String` expects allocator")
+	}
+	return fmt.Errorf("type error: `%s` expects %d args, got %d", name, want, got)
 }
 
 // userCallArgLabel returns stable extra detail for std wrapper diagnostics.
