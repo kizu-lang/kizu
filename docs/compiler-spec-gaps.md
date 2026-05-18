@@ -104,6 +104,8 @@ Source: [ADR-0052](adr/0052-zig-style-native-build-policy.md).
 - native builds are explicit through `kizu build --target native`
 - the current backend may use host `clang` and libc
 - no-libc / freestanding builds are a planned first-class mode
+- `--libc off`, `--runtime freestanding`, and `--emit obj|llvm` are accepted
+  CLI vocabulary but rejected until implemented
 - libc mode, runtime mode, target triple, ABI, linker, and optimization mode
   are build inputs and cache-key inputs
 - unsupported lowered features must fail before invoking clang

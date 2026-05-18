@@ -34,7 +34,14 @@ Kizu native builds follow these rules:
 Initial command shape:
 
 ```text
-kizu build --target native [--opt] [-o <out>] <file>
+kizu build --target native \
+  [--opt] \
+  [--triple <arch-os-abi>] \
+  [--libc on|off] \
+  [--runtime hosted|freestanding] \
+  [--emit exe|obj|llvm] \
+  [-o <out>] \
+  <file>
 ```
 
 Planned command shape:
@@ -51,6 +58,11 @@ kizu build \
   [-o <out>] \
   <file>
 ```
+
+Only `--libc on --runtime hosted --emit exe` is implemented today.
+`--libc off`, `--runtime freestanding`, and object/native LLVM artifact modes
+are accepted as explicit command-line vocabulary but rejected until they have
+real backend support.
 
 `--libc on` means the build may use C runtime and libc symbols. `--libc off`
 means generated code and the selected Kizu runtime must not require libc.
