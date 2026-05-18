@@ -27,6 +27,10 @@ func GenerateCompiler(repoRoot string, outDir string) error {
 	if err != nil {
 		return err
 	}
+	typeInfo, err := readTypesPackage(filepath.Join(repoRoot, "internal", "types", "checker.go"))
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(outDir, "src"), 0o755); err != nil {
 		return err
 	}
@@ -36,7 +40,7 @@ func GenerateCompiler(repoRoot string, outDir string) error {
 		"src/lexer.kizu":    lexerSource(lexerInfo),
 		"src/parser.kizu":   parserSource(parserInfo),
 		"src/resolver.kizu": resolverSource(),
-		"src/checker.kizu":  checkerSource(),
+		"src/checker.kizu":  checkerSource(typeInfo),
 		"src/lower.kizu":    lowerSource(),
 		"src/emit.kizu":     emitSource(),
 		"src/compiler.kizu": compilerSource(),
@@ -58,6 +62,12 @@ type lexerPackage struct {
 
 type parserPackage struct {
 	precedences []precedenceRule
+}
+
+type typesPackage struct {
+	knownTypes   []string
+	numericTypes []string
+	copyTypes    []string
 }
 
 type field struct {
@@ -116,6 +126,20 @@ func readParserPackage(path string) (parserPackage, error) {
 		return parserPackage{}, err
 	}
 	return parserPackage{precedences: collectPrecedenceRules(file)}, nil
+}
+
+// readTypesPackage extracts checker tables needed by the bootstrap checker.
+func readTypesPackage(path string) (typesPackage, error) {
+	file, err := parseGoFile(path)
+	if err != nil {
+		return typesPackage{}, err
+	}
+	constants := collectTypeStringConstants(file)
+	return typesPackage{
+		knownTypes:   collectTypeSet(file, constants, "knownTypes"),
+		numericTypes: collectTypeSet(file, constants, "numericTypes"),
+		copyTypes:    collectTypeSet(file, constants, "copyTypes"),
+	}, nil
 }
 
 // parseGoFile parses one Go source file.
@@ -480,6 +504,108 @@ func identName(expr ast.Expr) (string, bool) {
 		return "", false
 	}
 	return ident.Name, true
+}
+
+// collectTypeStringConstants extracts Type string constants from checker.go.
+func collectTypeStringConstants(file *ast.File) map[string]string {
+	constants := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			recordTypeStringConstants(value, constants)
+		}
+	}
+	return constants
+}
+
+// recordTypeStringConstants records string-valued Type constants.
+func recordTypeStringConstants(value *ast.ValueSpec, constants map[string]string) {
+	for idx, name := range value.Names {
+		if idx >= len(value.Values) {
+			continue
+		}
+		text, ok := stringLiteralValue(value.Values[idx])
+		if ok {
+			constants[name.Name] = text
+		}
+	}
+}
+
+// collectTypeSet extracts a map[Type]bool table as sorted string values.
+func collectTypeSet(file *ast.File, constants map[string]string, name string) []string {
+	values := []string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if ok && len(value.Names) == 1 && value.Names[0].Name == name {
+				values = append(values, typeSetValues(value, constants)...)
+			}
+		}
+	}
+	sort.Strings(values)
+	return values
+}
+
+// typeSetValues extracts true-valued map keys from a checker type set.
+func typeSetValues(value *ast.ValueSpec, constants map[string]string) []string {
+	lit, ok := onlyCompositeValue(value)
+	if !ok {
+		return nil
+	}
+	values := []string{}
+	for _, elt := range lit.Elts {
+		pair, ok := elt.(*ast.KeyValueExpr)
+		if !ok || !boolLiteralValue(pair.Value) {
+			continue
+		}
+		text, ok := typeSetKey(pair.Key, constants)
+		if ok {
+			values = append(values, text)
+		}
+	}
+	return values
+}
+
+// typeSetKey resolves a type-set key expression to its string value.
+func typeSetKey(expr ast.Expr, constants map[string]string) (string, bool) {
+	if text, ok := stringLiteralValue(expr); ok {
+		return text, true
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		text, known := constants[ident.Name]
+		return text, known
+	}
+	return "", false
+}
+
+// stringLiteralValue extracts an unquoted Go string literal.
+func stringLiteralValue(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	text, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return text, true
+}
+
+// boolLiteralValue reports whether expr is the literal true.
+func boolLiteralValue(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	return ok && ident.Name == "true"
 }
 
 // collectStructFields extracts fields for one named Go struct.
@@ -1180,12 +1306,31 @@ func selfhostModuleName(path string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
-// checkerSource renders the minimal checker entry used by the bootstrap chain.
-func checkerSource() string {
-	return `pub fn check_entry(parsed: i64) -> bool {
+// checkerSource renders checker tables and the bootstrap checker entry.
+func checkerSource(info typesPackage) string {
+	var out bytes.Buffer
+	out.WriteString(`pub fn check_entry(parsed: i64) -> bool {
     return parsed >= 100;
 }
-`
+`)
+	out.WriteString(typeSetFunctionSource("known_type", info.knownTypes))
+	out.WriteString(typeSetFunctionSource("numeric_type", info.numericTypes))
+	out.WriteString(typeSetFunctionSource("copy_type", info.copyTypes))
+	return out.String()
+}
+
+// typeSetFunctionSource renders one generated checker type-set lookup.
+func typeSetFunctionSource(name string, values []string) string {
+	var out bytes.Buffer
+	fmt.Fprintf(&out, "\npub fn %s(name: []const u8) -> bool {\n", name)
+	for _, value := range values {
+		fmt.Fprintf(&out, "    if name == %q {\n", value)
+		out.WriteString("        return true;\n")
+		out.WriteString("    }\n")
+	}
+	out.WriteString("    return false;\n")
+	out.WriteString("}\n")
+	return out.String()
 }
 
 // lowerSource renders the minimal lowering entry used by the bootstrap chain.
