@@ -58,6 +58,7 @@ Kizu 固有の Codex skill は `.codex/skills/kizu-language-design/` を正と�
 
 stdlib API の現状整理と Kizu 製 std への移行方針は `docs/stdlib.md` を参照してください。
 新しい `std::...` builtin を追加する場合は、同じ変更で registry、examples、conformance を更新してください。
+新しい positive example は原則 `std::testing` assertion style にし、CLI 出力自体を検証する例だけ stdout conformance を使ってください。
 
 開発は branch / Pull Request ベースで進めます。
 `main` への直接 commit / push は行わないでください。
