@@ -17,6 +17,7 @@ const (
 	Bang     Type = "!"
 	Question Type = "?"
 	Amp      Type = "&"
+	AndAnd   Type = "&&"
 	Asterisk Type = "*"
 	Slash    Type = "/"
 	Percent  Type = "%"
@@ -37,6 +38,7 @@ const (
 	Colon     Type = ":"
 	Semicolon Type = ";"
 	Pipe      Type = "|"
+	OrOr      Type = "||"
 
 	LParen   Type = "("
 	RParen   Type = ")"

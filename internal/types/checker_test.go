@@ -24,7 +24,7 @@ fn main() { print(add(1, 2)); }`,
 }`,
 		`fn main() {
     let age = 20;
-    if age >= 20 { print("adult"); } else { print("minor"); }
+    if age >= 20 && age < 130 || false { print("adult"); } else { print("minor"); }
     var i = 0;
     while i < 3 { i = i + 1 ;}
 }`,
@@ -107,6 +107,13 @@ func TestCheckRejectsReturnAndOperatorErrors(t *testing.T) {
     return a + b;
 }`,
 			want: "operator `+` expects numeric operands",
+		},
+		{
+			name: "logical bool operands",
+			source: `fn bad(a: bool) -> bool {
+    return a && 1;
+}`,
+			want: "operator `&&` expects bool operands",
 		},
 		{
 			name: "no numeric promotion",

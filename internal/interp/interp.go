@@ -791,8 +791,11 @@ func (i *Interpreter) evalBorrowPrefix(expr *ast.PrefixExpr, env *Env) (Value, e
 	}
 }
 
-// evalBinaryExpr evaluates arithmetic, equality, and comparison operators.
+// evalBinaryExpr evaluates arithmetic, logical, equality, and comparison operators.
 func (i *Interpreter) evalBinaryExpr(expr *ast.BinaryExpr, env *Env) (Value, error) {
+	if expr.Operator == "&&" || expr.Operator == "||" {
+		return i.evalLogicalExpr(expr, env)
+	}
 	left, err := i.evalExpr(expr.Left, env)
 	if err != nil {
 		return voidValue(), err
@@ -808,6 +811,31 @@ func (i *Interpreter) evalBinaryExpr(expr *ast.BinaryExpr, env *Env) (Value, err
 		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects integers", expr.Operator)
 	}
 	return evalIntBinary(expr.Operator, left.i, right.i)
+}
+
+// evalLogicalExpr evaluates short-circuit boolean operators.
+func (i *Interpreter) evalLogicalExpr(expr *ast.BinaryExpr, env *Env) (Value, error) {
+	left, err := i.evalExpr(expr.Left, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if left.kind != kindBool {
+		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects bools", expr.Operator)
+	}
+	if expr.Operator == "&&" && !left.b {
+		return boolValue(false), nil
+	}
+	if expr.Operator == "||" && left.b {
+		return boolValue(true), nil
+	}
+	right, err := i.evalExpr(expr.Right, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if right.kind != kindBool {
+		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects bools", expr.Operator)
+	}
+	return boolValue(right.b), nil
 }
 
 // evalEquality evaluates equality operators for values of the same kind.

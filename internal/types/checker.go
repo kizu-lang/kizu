@@ -1486,7 +1486,7 @@ func (c *Checker) checkBorrowPrefix(
 	return typ, mutable, nil
 }
 
-// checkBinaryExpr validates arithmetic, equality, and comparison operators.
+// checkBinaryExpr validates arithmetic, logical, equality, and comparison operators.
 func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool) (Type, error) {
 	left, err := c.checkExpr(expr.Left, env, unsafe)
 	if err != nil {
@@ -1495,6 +1495,9 @@ func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool)
 	right, err := c.checkExpr(expr.Right, env, unsafe)
 	if err != nil {
 		return "", err
+	}
+	if expr.Operator == "&&" || expr.Operator == "||" {
+		return checkLogical(expr.Operator, left, right)
 	}
 	if expr.Operator == "==" || expr.Operator == "!=" {
 		return checkEquality(expr.Operator, left, right)
@@ -1512,6 +1515,14 @@ func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool)
 		return typeBool, nil
 	}
 	return left, nil
+}
+
+// checkLogical validates boolean logical operands.
+func checkLogical(op string, left Type, right Type) (Type, error) {
+	if left != typeBool || right != typeBool {
+		return "", fmt.Errorf("type error: operator `%s` expects bool operands", op)
+	}
+	return typeBool, nil
 }
 
 // checkEquality validates equality operands.

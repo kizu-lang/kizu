@@ -784,6 +784,8 @@ func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 const (
 	_ int = iota
 	lowest
+	logicalOr
+	logicalAnd
 	equals
 	lessGreater
 	sum
@@ -794,6 +796,8 @@ const (
 )
 
 var precedences = map[token.Type]int{
+	token.OrOr:        logicalOr,
+	token.AndAnd:      logicalAnd,
 	token.Eq:          equals,
 	token.NotEq:       equals,
 	token.LT:          lessGreater,
@@ -817,7 +821,7 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 	for p.peek.Type != token.Semicolon && precedence < p.peekPrecedence() {
 		switch p.peek.Type {
 		case token.Plus, token.Minus, token.Asterisk, token.Slash, token.Percent,
-			token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
+			token.AndAnd, token.OrOr, token.Eq, token.NotEq, token.LTE, token.GT, token.GTE:
 			p.nextToken()
 			left = p.parseBinaryExpr(left)
 		case token.LParen:

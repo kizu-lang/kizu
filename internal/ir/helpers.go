@@ -48,7 +48,7 @@ func returnType(name string) string {
 // binaryResultType returns the type produced by a binary operator.
 func binaryResultType(op string, left string) string {
 	switch op {
-	case "==", "!=", "<", "<=", ">", ">=":
+	case "&&", "||", "==", "!=", "<", "<=", ">", ">=":
 		return "bool"
 	default:
 		return left

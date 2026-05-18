@@ -86,6 +86,22 @@ func TestRunControlFlow(t *testing.T) {
 	}
 }
 
+// TestRunLogicalOperators checks short-circuit boolean evaluation.
+func TestRunLogicalOperators(t *testing.T) {
+	got := runSource(t, `fn fail() -> bool {
+    print("bad");
+    return true;
+}
+fn main() -> void {
+    if false && fail() { print("and"); } else { print("skip-and"); }
+    if true || fail() { print("skip-or"); }
+}`)
+	want := "skip-and\nskip-or\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunLoopControl checks break, continue, labels, and bounded for loops.
 func TestRunLoopControl(t *testing.T) {
 	got := runSource(t, `fn main() -> void {
