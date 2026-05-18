@@ -38,6 +38,8 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn declaration_score")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn brace_score")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn parse_score")
+	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "pub fn token_path")
+	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "selfhost/src/compiler.kizu")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "return parsed >= 100")
 	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "return parsed")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "if module <= 0")

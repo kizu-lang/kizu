@@ -1154,7 +1154,8 @@ func compilerEmitStage2Source() string {
 
 // resolverSource renders the minimal self-host package resolver entry.
 func resolverSource() string {
-	return `pub struct Graph {
+	var out bytes.Buffer
+	out.WriteString(`pub struct Graph {
     pub root: []const u8
 }
 
@@ -1165,16 +1166,18 @@ pub fn resolve_selfhost(manifest: []const u8) -> Graph {
     return Graph { root: "selfhost" };
 }
 
-pub fn token_path(graph: &Graph) -> []const u8 { return "selfhost/src/token.kizu"; }
-pub fn lexer_path(graph: &Graph) -> []const u8 { return "selfhost/src/lexer.kizu"; }
-pub fn parser_path(graph: &Graph) -> []const u8 { return "selfhost/src/parser.kizu"; }
-pub fn resolver_path(graph: &Graph) -> []const u8 { return "selfhost/src/resolver.kizu"; }
-pub fn checker_path(graph: &Graph) -> []const u8 { return "selfhost/src/checker.kizu"; }
-pub fn lower_path(graph: &Graph) -> []const u8 { return "selfhost/src/lower.kizu"; }
-pub fn emit_path(graph: &Graph) -> []const u8 { return "selfhost/src/emit.kizu"; }
-pub fn compiler_path(graph: &Graph) -> []const u8 { return "selfhost/src/compiler.kizu"; }
-pub fn main_path(graph: &Graph) -> []const u8 { return "selfhost/src/main.kizu"; }
-`
+`)
+	for _, path := range selfhostSourcePaths() {
+		fmt.Fprintf(&out, "pub fn %s_path(graph: &Graph) -> []const u8 { return %q; }\n",
+			selfhostModuleName(path), path)
+	}
+	return out.String()
+}
+
+// selfhostModuleName returns the module stem for a generated selfhost source path.
+func selfhostModuleName(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // checkerSource renders the minimal checker entry used by the bootstrap chain.
