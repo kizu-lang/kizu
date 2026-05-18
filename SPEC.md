@@ -1266,7 +1266,9 @@ owned byte buffer です。
 std::string::String(allocator: Allocator) -> std::string::String
 string.append_bytes(bytes: []const u8) -> !void
 string.append_byte(byte: u8) -> !void
+string.reserve(additional: i64) -> !void
 string.len() -> i64
+string.capacity() -> i64
 string.as_bytes() -> []const u8
 string.clear() -> void
 string.deinit() -> void
@@ -1274,14 +1276,20 @@ string.deinit() -> void
 
 `string` primitive は追加しません。
 `std::string::String()` のような hidden default allocator は使いません。
+`std::string::String` は non-copy / move-only です。
 `append_bytes` は source の `[]const u8` を move せず、owned buffer に copy します。
+`append_byte` は 1 byte を追加します。
+`reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
+`capacity` は現在の capacity を `i64` で返します。
 `as_bytes` は owned buffer への local read-only view です。
 `as_bytes` の戻り値は local binding に束縛する必要があります。
 view が生きている間は `append_bytes`、`append_byte`、`clear`、`deinit` を禁止します。
-`append_bytes`、`append_byte`、`clear` は owned local `String` または
+`append_bytes`、`append_byte`、`reserve`、`clear` は owned local `String` または
 `&mut std::string::String` から呼べます。
+`clear` は length を 0 にしますが、capacity は保持します。
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
-v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure は実装しません。
+v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure、
+owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
 
 collection は次の順で実装します。
 
