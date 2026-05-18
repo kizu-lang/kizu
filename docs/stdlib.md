@@ -54,6 +54,50 @@ Trusted Go primitives live under `internal/stdprim`. New host or runtime
 boundaries should be added there first, then exposed through Kizu `std` wrappers
 under `std/src`.
 
+## Builtin Thinning Policy
+
+`std::builtin::*` is not a permanent home for ordinary library behavior. It is a
+temporary trusted boundary used while the Go interpreter remains the execution
+oracle.
+
+Every builtin falls into one of three classes:
+
+| Class | Meaning | Action |
+| --- | --- | --- |
+| Kizu-movable | Pure logic or validation that can be written in Kizu with existing language features | Move to `std/src/*.kizu` and delete the Go branch |
+| Blocked-by-language | Logic that should be Kizu eventually, but needs missing language/runtime features | Keep temporarily and track the blocker |
+| Host primitive | OS, process, file, allocator, thread, atomic, or backend boundary | Keep as a small trusted primitive |
+
+Rules:
+
+- public `std::...` APIs should live in Kizu source
+- Go branches should use `std::builtin::*` names, not public `std::...` names
+- Kizu-movable builtins should not gain new behavior in Go
+- host primitives must stay small, explicit, and capability-shaped
+- deleting a builtin requires examples and conformance to keep behavior stable
+- native/self-host work must treat remaining host primitives as the explicit
+  runtime boundary, not as general stdlib implementation
+
+Current builtin thinning candidates:
+
+| Builtin | Class | Next action |
+| --- | --- | --- |
+| `std::builtin::mem_equal_bytes` | Kizu-movable | Move after byte indexing / loops are sufficient in std source |
+| `std::builtin::mem_starts_with` | Kizu-movable | Move after byte indexing / loops are sufficient in std source |
+| `std::builtin::mem_trim_ascii` | Kizu-movable | Move after slice construction and byte loops are sufficient |
+| `std::builtin::path_basename` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
+| `std::builtin::path_dirname` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
+| `std::builtin::path_extension` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
+| `std::builtin::testing_expect*` | Kizu-movable | Move formatting once string/diagnostic construction exists in Kizu |
+| `std::builtin::path_clean` | Blocked-by-language | Keep until path normalization can be implemented without hidden allocation |
+| `std::builtin::path_join` | Blocked-by-language | Keep until owned string/buffer construction exists |
+| `std::builtin::mem_len` | Host primitive for now | Keep as slice metadata access |
+| `std::builtin::mem_byte_at` | Host primitive for now | Keep as checked byte access until indexing is language-level |
+| `std::builtin::mem_slice` | Host primitive for now | Keep as checked slice construction |
+| `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
+| `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
+| `std::builtin::process_*` | Host primitive | Keep as host process boundary |
+
 ## Builtin Registry
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
