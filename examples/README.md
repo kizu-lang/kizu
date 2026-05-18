@@ -67,6 +67,7 @@ go test ./...
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
+| checked index / slice syntax | `slice_syntax.kizu` | indexes and slices `[]const u8` through `try bytes[...]` |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
@@ -169,6 +170,9 @@ go test ./...
 | byte-slice helper args must be `[]const u8` | `negative/std_mem_wrong_type.kizu` | `expects []const u8` |
 | checked byte slices reject invalid ranges | `negative/std_mem_slice_out_of_bounds.kizu` | `range out of bounds` |
 | checked byte access rejects invalid indexes | `negative/std_mem_byte_at_out_of_bounds.kizu` | `index out of bounds` |
+| slice syntax rejects invalid ranges | `negative/slice_syntax_range_out_of_bounds.kizu` | `range out of bounds` |
+| index syntax rejects invalid indexes | `negative/slice_syntax_index_out_of_bounds.kizu` | `index out of bounds` |
+| index/slice syntax requires byte slices | `negative/slice_syntax_wrong_target.kizu` | `expects []const u8` |
 | array access is bounds-checked | `negative/std_array_bounds.kizu` | `index out of bounds` |
 | array construction requires explicit allocator | `negative/std_array_no_allocator.kizu` | `expects allocator` |
 | arrays cannot be used after `deinit` | `negative/std_array_use_after_deinit.kizu` | `moved value` |

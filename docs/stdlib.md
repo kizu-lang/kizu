@@ -92,8 +92,8 @@ Current builtin thinning candidates:
 | `std::builtin::path_clean` | Blocked-by-language | Keep until path normalization can be implemented without hidden allocation |
 | `std::builtin::path_join` | Blocked-by-language | Keep until owned string/buffer construction exists |
 | `std::builtin::mem_len` | Host primitive for now | Keep as slice metadata access |
-| `std::builtin::mem_byte_at` | Blocked-by-language | Replace with checked index syntax from ADR-0053 |
-| `std::builtin::mem_slice` | Blocked-by-language | Replace with checked slice syntax from ADR-0053 |
+| `std::builtin::mem_byte_at` | Removed | Replaced by checked index syntax from ADR-0053 |
+| `std::builtin::mem_slice` | Removed | Replaced by checked slice syntax from ADR-0053 |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
@@ -102,7 +102,7 @@ Current builtin thinning candidates:
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
-| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu wrappers in `std/src/mem.kizu` over `std::builtin::mem_*` primitives | migrated wrapper module; keep allocator and checked byte operations trusted |
+| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu wrappers in `std/src/mem.kizu`; byte_at/slice use checked syntax | migrated wrapper module; keep allocator and remaining byte predicates trusted until loops/indexing are sufficient |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; move ergonomic wrappers and tests to `std/array.kizu` after module resolver supports std sources |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `clear`, `len`, `as_bytes`, `deinit` | owned byte storage, view borrow tracking, deinit state | build on Array/slice primitives; keep raw allocation hidden |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; move wrapper and symbol-table shape to Kizu first |

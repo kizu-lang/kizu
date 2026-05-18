@@ -649,6 +649,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readCastExpr(e, env)
 	case *ast.TryExpr:
 		return c.readTryExpr(e, env)
+	case *ast.IndexExpr:
+		return c.readIndexExpr(e, env)
 	case *ast.ArenaNewExpr:
 		return fmt.Sprintf("arena<%s>", e.TypeName), nil
 	case *ast.StructLiteralExpr:
@@ -660,6 +662,34 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	default:
 		return "", fmt.Errorf("move error: unsupported expression %T", expr)
 	}
+}
+
+// readIndexExpr reads checked byte indexing and slicing without moving bytes.
+func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error) {
+	target, err := c.readExpr(expr.Target, env)
+	if err != nil {
+		return "", err
+	}
+	if target != "[]const u8" {
+		return "", fmt.Errorf("move error: index/slice target expects []const u8, got %s", target)
+	}
+	if !expr.Slice {
+		if _, err := c.readExpr(expr.Index, env); err != nil {
+			return "", err
+		}
+		return "!u8", nil
+	}
+	if expr.Start != nil {
+		if _, err := c.readExpr(expr.Start, env); err != nil {
+			return "", err
+		}
+	}
+	if expr.End != nil {
+		if _, err := c.readExpr(expr.End, env); err != nil {
+			return "", err
+		}
+	}
+	return "![]const u8", nil
 }
 
 // readLiteralType returns the ownership type of scalar literals.
@@ -1082,15 +1112,8 @@ func (c *Checker) checkMemBuiltin(
 		return "Allocator", true, nil
 	case "std.builtin.mem_len":
 		return c.checkMemByteArgs(name, args, env, 1, "i64")
-	case "std.builtin.mem_byte_at":
-		return c.checkMemByteIndex(name, args, env, "!u8")
 	case "std.builtin.mem_equal_bytes", "std.builtin.mem_starts_with":
 		return c.checkMemByteArgs(name, args, env, 2, "bool")
-	case "std.builtin.mem_slice":
-		if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env); err != nil {
-			return "", true, err
-		}
-		return "![]const u8", true, nil
 	case "std.builtin.mem_trim_ascii":
 		return c.checkMemByteArgs(name, args, env, 1, "[]const u8")
 	default:
@@ -1121,53 +1144,6 @@ func (c *Checker) checkMemByteArgs(
 		}
 	}
 	return result, true, nil
-}
-
-// checkMemByteIndex reads a byte-slice and index without consuming them.
-func (c *Checker) checkMemByteIndex(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	result string,
-) (string, bool, error) {
-	if len(args) != 2 {
-		return "", true, fmt.Errorf("move error: `%s` expects bytes and index", name)
-	}
-	if got, err := c.readExpr(args[0], env); err != nil {
-		return "", true, err
-	} else if got != "[]const u8" {
-		return "", true, fmt.Errorf("move error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	got, err := c.readExpr(args[1], env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "i64" {
-		return "", true, fmt.Errorf("move error: `%s` expects i64 index, got %s", name, got)
-	}
-	return result, true, nil
-}
-
-// checkMemSliceShape reads checked slice arguments without consuming them.
-func (c *Checker) checkMemSliceShape(name string, args []ast.Expression, env *scope) error {
-	if len(args) != 3 {
-		return fmt.Errorf("move error: `%s` expects bytes, start, and end", name)
-	}
-	if got, err := c.readExpr(args[0], env); err != nil {
-		return err
-	} else if got != "[]const u8" {
-		return fmt.Errorf("move error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	for idx, label := range []string{"start", "end"} {
-		got, err := c.readExpr(args[idx+1], env)
-		if err != nil {
-			return err
-		}
-		if got != "i64" {
-			return fmt.Errorf("move error: `%s` expects i64 %s, got %s", name, label, got)
-		}
-	}
-	return nil
 }
 
 // checkFsBuiltin validates ownership for std::fs calls.
