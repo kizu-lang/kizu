@@ -120,6 +120,12 @@ The Go implementation remains the oracle until the Kizu compiler matches it for
 lexer, parser, diagnostics, type checking, ownership checking, IR, backend smoke
 tests, and self-check/build.
 
+Self-host component migration readiness is tracked by
+[ADR-0054](adr/0054-self-host-readiness-gate.md) and
+[`docs/selfhost-readiness.md`](selfhost-readiness.md). A component should not
+replace a Go production path until its language features, stdlib dependencies,
+diagnostics, memory-safety cases, and oracle tests are explicit.
+
 ## Implementation Work Still Needed
 
 - Connect parsed imports to multi-file checking: #88.
