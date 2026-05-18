@@ -23,6 +23,10 @@ func GenerateCompiler(repoRoot string, outDir string) error {
 	if err != nil {
 		return err
 	}
+	parserInfo, err := readParserPackage(filepath.Join(repoRoot, "internal", "parser", "parser.go"))
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(outDir, "src"), 0o755); err != nil {
 		return err
 	}
@@ -30,7 +34,7 @@ func GenerateCompiler(repoRoot string, outDir string) error {
 		"kizu.toml":         manifestSource(),
 		"src/token.kizu":    tokenSource(tokenInfo),
 		"src/lexer.kizu":    lexerSource(lexerInfo),
-		"src/parser.kizu":   parserSource(),
+		"src/parser.kizu":   parserSource(parserInfo),
 		"src/resolver.kizu": resolverSource(),
 		"src/checker.kizu":  checkerSource(),
 		"src/lower.kizu":    lowerSource(),
@@ -52,6 +56,10 @@ type lexerPackage struct {
 	punctuation []punctuationRule
 }
 
+type parserPackage struct {
+	precedences []precedenceRule
+}
+
 type field struct {
 	name string
 	typ  string
@@ -68,6 +76,11 @@ type punctuationRule struct {
 	tag    string
 	width  int
 	serial int
+}
+
+type precedenceRule struct {
+	tag   string
+	level int
 }
 
 // readTokenPackage extracts token enum tags and the Token struct.
@@ -94,6 +107,15 @@ func readLexerPackage(path string) (lexerPackage, error) {
 		fields = []field{{name: "input", typ: "[]const u8"}, {name: "position", typ: "i64"}}
 	}
 	return lexerPackage{fields: fields, punctuation: collectPunctuationRules(file)}, nil
+}
+
+// readParserPackage extracts parser tables needed by the bootstrap parser.
+func readParserPackage(path string) (parserPackage, error) {
+	file, err := parseGoFile(path)
+	if err != nil {
+		return parserPackage{}, err
+	}
+	return parserPackage{precedences: collectPrecedenceRules(file)}, nil
 }
 
 // parseGoFile parses one Go source file.
@@ -362,6 +384,102 @@ func normalizePunctuationRules(rules []punctuationRule) []punctuationRule {
 		out = append(out, rule)
 	}
 	return out
+}
+
+// collectPrecedenceRules extracts the Pratt precedence table from parser.go.
+func collectPrecedenceRules(file *ast.File) []precedenceRule {
+	levels := collectPrecedenceLevels(file)
+	rules := []precedenceRule{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if ok && len(value.Names) == 1 && value.Names[0].Name == "precedences" {
+				rules = append(rules, precedenceRulesFromSpec(value, levels)...)
+			}
+		}
+	}
+	sort.Slice(rules, func(i int, j int) bool { return rules[i].tag < rules[j].tag })
+	return rules
+}
+
+// collectPrecedenceLevels extracts iota-assigned parser precedence names.
+func collectPrecedenceLevels(file *ast.File) map[string]int {
+	levels := map[string]int{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		collectConstPrecedenceLevels(gen, levels)
+	}
+	return levels
+}
+
+// collectConstPrecedenceLevels records names from the parser precedence const group.
+func collectConstPrecedenceLevels(gen *ast.GenDecl, levels map[string]int) {
+	index := 0
+	for _, spec := range gen.Specs {
+		value, ok := spec.(*ast.ValueSpec)
+		if !ok || len(value.Names) == 0 {
+			index++
+			continue
+		}
+		if len(value.Values) > 0 && !valueUsesIota(value) && len(levels) == 0 {
+			index++
+			continue
+		}
+		for _, name := range value.Names {
+			if name.Name != "_" {
+				levels[name.Name] = index
+			}
+		}
+		index++
+	}
+}
+
+// valueUsesIota reports whether a const spec starts an iota enum.
+func valueUsesIota(value *ast.ValueSpec) bool {
+	for _, expr := range value.Values {
+		if ident, ok := expr.(*ast.Ident); ok && ident.Name == "iota" {
+			return true
+		}
+	}
+	return false
+}
+
+// precedenceRulesFromSpec extracts token precedence mappings.
+func precedenceRulesFromSpec(value *ast.ValueSpec, levels map[string]int) []precedenceRule {
+	lit, ok := onlyCompositeValue(value)
+	if !ok {
+		return nil
+	}
+	rules := []precedenceRule{}
+	for _, elt := range lit.Elts {
+		pair, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		tag, okTag := tokenSelectorName(pair.Key)
+		levelName, okLevel := identName(pair.Value)
+		level, okKnown := levels[levelName]
+		if okTag && okLevel && okKnown {
+			rules = append(rules, precedenceRule{tag: tag, level: level})
+		}
+	}
+	return rules
+}
+
+// identName extracts a bare identifier name.
+func identName(expr ast.Expr) (string, bool) {
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	return ident.Name, true
 }
 
 // collectStructFields extracts fields for one named Go struct.
@@ -739,14 +857,15 @@ fn is_space(ch: u8) -> bool {
 }
 
 // parserSource renders a compileable parser bootstrap module.
-func parserSource() string {
-	return parserHeaderSource() + parserMetricSource() + parserWordCountSource() +
+func parserSource(info parserPackage) string {
+	return parserHeaderSource(info) + parserMetricSource() + parserWordCountSource() +
 		parserBraceSource() + parserMatchSource()
 }
 
 // parserHeaderSource renders parser entry points and public scoring functions.
-func parserHeaderSource() string {
-	return `import selfhost::lexer;
+func parserHeaderSource(info parserPackage) string {
+	var out bytes.Buffer
+	out.WriteString(`import selfhost::lexer;
 import selfhost::token;
 
 pub struct Parser {
@@ -794,7 +913,23 @@ pub fn parse_score(source: []const u8) -> i64 {
     return first_token_code(source) + declaration_score(source) + brace_score(source);
 }
 
-`
+`)
+	out.WriteString(parserPrecedenceSource(info.precedences))
+	return out.String()
+}
+
+// parserPrecedenceSource renders the extracted Pratt precedence table.
+func parserPrecedenceSource(rules []precedenceRule) string {
+	var out bytes.Buffer
+	out.WriteString("pub fn precedence(kind: token::Type) -> i64 {\n")
+	for _, rule := range rules {
+		fmt.Fprintf(&out, "    if kind == token::Type::%s {\n", rule.tag)
+		fmt.Fprintf(&out, "        return %d;\n", rule.level)
+		out.WriteString("    }\n")
+	}
+	out.WriteString("    return 1;\n")
+	out.WriteString("}\n\n")
+	return out.String()
 }
 
 // parserMetricSource renders byte-scanning declaration counters.
