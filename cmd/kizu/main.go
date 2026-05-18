@@ -559,6 +559,9 @@ func sourceStdModules(path string) ([]string, error) {
 		modules = appendStdModule(modules, "mem")
 		modules = appendStdModule(modules, "path")
 	}
+	if strings.Contains(text, "std::string::") {
+		modules = appendStdModule(modules, "string")
+	}
 	if strings.Contains(text, "std::io::") {
 		modules = appendStdModule(modules, "io")
 	}
@@ -606,15 +609,49 @@ func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
 	}
 	decls := make([]ast.Decl, 0, len(program.Decls))
 	for _, decl := range program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok {
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			renameStdFunction(module, d)
+		case *ast.ImplDecl:
+			renameStdImpl(module, d)
+		default:
 			return nil, nil, fmt.Errorf("std %s error: unsupported declaration %T", module, decl)
 		}
-		fn.Name = "std." + module + "." + fn.Name
-		fn.Public = false
-		decls = append(decls, fn)
+		decls = append(decls, decl)
 	}
 	return decls, nil, nil
+}
+
+// renameStdFunction rewrites a std wrapper function into its qualified form.
+func renameStdFunction(module string, fn *ast.FunctionDecl) {
+	fn.Name = "std." + module + "." + fn.Name
+	fn.Public = false
+	renameStdFunctionTypes(module, fn)
+}
+
+// renameStdImpl rewrites a std wrapper impl block into its qualified form.
+func renameStdImpl(module string, decl *ast.ImplDecl) {
+	decl.TypeName = qualifyStdTypeName(module, decl.TypeName)
+	for _, method := range decl.Methods {
+		method.Public = false
+		renameStdFunctionTypes(module, method)
+	}
+}
+
+// renameStdFunctionTypes qualifies module-local std type names in one function.
+func renameStdFunctionTypes(module string, fn *ast.FunctionDecl) {
+	fn.ReturnType = qualifyStdTypeName(module, fn.ReturnType)
+	for idx := range fn.Params {
+		fn.Params[idx].TypeName = qualifyStdTypeName(module, fn.Params[idx].TypeName)
+	}
+}
+
+// qualifyStdTypeName maps local std wrapper type names to public std names.
+func qualifyStdTypeName(module string, typ string) string {
+	if module == "string" && typ == "String" {
+		return "std::string::String"
+	}
+	return typ
 }
 
 // findRepoFile searches upward for a repository-relative file.

@@ -1034,6 +1034,9 @@ func (i *Interpreter) evalQualifiedRuntimeBuiltin(
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
+	if value, ok, err := i.evalStringStorageBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
 	if value, ok, err := i.evalStringConstructor(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
@@ -2013,7 +2016,7 @@ func (i *Interpreter) evalNonArenaMethod(
 	case kindArray:
 		return i.evalArrayMethod(receiver, name, args, env)
 	case kindOwnedString:
-		return i.evalStringMethod(receiver, name, args, env)
+		return i.evalImplMethod(receiver, name, args, env)
 	case kindMap:
 		return i.evalMapMethod(receiver, name, args, env)
 	case kindStruct:
@@ -2517,38 +2520,53 @@ func (i *Interpreter) evalStringConstructor(
 	return ownedStringValue(), true, nil
 }
 
-// evalStringMethod executes owned String prototype operations.
-func (i *Interpreter) evalStringMethod(
-	str Value,
+// evalStringStorageBuiltin executes trusted owned String storage primitives.
+func (i *Interpreter) evalStringStorageBuiltin(
 	name string,
 	args []ast.Expression,
 	env *Env,
-) (Value, error) {
+) (Value, bool, error) {
+	if !strings.HasPrefix(name, "std.builtin.string_") {
+		return voidValue(), false, nil
+	}
+	if len(args) == 0 {
+		return voidValue(), true, fmt.Errorf("runtime error: %s expects String", name)
+	}
+	str, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), true, err
+	}
+	if str.kind != kindOwnedString {
+		return voidValue(), true, fmt.Errorf("runtime error: %s expects String", name)
+	}
 	if str.ownedStr.deinit {
-		return voidValue(), fmt.Errorf("runtime error: String was deinitialized")
+		return voidValue(), true, fmt.Errorf("runtime error: String was deinitialized")
 	}
 	switch name {
-	case "append_bytes":
-		return i.evalStringAppendBytes(str, args, env)
-	case "append_byte":
-		return i.evalStringAppendByte(str, args, env)
-	case "reserve":
-		return i.evalStringReserve(str, args, env)
-	case "len":
-		return intValue(int64(len(str.ownedStr.bytes))), requireNoArgs("String.len", args)
-	case "capacity":
-		return intValue(int64(str.ownedStr.capacity)), requireNoArgs("String.capacity", args)
-	case "as_bytes":
-		return stringValue(str.ownedStr.bytes), requireNoArgs("String.as_bytes", args)
-	case "clear":
+	case "std.builtin.string_append_bytes":
+		value, err := i.evalStringAppendBytes(str, args[1:], env)
+		return value, true, err
+	case "std.builtin.string_append_byte":
+		value, err := i.evalStringAppendByte(str, args[1:], env)
+		return value, true, err
+	case "std.builtin.string_reserve":
+		value, err := i.evalStringReserve(str, args[1:], env)
+		return value, true, err
+	case "std.builtin.string_len":
+		return intValue(int64(len(str.ownedStr.bytes))), true, requireNoArgs("String.len", args[1:])
+	case "std.builtin.string_capacity":
+		return intValue(int64(str.ownedStr.capacity)), true, requireNoArgs("String.capacity", args[1:])
+	case "std.builtin.string_as_bytes":
+		return stringValue(str.ownedStr.bytes), true, requireNoArgs("String.as_bytes", args[1:])
+	case "std.builtin.string_clear":
 		str.ownedStr.bytes = ""
-		return voidValue(), requireNoArgs("String.clear", args)
-	case "deinit":
+		return voidValue(), true, requireNoArgs("String.clear", args[1:])
+	case "std.builtin.string_deinit":
 		str.ownedStr.bytes = ""
 		str.ownedStr.deinit = true
-		return voidValue(), requireNoArgs("String.deinit", args)
+		return voidValue(), true, requireNoArgs("String.deinit", args[1:])
 	default:
-		return voidValue(), fmt.Errorf("runtime error: String has no method `%s`", name)
+		return voidValue(), false, nil
 	}
 }
 

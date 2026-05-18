@@ -1705,6 +1705,9 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	if typ, ok, err := c.checkTestingBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
+	if typ, ok, err := c.checkStringStorageBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
 	return c.checkStdConstructorBuiltin(name, args, env, unsafe)
 }
 
@@ -2787,6 +2790,115 @@ func (c *Checker) checkArenaOrImplMethod(
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkStringStorageBuiltin validates trusted String storage primitives.
+func (c *Checker) checkStringStorageBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.builtin.string_append_bytes":
+		return c.checkStringStorageBytes(name, args, env, unsafe)
+	case "std.builtin.string_append_byte":
+		return c.checkStringStorageByte(name, args, env, unsafe)
+	case "std.builtin.string_reserve":
+		return c.checkStringStorageReserve(name, args, env, unsafe)
+	case "std.builtin.string_len", "std.builtin.string_capacity":
+		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeI64)
+	case "std.builtin.string_as_bytes":
+		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeByteString)
+	case "std.builtin.string_clear", "std.builtin.string_deinit":
+		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeVoid)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkStringStorageBytes validates String plus []const u8 primitive calls.
+func (c *Checker) checkStringStorageBytes(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeByteString); err != nil {
+		return "", true, err
+	}
+	return "!void", true, nil
+}
+
+// checkStringStorageByte validates String plus u8 primitive calls.
+func (c *Checker) checkStringStorageByte(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeU8); err != nil {
+		return "", true, err
+	}
+	return "!void", true, nil
+}
+
+// checkStringStorageReserve validates String plus i64 primitive calls.
+func (c *Checker) checkStringStorageReserve(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeI64); err != nil {
+		return "", true, err
+	}
+	return "!void", true, nil
+}
+
+// checkStringStorageNoArgResult validates String-only primitive calls.
+func (c *Checker) checkStringStorageNoArgResult(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	result Type,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe); err != nil {
+		return "", true, err
+	}
+	return result, true, nil
+}
+
+// checkStringStorageArgs validates trusted primitive String arguments.
+func (c *Checker) checkStringStorageArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	extra ...Type,
+) error {
+	if len(args) != 1+len(extra) {
+		return fmt.Errorf("type error: `%s` expects %d args", name, 1+len(extra))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != "std::string::String" {
+		return fmt.Errorf("type error: `%s` expects String, got %s", name, got)
+	}
+	for idx, want := range extra {
+		got, err := c.checkExpr(args[idx+1], env, unsafe)
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return fmt.Errorf("type error: `%s` arg %d expects %s, got %s",
+				name, idx+2, want, got)
+		}
+	}
+	return nil
 }
 
 // checkStringReceiverMethod validates receiver-sensitive String methods.
