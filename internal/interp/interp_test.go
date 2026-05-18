@@ -176,6 +176,22 @@ fn main() {
 	}
 }
 
+// TestRunControlExpressions checks if/match expressions and semicolonless statements.
+func TestRunControlExpressions(t *testing.T) {
+	got := runSource(t, `enum Color { Red Green }
+fn main() {
+    let color = Color::Green
+    let value = if false { 1 } else { 2 }
+    let name = match color { Red => "red", Green => "green" }
+    print(value)
+    print(name)
+}`)
+	want := "2\ngreen\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunTaggedUnionMatch checks payload binding in tagged union matches.
 func TestRunTaggedUnionMatch(t *testing.T) {
 	got := runSource(t, `union Shape {

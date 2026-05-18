@@ -221,16 +221,18 @@ func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env)
 
 // evalBlock executes statements in a lexical block.
 func (i *Interpreter) evalBlock(block *ast.BlockStmt, env *Env) (Value, bool, error) {
+	result := voidValue()
 	for _, stmt := range block.Statements {
-		result, returned, err := i.evalStmt(stmt, env)
+		value, returned, err := i.evalStmt(stmt, env)
 		if signal, ok := err.(trySignal); ok {
 			return signal.value, true, nil
 		}
 		if err != nil || returned {
-			return result, returned, err
+			return value, returned, err
 		}
+		result = value
 	}
-	return voidValue(), false, nil
+	return result, false, nil
 }
 
 // evalStmt executes one statement and reports explicit return flow.
@@ -248,6 +250,9 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		return value, true, err
 	case *ast.ExprStmt:
 		value, err := i.evalExpr(s.Expr, env)
+		if s.Semicolon {
+			value = voidValue()
+		}
 		return value, false, err
 	case *ast.IfStmt:
 		return i.evalIfStmt(s, env)
@@ -584,6 +589,20 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 		return i.evalFieldExpr(e, env)
 	case *ast.DerefExpr:
 		return i.evalDerefExpr(e, env)
+	default:
+		return i.evalControlExpr(expr, env)
+	}
+}
+
+// evalControlExpr evaluates statement-compatible control flow in expression position.
+func (i *Interpreter) evalControlExpr(expr ast.Expression, env *Env) (Value, error) {
+	switch e := expr.(type) {
+	case *ast.IfStmt:
+		value, _, err := i.evalIfStmt(e, env)
+		return value, err
+	case *ast.MatchStmt:
+		value, _, err := i.evalMatchStmt(e, env)
+		return value, err
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unsupported expression %T", expr)
 	}

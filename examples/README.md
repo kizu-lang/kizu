@@ -29,6 +29,7 @@ go test ./...
 | function call and explicit return type | `functions.kizu` | prints `3` |
 | empty `return` in `void` function | `return.kizu` | exits early and prints `done` |
 | `if` / `else` | `if.kizu` | prints `adult` |
+| `if` / `match` expressions and optional semicolons | `control_expressions.kizu` | asserts expression branch values |
 | `while` | `while.kizu` | prints `0`, `1`, `2` |
 | `break` / `continue` | `break_continue.kizu` | controls a `while` loop |
 | labeled loop branch | `labeled_loop.kizu` | exits an outer loop explicitly |
@@ -98,9 +99,7 @@ go test ./...
 | double move is rejected | `negative/double_move.kizu` | `moved value` |
 | branch moves are visible after `if` | `negative/if_branch_move.kizu` | `moved value` |
 | one-sided branch moves are visible after `if` | `negative/if_branch_partial_move.kizu` | `moved value` |
-| `if` is not valid in expression position | `negative/if_expression_removed.kizu` | `expected expression, got if` |
 | loop body moves are visible after the loop | `negative/while_body_move.kizu` | `moved value` |
-| statement semicolons are required | `negative/missing_semicolon.kizu` | `expected ;` |
 | borrowed non-copy values cannot be moved | `negative/move_while_borrowed.kizu` | `cannot be moved while borrowed` |
 | local borrow blocks moves until last use | `negative/borrow_before_last_use_move.kizu` | `cannot be moved while borrowed` |
 | loop body use does not end an outer borrow | `negative/borrow_loop_last_use.kizu` | `cannot be moved while borrowed` |

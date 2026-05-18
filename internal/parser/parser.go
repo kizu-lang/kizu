@@ -487,6 +487,9 @@ func (p *Parser) parseParams() []ast.Param {
 			break
 		}
 		p.nextToken()
+		if p.peek.Type == token.RParen {
+			break
+		}
 		p.nextToken()
 	}
 	if !p.expectPeek(token.RParen) {
@@ -519,8 +522,9 @@ func (p *Parser) parseStatement() ast.Statement {
 	if p.peek.Type == token.Assign {
 		return p.parseAssignStmt(expr)
 	}
+	semicolon := p.cur.Type == token.Semicolon || p.peek.Type == token.Semicolon
 	p.expectStatementTerminator("expression statement")
-	return &ast.ExprStmt{Expr: expr}
+	return &ast.ExprStmt{Expr: expr, Semicolon: semicolon}
 }
 
 // parseKeywordStatement parses statements that start with reserved keywords.
@@ -637,12 +641,12 @@ func (p *Parser) parseReturnStmt() ast.Statement {
 	}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
-	p.expectStatementTerminator("return statement")
+	p.expectExplicitSemicolon("return statement")
 	return stmt
 }
 
 // parseIfStmt parses an if statement with an optional else block.
-func (p *Parser) parseIfStmt() ast.Statement {
+func (p *Parser) parseIfStmt() *ast.IfStmt {
 	stmt := &ast.IfStmt{}
 	p.nextToken()
 	stmt.Condition = p.parseExpression(lowest)
@@ -728,12 +732,44 @@ func (p *Parser) expectStatementTerminator(context string) bool {
 		p.nextToken()
 		return true
 	}
+	if p.hasImplicitStatementTerminator() {
+		return true
+	}
 	p.errorf("expected `;` after %s", context)
 	return false
 }
 
+// expectExplicitSemicolon requires a concrete semicolon token.
+func (p *Parser) expectExplicitSemicolon(context string) bool {
+	if p.cur.Type == token.Semicolon {
+		return true
+	}
+	if p.peek.Type == token.Semicolon {
+		p.nextToken()
+		return true
+	}
+	p.errorf("expected `;` after %s", context)
+	return false
+}
+
+// hasImplicitStatementTerminator reports whether a simple statement may end here.
+func (p *Parser) hasImplicitStatementTerminator() bool {
+	if p.peek.Line > p.cur.Line {
+		return true
+	}
+	switch p.peek.Type {
+	case token.RBrace, token.EOF, token.Comma:
+		return true
+	case token.Let, token.Var, token.Return, token.If, token.While, token.For,
+		token.Break, token.Continue, token.Match, token.Unsafe, token.Comptime:
+		return true
+	default:
+		return false
+	}
+}
+
 // parseMatchStmt parses a simple enum tag match statement.
-func (p *Parser) parseMatchStmt() ast.Statement {
+func (p *Parser) parseMatchStmt() *ast.MatchStmt {
 	stmt := &ast.MatchStmt{}
 	p.nextToken()
 	stmt.Value = p.parseExpression(lowest)
@@ -915,6 +951,10 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return &ast.BoolExpr{Value: true}
 	case token.False:
 		return &ast.BoolExpr{Value: false}
+	case token.If:
+		return p.parseIfStmt()
+	case token.Match:
+		return p.parseMatchStmt()
 	case token.Comptime:
 		p.nextToken()
 		return &ast.ComptimeExpr{Expr: p.parseExpression(lowest)}
@@ -1094,6 +1134,9 @@ func (p *Parser) parseTypeArgList() string {
 			break
 		}
 		p.nextToken()
+		if p.peek.Type == token.GT {
+			break
+		}
 		p.nextToken()
 	}
 	return strings.Join(args, ", ")
@@ -1113,6 +1156,9 @@ func (p *Parser) parseTypeParamList() []string {
 			break
 		}
 		p.nextToken()
+		if p.peek.Type == token.GT {
+			break
+		}
 		p.nextToken()
 	}
 	return params
@@ -1162,6 +1208,9 @@ func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 	expr.Args = append(expr.Args, p.parseExpression(lowest))
 	for p.peek.Type == token.Comma {
 		p.nextToken()
+		if p.peek.Type == token.RParen {
+			break
+		}
 		p.nextToken()
 		expr.Args = append(expr.Args, p.parseExpression(lowest))
 	}
