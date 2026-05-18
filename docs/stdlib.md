@@ -189,3 +189,20 @@ Before replacing a Go builtin with Kizu source, the following must be true:
 - cache keys include std source hashes and public interface hashes
 - host primitives remain explicit and small
 - safe wrappers preserve the memory-safety contract in `docs/memory-safety.md`
+
+## Byte Storage Boundary
+
+`std::string::String` is the current Kizu-facing owned byte buffer. Its public
+API lives in Kizu source, but its backing allocation, capacity, local view, and
+cleanup operations remain trusted storage primitives. ADR 0056 keeps that
+boundary narrow and rejects a public `std::mem::OwnedBytes` type until mutable
+slice, raw storage provenance, and generic container rules are specified.
+
+The migration path is:
+
+- keep `String` public behavior in Kizu source over `std::builtin::string_*`
+- add regression coverage for each storage safety rule before expanding the
+  primitive set
+- use `String` for diagnostic and byte-building needs in the self-host frontend
+- revisit a public byte storage type only when it can preserve allocator,
+  cleanup, and view-borrow safety without raw pointer exposure
