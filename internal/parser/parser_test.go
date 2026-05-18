@@ -329,6 +329,28 @@ fn main() { let table = std::map::Map<[]const u8, i64>(allocator); }`
 	}
 }
 
+// TestParseBorrowErrorUnionReturnType checks !&T and !&mut T return spellings.
+func TestParseBorrowErrorUnionReturnType(t *testing.T) {
+	input := `fn at<T>(values: std::array::Array<T>, index: i64) -> !&T {
+    return std::builtin::array_at<T>(values, index);
+}
+fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&mut T {
+    return std::builtin::array_at_mut<T>(values, index);
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn at<T>(values: std::array::Array<T>, index: i64) -> !&T { ` +
+		`return std::builtin::array_at<T>(values, index); }
+fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&mut T { ` +
+		`return std::builtin::array_at_mut<T>(values, index); }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseUnsafeAndExtern checks Phase 12 unsafe and C ABI declarations.
 func TestParseUnsafeAndExtern(t *testing.T) {
 	input := `extern "c" fn get_byte(p: ptr<const u8>) -> u8

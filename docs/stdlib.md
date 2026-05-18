@@ -100,11 +100,11 @@ Current builtin thinning candidates:
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
 | `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for`, `std::builtin::task_parallel_map` | Host primitive | Public constructors, `parallel_for`, and `parallel_map` live in `std/src/task.kizu`; direct user calls are rejected |
-| `std::builtin::channel<T>` | Runtime primitive | Public `std::channel::Channel<T>()` lives in `std/src/channel.kizu`; direct user calls are rejected |
-| `std::builtin::atomic<T>` | Runtime primitive | Public `std::atomic::Atomic<T>(value)` lives in `std/src/atomic.kizu`; direct user calls are rejected |
-| `std::builtin::mutex<T>` | Runtime primitive | Public `std::sync::Mutex<T>(value)` lives in `std/src/sync.kizu`; direct user calls are rejected |
-| `std::builtin::array<T>` | Runtime primitive | Public `std::array::Array<T>(allocator)` lives in `std/src/array.kizu`; direct user calls are rejected |
-| `std::builtin::map<K, V>` | Runtime primitive | Public `std::map::Map<K, V>(allocator)` lives in `std/src/map.kizu`; direct user calls are rejected |
+| `std::builtin::channel<T>`, `std::builtin::channel_send<T>`, `std::builtin::channel_recv<T>` | Runtime primitive | Public constructor and methods live in `std/src/channel.kizu`; direct user calls are rejected |
+| `std::builtin::atomic<T>`, `std::builtin::atomic_load<T>`, `std::builtin::atomic_store<T>` | Runtime primitive | Public constructor and methods live in `std/src/atomic.kizu`; direct user calls are rejected |
+| `std::builtin::mutex<T>`, `std::builtin::mutex_get<T>` | Runtime primitive | Public constructor and methods live in `std/src/sync.kizu`; direct user calls are rejected |
+| `std::builtin::array<T>`, `std::builtin::array_*<T>` | Runtime primitive | Public constructor and methods live in `std/src/array.kizu`; direct user calls are rejected |
+| `std::builtin::map<K, V>`, `std::builtin::map_*<K, V>` | Runtime primitive | Public constructor and methods live in `std/src/map.kizu`; direct user calls are rejected |
 | `std::builtin::thread_scoped<T>` | Runtime primitive | Public `std::thread::scoped<T>(io, worker, arg)` lives in `std/src/thread.kizu`; direct user calls are rejected |
 
 `std::testing` now performs assertion checks and message construction in
@@ -136,20 +136,20 @@ forwarding through Kizu std source.
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
 | `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, len, byte_at, and slice use trusted primitives | keep only capability, metadata, and recoverable-bounds primitives trusted |
-| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor wrapper; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; method wrappers tracked by #382 |
+| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
-| `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor wrapper; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; method wrappers tracked by #382 |
+| `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::map_*`; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough |
 | `std::testing` | `expect`, equality helpers, `fail` | Kizu source over `std::fmt` and `String` | keep Go limited to the runner and error-union reporting boundary |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
 | `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors, `parallel_for`, and `parallel_map`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; method wrappers tracked by #382 |
-| `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor wrapper; Go owned message queue and boundary checks | keep queue primitive trusted; method wrappers tracked by #382 |
+| `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor and method wrappers over reserved `std::builtin::channel_*`; Go owned message queue and boundary checks | keep queue primitive trusted |
 | `std::thread` | `scoped<T>` | Kizu one-argument wrapper; Go host thread boundary and join semantics | keep thread boundary primitive trusted; broader argument forwarding tracked by #383 |
-| `std::sync` | `Mutex<T>` | Kizu constructor wrapper; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted; method wrappers tracked by #382 |
-| `std::atomic` | `Atomic<T>` | Kizu constructor wrapper; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API and method wrappers tracked by #382 |
+| `std::sync` | `Mutex<T>` | Kizu constructor and `get` wrapper over reserved `std::builtin::mutex_get`; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted |
+| `std::atomic` | `Atomic<T>` | Kizu constructor plus `load`/`store` wrappers over reserved `std::builtin::atomic_*`; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API remains future work |
 
 ## Source Layout Target
 

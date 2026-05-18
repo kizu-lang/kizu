@@ -999,26 +999,16 @@ func (p *Parser) parseCastExpr() ast.Expression {
 	return expr
 }
 
-// parseTypeName parses a plain, pointer, or generic type name.
+// parseTypeName parses a plain, borrow, pointer, or generic type name.
 func (p *Parser) parseTypeName() string {
 	if p.cur.Type == token.Bang {
-		p.nextToken()
-		inner := p.parseTypeName()
-		if inner == "" {
-			return ""
-		}
-		return "!" + inner
+		return p.parseErrorUnionTypeName()
+	}
+	if p.cur.Type == token.Amp {
+		return p.parseBorrowTypeName()
 	}
 	if p.cur.Type == token.LBracket {
-		if !p.expectPeek(token.RBracket) {
-			return ""
-		}
-		p.nextToken()
-		arg := p.parseTypeArg()
-		if arg == "" {
-			return ""
-		}
-		return "[]" + arg
+		return p.parseSliceTypeName()
 	}
 	nullable := false
 	if p.cur.Type == token.Question {
@@ -1056,6 +1046,47 @@ func (p *Parser) parseTypeName() string {
 		return "?" + out
 	}
 	return out
+}
+
+// parseErrorUnionTypeName parses !T type spellings.
+func (p *Parser) parseErrorUnionTypeName() string {
+	p.nextToken()
+	inner := p.parseTypeName()
+	if inner == "" {
+		return ""
+	}
+	return "!" + inner
+}
+
+// parseBorrowTypeName parses &T and &mut T type spellings.
+func (p *Parser) parseBorrowTypeName() string {
+	p.nextToken()
+	if p.cur.Type == token.Mut {
+		p.nextToken()
+		inner := p.parseTypeName()
+		if inner == "" {
+			return ""
+		}
+		return "&mut " + inner
+	}
+	inner := p.parseTypeName()
+	if inner == "" {
+		return ""
+	}
+	return "&" + inner
+}
+
+// parseSliceTypeName parses []T type spellings.
+func (p *Parser) parseSliceTypeName() string {
+	if !p.expectPeek(token.RBracket) {
+		return ""
+	}
+	p.nextToken()
+	arg := p.parseTypeArg()
+	if arg == "" {
+		return ""
+	}
+	return "[]" + arg
 }
 
 // parseTypeBaseName parses an identifier or namespace-qualified type base.
