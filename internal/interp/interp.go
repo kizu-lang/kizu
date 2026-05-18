@@ -1312,7 +1312,7 @@ func (i *Interpreter) evalTaskBuiltin(
 	case "std.builtin.task_parallel_for":
 		value, err := i.evalParallelFor(args, env)
 		return value, true, err
-	case "std.task.parallel_map":
+	case "std.builtin.task_parallel_map":
 		value, err := i.evalParallelMap(args, env)
 		return value, true, err
 	default:
@@ -2081,6 +2081,7 @@ func (i *Interpreter) evalParallelMap(args []ast.Expression, env *Env) (Value, e
 	if err != nil {
 		return voidValue(), err
 	}
+	partition = unwrapRefValue(partition)
 	if partition.kind != kindPartition {
 		return voidValue(), fmt.Errorf("runtime error: parallel_map expects Partition")
 	}
