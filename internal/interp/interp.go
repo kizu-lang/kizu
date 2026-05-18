@@ -1205,32 +1205,32 @@ func (i *Interpreter) evalMemIntArg(
 	return value.i, nil
 }
 
-// evalFsBuiltin evaluates std::fs functions with explicit Io.
+// evalFsBuiltin evaluates filesystem host primitives with explicit Io.
 func (i *Interpreter) evalFsBuiltin(
 	name string,
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.fs.read_file":
+	case "std.builtin.fs_read_file":
 		value, err := i.evalFsReadFile(args, env)
 		return value, true, err
-	case "std.fs.write_file":
+	case "std.builtin.fs_write_file":
 		value, err := i.evalFsWriteFile(args, env)
 		return value, true, err
-	case "std.fs.exists":
+	case "std.builtin.fs_exists":
 		value, err := i.evalFsExists(args, env)
 		return value, true, err
-	case "std.fs.metadata":
+	case "std.builtin.fs_metadata":
 		value, err := i.evalFsMetadata(args, env)
 		return value, true, err
-	case "std.fs.create_dir":
+	case "std.builtin.fs_create_dir":
 		value, err := i.evalFsCreateDir(args, env)
 		return value, true, err
-	case "std.fs.remove_dir":
+	case "std.builtin.fs_remove_dir":
 		value, err := i.evalFsRemoveDir(args, env)
 		return value, true, err
-	case "std.fs.remove_file":
+	case "std.builtin.fs_remove_file":
 		value, err := i.evalFsRemoveFile(args, env)
 		return value, true, err
 	default:
@@ -1346,6 +1346,7 @@ func (i *Interpreter) evalFsWriteFile(args []ast.Expression, env *Env) (Value, e
 	if err != nil {
 		return voidValue(), err
 	}
+	bytes = unwrapRefValue(bytes)
 	if bytes.kind != kindString {
 		return errorUnionValue("std::fs::write_file expected []const u8 bytes"), nil
 	}
@@ -1597,6 +1598,7 @@ func (i *Interpreter) evalFsIoPath(
 	if err != nil {
 		return voidValue(), "", err
 	}
+	path = unwrapRefValue(path)
 	if path.kind != kindString {
 		return voidValue(), "", fmt.Errorf("runtime error: %s expects []const u8 path", name)
 	}

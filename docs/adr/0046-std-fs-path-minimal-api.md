@@ -28,14 +28,18 @@ caller-provided allocator. Callers pass `result.as_bytes()` to APIs that need
 `std::fs` always requires explicit `Io`.
 
 ```text
-std::fs::read_file(io: Io, path: []const u8) -> ![]const u8
-std::fs::write_file(io: Io, path: []const u8, bytes: []const u8) -> !void
-std::fs::exists(io: Io, path: []const u8) -> !bool
-std::fs::metadata(io: Io, path: []const u8) -> !std::fs::Metadata
-std::fs::create_dir(io: Io, path: []const u8) -> !void
-std::fs::remove_dir(io: Io, path: []const u8) -> !void
-std::fs::remove_file(io: Io, path: []const u8) -> !void
+std::fs::read_file(io: Io, path: &[]const u8) -> ![]const u8
+std::fs::write_file(io: Io, path: &[]const u8, bytes: &[]const u8) -> !void
+std::fs::exists(io: Io, path: &[]const u8) -> !bool
+std::fs::metadata(io: Io, path: &[]const u8) -> !std::fs::Metadata
+std::fs::create_dir(io: Io, path: &[]const u8) -> !void
+std::fs::remove_dir(io: Io, path: &[]const u8) -> !void
+std::fs::remove_file(io: Io, path: &[]const u8) -> !void
 ```
+
+The byte-slice parameters are read-only borrows. `std::fs` does not retain them,
+so callers can pass string literals or local views such as `String.as_bytes()`
+without transferring ownership.
 
 `std::fs::Metadata` is intentionally narrow in v0.2:
 

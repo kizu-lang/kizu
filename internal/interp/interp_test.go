@@ -295,8 +295,8 @@ func TestRunFsWriteAndRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "note.txt")
 	source := strings.ReplaceAll(`fn main() -> !void {
     let io = std::builtin::io_blocking();
-    try std::fs::write_file(io, "__PATH__", "hello fs");
-    let text = try std::fs::read_file(io, "__PATH__");
+    try std::builtin::fs_write_file(io, "__PATH__", "hello fs");
+    let text = try std::builtin::fs_read_file(io, "__PATH__");
     print(text);
     return void;
 }`, "__PATH__", path)
