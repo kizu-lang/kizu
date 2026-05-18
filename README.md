@@ -147,7 +147,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
-go run ./cmd/kizu build --target native examples/hello.kizu
+go run ./cmd/kizu build --target native --libc on --runtime hosted examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -163,7 +163,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
-- `kizu build --target native [--opt] [-o <out>] <file>` links a native executable.
+- `kizu build --target native [--opt] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [-o <out>] <file>` links a native executable.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
 - `kizu why-rebuild <file>` explains cache hit or rebuild reasons.

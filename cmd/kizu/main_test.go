@@ -143,7 +143,9 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	}
 	output := filepath.Join(t.TempDir(), "hello")
 	build := exec.Command(
-		"go", "run", ".", "build", "--target", "native", "-o", output, "../../examples/hello.kizu",
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, "../../examples/hello.kizu",
 	)
 	out, err := build.CombinedOutput()
 	if err != nil {
@@ -159,6 +161,44 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	}
 	if string(out) != "hello, kizu\n" {
 		t.Fatalf("got %q", out)
+	}
+}
+
+// TestBuildTargetNativeRejectsUnsupportedModes checks planned Zig-style modes are explicit.
+func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "no libc",
+			args: []string{"build", "--target", "native", "--libc", "off", "../../examples/hello.kizu"},
+			want: "native error: --libc off is not implemented yet",
+		},
+		{
+			name: "freestanding",
+			args: []string{"build", "--target", "native", "--runtime", "freestanding",
+				"../../examples/hello.kizu"},
+			want: "native error: --runtime freestanding is not implemented yet",
+		},
+		{
+			name: "object",
+			args: []string{"build", "--target", "native", "--emit", "obj", "../../examples/hello.kizu"},
+			want: "native error: --emit obj is not implemented yet",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("go", append([]string{"run", "."}, tt.args...)...)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected command to fail\n%s", out)
+			}
+			if !strings.Contains(string(out), tt.want) {
+				t.Fatalf("got %q, want substring %q", out, tt.want)
+			}
+		})
 	}
 }
 

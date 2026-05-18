@@ -78,7 +78,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [--opt] [-o <out>] <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [options] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
@@ -280,11 +280,11 @@ func emitWASMFile(path string, opt bool) error {
 
 // emitNativeFile lowers and links a source file into a native executable.
 func emitNativeFile(args []string) error {
-	path, output, opt, err := parseNativeBuildArgs(args)
+	options, err := parseNativeBuildArgs(args)
 	if err != nil {
 		return err
 	}
-	module, err := lowerFile(path, opt)
+	module, err := lowerFile(options.Path, options.Opt)
 	if err != nil {
 		return err
 	}
@@ -292,10 +292,13 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := native.Build(native.Options{LLVMIR: llvmIR, Output: output}); err != nil {
+	if err := native.Build(native.Options{
+		LLVMIR: llvmIR, Output: options.Output, Triple: options.Triple,
+		LibC: options.LibC, Runtime: options.Runtime, Emit: options.Emit,
+	}); err != nil {
 		return err
 	}
-	_, _ = fmt.Println(output)
+	_, _ = fmt.Println(options.Output)
 	return nil
 }
 
@@ -311,44 +314,75 @@ func parseOptFileArgs(args []string) (string, bool, error) {
 	return "", false, fmt.Errorf("invalid command arguments")
 }
 
-// parseNativeBuildArgs parses native build flags and derives the default output path.
-func parseNativeBuildArgs(args []string) (string, string, bool, error) {
-	var path string
-	var output string
-	var opt bool
+// nativeBuildArgs stores Zig-style native build options accepted by the CLI.
+type nativeBuildArgs struct {
+	Path    string
+	Output  string
+	Triple  string
+	LibC    string
+	Runtime string
+	Emit    string
+	Opt     bool
+}
+
+// parseNativeBuildArgs parses native build flags and derives defaults.
+func parseNativeBuildArgs(args []string) (nativeBuildArgs, error) {
+	options := nativeBuildArgs{LibC: "on", Runtime: "hosted", Emit: "exe"}
 	for i := 0; i < len(args); i++ {
+		var err error
 		switch args[i] {
 		case "--opt":
-			opt = true
+			options.Opt = true
 		case "-o":
-			if i+1 >= len(args) {
-				usage()
-				return "", "", false, fmt.Errorf("missing output path after -o")
-			}
-			i++
-			output = args[i]
+			i, options.Output, err = nextNativeArg(args, i, "-o")
+		case "--triple":
+			i, options.Triple, err = nextNativeArg(args, i, "--triple")
+		case "--libc":
+			i, options.LibC, err = nextNativeArg(args, i, "--libc")
+		case "--runtime":
+			i, options.Runtime, err = nextNativeArg(args, i, "--runtime")
+		case "--emit":
+			i, options.Emit, err = nextNativeArg(args, i, "--emit")
 		default:
-			if path != "" {
+			if options.Path != "" {
 				usage()
-				return "", "", false, fmt.Errorf("invalid command arguments")
+				return nativeBuildArgs{}, fmt.Errorf("invalid command arguments")
 			}
-			path = args[i]
+			options.Path = args[i]
+		}
+		if err != nil {
+			usage()
+			return nativeBuildArgs{}, err
 		}
 	}
-	if path == "" {
+	if options.Path == "" {
 		usage()
-		return "", "", false, fmt.Errorf("missing source file")
+		return nativeBuildArgs{}, fmt.Errorf("missing source file")
 	}
-	if output == "" {
-		output = defaultNativeOutput(path)
+	if options.Output == "" {
+		options.Output = defaultNativeOutput(options.Path, options.Emit)
 	}
-	return path, output, opt, nil
+	return options, nil
+}
+
+// nextNativeArg returns the value following a flag.
+func nextNativeArg(args []string, index int, flag string) (int, string, error) {
+	if index+1 >= len(args) {
+		return index, "", fmt.Errorf("missing value after %s", flag)
+	}
+	return index + 1, args[index+1], nil
 }
 
 // defaultNativeOutput maps a source path to the default target/native artifact.
-func defaultNativeOutput(path string) string {
+func defaultNativeOutput(path string, emit string) string {
 	base := filepath.Base(path)
 	name := strings.TrimSuffix(base, filepath.Ext(base))
+	if emit == "obj" {
+		name += ".o"
+	}
+	if emit == "llvm" {
+		name += ".ll"
+	}
 	return filepath.Join("target", "native", name)
 }
 

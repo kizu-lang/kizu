@@ -9,14 +9,18 @@ import (
 
 // Options describes one native link request.
 type Options struct {
-	LLVMIR string
-	Output string
+	LLVMIR  string
+	Output  string
+	Triple  string
+	LibC    string
+	Runtime string
+	Emit    string
 }
 
 // Build writes transient inputs and links them into a native executable.
 func Build(options Options) error {
-	if options.Output == "" {
-		return fmt.Errorf("native error: output path is required")
+	if err := validateOptions(options); err != nil {
+		return err
 	}
 	tmp, err := os.MkdirTemp("", "kizu-native-*")
 	if err != nil {
@@ -30,7 +34,24 @@ func Build(options Options) error {
 	if err := os.MkdirAll(filepath.Dir(options.Output), 0o755); err != nil {
 		return err
 	}
-	return runClang(irPath, runtimePath, options.Output)
+	return runClang(irPath, runtimePath, options)
+}
+
+// validateOptions rejects native build modes that do not have a concrete backend yet.
+func validateOptions(options Options) error {
+	if options.Output == "" {
+		return fmt.Errorf("native error: output path is required")
+	}
+	if options.LibC != "on" {
+		return fmt.Errorf("native error: --libc %s is not implemented yet", options.LibC)
+	}
+	if options.Runtime != "hosted" {
+		return fmt.Errorf("native error: --runtime %s is not implemented yet", options.Runtime)
+	}
+	if options.Emit != "exe" {
+		return fmt.Errorf("native error: --emit %s is not implemented yet", options.Emit)
+	}
+	return nil
 }
 
 // writeInputs writes LLVM IR and the minimal Kizu runtime shim.
@@ -47,8 +68,13 @@ func writeInputs(dir string, llvmIR string) (string, string, error) {
 }
 
 // runClang invokes the host C/LLVM toolchain with explicit inputs.
-func runClang(irPath string, runtimePath string, output string) error {
-	cmd := exec.Command("clang", irPath, runtimePath, "-o", output)
+func runClang(irPath string, runtimePath string, options Options) error {
+	args := []string{}
+	if options.Triple != "" {
+		args = append(args, "-target", options.Triple)
+	}
+	args = append(args, irPath, runtimePath, "-o", options.Output)
+	cmd := exec.Command("clang", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("native error: clang failed: %w\n%s", err, out)
