@@ -1118,7 +1118,8 @@ kizu_print_bool
 ```
 
 LLVM IR backend では、extern C call は将来 `declare` と `call` に lower します。
-actual native object / executable generation は別 phase で扱います。
+native executable generation は、LLVM lowering 済み subset と `kizu_print_*` runtime shim に
+限定して扱います。extern C library selection と C layout 完全対応は別 phase で扱います。
 
 ## 13. comptime
 

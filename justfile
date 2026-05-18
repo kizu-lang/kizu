@@ -71,6 +71,15 @@ wasm file="examples/hello.kizu":
 wasm-opt file="examples/hello.kizu":
     go run ./cmd/kizu build --target wasm32-wasi --opt {{file}}
 
+# Build a native executable through LLVM IR and clang.
+native file="examples/hello.kizu":
+    go run ./cmd/kizu build --target native {{file}}
+
+# Build and run the default native hello artifact.
+native-smoke:
+    go run ./cmd/kizu build --target native examples/hello.kizu
+    ./target/native/hello
+
 # Build and run Phase 2 examples with wasmtime.
 wasi-smoke:
     scripts/run-wasi-smoke.sh
@@ -117,6 +126,7 @@ opt-smoke file="examples/arithmetic.kizu":
     go run ./cmd/kizu ir --opt {{file}} >/dev/null
     go run ./cmd/kizu build --emit-llvm --opt {{file}} >/dev/null
     go run ./cmd/kizu build --target wasm32-wasi --opt {{file}} >/dev/null
+    go run ./cmd/kizu build --target native --opt {{file}} >/dev/null
 
 # Run the everyday local validation sequence.
 verify: fmt test lint

@@ -13,6 +13,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/llvm"
+	"github.com/kizu-lang/kizu/internal/native"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/types"
@@ -77,6 +78,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [--opt] [-o <out>] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
@@ -242,6 +244,9 @@ func emitLLVMFile(path string, opt bool) error {
 
 // emitTargetFile lowers a checked source file to the requested target.
 func emitTargetFile(target string, args []string) error {
+	if target == "native" {
+		return emitNativeFile(args)
+	}
 	if target != "wasm32-wasi" {
 		usage()
 		return fmt.Errorf("invalid build target `%s`", target)
@@ -273,6 +278,27 @@ func emitWASMFile(path string, opt bool) error {
 	return nil
 }
 
+// emitNativeFile lowers and links a source file into a native executable.
+func emitNativeFile(args []string) error {
+	path, output, opt, err := parseNativeBuildArgs(args)
+	if err != nil {
+		return err
+	}
+	module, err := lowerFile(path, opt)
+	if err != nil {
+		return err
+	}
+	llvmIR, err := llvm.Emit(module)
+	if err != nil {
+		return err
+	}
+	if err := native.Build(native.Options{LLVMIR: llvmIR, Output: output}); err != nil {
+		return err
+	}
+	_, _ = fmt.Println(output)
+	return nil
+}
+
 // parseOptFileArgs parses an optional --opt flag followed by one file path.
 func parseOptFileArgs(args []string) (string, bool, error) {
 	if len(args) == 1 {
@@ -283,6 +309,47 @@ func parseOptFileArgs(args []string) (string, bool, error) {
 	}
 	usage()
 	return "", false, fmt.Errorf("invalid command arguments")
+}
+
+// parseNativeBuildArgs parses native build flags and derives the default output path.
+func parseNativeBuildArgs(args []string) (string, string, bool, error) {
+	var path string
+	var output string
+	var opt bool
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--opt":
+			opt = true
+		case "-o":
+			if i+1 >= len(args) {
+				usage()
+				return "", "", false, fmt.Errorf("missing output path after -o")
+			}
+			i++
+			output = args[i]
+		default:
+			if path != "" {
+				usage()
+				return "", "", false, fmt.Errorf("invalid command arguments")
+			}
+			path = args[i]
+		}
+	}
+	if path == "" {
+		usage()
+		return "", "", false, fmt.Errorf("missing source file")
+	}
+	if output == "" {
+		output = defaultNativeOutput(path)
+	}
+	return path, output, opt, nil
+}
+
+// defaultNativeOutput maps a source path to the default target/native artifact.
+func defaultNativeOutput(path string) string {
+	base := filepath.Base(path)
+	name := strings.TrimSuffix(base, filepath.Ext(base))
+	return filepath.Join("target", "native", name)
 }
 
 // cacheTarget includes the optimization level in cache-shaping inputs.

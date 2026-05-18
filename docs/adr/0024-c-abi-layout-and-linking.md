@@ -14,8 +14,8 @@ Phase 12-14 で `extern "c" fn`、raw pointer、C header import は扱えるよ�
 
 C ABI layout と linking はすべて明示する。
 
-Phase 17 では actual native linker 実装は行わない。
-先に、native 実行へ進むための境界を固定する。
+最初の native linker 実装は、LLVM IR backend が扱える限定 subset だけを対象にする。
+`kizu_print_*` runtime symbol は compiler が明示的に link する小さな shim で提供する。
 
 ## C function linking
 
@@ -85,12 +85,13 @@ declare i32 @puts(ptr)
 %1 = call i32 @puts(ptr %s)
 ```
 
-現状の LLVM backend は `extern "c" fn` の native link 実行を完成させない。
-native object / executable 生成は後続 phase で扱う。
+現状の LLVM backend は `kizu build --target native` で native executable を生成できる。
+ただし、対象は LLVM lowering 済み subset と `kizu_print_*` runtime shim に限定する。
+`extern "c" fn` の library selection、C struct layout、cross compilation 完全対応は後続で扱う。
 
 ## Smoke test 方針
 
-actual native linking を実装する phase では、最小 smoke test として次を置く。
+native linking の最小 smoke test として次を置く。
 
 ```text
 Kizu source -> LLVM IR -> object -> native executable -> run

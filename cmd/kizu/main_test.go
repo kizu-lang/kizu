@@ -99,7 +99,7 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "define void @main()"
+	want := "define i32 @main()"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
 	}
@@ -133,6 +133,32 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 	want := `(func $_start (export "_start")`
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
+// TestBuildTargetNativeCommandSmoke checks native build produces an executable.
+func TestBuildTargetNativeCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	output := filepath.Join(t.TempDir(), "hello")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native", "-o", output, "../../examples/hello.kizu",
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != output {
+		t.Fatalf("got %q, want output path %q", out, output)
+	}
+	run := exec.Command(output)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, out)
+	}
+	if string(out) != "hello, kizu\n" {
+		t.Fatalf("got %q", out)
 	}
 }
 
