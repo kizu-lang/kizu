@@ -402,19 +402,22 @@ func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
 	if !strings.Contains(text, "define i32 @main") {
 		t.Fatalf("stage2 artifact does not look like LLVM IR:\n%s", data)
 	}
+	if !strings.Contains(text, "@source0 = private constant [19 x i8]") {
+		t.Fatalf("stage2 artifact does not include the selfhost manifest input:\n%s", data)
+	}
 	if !strings.Contains(text, "fopen(ptr %source0, ptr %readmode)") ||
-		!strings.Contains(text, "fopen(ptr %source8, ptr %readmode)") {
+		!strings.Contains(text, "fopen(ptr %source9, ptr %readmode)") {
 		t.Fatalf("stage2 artifact does not read the selfhost source tree:\n%s", data)
 	}
 	if !strings.Contains(text, "fgetc(ptr %srcfile0)") ||
-		!strings.Contains(text, "fgetc(ptr %srcfile8)") {
+		!strings.Contains(text, "fgetc(ptr %srcfile9)") {
 		t.Fatalf("stage2 artifact does not scan source contents:\n%s", data)
 	}
-	if !strings.Contains(text, "read8.loop") ||
-		!strings.Contains(text, "%ok8 = icmp sgt i32 %count8, 0") {
+	if !strings.Contains(text, "read9.loop") ||
+		!strings.Contains(text, "%ok9 = icmp sgt i32 %count9, 0") {
 		t.Fatalf("stage2 artifact does not drain source files:\n%s", data)
 	}
-	if !strings.Contains(text, "%scanned = and i1 %all7, %large") ||
+	if !strings.Contains(text, "%scanned = and i1 %all8, %large") ||
 		!strings.Contains(text, "br i1 %scanned, label %write, label %done") {
 		t.Fatalf("stage2 artifact does not gate output on source scan:\n%s", data)
 	}
@@ -448,7 +451,7 @@ func assertStage2GeneratedArtifact(
 	if !strings.Contains(string(data), "; kizu stage source fn count ") {
 		t.Fatalf("stage2 generated artifact does not include source fn count:\n%s", data)
 	}
-	if !strings.Contains(string(data), "fopen(ptr %source8, ptr %readmode)") {
+	if !strings.Contains(string(data), "fopen(ptr %source9, ptr %readmode)") {
 		t.Fatalf("stage2 generated artifact is not a source-scanning compiler:\n%s", data)
 	}
 	assertStage2SourceOnlyMetrics(t, stage2Data, data)

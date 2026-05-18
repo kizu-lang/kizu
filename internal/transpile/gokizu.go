@@ -1268,6 +1268,7 @@ func compilerTreeSource() string {
     let compiler_source = try std::fs::read_file(io, resolver::compiler_path(graph));
     let main_source = try std::fs::read_file(io, resolver::main_path(graph));
 
+    let manifest_parse = parse_module(manifest);
     let token_parse = parse_module(token_source);
     let lexer_parse = parse_module(lexer_source);
     let parser_parse = parse_module(parser_source);
@@ -1277,19 +1278,21 @@ func compilerTreeSource() string {
     let emit_parse = parse_module(emit_source);
     let compiler_parse = parse_module(compiler_source);
     let main_parse = parse_module(main_source);
-    let source_bytes = std::mem::len(token_source) + std::mem::len(lexer_source) +
-        std::mem::len(parser_source) + std::mem::len(resolver_source) +
-        std::mem::len(checker_source) + std::mem::len(lower_source) +
-        std::mem::len(emit_source) + std::mem::len(compiler_source) +
-        std::mem::len(main_source);
-    let source_fns = parser::function_count(token_source) + parser::function_count(lexer_source) +
+    let source_bytes = std::mem::len(manifest) + std::mem::len(token_source) +
+        std::mem::len(lexer_source) + std::mem::len(parser_source) +
+        std::mem::len(resolver_source) + std::mem::len(checker_source) +
+        std::mem::len(lower_source) + std::mem::len(emit_source) +
+        std::mem::len(compiler_source) + std::mem::len(main_source);
+    let source_fns = parser::function_count(manifest) +
+        parser::function_count(token_source) + parser::function_count(lexer_source) +
         parser::function_count(parser_source) + parser::function_count(resolver_source) +
         parser::function_count(checker_source) + parser::function_count(lower_source) +
         parser::function_count(emit_source) + parser::function_count(compiler_source) +
         parser::function_count(main_source);
 
-    let parsed = token_parse + lexer_parse + parser_parse + resolver_parse +
-        checker_parse + lower_parse + emit_parse + compiler_parse + main_parse;
+    let parsed = manifest_parse + token_parse + lexer_parse + parser_parse +
+        resolver_parse + checker_parse + lower_parse + emit_parse + compiler_parse +
+        main_parse;
     let checked = checker::check_entry(parsed);
     let module = lower::lower_entry(checked, parsed);
     let artifact = try emit::llvm(allocator, module, source_bytes, source_fns);
@@ -1545,6 +1548,8 @@ func stageTemplateWriteLLVM(templateLen int) string {
 	parsePrefix := stageSourceMetricPrefix()
 	bytesPrefix := stageSourceBytesPrefix()
 	fnPrefix := stageSourceFnPrefix()
+	sourceTotal := fmt.Sprintf("%%total%d", len(selfhostStageInputPaths())-2)
+	fnTotal := fmt.Sprintf("%%fntotal%d", len(selfhostStageInputPaths())-2)
 	return "write: " +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
 		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
@@ -1552,9 +1557,9 @@ func stageTemplateWriteLLVM(templateLen int) string {
 		writeTemplateMetricPrefix("parsemetric", len(parsePrefix), "parsedigits",
 			"%parsetotal", "after.parse") +
 		writeTemplateMetricPrefix("metric", len(bytesPrefix), "digits",
-			"%total7", "after.bytes") +
+			sourceTotal, "after.bytes") +
 		writeTemplateMetricPrefix("fnmetric", len(fnPrefix), "fndigits",
-			"%fntotal7", "after.fns") +
+			fnTotal, "after.fns") +
 		stageTemplateLoopLLVM(templateLen) +
 		"close: call i32 @fclose(ptr %file) br label %done done: ret i32 0 }"
 }
@@ -1679,7 +1684,7 @@ func stage2WriteNumberLLVM(prefix string, value string, next string) string {
 // stage2SourceGlobals returns one path constant for each self-host source.
 func stage2SourceGlobals() string {
 	var out strings.Builder
-	for idx, path := range selfhostSourcePaths() {
+	for idx, path := range selfhostStageInputPaths() {
 		fmt.Fprintf(&out, "@source%d = private constant [%d x i8] [%s] ",
 			idx, len(path)+1, byteArray(path))
 	}
@@ -1689,7 +1694,7 @@ func stage2SourceGlobals() string {
 // stage2OpenSources emits the source-tree input reads in stage2.
 func stage2OpenSources() string {
 	var out strings.Builder
-	for idx, path := range selfhostSourcePaths() {
+	for idx, path := range selfhostStageInputPaths() {
 		fmt.Fprintf(&out, "%%source%d = getelementptr [%d x i8], ptr @source%d, i64 0, i64 0 ",
 			idx, len(path)+1, idx)
 		fmt.Fprintf(&out, "%%srcfile%d = call ptr @fopen(ptr %%source%d, ptr %%readmode) ",
@@ -1702,28 +1707,28 @@ func stage2OpenSources() string {
 // stage2CheckSources emits content-dependent validation before artifact writing.
 func stage2CheckSources() string {
 	var out strings.Builder
-	for idx := range selfhostSourcePaths() {
+	for idx := range selfhostStageInputPaths() {
 		writeStage2SourceReadLoop(&out, idx)
 	}
-	for idx := range selfhostSourcePaths() {
+	for idx := range selfhostStageInputPaths() {
 		fmt.Fprintf(&out, "%%ok%d = icmp sgt i32 %%count%d, 0 ", idx, idx)
 	}
 	out.WriteString("%all0 = and i1 %ok0, %ok1 ")
-	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+	for idx := 2; idx < len(selfhostStageInputPaths()); idx++ {
 		fmt.Fprintf(&out, "%%all%d = and i1 %%all%d, %%ok%d ", idx-1, idx-2, idx)
 	}
 	out.WriteString("%total0 = add i32 %count0, %count1 ")
-	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+	for idx := 2; idx < len(selfhostStageInputPaths()); idx++ {
 		fmt.Fprintf(&out, "%%total%d = add i32 %%total%d, %%count%d ", idx-1, idx-2, idx)
 	}
 	out.WriteString("%fntotal0 = add i32 %fn0, %fn1 ")
-	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+	for idx := 2; idx < len(selfhostStageInputPaths()); idx++ {
 		fmt.Fprintf(&out, "%%fntotal%d = add i32 %%fntotal%d, %%fn%d ", idx-1, idx-2, idx)
 	}
 	writeStage2ParseMetric(&out)
-	fmt.Fprintf(&out, "%%large = icmp sgt i32 %%total%d, 100 ", len(selfhostSourcePaths())-2)
-	fmt.Fprintf(&out, "%%scanned = and i1 %%all%d, %%large ", len(selfhostSourcePaths())-2)
-	for idx := range selfhostSourcePaths() {
+	fmt.Fprintf(&out, "%%large = icmp sgt i32 %%total%d, 100 ", len(selfhostStageInputPaths())-2)
+	fmt.Fprintf(&out, "%%scanned = and i1 %%all%d, %%large ", len(selfhostStageInputPaths())-2)
+	for idx := range selfhostStageInputPaths() {
 		fmt.Fprintf(&out, "call i32 @fclose(ptr %%srcfile%d) ", idx)
 	}
 	return out.String()
@@ -1736,7 +1741,7 @@ func writeStage2SourceReadLoop(out *strings.Builder, idx int) {
 		prev = fmt.Sprintf("read%d.done", idx-1)
 	}
 	next := "after.reads"
-	if idx+1 < len(selfhostSourcePaths()) {
+	if idx+1 < len(selfhostStageInputPaths()) {
 		next = fmt.Sprintf("read%d.loop", idx+1)
 	}
 	fmt.Fprintf(out, "read%d.loop: %%count%d = phi i32 [0, %%%s], [%%next%d, %%read%d.byte] ",
@@ -1752,7 +1757,7 @@ func writeStage2SourceReadLoop(out *strings.Builder, idx int) {
 	writeStage2PrevUpdates(out, idx)
 	fmt.Fprintf(out, "br label %%read%d.loop ", idx)
 	fmt.Fprintf(out, "read%d.done: br label %%%s ", idx, next)
-	if idx+1 == len(selfhostSourcePaths()) {
+	if idx+1 == len(selfhostStageInputPaths()) {
 		out.WriteString("after.reads: ")
 	}
 }
@@ -1902,7 +1907,7 @@ func writeStage2PrevUpdates(out *strings.Builder, idx int) {
 
 // writeStage2ParseMetric aggregates the source scan into parser.kizu's score.
 func writeStage2ParseMetric(out *strings.Builder) {
-	for idx := range selfhostSourcePaths() {
+	for idx := range selfhostStageInputPaths() {
 		fmt.Fprintf(out, "%%balanced%d = icmp eq i32 %%balance%d, 0 ", idx, idx)
 		fmt.Fprintf(out, "%%bracescore%d = select i1 %%balanced%d, i32 %%brace%d, i32 0 ",
 			idx, idx, idx)
@@ -1917,11 +1922,16 @@ func writeStage2ParseMetric(out *strings.Builder) {
 		fmt.Fprintf(out, "%%parse%d = add i32 %%parsea%d, %%bracescore%d ", idx, idx, idx)
 	}
 	out.WriteString("%parsetotal0 = add i32 %parse0, %parse1 ")
-	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+	for idx := 2; idx < len(selfhostStageInputPaths()); idx++ {
 		fmt.Fprintf(out, "%%parsetotal%d = add i32 %%parsetotal%d, %%parse%d ",
 			idx-1, idx-2, idx)
 	}
-	fmt.Fprintf(out, "%%parsetotal = add i32 %%parsetotal%d, 0 ", len(selfhostSourcePaths())-2)
+	fmt.Fprintf(out, "%%parsetotal = add i32 %%parsetotal%d, 0 ", len(selfhostStageInputPaths())-2)
+}
+
+// selfhostStageInputPaths lists every input read by stage artifacts.
+func selfhostStageInputPaths() []string {
+	return append([]string{"selfhost/kizu.toml"}, selfhostSourcePaths()...)
 }
 
 // selfhostSourcePaths lists the compiler source tree read by stage1 and stage2.
