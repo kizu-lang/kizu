@@ -19,7 +19,9 @@ allocation.
 std::string::String(allocator: Allocator) -> std::string::String
 string.append_bytes(bytes: []const u8) -> !void
 string.append_byte(byte: u8) -> !void
+string.reserve(additional: i64) -> !void
 string.len() -> i64
+string.capacity() -> i64
 string.as_bytes() -> []const u8
 string.clear() -> void
 string.deinit() -> void
@@ -27,7 +29,12 @@ string.deinit() -> void
 
 The constructor requires an explicit allocator capability. `append_bytes` copies
 from a read-only byte slice and does not move the source. `append_byte` appends
-one byte. Allocation failure is represented as `!void`.
+one byte. `reserve` requests capacity for at least `additional` more bytes.
+Allocation failure is represented as `!void`.
+
+`std::string::String` is non-copy and move-only. Copying a `String` would require
+either hidden allocation or shared ownership, so safe Kizu treats it as an owned
+resource like `std::array::Array<T>`.
 
 `as_bytes` returns a local read-only view into the owned buffer. To keep safe
 Kizu memory-safe, `as_bytes` must be bound as a local view:
@@ -41,12 +48,25 @@ rejected. While the local view is alive, `append_bytes`, `append_byte`, `clear`,
 and `deinit` are rejected. Last-use borrow release allows mutation after the
 view's final use.
 
-`append_bytes`, `append_byte`, and `clear` may be called on an owned local
-`String` or through `&mut std::string::String`. `deinit` requires an owned local
-receiver because a borrowed callee cannot invalidate the caller's binding.
+`append_bytes`, `append_byte`, `reserve`, and `clear` may be called on an owned
+local `String` or through `&mut std::string::String`. `clear` sets length to
+zero while keeping capacity for reuse. `capacity` exposes current capacity for
+allocation planning. `deinit` requires an owned local receiver because a
+borrowed callee cannot invalidate the caller's binding. After `deinit`, the
+binding is treated as moved/deinitialized and cannot be used again.
 
 `std::string::String` is bytes-first in v0.2. It does not validate UTF-8, expose
 raw pointers, or implicitly convert to a C ABI string.
+
+v0.2 deliberately does not include:
+
+- `into_bytes` or other owned-byte extraction APIs
+- String-specific equality helpers
+- String-specific indexing or slicing APIs
+- operator overloads for String comparison
+
+Code should use `string.as_bytes()` plus `std::mem` helpers for read-only byte
+operations. This keeps `String` focused on owned byte-buffer construction.
 
 `std::mem::index_of` remains deferred until `option<T>` runtime helpers are
 implemented.
@@ -58,3 +78,6 @@ implemented.
 - Safe byte views do not outlive or race with String mutation/deinit.
 - The self-host compiler can build simple diagnostics without hidden runtime
   allocation behavior.
+- `std::path::join`, `std::path::clean`, and testing diagnostics can be moved
+  from Go only after `reserve` and capacity-aware buffer behavior are
+  implemented and covered by conformance.
