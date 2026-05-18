@@ -36,7 +36,9 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "declare ptr @fopen")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fopen(ptr %source8, ptr %readmode)")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fgetc(ptr %srcfile8)")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fputc(i32 %ch, ptr %out.file)")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "@parsemetric")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "%parsetotal")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "br i1 %scanned, label %write")
 }
 
 // TestCheckedInSelfhostDoesNotEmitGoDriver checks the committed bootstrap seed

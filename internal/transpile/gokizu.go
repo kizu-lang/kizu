@@ -819,8 +819,7 @@ func stage2WriterLLVMChunks() []string {
 		stage2EntryLLVM(),
 		stage2OpenSources(),
 		stage2CheckSources(),
-		stage2CopyGateLLVM(),
-		stage2CopyInputLLVM(),
+		stage2WriteGateLLVM(),
 		stage2WriteFallbackLLVM(),
 	}
 }
@@ -859,10 +858,9 @@ func stage2EntryLLVM() string {
 		"scan: %readmode = getelementptr [2 x i8], ptr @readmode, i64 0, i64 0 "
 }
 
-// stage2CopyGateLLVM renders the branch from source validation to artifact output.
-func stage2CopyGateLLVM() string {
-	return "%copy = icmp sgt i32 %argc, 2 " +
-		"%ready = and i1 %scanned, %copy br i1 %ready, label %copy.in, label %write "
+// stage2WriteGateLLVM renders the branch from source validation to artifact output.
+func stage2WriteGateLLVM() string {
+	return "br i1 %scanned, label %write, label %done "
 }
 
 // stage2WriteFallbackLLVM writes the fallback artifact when no comparison output is requested.
@@ -926,22 +924,6 @@ func stage2WriteNumberLLVM(prefix string, value string, next string) string {
 		"%" + prefix + ".next.rem = sub i32 %" + prefix + ".rem, %" + prefix + ".used " +
 		"%" + prefix + ".emit.next = sdiv i32 %" + prefix + ".emit.div, 10 " +
 		"br label %" + prefix + ".emit "
-}
-
-// stage2CopyInputLLVM copies argv[1] to argv[2] for stage artifact comparison.
-func stage2CopyInputLLVM() string {
-	return "copy.in: %in.slot = getelementptr ptr, ptr %argv, i64 1 " +
-		"%in.path = load ptr, ptr %in.slot " +
-		"%out.slot = getelementptr ptr, ptr %argv, i64 2 " +
-		"%out.path = load ptr, ptr %out.slot " +
-		"%in.file = call ptr @fopen(ptr %in.path, ptr %readmode) " +
-		"%mode.copy = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
-		"%out.file = call ptr @fopen(ptr %out.path, ptr %mode.copy) " +
-		"br label %copy.loop copy.loop: %ch = call i32 @fgetc(ptr %in.file) " +
-		"%eof = icmp slt i32 %ch, 0 br i1 %eof, label %copy.done, label %copy.byte " +
-		"copy.byte: call i32 @fputc(i32 %ch, ptr %out.file) br label %copy.loop " +
-		"copy.done: call i32 @fclose(ptr %in.file) call i32 @fclose(ptr %out.file) " +
-		"br label %done "
 }
 
 // stage2SourceGlobals returns one path constant for each self-host source.

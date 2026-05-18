@@ -347,7 +347,7 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stage2 link failed: %v\n%s", err, out)
 	}
-	run = exec.Command(stage2Bin, stage2, stage3)
+	run = exec.Command(stage2Bin, stage3)
 	run.Dir = repoRoot
 	out, err = run.CombinedOutput()
 	if err != nil {
@@ -364,8 +364,7 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertStageArtifactsEqual(t, stage2Data, data)
-	assertStage2CanWriteWithoutInputCopy(t, repoRoot, stage2Bin, dir, stage2Data)
+	assertStage2GeneratedArtifact(t, repoRoot, stage2Data, data, stage3, dir)
 }
 
 // assertStage2LLVMReadsSources checks that the stage2 IR depends on compiler source inputs.
@@ -388,8 +387,11 @@ func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
 		t.Fatalf("stage2 artifact does not drain source files:\n%s", data)
 	}
 	if !strings.Contains(text, "%scanned = and i1 %all7, %large") ||
-		!strings.Contains(text, "%ready = and i1 %scanned, %copy") {
-		t.Fatalf("stage2 artifact does not gate copy on source scan:\n%s", data)
+		!strings.Contains(text, "br i1 %scanned, label %write, label %done") {
+		t.Fatalf("stage2 artifact does not gate output on source scan:\n%s", data)
+	}
+	if strings.Contains(text, "copy.in") {
+		t.Fatalf("stage2 artifact still includes input-copy path:\n%s", data)
 	}
 	if !strings.Contains(text, "; kizu selfhost source metric ") {
 		t.Fatalf("stage2 artifact does not include source-derived metric:\n%s", data)
@@ -399,57 +401,40 @@ func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
 	}
 }
 
-// assertStageArtifactsEqual checks stage output stability for the bootstrap smoke.
-func assertStageArtifactsEqual(t *testing.T, stage2 []byte, stage3 []byte) {
-	t.Helper()
-	if string(stage2) != string(stage3) {
-		t.Fatalf("stage2 and stage3 artifacts differ\nstage2:\n%s\nstage3:\n%s", stage2, stage3)
-	}
-}
-
-// assertStage2CanWriteWithoutInputCopy checks stage2 can emit after source scan alone.
-func assertStage2CanWriteWithoutInputCopy(
+// assertStage2GeneratedArtifact checks stage2 emits a linkable source-derived artifact.
+func assertStage2GeneratedArtifact(
 	t *testing.T,
 	repoRoot string,
-	stage2Bin string,
-	dir string,
 	stage2Data []byte,
+	data []byte,
+	stage3 string,
+	dir string,
 ) {
 	t.Helper()
-	sourceOut := filepath.Join(dir, "stage3-source.ll")
-	sourceBin := filepath.Join(dir, "kizu-stage3-source")
-	run := exec.Command(stage2Bin, sourceOut)
-	run.Dir = repoRoot
-	out, err := run.CombinedOutput()
-	if err != nil {
-		t.Fatalf("stage2 source-only executable failed: %v\n%s", err, out)
-	}
-	data, err := os.ReadFile(sourceOut)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if strings.Contains(string(data), "; kizu selfhost source metric ") {
-		t.Fatalf("source-only stage2 artifact unexpectedly copied stage2 input:\n%s", data)
+		t.Fatalf("stage2 generated artifact unexpectedly copied stage2 input:\n%s", data)
 	}
 	if !strings.Contains(string(data), "; kizu stage2 source bytes ") {
-		t.Fatalf("source-only stage2 artifact does not include source byte total:\n%s", data)
+		t.Fatalf("stage2 generated artifact does not include source byte total:\n%s", data)
 	}
 	if !strings.Contains(string(data), "; kizu stage2 source metric ") {
-		t.Fatalf("source-only stage2 artifact does not include source metric:\n%s", data)
+		t.Fatalf("stage2 generated artifact does not include source metric:\n%s", data)
 	}
 	if !strings.Contains(string(data), "; kizu stage2 source fn count ") {
-		t.Fatalf("source-only stage2 artifact does not include source fn count:\n%s", data)
+		t.Fatalf("stage2 generated artifact does not include source fn count:\n%s", data)
 	}
 	assertStage2SourceOnlyMetrics(t, stage2Data, data)
-	link := exec.Command("clang", sourceOut, "-o", sourceBin)
-	out, err = link.CombinedOutput()
+	sourceBin := filepath.Join(dir, "kizu-stage3")
+	link := exec.Command("clang", stage3, "-o", sourceBin)
+	out, err := link.CombinedOutput()
 	if err != nil {
-		t.Fatalf("source-only stage2 link failed: %v\n%s", err, out)
+		t.Fatalf("stage2 generated artifact link failed: %v\n%s", err, out)
 	}
-	run = exec.Command(sourceBin)
+	run := exec.Command(sourceBin)
+	run.Dir = repoRoot
 	out, err = run.CombinedOutput()
 	if err != nil {
-		t.Fatalf("source-only stage2 output failed: %v\n%s", err, out)
+		t.Fatalf("stage2 generated artifact output failed: %v\n%s", err, out)
 	}
 }
 
