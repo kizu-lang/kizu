@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -264,6 +265,73 @@ fn main() {
 	want := `enum Color { Red; Green; Blue }
 fn main() { let color = Color::Red; match color { Red => print("red"); ` +
 		`Green => print("green"); Blue => print("blue"); } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseControlExpressions checks if/match expressions and optional semicolons.
+func TestParseControlExpressions(t *testing.T) {
+	input := `enum Color { Red Green }
+fn main() {
+    let color = Color::Green
+    let value = if true { 1 } else { 2 }
+    let name = match color { Red => "red", Green => "green" }
+    print(value)
+    print(name)
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `enum Color { Red; Green }
+fn main() { let color = Color::Green; let value = if true { 1; } else { 2; }; ` +
+		`let name = match color { Red => "red"; Green => "green"; }; print(value); print(name); }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseRequiresSemicolonAfterReturn keeps return statement syntax explicit.
+func TestParseRequiresSemicolonAfterReturn(t *testing.T) {
+	input := `fn main() -> i64 {
+    return 1
+}`
+	p := New(lexer.New(input))
+	_ = p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatalf("expected parser error")
+	}
+	if !strings.Contains(p.Errors()[0], "expected `;` after return statement") {
+		t.Fatalf("got %v", p.Errors())
+	}
+}
+
+// TestParseAllowsTrailingCommas checks trailing commas in common list syntax.
+func TestParseAllowsTrailingCommas(t *testing.T) {
+	input := `fn id<T,>(value: T,) -> T {
+    return value;
+}
+struct User {
+    name: []const u8,
+}
+fn main() {
+    let user = User { name: "alice", }
+    let values = std::array::Array<i64,>(allocator,)
+    print(id(1,))
+    print(values.len())
+    print(user.name)
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn id<T>(value: T) -> T { return value; }
+struct User { name: []const u8 }
+fn main() { let user = User { name: "alice" }; let values = std::array::Array<i64>(allocator); ` +
+		`print(id(1)); print(values.len()); print(user.name); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

@@ -1425,8 +1425,149 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 	case *ast.DerefExpr:
 		return c.checkDerefExpr(e, env, unsafe)
 	default:
+		return c.checkControlExpr(expr, env, unsafe)
+	}
+}
+
+// checkControlExpr validates statement-compatible control flow used as expressions.
+func (c *Checker) checkControlExpr(expr ast.Expression, env *scope, unsafe bool) (Type, error) {
+	switch e := expr.(type) {
+	case *ast.IfStmt:
+		return c.checkIfExpr(e, env, unsafe)
+	case *ast.MatchStmt:
+		return c.checkMatchExpr(e, env, unsafe)
+	default:
 		return "", fmt.Errorf("type error: unsupported expression %T", expr)
 	}
+}
+
+// checkIfExpr validates an if expression and returns the common branch type.
+func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe bool) (Type, error) {
+	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if cond != typeBool {
+		return "", fmt.Errorf("type error: if condition must be bool, got %s", cond)
+	}
+	if stmt.Alternative == nil {
+		return "", fmt.Errorf("type error: if expression requires else branch")
+	}
+	left, err := c.checkBlockValue(stmt.Consequence, env.child(), unsafe)
+	if err != nil {
+		return "", err
+	}
+	right, err := c.checkBlockValue(stmt.Alternative, env.child(), unsafe)
+	if err != nil {
+		return "", err
+	}
+	if left != right {
+		return "", fmt.Errorf("type error: if expression branch types differ: %s vs %s",
+			left, right)
+	}
+	return left, nil
+}
+
+// checkBlockValue validates a block used as an expression branch.
+func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, unsafe bool) (Type, error) {
+	if block == nil || len(block.Statements) == 0 {
+		return "", fmt.Errorf("type error: expression block must end with a value")
+	}
+	for _, stmt := range block.Statements[:len(block.Statements)-1] {
+		returns, err := c.checkStmt(stmt, env, c.currentReturn, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if returns {
+			return "", fmt.Errorf("type error: expression block cannot contain early return")
+		}
+	}
+	return c.checkStmtValue(block.Statements[len(block.Statements)-1], env, unsafe)
+}
+
+// checkStmtValue computes the value type of a statement in expression-tail position.
+func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe bool) (Type, error) {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		if s.Semicolon {
+			return "", fmt.Errorf("type error: expression block must end with a value")
+		}
+		return c.checkExpr(s.Expr, env, unsafe)
+	case *ast.IfStmt:
+		return c.checkIfExpr(s, env, unsafe)
+	case *ast.MatchStmt:
+		return c.checkMatchExpr(s, env, unsafe)
+	default:
+		return "", fmt.Errorf("type error: expression block must end with a value")
+	}
+}
+
+// checkMatchExpr validates an exhaustive match expression and its arm result type.
+func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe bool) (Type, error) {
+	valueType, err := c.checkExpr(stmt.Value, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	enumType := c.enums[string(valueType)]
+	unionType := c.unions[string(valueType)]
+	if enumType == nil && unionType == nil {
+		return "", fmt.Errorf("type error: match expects enum or union, got %s", valueType)
+	}
+	return c.checkMatchExprArms(stmt.Arms, enumType, unionType, env, unsafe)
+}
+
+// checkMatchExprArms validates match expression arms and returns their common type.
+func (c *Checker) checkMatchExprArms(
+	arms []ast.MatchArm,
+	enumType *enumType,
+	unionType *unionType,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	seen := map[string]bool{}
+	var result Type
+	for idx, arm := range arms {
+		got, err := c.checkMatchExprArm(arm, enumType, unionType, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if seen[arm.Tag] {
+			return "", fmt.Errorf("type error: duplicate match tag `%s::%s`",
+				matchTypeName(enumType, unionType), arm.Tag)
+		}
+		seen[arm.Tag] = true
+		if idx == 0 {
+			result = got
+		} else if got != result {
+			return "", fmt.Errorf("type error: match arm types differ: %s vs %s", result, got)
+		}
+	}
+	if len(seen) != matchVariantCount(enumType, unionType) {
+		return "", fmt.Errorf("type error: match on `%s` is not exhaustive",
+			matchTypeName(enumType, unionType))
+	}
+	return result, nil
+}
+
+// checkMatchExprArm validates one match expression arm and returns its value type.
+func (c *Checker) checkMatchExprArm(
+	arm ast.MatchArm,
+	enumType *enumType,
+	unionType *unionType,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	payload, err := matchPayloadType(enumType, unionType, arm)
+	if err != nil {
+		return "", err
+	}
+	armEnv := env.child()
+	if payload != "" && arm.Binding != "" {
+		if err := armEnv.define(arm.Binding, Type(payload), false); err != nil {
+			return "", err
+		}
+	}
+	return c.checkStmtValue(arm.Body, armEnv, unsafe)
 }
 
 // checkIndexExpr validates checked one-dimensional byte indexing and slicing.

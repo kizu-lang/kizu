@@ -330,10 +330,13 @@ fn add(a: i64, b: i64) -> i64 {
 
 戻り値の型を省略した場合は `void` を返します。
 
-戻り値を返す場合は `return` を必須にします。
+戻り値を返す場合は `return expr;` を必須にします。
 Rust のような末尾式 return は採用しません。
-セミコロンの有無で戻り値が変わる仕様も採用しません。
-simple statement の終端には `;` を必須にします。
+セミコロンの有無で関数の戻り値が変わる仕様も採用しません。
+simple statement の終端には `;` を書けますが、次が `}`、EOF、次の statement 開始、
+または `match` arm 区切りの場合は省略できます。
+ただし `return` は Rust と同じく `return;` / `return expr;` の `;` を必須にします。
+comma-separated list は末尾カンマを許容します。
 
 ```kizu
 fn bad_add(a: i64, b: i64) -> i64 {
@@ -520,7 +523,7 @@ v0.1 の `union` は次に限定します。
 
 ### 6.9 if
 
-Kizu v0.1 の `if` は statement です。
+Kizu の `if` は statement と expression の両方で使えます。
 
 ```kizu
 if age >= 20 {
@@ -530,8 +533,18 @@ if age >= 20 {
 }
 ```
 
-値を返したい場合は、関数から `return` するか、`var` binding に明示的に代入します。
-Kizu v0.1 では `if` expression と三項演算子は採用しません。
+expression として使う場合は `else` が必須で、両 branch の末尾 value type が一致しなければ
+なりません。関数の戻り値は引き続き明示的な `return` で返します。
+
+```kizu
+let label = if age >= 20 {
+    "adult"
+} else {
+    "minor"
+}
+```
+
+三項演算子は採用しません。
 
 ### 6.9.1 bool 演算
 
@@ -600,7 +613,8 @@ v0.1 では iterator protocol、collection iteration、`inline for` は扱いま
 
 ### 6.12 match
 
-v0.1 の `match` は、単純な enum value と tagged union value を分岐する用途に限定します。
+`match` は、単純な enum value と tagged union value を分岐する用途に限定します。
+statement と expression の両方で使えます。
 
 ```kizu
 fn main() {
@@ -618,6 +632,7 @@ guard と多段 destructuring は v0.1 では扱いません。
 tagged union の payload binding だけを扱います。
 duplicate arm、unknown tag、non-exhaustive match は compile error です。
 wildcard pattern `_` は v0.1 では採用しません。
+expression として使う場合は、すべての arm の value type が一致しなければなりません。
 
 ## 7. 型
 
@@ -1825,6 +1840,7 @@ var declaration
 assignment
 return statement
 if statement
+if expression
 while statement
 function call
 binary expression
@@ -1835,6 +1851,7 @@ namespace access
 enum declaration
 union declaration
 match statement
+match expression
 borrow expression
 arena type and constructor
 error union type

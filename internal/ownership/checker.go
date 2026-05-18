@@ -663,6 +663,18 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	case *ast.DerefExpr:
 		return c.readDerefExpr(e, env)
 	default:
+		return c.readControlExpr(expr, env)
+	}
+}
+
+// readControlExpr checks control flow expressions without consuming owned values.
+func (c *Checker) readControlExpr(expr ast.Expression, env *scope) (string, error) {
+	switch e := expr.(type) {
+	case *ast.IfStmt:
+		return c.readIfExpr(e, env)
+	case *ast.MatchStmt:
+		return c.readMatchExpr(e, env)
+	default:
 		return "", fmt.Errorf("move error: unsupported expression %T", expr)
 	}
 }
@@ -762,7 +774,148 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 	if field, ok := expr.(*ast.FieldExpr); ok {
 		return c.moveFieldExpr(field, env)
 	}
+	if stmt, ok := expr.(*ast.IfStmt); ok {
+		return c.moveIfExpr(stmt, env)
+	}
+	if stmt, ok := expr.(*ast.MatchStmt); ok {
+		return c.moveMatchExpr(stmt, env)
+	}
 	return c.readExpr(expr, env)
+}
+
+// readIfExpr checks ownership effects for an if expression in read context.
+func (c *Checker) readIfExpr(stmt *ast.IfStmt, env *scope) (string, error) {
+	return c.checkIfExprValue(stmt, env, false)
+}
+
+// moveIfExpr checks ownership effects for an if expression in move context.
+func (c *Checker) moveIfExpr(stmt *ast.IfStmt, env *scope) (string, error) {
+	return c.checkIfExprValue(stmt, env, true)
+}
+
+// checkIfExprValue merges possible branch moves from an if expression.
+func (c *Checker) checkIfExprValue(stmt *ast.IfStmt, env *scope, moveTail bool) (string, error) {
+	if _, err := c.readExpr(stmt.Condition, env); err != nil {
+		return "", err
+	}
+	if stmt.Alternative == nil {
+		return "", fmt.Errorf("move error: if expression requires else branch")
+	}
+	left := env.clone()
+	leftType, err := c.checkBlockValue(stmt.Consequence, left.child(), moveTail)
+	if err != nil {
+		return "", err
+	}
+	right := env.clone()
+	rightType, err := c.checkBlockValue(stmt.Alternative, right.child(), moveTail)
+	if err != nil {
+		return "", err
+	}
+	if leftType != rightType {
+		return "", fmt.Errorf("move error: if expression branch types differ: %s vs %s",
+			leftType, rightType)
+	}
+	env.mergeMovedFrom(left)
+	env.mergeMovedFrom(right)
+	return leftType, nil
+}
+
+// readMatchExpr checks ownership effects for a match expression in read context.
+func (c *Checker) readMatchExpr(stmt *ast.MatchStmt, env *scope) (string, error) {
+	return c.checkMatchExprValue(stmt, env, false)
+}
+
+// moveMatchExpr checks ownership effects for a match expression in move context.
+func (c *Checker) moveMatchExpr(stmt *ast.MatchStmt, env *scope) (string, error) {
+	return c.checkMatchExprValue(stmt, env, true)
+}
+
+// checkMatchExprValue merges possible arm moves from a match expression.
+func (c *Checker) checkMatchExprValue(
+	stmt *ast.MatchStmt,
+	env *scope,
+	moveTail bool,
+) (string, error) {
+	valueType, err := c.readExpr(stmt.Value, env)
+	if err != nil {
+		return "", err
+	}
+	tags, unionPayloads, ok := c.matchTags(valueType)
+	if !ok {
+		return "", fmt.Errorf("move error: match expects enum or union, got %s", valueType)
+	}
+	var result string
+	for idx, arm := range stmt.Arms {
+		got, err := c.checkMatchExprArmValue(arm, tags, unionPayloads, env, moveTail)
+		if err != nil {
+			return "", err
+		}
+		if idx == 0 {
+			result = got
+		} else if got != result {
+			return "", fmt.Errorf("move error: match arm types differ: %s vs %s", result, got)
+		}
+	}
+	return result, nil
+}
+
+// checkMatchExprArmValue checks one arm and merges its possible moves.
+func (c *Checker) checkMatchExprArmValue(
+	arm ast.MatchArm,
+	tags map[string]bool,
+	unionPayloads map[string]string,
+	env *scope,
+	moveTail bool,
+) (string, error) {
+	if !tags[arm.Tag] {
+		return "", fmt.Errorf("move error: unknown match tag `%s`", arm.Tag)
+	}
+	armEnv := env.clone()
+	child := armEnv.child()
+	if payload := unionPayloads[arm.Tag]; payload != "" && arm.Binding != "" {
+		value := c.newBinding(arm.Binding, payload)
+		value.borrowedParam = true
+		child.define(value)
+	}
+	got, err := c.checkStmtValue(arm.Body, child, moveTail)
+	if err != nil {
+		return "", err
+	}
+	env.mergeMovedFrom(armEnv)
+	return got, nil
+}
+
+// checkBlockValue checks a branch block used in expression position.
+func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail bool) (string, error) {
+	if block == nil || len(block.Statements) == 0 {
+		return "", fmt.Errorf("move error: expression block must end with a value")
+	}
+	for _, stmt := range block.Statements[:len(block.Statements)-1] {
+		if err := c.checkStmt(stmt, env); err != nil {
+			return "", err
+		}
+	}
+	return c.checkStmtValue(block.Statements[len(block.Statements)-1], env, moveTail)
+}
+
+// checkStmtValue checks a value-producing tail statement.
+func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, moveTail bool) (string, error) {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		if s.Semicolon {
+			return "", fmt.Errorf("move error: expression block must end with a value")
+		}
+		if moveTail {
+			return c.moveExpr(s.Expr, env)
+		}
+		return c.readExpr(s.Expr, env)
+	case *ast.IfStmt:
+		return c.checkIfExprValue(s, env, moveTail)
+	case *ast.MatchStmt:
+		return c.checkMatchExprValue(s, env, moveTail)
+	default:
+		return "", fmt.Errorf("move error: expression block must end with a value")
+	}
 }
 
 // moveDerefExpr rejects moving a non-copy value out through a local borrow.

@@ -361,6 +361,9 @@ type IfStmt struct {
 // statementNode marks IfStmt as a statement node.
 func (*IfStmt) statementNode() {}
 
+// expressionNode marks IfStmt as an expression node.
+func (*IfStmt) expressionNode() {}
+
 // String returns a compact debug representation of the if statement.
 func (s *IfStmt) String() string {
 	out := fmt.Sprintf("if %s %s", s.Condition.String(), s.Consequence.String())
@@ -452,6 +455,9 @@ type MatchStmt struct {
 // statementNode marks MatchStmt as a statement node.
 func (*MatchStmt) statementNode() {}
 
+// expressionNode marks MatchStmt as an expression node.
+func (*MatchStmt) expressionNode() {}
+
 // String returns a compact debug representation of the match statement.
 func (s *MatchStmt) String() string {
 	arms := make([]string, 0, len(s.Arms))
@@ -510,7 +516,8 @@ func (s *ComptimeIfStmt) String() string {
 
 // ExprStmt wraps an expression used as a statement.
 type ExprStmt struct {
-	Expr Expression
+	Expr      Expression
+	Semicolon bool
 }
 
 // statementNode marks ExprStmt as a statement node.

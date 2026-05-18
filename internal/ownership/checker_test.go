@@ -372,6 +372,29 @@ fn main() {
 	}
 }
 
+// TestCheckControlExpressionMoveMarksOuterValueMoved checks expression branch moves.
+func TestCheckControlExpressionMoveMarksOuterValueMoved(t *testing.T) {
+	source := `struct Name { value: []const u8 }
+fn pick(left: Name, right: Name) -> Name {
+    let chosen = if true { left } else { right }
+    return chosen;
+}
+fn main() {
+    let left = Name { value: "left" };
+    let right = Name { value: "right" };
+    let chosen = pick(left, right);
+    print(left.value);
+    print(chosen.value);
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "moved value `left` was used") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckUnsafeDoesNotDisableMoveAndBorrowRules checks unsafe keeps safe rules.
 func TestCheckUnsafeDoesNotDisableMoveAndBorrowRules(t *testing.T) {
 	cases := []struct {

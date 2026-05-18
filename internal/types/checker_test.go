@@ -367,6 +367,36 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsControlExpressions checks value-producing if and match forms.
+func TestCheckAcceptsControlExpressions(t *testing.T) {
+	source := `enum Color { Red Green }
+fn main() -> void {
+    let color = Color::Green
+    let value = if true { 1 } else { 2 }
+    let name = match color { Red => "red", Green => "green" }
+    print(value)
+    print(name)
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsSemicolonTailControlExpressions keeps block values explicit.
+func TestCheckRejectsSemicolonTailControlExpressions(t *testing.T) {
+	source := `fn main() -> void {
+    let value = if true { 1; } else { 2; }
+    print(value);
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "expression block must end with a value") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckAcceptsTaggedUnionMatch checks tagged union constructors and payload matches.
 func TestCheckAcceptsTaggedUnionMatch(t *testing.T) {
 	source := `union Shape {
