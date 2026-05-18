@@ -1977,12 +1977,8 @@ func (c *Checker) checkMemBuiltin(
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeI64)
 	case "std.builtin.mem_byte_at":
 		return c.checkMemByteIndex(name, args, env, unsafe, "!u8")
-	case "std.builtin.mem_equal_bytes", "std.builtin.mem_starts_with":
-		return c.checkMemByteArgs(name, args, env, unsafe, 2, typeBool)
 	case "std.builtin.mem_slice":
 		return c.checkMemSlice(args, env, unsafe)
-	case "std.builtin.mem_trim_ascii":
-		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeByteString)
 	default:
 		return "", false, nil
 	}
