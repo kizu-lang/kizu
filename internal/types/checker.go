@@ -1496,7 +1496,7 @@ func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool)
 	if err != nil {
 		return "", err
 	}
-	if expr.Operator == "&&" || expr.Operator == "||" {
+	if expr.Operator == "and" || expr.Operator == "or" {
 		return checkLogical(expr.Operator, left, right)
 	}
 	if expr.Operator == "==" || expr.Operator == "!=" {

@@ -248,7 +248,7 @@ func (l *lowerer) lowerPrefixExpr(expr *ast.PrefixExpr) (Value, error) {
 
 // lowerBinaryExpr lowers binary operators.
 func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
-	if expr.Operator == "&&" || expr.Operator == "||" {
+	if expr.Operator == "and" || expr.Operator == "or" {
 		return l.lowerLogicalExpr(expr)
 	}
 	left, err := l.lowerExpr(expr.Left)

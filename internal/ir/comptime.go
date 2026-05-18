@@ -33,7 +33,7 @@ func constBool(expr ast.Expression) (bool, bool) {
 		value, ok := constBool(e.Right)
 		return !value, ok && e.Operator == "!"
 	case *ast.BinaryExpr:
-		if e.Operator == "&&" || e.Operator == "||" {
+		if e.Operator == "and" || e.Operator == "or" {
 			return constLogicalBool(e)
 		}
 		left, leftOK := constInt(e.Left)
@@ -51,17 +51,17 @@ func constLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
 	if !leftOK {
 		return false, false
 	}
-	if expr.Operator == "&&" && !left {
+	if expr.Operator == "and" && !left {
 		return false, true
 	}
-	if expr.Operator == "||" && left {
+	if expr.Operator == "or" && left {
 		return true, true
 	}
 	right, rightOK := constBool(expr.Right)
 	if !rightOK {
 		return false, false
 	}
-	if expr.Operator == "&&" {
+	if expr.Operator == "and" {
 		return left && right, true
 	}
 	return left || right, true

@@ -93,8 +93,8 @@ func TestRunLogicalOperators(t *testing.T) {
     return true;
 }
 fn main() -> void {
-    if false && fail() { print("and"); } else { print("skip-and"); }
-    if true || fail() { print("skip-or"); }
+    if false and fail() { print("and"); } else { print("skip-and"); }
+    if true or fail() { print("skip-or"); }
 }`)
 	want := "skip-and\nskip-or\n"
 	if got != want {

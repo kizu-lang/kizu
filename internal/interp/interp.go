@@ -793,7 +793,7 @@ func (i *Interpreter) evalBorrowPrefix(expr *ast.PrefixExpr, env *Env) (Value, e
 
 // evalBinaryExpr evaluates arithmetic, logical, equality, and comparison operators.
 func (i *Interpreter) evalBinaryExpr(expr *ast.BinaryExpr, env *Env) (Value, error) {
-	if expr.Operator == "&&" || expr.Operator == "||" {
+	if expr.Operator == "and" || expr.Operator == "or" {
 		return i.evalLogicalExpr(expr, env)
 	}
 	left, err := i.evalExpr(expr.Left, env)
@@ -822,10 +822,10 @@ func (i *Interpreter) evalLogicalExpr(expr *ast.BinaryExpr, env *Env) (Value, er
 	if left.kind != kindBool {
 		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects bools", expr.Operator)
 	}
-	if expr.Operator == "&&" && !left.b {
+	if expr.Operator == "and" && !left.b {
 		return boolValue(false), nil
 	}
-	if expr.Operator == "||" && left.b {
+	if expr.Operator == "or" && left.b {
 		return boolValue(true), nil
 	}
 	right, err := i.evalExpr(expr.Right, env)

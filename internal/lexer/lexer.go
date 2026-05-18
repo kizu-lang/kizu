@@ -40,12 +40,10 @@ var compoundTokens = map[rune]compoundToken{
 	'=': {next: '=', compound: token.Eq, single: token.Assign},
 	'-': {next: '>', compound: token.Arrow, single: token.Minus},
 	'!': {next: '=', compound: token.NotEq, single: token.Bang},
-	'&': {next: '&', compound: token.AndAnd, single: token.Amp},
 	'<': {next: '=', compound: token.LTE, single: token.LT},
 	'>': {next: '=', compound: token.GTE, single: token.GT},
 	'.': {next: '.', compound: token.Range, single: token.Dot},
 	':': {next: ':', compound: token.DoubleColon, single: token.Colon},
-	'|': {next: '|', compound: token.OrOr, single: token.Pipe},
 }
 
 // New creates a lexer for input.

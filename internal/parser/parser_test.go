@@ -105,14 +105,14 @@ func TestParseIfExpression(t *testing.T) {
 // TestParseLogicalExpressions checks boolean operator precedence.
 func TestParseLogicalExpressions(t *testing.T) {
 	input := `fn main() {
-    let ok = age >= 20 && age < 130 || false;
+    let ok = age >= 20 and age < 130 or false;
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() { let ok = (((age >= 20) && (age < 130)) || false); }`
+	want := `fn main() { let ok = (((age >= 20) and (age < 130)) or false); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

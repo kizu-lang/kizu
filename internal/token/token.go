@@ -17,7 +17,6 @@ const (
 	Bang     Type = "!"
 	Question Type = "?"
 	Amp      Type = "&"
-	AndAnd   Type = "&&"
 	Asterisk Type = "*"
 	Slash    Type = "/"
 	Percent  Type = "%"
@@ -38,7 +37,6 @@ const (
 	Colon     Type = ":"
 	Semicolon Type = ";"
 	Pipe      Type = "|"
-	OrOr      Type = "||"
 
 	LParen   Type = "("
 	RParen   Type = ")"
@@ -68,6 +66,8 @@ const (
 	Impl     Type = "impl"
 	True     Type = "true"
 	False    Type = "false"
+	And      Type = "and"
+	Or       Type = "or"
 	Mut      Type = "mut"
 	Unsafe   Type = "unsafe"
 	Extern   Type = "extern"
@@ -104,6 +104,8 @@ var keywords = map[string]Type{
 	"impl":     Impl,
 	"true":     True,
 	"false":    False,
+	"and":      And,
+	"or":       Or,
 	"mut":      Mut,
 	"unsafe":   Unsafe,
 	"extern":   Extern,
