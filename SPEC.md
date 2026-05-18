@@ -1224,6 +1224,10 @@ pub fn Channel<T>() -> Channel<T> {
 pub fn Atomic<T>(value: T) -> Atomic<T> {
     return std::builtin::atomic<T>(value);
 }
+
+pub fn Mutex<T>(value: T) -> Mutex<T> {
+    return std::builtin::mutex<T>(value);
+}
 ```
 
 This is not a general monomorphization system. v0.2 uses it only to move public

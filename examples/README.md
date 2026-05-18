@@ -166,6 +166,7 @@ go test ./...
 | parallel task host primitives are reserved | `negative/std_task_parallel_for_builtin_direct_call.kizu` | `reserved; use std::task` |
 | channel host primitives are reserved | `negative/std_channel_builtin_direct_call.kizu` | `reserved; use std::channel` |
 | atomic host primitives are reserved | `negative/std_atomic_builtin_direct_call.kizu` | `reserved; use std::atomic` |
+| mutex host primitives are reserved | `negative/std_mutex_builtin_direct_call.kizu` | `reserved; use std::sync` |
 | generic functions are std-only | `negative/generic_function_user_reserved.kizu` | `reserved for std` |
 | `Function` parameters are std-only | `negative/function_parameter_runtime.kizu` | `reserved for std` |
 | task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |

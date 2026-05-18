@@ -1645,11 +1645,10 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: unsupported type application `%s`", expr.String())
 	}
+	if value, ok, err := i.evalBuiltinTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
+		return value, err
+	}
 	switch name {
-	case "std.builtin.channel":
-		return callChannelFromExprs(i.resolveTypeArg(expr.TypeArg), args), nil
-	case "std.builtin.atomic":
-		return i.evalAtomic(i.resolveTypeArg(expr.TypeArg), args, env)
 	case "std.array.Array":
 		return i.evalArrayConstructor(expr.TypeArg, args, env)
 	case "std.map.Map":
@@ -1665,9 +1664,33 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 		}
 		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	case "std.sync.Mutex":
-		return i.evalMutex(expr.TypeArg, args, env)
+		if fn := i.functions[name]; fn != nil && len(fn.TypeParams) == 1 {
+			return i.callTypeApplyFunction(fn, expr.TypeArg, args, env)
+		}
+		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
+	}
+}
+
+// evalBuiltinTypeApply evaluates std-only generic runtime primitives.
+func (i *Interpreter) evalBuiltinTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "std.builtin.channel":
+		return callChannelFromExprs(i.resolveTypeArg(typeArg), args), true, nil
+	case "std.builtin.atomic":
+		value, err := i.evalAtomic(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
+	case "std.builtin.mutex":
+		value, err := i.evalMutex(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
 	}
 }
 
