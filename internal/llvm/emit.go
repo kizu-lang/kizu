@@ -144,11 +144,11 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	case instr.Op == "phi":
 		return e.writePhi(instr)
 	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
-		return e.writeOpaqueValue(instr)
+		return e.unsupported(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
-		return e.writeOpaqueValue(instr)
+		return e.unsupported(instr)
 	case instr.Op == "error.error" || instr.Op == "error.try":
-		return e.writeOpaqueValue(instr)
+		return e.unsupported(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
@@ -264,11 +264,9 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 	return nil
 }
 
-// writeOpaqueValue represents values not lowered to concrete LLVM layout in phase 9.
-func (e *emitter) writeOpaqueValue(instr *ir.Instr) error {
-	fmt.Fprintf(&e.out, "  ; %s omitted in phase 9\n", instr.Op)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
-	return nil
+// unsupported rejects checked IR that has no concrete LLVM representation yet.
+func (e *emitter) unsupported(instr *ir.Instr) error {
+	return fmt.Errorf("llvm error: `%s` is not supported by the LLVM backend yet", instr.Op)
 }
 
 // writeTerminator writes one LLVM terminator.

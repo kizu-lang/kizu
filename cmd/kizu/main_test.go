@@ -162,6 +162,28 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetNativeRejectsUnsupportedFeature checks native build fails before clang.
+func TestBuildTargetNativeRejectsUnsupportedFeature(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "struct.kizu")
+	code := []byte(`struct User { age: i64; }
+fn main() {
+    let user = User { age: 30 };
+    print(user.age);
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "build", "--target", "native", source)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected native build to fail\n%s", out)
+	}
+	want := "llvm error: `struct.new` is not supported by the LLVM backend yet"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
 // TestCacheCommands checks cache status, why-rebuild, and prune.
 func TestCacheCommands(t *testing.T) {
 	cacheDir := t.TempDir()

@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -35,6 +36,55 @@ func TestEmitSnapshots(t *testing.T) {
 				t.Fatalf("got:\n%s\nwant:\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestEmitRejectsUnsupportedLoweredInstructions avoids invalid placeholder IR.
+func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "struct", source: structSource, want: "`struct.new` is not supported"},
+		{name: "arena", source: arenaSource, want: "`arena.new` is not supported"},
+		{name: "error union", source: errorUnionSource, want: "`error.try` is not supported"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			module := lowerSource(t, tt.source)
+			_, err := Emit(module)
+			if err == nil {
+				t.Fatal("expected emit to reject unsupported instruction")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestEmitRejectsUnsupportedFieldInstruction checks field lowering is not faked.
+func TestEmitRejectsUnsupportedFieldInstruction(t *testing.T) {
+	module := &ir.Module{Functions: []*ir.Function{{
+		Name:   "main",
+		Return: "void",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%1", Type: "i64"},
+				Op:     "field.age",
+				Args:   []ir.Value{{Name: "%user", Type: "User"}},
+			}},
+			Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
+		}},
+	}}}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject field instruction")
+	}
+	if !strings.Contains(err.Error(), "`field.age` is not supported") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 
@@ -88,6 +138,27 @@ const whileSource = `fn main() {
         print(i);
         i = i + 1;
     }
+}`
+
+const structSource = `struct User { age: i64; }
+fn main() {
+    let user = User { age: 30 };
+    print(1);
+}`
+
+const arenaSource = `struct User { age: i64; }
+fn main() {
+    let users = arena<User>();
+    print(1);
+}`
+
+const errorUnionSource = `fn read() -> !i64 {
+    return 1;
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return void;
 }`
 
 const helloLLVM = `; Kizu LLVM IR
