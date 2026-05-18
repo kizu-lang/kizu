@@ -169,10 +169,10 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, llvmType(param.Type)+" "+param.Name)
+		params = append(params, e.llvmType(param.Type)+" "+param.Name)
 		e.values[param.Name] = valueInfo{typ: param.Type, operand: param.Name}
 	}
-	returnType := llvmType(fn.Return)
+	returnType := e.llvmType(fn.Return)
 	e.mainReturnsInt = fn.Name == "main" && (fn.Return == "void" || fn.Return == "!void")
 	e.currentMain = fn.Name == "main"
 	e.currentReturn = fn.Return
@@ -322,7 +322,7 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 		pred := llvmPredicate(op)
 		name := localName(instr.Result.Name)
 		fmt.Fprintf(&e.out, "  %s = icmp %s %s %s, %s\n",
-			name, pred, llvmType(instr.Args[0].Type), left.operand, right.operand)
+			name, pred, e.llvmType(instr.Args[0].Type), left.operand, right.operand)
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: name}
 		return nil
 	}
@@ -360,9 +360,10 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	args := make([]string, 0, len(instr.Args))
 	for _, arg := range instr.Args {
 		value := e.value(arg)
-		args = append(args, llvmType(arg.Type)+" "+value.operand)
+		args = append(args, e.llvmType(arg.Type)+" "+value.operand)
 	}
-	call := fmt.Sprintf("call %s @%s(%s)", llvmType(instr.Result.Type), name, strings.Join(args, ", "))
+	call := fmt.Sprintf("call %s @%s(%s)", e.llvmType(instr.Result.Type),
+		name, strings.Join(args, ", "))
 	if instr.Result.Type == "void" {
 		fmt.Fprintf(&e.out, "  %s\n", call)
 		return nil
@@ -593,8 +594,8 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 		return fmt.Errorf("llvm error: cast expects 1 arg")
 	}
 	value := e.value(instr.Args[0])
-	sourceType := llvmType(instr.Args[0].Type)
-	targetType := llvmType(instr.Result.Type)
+	sourceType := e.llvmType(instr.Args[0].Type)
+	targetType := e.llvmType(instr.Result.Type)
 	if sourceType == targetType || sourceType == "ptr" || targetType == "ptr" {
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
 		return nil
@@ -665,26 +666,40 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 	}
 	name := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = phi %s %s\n",
-		name, llvmType(instr.Result.Type), strings.Join(parts, ", "))
+		name, e.llvmType(instr.Result.Type), strings.Join(parts, ", "))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 
-// writeStructNew records aggregate fields for local field reads.
+// writeStructNew emits a first-class aggregate value.
 func (e *emitter) writeStructNew(instr *ir.Instr) error {
 	fields := map[string]valueInfo{}
 	for _, field := range instr.Fields {
 		fields[field.Name] = e.value(field.Value)
 	}
-	e.values[instr.Result.Name] = valueInfo{
-		typ:     instr.Result.Type,
-		operand: "null",
-		fields:  fields,
+	structFields, ok := e.module.Structs[instr.Result.Type]
+	if !ok {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null", fields: fields}
+		return nil
 	}
+	aggregate := "undef"
+	resultName := localName(instr.Result.Name)
+	for idx, field := range structFields.Fields {
+		value, ok := fields[field.Name]
+		if !ok {
+			value = zeroValue(field.Type)
+		}
+		nextName := fmt.Sprintf("%s.f%d", resultName, idx)
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
+			nextName, e.llvmType(instr.Result.Type), aggregate,
+			e.llvmType(field.Type), value.operand, idx)
+		aggregate = nextName
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: aggregate, fields: fields}
 	return nil
 }
 
-// writeField resolves fields from local aggregate construction.
+// writeField extracts a field from first-class aggregate values.
 func (e *emitter) writeField(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: field read expects receiver")
@@ -694,6 +709,13 @@ func (e *emitter) writeField(instr *ir.Instr) error {
 	if field, ok := receiver.fields[name]; ok {
 		field.typ = instr.Result.Type
 		e.values[instr.Result.Name] = field
+		return nil
+	}
+	if idx, ok := e.fieldIndex(instr.Args[0].Type, name); ok {
+		resultName := localName(instr.Result.Name)
+		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+			resultName, e.llvmType(instr.Args[0].Type), receiver.operand, idx)
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 		return nil
 	}
 	e.values[instr.Result.Name] = zeroValue(instr.Result.Type)
@@ -716,20 +738,20 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 			}
 			if e.currentReturn != "void" {
 				value := zeroValue(e.currentReturn)
-				fmt.Fprintf(&e.out, "  ret %s %s\n", llvmType(e.currentReturn), value.operand)
+				fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), value.operand)
 				return nil
 			}
 			e.out.WriteString("  ret void\n")
 			return nil
 		}
 		if e.currentReturn == "!"+term.Value.Type &&
-			llvmType(e.currentReturn) != llvmType(term.Value.Type) {
+			e.llvmType(e.currentReturn) != e.llvmType(term.Value.Type) {
 			value := zeroValue(e.currentReturn)
-			fmt.Fprintf(&e.out, "  ret %s %s\n", llvmType(e.currentReturn), value.operand)
+			fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), value.operand)
 			return nil
 		}
 		value := e.value(term.Value)
-		fmt.Fprintf(&e.out, "  ret %s %s\n", llvmType(term.Value.Type), value.operand)
+		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(term.Value.Type), value.operand)
 	case "jump":
 		fmt.Fprintf(&e.out, "  br label %%%s\n", term.Target)
 	case "branch":
@@ -748,6 +770,36 @@ func (e *emitter) value(value ir.Value) valueInfo {
 		return found
 	}
 	return valueInfo{typ: value.Type, operand: localName(value.Name)}
+}
+
+// llvmType maps Kizu IR types to LLVM IR types with module struct layouts.
+func (e *emitter) llvmType(typ string) string {
+	if strings.HasPrefix(typ, "std::") {
+		return llvmType(typ)
+	}
+	st, ok := e.module.Structs[typ]
+	if !ok {
+		return llvmType(typ)
+	}
+	parts := make([]string, 0, len(st.Fields))
+	for _, field := range st.Fields {
+		parts = append(parts, e.llvmType(field.Type))
+	}
+	return "{ " + strings.Join(parts, ", ") + " }"
+}
+
+// fieldIndex returns a struct field's positional index.
+func (e *emitter) fieldIndex(typ string, name string) (int, bool) {
+	st, ok := e.module.Structs[typ]
+	if !ok {
+		return 0, false
+	}
+	for idx, field := range st.Fields {
+		if field.Name == name {
+			return idx, true
+		}
+	}
+	return 0, false
 }
 
 // callResultValue stores dynamic byte slices with unknown runtime length.

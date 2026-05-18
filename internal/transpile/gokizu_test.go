@@ -84,7 +84,8 @@ func assertGeneratedSourceContains(t *testing.T, dir string, name string, want s
 // assertGeneratedCheckerSource checks generated type-checker bootstrap logic.
 func assertGeneratedCheckerSource(t *testing.T, outDir string) {
 	t.Helper()
-	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "return parsed >= 100")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub struct CheckedModule")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "valid: parsed >= 100")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn known_type")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", `if name == "i64"`)
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn numeric_type")
@@ -94,15 +95,17 @@ func assertGeneratedCheckerSource(t *testing.T, outDir string) {
 // assertGeneratedCompilerSource checks generated selfhost compiler pipeline logic.
 func assertGeneratedCompilerSource(t *testing.T, outDir string) {
 	t.Helper()
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub struct Module")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "pub struct SourceMetrics")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.parsed")
-	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "return parsed")
+	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "pub struct Module")
+	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "score: checked.score")
 }
 
 // assertGeneratedEmitSource checks generated LLVM emitter bootstrap logic.
 func assertGeneratedEmitSource(t *testing.T, outDir string) {
 	t.Helper()
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "if module <= 0")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "if module.score <= 0")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "std::string::String")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "append_i64")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "kizu stage source bytes")

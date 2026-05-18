@@ -103,6 +103,33 @@ fn main() {
 	}
 }
 
+// TestEmitReturnsAggregateFields checks struct values survive function calls.
+func TestEmitReturnsAggregateFields(t *testing.T) {
+	module := lowerSource(t, `struct Metrics { score: i64; ok: bool; }
+fn make_score(value: i64) -> Metrics {
+    return Metrics { score: value + 1, ok: true };
+}
+fn main() {
+    let metrics = make_score(6);
+    print(metrics.score);
+    print(metrics.ok);
+}`)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"define { i64, i1 } @make_score(i64 %value)",
+		"ret { i64, i1 } %kizu.4.f1",
+		"%kizu.3 = extractvalue { i64, i1 } %kizu.2, 0",
+		"%kizu.5 = extractvalue { i64, i1 } %kizu.2, 1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nmissing: %s", got, want)
+		}
+	}
+}
+
 // lowerSource parses, checks, and lowers a source snippet.
 func lowerSource(t *testing.T, source string) *ir.Module {
 	t.Helper()

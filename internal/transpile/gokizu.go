@@ -1106,7 +1106,7 @@ fn is_space(ch: u8) -> bool {
 
 // parserSource renders a compileable parser bootstrap module.
 func parserSource(info parserPackage) string {
-	return parserHeaderSource(info) + parserBraceSource()
+	return parserHeaderSource(info) + parserModuleSummarySource() + parserBraceSource()
 }
 
 // parserHeaderSource renders parser entry points and public scoring functions.
@@ -1163,6 +1163,33 @@ pub fn parse_score(source: []const u8) -> i64 {
 `)
 	out.WriteString(parserPrecedenceSource(info.precedences))
 	return out.String()
+}
+
+// parserModuleSummarySource renders the parser summary passed to later phases.
+func parserModuleSummarySource() string {
+	return `pub struct Module {
+    pub score: i64,
+    pub bytes: i64,
+    pub functions: i64,
+    pub balanced: bool
+}
+
+pub fn parse_module(source: []const u8) -> Module {
+    let balance = brace_balance(source);
+    let braces = brace_count(source);
+    var brace_metric = 0;
+    if balance == 0 {
+        brace_metric = braces;
+    }
+    return Module {
+        score: first_token_code(source) + declaration_score(source) + brace_metric,
+        bytes: std::mem::len(source),
+        functions: function_count(source),
+        balanced: balance == 0
+    };
+}
+
+`
 }
 
 // parserPrecedenceSource renders the extracted Pratt precedence table.
@@ -1244,11 +1271,12 @@ pub fn Compiler(source: []const u8) -> Compiler {
 }
 
 pub fn compile(source: []const u8) -> i64 {
-    return parser::parse_score(source);
+    let module = parse_module(source);
+    return module.score;
 }
 
-pub fn parse_module(source: []const u8) -> i64 {
-    return parser::parse_score(source);
+pub fn parse_module(source: []const u8) -> parser::Module {
+    return parser::parse_module(source);
 }
 
 pub fn first_token(source: []const u8) -> token::Token {
@@ -1285,22 +1313,19 @@ func compilerTreeSource() string {
     let compiler_parse = parse_module(compiler_source);
     let main_parse = parse_module(main_source);
     let metrics = SourceMetrics {
-        parsed: manifest_parse + token_parse + lexer_parse + parser_parse + resolver_parse +
-            checker_parse + lower_parse + emit_parse + compiler_parse + main_parse,
-        bytes: std::mem::len(manifest) + std::mem::len(token_source) +
-            std::mem::len(lexer_source) + std::mem::len(parser_source) +
-            std::mem::len(resolver_source) + std::mem::len(checker_source) +
-            std::mem::len(lower_source) + std::mem::len(emit_source) +
-            std::mem::len(compiler_source) + std::mem::len(main_source),
-        functions: parser::function_count(manifest) +
-            parser::function_count(token_source) + parser::function_count(lexer_source) +
-            parser::function_count(parser_source) + parser::function_count(resolver_source) +
-            parser::function_count(checker_source) + parser::function_count(lower_source) +
-            parser::function_count(emit_source) + parser::function_count(compiler_source) +
-            parser::function_count(main_source)
+        parsed: manifest_parse.score + token_parse.score + lexer_parse.score +
+            parser_parse.score + resolver_parse.score + checker_parse.score + lower_parse.score +
+            emit_parse.score + compiler_parse.score + main_parse.score,
+        bytes: manifest_parse.bytes + token_parse.bytes + lexer_parse.bytes +
+            parser_parse.bytes + resolver_parse.bytes + checker_parse.bytes + lower_parse.bytes +
+            emit_parse.bytes + compiler_parse.bytes + main_parse.bytes,
+        functions: manifest_parse.functions + token_parse.functions + lexer_parse.functions +
+            parser_parse.functions + resolver_parse.functions + checker_parse.functions +
+            lower_parse.functions + emit_parse.functions + compiler_parse.functions +
+            main_parse.functions
     };
     let checked = checker::check_entry(metrics.parsed);
-    let module = lower::lower_entry(checked, metrics.parsed);
+    let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, metrics.bytes, metrics.functions);
     let artifact_bytes = artifact.as_bytes();
     try std::fs::write_file(io, output, artifact_bytes);
@@ -1315,7 +1340,7 @@ func compilerEmitStage2Source() string {
 	return `pub fn emit_stage2() -> !void {
     let allocator = std::mem::page_allocator();
     let checked = checker::check_entry(1);
-    let module = lower::lower_entry(checked, 1);
+    let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, 0, 0);
     let artifact_bytes = artifact.as_bytes();
     print(artifact_bytes);
@@ -1355,8 +1380,16 @@ func selfhostModuleName(path string) string {
 // checkerSource renders checker tables and the bootstrap checker entry.
 func checkerSource(info typesPackage) string {
 	var out bytes.Buffer
-	out.WriteString(`pub fn check_entry(parsed: i64) -> bool {
-    return parsed >= 100;
+	out.WriteString(`pub struct CheckedModule {
+    pub valid: bool,
+    pub score: i64
+}
+
+pub fn check_entry(parsed: i64) -> CheckedModule {
+    return CheckedModule {
+        valid: parsed >= 100,
+        score: parsed
+    };
 }
 `)
 	out.WriteString(typeSetFunctionSource("known_type", info.knownTypes))
@@ -1381,11 +1414,21 @@ func typeSetFunctionSource(name string, values []string) string {
 
 // lowerSource renders the minimal lowering entry used by the bootstrap chain.
 func lowerSource() string {
-	return `pub fn lower_entry(checked: bool, parsed: i64) -> i64 {
-    if checked {
-        return parsed;
+	return `import selfhost::checker;
+
+pub struct Module {
+    pub score: i64
+}
+
+pub fn lower_entry(checked: checker::CheckedModule) -> Module {
+    if checked.valid {
+        return Module {
+            score: checked.score
+        };
     }
-    return 0;
+    return Module {
+        score: 0
+    };
 }
 `
 }
@@ -1397,18 +1440,18 @@ func emitSource() string {
 
 pub fn llvm(
     allocator: Allocator,
-    module: i64,
+    module: lower::Module,
     source_bytes: i64,
     source_fns: i64
 ) -> !std::string::String {
-    if module <= 0 {
+    if module.score <= 0 {
         var failed = std::string::String(allocator);
         try failed.append_bytes("define i32 @main() { entry: ret i32 1 }");
         return failed;
     }
     var out = std::string::String(allocator);
     try out.append_bytes("; kizu stage source metric ");
-    out = try append_i64(out, module);
+    out = try append_i64(out, module.score);
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("; kizu stage source bytes ");
     out = try append_i64(out, source_bytes);
