@@ -86,22 +86,6 @@ func TestParseIfAndWhile(t *testing.T) {
 	}
 }
 
-// TestParseIfExpression checks value-producing if expression parsing.
-func TestParseIfExpression(t *testing.T) {
-	input := `fn main() {
-    let value = if true { 1; } else { 2; };
-}`
-	p := New(lexer.New(input))
-	program := p.ParseProgram()
-	if len(p.Errors()) != 0 {
-		t.Fatalf("parser errors: %v", p.Errors())
-	}
-	want := `fn main() { let value = if true { 1; } else { 2; }; }`
-	if got := program.String(); got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
 // TestParseLogicalExpressions checks boolean operator precedence.
 func TestParseLogicalExpressions(t *testing.T) {
 	input := `fn main() {

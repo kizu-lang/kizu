@@ -1400,8 +1400,6 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
 		return literalType(e)
-	case *ast.IfExpr:
-		return c.checkIfExpr(e, env, unsafe)
 	case *ast.ComptimeExpr:
 		return c.checkComptimeExpr(e, env, unsafe)
 	case *ast.IdentExpr:
@@ -1491,55 +1489,6 @@ func literalType(expr ast.Expression) (Type, error) {
 	default:
 		return "", fmt.Errorf("type error: unsupported literal %T", expr)
 	}
-}
-
-// checkIfExpr validates a value-producing if expression.
-func (c *Checker) checkIfExpr(expr *ast.IfExpr, env *scope, unsafe bool) (Type, error) {
-	cond, err := c.checkExpr(expr.Condition, env, unsafe)
-	if err != nil {
-		return "", err
-	}
-	if cond != typeBool {
-		return "", fmt.Errorf("type error: if expression condition must be bool, got %s", cond)
-	}
-	if expr.Alternative == nil {
-		return "", fmt.Errorf("type error: if expression requires else branch")
-	}
-	left, err := c.checkIfExprBlock(expr.Consequence, env.child(), unsafe)
-	if err != nil {
-		return "", err
-	}
-	right, err := c.checkIfExprBlock(expr.Alternative, env.child(), unsafe)
-	if err != nil {
-		return "", err
-	}
-	if left != right {
-		return "", fmt.Errorf("type error: if expression branch types differ: %s and %s",
-			left, right)
-	}
-	return left, nil
-}
-
-// checkIfExprBlock validates statements before the final branch value.
-func (c *Checker) checkIfExprBlock(block *ast.BlockStmt, env *scope, unsafe bool) (Type, error) {
-	if block == nil || len(block.Statements) == 0 {
-		return "", fmt.Errorf("type error: if expression branch must end with a value")
-	}
-	last := len(block.Statements) - 1
-	for _, stmt := range block.Statements[:last] {
-		returns, err := c.checkStmt(stmt, env, c.currentReturn, unsafe)
-		if err != nil {
-			return "", err
-		}
-		if returns {
-			return "", fmt.Errorf("type error: if expression branch cannot return before value")
-		}
-	}
-	exprStmt, ok := block.Statements[last].(*ast.ExprStmt)
-	if !ok {
-		return "", fmt.Errorf("type error: if expression branch must end with a value")
-	}
-	return c.checkExpr(exprStmt.Expr, env, unsafe)
 }
 
 // checkIdentExpr resolves a variable reference in lexical scopes.

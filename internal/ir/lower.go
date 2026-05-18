@@ -172,8 +172,6 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
 		return l.lowerLiteralExpr(e)
-	case *ast.IfExpr:
-		return l.lowerIfExpr(e)
 	case *ast.ComptimeExpr:
 		return l.lowerExpr(e.Expr)
 	case *ast.IdentExpr:

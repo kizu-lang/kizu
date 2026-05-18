@@ -35,36 +35,6 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	return nil
 }
 
-// lowerIfExpr lowers a value-producing if into branch values and a result phi.
-func (l *lowerer) lowerIfExpr(expr *ast.IfExpr) (Value, error) {
-	cond, err := l.lowerExpr(expr.Condition)
-	if err != nil {
-		return Value{}, err
-	}
-	thenBlock := l.newBlock(l.nextBlockName("if.expr.then"))
-	elseBlock := l.newBlock(l.nextBlockName("if.expr.else"))
-	mergeBlock := l.newBlock(l.nextBlockName("if.expr.end"))
-	l.block.Terminator = Terminator{
-		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
-	}
-	thenEnv, thenValue, thenEnd, err := l.lowerBranchValue(
-		thenBlock, expr.Consequence, mergeBlock.Name)
-	if err != nil {
-		return Value{}, err
-	}
-	elseEnv, elseValue, elseEnd, err := l.lowerBranchValue(
-		elseBlock, expr.Alternative, mergeBlock.Name)
-	if err != nil {
-		return Value{}, err
-	}
-	l.block = mergeBlock
-	l.env = l.mergeEnvs(mergeBlock, thenEnd, thenEnv, elseEnd, elseEnv)
-	return l.addPhi(mergeBlock, thenValue.Type, []Incoming{
-		{Block: thenEnd, Value: thenValue},
-		{Block: elseEnd, Value: elseValue},
-	}), nil
-}
-
 // lowerLogicalExpr lowers short-circuit boolean operators into control flow.
 func (l *lowerer) lowerLogicalExpr(expr *ast.BinaryExpr) (Value, error) {
 	left, err := l.lowerExpr(expr.Left)
@@ -124,41 +94,6 @@ func (l *lowerer) lowerLogicalConst(block *Block, op string, target string) (Val
 	end := l.block.Name
 	l.block.Terminator = Terminator{Op: "jump", Target: target}
 	return value, end
-}
-
-// lowerBranchValue lowers one if-expression branch and returns its final value.
-func (l *lowerer) lowerBranchValue(
-	block *Block,
-	body *ast.BlockStmt,
-	target string,
-) (map[string]Value, Value, string, error) {
-	if body == nil || len(body.Statements) == 0 {
-		return nil, Value{}, "", fmt.Errorf("ir error: if expression branch has no value")
-	}
-	saved := l.copyEnv(l.env)
-	l.env = l.copyEnv(saved)
-	l.block = block
-	last := len(body.Statements) - 1
-	for _, stmt := range body.Statements[:last] {
-		if err := l.lowerStmt(stmt); err != nil {
-			return nil, Value{}, "", err
-		}
-	}
-	exprStmt, ok := body.Statements[last].(*ast.ExprStmt)
-	if !ok {
-		return nil, Value{}, "", fmt.Errorf("ir error: if expression branch has no value")
-	}
-	value, err := l.lowerExpr(exprStmt.Expr)
-	if err != nil {
-		return nil, Value{}, "", err
-	}
-	end := l.block.Name
-	if l.block.Terminator.Op == "" {
-		l.block.Terminator = Terminator{Op: "jump", Target: target}
-	}
-	out := l.copyEnv(l.env)
-	l.env = saved
-	return out, value, end, nil
 }
 
 // lowerBranchBlock lowers a branch with an isolated environment.

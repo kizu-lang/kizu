@@ -560,8 +560,6 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
 		return evalLiteralExpr(e)
-	case *ast.IfExpr:
-		return i.evalIfExpr(e, env)
 	case *ast.ComptimeExpr:
 		return i.evalExpr(e.Expr, env)
 	case *ast.IdentExpr:
@@ -684,41 +682,6 @@ func evalLiteralExpr(expr ast.Expression) (Value, error) {
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unsupported literal %T", expr)
 	}
-}
-
-// evalIfExpr evaluates the selected branch and returns its final expression value.
-func (i *Interpreter) evalIfExpr(expr *ast.IfExpr, env *Env) (Value, error) {
-	cond, err := i.evalExpr(expr.Condition, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	if cond.kind != kindBool {
-		return voidValue(), fmt.Errorf("runtime error: if expression condition must be bool")
-	}
-	branch := expr.Consequence
-	if !cond.b {
-		branch = expr.Alternative
-	}
-	return i.evalIfExprBlock(branch, env.Child())
-}
-
-// evalIfExprBlock executes statements before the final branch value.
-func (i *Interpreter) evalIfExprBlock(block *ast.BlockStmt, env *Env) (Value, error) {
-	if block == nil || len(block.Statements) == 0 {
-		return voidValue(), fmt.Errorf("runtime error: if expression branch has no value")
-	}
-	last := len(block.Statements) - 1
-	for _, stmt := range block.Statements[:last] {
-		result, returned, err := i.evalStmt(stmt, env)
-		if err != nil || returned {
-			return result, err
-		}
-	}
-	exprStmt, ok := block.Statements[last].(*ast.ExprStmt)
-	if !ok {
-		return voidValue(), fmt.Errorf("runtime error: if expression branch has no value")
-	}
-	return i.evalExpr(exprStmt.Expr, env)
 }
 
 // parseInt converts an integer literal into a runtime value.
