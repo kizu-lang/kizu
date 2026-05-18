@@ -74,6 +74,36 @@ func TestFmtCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestResolveStdModulesIncludesTransitiveStdSourceDeps checks std source dependencies.
+func TestResolveStdModulesIncludesTransitiveStdSourceDeps(t *testing.T) {
+	got, err := resolveStdModules(`fn main() {
+    let allocator = std::mem::page_allocator();
+    var text = std::string::String(allocator);
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mem", "array", "string"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestResolveStdModulesOrdersTestingDeps checks dependency-before-dependent order.
+func TestResolveStdModulesOrdersTestingDeps(t *testing.T) {
+	got, err := resolveStdModules(`fn main() -> !void {
+    try std::testing::expect_equal_i64(1, 1);
+    return void;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mem", "array", "string", "fmt", "testing"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 // TestIROptCommandSmoke checks the CLI can dump optimized typed SSA IR.
 func TestIROptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
