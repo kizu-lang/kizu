@@ -434,6 +434,12 @@ fn is_space(ch: u8) -> bool {
 
 // parserSource renders a compileable parser bootstrap module.
 func parserSource() string {
+	return parserHeaderSource() + parserMetricSource() + parserWordCountSource() +
+		parserBraceSource() + parserMatchSource()
+}
+
+// parserHeaderSource renders parser entry points and public scoring functions.
+func parserHeaderSource() string {
 	return `import selfhost::lexer;
 import selfhost::token;
 
@@ -461,6 +467,34 @@ pub fn first_token_code(source: []const u8) -> i64 {
 }
 
 pub fn function_count(source: []const u8) -> i64 {
+    return count_word_fn(source);
+}
+
+pub fn declaration_score(source: []const u8) -> i64 {
+    return count_word_fn(source) * 5 + count_word_import(source) * 3 +
+        count_word_struct(source) * 2 + count_word_enum(source) * 2;
+}
+
+pub fn brace_score(source: []const u8) -> i64 {
+    let balance = brace_balance(source);
+    let braces = brace_count(source);
+    if balance == 0 {
+        return braces;
+    }
+    return 0;
+}
+
+pub fn parse_score(source: []const u8) -> i64 {
+    return first_token_code(source) + declaration_score(source) + brace_score(source);
+}
+
+`
+}
+
+// parserMetricSource renders byte-scanning declaration counters.
+func parserMetricSource() string {
+	return `
+fn count_word_fn(source: []const u8) -> i64 {
     let length = std::builtin::mem_len(source);
     var index = 0;
     var count = 0;
@@ -473,16 +507,116 @@ pub fn function_count(source: []const u8) -> i64 {
     return count;
 }
 
-pub fn parse_score(source: []const u8) -> i64 {
-    return first_token_code(source) + function_count(source);
+`
+}
+
+// parserWordCountSource renders longer keyword counter helpers.
+func parserWordCountSource() string {
+	return `fn count_word_import(source: []const u8) -> i64 {
+    let length = std::builtin::mem_len(source);
+    var index = 0;
+    var count = 0;
+    while index + 5 < length {
+        if matches_import(source, index) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+fn count_word_struct(source: []const u8) -> i64 {
+    let length = std::builtin::mem_len(source);
+    var index = 0;
+    var count = 0;
+    while index + 5 < length {
+        if matches_struct(source, index) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+fn count_word_enum(source: []const u8) -> i64 {
+    let length = std::builtin::mem_len(source);
+    var index = 0;
+    var count = 0;
+    while index + 3 < length {
+        if matches_enum(source, index) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+`
+}
+
+// parserBraceSource renders balanced-brace metrics for the checker input.
+func parserBraceSource() string {
+	return `fn brace_balance(source: []const u8) -> i64 {
+    let length = std::builtin::mem_len(source);
+    var index = 0;
+    var balance = 0;
+    while index < length {
+        if source[index] == cast<u8>(123) {
+            balance = balance + 1;
+        }
+        if source[index] == cast<u8>(125) {
+            balance = balance - 1;
+        }
+        index = index + 1;
+    }
+    return balance;
+}
+
+fn brace_count(source: []const u8) -> i64 {
+    let length = std::builtin::mem_len(source);
+    var index = 0;
+    var count = 0;
+    while index < length {
+        if source[index] == cast<u8>(123) or source[index] == cast<u8>(125) {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+`
+}
+
+// parserMatchSource renders fixed byte-pattern recognizers for Kizu keywords.
+func parserMatchSource() string {
+	return `fn matches_import(source: []const u8, index: i64) -> bool {
+    return source[index] == cast<u8>(105) and source[index + 1] == cast<u8>(109) and
+        source[index + 2] == cast<u8>(112) and source[index + 3] == cast<u8>(111) and
+        source[index + 4] == cast<u8>(114) and source[index + 5] == cast<u8>(116);
+}
+
+fn matches_struct(source: []const u8, index: i64) -> bool {
+    return source[index] == cast<u8>(115) and source[index + 1] == cast<u8>(116) and
+        source[index + 2] == cast<u8>(114) and source[index + 3] == cast<u8>(117) and
+        source[index + 4] == cast<u8>(99) and source[index + 5] == cast<u8>(116);
+}
+
+fn matches_enum(source: []const u8, index: i64) -> bool {
+    return source[index] == cast<u8>(101) and source[index + 1] == cast<u8>(110) and
+        source[index + 2] == cast<u8>(117) and source[index + 3] == cast<u8>(109);
 }
 `
 }
 
 // compilerSource renders the self-host compiler facade.
 func compilerSource() string {
-	var out bytes.Buffer
-	out.WriteString(`import selfhost::checker;
+	return compilerIntroSource() + compilerTreeSource() + compilerEmitStage2Source()
+}
+
+// compilerIntroSource renders imports and scalar parse entry points.
+func compilerIntroSource() string {
+	return `import selfhost::checker;
 import selfhost::emit;
 import selfhost::lower;
 import selfhost::parser;
@@ -503,12 +637,20 @@ pub fn compile(source: []const u8) -> i64 {
     return parser::parse_score(source);
 }
 
+pub fn parse_module(source: []const u8) -> i64 {
+    return parser::parse_score(source);
+}
+
 pub fn first_token(source: []const u8) -> token::Token {
     return parser::first_token_from_source(source);
 }
-`)
-	out.WriteString("\n")
-	out.WriteString(`pub fn compile_tree(io: Io, output: []const u8) -> !void {
+
+`
+}
+
+// compilerTreeSource renders the package compile pipeline used by stage1.
+func compilerTreeSource() string {
+	return `pub fn compile_tree(io: Io, output: []const u8) -> !void {
     let manifest = try std::fs::read_file(io, "selfhost/kizu.toml");
     let graph = resolver::resolve_selfhost(manifest);
     let token_source = try std::fs::read_file(io, resolver::token_path(graph));
@@ -521,18 +663,18 @@ pub fn first_token(source: []const u8) -> token::Token {
     let compiler_source = try std::fs::read_file(io, resolver::compiler_path(graph));
     let main_source = try std::fs::read_file(io, resolver::main_path(graph));
 
-    let token_first = compile(token_source);
-    let lexer_first = compile(lexer_source);
-    let parser_first = compile(parser_source);
-    let resolver_first = compile(resolver_source);
-    let checker_first = compile(checker_source);
-    let lower_first = compile(lower_source);
-    let emit_first = compile(emit_source);
-    let compiler_first = compile(compiler_source);
-    let main_first = compile(main_source);
+    let token_parse = parse_module(token_source);
+    let lexer_parse = parse_module(lexer_source);
+    let parser_parse = parse_module(parser_source);
+    let resolver_parse = parse_module(resolver_source);
+    let checker_parse = parse_module(checker_source);
+    let lower_parse = parse_module(lower_source);
+    let emit_parse = parse_module(emit_source);
+    let compiler_parse = parse_module(compiler_source);
+    let main_parse = parse_module(main_source);
 
-    let parsed = token_first + lexer_first + parser_first + resolver_first +
-        checker_first + lower_first + emit_first + compiler_first + main_first;
+    let parsed = token_parse + lexer_parse + parser_parse + resolver_parse +
+        checker_parse + lower_parse + emit_parse + compiler_parse + main_parse;
     let checked = checker::check_entry(parsed);
     let module = lower::lower_entry(checked);
     let artifact = emit::llvm(module);
@@ -540,14 +682,18 @@ pub fn first_token(source: []const u8) -> token::Token {
     return;
 }
 
-`)
-	out.WriteString("pub fn emit_stage2() -> void {\n")
-	out.WriteString("    let checked = checker::check_entry(1);\n")
-	out.WriteString("    let module = lower::lower_entry(checked);\n")
-	out.WriteString("    print(emit::llvm(module));\n")
-	out.WriteString("    return;\n")
-	out.WriteString("}\n")
-	return out.String()
+`
+}
+
+// compilerEmitStage2Source renders a CLI-visible emission helper.
+func compilerEmitStage2Source() string {
+	return `pub fn emit_stage2() -> void {
+    let checked = checker::check_entry(1);
+    let module = lower::lower_entry(checked);
+    print(emit::llvm(module));
+    return;
+}
+`
 }
 
 // resolverSource renders the minimal self-host package resolver entry.
@@ -578,7 +724,7 @@ pub fn main_path(graph: &Graph) -> []const u8 { return "selfhost/src/main.kizu";
 // checkerSource renders the minimal checker entry used by the bootstrap chain.
 func checkerSource() string {
 	return `pub fn check_entry(parsed: i64) -> bool {
-    return parsed > 0;
+    return parsed >= 100;
 }
 `
 }
