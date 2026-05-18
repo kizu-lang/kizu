@@ -1011,6 +1011,15 @@ func (c *Checker) checkQualifiedStdRuntimeBuiltin(
 	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
 		return typ, ok, err
 	}
+	return c.checkQualifiedStdRuntimeStateBuiltin(name, args, env)
+}
+
+// checkQualifiedStdRuntimeStateBuiltin validates stateful std runtime helpers.
+func (c *Checker) checkQualifiedStdRuntimeStateBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
 	if name == "std.string.String" {
 		return c.checkStringConstructor(args, env)
 	}
@@ -1018,6 +1027,9 @@ func (c *Checker) checkQualifiedStdRuntimeBuiltin(
 		return typ, ok, err
 	}
 	if typ, ok, err := c.checkTestingBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkStringStorageBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
 	return "", false, nil
@@ -1665,6 +1677,61 @@ func (c *Checker) checkTypeApplyCallExpr(
 	default:
 		return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
 	}
+}
+
+// checkStringStorageBuiltin validates trusted String storage primitives.
+func (c *Checker) checkStringStorageBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.builtin.string_append_bytes":
+		return c.checkStringStorageArgs(name, args, env, "!void", "[]const u8")
+	case "std.builtin.string_append_byte":
+		return c.checkStringStorageArgs(name, args, env, "!void", "u8")
+	case "std.builtin.string_reserve":
+		return c.checkStringStorageArgs(name, args, env, "!void", "i64")
+	case "std.builtin.string_len", "std.builtin.string_capacity":
+		return c.checkStringStorageArgs(name, args, env, "i64")
+	case "std.builtin.string_as_bytes":
+		return c.checkStringStorageArgs(name, args, env, "[]const u8")
+	case "std.builtin.string_clear", "std.builtin.string_deinit":
+		return c.checkStringStorageArgs(name, args, env, "void")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkStringStorageArgs reads primitive String arguments without moving them.
+func (c *Checker) checkStringStorageArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	result string,
+	extra ...string,
+) (string, bool, error) {
+	if len(args) != 1+len(extra) {
+		return "", true, fmt.Errorf("move error: `%s` expects %d args", name, 1+len(extra))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "std::string::String" {
+		return "", true, fmt.Errorf("move error: `%s` expects String, got %s", name, got)
+	}
+	for idx, want := range extra {
+		got, err := c.readExpr(args[idx+1], env)
+		if err != nil {
+			return "", true, err
+		}
+		if got != want {
+			return "", true, fmt.Errorf("move error: `%s` arg %d expects %s, got %s",
+				name, idx+2, want, got)
+		}
+	}
+	return result, true, nil
 }
 
 // checkBuiltinCall validates ownership effects for builtin calls.
