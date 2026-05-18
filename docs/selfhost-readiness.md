@@ -106,6 +106,82 @@ blocker:
 - cache key ownership
 - no-op rebuild / source edit / std hash measurement
 
+## Current Bootstrap Evidence
+
+最終更新: `feat/selfhost-bootstrap-chain` の `2789672 Transpile checker type sets` 時点。
+
+この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
+次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
+pipeline ではなく、Go が生成した source-scanning LLVM template に依存している。
+
+実行した command:
+
+```sh
+go run ./cmd/kizu check selfhost
+go test ./internal/transpile -count=1
+go test ./cmd/kizu -run TestSelfhostStage1ReadsSourceTree -count=1
+go test ./...
+pre-commit run --all-files
+
+go run ./cmd/kizu build --target native --libc on --runtime hosted --emit exe \
+  -o target/selfhost/kizu-stage1 selfhost
+target/selfhost/kizu-stage1 target/selfhost/stage2.ll
+clang target/selfhost/stage2.ll -o target/selfhost/kizu-stage2
+target/selfhost/kizu-stage2 target/selfhost/stage3.ll
+clang target/selfhost/stage3.ll -o target/selfhost/kizu-stage3
+target/selfhost/kizu-stage3 target/selfhost/stage4.ll
+```
+
+artifact path:
+
+```text
+stage1 binary: target/selfhost/kizu-stage1
+stage2 binary: target/selfhost/kizu-stage2
+stage3 binary: target/selfhost/kizu-stage3
+stage2 LLVM:   target/selfhost/stage2.ll
+stage3 LLVM:   target/selfhost/stage3.ll
+stage4 LLVM:   target/selfhost/stage4.ll
+```
+
+compile log summary:
+
+```text
+stage1 build: target/selfhost/kizu-stage1
+stage2 link: clang warning only: overriding the module target triple
+stage3 link: clang warning only: overriding the module target triple
+```
+
+artifact comparison:
+
+```text
+stage2_vs_stage3_bytes=0
+stage3_vs_stage4_bytes=0
+
+ 535892 target/selfhost/stage2.ll
+ 535892 target/selfhost/stage3.ll
+ 535892 target/selfhost/stage4.ll
+1607676 total
+```
+
+stage2 source metric header:
+
+```text
+; kizu stage source metric 2996
+; kizu stage source bytes 565659
+; kizu stage source fn count 248
+```
+
+remaining Go / template dependency:
+
+- `internal/transpile/gokizu.go` still generates Kizu compiler source and the fixed-point
+  source-scanning LLVM artifact.
+- `selfhost/src/emit.kizu` still appends a generated LLVM template rather than lowering a real IR.
+- stage2 reads the selfhost source tree and scans it, but it does not execute the Kizu parser,
+  resolver, checker, lowering, and LLVM emitter as a compiler pipeline.
+- Go native backend and hosted runtime still build `target/selfhost/kizu-stage1`.
+- The generated Kizu parser/checker/lower are partial surfaces, not production replacements for
+  `internal/parser`, `internal/types`, or backend lowering.
+
 ## Issue 化する作業
 
 - self-host readiness gate を tracking issue にする: #196
