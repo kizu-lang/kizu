@@ -75,6 +75,8 @@ go test ./...
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
+| diagnostic formatting | `std_fmt.kizu` | appends deterministic i64, bool, and byte literal output |
+| diagnostic byte escaping | `std_fmt_escapes.kizu` | escapes newline, tab, and backslash bytes |
 | owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]const u8, i64>` |
 | symbol table map shape | `std_map_symbol_table.kizu` | maps byte keys to copy enum values |
 | owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&mut Map` |
@@ -212,6 +214,8 @@ go test ./...
 | shared string borrows cannot deinit | `negative/std_string_deinit_through_shared_borrow.kizu` | `requires owned String receiver` |
 | mutable string borrows cannot deinit | `negative/std_string_deinit_through_mut_borrow.kizu` | `requires owned String receiver` |
 | shared string borrows cannot append | `negative/std_string_append_through_shared_borrow.kizu` | `requires mutable String receiver` |
+| fmt i64 formatting requires `i64` | `negative/std_fmt_wrong_i64_type.kizu` | `expects i64` |
+| fmt byte literal formatting requires bytes | `negative/std_fmt_wrong_bytes_type.kizu` | `expects []const u8` |
 | map missing key is checked | `negative/std_map_get_missing.kizu` | `key not found` |
 | map construction requires explicit allocator | `negative/std_map_no_allocator.kizu` | `expects allocator` |
 | map values are copy-only in v0.2 | `negative/std_map_non_copy_value.kizu` | `value type must be copy` |

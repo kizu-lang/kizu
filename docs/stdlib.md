@@ -88,7 +88,7 @@ Current builtin thinning candidates:
 | `std::builtin::path_basename` | Removed | Implemented in `std/src/path.kizu` |
 | `std::builtin::path_dirname` | Removed | Implemented in `std/src/path.kizu` |
 | `std::builtin::path_extension` | Removed | Implemented in `std/src/path.kizu` |
-| `std::builtin::testing_expect*` | Kizu-movable | Move formatting once string/diagnostic construction exists in Kizu |
+| `std::builtin::testing_expect*` | Kizu-movable | Move to `std/src/testing.kizu` using `std::fmt`, then delete |
 | `std::builtin::path_clean` | Removed | Implemented in `std/src/path.kizu` with explicit allocator-backed `String` output |
 | `std::builtin::path_join` | Removed | Implemented in `std/src/path.kizu` with explicit allocator-backed `String` output |
 | `std::builtin::mem_len` | Host primitive for now | Keep as slice metadata access |
@@ -98,6 +98,12 @@ Current builtin thinning candidates:
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
 
+`std::builtin::testing_expect*` must not grow broader formatting behavior in Go.
+`std::fmt` now provides deterministic `i64`, `bool`, and byte-slice literal
+formatting into `std::string::String`, so assertion checks and message
+construction should move to `std/src/testing.kizu` and the testing builtins
+should be deleted.
+
 ## Builtin Registry
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
@@ -105,8 +111,9 @@ Current builtin thinning candidates:
 | `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, len, byte_at, and slice use trusted primitives | keep only capability, metadata, and recoverable-bounds primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; move ergonomic wrappers and tests to `std/array.kizu` after module resolver supports std sources |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | owned byte storage, capacity management, view borrow tracking, deinit state | use as the explicit owned byte buffer for path construction and diagnostics; keep raw allocation hidden |
+| `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; move wrapper and symbol-table shape to Kizu first |
-| `std::testing` | `expect`, `expect_equal_i64`, `expect_equal_bool`, `expect_equal_bytes`, `fail` | Kizu wrappers in `std/src/testing.kizu` over `std::builtin::testing_*` primitives | migrated wrapper module; keep assertion formatting and `!void` error construction trusted |
+| `std::testing` | `expect`, equality helpers, `fail` | temporary `std::builtin::testing_*` wrappers | move checks and diagnostics to Kizu after `std::fmt`; delete testing builtins |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | host filesystem calls through explicit `Io` | keep host calls primitive; move path/type validation and error shaping to Kizu wrappers |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator/string storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
