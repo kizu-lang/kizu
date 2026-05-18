@@ -116,7 +116,10 @@ source is tracked by #360 and must not leave dual public paths behind. The
 task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
 Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
 and `parallel_map` remain public Go branches until Kizu can pass function names
-through wrapper functions without losing the original task body identity.
+through wrapper functions without losing the original task body identity; that
+blocker is tracked by #372. Generic constructor wrappers for Array, Map,
+Channel, Mutex, and Atomic require source-level type-argument forwarding before
+they can move without builtin camouflage; that blocker is tracked by #371.
 
 ## Builtin Registry
 
