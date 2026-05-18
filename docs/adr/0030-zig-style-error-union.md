@@ -41,6 +41,8 @@ fn read_config() -> ConfigError![]const u8 {
 
 `!T` 関数で `T` を返した場合は成功値として扱う。
 失敗値は `error(message)` で明示的に作る。
+`error(message)` は message bytes を error payload に copy して所有し、
+borrow view を保持しない。
 
 ## 影響
 
@@ -48,7 +50,7 @@ fn read_config() -> ConfigError![]const u8 {
 - `try` は `!T` のみを unwrap / propagate する
 - `try` は `ErrorType!T` も unwrap / propagate する
 - typed error は同じ `ErrorType` の関数にだけ伝播できる
-- error payload は v0.1 では `[]const u8` message に固定する
+- error payload は v0.1 では owned copy of `[]const u8` message に固定する
 - custom typed error payload は `union` で定義する
 - full generics なしでエラー処理を実装できる
 - 将来、error set や stdlib error 型を追加する余地は残す

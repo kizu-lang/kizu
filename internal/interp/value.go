@@ -91,7 +91,7 @@ type Map struct {
 	deinit    bool
 }
 
-// ErrorUnion stores an error value for !T runtime propagation.
+// ErrorUnion owns an error value for !T runtime propagation.
 type ErrorUnion struct {
 	message string
 	payload *Value

@@ -1019,6 +1019,9 @@ fn main() -> ConfigError!void {
 * `error(message)` は `!T` を返す関数内でだけ使える
 * `error(message)` は typed error union では使えない
 * `error(message)` の message は `[]const u8`
+* `error(message)` は message bytes を error payload に copy して所有する
+* `error(message)` は borrow view を保持しないため、local `String.as_bytes()` view から
+  diagnostic を作れる
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない
 
@@ -1410,6 +1413,13 @@ std::testing::fail(message: []const u8) -> !void
 ```
 
 assertion failure は panic ではなく `!void` の error として返します。
+`std::testing` は Kizu source で実装し、`std::builtin::testing_*` は持ちません。
+`expect` は condition failure を fixed message の `!void` error として返します。
+`fail` は caller-provided `[]const u8` を error message として返します。
+Equality helpers は `std::mem` で比較し、失敗時だけ明示 allocator-backed
+`std::string::String` に `std::fmt` で deterministic な expected / actual
+diagnostic を構築します。`error(...)` は message bytes を copy して所有するため、
+testing diagnostic は local `String.as_bytes()` view を返しません。
 `kizu test <file>` は v0.2 では discovery なしの single-file runner です。
 file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示します。
 generic equality、test discovery、location-aware diagnostics は後続で扱います。
