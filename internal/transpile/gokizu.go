@@ -677,7 +677,7 @@ func compilerTreeSource() string {
     let parsed = token_parse + lexer_parse + parser_parse + resolver_parse +
         checker_parse + lower_parse + emit_parse + compiler_parse + main_parse;
     let checked = checker::check_entry(parsed);
-    let module = lower::lower_entry(checked);
+    let module = lower::lower_entry(checked, parsed);
     let artifact = try emit::llvm(allocator, module);
     let artifact_bytes = artifact.as_bytes();
     try std::fs::write_file(io, output, artifact_bytes);
@@ -692,7 +692,7 @@ func compilerEmitStage2Source() string {
 	return `pub fn emit_stage2() -> !void {
     let allocator = std::mem::page_allocator();
     let checked = checker::check_entry(1);
-    let module = lower::lower_entry(checked);
+    let module = lower::lower_entry(checked, 1);
     let artifact = try emit::llvm(allocator, module);
     let artifact_bytes = artifact.as_bytes();
     print(artifact_bytes);
@@ -736,8 +736,11 @@ func checkerSource() string {
 
 // lowerSource renders the minimal lowering entry used by the bootstrap chain.
 func lowerSource() string {
-	return `pub fn lower_entry(checked: bool) -> bool {
-    return checked;
+	return `pub fn lower_entry(checked: bool, parsed: i64) -> i64 {
+    if checked {
+        return parsed;
+    }
+    return 0;
 }
 `
 }
@@ -747,19 +750,41 @@ func emitSource() string {
 	var out bytes.Buffer
 	out.WriteString(`import selfhost::lower;
 
-pub fn llvm(allocator: Allocator, module: bool) -> !std::string::String {
-    if !module {
+pub fn llvm(allocator: Allocator, module: i64) -> !std::string::String {
+    if module <= 0 {
         var failed = std::string::String(allocator);
         try failed.append_bytes("define i32 @main() { entry: ret i32 1 }");
         return failed;
     }
     var out = std::string::String(allocator);
+    try out.append_bytes("; kizu selfhost source metric ");
+    out = try append_i64(out, module);
+    try out.append_byte(cast<u8>(10));
 `)
 	for _, chunk := range stage2WriterLLVMChunks() {
 		fmt.Fprintf(&out, "    try out.append_bytes(%q);\n", chunk)
 	}
 	out.WriteString("    return out;\n")
 	out.WriteString(`}
+
+fn append_i64(out: std::string::String, value: i64) -> !std::string::String {
+    var remaining = value;
+    if remaining == 0 {
+        try out.append_byte(cast<u8>(48));
+    } else {
+        var divisor = 1;
+        while divisor * 10 <= remaining {
+            divisor = divisor * 10;
+        }
+        while divisor > 0 {
+            let digit = remaining / divisor;
+            try out.append_byte(cast<u8>(48 + digit));
+            remaining = remaining - digit * divisor;
+            divisor = divisor / 10;
+        }
+    }
+    return out;
+}
 `)
 	return out.String()
 }

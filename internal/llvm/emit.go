@@ -586,13 +586,23 @@ func (e *emitter) writeProcessEnv(instr *ir.Instr) error {
 	return nil
 }
 
-// writeCast emits a no-op value conversion for the Phase 16 low-level subset.
+// writeCast emits integer width conversions for the native subset.
 func (e *emitter) writeCast(instr *ir.Instr) error {
 	if len(instr.Args) != 1 {
 		return fmt.Errorf("llvm error: cast expects 1 arg")
 	}
 	value := e.value(instr.Args[0])
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+	sourceType := llvmType(instr.Args[0].Type)
+	targetType := llvmType(instr.Result.Type)
+	if sourceType == targetType || sourceType == "ptr" || targetType == "ptr" {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+		return nil
+	}
+	resultName := localName(instr.Result.Name)
+	op := integerCastOp(sourceType, targetType)
+	fmt.Fprintf(&e.out, "  %s = %s %s %s to %s\n",
+		resultName, op, sourceType, value.operand, targetType)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 

@@ -40,6 +40,30 @@ func integerLLVMType(typ string) string {
 	}
 }
 
+// integerCastOp chooses the LLVM conversion for integer width changes.
+func integerCastOp(source string, target string) string {
+	if integerBitWidth(source) > integerBitWidth(target) {
+		return "trunc"
+	}
+	return "sext"
+}
+
+// integerBitWidth returns the bit count for an LLVM integer type.
+func integerBitWidth(typ string) int {
+	switch typ {
+	case "i1":
+		return 1
+	case "i8":
+		return 8
+	case "i16":
+		return 16
+	case "i32":
+		return 32
+	default:
+		return 64
+	}
+}
+
 // llvmBinaryOp maps a Kizu binary operator to an LLVM integer instruction.
 func llvmBinaryOp(op string) string {
 	switch op {

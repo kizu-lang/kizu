@@ -385,6 +385,9 @@ func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
 	if !strings.Contains(text, "%ready = and i1 %all7, %copy") {
 		t.Fatalf("stage2 artifact does not gate copy on source scan:\n%s", data)
 	}
+	if !strings.Contains(text, "; kizu selfhost source metric ") {
+		t.Fatalf("stage2 artifact does not include source-derived metric:\n%s", data)
+	}
 }
 
 // assertStageArtifactsEqual checks stage output stability for the bootstrap smoke.
