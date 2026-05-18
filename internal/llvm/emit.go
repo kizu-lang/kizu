@@ -614,7 +614,7 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 // canForwardErrorUnionPayload limits temporary hosted !T lowering to std bootstrap shapes.
 func canForwardErrorUnionPayload(typ string) bool {
 	switch typ {
-	case "[]const u8", "void", "bool", "std::fs::Metadata":
+	case "[]const u8", "void", "bool", "std::fs::Metadata", "std::string::String":
 		return true
 	default:
 		return false

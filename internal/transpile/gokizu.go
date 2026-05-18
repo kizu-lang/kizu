@@ -651,6 +651,7 @@ pub fn first_token(source: []const u8) -> token::Token {
 // compilerTreeSource renders the package compile pipeline used by stage1.
 func compilerTreeSource() string {
 	return `pub fn compile_tree(io: Io, output: []const u8) -> !void {
+    let allocator = std::mem::page_allocator();
     let manifest = try std::fs::read_file(io, "selfhost/kizu.toml");
     let graph = resolver::resolve_selfhost(manifest);
     let token_source = try std::fs::read_file(io, resolver::token_path(graph));
@@ -677,8 +678,9 @@ func compilerTreeSource() string {
         checker_parse + lower_parse + emit_parse + compiler_parse + main_parse;
     let checked = checker::check_entry(parsed);
     let module = lower::lower_entry(checked);
-    let artifact = emit::llvm(module);
-    try std::fs::write_file(io, output, artifact);
+    let artifact = try emit::llvm(allocator, module);
+    let artifact_bytes = artifact.as_bytes();
+    try std::fs::write_file(io, output, artifact_bytes);
     return;
 }
 
@@ -687,10 +689,13 @@ func compilerTreeSource() string {
 
 // compilerEmitStage2Source renders a CLI-visible emission helper.
 func compilerEmitStage2Source() string {
-	return `pub fn emit_stage2() -> void {
+	return `pub fn emit_stage2() -> !void {
+    let allocator = std::mem::page_allocator();
     let checked = checker::check_entry(1);
     let module = lower::lower_entry(checked);
-    print(emit::llvm(module));
+    let artifact = try emit::llvm(allocator, module);
+    let artifact_bytes = artifact.as_bytes();
+    print(artifact_bytes);
     return;
 }
 `
@@ -742,38 +747,72 @@ func emitSource() string {
 	var out bytes.Buffer
 	out.WriteString(`import selfhost::lower;
 
-pub fn llvm(module: bool) -> []const u8 {
+pub fn llvm(allocator: Allocator, module: bool) -> !std::string::String {
     if !module {
-        return "define i32 @main() { entry: ret i32 1 }";
+        var failed = std::string::String(allocator);
+        try failed.append_bytes("define i32 @main() { entry: ret i32 1 }");
+        return failed;
     }
+    var out = std::string::String(allocator);
 `)
-	fmt.Fprintf(&out, "    return %q;\n", stage2WriterLLVM())
+	for _, chunk := range stage2WriterLLVMChunks() {
+		fmt.Fprintf(&out, "    try out.append_bytes(%q);\n", chunk)
+	}
+	out.WriteString("    return out;\n")
 	out.WriteString(`}
 `)
 	return out.String()
 }
 
-// stage2WriterLLVM returns a no-Go stage2 that writes a next LLVM artifact.
-func stage2WriterLLVM() string {
+// stage2WriterLLVMChunks returns Kizu-emitted LLVM pieces for the stage2 writer.
+func stage2WriterLLVMChunks() []string {
+	return []string{
+		stage2ArtifactLLVM(),
+		stage2SourceGlobals(),
+		stage2RuntimeDeclsLLVM(),
+		stage2EntryLLVM(),
+		stage2OpenSources(),
+		stage2CheckSources(),
+		stage2CopyGateLLVM(),
+		stage2CopyInputLLVM(),
+		stage2WriteFallbackLLVM(),
+	}
+}
+
+// stage2ArtifactLLVM renders the fallback stage artifact constant.
+func stage2ArtifactLLVM() string {
 	artifact := "define i32 @main() { entry: ret i32 0 }"
 	return "@artifact = private constant [" + fmt.Sprint(len(artifact)+1) +
 		" x i8] [" + byteArray(artifact) + "] " +
-		stage2SourceGlobals() +
-		"@mode = private constant [2 x i8] [i8 119, i8 0] " +
-		"@readmode = private constant [2 x i8] [i8 114, i8 0] " +
+		"@mode = private constant [2 x i8] [i8 119, i8 0] "
+}
+
+// stage2RuntimeDeclsLLVM renders libc declarations used by stage2.
+func stage2RuntimeDeclsLLVM() string {
+	return "@readmode = private constant [2 x i8] [i8 114, i8 0] " +
 		"declare ptr @fopen(ptr, ptr) declare i32 @fputs(ptr, ptr) " +
-		"declare i32 @fgetc(ptr) declare i32 @fputc(i32, ptr) declare i32 @fclose(ptr) " +
-		"define i32 @main(i32 %argc, ptr %argv) { " +
+		"declare i32 @fgetc(ptr) declare i32 @fputc(i32, ptr) declare i32 @fclose(ptr) "
+}
+
+// stage2EntryLLVM renders the stage2 entry and source-scan branch.
+func stage2EntryLLVM() string {
+	return "define i32 @main(i32 %argc, ptr %argv) { " +
 		"entry: %has = icmp sgt i32 %argc, 1 br i1 %has, label %scan, label %done " +
-		"scan: %readmode = getelementptr [2 x i8], ptr @readmode, i64 0, i64 0 " +
-		stage2OpenSources() +
-		stage2CheckSources() +
-		"%copy = icmp sgt i32 %argc, 2 " +
-		"%ready = and i1 %all7, %copy br i1 %ready, label %copy.in, label %write " +
-		stage2CopyInputLLVM() +
-		"write: " +
+		"scan: %readmode = getelementptr [2 x i8], ptr @readmode, i64 0, i64 0 "
+}
+
+// stage2CopyGateLLVM renders the branch from source validation to artifact output.
+func stage2CopyGateLLVM() string {
+	return "%copy = icmp sgt i32 %argc, 2 " +
+		"%ready = and i1 %all7, %copy br i1 %ready, label %copy.in, label %write "
+}
+
+// stage2WriteFallbackLLVM writes the fallback artifact when no comparison output is requested.
+func stage2WriteFallbackLLVM() string {
+	artifact := "define i32 @main() { entry: ret i32 0 }"
+	return "write: " +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
-		"%mode = getelementptr [" + fmt.Sprint(2) + " x i8], ptr @mode, i64 0, i64 0 " +
+		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
 		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
 		"%text = getelementptr [" + fmt.Sprint(len(artifact)+1) +
 		" x i8], ptr @artifact, i64 0, i64 0 " +
