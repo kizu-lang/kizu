@@ -903,6 +903,31 @@ pub fn CountEnum(input: []const u8) -> i64 {
     return count_keyword(input, 4);
 }
 
+pub fn CountTokens(input: []const u8) -> i64 {
+    let length = std::builtin::mem_len(input);
+    var index = 0;
+    var count = 0;
+    while index < length {
+        while index < length and is_space(input[index]) {
+            index = index + 1;
+        }
+        if index >= length {
+            return count;
+        }
+        count = count + 1;
+        if is_letter(input[index]) {
+            index = ident_end(input, index, length);
+        } else {
+            if is_digit(input[index]) {
+                index = digit_end(input, index, length);
+            } else {
+                index = punctuation_end(input, index, length);
+            }
+        }
+    }
+    return count;
+}
+
 fn count_keyword(input: []const u8, want: i64) -> i64 {
     let length = std::builtin::mem_len(input);
     var index = 0;
@@ -1171,6 +1196,7 @@ func parserModuleSummarySource() string {
     pub score: i64,
     pub first_token: i64,
     pub declarations: i64,
+    pub tokens: i64,
     pub bytes: i64,
     pub functions: i64,
     pub imports: i64,
@@ -1187,6 +1213,7 @@ pub fn parse_module(source: []const u8) -> Module {
     let imports = lexer::CountImport(source);
     let structs = lexer::CountStruct(source);
     let enums = lexer::CountEnum(source);
+    let tokens = lexer::CountTokens(source);
     let declarations = functions * 5 + imports * 3 + structs * 2 + enums * 2;
     let balance = brace_balance(source);
     let braces = brace_count(source);
@@ -1198,6 +1225,7 @@ pub fn parse_module(source: []const u8) -> Module {
         score: first + declarations + brace_metric,
         first_token: first,
         declarations: declarations,
+        tokens: tokens,
         bytes: std::mem::len(source),
         functions: functions,
         imports: imports,
@@ -1283,6 +1311,7 @@ pub struct SourceMetrics {
     pub bytes: i64,
     pub functions: i64,
     pub declarations: i64,
+    pub tokens: i64,
     pub braces: i64,
     pub balanced: bool
 }
@@ -1350,6 +1379,9 @@ func compilerTreeSource() string {
             lexer_parse.declarations + parser_parse.declarations + resolver_parse.declarations +
             checker_parse.declarations + lower_parse.declarations + emit_parse.declarations +
             compiler_parse.declarations + main_parse.declarations,
+        tokens: manifest_parse.tokens + token_parse.tokens + lexer_parse.tokens +
+            parser_parse.tokens + resolver_parse.tokens + checker_parse.tokens +
+            lower_parse.tokens + emit_parse.tokens + compiler_parse.tokens + main_parse.tokens,
         braces: manifest_parse.braces + token_parse.braces + lexer_parse.braces +
             parser_parse.braces + resolver_parse.braces + checker_parse.braces +
             lower_parse.braces + emit_parse.braces + compiler_parse.braces + main_parse.braces,
@@ -1362,6 +1394,7 @@ func compilerTreeSource() string {
         metrics.parsed,
         metrics.functions,
         metrics.declarations,
+        metrics.tokens,
         metrics.braces,
         metrics.balanced
     );
@@ -1379,7 +1412,7 @@ func compilerTreeSource() string {
 func compilerEmitStage2Source() string {
 	return `pub fn emit_stage2() -> !void {
     let allocator = std::mem::page_allocator();
-    let checked = checker::check_entry(1, 0, 0, 0, false);
+    let checked = checker::check_entry(1, 0, 0, 0, 0, false);
     let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, 0, 0);
     let artifact_bytes = artifact.as_bytes();
@@ -1425,6 +1458,7 @@ func checkerSource(info typesPackage) string {
     pub score: i64,
     pub functions: i64,
     pub declarations: i64,
+    pub tokens: i64,
     pub braces: i64,
     pub balanced: bool
 }
@@ -1433,6 +1467,7 @@ pub fn check_entry(
     parsed: i64,
     functions: i64,
     declarations: i64,
+    tokens: i64,
     braces: i64,
     balanced: bool
 ) -> CheckedModule {
@@ -1441,6 +1476,7 @@ pub fn check_entry(
         score: parsed,
         functions: functions,
         declarations: declarations,
+        tokens: tokens,
         braces: braces,
         balanced: balanced
     };
@@ -1474,6 +1510,7 @@ pub struct Module {
     pub score: i64,
     pub functions: i64,
     pub declarations: i64,
+    pub tokens: i64,
     pub braces: i64
 }
 
@@ -1483,6 +1520,7 @@ pub fn lower_entry(checked: checker::CheckedModule) -> Module {
             score: checked.score,
             functions: checked.functions,
             declarations: checked.declarations,
+            tokens: checked.tokens,
             braces: checked.braces
         };
     }
@@ -1490,6 +1528,7 @@ pub fn lower_entry(checked: checker::CheckedModule) -> Module {
         score: 0,
         functions: checked.functions,
         declarations: checked.declarations,
+        tokens: checked.tokens,
         braces: checked.braces
     };
 }

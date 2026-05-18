@@ -109,8 +109,8 @@ blocker:
 ## Current Bootstrap Evidence
 
 最終更新: `feat/selfhost-bootstrap-chain` で selfhost manifest を stage input graph に含め、
-parser/checker/lower summary と parse component metrics を Kizu struct で渡すようにした
-working tree 時点。
+parser/checker/lower summary と parse / token component metrics を Kizu struct で渡すように
+した working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
@@ -173,9 +173,9 @@ stage3_vs_stage4_bytes=0
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 1072
-; kizu stage source bytes 1134110
-; kizu stage source fn count 63
+; kizu stage source metric 1093
+; kizu stage source bytes 1135347
+; kizu stage source fn count 64
 ```
 
 remaining Go / template dependency:
@@ -187,8 +187,8 @@ remaining Go / template dependency:
   execute the Kizu parser, resolver, checker, lowering, and LLVM emitter as a compiler pipeline.
 - `selfhost/src/compiler.kizu` uses `SourceMetrics`, `parser::Module`,
   `checker::CheckedModule`, and `lower::Module` summaries. Parser summaries carry first-token,
-  declaration, byte, function/import/struct/enum, brace, and balance metrics, but still not AST,
-  typed IR, or lowered LLVM instructions.
+  declaration, token, byte, function/import/struct/enum, brace, and balance metrics, but still
+  not AST, typed IR, or lowered LLVM instructions.
 - Go native backend and hosted runtime still build `target/selfhost/kizu-stage1`.
 - The generated Kizu parser/checker/lower are partial surfaces, not production replacements for
   `internal/parser`, `internal/types`, or backend lowering.
