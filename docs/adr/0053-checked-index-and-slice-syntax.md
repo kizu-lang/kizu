@@ -39,6 +39,7 @@ The bounds are half-open: `start..end` includes `start` and excludes `end`.
 
 Rules:
 
+- index and slice syntax is limited to one-dimensional contiguous sequences
 - index and slice bounds must be integer values
 - negative index, negative bound, `start > end`, and `end > len` return an error
 - safe Kizu never performs unchecked index or slice access
@@ -55,6 +56,8 @@ Rules:
 - indexing `std::array::Array<T>` directly
 - mutable slice syntax
 - indexed borrow
+- multi-dimensional slicing such as `matrix[rows, cols]`
+- strided views and matrix views
 - compile-time proof that a bounds check is unnecessary
 - unchecked indexing in `unsafe`
 
