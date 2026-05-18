@@ -1613,7 +1613,10 @@ func (c *Checker) checkTypeApplyCallExpr(
 		}
 		typ, _, err := c.checkAtomic(expr.TypeArg, args, env)
 		return typ, err
-	case "std.sync.Mutex":
+	case "std.builtin.mutex":
+		if !c.currentStd {
+			return "", fmt.Errorf("move error: `%s` is reserved; use std::sync", name)
+		}
 		typ, _, err := c.checkMutex(expr.TypeArg, args, env)
 		return typ, err
 	default:
@@ -1658,6 +1661,11 @@ func (c *Checker) checkGenericWrapperTypeArg(name string, typeArg string) error 
 		if !isAtomicSupportedType(typeArg) {
 			return fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArg)
 		}
+	case "std.sync.Mutex":
+		if !c.isCopyType(typeArg) {
+			return fmt.Errorf(
+				"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1", typeArg)
+		}
 	}
 	return nil
 }
@@ -1671,6 +1679,11 @@ func (c *Checker) checkGenericUserArg(
 	arg ast.Expression,
 	env *scope,
 ) error {
+	if name == "std.sync.Mutex" {
+		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
+			return err
+		}
+	}
 	got, err := c.readExpr(arg, env)
 	if err != nil {
 		return err
@@ -3378,8 +3391,10 @@ func (c *Checker) checkMutex(elem string, args []ast.Expression, env *scope) (st
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("sync error: `std::sync::Mutex<%s>` expects 1 arg", elem)
 	}
-	if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
-		return "", true, err
+	if elem != "T" {
+		if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
+			return "", true, err
+		}
 	}
 	got, err := c.moveExpr(args[0], env)
 	if err != nil {
@@ -3389,7 +3404,7 @@ func (c *Checker) checkMutex(elem string, args []ast.Expression, env *scope) (st
 		return "", true, fmt.Errorf("sync error: `std::sync::Mutex<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
-	if !c.isCopyType(elem) {
+	if elem != "T" && !c.isCopyType(elem) {
 		return "", true, fmt.Errorf(
 			"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1", elem)
 	}

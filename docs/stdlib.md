@@ -102,6 +102,7 @@ Current builtin thinning candidates:
 | `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for` | Host primitive | Public constructors and `parallel_for` live in `std/src/task.kizu`; direct user calls are rejected |
 | `std::builtin::channel<T>` | Runtime primitive | Public `std::channel::Channel<T>()` lives in `std/src/channel.kizu`; direct user calls are rejected |
 | `std::builtin::atomic<T>` | Runtime primitive | Public `std::atomic::Atomic<T>(value)` lives in `std/src/atomic.kizu`; direct user calls are rejected |
+| `std::builtin::mutex<T>` | Runtime primitive | Public `std::sync::Mutex<T>(value)` lives in `std/src/sync.kizu`; direct user calls are rejected |
 
 `std::testing` now performs assertion checks and message construction in
 `std/src/testing.kizu`. Equality diagnostics are built with `std::fmt` into an
@@ -120,11 +121,12 @@ Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
 uses a `comptime Function` parameter to forward the worker name through
 `std/src/task.kizu`. `parallel_map` remains a public Go branch until Kizu can
 forward both function names and mutable partition access without moving the
-partition value; that blocker is tracked by #372. `std::channel::Channel<T>()`
-and `std::atomic::Atomic<T>(value)` now use source-level type-argument
-forwarding through Kizu std source. Generic constructor wrappers for Array, Map,
-and Mutex still require source-level type-argument forwarding before they can
-move without builtin camouflage; that blocker is tracked by #371.
+partition value; that blocker is tracked by #372. `std::channel::Channel<T>()`,
+`std::atomic::Atomic<T>(value)`, and `std::sync::Mutex<T>(value)` now use
+source-level type-argument forwarding through Kizu std source. Generic
+constructor wrappers for Array and Map still require source-level type-argument
+forwarding before they can move without builtin camouflage; that blocker is
+tracked by #371.
 
 ## Builtin Registry
 
@@ -143,7 +145,7 @@ move without builtin camouflage; that blocker is tracked by #371.
 | `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors and `parallel_for`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; finish `parallel_map` wrapper split after mutable partition forwarding is representable |
 | `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor wrapper; Go owned message queue and boundary checks | keep queue primitive trusted; method wrappers still tracked by #360 |
 | `std::thread` | `scoped` | host thread boundary and join semantics | trusted primitive; wrapper split tracked by #360 |
-| `std::sync` | `Mutex<T>` | shared mutable state primitive and copy-value restrictions | trusted primitive; wrapper split tracked by #360 |
+| `std::sync` | `Mutex<T>` | Kizu constructor wrapper; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted; method wrappers tracked by #360 |
 | `std::atomic` | `Atomic<T>` | Kizu constructor wrapper; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API and method wrappers tracked by #360 |
 
 ## Source Layout Target

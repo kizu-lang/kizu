@@ -2413,6 +2413,16 @@ func (c *Checker) checkBuiltinTypeApply(
 		}
 		typ, _, err := c.checkAtomic(arg, args, env, unsafe)
 		return typ, true, err
+	case "std.builtin.mutex":
+		if !c.currentStd {
+			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::sync", name)
+		}
+		arg, err := c.parseType(typeArg)
+		if err != nil {
+			return "", true, err
+		}
+		typ, _, err := c.checkMutex(arg, args, env, unsafe)
+		return typ, true, err
 	default:
 		return "", false, nil
 	}
@@ -2459,6 +2469,10 @@ func (c *Checker) checkGenericWrapperTypeArg(name string, arg Type) error {
 		if !isAtomicSupportedType(arg) {
 			return fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", arg)
 		}
+	case "std.sync.Mutex":
+		if !c.isCopyType(arg) {
+			return fmt.Errorf("type error: `std::sync::Mutex<%s>` requires copy value in v0.1", arg)
+		}
 	}
 	return nil
 }
@@ -2474,11 +2488,20 @@ func (c *Checker) checkGenericUserArg(
 	unsafe bool,
 ) error {
 	want := substituteTypeParams(fn.params[idx], subst)
+	if name == "std.sync.Mutex" {
+		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
+			return err
+		}
+	}
 	got, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {
 		return err
 	}
 	if got != want {
+		if name == "std.sync.Mutex" {
+			return fmt.Errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
+				want, want, got)
+		}
 		return userCallArgError(name, fn, idx, got)
 	}
 	return nil
@@ -3933,8 +3956,10 @@ func (c *Checker) checkMutex(
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects 1 arg", elem)
 	}
-	if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
-		return "", true, err
+	if !c.typeParams[string(elem)] {
+		if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
+			return "", true, err
+		}
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -3944,7 +3969,7 @@ func (c *Checker) checkMutex(
 		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
-	if !c.isCopyType(elem) {
+	if !c.typeParams[string(elem)] && !c.isCopyType(elem) {
 		return "", true, fmt.Errorf(
 			"type error: `std::sync::Mutex<%s>` requires copy value in v0.1", elem)
 	}
