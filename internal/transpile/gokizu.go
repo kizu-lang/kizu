@@ -524,6 +524,13 @@ func firstTokenSource() string {
         return token::EOFToken();
     }
     let ch = input[start];
+    if ch == cast<u8>(34) {
+        var end = start + 1;
+        while end < length and input[end] != cast<u8>(34) {
+            end = end + 1;
+        }
+        return make_token(token::Type::String, input[start + 1..end]);
+    }
     if is_letter(ch) {
         var end = start;
         while end < length and is_ident_byte(input[end]) {
@@ -565,6 +572,14 @@ func lexerTokenAtSource() string {
         return token::EOFToken();
     }
     let ch = input[start];
+    if ch == cast<u8>(34) {
+        var end = start + 1;
+        while end < length and input[end] != cast<u8>(34) {
+            end = end + 1;
+        }
+        return make_token_at(token::Type::String, input[start + 1..end],
+            token_line, token_column + 1);
+    }
     if is_letter(ch) {
         var end = start;
         while end < length and is_ident_byte(input[end]) {

@@ -28,6 +28,8 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "token::Type::Slash")
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "token::Type::NotEq")
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "token::Type::LBracket")
+	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "token::Type::String")
+	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "input[start + 1..end]")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn first_token_code")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn function_count")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn declaration_score")
