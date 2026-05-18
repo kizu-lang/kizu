@@ -1549,7 +1549,7 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `std::fs::remove_dir(io, path)` は `!void` を返す
 * `std::fs::remove_file(io, path)` は `!void` を返す
 * `std::fs::Metadata` は v0.2 では `size: i64` と `is_dir: bool` だけを持つ
-* `path` と `bytes` は `[]const u8`
+* `path` と `bytes` は caller 側の `[]const u8` を保持しない read-only borrow
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない
 * `std::io::failing()` は deterministic failing I/O として、テストで I/O error path を確認する

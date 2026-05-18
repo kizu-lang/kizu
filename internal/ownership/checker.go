@@ -1020,9 +1020,6 @@ func (c *Checker) checkQualifiedStdRuntimeStateBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if name == "std.string.String" {
-		return c.checkStringConstructor(args, env)
-	}
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
@@ -1162,22 +1159,22 @@ func (c *Checker) checkMemSliceShape(name string, args []ast.Expression, env *sc
 	return nil
 }
 
-// checkFsBuiltin validates ownership for std::fs calls.
+// checkFsBuiltin validates ownership for filesystem host primitives.
 func (c *Checker) checkFsBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.fs.read_file":
+	case "std.builtin.fs_read_file":
 		return c.checkFsReadFile(args, env)
-	case "std.fs.write_file":
+	case "std.builtin.fs_write_file":
 		return c.checkFsWriteFile(args, env)
-	case "std.fs.exists":
+	case "std.builtin.fs_exists":
 		return c.checkFsPathOnly("std::fs::exists", args, env, "!bool")
-	case "std.fs.metadata":
+	case "std.builtin.fs_metadata":
 		return c.checkFsPathOnly("std::fs::metadata", args, env, "!std::fs::Metadata")
-	case "std.fs.create_dir", "std.fs.remove_dir", "std.fs.remove_file":
+	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
 		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "!void")
 	default:
 		return "", false, nil
@@ -1598,6 +1595,8 @@ func (c *Checker) checkStringStorageBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
+	case "std.builtin.string_new":
+		return c.checkStringConstructor(args, env)
 	case "std.builtin.string_append_bytes":
 		return c.checkStringStorageArgs(name, args, env, "!void", "[]const u8")
 	case "std.builtin.string_append_byte":

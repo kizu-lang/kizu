@@ -1722,7 +1722,7 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
 	case "std.map.Map":
 		return "", true, fmt.Errorf("type error: use `std::map::Map<K, V>(allocator)`")
-	case "std.string.String":
+	case "std.builtin.string_new":
 		return c.checkStringConstructor(args, env, unsafe)
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
@@ -1993,7 +1993,7 @@ func (c *Checker) checkMemSliceShape(
 	return nil
 }
 
-// checkFsBuiltin validates std::fs calls with explicit Io.
+// checkFsBuiltin validates filesystem host primitives with explicit Io.
 func (c *Checker) checkFsBuiltin(
 	name string,
 	args []ast.Expression,
@@ -2001,15 +2001,15 @@ func (c *Checker) checkFsBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.fs.read_file":
+	case "std.builtin.fs_read_file":
 		return c.checkFsReadFile(args, env, unsafe)
-	case "std.fs.write_file":
+	case "std.builtin.fs_write_file":
 		return c.checkFsWriteFile(args, env, unsafe)
-	case "std.fs.exists":
+	case "std.builtin.fs_exists":
 		return c.checkFsExists(args, env, unsafe)
-	case "std.fs.metadata":
+	case "std.builtin.fs_metadata":
 		return c.checkFsMetadata(args, env, unsafe)
-	case "std.fs.create_dir", "std.fs.remove_dir", "std.fs.remove_file":
+	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
 		return c.checkFsPathOnly(name, args, env, unsafe, "!void")
 	default:
 		return "", false, nil
@@ -2364,8 +2364,7 @@ func (c *Checker) checkUserCall(
 		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name)
 	}
 	if len(args) != len(fn.params) {
-		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
-			name, len(fn.params), len(args))
+		return "", userCallArityError(name, len(fn.params), len(args))
 	}
 	for idx, arg := range args {
 		if fn.mutBorrowParams[idx] {
@@ -2389,11 +2388,28 @@ func (c *Checker) checkUserCall(
 			continue
 		}
 		if got != fn.params[idx] {
-			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
-				idx+1, name, fn.params[idx], got)
+			label := userCallArgLabel(name, fn, idx)
+			return "", fmt.Errorf("type error: arg %d of `%s` expects %s%s, got %s",
+				idx+1, name, fn.params[idx], label, got)
 		}
 	}
 	return fn.returnType, nil
+}
+
+// userCallArityError preserves stable diagnostics for std wrapper constructors.
+func userCallArityError(name string, want int, got int) error {
+	if name == "std.string.String" {
+		return fmt.Errorf("type error: `std::string::String` expects allocator")
+	}
+	return fmt.Errorf("type error: `%s` expects %d args, got %d", name, want, got)
+}
+
+// userCallArgLabel returns stable extra detail for std wrapper diagnostics.
+func userCallArgLabel(name string, fn *functionType, idx int) string {
+	if !strings.HasPrefix(name, "std.fs.") || fn.decl == nil || idx >= len(fn.decl.Params) {
+		return ""
+	}
+	return " " + fn.decl.Params[idx].Name
 }
 
 // checkUnionConstructorCall validates Union.Variant(payload) construction.
