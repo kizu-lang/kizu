@@ -829,7 +829,7 @@ func stage2EntryLLVM() string {
 // stage2CopyGateLLVM renders the branch from source validation to artifact output.
 func stage2CopyGateLLVM() string {
 	return "%copy = icmp sgt i32 %argc, 2 " +
-		"%ready = and i1 %all7, %copy br i1 %ready, label %copy.in, label %write "
+		"%ready = and i1 %scanned, %copy br i1 %ready, label %copy.in, label %write "
 }
 
 // stage2WriteFallbackLLVM writes the fallback artifact when no comparison output is requested.
@@ -897,6 +897,12 @@ func stage2CheckSources() string {
 	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
 		fmt.Fprintf(&out, "%%all%d = and i1 %%all%d, %%ok%d ", idx-1, idx-2, idx)
 	}
+	out.WriteString("%total0 = add i32 %count0, %count1 ")
+	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+		fmt.Fprintf(&out, "%%total%d = add i32 %%total%d, %%count%d ", idx-1, idx-2, idx)
+	}
+	fmt.Fprintf(&out, "%%large = icmp sgt i32 %%total%d, 100 ", len(selfhostSourcePaths())-2)
+	fmt.Fprintf(&out, "%%scanned = and i1 %%all%d, %%large ", len(selfhostSourcePaths())-2)
 	for idx := range selfhostSourcePaths() {
 		fmt.Fprintf(&out, "call i32 @fclose(ptr %%srcfile%d) ", idx)
 	}

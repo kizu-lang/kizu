@@ -386,7 +386,8 @@ func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
 		!strings.Contains(text, "%ok8 = icmp sgt i32 %count8, 0") {
 		t.Fatalf("stage2 artifact does not drain source files:\n%s", data)
 	}
-	if !strings.Contains(text, "%ready = and i1 %all7, %copy") {
+	if !strings.Contains(text, "%scanned = and i1 %all7, %large") ||
+		!strings.Contains(text, "%ready = and i1 %scanned, %copy") {
 		t.Fatalf("stage2 artifact does not gate copy on source scan:\n%s", data)
 	}
 	if !strings.Contains(text, "; kizu selfhost source metric ") {
