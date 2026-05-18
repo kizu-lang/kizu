@@ -2,6 +2,14 @@ package llvm
 
 import "strings"
 
+// localName turns Kizu SSA names into valid named LLVM local identifiers.
+func localName(name string) string {
+	if strings.HasPrefix(name, "%") {
+		return "%kizu." + strings.TrimPrefix(name, "%")
+	}
+	return name
+}
+
 // llvmType maps Kizu IR types to LLVM IR types.
 func llvmType(typ string) string {
 	switch typ {

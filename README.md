@@ -59,10 +59,12 @@ Experimental compiler and tooling pieces:
 - WASI-compatible WebAssembly text backend
 - limited C header import for extern function declarations
 - opt-in IR optimization pipeline
+- limited native executable generation through LLVM IR and clang
 
 These experimental pieces are not the language oracle yet. LLVM and WASM
-currently support more limited target subsets than the interpreter, and native
-executable generation is not implemented.
+currently support more limited target subsets than the interpreter. Native
+builds are limited to the LLVM-lowered subset and a small `kizu_print_*`
+runtime shim.
 
 There are no open v0.2 issues at the time of writing. Future compiler migration
 work should start from new GitHub Issues with explicit acceptance criteria.
@@ -144,6 +146,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu build --target native examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -159,6 +162,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
+- `kizu build --target native [--opt] [-o <out>] <file>` links a native executable.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
 - `kizu why-rebuild <file>` explains cache hit or rebuild reasons.

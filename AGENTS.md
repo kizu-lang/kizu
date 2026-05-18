@@ -76,8 +76,8 @@ internal/interp
 internal/types
 internal/ownership
 internal/stdprim
+internal/native
 std
-compiler
 examples
 tests
 ```
@@ -90,7 +90,7 @@ tests
 * 各 milestone にテストを追加する
 * v0 では generics を本格実装しない
 * `async fn` / `await` syntax は実装しない
-* native executable generation は実装しない
+* native executable generation は限定 subset の明示 build target として扱う
 * macro は実装しない
 * package manager はまだ実装しない
 * `SPEC.md` と矛盾する構文や機能を勝手に追加しない

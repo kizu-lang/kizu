@@ -97,11 +97,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
-  %1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %1, i64 11)
-  ret void
+  %kizu.1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
+  call void @kizu_print_string(ptr %kizu.1, i64 11)
+  ret i32 0
 }`
 
 const functionsLLVM = `; Kizu LLVM IR
@@ -111,15 +111,15 @@ declare void @kizu_print_bool(i1)
 
 define i64 @add(i64 %a, i64 %b) {
 entry:
-  %1 = add i64 %a, %b
-  ret i64 %1
+  %kizu.1 = add i64 %a, %b
+  ret i64 %kizu.1
 }
 
-define void @main() {
+define i32 @main() {
 entry:
-  %3 = call i64 @add(i64 1, i64 2)
-  call void @kizu_print_int(i64 %3)
-  ret void
+  %kizu.3 = call i64 @add(i64 1, i64 2)
+  call void @kizu_print_int(i64 %kizu.3)
+  ret i32 0
 }`
 
 const variablesLLVM = `; Kizu LLVM IR
@@ -129,13 +129,13 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
-  %1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-  %4 = add i64 30, 1
-  call void @kizu_print_string(ptr %1, i64 5)
-  call void @kizu_print_int(i64 %4)
-  ret void
+  %kizu.1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %kizu.4 = add i64 30, 1
+  call void @kizu_print_string(ptr %kizu.1, i64 5)
+  call void @kizu_print_int(i64 %kizu.4)
+  ret i32 0
 }`
 
 const ifLLVM = `; Kizu LLVM IR
@@ -146,20 +146,20 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
-  %3 = icmp sge i64 20, 20
-  br i1 %3, label %if.then.1, label %if.else.2
+  %kizu.3 = icmp sge i64 20, 20
+  br i1 %kizu.3, label %if.then.1, label %if.else.2
 if.then.1:
-  %4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %4, i64 5)
+  %kizu.4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  call void @kizu_print_string(ptr %kizu.4, i64 5)
   br label %if.end.3
 if.else.2:
-  %6 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
-  call void @kizu_print_string(ptr %6, i64 5)
+  %kizu.6 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+  call void @kizu_print_string(ptr %kizu.6, i64 5)
   br label %if.end.3
 if.end.3:
-  ret void
+  ret i32 0
 }`
 
 const whileLLVM = `; Kizu LLVM IR
@@ -167,17 +167,17 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
   br label %while.header.1
 while.header.1:
-  %2 = phi i64 [ 0, %entry ], [ %7, %while.body.2 ]
-  %4 = icmp slt i64 %2, 3
-  br i1 %4, label %while.body.2, label %while.end.3
+  %kizu.2 = phi i64 [ 0, %entry ], [ %kizu.7, %while.body.2 ]
+  %kizu.4 = icmp slt i64 %kizu.2, 3
+  br i1 %kizu.4, label %while.body.2, label %while.end.3
 while.body.2:
-  call void @kizu_print_int(i64 %2)
-  %7 = add i64 %2, 1
+  call void @kizu_print_int(i64 %kizu.2)
+  %kizu.7 = add i64 %kizu.2, 1
   br label %while.header.1
 while.end.3:
-  ret void
+  ret i32 0
 }`

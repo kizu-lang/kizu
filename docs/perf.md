@@ -52,6 +52,7 @@ go run ./cmd/kizu check examples/user_registry.kizu
 go run ./cmd/kizu run examples/user_registry.kizu
 go run ./cmd/kizu ir examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
+go run ./cmd/kizu build --target native examples/hello.kizu
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu cache status
 pre-commit run --all-files

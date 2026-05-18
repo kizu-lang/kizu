@@ -57,9 +57,11 @@ v0.1 の対象は interpreter-first の language core です。
 - WASI-compatible WebAssembly text backend
 - extern function 宣言向けの限定的な C header import
 - opt-in の IR optimization pipeline
+- LLVM IR と clang 経由の限定的な native executable generation
 
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
-LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
+LLVM と WASM は interpreter より限定された subset だけを扱います。native build は
+LLVM lowering 済み subset と小さな `kizu_print_*` runtime shim に限定します。
 
 現時点で open な v0.2 Issue はありません。将来の compiler migration work は、
 明確な受け入れ条件を持つ新しい GitHub Issues から開始します。
@@ -139,6 +141,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu build --target native examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -154,6 +157,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
 - `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
+- `kizu build --target native [--opt] [-o <out>] <file>` は native executable を link します。
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
