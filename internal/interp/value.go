@@ -79,8 +79,9 @@ type Array struct {
 
 // OwnedString stores owned bytes for the v0.2 std::string prototype.
 type OwnedString struct {
-	bytes  string
-	deinit bool
+	bytes    string
+	capacity int
+	deinit   bool
 }
 
 // Map stores owned key/value entries for the v0.2 std::map prototype.

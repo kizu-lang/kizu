@@ -2532,8 +2532,12 @@ func (i *Interpreter) evalStringMethod(
 		return i.evalStringAppendBytes(str, args, env)
 	case "append_byte":
 		return i.evalStringAppendByte(str, args, env)
+	case "reserve":
+		return i.evalStringReserve(str, args, env)
 	case "len":
 		return intValue(int64(len(str.ownedStr.bytes))), requireNoArgs("String.len", args)
+	case "capacity":
+		return intValue(int64(str.ownedStr.capacity)), requireNoArgs("String.capacity", args)
 	case "as_bytes":
 		return stringValue(str.ownedStr.bytes), requireNoArgs("String.as_bytes", args)
 	case "clear":
@@ -2564,6 +2568,7 @@ func (i *Interpreter) evalStringAppendBytes(
 	if value.kind != kindString {
 		return errorUnionValue("String.append_bytes expects []const u8"), nil
 	}
+	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + len(value.s))
 	str.ownedStr.bytes += value.s
 	return voidValue(), nil
 }
@@ -2584,8 +2589,36 @@ func (i *Interpreter) evalStringAppendByte(
 	if value.kind != kindInt || value.i < 0 || value.i > 255 {
 		return errorUnionValue("String.append_byte expects u8"), nil
 	}
+	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + 1)
 	str.ownedStr.bytes += string(byte(value.i))
 	return voidValue(), nil
+}
+
+// evalStringReserve ensures additional capacity for future String appends.
+func (i *Interpreter) evalStringReserve(
+	str Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: String.reserve expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindInt || value.i < 0 {
+		return errorUnionValue("String.reserve expects non-negative i64"), nil
+	}
+	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + int(value.i))
+	return voidValue(), nil
+}
+
+// ensureCapacity records semantic capacity for the interpreter prototype.
+func (s *OwnedString) ensureCapacity(want int) {
+	if want > s.capacity {
+		s.capacity = want
+	}
 }
 
 // evalArrayMethod executes owned Array<T> prototype operations.

@@ -2825,9 +2825,14 @@ func (c *Checker) checkStringMethod(
 			return "", err
 		}
 		return "!void", nil
-	case "len":
+	case "reserve":
+		if err := c.checkStringReserveArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!void", nil
+	case "len", "capacity":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `String.len` expects 0 args, got %d", len(args))
+			return "", fmt.Errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeI64, nil
 	case "as_bytes":
@@ -2846,7 +2851,7 @@ func (c *Checker) checkStringMethod(
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "clear", "deinit":
+	case "append_bytes", "append_byte", "reserve", "clear", "deinit":
 		return true
 	default:
 		return false
@@ -2869,6 +2874,26 @@ func (c *Checker) checkStringBytesArg(
 	}
 	if got != typeByteString {
 		return fmt.Errorf("type error: `String.%s` expects []const u8, got %s", name, got)
+	}
+	return nil
+}
+
+// checkStringReserveArg validates a reserve additional byte count.
+func (c *Checker) checkStringReserveArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != 1 {
+		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeI64 {
+		return fmt.Errorf("type error: `String.%s` expects i64, got %s", name, got)
 	}
 	return nil
 }
