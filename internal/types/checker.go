@@ -2005,15 +2005,18 @@ func (c *Checker) checkTaskBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
+	if strings.HasPrefix(name, "std.builtin.task_") && !c.currentStd {
+		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::task", name)
+	}
 	switch name {
-	case "std.task.Group":
+	case "std.builtin.task_group":
 		return c.checkTaskGroup(args, env, unsafe)
-	case "std.task.Queue":
+	case "std.builtin.task_queue":
 		typ, err := checkNoArgConstructor(name, args, "Queue")
 		return typ, true, err
-	case "std.task.partition_mut":
+	case "std.builtin.task_partition_mut":
 		return c.checkPartitionMut(args, env, unsafe)
-	case "std.task.LocalBuffer":
+	case "std.builtin.task_local_buffer":
 		return c.checkLocalBuffer(args, env, unsafe)
 	case "std.task.parallel_for":
 		return c.checkParallelFor(args, env, unsafe)
@@ -2346,7 +2349,7 @@ func (c *Checker) checkUserCall(
 		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name)
 	}
 	if len(args) != len(fn.params) {
-		return "", userCallArityError(name, len(fn.params), len(args))
+		return "", userCallArityError(name, fn, len(args))
 	}
 	for idx, arg := range args {
 		if fn.mutBorrowParams[idx] {
@@ -2370,28 +2373,50 @@ func (c *Checker) checkUserCall(
 			continue
 		}
 		if got != fn.params[idx] {
-			label := userCallArgLabel(name, fn, idx)
-			return "", fmt.Errorf("type error: arg %d of `%s` expects %s%s, got %s",
-				idx+1, name, fn.params[idx], label, got)
+			return "", userCallArgError(name, fn, idx, got)
 		}
 	}
 	return fn.returnType, nil
 }
 
-// userCallArityError preserves stable diagnostics for std wrapper constructors.
-func userCallArityError(name string, want int, got int) error {
+// userCallArityError reports declared function arity using source signatures when useful.
+func userCallArityError(name string, fn *functionType, got int) error {
 	if name == "std.string.String" {
 		return fmt.Errorf("type error: `std::string::String` expects allocator")
 	}
-	return fmt.Errorf("type error: `%s` expects %d args, got %d", name, want, got)
+	if len(fn.params) == 1 && fn.decl != nil {
+		paramName := fn.decl.Params[0].Name
+		if paramName != "" {
+			return fmt.Errorf("type error: `%s` expects %s",
+				diagnosticName(name), paramName)
+		}
+	}
+	return fmt.Errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), got)
 }
 
-// userCallArgLabel returns stable extra detail for std wrapper diagnostics.
-func userCallArgLabel(name string, fn *functionType, idx int) string {
-	if !strings.HasPrefix(name, "std.fs.") || fn.decl == nil || idx >= len(fn.decl.Params) {
-		return ""
+// userCallArgError reports source-call argument type mismatches.
+func userCallArgError(name string, fn *functionType, idx int, got Type) error {
+	if strings.HasPrefix(name, "std.") && fn.decl != nil && idx < len(fn.decl.Params) {
+		paramName := fn.decl.Params[idx].Name
+		if paramName != "" {
+			if strings.HasPrefix(name, "std.fs.") {
+				return fmt.Errorf("type error: `%s` expects %s %s, got %s",
+					diagnosticName(name), fn.params[idx], paramName, got)
+			}
+			return fmt.Errorf("type error: `%s` %s expects %s, got %s",
+				diagnosticName(name), paramName, fn.params[idx], got)
+		}
 	}
-	return " " + fn.decl.Params[idx].Name
+	return fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+		idx+1, name, fn.params[idx], got)
+}
+
+// diagnosticName formats internal qualified names as user-facing paths.
+func diagnosticName(name string) string {
+	if strings.HasPrefix(name, "std.") {
+		return strings.ReplaceAll(name, ".", "::")
+	}
+	return name
 }
 
 // checkUnionConstructorCall validates Union.Variant(payload) construction.

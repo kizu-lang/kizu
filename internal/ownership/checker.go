@@ -1287,18 +1287,21 @@ func (c *Checker) checkTaskBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	if strings.HasPrefix(name, "std.builtin.task_") && !c.currentStd {
+		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::task", name)
+	}
 	switch name {
-	case "std.task.Group":
+	case "std.builtin.task_group":
 		return c.checkTaskGroup(args, env)
-	case "std.task.Queue":
+	case "std.builtin.task_queue":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return "Queue", true, nil
-	case "std.task.partition_mut":
+	case "std.builtin.task_partition_mut":
 		return c.checkPartitionMut(args, env)
-	case "std.task.LocalBuffer":
+	case "std.builtin.task_local_buffer":
 		return c.checkLocalBuffer(args, env)
 	case "std.task.parallel_for":
 		return c.checkParallelFor(args, env)

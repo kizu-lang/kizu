@@ -1286,15 +1286,15 @@ func (i *Interpreter) evalTaskBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.task.Group":
+	case "std.builtin.task_group":
 		value, err := i.evalTaskGroup(args, env)
 		return value, true, err
-	case "std.task.Queue":
+	case "std.builtin.task_queue":
 		return callQueueFromExprs(args), true, nil
-	case "std.task.partition_mut":
+	case "std.builtin.task_partition_mut":
 		value, err := i.evalPartitionMut(args, env)
 		return value, true, err
-	case "std.task.LocalBuffer":
+	case "std.builtin.task_local_buffer":
 		value, err := i.evalLocalBuffer(args, env)
 		return value, true, err
 	case "std.task.parallel_for":
