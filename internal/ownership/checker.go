@@ -649,6 +649,8 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		return c.readCastExpr(e, env)
 	case *ast.TryExpr:
 		return c.readTryExpr(e, env)
+	case *ast.IndexExpr:
+		return c.readIndexExpr(e, env)
 	case *ast.ArenaNewExpr:
 		return fmt.Sprintf("arena<%s>", e.TypeName), nil
 	case *ast.StructLiteralExpr:
@@ -660,6 +662,34 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	default:
 		return "", fmt.Errorf("move error: unsupported expression %T", expr)
 	}
+}
+
+// readIndexExpr reads checked byte indexing and slicing without moving bytes.
+func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error) {
+	target, err := c.readExpr(expr.Target, env)
+	if err != nil {
+		return "", err
+	}
+	if target != "[]const u8" {
+		return "", fmt.Errorf("move error: index/slice target expects []const u8, got %s", target)
+	}
+	if !expr.Slice {
+		if _, err := c.readExpr(expr.Index, env); err != nil {
+			return "", err
+		}
+		return "u8", nil
+	}
+	if expr.Start != nil {
+		if _, err := c.readExpr(expr.Start, env); err != nil {
+			return "", err
+		}
+	}
+	if expr.End != nil {
+		if _, err := c.readExpr(expr.End, env); err != nil {
+			return "", err
+		}
+	}
+	return "[]const u8", nil
 }
 
 // readLiteralType returns the ownership type of scalar literals.
@@ -822,6 +852,9 @@ func (c *Checker) readBinaryExpr(expr *ast.BinaryExpr, env *scope) (string, erro
 	if _, err := c.readExpr(expr.Right, env); err != nil {
 		return "", err
 	}
+	if expr.Operator == "and" || expr.Operator == "or" {
+		return "bool", nil
+	}
 	if isBooleanBinaryOperator(expr.Operator) {
 		return "bool", nil
 	}
@@ -853,20 +886,29 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
 		return result, err
 	}
-	fn, ok := c.functions[name.Name]
+	return c.checkUserCall(name.Name, expr.Args, env)
+}
+
+// checkUserCall validates ownership effects for a declared function call.
+func (c *Checker) checkUserCall(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	fn, ok := c.functions[name]
 	if !ok {
-		return "", fmt.Errorf("move error: undefined function `%s`", name.Name)
+		return "", fmt.Errorf("move error: undefined function `%s`", name)
 	}
-	if len(expr.Args) != len(fn.params) {
+	if len(args) != len(fn.params) {
 		return "", fmt.Errorf("move error: `%s` expects %d args, got %d",
-			name.Name, len(fn.params), len(expr.Args))
+			name, len(fn.params), len(args))
 	}
-	borrowed, err := c.activateBorrowArgs(fn, expr.Args, env)
+	borrowed, err := c.activateBorrowArgs(fn, args, env)
 	if err != nil {
 		return "", err
 	}
 	defer releaseBorrows(borrowed)
-	for idx, arg := range expr.Args {
+	for idx, arg := range args {
 		if fn.params[idx].comptime {
 			_, err = c.readExpr(arg, env)
 		} else if fn.params[idx].borrow {
@@ -890,10 +932,30 @@ func (c *Checker) checkFieldCallExpr(
 	if typ, ok, err := c.checkUnionConstructor(field, args, env); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkQualifiedUserCall(field, args, env); ok || err != nil {
+		return typ, err
+	}
 	if typ, ok, err := c.checkQualifiedBuiltin(field, args, env); ok || err != nil {
 		return typ, err
 	}
 	return c.checkMethodCallExpr(field, args, env)
+}
+
+// checkQualifiedUserCall validates ownership for source-loaded qualified calls.
+func (c *Checker) checkQualifiedUserCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return "", false, nil
+	}
+	if _, ok := c.functions[name]; !ok {
+		return "", false, nil
+	}
+	typ, err := c.checkUserCall(name, args, env)
+	return typ, true, err
 }
 
 // checkQualifiedBuiltin validates ownership for std:: namespace prototype calls.
@@ -949,6 +1011,15 @@ func (c *Checker) checkQualifiedStdRuntimeBuiltin(
 	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
 		return typ, ok, err
 	}
+	return c.checkQualifiedStdRuntimeStateBuiltin(name, args, env)
+}
+
+// checkQualifiedStdRuntimeStateBuiltin validates stateful std runtime helpers.
+func (c *Checker) checkQualifiedStdRuntimeStateBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
 	if name == "std.string.String" {
 		return c.checkStringConstructor(args, env)
 	}
@@ -956,6 +1027,9 @@ func (c *Checker) checkQualifiedStdRuntimeBuiltin(
 		return typ, ok, err
 	}
 	if typ, ok, err := c.checkTestingBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkStringStorageBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
 	return "", false, nil
@@ -983,15 +1057,15 @@ func (c *Checker) checkTestingBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.testing.expect":
+	case "std.builtin.testing_expect":
 		return c.checkTestingArgs(name, args, env, "bool")
-	case "std.testing.expect_equal_i64":
+	case "std.builtin.testing_expect_equal_i64":
 		return c.checkTestingArgs(name, args, env, "i64", "i64")
-	case "std.testing.expect_equal_bool":
+	case "std.builtin.testing_expect_equal_bool":
 		return c.checkTestingArgs(name, args, env, "bool", "bool")
-	case "std.testing.expect_equal_bytes":
+	case "std.builtin.testing_expect_equal_bytes":
 		return c.checkTestingArgs(name, args, env, "[]const u8", "[]const u8")
-	case "std.testing.fail":
+	case "std.builtin.testing_fail":
 		return c.checkTestingArgs(name, args, env, "[]const u8")
 	default:
 		return "", false, nil
@@ -1045,25 +1119,21 @@ func (c *Checker) checkMemBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.mem.page_allocator":
+	case "std.builtin.mem_page_allocator":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return "Allocator", true, nil
-	case "std.mem.len":
+	case "std.builtin.mem_len":
 		return c.checkMemByteArgs(name, args, env, 1, "i64")
-	case "std.mem.byte_at":
+	case "std.builtin.mem_byte_at":
 		return c.checkMemByteIndex(name, args, env, "!u8")
-	case "std.mem.equal_bytes", "std.mem.starts_with":
-		return c.checkMemByteArgs(name, args, env, 2, "bool")
-	case "std.mem.slice":
-		if err := c.checkMemSliceShape("std.mem.slice", args, env); err != nil {
+	case "std.builtin.mem_slice":
+		if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env); err != nil {
 			return "", true, err
 		}
 		return "![]const u8", true, nil
-	case "std.mem.trim_ascii":
-		return c.checkMemByteArgs(name, args, env, 1, "[]const u8")
 	default:
 		return "", false, nil
 	}
@@ -1170,9 +1240,9 @@ func (c *Checker) checkPathBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.path.join":
+	case "std.builtin.path_join":
 		return c.checkPathArgs(name, args, env, 2)
-	case "std.path.clean", "std.path.basename", "std.path.dirname", "std.path.extension":
+	case "std.builtin.path_clean":
 		return c.checkPathArgs(name, args, env, 1)
 	default:
 		return "", false, nil
@@ -1209,9 +1279,9 @@ func (c *Checker) checkIoWriteBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.io.write_stdout", "std.io.write_stderr":
+	case "std.builtin.io_write_stdout", "std.builtin.io_write_stderr":
 		return c.checkIoBytesCall(name, args, env)
-	case "std.io.read_stdin":
+	case "std.builtin.io_read_stdin":
 		return c.checkIoOnlyCall(name, args, env, "![]const u8")
 	default:
 		return "", false, nil
@@ -1263,14 +1333,14 @@ func (c *Checker) checkProcessBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.process.arg_count":
+	case "std.builtin.process_arg_count":
 		_, err := checkNoArgOwnershipCall(name, args)
 		return "i64", true, err
-	case "std.process.arg":
+	case "std.builtin.process_arg":
 		return c.checkProcessI64Arg(name, args, env, "![]const u8")
-	case "std.process.env":
+	case "std.builtin.process_env":
 		return c.checkProcessBytesArg(name, args, env, "![]const u8")
-	case "std.process.exit_code":
+	case "std.builtin.process_exit_code":
 		return c.checkProcessI64Arg(name, args, env, "i64")
 	default:
 		return "", false, nil
@@ -1564,13 +1634,13 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, name string) error 
 // checkIoBuiltin validates std::io constructor ownership effects.
 func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 	switch name {
-	case "std.io.blocking", "std.io.threaded", "std.io.failing":
+	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return "Io", true, nil
-	case "std.io.evented":
+	case "std.io.evented", "std.builtin.io_evented":
 		return "", true, fmt.Errorf("move error: `std::io::evented` is not implemented in v0.1")
 	default:
 		return "", false, nil
@@ -1607,6 +1677,61 @@ func (c *Checker) checkTypeApplyCallExpr(
 	default:
 		return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
 	}
+}
+
+// checkStringStorageBuiltin validates trusted String storage primitives.
+func (c *Checker) checkStringStorageBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.builtin.string_append_bytes":
+		return c.checkStringStorageArgs(name, args, env, "!void", "[]const u8")
+	case "std.builtin.string_append_byte":
+		return c.checkStringStorageArgs(name, args, env, "!void", "u8")
+	case "std.builtin.string_reserve":
+		return c.checkStringStorageArgs(name, args, env, "!void", "i64")
+	case "std.builtin.string_len", "std.builtin.string_capacity":
+		return c.checkStringStorageArgs(name, args, env, "i64")
+	case "std.builtin.string_as_bytes":
+		return c.checkStringStorageArgs(name, args, env, "[]const u8")
+	case "std.builtin.string_clear", "std.builtin.string_deinit":
+		return c.checkStringStorageArgs(name, args, env, "void")
+	default:
+		return "", false, nil
+	}
+}
+
+// checkStringStorageArgs reads primitive String arguments without moving them.
+func (c *Checker) checkStringStorageArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	result string,
+	extra ...string,
+) (string, bool, error) {
+	if len(args) != 1+len(extra) {
+		return "", true, fmt.Errorf("move error: `%s` expects %d args", name, 1+len(extra))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "std::string::String" {
+		return "", true, fmt.Errorf("move error: `%s` expects String, got %s", name, got)
+	}
+	for idx, want := range extra {
+		got, err := c.readExpr(args[idx+1], env)
+		if err != nil {
+			return "", true, err
+		}
+		if got != want {
+			return "", true, fmt.Errorf("move error: `%s` arg %d expects %s, got %s",
+				name, idx+2, want, got)
+		}
+	}
+	return result, true, nil
 }
 
 // checkBuiltinCall validates ownership effects for builtin calls.
@@ -2013,50 +2138,71 @@ func (c *Checker) checkStringMethod(
 	env *scope,
 ) (string, error) {
 	switch name {
-	case "append_bytes":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.append_bytes` cannot run while string is borrowed")
+	case "append_bytes", "append_byte", "reserve":
+		if err := checkStringMutationAllowed(str, name); err != nil {
+			return "", err
 		}
-		return c.checkStringBytesArg(name, args, env)
-	case "append_byte":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.append_byte` cannot run while string is borrowed")
-		}
-		return c.checkStringByteArg(name, args, env)
-	case "len":
-		if len(args) != 0 {
-			return "", fmt.Errorf("string error: `String.len` expects 0 args, got %d", len(args))
+		return c.checkStringAppendOrReserve(name, args, env)
+	case "len", "capacity":
+		if err := checkStringNoArgs(name, args); err != nil {
+			return "", err
 		}
 		return "i64", nil
 	case "as_bytes":
 		return "", fmt.Errorf(
 			"string error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
-	case "clear":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.clear` cannot run while string is borrowed")
+	case "clear", "deinit":
+		if err := checkStringMutationAllowed(str, name); err != nil {
+			return "", err
 		}
-		if len(args) != 0 {
-			return "", fmt.Errorf("string error: `String.clear` expects 0 args, got %d", len(args))
+		if err := checkStringNoArgs(name, args); err != nil {
+			return "", err
 		}
-		return "void", nil
-	case "deinit":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.deinit` cannot run while string is borrowed")
+		if name == "deinit" {
+			str.moved = true
 		}
-		if len(args) != 0 {
-			return "", fmt.Errorf("string error: `String.deinit` expects 0 args, got %d", len(args))
-		}
-		str.moved = true
 		return "void", nil
 	default:
 		return "", fmt.Errorf("string error: String has no method `%s`", name)
 	}
 }
 
+// checkStringAppendOrReserve validates one-argument String mutators.
+func (c *Checker) checkStringAppendOrReserve(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
+	case "append_bytes":
+		return c.checkStringBytesArg(name, args, env)
+	case "append_byte":
+		return c.checkStringByteArg(name, args, env)
+	default:
+		return c.checkStringReserveArg(name, args, env)
+	}
+}
+
+// checkStringMutationAllowed rejects mutation while a byte view is alive.
+func checkStringMutationAllowed(str *binding, name string) error {
+	if str.hasAnyBorrow() {
+		return fmt.Errorf("string error: `String.%s` cannot run while string is borrowed", name)
+	}
+	return nil
+}
+
+// checkStringNoArgs validates no-argument String methods.
+func checkStringNoArgs(name string, args []ast.Expression) error {
+	if len(args) != 0 {
+		return fmt.Errorf("string error: `String.%s` expects 0 args, got %d", name, len(args))
+	}
+	return nil
+}
+
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "clear", "deinit":
+	case "append_bytes", "append_byte", "reserve", "clear", "deinit":
 		return true
 	default:
 		return false
@@ -2078,6 +2224,25 @@ func (c *Checker) checkStringBytesArg(
 	}
 	if got != "[]const u8" {
 		return "", fmt.Errorf("string error: `String.%s` expects []const u8, got %s", name, got)
+	}
+	return "!void", nil
+}
+
+// checkStringReserveArg validates reserve without moving the count.
+func (c *Checker) checkStringReserveArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", fmt.Errorf("string error: `String.%s` expects i64, got %s", name, got)
 	}
 	return "!void", nil
 }

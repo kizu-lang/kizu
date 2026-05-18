@@ -20,10 +20,10 @@ code, and less likely to grow heavy CI and build caches.
 
 Kizu is an early prototype implemented in Go.
 
-The v0.1 target is the interpreter-first language core. The current v0.2 work
-adds the minimal standard-library surface needed by the future self-host
-compiler. The authoritative behavior is still the Go interpreter plus
-`kizu check`.
+The v0.1 target is the interpreter-first language core. The current v0.2
+baseline adds the minimal standard-library surface and tooling needed to keep
+language behavior testable. The authoritative behavior is still the Go
+interpreter plus `kizu check`.
 
 Implemented language-core pieces:
 
@@ -52,20 +52,23 @@ Implemented language-core pieces:
 
 Experimental compiler and tooling pieces:
 
-- self-host compiler skeleton in `selfhost/`
+- Kizu stdlib migration layout in `std/`
 - typed SSA IR
 - LLVM IR text backend
 - bounded local build cache and rebuild explanations
 - WASI-compatible WebAssembly text backend
 - limited C header import for extern function declarations
 - opt-in IR optimization pipeline
+- limited native executable generation through LLVM IR and clang
 
 These experimental pieces are not the language oracle yet. LLVM and WASM
-currently support more limited target subsets than the interpreter, and native
-executable generation is not implemented.
+currently support more limited target subsets than the interpreter. Native
+builds are limited to the LLVM-lowered subset and a small `kizu_print_*`
+runtime shim. The current native path uses host `clang` and libc; future
+no-libc / freestanding builds are part of the accepted build policy.
 
-There are no open v0.2 issues at the time of writing. Remaining work is tracked
-as v0.3 self-host and module-boundary implementation issues in GitHub Issues.
+There are no open v0.2 issues at the time of writing. Future compiler migration
+work should start from new GitHub Issues with explicit acceptance criteria.
 
 This repository is still experimental. Syntax and implementation details can
 change while the language design is being tested.
@@ -144,6 +147,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -159,9 +163,10 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.
+- `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` links a native executable.
 - `kizu cache status` prints local build cache status.
 - `kizu cache prune` clears local build cache entries.
-- `kizu why-rebuild <file|package>` explains cache hit or rebuild reasons.
+- `kizu why-rebuild <file>` explains cache hit or rebuild reasons.
 - `kizu import-c-header <file>` converts supported C prototypes to Kizu externs.
 
 `kizu lint` is not implemented.

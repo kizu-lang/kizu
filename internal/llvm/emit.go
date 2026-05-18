@@ -24,10 +24,11 @@ func Emit(module *ir.Module) (string, error) {
 }
 
 type emitter struct {
-	module  *ir.Module
-	out     bytes.Buffer
-	strings map[string]string
-	values  map[string]valueInfo
+	module         *ir.Module
+	out            bytes.Buffer
+	strings        map[string]string
+	values         map[string]valueInfo
+	mainReturnsInt bool
 }
 
 type valueInfo struct {
@@ -102,14 +103,19 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 		params = append(params, llvmType(param.Type)+" "+param.Name)
 		e.values[param.Name] = valueInfo{typ: param.Type, operand: param.Name}
 	}
-	fmt.Fprintf(&e.out, "define %s @%s(%s) {\n",
-		llvmType(fn.Return), fn.Name, strings.Join(params, ", "))
+	returnType := llvmType(fn.Return)
+	e.mainReturnsInt = fn.Name == "main" && fn.Return == "void"
+	if e.mainReturnsInt {
+		returnType = "i32"
+	}
+	fmt.Fprintf(&e.out, "define %s @%s(%s) {\n", returnType, fn.Name, strings.Join(params, ", "))
 	for _, block := range fn.Blocks {
 		if err := e.writeBlock(block); err != nil {
 			return err
 		}
 	}
 	e.out.WriteString("}\n\n")
+	e.mainReturnsInt = false
 	return nil
 }
 
@@ -138,11 +144,11 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	case instr.Op == "phi":
 		return e.writePhi(instr)
 	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
-		return e.writeOpaqueValue(instr)
+		return e.unsupported(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" || instr.Op == "arena.get":
-		return e.writeOpaqueValue(instr)
+		return e.unsupported(instr)
 	case instr.Op == "error.error" || instr.Op == "error.try":
-		return e.writeOpaqueValue(instr)
+		return e.unsupported(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
@@ -158,10 +164,11 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 	case "[]const u8":
 		unquoted, _ := strconv.Unquote(instr.Immediate)
 		global := e.strings[instr.Immediate]
+		name := localName(instr.Result.Name)
 		fmt.Fprintf(&e.out, "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0\n",
-			instr.Result.Name, len(unquoted)+1, global)
+			name, len(unquoted)+1, global)
 		e.values[instr.Result.Name] = valueInfo{
-			typ: "[]const u8", operand: instr.Result.Name, length: len(unquoted),
+			typ: "[]const u8", operand: name, length: len(unquoted),
 		}
 	default:
 		return fmt.Errorf("llvm error: unsupported const type `%s`", instr.Result.Type)
@@ -179,14 +186,15 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	op := strings.TrimPrefix(instr.Op, "binary.")
 	if instr.Result.Type == "bool" {
 		pred := llvmPredicate(op)
+		name := localName(instr.Result.Name)
 		fmt.Fprintf(&e.out, "  %s = icmp %s i64 %s, %s\n",
-			instr.Result.Name, pred, left.operand, right.operand)
-		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: instr.Result.Name}
+			name, pred, left.operand, right.operand)
+		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: name}
 		return nil
 	}
-	fmt.Fprintf(&e.out, "  %s = %s i64 %s, %s\n",
-		instr.Result.Name, llvmBinaryOp(op), left.operand, right.operand)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Result.Name}
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s i64 %s, %s\n", name, llvmBinaryOp(op), left.operand, right.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 
@@ -206,8 +214,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 		fmt.Fprintf(&e.out, "  %s\n", call)
 		return nil
 	}
-	fmt.Fprintf(&e.out, "  %s = %s\n", instr.Result.Name, call)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Result.Name}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 
@@ -248,17 +257,16 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 		value := e.value(incoming.Value)
 		parts = append(parts, fmt.Sprintf("[ %s, %%%s ]", value.operand, incoming.Block))
 	}
+	name := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = phi %s %s\n",
-		instr.Result.Name, llvmType(instr.Result.Type), strings.Join(parts, ", "))
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Result.Name}
+		name, llvmType(instr.Result.Type), strings.Join(parts, ", "))
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 
-// writeOpaqueValue represents values not lowered to concrete LLVM layout in phase 9.
-func (e *emitter) writeOpaqueValue(instr *ir.Instr) error {
-	fmt.Fprintf(&e.out, "  ; %s omitted in phase 9\n", instr.Op)
-	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
-	return nil
+// unsupported rejects checked IR that has no concrete LLVM representation yet.
+func (e *emitter) unsupported(instr *ir.Instr) error {
+	return fmt.Errorf("llvm error: `%s` is not supported by the LLVM backend yet", instr.Op)
 }
 
 // writeTerminator writes one LLVM terminator.
@@ -266,6 +274,10 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 	switch term.Op {
 	case "return":
 		if term.Value.Type == "void" {
+			if e.mainReturnsInt {
+				e.out.WriteString("  ret i32 0\n")
+				return nil
+			}
 			e.out.WriteString("  ret void\n")
 			return nil
 		}
@@ -288,5 +300,5 @@ func (e *emitter) value(value ir.Value) valueInfo {
 	if found, ok := e.values[value.Name]; ok {
 		return found
 	}
-	return valueInfo{typ: value.Type, operand: value.Name}
+	return valueInfo{typ: value.Type, operand: localName(value.Name)}
 }

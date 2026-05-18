@@ -65,6 +65,67 @@ func (l *lowerer) lowerIfExpr(expr *ast.IfExpr) (Value, error) {
 	}), nil
 }
 
+// lowerLogicalExpr lowers short-circuit boolean operators into control flow.
+func (l *lowerer) lowerLogicalExpr(expr *ast.BinaryExpr) (Value, error) {
+	left, err := l.lowerExpr(expr.Left)
+	if err != nil {
+		return Value{}, err
+	}
+	rightBlock := l.newBlock(l.nextBlockName("logical.right"))
+	constBlock := l.newBlock(l.nextBlockName("logical.const"))
+	mergeBlock := l.newBlock(l.nextBlockName("logical.end"))
+	if expr.Operator == "and" {
+		l.block.Terminator = Terminator{
+			Op: "branch", Cond: left, Target: rightBlock.Name, Else: constBlock.Name,
+		}
+	} else {
+		l.block.Terminator = Terminator{
+			Op: "branch", Cond: left, Target: constBlock.Name, Else: rightBlock.Name,
+		}
+	}
+	rightValue, rightEnd, err := l.lowerLogicalBranch(rightBlock, expr.Right, mergeBlock.Name)
+	if err != nil {
+		return Value{}, err
+	}
+	constValue, constEnd := l.lowerLogicalConst(constBlock, expr.Operator, mergeBlock.Name)
+	l.block = mergeBlock
+	return l.addPhi(mergeBlock, "bool", []Incoming{
+		{Block: rightEnd, Value: rightValue},
+		{Block: constEnd, Value: constValue},
+	}), nil
+}
+
+// lowerLogicalBranch lowers the RHS of a short-circuit operator.
+func (l *lowerer) lowerLogicalBranch(
+	block *Block,
+	expr ast.Expression,
+	target string,
+) (Value, string, error) {
+	l.block = block
+	value, err := l.lowerExpr(expr)
+	if err != nil {
+		return Value{}, "", err
+	}
+	end := l.block.Name
+	if l.block.Terminator.Op == "" {
+		l.block.Terminator = Terminator{Op: "jump", Target: target}
+	}
+	return value, end, nil
+}
+
+// lowerLogicalConst lowers the branch that skips the RHS.
+func (l *lowerer) lowerLogicalConst(block *Block, op string, target string) (Value, string) {
+	l.block = block
+	immediate := "true"
+	if op == "and" {
+		immediate = "false"
+	}
+	value := l.emitConst("bool", immediate)
+	end := l.block.Name
+	l.block.Terminator = Terminator{Op: "jump", Target: target}
+	return value, end
+}
+
 // lowerBranchValue lowers one if-expression branch and returns its final value.
 func (l *lowerer) lowerBranchValue(
 	block *Block,

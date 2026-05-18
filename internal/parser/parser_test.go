@@ -102,6 +102,43 @@ func TestParseIfExpression(t *testing.T) {
 	}
 }
 
+// TestParseLogicalExpressions checks boolean operator precedence.
+func TestParseLogicalExpressions(t *testing.T) {
+	input := `fn main() {
+    let ok = age >= 20 and age < 130 or false;
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() { let ok = (((age >= 20) and (age < 130)) or false); }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseIndexAndSliceExpressions checks checked byte access syntax.
+func TestParseIndexAndSliceExpressions(t *testing.T) {
+	input := `fn main() -> !void {
+    let byte = bytes[0];
+    let part = bytes[0..5];
+    let tail = bytes[2..];
+    let head = bytes[..3];
+    return void;
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() -> !void { let byte = bytes[0]; let part = bytes[0..5]; ` +
+		`let tail = bytes[2..]; let head = bytes[..3]; return void; }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseLoopControl checks for loops and labeled branches.
 func TestParseLoopControl(t *testing.T) {
 	input := `fn main() {
@@ -266,26 +303,6 @@ fn main() {
 	want := `struct User { name: []const u8 }
 fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice" }); ` +
 		`print(users.get(alice).name); }`
-	if got := program.String(); got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-// TestParseNamespacedStructLiteral checks module-qualified construction.
-func TestParseNamespacedStructLiteral(t *testing.T) {
-	input := `fn main() {
-    let token = lexer::Token { kind: 1 };
-    if token.kind == TokenKind::Eof {
-        return;
-    }
-}`
-	p := New(lexer.New(input))
-	program := p.ParseProgram()
-	if len(p.Errors()) != 0 {
-		t.Fatalf("parser errors: %v", p.Errors())
-	}
-	want := `fn main() { let token = lexer::Token { kind: 1 }; ` +
-		`if (token.kind == TokenKind::Eof) { return; } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

@@ -33,6 +33,9 @@ func constBool(expr ast.Expression) (bool, bool) {
 		value, ok := constBool(e.Right)
 		return !value, ok && e.Operator == "!"
 	case *ast.BinaryExpr:
+		if e.Operator == "and" || e.Operator == "or" {
+			return constLogicalBool(e)
+		}
 		left, leftOK := constInt(e.Left)
 		right, rightOK := constInt(e.Right)
 		if leftOK && rightOK {
@@ -40,6 +43,28 @@ func constBool(expr ast.Expression) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// constLogicalBool evaluates boolean logic for comptime branch selection.
+func constLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
+	left, leftOK := constBool(expr.Left)
+	if !leftOK {
+		return false, false
+	}
+	if expr.Operator == "and" && !left {
+		return false, true
+	}
+	if expr.Operator == "or" && left {
+		return true, true
+	}
+	right, rightOK := constBool(expr.Right)
+	if !rightOK {
+		return false, false
+	}
+	if expr.Operator == "and" {
+		return left && right, true
+	}
+	return left || right, true
 }
 
 // constInt evaluates constant integer arithmetic used by comptime branches.

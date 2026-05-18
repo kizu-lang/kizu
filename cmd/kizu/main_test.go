@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,43 +45,6 @@ func TestRunCommandArenaExample(t *testing.T) {
 	want := "alice\n"
 	if string(out) != want {
 		t.Fatalf("got %q, want %q", out, want)
-	}
-}
-
-// TestCheckCommandPackageFixture checks manifest-based multi-file package checks.
-func TestCheckCommandPackageFixture(t *testing.T) {
-	source := filepath.Join("..", "..", "tests", "conformance", "modules", "basic")
-	cmd := exec.Command("go", "run", ".", "check", source)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, out)
-	}
-	if string(out) != "check: ok\n" {
-		t.Fatalf("got %q", out)
-	}
-}
-
-// TestCheckCommandStdPackage checks the compiler-owned std source skeleton.
-func TestCheckCommandStdPackage(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "check", "../../std")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, out)
-	}
-	if string(out) != "check: ok\n" {
-		t.Fatalf("got %q", out)
-	}
-}
-
-// TestCheckCommandSelfHostPackage checks the module-first self-host scaffold.
-func TestCheckCommandSelfHostPackage(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "check", "../../selfhost")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("command failed: %v\n%s", err, out)
-	}
-	if string(out) != "check: ok\n" {
-		t.Fatalf("got %q", out)
 	}
 }
 
@@ -136,7 +100,7 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "define void @main()"
+	want := "define i32 @main()"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
 	}
@@ -168,6 +132,140 @@ func TestBuildTargetWASICommandSmoke(t *testing.T) {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
 	want := `(func $_start (export "_start")`
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("got %q, want substring %q", out, want)
+	}
+}
+
+// TestBuildTargetNativeCommandSmoke checks native build produces an executable.
+func TestBuildTargetNativeCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	output := filepath.Join(t.TempDir(), "hello")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, "../../examples/hello.kizu",
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != output {
+		t.Fatalf("got %q, want output path %q", out, output)
+	}
+	assertNativeMetadata(t, output+".kizu-build.json", output)
+	run := exec.Command(output)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, out)
+	}
+	if string(out) != "hello, kizu\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestBuildTargetNativeRejectsUnsupportedModes checks planned Zig-style modes are explicit.
+func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "no libc",
+			args: []string{"build", "--target", "native", "--libc", "off", "../../examples/hello.kizu"},
+			want: "native error: --libc off is not implemented yet",
+		},
+		{
+			name: "freestanding",
+			args: []string{"build", "--target", "native", "--runtime", "freestanding",
+				"../../examples/hello.kizu"},
+			want: "native error: --runtime freestanding is not implemented yet",
+		},
+		{
+			name: "object",
+			args: []string{"build", "--target", "native", "--emit", "obj", "../../examples/hello.kizu"},
+			want: "native error: --emit obj is not implemented yet",
+		},
+		{
+			name: "cpu",
+			args: []string{"build", "--target", "native", "--cpu", "baseline", "../../examples/hello.kizu"},
+			want: "native error: --cpu is not implemented yet",
+		},
+		{
+			name: "abi",
+			args: []string{"build", "--target", "native", "--abi", "gnu", "../../examples/hello.kizu"},
+			want: "native error: --abi is not implemented yet",
+		},
+		{
+			name: "linker",
+			args: []string{"build", "--target", "native", "--linker", "lld", "../../examples/hello.kizu"},
+			want: "native error: --linker lld is not implemented yet",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("go", append([]string{"run", "."}, tt.args...)...)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected command to fail\n%s", out)
+			}
+			if !strings.Contains(string(out), tt.want) {
+				t.Fatalf("got %q, want substring %q", out, tt.want)
+			}
+		})
+	}
+}
+
+// assertNativeMetadata checks native artifact metadata records explicit build inputs.
+func assertNativeMetadata(t *testing.T, path string, output string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Target  string   `json:"target"`
+		LibC    string   `json:"libc"`
+		Runtime string   `json:"runtime"`
+		Emit    string   `json:"emit"`
+		Linker  string   `json:"linker"`
+		Output  string   `json:"output"`
+		Command []string `json:"command"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Target != "native" || got.LibC != "on" || got.Runtime != "hosted" {
+		t.Fatalf("unexpected metadata: %+v", got)
+	}
+	if got.Emit != "exe" || got.Linker != "clang" || got.Output != output {
+		t.Fatalf("unexpected metadata: %+v", got)
+	}
+	if len(got.Command) == 0 || got.Command[0] != "clang" {
+		t.Fatalf("unexpected command metadata: %+v", got.Command)
+	}
+}
+
+// TestBuildTargetNativeRejectsUnsupportedFeature checks native build fails before clang.
+func TestBuildTargetNativeRejectsUnsupportedFeature(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "struct.kizu")
+	code := []byte(`struct User { age: i64; }
+fn main() {
+    let user = User { age: 30 };
+    print(user.age);
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "build", "--target", "native", source)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected native build to fail\n%s", out)
+	}
+	want := "llvm error: `struct.new` is not supported by the LLVM backend yet"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
 	}

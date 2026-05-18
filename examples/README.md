@@ -4,7 +4,7 @@ This directory is the user-visible catalog for Kizu language behavior.
 
 Executable and negative examples are listed in
 [`tests/conformance/`](../tests/conformance/). The Go test runner reads the
-versioned manifests, and the future self-host compiler should reuse them as the
+versioned manifests so future compiler implementations can reuse them as the
 compatibility corpus.
 
 Run the full catalog through the normal project gate:
@@ -63,15 +63,17 @@ go test ./...
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
 | task-based file read | `fs_task.kizu` | reads a fixture from a spawned task |
 | pure path helpers | `std_path.kizu` | joins, cleans, and decomposes slash-separated paths |
+| path edge cases | `std_path_edges.kizu` | asserts root, empty path, trailing slash, and extension behavior |
 | explicit-Io fs helpers | `std_fs_path.kizu` | checks existence, metadata, create_dir, and remove_dir |
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
+| checked index / slice syntax | `slice_syntax.kizu` | asserts trapping `[]const u8` indexing and slicing through `bytes[...]` |
+| boolean logic | `logical.kizu` | asserts `and` / `or` precedence and short-circuit shape |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
-| single-element array get | `std_array_single_get.kizu` | keeps in-bounds `Array.get(0)` diagnostic-clean |
-| self-host token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
+| token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
-| owned string with explicit allocator | `std_string.kizu` | builds owned bytes and exposes local byte views |
+| owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
 | owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]const u8, i64>` |
 | symbol table map shape | `std_map_symbol_table.kizu` | maps byte keys to copy enum values |
@@ -170,6 +172,9 @@ go test ./...
 | byte-slice helper args must be `[]const u8` | `negative/std_mem_wrong_type.kizu` | `expects []const u8` |
 | checked byte slices reject invalid ranges | `negative/std_mem_slice_out_of_bounds.kizu` | `range out of bounds` |
 | checked byte access rejects invalid indexes | `negative/std_mem_byte_at_out_of_bounds.kizu` | `index out of bounds` |
+| slice syntax rejects invalid ranges | `negative/slice_syntax_range_out_of_bounds.kizu` | `range out of bounds` |
+| index syntax rejects invalid indexes | `negative/slice_syntax_index_out_of_bounds.kizu` | `index out of bounds` |
+| index/slice syntax requires byte slices | `negative/slice_syntax_wrong_target.kizu` | `expects []const u8` |
 | array access is bounds-checked | `negative/std_array_bounds.kizu` | `index out of bounds` |
 | array construction requires explicit allocator | `negative/std_array_no_allocator.kizu` | `expects allocator` |
 | arrays cannot be used after `deinit` | `negative/std_array_use_after_deinit.kizu` | `moved value` |
@@ -196,9 +201,11 @@ go test ./...
 | string construction requires explicit allocator | `negative/std_string_no_allocator.kizu` | `expects allocator` |
 | string append bytes requires `[]const u8` | `negative/std_string_wrong_append_type.kizu` | `expects []const u8` |
 | string append byte requires `u8` | `negative/std_string_append_byte_wrong_type.kizu` | `expects u8` |
+| string reserve requires `i64` | `negative/std_string_reserve_wrong_type.kizu` | `expects i64` |
 | strings cannot be used after `deinit` | `negative/std_string_use_after_deinit.kizu` | `moved value` |
 | string byte views block append | `negative/std_string_append_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views block clear | `negative/std_string_clear_while_viewed.kizu` | `cannot run while string is borrowed` |
+| string byte views block reserve | `negative/std_string_reserve_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views block deinit | `negative/std_string_deinit_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views cannot escape through return | `negative/std_string_as_bytes_return_escape.kizu` | `String.as_bytes` must be bound |
 | string byte views cannot be used directly | `negative/std_string_as_bytes_direct_use.kizu` | `String.as_bytes` must be bound |

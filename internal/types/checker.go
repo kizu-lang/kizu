@@ -13,6 +13,7 @@ type Type string
 const (
 	typeBool       Type = "bool"
 	typeI64        Type = "i64"
+	typeU8         Type = "u8"
 	typeByteString Type = "[]const u8"
 	typeSelf       Type = "Self"
 	typeVoid       Type = "void"
@@ -26,7 +27,7 @@ var knownTypes = map[Type]bool{
 	"i8":                  true,
 	"i16":                 true,
 	"i32":                 true,
-	"u8":                  true,
+	typeU8:                true,
 	"u16":                 true,
 	"u32":                 true,
 	"u64":                 true,
@@ -49,7 +50,7 @@ var numericTypes = map[Type]bool{
 	"i16":   true,
 	"i32":   true,
 	"i64":   true,
-	"u8":    true,
+	typeU8:  true,
 	"u16":   true,
 	"u32":   true,
 	"u64":   true,
@@ -67,7 +68,7 @@ var copyTypes = map[Type]bool{
 	"i8":                true,
 	"i16":               true,
 	"i32":               true,
-	"u8":                true,
+	typeU8:              true,
 	"u16":               true,
 	"u32":               true,
 	"u64":               true,
@@ -1299,6 +1300,8 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 		return c.checkCastExpr(e, env, unsafe)
 	case *ast.TryExpr:
 		return c.checkTryExpr(e, env, unsafe)
+	case *ast.IndexExpr:
+		return c.checkIndexExpr(e, env, unsafe)
 	case *ast.ArenaNewExpr:
 		return c.checkArenaNewExpr(e)
 	case *ast.StructLiteralExpr:
@@ -1310,6 +1313,54 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 	default:
 		return "", fmt.Errorf("type error: unsupported expression %T", expr)
 	}
+}
+
+// checkIndexExpr validates checked one-dimensional byte indexing and slicing.
+func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe bool) (Type, error) {
+	target, err := c.checkExpr(expr.Target, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if target != typeByteString {
+		return "", fmt.Errorf("type error: index/slice target expects []const u8, got %s", target)
+	}
+	if !expr.Slice {
+		if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
+			return "", err
+		}
+		return typeU8, nil
+	}
+	if expr.Start != nil {
+		if err := c.checkIndexBound("slice start", expr.Start, env, unsafe); err != nil {
+			return "", err
+		}
+	}
+	if expr.End != nil {
+		if err := c.checkIndexBound("slice end", expr.End, env, unsafe); err != nil {
+			return "", err
+		}
+	}
+	return typeByteString, nil
+}
+
+// checkIndexBound validates one i64 index or slice bound.
+func (c *Checker) checkIndexBound(
+	name string,
+	expr ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if expr == nil {
+		return fmt.Errorf("type error: %s is missing", name)
+	}
+	got, err := c.checkExpr(expr, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeI64 {
+		return fmt.Errorf("type error: %s expects i64, got %s", name, got)
+	}
+	return nil
 }
 
 // literalType returns the static type of scalar literals.
@@ -1435,7 +1486,7 @@ func (c *Checker) checkBorrowPrefix(
 	return typ, mutable, nil
 }
 
-// checkBinaryExpr validates arithmetic, equality, and comparison operators.
+// checkBinaryExpr validates arithmetic, logical, equality, and comparison operators.
 func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool) (Type, error) {
 	left, err := c.checkExpr(expr.Left, env, unsafe)
 	if err != nil {
@@ -1444,6 +1495,9 @@ func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool)
 	right, err := c.checkExpr(expr.Right, env, unsafe)
 	if err != nil {
 		return "", err
+	}
+	if expr.Operator == "and" || expr.Operator == "or" {
+		return checkLogical(expr.Operator, left, right)
 	}
 	if expr.Operator == "==" || expr.Operator == "!=" {
 		return checkEquality(expr.Operator, left, right)
@@ -1461,6 +1515,14 @@ func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool)
 		return typeBool, nil
 	}
 	return left, nil
+}
+
+// checkLogical validates boolean logical operands.
+func checkLogical(op string, left Type, right Type) (Type, error) {
+	if left != typeBool || right != typeBool {
+		return "", fmt.Errorf("type error: operator `%s` expects bool operands", op)
+	}
+	return typeBool, nil
 }
 
 // checkEquality validates equality operands.
@@ -1521,13 +1583,7 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type
 // checkCallExpr validates builtin and user function calls.
 func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		if typ, ok, err := c.checkUnionConstructorCall(field, expr.Args, env, unsafe); ok || err != nil {
-			return typ, err
-		}
-		if typ, ok, err := c.checkQualifiedBuiltin(field, expr.Args, env, unsafe); ok || err != nil {
-			return typ, err
-		}
-		return c.checkMethodCallExpr(field, expr.Args, env, unsafe)
+		return c.checkFieldCallExpr(field, expr.Args, env, unsafe)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
 		return c.checkTypeApplyCallExpr(typeApply, expr.Args, env, unsafe)
@@ -1555,6 +1611,43 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 		return "", fmt.Errorf("type error: use `std::task::Group(io)`")
 	}
 	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
+}
+
+// checkFieldCallExpr validates qualified, union, and method calls.
+func (c *Checker) checkFieldCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if typ, ok, err := c.checkUnionConstructorCall(field, args, env, unsafe); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkQualifiedUserCall(field, args, env, unsafe); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkQualifiedBuiltin(field, args, env, unsafe); ok || err != nil {
+		return typ, err
+	}
+	return c.checkMethodCallExpr(field, args, env, unsafe)
+}
+
+// checkQualifiedUserCall validates module-qualified functions loaded from source.
+func (c *Checker) checkQualifiedUserCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return "", false, nil
+	}
+	if _, ok := c.functions[name]; !ok {
+		return "", false, nil
+	}
+	typ, err := c.checkUserCall(name, args, env, unsafe)
+	return typ, true, err
 }
 
 // checkQualifiedBuiltin validates std:: namespace prototype calls.
@@ -1612,6 +1705,9 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	if typ, ok, err := c.checkTestingBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
+	if typ, ok, err := c.checkStringStorageBuiltin(name, args, env, unsafe); ok || err != nil {
+		return typ, ok, err
+	}
 	return c.checkStdConstructorBuiltin(name, args, env, unsafe)
 }
 
@@ -1623,15 +1719,15 @@ func (c *Checker) checkTestingBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.testing.expect":
+	case "std.builtin.testing_expect":
 		return c.checkTestingArgs(name, args, env, unsafe, typeBool)
-	case "std.testing.expect_equal_i64":
+	case "std.builtin.testing_expect_equal_i64":
 		return c.checkTestingArgs(name, args, env, unsafe, typeI64, typeI64)
-	case "std.testing.expect_equal_bool":
+	case "std.builtin.testing_expect_equal_bool":
 		return c.checkTestingArgs(name, args, env, unsafe, typeBool, typeBool)
-	case "std.testing.expect_equal_bytes":
+	case "std.builtin.testing_expect_equal_bytes":
 		return c.checkTestingArgs(name, args, env, unsafe, typeByteString, typeByteString)
-	case "std.testing.fail":
+	case "std.builtin.testing_fail":
 		return c.checkTestingArgs(name, args, env, unsafe, typeByteString)
 	default:
 		return "", false, nil
@@ -1671,10 +1767,10 @@ func (c *Checker) checkStdConstructorBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.io.blocking", "std.io.threaded", "std.io.failing":
+	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
-	case "std.io.evented":
+	case "std.io.evented", "std.builtin.io_evented":
 		return "", true, fmt.Errorf("type error: `std::io::evented` is not implemented in v0.1")
 	case "std.array.Array":
 		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
@@ -1705,9 +1801,9 @@ func (c *Checker) checkIoBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.io.write_stdout", "std.io.write_stderr":
+	case "std.builtin.io_write_stdout", "std.builtin.io_write_stderr":
 		return c.checkIoBytesCall(name, args, env, unsafe)
-	case "std.io.read_stdin":
+	case "std.builtin.io_read_stdin":
 		return c.checkIoOnlyCall(name, args, env, unsafe, "![]const u8")
 	default:
 		return "", false, nil
@@ -1762,14 +1858,14 @@ func (c *Checker) checkProcessBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.process.arg_count":
+	case "std.builtin.process_arg_count":
 		typ, err := checkNoArgConstructor(name, args, "i64")
 		return typ, true, err
-	case "std.process.arg":
+	case "std.builtin.process_arg":
 		return c.checkOneI64Arg(name, args, env, unsafe, "![]const u8")
-	case "std.process.env":
+	case "std.builtin.process_env":
 		return c.checkOneBytesArg(name, args, env, unsafe, "![]const u8")
-	case "std.process.exit_code":
+	case "std.builtin.process_exit_code":
 		return c.checkOneI64Arg(name, args, env, unsafe, "i64")
 	default:
 		return "", false, nil
@@ -1784,9 +1880,9 @@ func (c *Checker) checkPathBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.path.join":
+	case "std.builtin.path_join":
 		return c.checkPathBytesArgs(name, args, env, unsafe, 2)
-	case "std.path.clean", "std.path.basename", "std.path.dirname", "std.path.extension":
+	case "std.builtin.path_clean":
 		return c.checkPathBytesArgs(name, args, env, unsafe, 1)
 	default:
 		return "", false, nil
@@ -1887,19 +1983,15 @@ func (c *Checker) checkMemBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.mem.page_allocator":
+	case "std.builtin.mem_page_allocator":
 		typ, err := checkNoArgConstructor(name, args, "Allocator")
 		return typ, true, err
-	case "std.mem.len":
+	case "std.builtin.mem_len":
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeI64)
-	case "std.mem.byte_at":
+	case "std.builtin.mem_byte_at":
 		return c.checkMemByteIndex(name, args, env, unsafe, "!u8")
-	case "std.mem.equal_bytes", "std.mem.starts_with":
-		return c.checkMemByteArgs(name, args, env, unsafe, 2, typeBool)
-	case "std.mem.slice":
+	case "std.builtin.mem_slice":
 		return c.checkMemSlice(args, env, unsafe)
-	case "std.mem.trim_ascii":
-		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeByteString)
 	default:
 		return "", false, nil
 	}
@@ -1957,13 +2049,13 @@ func (c *Checker) checkMemByteIndex(
 	return result, true, nil
 }
 
-// checkMemSlice validates safe checked slicing of []const u8.
+// checkMemSlice validates recoverable slicing of []const u8.
 func (c *Checker) checkMemSlice(
 	args []ast.Expression,
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if err := c.checkMemSliceShape("std.mem.slice", args, env, unsafe); err != nil {
+	if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env, unsafe); err != nil {
 		return "", true, err
 	}
 	return "![]const u8", true, nil
@@ -2700,6 +2792,115 @@ func (c *Checker) checkArenaOrImplMethod(
 	}
 }
 
+// checkStringStorageBuiltin validates trusted String storage primitives.
+func (c *Checker) checkStringStorageBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.builtin.string_append_bytes":
+		return c.checkStringStorageBytes(name, args, env, unsafe)
+	case "std.builtin.string_append_byte":
+		return c.checkStringStorageByte(name, args, env, unsafe)
+	case "std.builtin.string_reserve":
+		return c.checkStringStorageReserve(name, args, env, unsafe)
+	case "std.builtin.string_len", "std.builtin.string_capacity":
+		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeI64)
+	case "std.builtin.string_as_bytes":
+		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeByteString)
+	case "std.builtin.string_clear", "std.builtin.string_deinit":
+		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeVoid)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkStringStorageBytes validates String plus []const u8 primitive calls.
+func (c *Checker) checkStringStorageBytes(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeByteString); err != nil {
+		return "", true, err
+	}
+	return "!void", true, nil
+}
+
+// checkStringStorageByte validates String plus u8 primitive calls.
+func (c *Checker) checkStringStorageByte(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeU8); err != nil {
+		return "", true, err
+	}
+	return "!void", true, nil
+}
+
+// checkStringStorageReserve validates String plus i64 primitive calls.
+func (c *Checker) checkStringStorageReserve(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeI64); err != nil {
+		return "", true, err
+	}
+	return "!void", true, nil
+}
+
+// checkStringStorageNoArgResult validates String-only primitive calls.
+func (c *Checker) checkStringStorageNoArgResult(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	result Type,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe); err != nil {
+		return "", true, err
+	}
+	return result, true, nil
+}
+
+// checkStringStorageArgs validates trusted primitive String arguments.
+func (c *Checker) checkStringStorageArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+	extra ...Type,
+) error {
+	if len(args) != 1+len(extra) {
+		return fmt.Errorf("type error: `%s` expects %d args", name, 1+len(extra))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != "std::string::String" {
+		return fmt.Errorf("type error: `%s` expects String, got %s", name, got)
+	}
+	for idx, want := range extra {
+		got, err := c.checkExpr(args[idx+1], env, unsafe)
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return fmt.Errorf("type error: `%s` arg %d expects %s, got %s",
+				name, idx+2, want, got)
+		}
+	}
+	return nil
+}
+
 // checkStringReceiverMethod validates receiver-sensitive String methods.
 func (c *Checker) checkStringReceiverMethod(
 	field *ast.FieldExpr,
@@ -2736,9 +2937,14 @@ func (c *Checker) checkStringMethod(
 			return "", err
 		}
 		return "!void", nil
-	case "len":
+	case "reserve":
+		if err := c.checkStringReserveArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!void", nil
+	case "len", "capacity":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `String.len` expects 0 args, got %d", len(args))
+			return "", fmt.Errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeI64, nil
 	case "as_bytes":
@@ -2757,7 +2963,7 @@ func (c *Checker) checkStringMethod(
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "clear", "deinit":
+	case "append_bytes", "append_byte", "reserve", "clear", "deinit":
 		return true
 	default:
 		return false
@@ -2780,6 +2986,26 @@ func (c *Checker) checkStringBytesArg(
 	}
 	if got != typeByteString {
 		return fmt.Errorf("type error: `String.%s` expects []const u8, got %s", name, got)
+	}
+	return nil
+}
+
+// checkStringReserveArg validates a reserve additional byte count.
+func (c *Checker) checkStringReserveArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != 1 {
+		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != typeI64 {
+		return fmt.Errorf("type error: `String.%s` expects i64, got %s", name, got)
 	}
 	return nil
 }

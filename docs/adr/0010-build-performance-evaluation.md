@@ -30,7 +30,7 @@ Rust のようにビルドキャッシュが数十 GB まで膨らむ体験は�
 ```sh
 kizu cache status
 kizu cache prune
-kizu why-rebuild <file|package>
+kizu why-rebuild <file>
 ```
 
 ## 方針

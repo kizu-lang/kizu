@@ -31,7 +31,6 @@ type Program struct {
 // ImportDecl represents one explicit top-level module import.
 type ImportDecl struct {
 	Path []string
-	Span Span
 }
 
 // declNode marks ImportDecl as a declaration node.
@@ -69,7 +68,6 @@ type FunctionDecl struct {
 	Unsafe     bool
 	ExternABI  string
 	Public     bool
-	Span       Span
 }
 
 // declNode marks FunctionDecl as a declaration node.
@@ -105,7 +103,6 @@ type StructDecl struct {
 	Name   string
 	Fields []Field
 	Public bool
-	Span   Span
 }
 
 // declNode marks StructDecl as a declaration node.
@@ -129,7 +126,6 @@ type EnumDecl struct {
 	Name   string
 	Tags   []string
 	Public bool
-	Span   Span
 }
 
 // declNode marks EnumDecl as a declaration node.
@@ -149,7 +145,6 @@ type UnionDecl struct {
 	Name     string
 	Variants []UnionVariant
 	Public   bool
-	Span     Span
 }
 
 // declNode marks UnionDecl as a declaration node.
@@ -187,7 +182,6 @@ type ContractDecl struct {
 	Name    string
 	Methods []*FunctionDecl
 	Public  bool
-	Span    Span
 }
 
 // declNode marks ContractDecl as a declaration node.
@@ -245,7 +239,6 @@ type Field struct {
 	Borrow    bool
 	MutBorrow bool
 	Public    bool
-	Span      Span
 }
 
 // String returns a compact debug representation of the field.
@@ -694,6 +687,34 @@ func (e *TryExpr) String() string {
 	return "try " + e.Value.String()
 }
 
+// IndexExpr represents checked byte indexing or one-dimensional slicing.
+type IndexExpr struct {
+	Target Expression
+	Index  Expression
+	Start  Expression
+	End    Expression
+	Slice  bool
+}
+
+// expressionNode marks IndexExpr as an expression node.
+func (*IndexExpr) expressionNode() {}
+
+// String returns a compact debug representation of checked access.
+func (e *IndexExpr) String() string {
+	if !e.Slice {
+		return fmt.Sprintf("%s[%s]", e.Target.String(), e.Index.String())
+	}
+	start := ""
+	if e.Start != nil {
+		start = e.Start.String()
+	}
+	end := ""
+	if e.End != nil {
+		end = e.End.String()
+	}
+	return fmt.Sprintf("%s[%s..%s]", e.Target.String(), start, end)
+}
+
 // ArenaNewExpr represents arena<T>() construction.
 type ArenaNewExpr struct {
 	TypeName string
@@ -711,7 +732,6 @@ func (e *ArenaNewExpr) String() string {
 type StructLiteralExpr struct {
 	TypeName string
 	Fields   []FieldValue
-	Span     Span
 }
 
 // expressionNode marks StructLiteralExpr as an expression node.
@@ -730,7 +750,6 @@ func (e *StructLiteralExpr) String() string {
 type FieldValue struct {
 	Name  string
 	Value Expression
-	Span  Span
 }
 
 // String returns a compact debug representation of the field initializer.
@@ -743,7 +762,6 @@ type FieldExpr struct {
 	Receiver  Expression
 	Name      string
 	Namespace bool
-	Span      Span
 }
 
 // expressionNode marks FieldExpr as an expression node.

@@ -74,6 +74,49 @@ func TestNextToken(t *testing.T) {
 	}
 }
 
+// TestLogicalTokens checks and and or without changing identifiers.
+func TestLogicalTokens(t *testing.T) {
+	input := `age >= 20 and age < 130 or false
+for 0..1 |i| { update(&value); }`
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.Ident, "age"},
+		{token.GTE, ">="},
+		{token.Int, "20"},
+		{token.And, "and"},
+		{token.Ident, "age"},
+		{token.LT, "<"},
+		{token.Int, "130"},
+		{token.Or, "or"},
+		{token.False, "false"},
+		{token.For, "for"},
+		{token.Int, "0"},
+		{token.Range, ".."},
+		{token.Int, "1"},
+		{token.Pipe, "|"},
+		{token.Ident, "i"},
+		{token.Pipe, "|"},
+		{token.LBrace, "{"},
+		{token.Ident, "update"},
+		{token.LParen, "("},
+		{token.Amp, "&"},
+		{token.Ident, "value"},
+		{token.RParen, ")"},
+		{token.Semicolon, ";"},
+		{token.RBrace, "}"},
+		{token.EOF, ""},
+	}
+	l := New(input)
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)", i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
 // TestLoopControlTokens checks v0.1 loop-control syntax.
 func TestLoopControlTokens(t *testing.T) {
 	input := `for 0..3 |i| { continue; }

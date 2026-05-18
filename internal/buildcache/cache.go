@@ -1,6 +1,8 @@
 package buildcache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,7 +13,7 @@ import (
 
 const (
 	// Version is included in cache keys so incompatible formats do not collide.
-	Version = "v0.3-module-cache-v1"
+	Version = "native-v1"
 
 	// DefaultMaxBytes bounds the local cache to 256 MiB by default.
 	DefaultMaxBytes int64 = 256 * 1024 * 1024
@@ -25,20 +27,14 @@ type Cache struct {
 
 // Entry describes one cached build artifact.
 type Entry struct {
-	Key                 string            `json:"key"`
-	Target              string            `json:"target"`
-	SourcePath          string            `json:"source_path"`
-	SourceHash          string            `json:"source_hash"`
-	Version             string            `json:"version"`
-	Output              string            `json:"output"`
-	SizeBytes           int64             `json:"size_bytes"`
-	CreatedAt           time.Time         `json:"created_at"`
-	InputKind           string            `json:"input_kind,omitempty"`
-	ManifestHash        string            `json:"manifest_hash,omitempty"`
-	ModuleGraphHash     string            `json:"module_graph_hash,omitempty"`
-	PublicInterfaceHash string            `json:"public_interface_hash,omitempty"`
-	StdlibHash          string            `json:"stdlib_hash,omitempty"`
-	SourceHashes        map[string]string `json:"source_hashes,omitempty"`
+	Key        string    `json:"key"`
+	Target     string    `json:"target"`
+	SourcePath string    `json:"source_path"`
+	SourceHash string    `json:"source_hash"`
+	Version    string    `json:"version"`
+	Output     string    `json:"output"`
+	SizeBytes  int64     `json:"size_bytes"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // Status summarizes cache state.
@@ -142,25 +138,40 @@ func (c *Cache) WhyRebuild(path string, target string) (string, error) {
 		return "", err
 	}
 	if !ok {
-		return "cache miss: no previous build for input", nil
+		return "cache miss: no previous build for file", nil
 	}
 	if previous.Version != Version {
 		return "cache miss: compiler cache version changed", nil
 	}
-	return explainChangedInput(previous, input), nil
+	if previous.SourceHash != input.sourceHash {
+		return "cache miss: source changed", nil
+	}
+	return "cache miss: build inputs changed", nil
 }
 
 type cacheInput struct {
-	key                 string
-	target              string
-	sourcePath          string
-	sourceHash          string
-	inputKind           string
-	manifestHash        string
-	moduleGraphHash     string
-	publicInterfaceHash string
-	stdlibHash          string
-	sourceHashes        map[string]string
+	key        string
+	target     string
+	sourcePath string
+	sourceHash string
+}
+
+// newInput hashes source content and cache-shaping inputs.
+func newInput(path string, target string) (cacheInput, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cacheInput{}, err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return cacheInput{}, err
+	}
+	sourceHashBytes := sha256.Sum256(data)
+	sourceHash := hex.EncodeToString(sourceHashBytes[:])
+	keyHash := sha256.Sum256([]byte(Version + "\n" + target + "\n" + abs + "\n" + sourceHash))
+	return cacheInput{
+		key: hex.EncodeToString(keyHash[:]), target: target, sourcePath: abs, sourceHash: sourceHash,
+	}, nil
 }
 
 // writeEntry writes metadata and output for one artifact.
@@ -176,9 +187,6 @@ func (c *Cache) writeEntry(input cacheInput, output string) error {
 		Key: input.key, Target: input.target, SourcePath: input.sourcePath,
 		SourceHash: input.sourceHash, Version: Version, Output: outputName,
 		SizeBytes: int64(len(output)), CreatedAt: time.Now().UTC(),
-		InputKind: input.inputKind, ManifestHash: input.manifestHash,
-		ModuleGraphHash: input.moduleGraphHash, StdlibHash: input.stdlibHash,
-		PublicInterfaceHash: input.publicInterfaceHash, SourceHashes: input.sourceHashes,
 	}
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {

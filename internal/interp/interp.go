@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
 // Interpreter executes a parsed Kizu program.
@@ -565,6 +565,8 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 		return i.evalExpr(e.Value, env)
 	case *ast.TryExpr:
 		return i.evalTryExpr(e, env)
+	case *ast.IndexExpr:
+		return i.evalIndexExpr(e, env)
 	case *ast.ArenaNewExpr:
 		return arenaValue(), nil
 	case *ast.StructLiteralExpr:
@@ -576,6 +578,87 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unsupported expression %T", expr)
 	}
+}
+
+// evalIndexExpr evaluates checked one-dimensional byte indexing and slicing.
+func (i *Interpreter) evalIndexExpr(expr *ast.IndexExpr, env *Env) (Value, error) {
+	target, err := i.evalExpr(expr.Target, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if target.kind != kindString {
+		return voidValue(), fmt.Errorf("runtime error: index/slice target expects []const u8")
+	}
+	if !expr.Slice {
+		return i.evalByteIndex(target.s, expr.Index, env, true)
+	}
+	return i.evalByteSlice(target.s, expr, env, true)
+}
+
+// evalByteIndex returns one checked byte or a recoverable error-union payload.
+func (i *Interpreter) evalByteIndex(
+	bytes string,
+	indexExpr ast.Expression,
+	env *Env,
+	trap bool,
+) (Value, error) {
+	index, err := i.evalIndexBound("index", indexExpr, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= int64(len(bytes)) {
+		if trap {
+			return voidValue(), fmt.Errorf("runtime error: index out of bounds")
+		}
+		return errorUnionValue("index out of bounds"), nil
+	}
+	return intValue(int64(bytes[int(index)])), nil
+}
+
+// evalByteSlice returns one checked sub-slice or a recoverable error-union payload.
+func (i *Interpreter) evalByteSlice(
+	bytes string,
+	expr *ast.IndexExpr,
+	env *Env,
+	trap bool,
+) (Value, error) {
+	start, end := int64(0), int64(len(bytes))
+	if expr.Start != nil {
+		value, err := i.evalIndexBound("slice start", expr.Start, env)
+		if err != nil {
+			return voidValue(), err
+		}
+		start = value
+	}
+	if expr.End != nil {
+		value, err := i.evalIndexBound("slice end", expr.End, env)
+		if err != nil {
+			return voidValue(), err
+		}
+		end = value
+	}
+	if start < 0 || end < start || end > int64(len(bytes)) {
+		if trap {
+			return voidValue(), fmt.Errorf("runtime error: slice range out of bounds")
+		}
+		return errorUnionValue("slice range out of bounds"), nil
+	}
+	return stringValue(bytes[int(start):int(end)]), nil
+}
+
+// evalIndexBound evaluates one i64 index or slice bound.
+func (i *Interpreter) evalIndexBound(name string, expr ast.Expression, env *Env) (int64, error) {
+	if expr == nil {
+		return 0, fmt.Errorf("runtime error: %s is missing", name)
+	}
+	value, err := i.evalExpr(expr, env)
+	if err != nil {
+		return 0, err
+	}
+	if value.kind != kindInt {
+		return 0, fmt.Errorf("runtime error: %s expects i64", name)
+	}
+	return value.i, nil
 }
 
 // evalLiteralExpr evaluates scalar literal expressions.
@@ -708,8 +791,11 @@ func (i *Interpreter) evalBorrowPrefix(expr *ast.PrefixExpr, env *Env) (Value, e
 	}
 }
 
-// evalBinaryExpr evaluates arithmetic, equality, and comparison operators.
+// evalBinaryExpr evaluates arithmetic, logical, equality, and comparison operators.
 func (i *Interpreter) evalBinaryExpr(expr *ast.BinaryExpr, env *Env) (Value, error) {
+	if expr.Operator == "and" || expr.Operator == "or" {
+		return i.evalLogicalExpr(expr, env)
+	}
 	left, err := i.evalExpr(expr.Left, env)
 	if err != nil {
 		return voidValue(), err
@@ -725,6 +811,31 @@ func (i *Interpreter) evalBinaryExpr(expr *ast.BinaryExpr, env *Env) (Value, err
 		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects integers", expr.Operator)
 	}
 	return evalIntBinary(expr.Operator, left.i, right.i)
+}
+
+// evalLogicalExpr evaluates short-circuit boolean operators.
+func (i *Interpreter) evalLogicalExpr(expr *ast.BinaryExpr, env *Env) (Value, error) {
+	left, err := i.evalExpr(expr.Left, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if left.kind != kindBool {
+		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects bools", expr.Operator)
+	}
+	if expr.Operator == "and" && !left.b {
+		return boolValue(false), nil
+	}
+	if expr.Operator == "or" && left.b {
+		return boolValue(true), nil
+	}
+	right, err := i.evalExpr(expr.Right, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if right.kind != kindBool {
+		return voidValue(), fmt.Errorf("runtime error: operator `%s` expects bools", expr.Operator)
+	}
+	return boolValue(right.b), nil
 }
 
 // evalEquality evaluates equality operators for values of the same kind.
@@ -807,13 +918,7 @@ func evalModulo(left int64, right int64) (Value, error) {
 // evalCallExpr evaluates builtin and user-defined function calls.
 func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
-		if value, ok, err := i.evalUnionConstructor(field, expr.Args, env); ok || err != nil {
-			return value, err
-		}
-		if value, ok, err := i.evalQualifiedBuiltin(field, expr.Args, env); ok || err != nil {
-			return value, err
-		}
-		return i.evalMethodCallExpr(field, expr.Args, env)
+		return i.evalFieldCallExpr(field, expr.Args, env)
 	}
 	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
 		return i.evalTypeApplyCallExpr(typeApply, expr.Args, env)
@@ -842,6 +947,42 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		return callTaskGroup(args)
 	}
 	return i.callFunction(name.Name, args)
+}
+
+// evalFieldCallExpr evaluates qualified, union, and method calls.
+func (i *Interpreter) evalFieldCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if value, ok, err := i.evalUnionConstructor(field, args, env); ok || err != nil {
+		return value, err
+	}
+	if value, ok, err := i.evalQualifiedUserCall(field, args, env); ok || err != nil {
+		return value, err
+	}
+	if value, ok, err := i.evalQualifiedBuiltin(field, args, env); ok || err != nil {
+		return value, err
+	}
+	return i.evalMethodCallExpr(field, args, env)
+}
+
+// evalQualifiedUserCall evaluates source-loaded qualified functions.
+func (i *Interpreter) evalQualifiedUserCall(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return voidValue(), false, nil
+	}
+	fn, ok := i.functions[name]
+	if !ok {
+		return voidValue(), false, nil
+	}
+	value, err := i.callFunctionExpr(fn, args, env)
+	return value, true, err
 }
 
 // evalQualifiedBuiltin evaluates std:: namespace prototype calls without a module system.
@@ -893,6 +1034,9 @@ func (i *Interpreter) evalQualifiedRuntimeBuiltin(
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
+	if value, ok, err := i.evalStringStorageBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
 	if value, ok, err := i.evalStringConstructor(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
@@ -912,19 +1056,19 @@ func (i *Interpreter) evalTestingBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.testing.expect":
+	case "std.builtin.testing_expect":
 		value, err := i.evalTestingOne(name, args, env, kindBool)
 		if err != nil || value.b {
 			return voidValue(), true, err
 		}
 		return errorUnionValue("expected condition to be true"), true, nil
-	case "std.testing.expect_equal_i64":
+	case "std.builtin.testing_expect_equal_i64":
 		return i.evalTestingEqual(name, args, env, kindInt)
-	case "std.testing.expect_equal_bool":
+	case "std.builtin.testing_expect_equal_bool":
 		return i.evalTestingEqual(name, args, env, kindBool)
-	case "std.testing.expect_equal_bytes":
+	case "std.builtin.testing_expect_equal_bytes":
 		return i.evalTestingEqual(name, args, env, kindString)
-	case "std.testing.fail":
+	case "std.builtin.testing_fail":
 		value, err := i.evalTestingOne(name, args, env, kindString)
 		if err != nil {
 			return voidValue(), true, err
@@ -1040,27 +1184,16 @@ func (i *Interpreter) evalMemBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.mem.page_allocator":
+	case "std.builtin.mem_page_allocator":
 		return callAllocatorFromExprs(args), true, nil
-	case "std.mem.len":
+	case "std.builtin.mem_len":
 		value, err := i.evalMemLen(args, env)
 		return value, true, err
-	case "std.mem.byte_at":
+	case "std.builtin.mem_byte_at":
 		value, err := i.evalMemByteAt(args, env)
 		return value, true, err
-	case "std.mem.equal_bytes":
-		value, err := i.evalMemCompare(args, env, func(left string, right string) bool {
-			return left == right
-		})
-		return value, true, err
-	case "std.mem.starts_with":
-		value, err := i.evalMemStartsWith(args, env)
-		return value, true, err
-	case "std.mem.slice":
+	case "std.builtin.mem_slice":
 		value, err := i.evalMemSlice(args, env)
-		return value, true, err
-	case "std.mem.trim_ascii":
-		value, err := i.evalMemTrimASCII(args, env)
 		return value, true, err
 	default:
 		return voidValue(), false, nil
@@ -1082,32 +1215,8 @@ func (i *Interpreter) evalMemByteAt(args []ast.Expression, env *Env) (Value, err
 	if err != nil {
 		return voidValue(), err
 	}
-	if index < 0 || index >= int64(len(bytes)) {
-		return errorUnionValue("std::mem::byte_at index out of bounds"), nil
-	}
-	return intValue(int64(bytes[int(index)])), nil
-}
-
-// evalMemCompare evaluates two-byte-slice boolean predicates.
-func (i *Interpreter) evalMemCompare(
-	args []ast.Expression,
-	env *Env,
-	predicate func(string, string) bool,
-) (Value, error) {
-	left, right, err := i.evalMemTwoBytes("std::mem::equal_bytes", args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	return boolValue(predicate(left, right)), nil
-}
-
-// evalMemStartsWith reports whether bytes starts with prefix.
-func (i *Interpreter) evalMemStartsWith(args []ast.Expression, env *Env) (Value, error) {
-	bytes, prefix, err := i.evalMemTwoBytes("std::mem::starts_with", args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	return boolValue(strings.HasPrefix(bytes, prefix)), nil
+	expr := &ast.IntExpr{Value: fmt.Sprintf("%d", index)}
+	return i.evalByteIndex(bytes, expr, env, false)
 }
 
 // evalMemSlice returns a checked byte sub-slice without allocating.
@@ -1116,19 +1225,12 @@ func (i *Interpreter) evalMemSlice(args []ast.Expression, env *Env) (Value, erro
 	if err != nil {
 		return voidValue(), err
 	}
-	if start < 0 || end < start || end > int64(len(bytes)) {
-		return errorUnionValue("std::mem::slice range out of bounds"), nil
+	expr := &ast.IndexExpr{
+		Start: &ast.IntExpr{Value: fmt.Sprintf("%d", start)},
+		End:   &ast.IntExpr{Value: fmt.Sprintf("%d", end)},
+		Slice: true,
 	}
-	return stringValue(bytes[int(start):int(end)]), nil
-}
-
-// evalMemTrimASCII trims ASCII whitespace from both ends of a byte slice.
-func (i *Interpreter) evalMemTrimASCII(args []ast.Expression, env *Env) (Value, error) {
-	bytes, err := i.evalMemOneBytes("std::mem::trim_ascii", args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	return stringValue(strings.Trim(bytes, " \t\n\r\v\f")), nil
+	return i.evalByteSlice(bytes, expr, env, false)
 }
 
 // evalMemOneBytes evaluates one []const u8 argument.
@@ -1148,29 +1250,6 @@ func (i *Interpreter) evalMemOneBytes(
 		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
 	}
 	return bytes.s, nil
-}
-
-// evalMemTwoBytes evaluates two []const u8 arguments.
-func (i *Interpreter) evalMemTwoBytes(
-	name string,
-	args []ast.Expression,
-	env *Env,
-) (string, string, error) {
-	if len(args) != 2 {
-		return "", "", fmt.Errorf("runtime error: %s expects 2 args", name)
-	}
-	left, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return "", "", err
-	}
-	right, err := i.evalExpr(args[1], env)
-	if err != nil {
-		return "", "", err
-	}
-	if left.kind != kindString || right.kind != kindString {
-		return "", "", fmt.Errorf("runtime error: %s expects []const u8 args", name)
-	}
-	return left.s, right.s, nil
 }
 
 // evalMemBytesIndex evaluates byte-slice and i64 index arguments.
@@ -1278,17 +1357,11 @@ func (i *Interpreter) evalPathBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.path.join":
+	case "std.builtin.path_join":
 		value, err := i.evalPathJoin(args, env)
 		return value, true, err
-	case "std.path.clean":
-		return i.evalPathUnary(name, args, env, path.Clean)
-	case "std.path.basename":
-		return i.evalPathUnary(name, args, env, path.Base)
-	case "std.path.dirname":
-		return i.evalPathUnary(name, args, env, path.Dir)
-	case "std.path.extension":
-		return i.evalPathUnary(name, args, env, path.Ext)
+	case "std.builtin.path_clean":
+		return i.evalPathUnary(name, args, env, stdprim.PathClean)
 	default:
 		return voidValue(), false, nil
 	}
@@ -1301,13 +1374,13 @@ func (i *Interpreter) evalIoHelperBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.io.write_stdout":
+	case "std.builtin.io_write_stdout":
 		value, err := i.evalIoWrite(args, env, i.out)
 		return value, true, err
-	case "std.io.write_stderr":
+	case "std.builtin.io_write_stderr":
 		value, err := i.evalIoWrite(args, env, os.Stderr)
 		return value, true, err
-	case "std.io.read_stdin":
+	case "std.builtin.io_read_stdin":
 		value, err := i.evalIoReadStdin(args, env)
 		return value, true, err
 	default:
@@ -1322,18 +1395,18 @@ func (i *Interpreter) evalProcessBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.process.arg_count":
+	case "std.builtin.process_arg_count":
 		if len(args) != 0 {
 			return voidValue(), true, fmt.Errorf("runtime error: std::process::arg_count expects 0 args")
 		}
 		return intValue(int64(len(i.processArgs))), true, nil
-	case "std.process.arg":
+	case "std.builtin.process_arg":
 		value, err := i.evalProcessArg(args, env)
 		return value, true, err
-	case "std.process.env":
+	case "std.builtin.process_env":
 		value, err := i.evalProcessEnv(args, env)
 		return value, true, err
-	case "std.process.exit_code":
+	case "std.builtin.process_exit_code":
 		value, err := i.evalProcessExitCode(args, env)
 		return value, true, err
 	default:
@@ -1505,7 +1578,7 @@ func (i *Interpreter) evalPathJoin(args []ast.Expression, env *Env) (Value, erro
 	if err != nil {
 		return voidValue(), err
 	}
-	return stringValue(path.Join(left, right)), nil
+	return stringValue(stdprim.PathJoin(left, right)), nil
 }
 
 // evalPathUnary evaluates one-argument path helpers.
@@ -1703,13 +1776,13 @@ func failingIoError(ioValue Value) (Value, bool) {
 // evalIoBuiltin evaluates std::io constructor calls.
 func evalIoBuiltin(name string, args []ast.Expression) (Value, bool) {
 	switch name {
-	case "std.io.blocking":
+	case "std.builtin.io_blocking":
 		return callIoFromExprs("blocking", args), true
-	case "std.io.threaded":
+	case "std.builtin.io_threaded":
 		return callIoFromExprs("threaded", args), true
-	case "std.io.failing":
+	case "std.builtin.io_failing":
 		return callIoFromExprs("failing", args), true
-	case "std.io.evented":
+	case "std.io.evented", "std.builtin.io_evented":
 		return errorUnionValue("std::io::evented is not implemented in v0.1"), true
 	default:
 		return voidValue(), false
@@ -1943,7 +2016,7 @@ func (i *Interpreter) evalNonArenaMethod(
 	case kindArray:
 		return i.evalArrayMethod(receiver, name, args, env)
 	case kindOwnedString:
-		return i.evalStringMethod(receiver, name, args, env)
+		return i.evalImplMethod(receiver, name, args, env)
 	case kindMap:
 		return i.evalMapMethod(receiver, name, args, env)
 	case kindStruct:
@@ -2447,34 +2520,53 @@ func (i *Interpreter) evalStringConstructor(
 	return ownedStringValue(), true, nil
 }
 
-// evalStringMethod executes owned String prototype operations.
-func (i *Interpreter) evalStringMethod(
-	str Value,
+// evalStringStorageBuiltin executes trusted owned String storage primitives.
+func (i *Interpreter) evalStringStorageBuiltin(
 	name string,
 	args []ast.Expression,
 	env *Env,
-) (Value, error) {
+) (Value, bool, error) {
+	if !strings.HasPrefix(name, "std.builtin.string_") {
+		return voidValue(), false, nil
+	}
+	if len(args) == 0 {
+		return voidValue(), true, fmt.Errorf("runtime error: %s expects String", name)
+	}
+	str, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), true, err
+	}
+	if str.kind != kindOwnedString {
+		return voidValue(), true, fmt.Errorf("runtime error: %s expects String", name)
+	}
 	if str.ownedStr.deinit {
-		return voidValue(), fmt.Errorf("runtime error: String was deinitialized")
+		return voidValue(), true, fmt.Errorf("runtime error: String was deinitialized")
 	}
 	switch name {
-	case "append_bytes":
-		return i.evalStringAppendBytes(str, args, env)
-	case "append_byte":
-		return i.evalStringAppendByte(str, args, env)
-	case "len":
-		return intValue(int64(len(str.ownedStr.bytes))), requireNoArgs("String.len", args)
-	case "as_bytes":
-		return stringValue(str.ownedStr.bytes), requireNoArgs("String.as_bytes", args)
-	case "clear":
+	case "std.builtin.string_append_bytes":
+		value, err := i.evalStringAppendBytes(str, args[1:], env)
+		return value, true, err
+	case "std.builtin.string_append_byte":
+		value, err := i.evalStringAppendByte(str, args[1:], env)
+		return value, true, err
+	case "std.builtin.string_reserve":
+		value, err := i.evalStringReserve(str, args[1:], env)
+		return value, true, err
+	case "std.builtin.string_len":
+		return intValue(int64(len(str.ownedStr.bytes))), true, requireNoArgs("String.len", args[1:])
+	case "std.builtin.string_capacity":
+		return intValue(int64(str.ownedStr.capacity)), true, requireNoArgs("String.capacity", args[1:])
+	case "std.builtin.string_as_bytes":
+		return stringValue(str.ownedStr.bytes), true, requireNoArgs("String.as_bytes", args[1:])
+	case "std.builtin.string_clear":
 		str.ownedStr.bytes = ""
-		return voidValue(), requireNoArgs("String.clear", args)
-	case "deinit":
+		return voidValue(), true, requireNoArgs("String.clear", args[1:])
+	case "std.builtin.string_deinit":
 		str.ownedStr.bytes = ""
 		str.ownedStr.deinit = true
-		return voidValue(), requireNoArgs("String.deinit", args)
+		return voidValue(), true, requireNoArgs("String.deinit", args[1:])
 	default:
-		return voidValue(), fmt.Errorf("runtime error: String has no method `%s`", name)
+		return voidValue(), false, nil
 	}
 }
 
@@ -2494,6 +2586,7 @@ func (i *Interpreter) evalStringAppendBytes(
 	if value.kind != kindString {
 		return errorUnionValue("String.append_bytes expects []const u8"), nil
 	}
+	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + len(value.s))
 	str.ownedStr.bytes += value.s
 	return voidValue(), nil
 }
@@ -2514,8 +2607,36 @@ func (i *Interpreter) evalStringAppendByte(
 	if value.kind != kindInt || value.i < 0 || value.i > 255 {
 		return errorUnionValue("String.append_byte expects u8"), nil
 	}
+	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + 1)
 	str.ownedStr.bytes += string(byte(value.i))
 	return voidValue(), nil
+}
+
+// evalStringReserve ensures additional capacity for future String appends.
+func (i *Interpreter) evalStringReserve(
+	str Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: String.reserve expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindInt || value.i < 0 {
+		return errorUnionValue("String.reserve expects non-negative i64"), nil
+	}
+	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + int(value.i))
+	return voidValue(), nil
+}
+
+// ensureCapacity records semantic capacity for the interpreter prototype.
+func (s *OwnedString) ensureCapacity(want int) {
+	if want > s.capacity {
+		s.capacity = want
+	}
 }
 
 // evalArrayMethod executes owned Array<T> prototype operations.

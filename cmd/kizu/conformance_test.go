@@ -2,15 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
 const conformanceManifestGlob = "../../tests/conformance/v0_*.json"
+
+var conformanceProcessMu sync.Mutex
 
 type conformanceManifest struct {
 	Version string            `json:"version"`
@@ -51,7 +54,7 @@ func TestConformanceManifestsCoverExamples(t *testing.T) {
 	}
 }
 
-// TestConformanceManifestShape validates fields needed by self-host runners.
+// TestConformanceManifestShape validates reusable conformance manifest fields.
 func TestConformanceManifestShape(t *testing.T) {
 	seen := map[string]bool{}
 	for _, manifest := range loadConformanceManifests(t) {
@@ -240,10 +243,65 @@ func runKizuOK(t *testing.T, args ...string) string {
 
 // runKizu runs the Kizu CLI from the repository root.
 func runKizu(args ...string) (string, error) {
-	cmdArgs := append([]string{"run", "./cmd/kizu"}, args...)
-	cmd := exec.Command("go", cmdArgs...)
-	cmd.Dir = "../.."
-	cmd.Env = append(os.Environ(), "KIZU_TEST_ENV=env-ok")
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	conformanceProcessMu.Lock()
+	defer conformanceProcessMu.Unlock()
+
+	if len(args) == 0 {
+		return runDispatchWithCapture("", nil)
+	}
+	return runDispatchWithCapture(args[0], args[1:])
+}
+
+// runDispatchWithCapture runs dispatch while capturing process-global output.
+func runDispatchWithCapture(command string, args []string) (string, error) {
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	oldWd, wdErr := os.Getwd()
+	if wdErr != nil {
+		return "", wdErr
+	}
+	envValue, envWasSet := os.LookupEnv("KIZU_TEST_ENV")
+
+	reader, writer, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		return "", pipeErr
+	}
+
+	output := make(chan string, 1)
+	go func() {
+		var builder strings.Builder
+		_, _ = io.Copy(&builder, reader)
+		output <- builder.String()
+	}()
+
+	os.Stdout = writer
+	os.Stderr = writer
+	_ = os.Setenv("KIZU_TEST_ENV", "env-ok")
+	chdirErr := os.Chdir("../..")
+
+	var err error
+	if chdirErr != nil {
+		err = chdirErr
+	} else {
+		err = dispatch(command, args)
+		if err != nil {
+			printError(err)
+		}
+	}
+
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+	_ = os.Chdir(oldWd)
+	restoreEnv("KIZU_TEST_ENV", envValue, envWasSet)
+	_ = writer.Close()
+	return <-output, err
+}
+
+// restoreEnv restores an environment variable after an in-process CLI run.
+func restoreEnv(name string, value string, wasSet bool) {
+	if wasSet {
+		_ = os.Setenv(name, value)
+		return
+	}
+	_ = os.Unsetenv(name)
 }

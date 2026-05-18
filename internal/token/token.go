@@ -66,6 +66,8 @@ const (
 	Impl     Type = "impl"
 	True     Type = "true"
 	False    Type = "false"
+	And      Type = "and"
+	Or       Type = "or"
 	Mut      Type = "mut"
 	Unsafe   Type = "unsafe"
 	Extern   Type = "extern"
@@ -76,8 +78,6 @@ const (
 type Token struct {
 	Type    Type
 	Literal string
-	Start   int
-	End     int
 	Line    int
 	Column  int
 }
@@ -104,6 +104,8 @@ var keywords = map[string]Type{
 	"impl":     Impl,
 	"true":     True,
 	"false":    False,
+	"and":      And,
+	"or":       Or,
 	"mut":      Mut,
 	"unsafe":   Unsafe,
 	"extern":   Extern,

@@ -542,6 +542,29 @@ let level = if age >= 20 {
 両 branch の value type は一致しなければなりません。
 branch 内で move された値は、`if` expression の外側でも moved として扱います。
 
+### 6.9.1 bool 演算
+
+Kizu は boolean logic に `and` と `or` を使います。
+両辺は `bool` でなければなりません。
+`and` と `or` は短絡評価します。
+
+優先順位は低い順に次の通りです。
+
+```text
+or
+and
+== !=
+< <= > >=
+```
+
+例:
+
+```kizu
+if age >= 20 and age < 130 or admin {
+    print("ok");
+}
+```
+
 ### 6.10 while
 
 ```kizu
@@ -669,7 +692,42 @@ slice<T>
 v0.1 では full generics を実装しません。
 `arena<T>`、`handle<T>`、`!T`、raw pointer 型は専用の型構文として扱います。
 
-### 7.1 明示 cast
+### 7.1 index / slice expression
+
+Kizu は checked index と checked slice syntax を持ちます。
+
+```kizu
+let byte = bytes[index];
+let part = bytes[start..end];
+let tail = bytes[start..];
+let head = bytes[..end];
+```
+
+v0.2 の最初の対象は `[]const u8` です。
+
+```text
+[]const u8 [ i64 ] -> u8
+[]const u8 [ i64 .. i64 ] -> []const u8
+```
+
+index / slice syntax は 1 次元 contiguous sequence に限定します。
+`matrix[rows, cols]` のような multi-dimensional slicing、strided view、
+matrix view は言語構文として採用しません。
+多次元データは、将来の `std::matrix` などの標準ライブラリ型で明示 API として扱います。
+
+slice bounds は half-open です。
+`start..end` は `start` を含み、`end` を含みません。
+
+safe Kizu では unchecked bounds access を許しません。
+負の index、負の bound、`start > end`、`end > len` は safety check failure として trap します。
+index / slice syntax は recoverable error を返しません。
+境界外を回復可能な値として扱いたい場合は、`std::mem::byte_at` や
+`std::mem::slice` のような明示 API を使います。
+
+v0.2 では mutable indexed assignment、indexed borrow、multi-dimensional slicing、
+`std::array::Array<T>` への直接 indexing は後続に分離します。
+
+### 7.2 明示 cast
 
 Kizu は暗黙の numeric promotion をしません。
 異なる numeric type の間で値を渡す場合は、明示的に `cast<T>(value)` を使います。
@@ -787,7 +845,8 @@ borrow のルール:
 * field borrow 中でも disjoint field assignment は許可する
 * field borrow 中の owner 全体の move と同一 field assignment は禁止する
 * v0.1 は `&user.profile.name` のような nested field borrow を拒否する
-* v0.1 は indexed borrow syntax を実装しない。将来 `&items[0]` を追加する場合は、
+* v0.2 の index / slice expression は read-only checked access から始める
+* indexed borrow syntax はまだ実装しない。将来 `&items[0]` を追加する場合は、
   専用の安全ルールと regression coverage を先に追加する
 
 明示 dereference は Zig に合わせて postfix の `.*` を使います。
@@ -1118,7 +1177,8 @@ kizu_print_bool
 ```
 
 LLVM IR backend では、extern C call は将来 `declare` と `call` に lower します。
-actual native object / executable generation は別 phase で扱います。
+native executable generation は、LLVM lowering 済み subset と `kizu_print_*` runtime shim に
+限定して扱います。extern C library selection と C layout 完全対応は別 phase で扱います。
 
 ## 13. comptime
 
@@ -1206,7 +1266,9 @@ owned byte buffer です。
 std::string::String(allocator: Allocator) -> std::string::String
 string.append_bytes(bytes: []const u8) -> !void
 string.append_byte(byte: u8) -> !void
+string.reserve(additional: i64) -> !void
 string.len() -> i64
+string.capacity() -> i64
 string.as_bytes() -> []const u8
 string.clear() -> void
 string.deinit() -> void
@@ -1214,14 +1276,20 @@ string.deinit() -> void
 
 `string` primitive は追加しません。
 `std::string::String()` のような hidden default allocator は使いません。
+`std::string::String` は non-copy / move-only です。
 `append_bytes` は source の `[]const u8` を move せず、owned buffer に copy します。
+`append_byte` は 1 byte を追加します。
+`reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
+`capacity` は現在の capacity を `i64` で返します。
 `as_bytes` は owned buffer への local read-only view です。
 `as_bytes` の戻り値は local binding に束縛する必要があります。
 view が生きている間は `append_bytes`、`append_byte`、`clear`、`deinit` を禁止します。
-`append_bytes`、`append_byte`、`clear` は owned local `String` または
+`append_bytes`、`append_byte`、`reserve`、`clear` は owned local `String` または
 `&mut std::string::String` から呼べます。
+`clear` は length を 0 にしますが、capacity は保持します。
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
-v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure は実装しません。
+v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure、
+owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
 
 collection は次の順で実装します。
 
@@ -1247,6 +1315,8 @@ std::mem::trim_ascii(bytes: []const u8) -> []const u8
 
 `std::mem` の safe API は raw pointer を返しません。
 `std::mem::slice` と `std::mem::byte_at` は境界外アクセスを `!T` として返します。
+checked index / slice syntax の実装後は、Kizu std source では
+trap-on-bounds-failure の syntax と recoverable な `std::mem` API を用途で使い分けます。
 allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
 mutable slice の仕様後に実装します。
 
@@ -1614,6 +1684,13 @@ target/
 
 `kizu check` は durable artifact をデフォルトでは生成しません。
 IR、WASM、native、C 出力は明示的な build command でだけ生成します。
+
+native build は Zig を参考に、target、ABI、libc mode、runtime mode、linker mode を
+明示的な build input として扱います。現時点の native backend は host `clang` と libc を
+使ってよいですが、将来の `--libc off` / freestanding build を一級の build mode として
+扱います。libc 依存は言語仕様に埋め込まず、build metadata と cache key に含めます。
+native build は生成物の隣に `<output>.kizu-build.json` を書き、実際に使った target、
+ABI、libc、runtime、emit mode、linker command を記録します。
 
 build cache key には、compiler version、manifest hash、resolved module graph hash、
 source hash、public interface hash、target、backend、optimization mode、stdlib hash

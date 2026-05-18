@@ -105,6 +105,9 @@ func evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error) {
 
 // evalComptimeBinary evaluates compile-time binary operators.
 func evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error) {
+	if expr.Operator == "and" || expr.Operator == "or" {
+		return evalComptimeLogical(expr)
+	}
 	left, err := evalComptime(expr.Left)
 	if err != nil {
 		return comptimeValue{}, err
@@ -123,6 +126,31 @@ func evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error) {
 		)
 	}
 	return evalComptimeIntBinary(expr.Operator, left.i, right.i)
+}
+
+// evalComptimeLogical evaluates short-circuit compile-time boolean operators.
+func evalComptimeLogical(expr *ast.BinaryExpr) (comptimeValue, error) {
+	left, err := evalComptime(expr.Left)
+	if err != nil {
+		return comptimeValue{}, err
+	}
+	if left.typ != typeBool {
+		return comptimeValue{}, fmt.Errorf("comptime error: operator `%s` expects bools", expr.Operator)
+	}
+	if expr.Operator == "and" && !left.b {
+		return comptimeValue{typ: typeBool, b: false}, nil
+	}
+	if expr.Operator == "or" && left.b {
+		return comptimeValue{typ: typeBool, b: true}, nil
+	}
+	right, err := evalComptime(expr.Right)
+	if err != nil {
+		return comptimeValue{}, err
+	}
+	if right.typ != typeBool {
+		return comptimeValue{}, fmt.Errorf("comptime error: operator `%s` expects bools", expr.Operator)
+	}
+	return comptimeValue{typ: typeBool, b: right.b}, nil
 }
 
 // evalComptimeEquality compares compile-time scalar values of the same type.

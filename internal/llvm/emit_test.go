@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/ir"
@@ -35,6 +36,55 @@ func TestEmitSnapshots(t *testing.T) {
 				t.Fatalf("got:\n%s\nwant:\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestEmitRejectsUnsupportedLoweredInstructions avoids invalid placeholder IR.
+func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "struct", source: structSource, want: "`struct.new` is not supported"},
+		{name: "arena", source: arenaSource, want: "`arena.new` is not supported"},
+		{name: "error union", source: errorUnionSource, want: "`error.try` is not supported"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			module := lowerSource(t, tt.source)
+			_, err := Emit(module)
+			if err == nil {
+				t.Fatal("expected emit to reject unsupported instruction")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestEmitRejectsUnsupportedFieldInstruction checks field lowering is not faked.
+func TestEmitRejectsUnsupportedFieldInstruction(t *testing.T) {
+	module := &ir.Module{Functions: []*ir.Function{{
+		Name:   "main",
+		Return: "void",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%1", Type: "i64"},
+				Op:     "field.age",
+				Args:   []ir.Value{{Name: "%user", Type: "User"}},
+			}},
+			Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
+		}},
+	}}}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject field instruction")
+	}
+	if !strings.Contains(err.Error(), "`field.age` is not supported") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 
@@ -90,6 +140,27 @@ const whileSource = `fn main() {
     }
 }`
 
+const structSource = `struct User { age: i64; }
+fn main() {
+    let user = User { age: 30 };
+    print(1);
+}`
+
+const arenaSource = `struct User { age: i64; }
+fn main() {
+    let users = arena<User>();
+    print(1);
+}`
+
+const errorUnionSource = `fn read() -> !i64 {
+    return 1;
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return void;
+}`
+
 const helloLLVM = `; Kizu LLVM IR
 @.str.0 = private unnamed_addr constant [12 x i8] c"hello, kizu\00"
 
@@ -97,11 +168,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
-  %1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %1, i64 11)
-  ret void
+  %kizu.1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
+  call void @kizu_print_string(ptr %kizu.1, i64 11)
+  ret i32 0
 }`
 
 const functionsLLVM = `; Kizu LLVM IR
@@ -111,15 +182,15 @@ declare void @kizu_print_bool(i1)
 
 define i64 @add(i64 %a, i64 %b) {
 entry:
-  %1 = add i64 %a, %b
-  ret i64 %1
+  %kizu.1 = add i64 %a, %b
+  ret i64 %kizu.1
 }
 
-define void @main() {
+define i32 @main() {
 entry:
-  %3 = call i64 @add(i64 1, i64 2)
-  call void @kizu_print_int(i64 %3)
-  ret void
+  %kizu.3 = call i64 @add(i64 1, i64 2)
+  call void @kizu_print_int(i64 %kizu.3)
+  ret i32 0
 }`
 
 const variablesLLVM = `; Kizu LLVM IR
@@ -129,13 +200,13 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
-  %1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-  %4 = add i64 30, 1
-  call void @kizu_print_string(ptr %1, i64 5)
-  call void @kizu_print_int(i64 %4)
-  ret void
+  %kizu.1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %kizu.4 = add i64 30, 1
+  call void @kizu_print_string(ptr %kizu.1, i64 5)
+  call void @kizu_print_int(i64 %kizu.4)
+  ret i32 0
 }`
 
 const ifLLVM = `; Kizu LLVM IR
@@ -146,20 +217,20 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
-  %3 = icmp sge i64 20, 20
-  br i1 %3, label %if.then.1, label %if.else.2
+  %kizu.3 = icmp sge i64 20, 20
+  br i1 %kizu.3, label %if.then.1, label %if.else.2
 if.then.1:
-  %4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %4, i64 5)
+  %kizu.4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  call void @kizu_print_string(ptr %kizu.4, i64 5)
   br label %if.end.3
 if.else.2:
-  %6 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
-  call void @kizu_print_string(ptr %6, i64 5)
+  %kizu.6 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+  call void @kizu_print_string(ptr %kizu.6, i64 5)
   br label %if.end.3
 if.end.3:
-  ret void
+  ret i32 0
 }`
 
 const whileLLVM = `; Kizu LLVM IR
@@ -167,17 +238,17 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define void @main() {
+define i32 @main() {
 entry:
   br label %while.header.1
 while.header.1:
-  %2 = phi i64 [ 0, %entry ], [ %7, %while.body.2 ]
-  %4 = icmp slt i64 %2, 3
-  br i1 %4, label %while.body.2, label %while.end.3
+  %kizu.2 = phi i64 [ 0, %entry ], [ %kizu.7, %while.body.2 ]
+  %kizu.4 = icmp slt i64 %kizu.2, 3
+  br i1 %kizu.4, label %while.body.2, label %while.end.3
 while.body.2:
-  call void @kizu_print_int(i64 %2)
-  %7 = add i64 %2, 1
+  call void @kizu_print_int(i64 %kizu.2)
+  %kizu.7 = add i64 %kizu.2, 1
   br label %while.header.1
 while.end.3:
-  ret void
+  ret i32 0
 }`

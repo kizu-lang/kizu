@@ -1,8 +1,8 @@
 # Compiler Specification Decisions
 
 This document tracks compiler-facing language and toolchain decisions that are
-specified but still need implementation work before the self-host compiler can
-replace the Go implementation.
+specified but still need implementation work before another compiler
+implementation can replace the Go implementation.
 
 ## Accepted Decisions
 
@@ -97,39 +97,50 @@ Required user-facing commands:
 - `kizu cache prune`
 - `kizu why-rebuild`
 
+### Native Build Policy
+
+Source: [ADR-0052](adr/0052-zig-style-native-build-policy.md).
+
+- native builds are explicit through `kizu build --target native`
+- the current backend may use host `clang` and libc
+- no-libc / freestanding builds are a planned first-class mode
+- `--cpu`, `--abi`, `--libc off`, `--runtime freestanding`,
+  `--emit obj|llvm`, and non-clang linkers are accepted CLI vocabulary but
+  rejected until implemented
+- native builds write `<output>.kizu-build.json` with explicit build inputs
+- libc mode, runtime mode, target triple, ABI, linker, and optimization mode
+  are build inputs and cache-key inputs
+- unsupported lowered features must fail before invoking clang
+
 ### Bootstrap
 
 Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
-Operational contract: [docs/bootstrap.md](bootstrap.md).
-Self-host migration strategy:
-[ADR-0052](adr/0052-module-first-self-host-migration.md).
 
 The Go implementation remains the oracle until the Kizu compiler matches it for
 lexer, parser, diagnostics, type checking, ownership checking, IR, backend smoke
 tests, and self-check/build.
 
-The self-host compiler replacement path is module-first. The legacy
-`selfhost/frontend.kizu` file remains an oracle harness while new compiler
-modules are ported under `selfhost/src`.
-
 Self-host component migration readiness is tracked by
-[ADR-0053](adr/0053-self-host-readiness-gate.md) and
+[ADR-0054](adr/0054-self-host-readiness-gate.md) and
 [`docs/selfhost-readiness.md`](selfhost-readiness.md). A component should not
 replace a Go production path until its language features, stdlib dependencies,
 diagnostics, memory-safety cases, and oracle tests are explicit.
 
 ## Implementation Work Still Needed
 
-- Connect explicit build outputs to a package artifact layout under `target/`: #100.
-- Expand self-host snapshots from normalized summaries to full phase outputs: #31.
-- Reset self-host migration around a multi-file Kizu package: #190.
-- Scaffold `selfhost/kizu.toml` and `selfhost/src/*.kizu`: #191.
-- Port `internal/token` and `internal/lexer` to Kizu modules: #192.
-- Port `internal/ast` and `internal/parser` to Kizu modules: #193.
-- Track self-host readiness before file-by-file migration: #196.
-- Add package component tests for self-host modules: #197.
-- Add cross-module type reference conformance for imported compiler modules: #198.
-- Gate lexer stdlib dependencies before porting lexer logic: #199.
+- Connect parsed imports to multi-file checking: #88.
+- Add resolver phase between parser and type checker: #88.
+- Enforce visibility across module boundaries: #89.
+- Preserve byte spans and file IDs through compiler phases: #89.
+- Render multi-file diagnostics: #89.
+- Add artifact layout under `target/`: #90.
+- Add explicit native target metadata flags for triple, ABI, libc, runtime, and
+  linker mode.
+- Add no-libc / freestanding runtime support after hosted libc native builds are
+  stable.
+- Extend build cache keys with module graph and public interface hashes: #90.
+- Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
+  IR, backend outputs, and module fixtures: #91.
 
 ## Implemented Groundwork
 
@@ -139,34 +150,9 @@ diagnostics, memory-safety cases, and oracle tests are explicit.
 - Minimal `kizu.toml` parsing for `[package]` and `[modules]`.
 - File path to module path graph resolution.
 - Single-program public API checks for private type leaks.
-- Module-boundary visibility checks reject private namespace access, imported
-  private type leaks in public signatures, and private field construction.
-- AST declarations and visibility-sensitive expressions carry byte spans with
-  line/column origins for multi-file diagnostics.
-- Visibility diagnostics render a primary location and related declaration or
-  field location.
-- `std/` source skeleton records the Kizu wrapper surface for `std::mem`,
-  `std::path`, `std::io`, `std::process`, and `std::testing`.
-- Build cache stdlib invalidation hashes the checked-in `std/` manifest and
-  Kizu source skeleton.
-- Self-host parser oracle compares normalized AST snapshots against the Go
-  parser for representative parseable sources and module fixtures.
-- Self-host semantic oracle compares symbol/diagnostic snapshots for selected
-  positive fixtures and keeps memory-safety negative fixtures paired with Go
-  checker diagnostics.
-- Module-aware build cache keys include manifest, module graph, source, public
-  interface, target/backend/optimization, and stdlib hashes.
-- `why-rebuild` explains package input changes for manifest, module graph,
-  public interface, source-only, stdlib, and cache version changes.
 - Multi-file module conformance fixture at `tests/conformance/modules/basic`.
 - Go project tests resolve the module fixture graph and parse every fixture
   source file.
-- Resolver phase parses package modules, validates explicit imports, rejects
-  missing imports, same-name import collisions, import shadowing, and cycles.
-- `kizu check <package-dir>` and `kizu check <package-dir>/kizu.toml` run
-  multi-file package smoke checks.
-- The self-host frontend can read the module fixture source path through the
-  same explicit `std::fs` / `std::path` / `std::process` APIs.
 
 ## Postponed
 

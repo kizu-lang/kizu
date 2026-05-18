@@ -39,19 +39,3 @@ root = "src/main.kizu"
 		t.Fatal("expected error")
 	}
 }
-
-// TestParseStdManifestAcceptsReservedPackageName checks compiler-owned std.
-func TestParseStdManifestAcceptsReservedPackageName(t *testing.T) {
-	manifest, err := ParseStdManifest(`[package]
-name = "std"
-
-[modules]
-root = "src/mod.kizu"
-`)
-	if err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	if manifest.PackageName != "std" {
-		t.Fatalf("got package %q", manifest.PackageName)
-	}
-}

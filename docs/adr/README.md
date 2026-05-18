@@ -70,5 +70,6 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0049: module graph and name resolution](0049-module-graph-name-resolution.md)
 - [ADR-0050: visibility and diagnostics](0050-visibility-diagnostics.md)
 - [ADR-0051: compiler outputs, build cache, and bootstrap criteria](0051-compiler-outputs-cache-bootstrap.md)
-- [ADR-0052: module-first self-host migration](0052-module-first-self-host-migration.md)
-- [ADR-0053: self-host migration readiness gate](0053-self-host-readiness-gate.md)
+- [ADR-0052: Zig-style native build policy](0052-zig-style-native-build-policy.md)
+- [ADR-0053: checked index and slice syntax](0053-checked-index-and-slice-syntax.md)
+- [ADR-0054: self-host migration readiness gate](0054-self-host-readiness-gate.md)

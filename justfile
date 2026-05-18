@@ -71,6 +71,15 @@ wasm file="examples/hello.kizu":
 wasm-opt file="examples/hello.kizu":
     go run ./cmd/kizu build --target wasm32-wasi --opt {{file}}
 
+# Build a native executable through LLVM IR and clang.
+native file="examples/hello.kizu":
+    go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang {{file}}
+
+# Build and run the default native hello artifact.
+native-smoke:
+    go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
+    ./target/native/hello
+
 # Build and run Phase 2 examples with wasmtime.
 wasi-smoke:
     scripts/run-wasi-smoke.sh
@@ -83,7 +92,7 @@ cache-status:
 cache-prune:
     go run ./cmd/kizu cache prune
 
-# Explain whether a file or package would rebuild.
+# Explain whether a file would rebuild.
 why file="examples/hello.kizu":
     go run ./cmd/kizu why-rebuild {{file}}
 
@@ -117,6 +126,7 @@ opt-smoke file="examples/arithmetic.kizu":
     go run ./cmd/kizu ir --opt {{file}} >/dev/null
     go run ./cmd/kizu build --emit-llvm --opt {{file}} >/dev/null
     go run ./cmd/kizu build --target wasm32-wasi --opt {{file}} >/dev/null
+    go run ./cmd/kizu build --target native --opt --libc on --runtime hosted --linker clang {{file}} >/dev/null
 
 # Run the everyday local validation sequence.
 verify: fmt test lint

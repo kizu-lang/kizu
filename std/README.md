@@ -1,17 +1,11 @@
-# Kizu std Source Skeleton
+# Kizu Standard Library Sources
 
-`std/` is the future home of Kizu-written standard-library wrappers.
+This directory is the migration target for Kizu-written `std` modules.
 
-In v0.3 these sources are a skeleton only. Runtime behavior still comes from
-explicit Go-backed primitives in `internal/types`, `internal/ownership`, and
-`internal/interp`. The public declarations here document the wrapper boundary
-and participate in build-cache std source hashing.
+The current implementation still uses Go-backed trusted primitives. Public std
+APIs should move here as Kizu wrappers while host and runtime boundaries remain
+in `internal/stdprim`.
 
-Rules:
-
-- user packages cannot use the `std` package name
-- host I/O, process access, allocation, threads, mutexes, atomics, and raw
-  storage remain trusted primitives
-- Kizu source should migrate pure helpers first
-- wrappers must not introduce hidden allocators, hidden runtimes, implicit I/O,
-  or silent fallback behavior
+This is a migration layout, not an active package-loader input yet. Keep files
+parseable, but do not assume `kizu check std` works until package loading is
+reintroduced with explicit acceptance tests.

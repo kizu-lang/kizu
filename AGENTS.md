@@ -5,7 +5,7 @@
 ## プロジェクト目標
 
 Kizu v0.1 は Go 製の interpreter-first language core です。
-現在は v0.2 stdlib prototype と v0.3 self-host compiler preparation を進めます。
+現在は v0.2 stdlib prototype を基準に、言語仕様と Go 実装の品質を固めます。
 
 Kizu は Rust clone ではありません。
 
@@ -40,7 +40,7 @@ v0.1 の中心は以下です。
 7. borrow checker
 8. Arena / Handle
 
-v0.2 の中心は、self-host compiler に必要な最小 stdlib と tooling です。
+v0.2 の中心は、最小 stdlib と tooling です。
 
 - `std::mem`
 - `std::array::Array<T>`
@@ -54,10 +54,11 @@ active work は GitHub Issues を正として管理します。
 Markdown の phase TODO 文書は使いません。
 
 Kizu 固有の Codex skill は `.codex/skills/kizu-language-design/` を正として管理します。
-言語設計、stdlib、self-host、memory-safety の判断では、この skill の方針を参照してください。
+言語設計、stdlib、memory-safety の判断では、この skill の方針を参照してください。
 
 stdlib API の現状整理と Kizu 製 std への移行方針は `docs/stdlib.md` を参照してください。
 新しい `std::...` builtin を追加する場合は、同じ変更で registry、examples、conformance を更新してください。
+新しい positive example は原則 `std::testing` assertion style にし、CLI 出力自体を検証する例だけ stdout conformance を使ってください。
 
 開発は branch / Pull Request ベースで進めます。
 `main` への直接 commit / push は行わないでください。
@@ -75,6 +76,9 @@ internal/parser
 internal/interp
 internal/types
 internal/ownership
+internal/stdprim
+internal/native
+std
 examples
 tests
 ```
@@ -87,7 +91,7 @@ tests
 * 各 milestone にテストを追加する
 * v0 では generics を本格実装しない
 * `async fn` / `await` syntax は実装しない
-* native executable generation は実装しない
+* native executable generation は限定 subset の明示 build target として扱う
 * macro は実装しない
 * package manager はまだ実装しない
 * `SPEC.md` と矛盾する構文や機能を勝手に追加しない

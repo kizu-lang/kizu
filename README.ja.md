@@ -20,7 +20,7 @@ Rust より単純で、safe code では C/C++/Zig より安全で、CI とビル
 Kizu は Go 製の初期プロトタイプです。
 
 v0.1 の対象は interpreter-first の language core です。
-現在の v0.2 作業では、将来の self-host compiler に必要な最小 stdlib surface を追加しています。
+現在の v0.2 baseline では、言語挙動を検証し続けるための最小 stdlib surface と tooling を追加しています。
 正となる挙動は引き続き Go 製 interpreter と `kizu check` です。
 
 実装済み language core:
@@ -50,19 +50,23 @@ v0.1 の対象は interpreter-first の language core です。
 
 実験的な compiler / tooling:
 
-- `selfhost/` の self-host compiler skeleton
+- `std/` の Kizu stdlib 移行用 layout
 - typed SSA IR
 - LLVM IR text backend
 - 上限付きローカルビルドキャッシュと再ビルド理由表示
 - WASI-compatible WebAssembly text backend
 - extern function 宣言向けの限定的な C header import
 - opt-in の IR optimization pipeline
+- LLVM IR と clang 経由の限定的な native executable generation
 
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
-LLVM と WASM は interpreter より限定された subset だけを扱い、native executable generation は未実装です。
+LLVM と WASM は interpreter より限定された subset だけを扱います。native build は
+LLVM lowering 済み subset と小さな `kizu_print_*` runtime shim に限定します。
+現時点の native path は host `clang` と libc を使いますが、将来の no-libc /
+freestanding build は採用済みの build policy として扱います。
 
-現時点で open な v0.2 Issue はありません。残作業は GitHub Issues 上の v0.3 self-host /
-module-boundary 実装 Issue として管理しています。
+現時点で open な v0.2 Issue はありません。将来の compiler migration work は、
+明確な受け入れ条件を持つ新しい GitHub Issues から開始します。
 
 まだ実験段階です。構文や実装詳細は、言語設計を検証しながら変わる可能性があります。
 
@@ -139,6 +143,7 @@ go run ./cmd/kizu ir --opt examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm examples/hello.kizu
 go run ./cmd/kizu build --emit-llvm --opt examples/hello.kizu
 go run ./cmd/kizu build --target wasm32-wasi examples/hello.kizu
+go run ./cmd/kizu build --target native --libc on --runtime hosted --linker clang examples/hello.kizu
 go run ./cmd/kizu cache status
 go run ./cmd/kizu why-rebuild examples/hello.kizu
 go run ./cmd/kizu import-c-header examples/c_abi.h
@@ -154,6 +159,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。
 - `kizu build --emit-llvm [--opt] <file>` は LLVM IR text を出力します。
 - `kizu build --target wasm32-wasi [--opt] <file>` は WASI-compatible WAT を出力します。
+- `kizu build --target native [--opt] [--triple <triple>] [--cpu <cpu>] [--abi <abi>] [--libc on|off] [--runtime hosted|freestanding] [--emit exe|obj|llvm] [--linker clang] [-o <out>] <file>` は native executable を link します。
 - `kizu cache status` はローカルビルドキャッシュの状態を表示します。
 - `kizu cache prune` はローカルビルドキャッシュを削除します。
 - `kizu why-rebuild <file>` は cache hit または rebuild 理由を表示します。
