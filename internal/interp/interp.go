@@ -1680,17 +1680,35 @@ func (i *Interpreter) evalBuiltinTypeApply(
 	switch name {
 	case "std.builtin.channel":
 		return callChannelFromExprs(i.resolveTypeArg(typeArg), args), true, nil
+	case "std.builtin.channel_send", "std.builtin.channel_recv":
+		value, err := i.evalChannelPrimitive(name, i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
 	case "std.builtin.atomic":
 		value, err := i.evalAtomic(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
+	case "std.builtin.atomic_load", "std.builtin.atomic_store":
+		value, err := i.evalAtomicPrimitive(name, args, env)
 		return value, true, err
 	case "std.builtin.mutex":
 		value, err := i.evalMutex(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
+	case "std.builtin.mutex_get":
+		value, err := i.evalMutexPrimitive(args, env)
+		return value, true, err
 	case "std.builtin.array":
 		value, err := i.evalArrayConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
+	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
+		"std.builtin.array_get", "std.builtin.array_at", "std.builtin.array_at_mut",
+		"std.builtin.array_set", "std.builtin.array_deinit":
+		value, err := i.evalArrayPrimitive(name, args, env)
+		return value, true, err
 	case "std.builtin.map":
 		value, err := i.evalMapConstructor(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
+	case "std.builtin.map_insert", "std.builtin.map_get", "std.builtin.map_contains",
+		"std.builtin.map_len", "std.builtin.map_deinit":
+		value, err := i.evalMapPrimitive(name, args, env)
 		return value, true, err
 	case "std.builtin.thread_scoped":
 		value, err := i.evalThreadScopedTyped(args, env)
@@ -1698,6 +1716,87 @@ func (i *Interpreter) evalBuiltinTypeApply(
 	default:
 		return voidValue(), false, nil
 	}
+}
+
+// evalChannelPrimitive executes reserved Channel method primitives.
+func (i *Interpreter) evalChannelPrimitive(
+	name string,
+	_ string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	receiver, rest, err := i.evalPrimitiveReceiver(name, args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.evalChannelRuntimeMethod(receiver, strings.TrimPrefix(name, "std.builtin.channel_"),
+		rest, env)
+}
+
+// evalAtomicPrimitive executes reserved Atomic method primitives.
+func (i *Interpreter) evalAtomicPrimitive(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	receiver, rest, err := i.evalPrimitiveReceiver(name, args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.evalAtomicRuntimeMethod(receiver, strings.TrimPrefix(name, "std.builtin.atomic_"),
+		rest, env)
+}
+
+// evalMutexPrimitive executes reserved Mutex method primitives.
+func (i *Interpreter) evalMutexPrimitive(args []ast.Expression, env *Env) (Value, error) {
+	receiver, rest, err := i.evalPrimitiveReceiver("std.builtin.mutex_get", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.evalMutexRuntimeMethod(receiver, "get", rest, env)
+}
+
+// evalArrayPrimitive executes reserved Array method primitives.
+func (i *Interpreter) evalArrayPrimitive(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	receiver, rest, err := i.evalPrimitiveReceiver(name, args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.evalArrayRuntimeMethod(receiver, strings.TrimPrefix(name, "std.builtin.array_"),
+		rest, env)
+}
+
+// evalMapPrimitive executes reserved Map method primitives.
+func (i *Interpreter) evalMapPrimitive(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	receiver, rest, err := i.evalPrimitiveReceiver(name, args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.evalMapRuntimeMethod(receiver, strings.TrimPrefix(name, "std.builtin.map_"), rest, env)
+}
+
+// evalPrimitiveReceiver evaluates the explicit receiver for a std primitive.
+func (i *Interpreter) evalPrimitiveReceiver(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, []ast.Expression, error) {
+	if len(args) == 0 {
+		return voidValue(), nil, fmt.Errorf("runtime error: %s expects receiver", name)
+	}
+	receiver, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), nil, err
+	}
+	return unwrapRefValue(receiver), args[1:], nil
 }
 
 // callTypeApplyFunction invokes a generic std wrapper.
@@ -1714,6 +1813,35 @@ func (i *Interpreter) callTypeApplyFunction(
 	}
 	defer func() { i.typeArgs = previous }()
 	return i.callFunctionExpr(fn, args, caller)
+}
+
+// evalStdMethodWrapper invokes a Kizu std method wrapper with an explicit receiver.
+func (i *Interpreter) evalStdMethodWrapper(
+	name string,
+	typeArgs []string,
+	receiver Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	fn := i.functions[name]
+	if fn == nil {
+		return voidValue(), false, nil
+	}
+	values, err := i.evalArgs(args, env)
+	if err != nil {
+		return voidValue(), true, err
+	}
+	callArgs := append([]Value{receiver}, values...)
+	previous := i.typeArgs
+	i.typeArgs = map[string]string{}
+	for idx, param := range fn.TypeParams {
+		if idx < len(typeArgs) {
+			i.typeArgs[param] = typeArgs[idx]
+		}
+	}
+	defer func() { i.typeArgs = previous }()
+	value, err := i.callFunction(name, callArgs)
+	return value, true, err
 }
 
 // resolveTypeArg maps a wrapper type parameter to the caller-provided type.
@@ -2356,8 +2484,26 @@ func waitTask(task *Task) {
 	}
 }
 
-// evalChannelMethod executes owned message passing operations.
+// evalChannelMethod dispatches public Channel methods through Kizu std wrappers.
 func (i *Interpreter) evalChannelMethod(
+	channel Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if name == "close" {
+		return i.evalChannelRuntimeMethod(channel, name, args, env)
+	}
+	if value, ok, err := i.evalStdMethodWrapper(
+		"std.channel."+name, []string{channel.typeName}, channel, args, env,
+	); ok || err != nil {
+		return value, err
+	}
+	return voidValue(), missingStdMethodWrapper("std.channel." + name)
+}
+
+// evalChannelRuntimeMethod executes owned message passing operations.
+func (i *Interpreter) evalChannelRuntimeMethod(
 	channel Value,
 	name string,
 	args []ast.Expression,
@@ -2441,8 +2587,26 @@ func (i *Interpreter) evalLocalBufferMethod(
 	return buffer.localBuf.values[int(index.i)], nil
 }
 
-// evalArrayMethod executes owned Array<T> prototype operations.
+// evalArrayMethod dispatches public Array methods through Kizu std wrappers.
 func (i *Interpreter) evalArrayMethod(
+	array Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if isArrayRuntimeOnlyMethod(name) {
+		return i.evalArrayRuntimeMethod(array, name, args, env)
+	}
+	if value, ok, err := i.evalStdMethodWrapper(
+		"std.array."+name, []string{array.typeName}, array, args, env,
+	); ok || err != nil {
+		return value, err
+	}
+	return voidValue(), missingStdMethodWrapper("std.array." + name)
+}
+
+// evalArrayRuntimeMethod executes owned Array<T> prototype operations.
+func (i *Interpreter) evalArrayRuntimeMethod(
 	array Value,
 	name string,
 	args []ast.Expression,
@@ -2620,8 +2784,23 @@ func (i *Interpreter) evalArrayGet(array Value, args []ast.Expression, env *Env)
 	return array.array.values[index], nil
 }
 
-// evalMapMethod executes owned Map<[]const u8, V> prototype operations.
+// evalMapMethod dispatches public Map methods through Kizu std wrappers.
 func (i *Interpreter) evalMapMethod(
+	mapVal Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if value, ok, err := i.evalStdMethodWrapper(
+		"std.map."+name, []string{mapVal.mapValue.valueType}, mapVal, args, env,
+	); ok || err != nil {
+		return value, err
+	}
+	return voidValue(), missingStdMethodWrapper("std.map." + name)
+}
+
+// evalMapRuntimeMethod executes owned Map<[]const u8, V> prototype operations.
+func (i *Interpreter) evalMapRuntimeMethod(
 	mapVal Value,
 	name string,
 	args []ast.Expression,
@@ -2790,8 +2969,23 @@ func splitGenericArgs(arg string) ([]string, bool) {
 	return append(args, item), true
 }
 
-// evalAtomicMethod executes seq_cst-only integer atomic operations.
+// evalAtomicMethod dispatches public Atomic methods through Kizu std wrappers.
 func (i *Interpreter) evalAtomicMethod(
+	atomic Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if value, ok, err := i.evalStdMethodWrapper(
+		"std.atomic."+name, []string{atomic.typeName}, atomic, args, env,
+	); ok || err != nil {
+		return value, err
+	}
+	return voidValue(), missingStdMethodWrapper("std.atomic." + name)
+}
+
+// evalAtomicRuntimeMethod executes seq_cst-only integer atomic operations.
+func (i *Interpreter) evalAtomicRuntimeMethod(
 	atomic Value,
 	name string,
 	args []ast.Expression,
@@ -2821,8 +3015,38 @@ func (i *Interpreter) evalAtomicMethod(
 	}
 }
 
-// evalMutexMethod executes synchronous lock-free prototype operations.
+// evalMutexMethod dispatches public Mutex methods through Kizu std wrappers.
 func (i *Interpreter) evalMutexMethod(
+	mutex Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if value, ok, err := i.evalStdMethodWrapper(
+		"std.sync."+name, []string{mutex.typeName}, mutex, args, env,
+	); ok || err != nil {
+		return value, err
+	}
+	return voidValue(), missingStdMethodWrapper("std.sync." + name)
+}
+
+// missingStdMethodWrapper reports a violated std wrapper registration invariant.
+func missingStdMethodWrapper(name string) error {
+	return fmt.Errorf("runtime error: missing std method wrapper `%s`", name)
+}
+
+// isArrayRuntimeOnlyMethod reports private storage helpers intentionally kept primitive.
+func isArrayRuntimeOnlyMethod(name string) bool {
+	switch name {
+	case "reserve", "truncate", "clear", "as_bytes":
+		return true
+	default:
+		return false
+	}
+}
+
+// evalMutexRuntimeMethod executes synchronous lock-free prototype operations.
+func (i *Interpreter) evalMutexRuntimeMethod(
 	mutex Value,
 	name string,
 	args []ast.Expression,

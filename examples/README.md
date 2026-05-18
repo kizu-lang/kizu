@@ -170,6 +170,11 @@ go test ./...
 | mutex host primitives are reserved | `negative/std_mutex_builtin_direct_call.kizu` | `reserved; use std::sync` |
 | array host primitives are reserved | `negative/std_array_builtin_direct_call.kizu` | `reserved; use std::array` |
 | map host primitives are reserved | `negative/std_map_builtin_direct_call.kizu` | `reserved; use std::map` |
+| channel method primitives are reserved | `negative/std_channel_send_builtin_direct_call.kizu` | `reserved` |
+| atomic method primitives are reserved | `negative/std_atomic_load_builtin_direct_call.kizu` | `reserved` |
+| mutex method primitives are reserved | `negative/std_mutex_get_builtin_direct_call.kizu` | `reserved` |
+| array method primitives are reserved | `negative/std_array_append_builtin_direct_call.kizu` | `reserved` |
+| map method primitives are reserved | `negative/std_map_insert_builtin_direct_call.kizu` | `reserved` |
 | generic functions are std-only | `negative/generic_function_user_reserved.kizu` | `reserved for std` |
 | `Function` parameters are std-only | `negative/function_parameter_runtime.kizu` | `reserved for std` |
 | task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |

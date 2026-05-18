@@ -601,6 +601,10 @@ func substituteTypeParams(typ Type, subst map[string]Type) Type {
 	out := string(typ)
 	for name, replacement := range subst {
 		repl := string(replacement)
+		out = strings.ReplaceAll(out, "!&mut "+name, "!&mut "+repl)
+		out = strings.ReplaceAll(out, "!&"+name, "!&"+repl)
+		out = strings.ReplaceAll(out, "&mut "+name, "&mut "+repl)
+		out = strings.ReplaceAll(out, "&"+name, "&"+repl)
 		out = strings.ReplaceAll(out, "<"+name+">", "<"+string(replacement)+">")
 		out = strings.ReplaceAll(out, "<"+name+",", "<"+repl+",")
 		out = strings.ReplaceAll(out, ", "+name+",", ", "+repl+",")
@@ -613,6 +617,9 @@ func substituteTypeParams(typ Type, subst map[string]Type) Type {
 func (c *Checker) parseType(name string) (Type, error) {
 	if strings.HasPrefix(name, "!") {
 		return c.parseErrorUnionType(name)
+	}
+	if strings.HasPrefix(name, "&") {
+		return c.parseBorrowType(name)
 	}
 	if errorType, successType, ok := typedErrorUnionParts(name); ok {
 		if _, err := c.parseType(errorType); err != nil {
@@ -644,6 +651,19 @@ func (c *Checker) parseType(name string) (Type, error) {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
+}
+
+// parseBorrowType validates local borrow type spellings used by std wrappers.
+func (c *Checker) parseBorrowType(name string) (Type, error) {
+	inner := strings.TrimPrefix(name, "&")
+	inner = strings.TrimPrefix(inner, "mut ")
+	if inner == "" {
+		return "", fmt.Errorf("type error: & must wrap a type")
+	}
+	if _, err := c.parseType(inner); err != nil {
+		return "", err
+	}
+	return Type(name), nil
 }
 
 // parseSliceType validates v0.1 byte slice spellings.
@@ -2389,6 +2409,11 @@ func (c *Checker) checkBuiltinTypeApply(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
+	if typ, ok, err := c.checkBuiltinMethodTypeApply(
+		name, typeArg, args, env, unsafe,
+	); ok || err != nil {
+		return typ, ok, err
+	}
 	switch name {
 	case "std.builtin.channel":
 		if !c.currentStd {
@@ -2435,6 +2460,187 @@ func (c *Checker) checkBuiltinTypeApply(
 	}
 }
 
+// checkBuiltinMethodTypeApply validates std-only method primitive calls.
+func (c *Checker) checkBuiltinMethodTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.builtin.channel_send", "std.builtin.channel_recv":
+		return c.checkBuiltinChannelMethod(name, typeArg, args, env, unsafe)
+	case "std.builtin.atomic_load", "std.builtin.atomic_store":
+		return c.checkBuiltinAtomicMethod(name, typeArg, args, env, unsafe)
+	case "std.builtin.mutex_get":
+		return c.checkBuiltinMutexMethod(name, typeArg, args, env, unsafe)
+	default:
+		return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
+	}
+}
+
+// checkBuiltinArrayMethodTypeApply validates std-only Array method primitives.
+func (c *Checker) checkBuiltinArrayMethodTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
+		"std.builtin.array_get", "std.builtin.array_at", "std.builtin.array_at_mut",
+		"std.builtin.array_set", "std.builtin.array_deinit":
+		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkBuiltinChannelMethod validates std-only channel method primitives.
+func (c *Checker) checkBuiltinChannelMethod(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	elem, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	return c.checkBuiltinReceiverMethod(name, Type(fmt.Sprintf("Channel<%s>", elem)),
+		func(rest []ast.Expression) (Type, error) {
+			method := strings.TrimPrefix(name, "std.builtin.channel_")
+			return c.checkChannelMethod(elem, method, rest, env, unsafe)
+		}, args, env, unsafe)
+}
+
+// checkBuiltinAtomicMethod validates std-only atomic method primitives.
+func (c *Checker) checkBuiltinAtomicMethod(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	elem, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	method := strings.TrimPrefix(name, "std.builtin.atomic_")
+	return c.checkBuiltinReceiverMethod(name, Type(fmt.Sprintf("Atomic<%s>", elem)),
+		func(rest []ast.Expression) (Type, error) {
+			return c.checkAtomicMethod(elem, method, rest, env, unsafe)
+		}, args, env, unsafe)
+}
+
+// checkBuiltinMutexMethod validates std-only mutex method primitives.
+func (c *Checker) checkBuiltinMutexMethod(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	elem, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	return c.checkBuiltinReceiverMethod(name, Type(fmt.Sprintf("Mutex<%s>", elem)),
+		func(rest []ast.Expression) (Type, error) {
+			return c.checkMutexMethod(elem, "get", rest)
+		}, args, env, unsafe)
+}
+
+// checkBuiltinArrayMethod validates std-only Array method primitives.
+func (c *Checker) checkBuiltinArrayMethod(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	elem, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	method := strings.TrimPrefix(name, "std.builtin.array_")
+	return c.checkBuiltinReceiverMethod(name, Type(fmt.Sprintf("std::array::Array<%s>", elem)),
+		func(rest []ast.Expression) (Type, error) {
+			return c.checkArrayPrimitiveMethod(elem, method, rest, env, unsafe)
+		}, args, env, unsafe)
+}
+
+// checkBuiltinReceiverMethod validates a trusted primitive receiver argument.
+func (c *Checker) checkBuiltinReceiverMethod(
+	name string,
+	receiver Type,
+	checkRest func([]ast.Expression) (Type, error),
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if !c.currentStd {
+		return "", true, fmt.Errorf("type error: `%s` is reserved", name)
+	}
+	if len(args) == 0 {
+		return "", true, fmt.Errorf("type error: `%s` expects receiver", name)
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != receiver {
+		return "", true, fmt.Errorf("type error: `%s` expects %s receiver, got %s",
+			name, receiver, got)
+	}
+	typ, err := checkRest(args[1:])
+	return typ, true, err
+}
+
+// checkArrayPrimitiveMethod validates Array primitives that back source wrappers.
+func (c *Checker) checkArrayPrimitiveMethod(
+	elem Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch name {
+	case "at":
+		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return Type("!&" + string(elem)), nil
+	case "at_mut":
+		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return Type("!&mut " + string(elem)), nil
+	case "get":
+		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		if !isGenericParamType(elem) && !c.isCopyType(elem) {
+			return "", fmt.Errorf("type error: `Array.get` requires copy element in v0.2")
+		}
+		return Type("!" + string(elem)), nil
+	default:
+		return c.checkArrayMethod(elem, name, args, env, unsafe)
+	}
+}
+
+// isGenericParamType reports whether a type is a std generic wrapper parameter.
+func isGenericParamType(typ Type) bool {
+	name := string(typ)
+	if name == "" {
+		return false
+	}
+	return name[0] >= 'A' && name[0] <= 'Z'
+}
+
 // checkBuiltinMapTypeApply validates the std-only Map runtime primitive.
 func (c *Checker) checkBuiltinMapTypeApply(
 	name string,
@@ -2443,6 +2649,9 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
+	if strings.HasPrefix(name, "std.builtin.map_") {
+		return c.checkBuiltinMapMethod(name, typeArg, args, env, unsafe)
+	}
 	if name != "std.builtin.map" {
 		return "", false, nil
 	}
@@ -2457,6 +2666,94 @@ func (c *Checker) checkBuiltinMapTypeApply(
 		Type(mapArgs[0]), Type(mapArgs[1]), args, env, unsafe,
 	)
 	return typ, true, err
+}
+
+// checkBuiltinMapMethod validates std-only Map method primitives.
+func (c *Checker) checkBuiltinMapMethod(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	mapArgs, err := c.checkedMapArgsAllowTypeParams(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	receiver := Type(fmt.Sprintf("std::map::Map<%s, %s>", mapArgs[0], mapArgs[1]))
+	method := strings.TrimPrefix(name, "std.builtin.map_")
+	return c.checkBuiltinReceiverMethod(name, receiver,
+		func(rest []ast.Expression) (Type, error) {
+			return c.checkMapPrimitiveMethod(mapArgs[0], Type(mapArgs[1]), method,
+				rest, env, unsafe)
+		}, args, env, unsafe)
+}
+
+// checkMapPrimitiveMethod validates Map primitives that back source wrappers.
+func (c *Checker) checkMapPrimitiveMethod(
+	keyType string,
+	valueType Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if !isGenericParamType(Type(keyType)) && !isGenericParamType(valueType) {
+		return c.checkMapMethod(valueType, name, args, env, unsafe)
+	}
+	switch name {
+	case "insert":
+		if len(args) != 2 {
+			return "", fmt.Errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
+		}
+		if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
+			return "", err
+		} else if got != Type(keyType) {
+			return "", fmt.Errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
+		}
+		got, err := c.checkExpr(args[1], env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if got != valueType {
+			return "", fmt.Errorf("type error: `Map.insert` expects %s value, got %s",
+				valueType, got)
+		}
+		return "!void", nil
+	case "get":
+		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return Type("!" + string(valueType)), nil
+	case "contains":
+		if err := c.checkMapPrimitiveKeyArg(name, keyType, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return typeBool, nil
+	default:
+		return c.checkMapMethod(valueType, name, args, env, unsafe)
+	}
+}
+
+// checkMapPrimitiveKeyArg validates a generic Map wrapper key argument.
+func (c *Checker) checkMapPrimitiveKeyArg(
+	name string,
+	keyType string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if len(args) != 1 {
+		return fmt.Errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != Type(keyType) {
+		return fmt.Errorf("type error: `Map.%s` expects %s key, got %s", name, keyType, got)
+	}
+	return nil
 }
 
 // checkBuiltinThreadScopedTypeApply validates the std-only scoped thread primitive.
