@@ -828,11 +828,14 @@ func stage2WriterLLVMChunks() []string {
 // stage2ArtifactLLVM renders the fallback stage artifact constant.
 func stage2ArtifactLLVM() string {
 	artifact := "define i32 @main() { entry: ret i32 0 }"
+	parsePrefix := "; kizu stage2 source metric "
 	bytesPrefix := "; kizu stage2 source bytes "
 	fnPrefix := "; kizu stage2 source fn count "
 	newline := "\n"
 	return "@artifact = private constant [" + fmt.Sprint(len(artifact)+1) +
 		" x i8] [" + byteArray(artifact) + "] " +
+		"@parsemetric = private constant [" + fmt.Sprint(len(parsePrefix)+1) +
+		" x i8] [" + byteArray(parsePrefix) + "] " +
 		"@metric = private constant [" + fmt.Sprint(len(bytesPrefix)+1) +
 		" x i8] [" + byteArray(bytesPrefix) + "] " +
 		"@fnmetric = private constant [" + fmt.Sprint(len(fnPrefix)+1) +
@@ -865,6 +868,7 @@ func stage2CopyGateLLVM() string {
 // stage2WriteFallbackLLVM writes the fallback artifact when no comparison output is requested.
 func stage2WriteFallbackLLVM() string {
 	artifact := "define i32 @main() { entry: ret i32 0 }"
+	parsePrefix := "; kizu stage2 source metric "
 	bytesPrefix := "; kizu stage2 source bytes "
 	fnPrefix := "; kizu stage2 source fn count "
 	newline := "\n"
@@ -872,6 +876,12 @@ func stage2WriteFallbackLLVM() string {
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
 		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
 		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
+		"%parsemetric = getelementptr [" + fmt.Sprint(len(parsePrefix)+1) +
+		" x i8], ptr @parsemetric, i64 0, i64 0 " +
+		"call i32 @fputs(ptr %parsemetric, ptr %file) " +
+		stage2WriteNumberLLVM("parsedigits", "%parsetotal", "after.parse") +
+		"after.parse: %newline0 = getelementptr [" + fmt.Sprint(len(newline)+1) +
+		" x i8], ptr @newline, i64 0, i64 0 call i32 @fputs(ptr %newline0, ptr %file) " +
 		"%metric = getelementptr [" + fmt.Sprint(len(bytesPrefix)+1) +
 		" x i8], ptr @metric, i64 0, i64 0 " +
 		"call i32 @fputs(ptr %metric, ptr %file) " +
@@ -978,6 +988,7 @@ func stage2CheckSources() string {
 	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
 		fmt.Fprintf(&out, "%%fntotal%d = add i32 %%fntotal%d, %%fn%d ", idx-1, idx-2, idx)
 	}
+	writeStage2ParseMetric(&out)
 	fmt.Fprintf(&out, "%%large = icmp sgt i32 %%total%d, 100 ", len(selfhostSourcePaths())-2)
 	fmt.Fprintf(&out, "%%scanned = and i1 %%all%d, %%large ", len(selfhostSourcePaths())-2)
 	for idx := range selfhostSourcePaths() {
@@ -998,24 +1009,171 @@ func writeStage2SourceReadLoop(out *strings.Builder, idx int) {
 	}
 	fmt.Fprintf(out, "read%d.loop: %%count%d = phi i32 [0, %%%s], [%%next%d, %%read%d.byte] ",
 		idx, idx, prev, idx, idx)
-	fmt.Fprintf(out, "%%prev%d = phi i32 [0, %%%s], [%%ch%d, %%read%d.byte] ",
-		idx, prev, idx, idx)
-	fmt.Fprintf(out, "%%fn%d = phi i32 [0, %%%s], [%%fnnext%d, %%read%d.byte] ",
-		idx, prev, idx, idx)
+	writeStage2ReadPhis(out, idx, prev)
 	fmt.Fprintf(out, "%%ch%d = call i32 @fgetc(ptr %%srcfile%d) ", idx, idx)
 	fmt.Fprintf(out, "%%eof%d = icmp slt i32 %%ch%d, 0 ", idx, idx)
 	fmt.Fprintf(out, "br i1 %%eof%d, label %%read%d.done, label %%read%d.byte ", idx, idx, idx)
 	fmt.Fprintf(out, "read%d.byte: %%next%d = add i32 %%count%d, 1 ", idx, idx, idx)
-	fmt.Fprintf(out, "%%isf%d = icmp eq i32 %%prev%d, 102 ", idx, idx)
-	fmt.Fprintf(out, "%%isn%d = icmp eq i32 %%ch%d, 110 ", idx, idx)
-	fmt.Fprintf(out, "%%ispair%d = and i1 %%isf%d, %%isn%d ", idx, idx, idx)
-	fmt.Fprintf(out, "%%pairint%d = zext i1 %%ispair%d to i32 ", idx, idx)
-	fmt.Fprintf(out, "%%fnnext%d = add i32 %%fn%d, %%pairint%d ", idx, idx, idx)
+	writeStage2FirstTokenCode(out, idx)
+	writeStage2WordCounters(out, idx)
+	writeStage2BraceCounters(out, idx)
+	writeStage2PrevUpdates(out, idx)
 	fmt.Fprintf(out, "br label %%read%d.loop ", idx)
 	fmt.Fprintf(out, "read%d.done: br label %%%s ", idx, next)
 	if idx+1 == len(selfhostSourcePaths()) {
 		out.WriteString("after.reads: ")
 	}
+}
+
+// writeStage2ReadPhis emits scan state for one source file.
+func writeStage2ReadPhis(out *strings.Builder, idx int, prev string) {
+	for slot := 1; slot <= 5; slot++ {
+		fmt.Fprintf(out, "%%prev%d_%d = phi i32 [0, %%%s], [%%nextprev%d_%d, %%read%d.byte] ",
+			idx, slot, prev, idx, slot, idx)
+	}
+	for _, name := range []string{"fn", "imp", "struct", "enum", "brace", "balance", "first"} {
+		fmt.Fprintf(out, "%%%s%d = phi i32 [0, %%%s], [%%%snext%d, %%read%d.byte] ",
+			name, idx, prev, name, idx, idx)
+	}
+	fmt.Fprintf(out, "%%seen%d = phi i1 [0, %%%s], [%%seennext%d, %%read%d.byte] ",
+		idx, prev, idx, idx)
+}
+
+// writeStage2FirstTokenCode emits the same first-token code metric used by parser.kizu.
+func writeStage2FirstTokenCode(out *strings.Builder, idx int) {
+	fmt.Fprintf(out, "%%space%d_0 = icmp eq i32 %%ch%d, 32 ", idx, idx)
+	fmt.Fprintf(out, "%%space%d_1 = icmp eq i32 %%ch%d, 9 ", idx, idx)
+	fmt.Fprintf(out, "%%space%d_2 = icmp eq i32 %%ch%d, 10 ", idx, idx)
+	fmt.Fprintf(out, "%%space%d_3 = icmp eq i32 %%ch%d, 13 ", idx, idx)
+	fmt.Fprintf(out, "%%space%d_4 = or i1 %%space%d_0, %%space%d_1 ", idx, idx, idx)
+	fmt.Fprintf(out, "%%space%d_5 = or i1 %%space%d_2, %%space%d_3 ", idx, idx, idx)
+	fmt.Fprintf(out, "%%space%d = or i1 %%space%d_4, %%space%d_5 ", idx, idx, idx)
+	fmt.Fprintf(out, "%%notspace%d = xor i1 %%space%d, true ", idx, idx)
+	fmt.Fprintf(out, "%%unseen%d = xor i1 %%seen%d, true ", idx, idx)
+	fmt.Fprintf(out, "%%setfirst%d = and i1 %%notspace%d, %%unseen%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%seennext%d = or i1 %%seen%d, %%notspace%d ", idx, idx, idx)
+	writeStage2FirstTokenSelect(out, idx)
+}
+
+// writeStage2FirstTokenSelect renders first-token code selection.
+func writeStage2FirstTokenSelect(out *strings.Builder, idx int) {
+	fmt.Fprintf(out, "%%islower%d = icmp uge i32 %%ch%d, 97 ", idx, idx)
+	fmt.Fprintf(out, "%%islowerz%d = icmp ule i32 %%ch%d, 122 ", idx, idx)
+	fmt.Fprintf(out, "%%islowerrange%d = and i1 %%islower%d, %%islowerz%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%isupper%d = icmp uge i32 %%ch%d, 65 ", idx, idx)
+	fmt.Fprintf(out, "%%isupperz%d = icmp ule i32 %%ch%d, 90 ", idx, idx)
+	fmt.Fprintf(out, "%%isupperrange%d = and i1 %%isupper%d, %%isupperz%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%isunderscore%d = icmp eq i32 %%ch%d, 95 ", idx, idx)
+	fmt.Fprintf(out, "%%islettera%d = or i1 %%islowerrange%d, %%isupperrange%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%isletter%d = or i1 %%islettera%d, %%isunderscore%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%isdigitlo%d = icmp uge i32 %%ch%d, 48 ", idx, idx)
+	fmt.Fprintf(out, "%%isdigithi%d = icmp ule i32 %%ch%d, 57 ", idx, idx)
+	fmt.Fprintf(out, "%%isdigit%d = and i1 %%isdigitlo%d, %%isdigithi%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%isimportfirst%d = icmp eq i32 %%ch%d, 105 ", idx, idx)
+	fmt.Fprintf(out, "%%ispubfirst%d = icmp eq i32 %%ch%d, 112 ", idx, idx)
+	fmt.Fprintf(out, "%%isfnfirst%d = icmp eq i32 %%ch%d, 102 ", idx, idx)
+	fmt.Fprintf(out, "%%codeletter%d = select i1 %%isletter%d, i32 1, i32 3 ", idx, idx)
+	fmt.Fprintf(out,
+		"%%codedigit%d = select i1 %%isdigit%d, i32 2, i32 %%codeletter%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%codefn%d = select i1 %%isfnfirst%d, i32 12, i32 %%codedigit%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%codepub%d = select i1 %%ispubfirst%d, i32 11, i32 %%codefn%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%code%d = select i1 %%isimportfirst%d, i32 10, i32 %%codepub%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%firstnext%d = select i1 %%setfirst%d, i32 %%code%d, i32 %%first%d ",
+		idx, idx, idx, idx)
+}
+
+// writeStage2WordCounters emits declaration keyword counters.
+func writeStage2WordCounters(out *strings.Builder, idx int) {
+	writeStage2PairCounter(out, idx)
+	writeStage2ImportCounter(out, idx)
+	writeStage2StructCounter(out, idx)
+	writeStage2EnumCounter(out, idx)
+}
+
+// writeStage2PairCounter emits the parser function-count metric.
+func writeStage2PairCounter(out *strings.Builder, idx int) {
+	fmt.Fprintf(out, "%%isf%d = icmp eq i32 %%prev%d_1, 102 ", idx, idx)
+	fmt.Fprintf(out, "%%isn%d = icmp eq i32 %%ch%d, 110 ", idx, idx)
+	fmt.Fprintf(out, "%%ispair%d = and i1 %%isf%d, %%isn%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%pairint%d = zext i1 %%ispair%d to i32 ", idx, idx)
+	fmt.Fprintf(out, "%%fnnext%d = add i32 %%fn%d, %%pairint%d ", idx, idx, idx)
+}
+
+// writeStage2ImportCounter emits the parser import keyword metric.
+func writeStage2ImportCounter(out *strings.Builder, idx int) {
+	writeStage2CharMatch(out, idx, "imp", []int{105, 109, 112, 111, 114, 116})
+}
+
+// writeStage2StructCounter emits the parser struct keyword metric.
+func writeStage2StructCounter(out *strings.Builder, idx int) {
+	writeStage2CharMatch(out, idx, "struct", []int{115, 116, 114, 117, 99, 116})
+}
+
+// writeStage2EnumCounter emits the parser enum keyword metric.
+func writeStage2EnumCounter(out *strings.Builder, idx int) {
+	writeStage2CharMatch(out, idx, "enum", []int{101, 110, 117, 109})
+}
+
+// writeStage2CharMatch emits a rolling literal counter.
+func writeStage2CharMatch(out *strings.Builder, idx int, name string, chars []int) {
+	last := len(chars) - 1
+	fmt.Fprintf(out, "%%%s%d_c%d = icmp eq i32 %%ch%d, %d ", name, idx, last, idx, chars[last])
+	prev := fmt.Sprintf("%%%s%d_c%d", name, idx, last)
+	for pos := last - 1; pos >= 0; pos-- {
+		slot := last - pos
+		fmt.Fprintf(out, "%%%s%d_c%d = icmp eq i32 %%prev%d_%d, %d ",
+			name, idx, pos, idx, slot, chars[pos])
+		fmt.Fprintf(out, "%%%s%d_m%d = and i1 %s, %%%s%d_c%d ",
+			name, idx, pos, prev, name, idx, pos)
+		prev = fmt.Sprintf("%%%s%d_m%d", name, idx, pos)
+	}
+	fmt.Fprintf(out, "%%%smatch%d = zext i1 %s to i32 ", name, idx, prev)
+	fmt.Fprintf(out, "%%%snext%d = add i32 %%%s%d, %%%smatch%d ", name, idx, name, idx, name, idx)
+}
+
+// writeStage2BraceCounters emits brace count and balance metrics.
+func writeStage2BraceCounters(out *strings.Builder, idx int) {
+	fmt.Fprintf(out, "%%isopen%d = icmp eq i32 %%ch%d, 123 ", idx, idx)
+	fmt.Fprintf(out, "%%isclose%d = icmp eq i32 %%ch%d, 125 ", idx, idx)
+	fmt.Fprintf(out, "%%isbrace%d = or i1 %%isopen%d, %%isclose%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%braceinc%d = zext i1 %%isbrace%d to i32 ", idx, idx)
+	fmt.Fprintf(out, "%%bracenext%d = add i32 %%brace%d, %%braceinc%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%balanceopen%d = zext i1 %%isopen%d to i32 ", idx, idx)
+	fmt.Fprintf(out, "%%balanceclose%d = zext i1 %%isclose%d to i32 ", idx, idx)
+	fmt.Fprintf(out, "%%balancedelta%d = sub i32 %%balanceopen%d, %%balanceclose%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%balancenext%d = add i32 %%balance%d, %%balancedelta%d ", idx, idx, idx)
+}
+
+// writeStage2PrevUpdates advances the rolling byte window.
+func writeStage2PrevUpdates(out *strings.Builder, idx int) {
+	fmt.Fprintf(out, "%%nextprev%d_1 = add i32 %%ch%d, 0 ", idx, idx)
+	for slot := 2; slot <= 5; slot++ {
+		fmt.Fprintf(out, "%%nextprev%d_%d = add i32 %%prev%d_%d, 0 ", idx, slot, idx, slot-1)
+	}
+}
+
+// writeStage2ParseMetric aggregates the source scan into parser.kizu's score.
+func writeStage2ParseMetric(out *strings.Builder) {
+	for idx := range selfhostSourcePaths() {
+		fmt.Fprintf(out, "%%balanced%d = icmp eq i32 %%balance%d, 0 ", idx, idx)
+		fmt.Fprintf(out, "%%bracescore%d = select i1 %%balanced%d, i32 %%brace%d, i32 0 ",
+			idx, idx, idx)
+		fmt.Fprintf(out, "%%declfn%d = mul i32 %%fn%d, 5 ", idx, idx)
+		fmt.Fprintf(out, "%%declimp%d = mul i32 %%imp%d, 3 ", idx, idx)
+		fmt.Fprintf(out, "%%declstruct%d = mul i32 %%struct%d, 2 ", idx, idx)
+		fmt.Fprintf(out, "%%declenum%d = mul i32 %%enum%d, 2 ", idx, idx)
+		fmt.Fprintf(out, "%%decla%d = add i32 %%declfn%d, %%declimp%d ", idx, idx, idx)
+		fmt.Fprintf(out, "%%declb%d = add i32 %%declstruct%d, %%declenum%d ", idx, idx, idx)
+		fmt.Fprintf(out, "%%decl%d = add i32 %%decla%d, %%declb%d ", idx, idx, idx)
+		fmt.Fprintf(out, "%%parsea%d = add i32 %%first%d, %%decl%d ", idx, idx, idx)
+		fmt.Fprintf(out, "%%parse%d = add i32 %%parsea%d, %%bracescore%d ", idx, idx, idx)
+	}
+	out.WriteString("%parsetotal0 = add i32 %parse0, %parse1 ")
+	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+		fmt.Fprintf(out, "%%parsetotal%d = add i32 %%parsetotal%d, %%parse%d ",
+			idx-1, idx-2, idx)
+	}
+	fmt.Fprintf(out, "%%parsetotal = add i32 %%parsetotal%d, 0 ", len(selfhostSourcePaths())-2)
 }
 
 // selfhostSourcePaths lists the compiler source tree read by stage1 and stage2.

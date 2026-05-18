@@ -434,12 +434,42 @@ func assertStage2CanWriteWithoutInputCopy(
 	if !strings.Contains(string(data), "; kizu stage2 source bytes ") {
 		t.Fatalf("source-only stage2 artifact does not include source byte total:\n%s", data)
 	}
+	if !strings.Contains(string(data), "; kizu stage2 source metric ") {
+		t.Fatalf("source-only stage2 artifact does not include source metric:\n%s", data)
+	}
 	if !strings.Contains(string(data), "; kizu stage2 source fn count ") {
 		t.Fatalf("source-only stage2 artifact does not include source fn count:\n%s", data)
 	}
+	assertStage2SourceOnlyMetrics(t, stage2Data, data)
+	link := exec.Command("clang", sourceOut, "-o", sourceBin)
+	out, err = link.CombinedOutput()
+	if err != nil {
+		t.Fatalf("source-only stage2 link failed: %v\n%s", err, out)
+	}
+	run = exec.Command(sourceBin)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("source-only stage2 output failed: %v\n%s", err, out)
+	}
+}
+
+// assertStage2SourceOnlyMetrics checks source-only output against stage1 metrics.
+func assertStage2SourceOnlyMetrics(t *testing.T, stage2Data []byte, sourceData []byte) {
+	t.Helper()
+	stage2ParseLine := firstLineContaining(string(stage2Data), "; kizu selfhost source metric ")
+	sourceParseLine := strings.Replace(
+		firstLineContaining(string(sourceData), "; kizu stage2 source metric "),
+		"; kizu stage2 source metric ",
+		"; kizu selfhost source metric ",
+		1,
+	)
+	if stage2ParseLine != sourceParseLine {
+		t.Fatalf("source parse metrics differ: stage2 %q source-only %q",
+			stage2ParseLine, sourceParseLine)
+	}
 	stage2BytesLine := firstLineContaining(string(stage2Data), "; kizu selfhost source bytes ")
 	sourceBytesLine := strings.Replace(
-		firstLineContaining(string(data), "; kizu stage2 source bytes "),
+		firstLineContaining(string(sourceData), "; kizu stage2 source bytes "),
 		"; kizu stage2 source bytes ",
 		"; kizu selfhost source bytes ",
 		1,
@@ -450,7 +480,7 @@ func assertStage2CanWriteWithoutInputCopy(
 	}
 	stage2FnsLine := firstLineContaining(string(stage2Data), "; kizu selfhost source fn count ")
 	sourceFnsLine := strings.Replace(
-		firstLineContaining(string(data), "; kizu stage2 source fn count "),
+		firstLineContaining(string(sourceData), "; kizu stage2 source fn count "),
 		"; kizu stage2 source fn count ",
 		"; kizu selfhost source fn count ",
 		1,
@@ -458,16 +488,6 @@ func assertStage2CanWriteWithoutInputCopy(
 	if stage2FnsLine != sourceFnsLine {
 		t.Fatalf("source fn counts differ: stage2 %q source-only %q",
 			stage2FnsLine, sourceFnsLine)
-	}
-	link := exec.Command("clang", sourceOut, "-o", sourceBin)
-	out, err = link.CombinedOutput()
-	if err != nil {
-		t.Fatalf("source-only stage2 link failed: %v\n%s", err, out)
-	}
-	run = exec.Command(sourceBin)
-	out, err = run.CombinedOutput()
-	if err != nil {
-		t.Fatalf("source-only stage2 output failed: %v\n%s", err, out)
 	}
 }
 
