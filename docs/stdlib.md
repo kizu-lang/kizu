@@ -104,6 +104,7 @@ Current builtin thinning candidates:
 | `std::builtin::atomic<T>` | Runtime primitive | Public `std::atomic::Atomic<T>(value)` lives in `std/src/atomic.kizu`; direct user calls are rejected |
 | `std::builtin::mutex<T>` | Runtime primitive | Public `std::sync::Mutex<T>(value)` lives in `std/src/sync.kizu`; direct user calls are rejected |
 | `std::builtin::array<T>` | Runtime primitive | Public `std::array::Array<T>(allocator)` lives in `std/src/array.kizu`; direct user calls are rejected |
+| `std::builtin::map<K, V>` | Runtime primitive | Public `std::map::Map<K, V>(allocator)` lives in `std/src/map.kizu`; direct user calls are rejected |
 
 `std::testing` now performs assertion checks and message construction in
 `std/src/testing.kizu`. Equality diagnostics are built with `std::fmt` into an
@@ -112,11 +113,11 @@ and error-union reporting boundary, not the assertion implementation.
 
 Stateful runtime APIs such as `std::array::Array`, `std::map::Map`,
 `std::task::parallel_for`, `std::task::parallel_map`, `std::channel::Channel`, `std::thread::scoped`,
-`std::sync::Mutex`, and `std::atomic::Atomic` still use public `std.*` Go
-branches while they own runtime storage, scheduler, synchronization, and
-borrow-safety rules. Treat those branches as explicit runtime boundaries, not
-ordinary stdlib logic. Splitting their ergonomic public wrappers into Kizu
-source is tracked by #360 and must not leave dual public paths behind. The
+`std::sync::Mutex`, and `std::atomic::Atomic` still keep Go runtime primitives
+where they own runtime storage, scheduler, synchronization, and borrow-safety
+rules. Treat those primitives as explicit runtime boundaries, not ordinary
+stdlib logic. Splitting their ergonomic public wrappers into Kizu source is
+tracked by #360 and must not leave dual public paths behind. The
 task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
 Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
 uses a `comptime Function` parameter to forward the worker name through
@@ -124,10 +125,8 @@ uses a `comptime Function` parameter to forward the worker name through
 forward both function names and mutable partition access without moving the
 partition value; that blocker is tracked by #372. `std::channel::Channel<T>()`,
 `std::atomic::Atomic<T>(value)`, `std::sync::Mutex<T>(value)`, and
-`std::array::Array<T>(allocator)` now use source-level type-argument forwarding
-through Kizu std source. The generic constructor wrapper for Map still requires
-source-level type-argument forwarding before it can move without builtin
-camouflage; that blocker is tracked by #371.
+`std::array::Array<T>(allocator)`, and `std::map::Map<K, V>(allocator)` now use
+source-level type-argument forwarding through Kizu std source.
 
 ## Builtin Registry
 
@@ -137,7 +136,7 @@ camouflage; that blocker is tracked by #371.
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor wrapper; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; method wrappers tracked by #360 |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
-| `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; wrapper split tracked by #360 |
+| `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor wrapper; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; method wrappers tracked by #360 |
 | `std::testing` | `expect`, equality helpers, `fail` | Kizu source over `std::fmt` and `String` | keep Go limited to the runner and error-union reporting boundary |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |

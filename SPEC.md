@@ -1213,7 +1213,7 @@ fn sized(comptime n: i64) -> i64 {
 }
 ```
 
-Std source may define restricted one-parameter generic wrappers when the type
+Std source may define restricted generic wrappers when the type
 argument is forwarded to an explicit trusted primitive:
 
 ```kizu
@@ -1231,6 +1231,10 @@ pub fn Atomic<T>(value: T) -> Atomic<T> {
 
 pub fn Mutex<T>(value: T) -> Mutex<T> {
     return std::builtin::mutex<T>(value);
+}
+
+pub fn Map<K, V>(allocator: Allocator) -> std::map::Map<K, V> {
+    return std::builtin::map<K, V>(allocator);
 }
 ```
 

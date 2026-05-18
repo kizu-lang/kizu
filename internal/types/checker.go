@@ -600,8 +600,11 @@ func substituteTypeParams(typ Type, subst map[string]Type) Type {
 	}
 	out := string(typ)
 	for name, replacement := range subst {
+		repl := string(replacement)
 		out = strings.ReplaceAll(out, "<"+name+">", "<"+string(replacement)+">")
-		out = strings.ReplaceAll(out, ", "+name+">", ", "+string(replacement)+">")
+		out = strings.ReplaceAll(out, "<"+name+",", "<"+repl+",")
+		out = strings.ReplaceAll(out, ", "+name+",", ", "+repl+",")
+		out = strings.ReplaceAll(out, ", "+name+">", ", "+repl+">")
 	}
 	return Type(out)
 }
@@ -712,13 +715,13 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if len(args) != 2 {
 		return "", fmt.Errorf("type error: std::map::Map expects 2 type arguments")
 	}
-	if args[0] != string(typeByteString) {
+	if args[0] != string(typeByteString) && !c.typeParams[args[0]] {
 		return "", fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
 	}
 	if _, err := c.parseType(args[1]); err != nil {
 		return "", err
 	}
-	if !c.isCopyType(Type(args[1])) {
+	if !c.typeParams[args[1]] && !c.isCopyType(Type(args[1])) {
 		return "", fmt.Errorf("type error: std::map::Map value type must be copy in v0.2")
 	}
 	return Type(name), nil
@@ -2354,19 +2357,17 @@ func (c *Checker) checkTypeApplyCallExpr(
 	); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkBuiltinMapTypeApply(
+		name, expr.TypeArg, args, env, unsafe,
+	); ok || err != nil {
+		return typ, err
+	}
 	if typ, ok, err := c.checkBuiltinTypeApply(
 		name, expr.TypeArg, args, env, unsafe,
 	); ok || err != nil {
 		return typ, err
 	}
 	switch name {
-	case "std.map.Map":
-		mapArgs, err := c.checkedMapArgs(expr.TypeArg)
-		if err != nil {
-			return "", err
-		}
-		typ, _, err := c.checkMapConstructor(Type(mapArgs[1]), args, env, unsafe)
-		return typ, err
 	case "std.sync.Mutex":
 		arg, err := c.parseType(expr.TypeArg)
 		if err != nil {
@@ -2433,7 +2434,31 @@ func (c *Checker) checkBuiltinTypeApply(
 	}
 }
 
-// checkGenericUserTypeApply validates source-defined one-parameter generic wrappers.
+// checkBuiltinMapTypeApply validates the std-only Map runtime primitive.
+func (c *Checker) checkBuiltinMapTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if name != "std.builtin.map" {
+		return "", false, nil
+	}
+	if !c.currentStd {
+		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::map", name)
+	}
+	mapArgs, err := c.checkedMapArgsAllowTypeParams(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	typ, _, err := c.checkMapConstructorForArgs(
+		Type(mapArgs[0]), Type(mapArgs[1]), args, env, unsafe,
+	)
+	return typ, true, err
+}
+
+// checkGenericUserTypeApply validates source-defined std generic wrappers.
 func (c *Checker) checkGenericUserTypeApply(
 	name string,
 	typeArg string,
@@ -2445,20 +2470,25 @@ func (c *Checker) checkGenericUserTypeApply(
 	if fn == nil || len(fn.typeParams) == 0 {
 		return "", false, nil
 	}
-	if len(fn.typeParams) != 1 {
-		return "", true, fmt.Errorf("type error: `%s` supports one type argument in v0.2", name)
+	argsText, ok := splitGenericArgs(typeArg)
+	if !ok || len(argsText) != len(fn.typeParams) {
+		return "", true, fmt.Errorf("type error: `%s` expects %d type arguments",
+			name, len(fn.typeParams))
 	}
-	arg, err := c.parseType(typeArg)
+	typeArgs, err := c.parseGenericWrapperTypeArgs(argsText)
 	if err != nil {
 		return "", true, err
 	}
-	if err := c.checkGenericWrapperTypeArg(name, arg); err != nil {
+	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
 		return "", true, err
 	}
 	if len(args) != len(fn.params) {
 		return "", true, userCallArityError(name, fn, len(args))
 	}
-	subst := map[string]Type{fn.typeParams[0]: arg}
+	subst := map[string]Type{}
+	for idx, param := range fn.typeParams {
+		subst[param] = typeArgs[idx]
+	}
 	for idx, expr := range args {
 		if err := c.checkGenericUserArg(name, fn, subst, idx, expr, env, unsafe); err != nil {
 			return "", true, err
@@ -2467,19 +2497,35 @@ func (c *Checker) checkGenericUserTypeApply(
 	return substituteTypeParams(fn.returnType, subst), true, nil
 }
 
-// checkGenericWrapperTypeArg validates std wrapper-specific type argument contracts.
-func (c *Checker) checkGenericWrapperTypeArg(name string, arg Type) error {
+// parseGenericWrapperTypeArgs validates source-level generic wrapper arguments.
+func (c *Checker) parseGenericWrapperTypeArgs(args []string) ([]Type, error) {
+	out := make([]Type, 0, len(args))
+	for _, arg := range args {
+		typ, err := c.parseType(arg)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, typ)
+	}
+	return out, nil
+}
+
+// checkGenericWrapperTypeArgs validates std wrapper-specific type argument contracts.
+func (c *Checker) checkGenericWrapperTypeArgs(name string, args []Type) error {
 	switch name {
 	case "std.array.Array":
-		return c.rejectArrayElementType(arg)
+		return c.rejectArrayElementType(args[0])
 	case "std.atomic.Atomic":
-		if !isAtomicSupportedType(arg) {
-			return fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", arg)
+		if !isAtomicSupportedType(args[0]) {
+			return fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", args[0])
 		}
 	case "std.sync.Mutex":
-		if !c.isCopyType(arg) {
-			return fmt.Errorf("type error: `std::sync::Mutex<%s>` requires copy value in v0.1", arg)
+		if !c.isCopyType(args[0]) {
+			return fmt.Errorf(
+				"type error: `std::sync::Mutex<%s>` requires copy value in v0.1", args[0])
 		}
+	case "std.map.Map":
+		return c.checkMapTypeArgContract(args)
 	}
 	return nil
 }
@@ -3371,8 +3417,9 @@ func (c *Checker) checkArraySet(
 	return "!void", nil
 }
 
-// checkMapConstructor validates std::map::Map<[]const u8, V>(allocator).
-func (c *Checker) checkMapConstructor(
+// checkMapConstructorForArgs validates Map allocator construction for key and value types.
+func (c *Checker) checkMapConstructorForArgs(
+	keyType Type,
 	valueType Type,
 	args []ast.Expression,
 	env *scope,
@@ -3388,7 +3435,7 @@ func (c *Checker) checkMapConstructor(
 	if got != "Allocator" {
 		return "", true, fmt.Errorf("type error: `std::map::Map` expects Allocator, got %s", got)
 	}
-	return Type(fmt.Sprintf("std::map::Map<[]const u8, %s>", valueType)), true, nil
+	return Type(fmt.Sprintf("std::map::Map<%s, %s>", keyType, valueType)), true, nil
 }
 
 // checkMapMethod validates owned Map<[]const u8, V> prototype methods.
@@ -3482,6 +3529,32 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 		return nil, err
 	}
 	return args, nil
+}
+
+// checkedMapArgsAllowTypeParams validates Map arguments inside std generic wrappers.
+func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
+	args, ok := splitGenericArgs(arg)
+	if !ok || len(args) != 2 {
+		return nil, fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+	}
+	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
+		return nil, err
+	}
+	return args, nil
+}
+
+// checkMapTypeArgContract enforces v0.2 public Map constructor restrictions.
+func (c *Checker) checkMapTypeArgContract(args []Type) error {
+	if len(args) != 2 {
+		return fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+	}
+	if args[0] != typeByteString {
+		return fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
+	}
+	if !c.isCopyType(args[1]) {
+		return fmt.Errorf("type error: std::map::Map value type must be copy in v0.2")
+	}
+	return nil
 }
 
 // checkTaskGroupMethod validates structured task spawning.

@@ -1651,15 +1651,10 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	if value, ok, err := i.evalGenericUserTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
 		return value, err
 	}
-	switch name {
-	case "std.map.Map":
-		return i.evalMapConstructor(expr.TypeArg, args, env)
-	default:
-		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
-	}
+	return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 }
 
-// evalGenericUserTypeApply invokes source-defined one-parameter std wrappers.
+// evalGenericUserTypeApply invokes source-defined std generic wrappers.
 func (i *Interpreter) evalGenericUserTypeApply(
 	name string,
 	typeArg string,
@@ -1670,12 +1665,13 @@ func (i *Interpreter) evalGenericUserTypeApply(
 	if fn == nil || len(fn.TypeParams) == 0 {
 		return voidValue(), false, nil
 	}
-	if len(fn.TypeParams) != 1 {
+	typeArgs, ok := splitGenericArgs(typeArg)
+	if !ok || len(typeArgs) != len(fn.TypeParams) {
 		return voidValue(), true, fmt.Errorf(
-			"runtime error: `%s` supports one type argument in v0.2", name,
+			"runtime error: `%s` expects %d type arguments", name, len(fn.TypeParams),
 		)
 	}
-	value, err := i.callTypeApplyFunction(fn, typeArg, args, env)
+	value, err := i.callTypeApplyFunction(fn, typeArgs, args, env)
 	return value, true, err
 }
 
@@ -1698,20 +1694,26 @@ func (i *Interpreter) evalBuiltinTypeApply(
 	case "std.builtin.array":
 		value, err := i.evalArrayConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
+	case "std.builtin.map":
+		value, err := i.evalMapConstructor(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
 	default:
 		return voidValue(), false, nil
 	}
 }
 
-// callTypeApplyFunction invokes a one-parameter generic std wrapper.
+// callTypeApplyFunction invokes a generic std wrapper.
 func (i *Interpreter) callTypeApplyFunction(
 	fn *ast.FunctionDecl,
-	typeArg string,
+	typeArgs []string,
 	args []ast.Expression,
 	caller *Env,
 ) (Value, error) {
 	previous := i.typeArgs
-	i.typeArgs = map[string]string{fn.TypeParams[0]: typeArg}
+	i.typeArgs = map[string]string{}
+	for idx, param := range fn.TypeParams {
+		i.typeArgs[param] = typeArgs[idx]
+	}
 	defer func() { i.typeArgs = previous }()
 	return i.callFunctionExpr(fn, args, caller)
 }
@@ -1720,6 +1722,13 @@ func (i *Interpreter) callTypeApplyFunction(
 func (i *Interpreter) resolveTypeArg(typeArg string) string {
 	if replacement, ok := i.typeArgs[typeArg]; ok {
 		return replacement
+	}
+	args, ok := splitGenericArgs(typeArg)
+	if ok && len(args) > 1 {
+		for idx, arg := range args {
+			args[idx] = i.resolveTypeArg(arg)
+		}
+		return strings.Join(args, ", ")
 	}
 	return typeArg
 }
