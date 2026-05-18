@@ -27,7 +27,6 @@ const (
 	kindAtomic
 	kindMutex
 	kindArray
-	kindOwnedString
 	kindMap
 	kindRef
 )
@@ -55,7 +54,6 @@ type Value struct {
 	atomic    *Atomic
 	mutex     *Mutex
 	array     *Array
-	ownedStr  *OwnedString
 	mapValue  *Map
 	ref       *binding
 }
@@ -75,13 +73,6 @@ type Handle struct {
 type Array struct {
 	values []Value
 	deinit bool
-}
-
-// OwnedString stores owned bytes for the v0.2 std::string prototype.
-type OwnedString struct {
-	bytes    string
-	capacity int
-	deinit   bool
 }
 
 // Map stores owned key/value entries for the v0.2 std::map prototype.
@@ -259,8 +250,6 @@ func (v Value) capabilityString() string {
 		return "<mutex>"
 	case kindArray:
 		return "<array>"
-	case kindOwnedString:
-		return v.ownedStr.bytes
 	case kindRef:
 		return v.ref.value.String()
 	default:
@@ -336,11 +325,6 @@ func allocatorValue(name string) Value {
 // arrayValue returns an empty owned array value.
 func arrayValue(typeName string) Value {
 	return Value{kind: kindArray, typeName: typeName, array: &Array{}}
-}
-
-// ownedStringValue returns an empty owned string value.
-func ownedStringValue() Value {
-	return Value{kind: kindOwnedString, typeName: "std::string::String", ownedStr: &OwnedString{}}
 }
 
 // mapValue returns an empty owned map value.

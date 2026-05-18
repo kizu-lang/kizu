@@ -1030,12 +1030,6 @@ func (i *Interpreter) evalQualifiedRuntimeBuiltin(
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
-	if value, ok, err := i.evalStringConstructorBuiltin(name, args, env); ok || err != nil {
-		return value, ok, err
-	}
-	if value, ok, err := i.evalStringStorageBuiltin(name, args, env); ok || err != nil {
-		return value, ok, err
-	}
 	if value, ok, err := i.evalTaskBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
@@ -1855,8 +1849,6 @@ func (i *Interpreter) evalNonArenaMethod(
 		return i.evalMutexMethod(receiver, name, args, env)
 	case kindArray:
 		return i.evalArrayMethod(receiver, name, args, env)
-	case kindOwnedString:
-		return i.evalImplMethod(receiver, name, args, env)
 	case kindMap:
 		return i.evalMapMethod(receiver, name, args, env)
 	case kindStruct:
@@ -2338,170 +2330,6 @@ func (i *Interpreter) evalLocalBufferMethod(
 	return buffer.localBuf.values[int(index.i)], nil
 }
 
-// evalStringConstructorBuiltin creates an owned String with an explicit allocator.
-func (i *Interpreter) evalStringConstructorBuiltin(
-	name string,
-	args []ast.Expression,
-	env *Env,
-) (Value, bool, error) {
-	if name != "std.builtin.string_new" {
-		return voidValue(), false, nil
-	}
-	if len(args) != 1 {
-		return voidValue(), true, fmt.Errorf("runtime error: std::string::String expects allocator")
-	}
-	allocator, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), true, err
-	}
-	if allocator.kind != kindAllocator {
-		return voidValue(), true, fmt.Errorf("runtime error: std::string::String expects Allocator")
-	}
-	return ownedStringValue(), true, nil
-}
-
-// evalStringStorageBuiltin executes trusted owned String storage primitives.
-func (i *Interpreter) evalStringStorageBuiltin(
-	name string,
-	args []ast.Expression,
-	env *Env,
-) (Value, bool, error) {
-	if !strings.HasPrefix(name, "std.builtin.string_") {
-		return voidValue(), false, nil
-	}
-	if len(args) == 0 {
-		return voidValue(), true, fmt.Errorf("runtime error: %s expects String", name)
-	}
-	str, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), true, err
-	}
-	if str.kind != kindOwnedString {
-		return voidValue(), true, fmt.Errorf("runtime error: %s expects String", name)
-	}
-	if str.ownedStr.deinit {
-		return voidValue(), true, fmt.Errorf("runtime error: String was deinitialized")
-	}
-	switch name {
-	case "std.builtin.string_append_bytes":
-		value, err := i.evalStringAppendBytes(str, args[1:], env)
-		return value, true, err
-	case "std.builtin.string_append_byte":
-		value, err := i.evalStringAppendByte(str, args[1:], env)
-		return value, true, err
-	case "std.builtin.string_reserve":
-		value, err := i.evalStringReserve(str, args[1:], env)
-		return value, true, err
-	case "std.builtin.string_truncate":
-		value, err := i.evalStringTruncate(str, args[1:], env)
-		return value, true, err
-	case "std.builtin.string_len":
-		return intValue(int64(len(str.ownedStr.bytes))), true, requireNoArgs("String.len", args[1:])
-	case "std.builtin.string_capacity":
-		return intValue(int64(str.ownedStr.capacity)), true, requireNoArgs("String.capacity", args[1:])
-	case "std.builtin.string_as_bytes":
-		return stringValue(str.ownedStr.bytes), true, requireNoArgs("String.as_bytes", args[1:])
-	case "std.builtin.string_clear":
-		str.ownedStr.bytes = ""
-		return voidValue(), true, requireNoArgs("String.clear", args[1:])
-	case "std.builtin.string_deinit":
-		str.ownedStr.bytes = ""
-		str.ownedStr.deinit = true
-		return voidValue(), true, requireNoArgs("String.deinit", args[1:])
-	default:
-		return voidValue(), false, nil
-	}
-}
-
-// evalStringAppendBytes appends a read-only byte slice into an owned String.
-func (i *Interpreter) evalStringAppendBytes(
-	str Value,
-	args []ast.Expression,
-	env *Env,
-) (Value, error) {
-	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: String.append_bytes expects 1 arg")
-	}
-	value, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), err
-	}
-	if value.kind != kindString {
-		return errorUnionValue("String.append_bytes expects []const u8"), nil
-	}
-	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + len(value.s))
-	str.ownedStr.bytes += value.s
-	return voidValue(), nil
-}
-
-// evalStringAppendByte appends one byte value into an owned String.
-func (i *Interpreter) evalStringAppendByte(
-	str Value,
-	args []ast.Expression,
-	env *Env,
-) (Value, error) {
-	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: String.append_byte expects 1 arg")
-	}
-	value, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), err
-	}
-	if value.kind != kindInt || value.i < 0 || value.i > 255 {
-		return errorUnionValue("String.append_byte expects u8"), nil
-	}
-	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + 1)
-	str.ownedStr.bytes += string(byte(value.i))
-	return voidValue(), nil
-}
-
-// evalStringReserve ensures additional capacity for future String appends.
-func (i *Interpreter) evalStringReserve(
-	str Value,
-	args []ast.Expression,
-	env *Env,
-) (Value, error) {
-	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: String.reserve expects 1 arg")
-	}
-	value, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), err
-	}
-	if value.kind != kindInt || value.i < 0 {
-		return errorUnionValue("String.reserve expects non-negative i64"), nil
-	}
-	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + int(value.i))
-	return voidValue(), nil
-}
-
-// evalStringTruncate shortens an owned String while preserving capacity.
-func (i *Interpreter) evalStringTruncate(
-	str Value,
-	args []ast.Expression,
-	env *Env,
-) (Value, error) {
-	if len(args) != 1 {
-		return voidValue(), fmt.Errorf("runtime error: String.truncate expects 1 arg")
-	}
-	value, err := i.evalExpr(args[0], env)
-	if err != nil {
-		return voidValue(), err
-	}
-	if value.kind != kindInt || value.i < 0 || value.i > int64(len(str.ownedStr.bytes)) {
-		return errorUnionValue("String.truncate length out of bounds"), nil
-	}
-	str.ownedStr.bytes = str.ownedStr.bytes[:value.i]
-	return voidValue(), nil
-}
-
-// ensureCapacity records semantic capacity for the interpreter prototype.
-func (s *OwnedString) ensureCapacity(want int) {
-	if want > s.capacity {
-		s.capacity = want
-	}
-}
-
 // evalArrayMethod executes owned Array<T> prototype operations.
 func (i *Interpreter) evalArrayMethod(
 	array Value,
@@ -2515,10 +2343,14 @@ func (i *Interpreter) evalArrayMethod(
 	switch name {
 	case "append":
 		return i.evalArrayAppend(array, args, env)
+	case "reserve":
+		return i.evalArrayReserve(array, args, env)
 	case "len":
 		return intValue(int64(len(array.array.values))), requireNoArgs("Array.len", args)
 	case "capacity":
 		return intValue(int64(cap(array.array.values))), requireNoArgs("Array.capacity", args)
+	case "as_bytes":
+		return evalArrayAsBytes(array, args)
 	case "get":
 		return i.evalArrayGet(array, args, env)
 	case "at":
@@ -2527,6 +2359,11 @@ func (i *Interpreter) evalArrayMethod(
 		return i.evalArrayAt(array, args, env, true)
 	case "set":
 		return i.evalArraySet(array, args, env)
+	case "clear":
+		array.array.values = array.array.values[:0]
+		return voidValue(), requireNoArgs("Array.clear", args)
+	case "truncate":
+		return i.evalArrayTruncate(array, args, env)
 	case "deinit":
 		array.array.values = nil
 		array.array.deinit = true
@@ -2534,6 +2371,58 @@ func (i *Interpreter) evalArrayMethod(
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Array has no method `%s`", name)
 	}
+}
+
+// evalArrayReserve ensures additional capacity for future Array appends.
+func (i *Interpreter) evalArrayReserve(
+	array Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	additional, err := i.evalArrayCount("Array.reserve", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if additional < 0 {
+		return errorUnionValue("Array.reserve expects non-negative i64"), nil
+	}
+	ensureArrayCapacity(array.array, len(array.array.values)+additional)
+	return voidValue(), nil
+}
+
+// evalArrayTruncate shortens an Array while preserving capacity.
+func (i *Interpreter) evalArrayTruncate(
+	array Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	length, err := i.evalArrayCount("Array.truncate", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if length < 0 || length > len(array.array.values) {
+		return errorUnionValue("Array.truncate length out of bounds"), nil
+	}
+	array.array.values = array.array.values[:length]
+	return voidValue(), nil
+}
+
+// evalArrayAsBytes copies Array<u8> contents into a read-only byte slice value.
+func evalArrayAsBytes(array Value, args []ast.Expression) (Value, error) {
+	if err := requireNoArgs("Array.as_bytes", args); err != nil {
+		return voidValue(), err
+	}
+	if array.typeName != "u8" {
+		return voidValue(), fmt.Errorf("runtime error: Array.as_bytes requires Array<u8>")
+	}
+	bytes := make([]byte, 0, len(array.array.values))
+	for _, value := range array.array.values {
+		if value.kind != kindInt || value.i < 0 || value.i > 255 {
+			return voidValue(), fmt.Errorf("runtime error: Array.as_bytes requires u8 elements")
+		}
+		bytes = append(bytes, byte(value.i))
+	}
+	return stringValue(string(bytes)), nil
 }
 
 // evalArrayAt returns a checked local borrow for one array element.
@@ -2596,6 +2485,16 @@ func (i *Interpreter) evalArrayAppend(array Value, args []ast.Expression, env *E
 	}
 	array.array.values = append(array.array.values, value)
 	return voidValue(), nil
+}
+
+// ensureArrayCapacity grows an Array backing slice without changing its length.
+func ensureArrayCapacity(array *Array, want int) {
+	if want <= cap(array.values) {
+		return
+	}
+	values := make([]Value, len(array.values), want)
+	copy(values, array.values)
+	array.values = values
 }
 
 // evalArrayGet reads one copyable element by checked index.
@@ -2713,6 +2612,21 @@ func (i *Interpreter) evalMapKey(name string, args []ast.Expression, env *Env) (
 		return "", fmt.Errorf("runtime error: %s expects []const u8 key", name)
 	}
 	return key.s, nil
+}
+
+// evalArrayCount evaluates one i64 count argument.
+func (i *Interpreter) evalArrayCount(name string, args []ast.Expression, env *Env) (int, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("runtime error: %s expects 1 arg", name)
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return 0, err
+	}
+	if value.kind != kindInt {
+		return 0, fmt.Errorf("runtime error: %s expects i64", name)
+	}
+	return int(value.i), nil
 }
 
 // evalArrayIndex evaluates one checked i64 index argument.

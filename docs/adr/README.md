@@ -75,3 +75,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0054: self-host migration readiness gate](0054-self-host-readiness-gate.md)
 - [ADR-0055: std::fmt diagnostic formatting](0055-std-fmt-diagnostic-formatting.md)
 - [ADR-0056: allocator-backed byte storage boundary](0056-allocator-backed-byte-storage.md)
+- [ADR-0057: Kizu String over Array storage](0057-kizu-string-array-storage.md)

@@ -202,8 +202,9 @@ go test ./...
 | array elements reject channels through structs | `negative/std_array_struct_channel_element.kizu` | `Channel` |
 | array elements reject atomics | `negative/std_array_atomic_element.kizu` | `Atomic` |
 | string construction requires explicit allocator | `negative/std_string_no_allocator.kizu` | `expects allocator` |
-| string storage builtins stay reserved | `negative/std_string_builtin_direct_call.kizu` | `reserved for std::string` |
-| string view builtin stays reserved | `negative/std_string_builtin_as_bytes_direct_call.kizu` | `reserved for std::string` |
+| string storage builtins are removed | `negative/std_string_builtin_direct_call.kizu` | `was removed` |
+| string view builtin is removed | `negative/std_string_builtin_as_bytes_direct_call.kizu` | `was removed` |
+| string storage field stays private | `negative/std_string_private_storage.kizu` | `is private` |
 | string append bytes requires `[]const u8` | `negative/std_string_wrong_append_type.kizu` | `expects []const u8` |
 | string append byte requires `u8` | `negative/std_string_append_byte_wrong_type.kizu` | `expects u8` |
 | string reserve requires `i64` | `negative/std_string_reserve_wrong_type.kizu` | `expects i64` |

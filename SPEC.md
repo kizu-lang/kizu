@@ -1296,10 +1296,11 @@ view が生きている間は `append_bytes`、`append_byte`、`truncate`、`cle
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
 v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure、
 owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
-`std::string::String` の backing allocation、capacity、local view、cleanup は
-v0.2 では trusted storage primitive に残します。safe Kizu に raw pointer や
-mutable backing slice は公開しません。public `std::mem::OwnedBytes` または
-`std::bytes::Buffer` は、mutable slice と raw storage provenance の仕様後に検討します。
+`std::string::String` の public behavior は `std/src/string.kizu` に実装します。
+v0.2 では private `std::array::Array<u8>` storage の上に構成し、safe Kizu に
+raw pointer や mutable backing slice は公開しません。public
+`std::mem::OwnedBytes` または `std::bytes::Buffer` は、mutable slice と raw
+storage provenance の仕様後に検討します。
 
 v0.2 の `std::fmt` は、diagnostic construction 用の最小 formatting API です。
 format string、locale、generic display trait、reflection は持ちません。

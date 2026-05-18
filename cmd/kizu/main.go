@@ -561,6 +561,7 @@ func sourceStdModules(path string) ([]string, error) {
 		modules = appendStdModule(modules, "path")
 	}
 	if strings.Contains(text, "std::string::") {
+		modules = appendStdModule(modules, "mem")
 		modules = appendStdModule(modules, "string")
 	}
 	if strings.Contains(text, "std::fmt::") {
@@ -622,6 +623,8 @@ func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
 	decls := make([]ast.Decl, 0, len(program.Decls))
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
+		case *ast.StructDecl:
+			renameStdStruct(module, d)
 		case *ast.FunctionDecl:
 			renameStdFunction(module, d)
 			d.Std = true
@@ -635,11 +638,20 @@ func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
 	return decls, nil, nil
 }
 
+// renameStdStruct rewrites a std wrapper struct into its qualified form.
+func renameStdStruct(module string, decl *ast.StructDecl) {
+	decl.Name = qualifyStdTypeName(module, decl.Name)
+	for idx := range decl.Fields {
+		decl.Fields[idx].TypeName = qualifyStdTypeName(module, decl.Fields[idx].TypeName)
+	}
+}
+
 // renameStdFunction rewrites a std wrapper function into its qualified form.
 func renameStdFunction(module string, fn *ast.FunctionDecl) {
 	fn.Name = "std." + module + "." + fn.Name
 	fn.Public = false
 	renameStdFunctionTypes(module, fn)
+	renameStdBlockExprs(module, fn.Body)
 }
 
 // renameStdImpl rewrites a std wrapper impl block into its qualified form.
@@ -649,6 +661,7 @@ func renameStdImpl(module string, decl *ast.ImplDecl) {
 		method.Public = false
 		method.Std = true
 		renameStdFunctionTypes(module, method)
+		renameStdBlockExprs(module, method.Body)
 	}
 }
 
@@ -657,6 +670,96 @@ func renameStdFunctionTypes(module string, fn *ast.FunctionDecl) {
 	fn.ReturnType = qualifyStdTypeName(module, fn.ReturnType)
 	for idx := range fn.Params {
 		fn.Params[idx].TypeName = qualifyStdTypeName(module, fn.Params[idx].TypeName)
+	}
+}
+
+// renameStdBlockExprs qualifies module-local type names inside std function bodies.
+func renameStdBlockExprs(module string, block *ast.BlockStmt) {
+	if block == nil {
+		return
+	}
+	for _, stmt := range block.Statements {
+		renameStdStmtExprs(module, stmt)
+	}
+}
+
+// renameStdStmtExprs qualifies module-local type names inside one statement.
+func renameStdStmtExprs(module string, stmt ast.Statement) {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		renameStdExpr(module, s.Value)
+	case *ast.AssignStmt:
+		renameStdExpr(module, s.Target)
+		renameStdExpr(module, s.Value)
+	case *ast.ReturnStmt:
+		renameStdExpr(module, s.Value)
+	case *ast.ExprStmt:
+		renameStdExpr(module, s.Expr)
+	case *ast.IfStmt:
+		renameStdExpr(module, s.Condition)
+		renameStdBlockExprs(module, s.Consequence)
+		renameStdBlockExprs(module, s.Alternative)
+	case *ast.WhileStmt:
+		renameStdExpr(module, s.Condition)
+		renameStdBlockExprs(module, s.Body)
+	case *ast.ForStmt:
+		renameStdExpr(module, s.Start)
+		renameStdExpr(module, s.End)
+		renameStdBlockExprs(module, s.Body)
+	case *ast.MatchStmt:
+		renameStdExpr(module, s.Value)
+		for _, arm := range s.Arms {
+			renameStdStmtExprs(module, arm.Body)
+		}
+	case *ast.UnsafeStmt:
+		renameStdBlockExprs(module, s.Body)
+	case *ast.ComptimeIfStmt:
+		renameStdExpr(module, s.Condition)
+		renameStdBlockExprs(module, s.Consequence)
+		renameStdBlockExprs(module, s.Alternative)
+	}
+}
+
+// renameStdExpr qualifies module-local struct literal type names recursively.
+func renameStdExpr(module string, expr ast.Expression) {
+	switch e := expr.(type) {
+	case *ast.StructLiteralExpr:
+		e.TypeName = qualifyStdTypeName(module, e.TypeName)
+		for idx := range e.Fields {
+			renameStdExpr(module, e.Fields[idx].Value)
+		}
+	case *ast.PrefixExpr:
+		renameStdExpr(module, e.Right)
+	case *ast.BinaryExpr:
+		renameStdExpr(module, e.Left)
+		renameStdExpr(module, e.Right)
+	case *ast.IfExpr:
+		renameStdExpr(module, e.Condition)
+		renameStdBlockExprs(module, e.Consequence)
+		renameStdBlockExprs(module, e.Alternative)
+	case *ast.ComptimeExpr:
+		renameStdExpr(module, e.Expr)
+	case *ast.CallExpr:
+		renameStdExpr(module, e.Callee)
+		for _, arg := range e.Args {
+			renameStdExpr(module, arg)
+		}
+	case *ast.TypeApplyExpr:
+		renameStdExpr(module, e.Callee)
+	case *ast.CastExpr:
+		e.TargetType = qualifyStdTypeName(module, e.TargetType)
+		renameStdExpr(module, e.Value)
+	case *ast.TryExpr:
+		renameStdExpr(module, e.Value)
+	case *ast.IndexExpr:
+		renameStdExpr(module, e.Target)
+		renameStdExpr(module, e.Index)
+		renameStdExpr(module, e.Start)
+		renameStdExpr(module, e.End)
+	case *ast.FieldExpr:
+		renameStdExpr(module, e.Receiver)
+	case *ast.DerefExpr:
+		renameStdExpr(module, e.Receiver)
 	}
 }
 

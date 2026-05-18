@@ -1700,10 +1700,10 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
-		return typ, ok, err
+	if strings.HasPrefix(name, "std.builtin.string_") {
+		return "", true, fmt.Errorf("type error: `%s` was removed; use std::string", name)
 	}
-	if typ, ok, err := c.checkStringStorageBuiltin(name, args, env, unsafe); ok || err != nil {
+	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
 	return c.checkStdConstructorBuiltin(name, args, env, unsafe)
@@ -1726,8 +1726,6 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
 	case "std.map.Map":
 		return "", true, fmt.Errorf("type error: use `std::map::Map<K, V>(allocator)`")
-	case "std.builtin.string_new":
-		return c.checkStringConstructor(args, env, unsafe)
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
 	case "std.thread.scoped":
@@ -1862,26 +1860,6 @@ func (c *Checker) checkOneBytesArg(
 		return "", true, fmt.Errorf("type error: `%s` expects []const u8, got %s", name, got)
 	}
 	return result, true, nil
-}
-
-// checkStringConstructor validates std::string::String(allocator).
-func (c *Checker) checkStringConstructor(
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::string::String` expects allocator")
-	}
-	got, err := c.checkExpr(args[0], env, unsafe)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "Allocator" {
-		return "", true, fmt.Errorf("type error: `std::string::String` expects Allocator, got %s",
-			got)
-	}
-	return "std::string::String", true, nil
 }
 
 // checkMemBuiltin validates allocation-free std::mem byte-slice helpers.
@@ -2531,6 +2509,9 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 	}
 	for _, field := range decl.Fields {
 		if field.Name == expr.Name {
+			if !field.Public && isStdType(receiver) && !c.currentStd {
+				return "", fmt.Errorf("type error: field `%s.%s` is private", receiver, expr.Name)
+			}
 			return Type(field.TypeName), nil
 		}
 	}
@@ -2715,133 +2696,6 @@ func (c *Checker) checkArenaOrImplMethod(
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
 	}
-}
-
-// checkStringStorageBuiltin validates trusted String storage primitives.
-func (c *Checker) checkStringStorageBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if strings.HasPrefix(name, "std.builtin.string_") && !c.currentStd {
-		return "", true, fmt.Errorf("type error: `%s` is reserved for std::string", name)
-	}
-	switch name {
-	case "std.builtin.string_append_bytes":
-		return c.checkStringStorageBytes(name, args, env, unsafe)
-	case "std.builtin.string_append_byte":
-		return c.checkStringStorageByte(name, args, env, unsafe)
-	case "std.builtin.string_reserve":
-		return c.checkStringStorageReserve(name, args, env, unsafe)
-	case "std.builtin.string_truncate":
-		return c.checkStringStorageTruncate(name, args, env, unsafe)
-	case "std.builtin.string_len", "std.builtin.string_capacity":
-		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeI64)
-	case "std.builtin.string_as_bytes":
-		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeByteString)
-	case "std.builtin.string_clear", "std.builtin.string_deinit":
-		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeVoid)
-	default:
-		return "", false, nil
-	}
-}
-
-// checkStringStorageBytes validates String plus []const u8 primitive calls.
-func (c *Checker) checkStringStorageBytes(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeByteString); err != nil {
-		return "", true, err
-	}
-	return "!void", true, nil
-}
-
-// checkStringStorageByte validates String plus u8 primitive calls.
-func (c *Checker) checkStringStorageByte(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeU8); err != nil {
-		return "", true, err
-	}
-	return "!void", true, nil
-}
-
-// checkStringStorageReserve validates String plus i64 primitive calls.
-func (c *Checker) checkStringStorageReserve(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeI64); err != nil {
-		return "", true, err
-	}
-	return "!void", true, nil
-}
-
-// checkStringStorageTruncate validates String plus i64 primitive calls.
-func (c *Checker) checkStringStorageTruncate(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeI64); err != nil {
-		return "", true, err
-	}
-	return "!void", true, nil
-}
-
-// checkStringStorageNoArgResult validates String-only primitive calls.
-func (c *Checker) checkStringStorageNoArgResult(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	result Type,
-) (Type, bool, error) {
-	if err := c.checkStringStorageArgs(name, args, env, unsafe); err != nil {
-		return "", true, err
-	}
-	return result, true, nil
-}
-
-// checkStringStorageArgs validates trusted primitive String arguments.
-func (c *Checker) checkStringStorageArgs(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	extra ...Type,
-) error {
-	if len(args) != 1+len(extra) {
-		return fmt.Errorf("type error: `%s` expects %d args", name, 1+len(extra))
-	}
-	got, err := c.checkExpr(args[0], env, unsafe)
-	if err != nil {
-		return err
-	}
-	if got != "std::string::String" {
-		return fmt.Errorf("type error: `%s` expects String, got %s", name, got)
-	}
-	for idx, want := range extra {
-		got, err := c.checkExpr(args[idx+1], env, unsafe)
-		if err != nil {
-			return err
-		}
-		if got != want {
-			return fmt.Errorf("type error: `%s` arg %d expects %s, got %s",
-				name, idx+2, want, got)
-		}
-	}
-	return nil
 }
 
 // checkStringReceiverMethod validates receiver-sensitive String methods.
@@ -3072,32 +2926,19 @@ func (c *Checker) checkArrayMethod(
 	env *scope,
 	unsafe bool,
 ) (Type, error) {
+	if isStdArrayStorageMethod(name) {
+		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
+	}
 	switch name {
 	case "append":
-		if len(args) != 1 {
-			return "", fmt.Errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
-		}
-		got, err := c.checkExpr(args[0], env, unsafe)
-		if err != nil {
-			return "", err
-		}
-		if got != elem {
-			return "", fmt.Errorf("type error: `Array.append` expects %s, got %s", elem, got)
-		}
-		return "!void", nil
+		return c.checkArrayAppendArg(elem, args, env, unsafe)
 	case "len", "capacity":
 		if len(args) != 0 {
 			return "", fmt.Errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeI64, nil
 	case "get":
-		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
-			return "", err
-		}
-		if !c.isCopyType(elem) {
-			return "", fmt.Errorf("type error: `Array.get` requires copy element in v0.2")
-		}
-		return Type("!" + string(elem)), nil
+		return c.checkArrayGet(elem, args, env, unsafe)
 	case "at", "at_mut":
 		return "", fmt.Errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
 			name, name)
@@ -3105,12 +2946,96 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArraySet(elem, args, env, unsafe)
 	case "deinit":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Array.deinit` expects 0 args, got %d", len(args))
+			return "", fmt.Errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeVoid, nil
 	default:
 		return "", fmt.Errorf("type error: Array has no method `%s`", name)
 	}
+}
+
+// checkStdArrayStorageMethod validates Array helpers reserved to std source.
+func (c *Checker) checkStdArrayStorageMethod(
+	elem Type,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if !c.currentStd {
+		return "", fmt.Errorf("type error: Array has no method `%s`", name)
+	}
+	switch name {
+	case "reserve", "truncate":
+		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!void", nil
+	case "clear":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Array.clear` expects 0 args, got %d", len(args))
+		}
+		return typeVoid, nil
+	default:
+		return checkArrayAsBytes(elem, args)
+	}
+}
+
+// isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
+func isStdArrayStorageMethod(name string) bool {
+	return name == "reserve" || name == "truncate" || name == "clear" || name == "as_bytes"
+}
+
+// checkArrayAppendArg validates append's single element argument.
+func (c *Checker) checkArrayAppendArg(
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != elem {
+		return "", fmt.Errorf("type error: `Array.append` expects %s, got %s", elem, got)
+	}
+	return "!void", nil
+}
+
+// checkArrayAsBytes validates Array<u8> to byte-slice view conversion.
+func checkArrayAsBytes(elem Type, args []ast.Expression) (Type, error) {
+	if elem != typeU8 {
+		return "", fmt.Errorf("type error: `Array.as_bytes` requires Array<u8>")
+	}
+	if len(args) != 0 {
+		return "", fmt.Errorf("type error: `Array.as_bytes` expects 0 args, got %d", len(args))
+	}
+	return typeByteString, nil
+}
+
+// checkArrayGet validates checked copy reads from an Array.
+func (c *Checker) checkArrayGet(
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if err := c.checkArrayIndexArg("get", args, env, unsafe); err != nil {
+		return "", err
+	}
+	if !c.isCopyType(elem) {
+		return "", fmt.Errorf("type error: `Array.get` requires copy element in v0.2")
+	}
+	return Type("!" + string(elem)), nil
+}
+
+// isStdType reports whether a type belongs to the reserved std namespace.
+func isStdType(typ Type) bool {
+	return strings.HasPrefix(string(typ), "std::")
 }
 
 // checkArrayIndexArg validates one i64 index argument.
