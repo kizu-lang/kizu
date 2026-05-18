@@ -1673,7 +1673,7 @@ func (c *Checker) checkBuiltinCall(
 	}
 }
 
-// checkErrorCall reads the error message and returns the current error-union shape.
+// checkErrorCall reads and copies the message into the error payload.
 func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope) (string, error) {
 	if len(expr.Args) != 1 {
 		return "", fmt.Errorf("move error: `error` expects 1 arg, got %d", len(expr.Args))

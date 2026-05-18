@@ -95,6 +95,17 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsErrorFromStringView checks error copies local view bytes.
+func TestCheckAcceptsErrorFromStringView(t *testing.T) {
+	source := `fn fail(text: std::string::String) -> !void {
+    let bytes = text.as_bytes();
+    return error(bytes);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsBorrowEscape checks borrowed parameters cannot become owned values.
 func TestCheckRejectsBorrowEscape(t *testing.T) {
 	cases := []struct {

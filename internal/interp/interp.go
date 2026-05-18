@@ -2914,7 +2914,7 @@ func (i *Interpreter) callPrint(args []Value) (Value, error) {
 	return voidValue(), nil
 }
 
-// callError constructs an error-union error value.
+// callError constructs an error-union error value by copying message bytes.
 func callError(args []Value) (Value, error) {
 	if len(args) != 1 || args[0].kind != kindString {
 		return voidValue(), fmt.Errorf("runtime error: error expected []const u8")

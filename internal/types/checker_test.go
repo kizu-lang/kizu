@@ -750,6 +750,17 @@ fn main() -> !i64 {
 	}
 }
 
+// TestCheckAcceptsErrorFromStringView fixes error payload copy semantics.
+func TestCheckAcceptsErrorFromStringView(t *testing.T) {
+	source := `fn fail(text: std::string::String) -> !void {
+    let bytes = text.as_bytes();
+    return error(bytes);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsTryErrors checks readable error propagation errors.
 func TestCheckRejectsTryErrors(t *testing.T) {
 	cases := []struct {

@@ -26,10 +26,13 @@ Assertion failure は panic ではなく `!void` の error として返す。
 test source は `try` で失敗を伝播し、runner が readable な failure message を表示する。
 
 `expect` と `fail` は fixed message または caller-provided byte message を
-そのまま `error(...)` に渡す。Equality helpers は `std::mem` で比較し、
-失敗時だけ明示 allocator-backed `std::string::String` を作り、`std::fmt` で
-deterministic な expected / actual diagnostic を構築して `error(...)` に渡す。
-Go 側の責務は `kizu test` runner と unhandled error 表示境界に限定し、
+`error(...)` に渡す。Equality helpers は `std::mem` で比較し、失敗時だけ
+明示 allocator-backed `std::string::String` を作り、`std::fmt` で deterministic な
+expected / actual diagnostic を構築して `error(...)` に渡す。
+
+`error(...)` は message bytes を error payload に copy して所有するため、
+`std::testing` は local `String.as_bytes()` view を返さない。Go 側の責務は
+`kizu test` runner、error payload の所有境界、unhandled error 表示境界に限定し、
 `std::builtin::testing_*` は持たない。
 
 `kizu test <file>` は v0.2 では discovery なしの single-file runner とする。
