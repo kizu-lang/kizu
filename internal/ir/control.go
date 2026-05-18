@@ -158,7 +158,7 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	if err != nil {
 		return err
 	}
-	header.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
+	l.block.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
 	l.block = body
 	l.pushLoop(stmt.Label, exit.Name, header.Name)
 	if err := l.lowerBlock(stmt.Body); err != nil {

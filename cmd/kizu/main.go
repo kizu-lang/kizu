@@ -16,6 +16,8 @@ import (
 	"github.com/kizu-lang/kizu/internal/native"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/transpile"
 	"github.com/kizu-lang/kizu/internal/types"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
@@ -67,6 +69,8 @@ func dispatch(cmd string, args []string) error {
 		return whyRebuildFile(args[0])
 	case "import-c-header":
 		return importCHeaderFile(args[0])
+	case "transpile-go":
+		return transpileGoCommand(args)
 	default:
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
@@ -83,6 +87,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu import-c-header <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu transpile-go <out-dir>")
 }
 
 // parseFile parses a source file and prints its AST summary.
@@ -121,6 +126,9 @@ func runFile(path string, args []string) error {
 
 // checkFile parses a source file and runs static checks.
 func checkFile(path string) error {
+	if isPackageInput(path) {
+		return checkPackage(path)
+	}
 	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return err
@@ -136,6 +144,48 @@ func checkFile(path string) error {
 	}
 	_, _ = fmt.Println("check: ok")
 	return nil
+}
+
+// checkPackage resolves a manifest-backed package and runs static checks.
+func checkPackage(path string) error {
+	resolved, errs, err := project.ResolvePackage(path)
+	if err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		for _, msg := range errs {
+			_, _ = fmt.Fprintln(os.Stderr, msg)
+		}
+		return fmt.Errorf("parse failed")
+	}
+	modules, err := packageStdModules(resolved)
+	if err != nil {
+		return err
+	}
+	program, errs, err := appendStdModules(resolved.Program, modules)
+	if err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		for _, msg := range errs {
+			_, _ = fmt.Fprintln(os.Stderr, msg)
+		}
+		return fmt.Errorf("parse failed")
+	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	_, _ = fmt.Println("check: ok")
+	return nil
+}
+
+// isPackageInput reports whether path should be treated as a package root.
+func isPackageInput(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir() || filepath.Base(path) == "kizu.toml"
 }
 
 // testFile runs a single Kizu test source and reports a minimal test result.
@@ -224,6 +274,13 @@ func buildFile(args []string) error {
 
 // emitLLVMFile lowers a checked source file to LLVM IR text.
 func emitLLVMFile(path string, opt bool) error {
+	if isPackageInput(path) {
+		module, err := lowerPackage(path, opt)
+		if err != nil {
+			return err
+		}
+		return printLLVMModule(module)
+	}
 	cache, err := buildcache.New()
 	if err != nil {
 		return err
@@ -239,6 +296,16 @@ func emitLLVMFile(path string, opt bool) error {
 		return err
 	}
 	_, _ = fmt.Println(result.Output)
+	return nil
+}
+
+// printLLVMModule emits LLVM IR for one lowered module.
+func printLLVMModule(module *ir.Module) error {
+	output, err := llvm.Emit(module)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Println(output)
 	return nil
 }
 
@@ -476,8 +543,28 @@ func importCHeaderFile(path string) error {
 	return nil
 }
 
+// transpileGoCommand writes constrained Go-to-Kizu bootstrap compiler sources.
+func transpileGoCommand(args []string) error {
+	if len(args) != 1 {
+		usage()
+		return fmt.Errorf("invalid transpile-go command")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := transpile.GenerateCompiler(root, args[0]); err != nil {
+		return err
+	}
+	_, _ = fmt.Println("generated: " + transpile.ModuleNames())
+	return nil
+}
+
 // lowerFile parses, checks, lowers, and optionally optimizes source to typed SSA IR.
 func lowerFile(path string, opt bool) (*ir.Module, error) {
+	if isPackageInput(path) {
+		return lowerPackage(path, opt)
+	}
 	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return nil, err
@@ -488,6 +575,26 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 		}
 		return nil, fmt.Errorf("parse failed")
 	}
+	return lowerProgram(program, opt)
+}
+
+// lowerPackage resolves, checks, and lowers a manifest-backed package.
+func lowerPackage(path string, opt bool) (*ir.Module, error) {
+	program, errs, err := parsePackageWithStd(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(errs) > 0 {
+		for _, msg := range errs {
+			_, _ = fmt.Fprintln(os.Stderr, msg)
+		}
+		return nil, fmt.Errorf("parse failed")
+	}
+	return lowerProgram(program, opt)
+}
+
+// lowerProgram checks and lowers one already parsed program.
+func lowerProgram(program *ast.Program, opt bool) (*ir.Module, error) {
 	if err := checkProgram(program); err != nil {
 		return nil, err
 	}
@@ -533,6 +640,24 @@ func parsePathWithStd(path string) (*ast.Program, []string, error) {
 	if err != nil {
 		return program, nil, err
 	}
+	return appendStdModules(program, modules)
+}
+
+// parsePackageWithStd resolves a package and appends Kizu std wrappers.
+func parsePackageWithStd(path string) (*ast.Program, []string, error) {
+	resolved, errs, err := project.ResolvePackage(path)
+	if err != nil || len(errs) > 0 {
+		return nil, errs, err
+	}
+	modules, err := packageStdModules(resolved)
+	if err != nil {
+		return nil, nil, err
+	}
+	return appendStdModules(resolved.Program, modules)
+}
+
+// appendStdModules prepends referenced Kizu std wrapper declarations.
+func appendStdModules(program *ast.Program, modules []string) (*ast.Program, []string, error) {
 	if len(modules) == 0 {
 		return program, nil, nil
 	}
@@ -542,6 +667,26 @@ func parsePathWithStd(path string) (*ast.Program, []string, error) {
 	}
 	program.Decls = append(stdDecls, program.Decls...)
 	return program, nil, nil
+}
+
+// packageStdModules reports Kizu std wrapper modules referenced by a package.
+func packageStdModules(resolved project.ResolvedPackage) ([]string, error) {
+	resolver := &stdModuleResolver{
+		visited:  map[string]bool{},
+		visiting: map[string]bool{},
+	}
+	for _, module := range resolved.Modules {
+		source, err := os.ReadFile(module.File)
+		if err != nil {
+			return nil, err
+		}
+		for _, stdModule := range referencedStdModules(string(source)) {
+			if err := resolver.visit(stdModule); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return resolver.modules, nil
 }
 
 // sourceStdModules reports which Kizu std wrapper modules a source references.

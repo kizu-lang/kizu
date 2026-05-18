@@ -130,6 +130,11 @@ func writeMetadata(options Options, command []string) error {
 const runtimeSource = `
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int kizu_argc = 0;
+static char **kizu_argv = 0;
 
 void kizu_print_string(const unsigned char *s, int64_t len) {
     fwrite(s, 1, (size_t)len, stdout);
@@ -142,5 +147,92 @@ void kizu_print_int(int64_t v) {
 
 void kizu_print_bool(_Bool v) {
     fputs(v ? "true\n" : "false\n", stdout);
+}
+
+void kizu_print_cstring(const unsigned char *s) {
+    if (s == 0) {
+        fputc('\n', stdout);
+        return;
+    }
+    fputs((const char *)s, stdout);
+    fputc('\n', stdout);
+}
+
+void kizu_process_init(int argc, char **argv) {
+    kizu_argc = argc;
+    kizu_argv = argv;
+}
+
+int64_t kizu_process_arg_count(void) {
+    (void)kizu_argv;
+    return (int64_t)kizu_argc;
+}
+
+const unsigned char *kizu_process_arg(int64_t index) {
+    if (index < 0 || index >= kizu_argc || kizu_argv == 0) {
+        return (const unsigned char *)"";
+    }
+    return (const unsigned char *)kizu_argv[index];
+}
+
+const unsigned char *kizu_process_env(const unsigned char *name) {
+    char *value = getenv((const char *)name);
+    if (value == 0) {
+        return (const unsigned char *)"";
+    }
+    return (const unsigned char *)value;
+}
+
+const unsigned char *kizu_fs_read_file(const unsigned char *path) {
+    FILE *file = fopen((const char *)path, "rb");
+    if (file == 0) {
+        return (const unsigned char *)"";
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return (const unsigned char *)"";
+    }
+    long size = ftell(file);
+    if (size < 0) {
+        fclose(file);
+        return (const unsigned char *)"";
+    }
+    rewind(file);
+    unsigned char *buffer = (unsigned char *)malloc((size_t)size + 1);
+    if (buffer == 0) {
+        fclose(file);
+        return (const unsigned char *)"";
+    }
+    size_t read = fread(buffer, 1, (size_t)size, file);
+    fclose(file);
+    buffer[read] = 0;
+    return buffer;
+}
+
+void kizu_fs_write_file(const unsigned char *path, const unsigned char *bytes) {
+    FILE *file = fopen((const char *)path, "wb");
+    if (file == 0) {
+        return;
+    }
+    if (bytes != 0) {
+        fputs((const char *)bytes, file);
+    }
+    fclose(file);
+}
+
+_Bool kizu_fs_exists(const unsigned char *path) {
+    FILE *file = fopen((const char *)path, "rb");
+    if (file == 0) {
+        return 0;
+    }
+    fclose(file);
+    return 1;
+}
+
+int64_t kizu_mem_len(const unsigned char *bytes) {
+    if (bytes == 0) {
+        return 0;
+    }
+    return (int64_t)strlen((const char *)bytes);
 }
 `

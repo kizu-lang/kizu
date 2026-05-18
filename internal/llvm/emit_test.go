@@ -46,7 +46,6 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 		source string
 		want   string
 	}{
-		{name: "struct", source: structSource, want: "`struct.new` is not supported"},
 		{name: "arena", source: arenaSource, want: "`arena.new` is not supported"},
 		{name: "error union", source: errorUnionSource, want: "`error.try` is not supported"},
 	}
@@ -64,8 +63,8 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 	}
 }
 
-// TestEmitRejectsUnsupportedFieldInstruction checks field lowering is not faked.
-func TestEmitRejectsUnsupportedFieldInstruction(t *testing.T) {
+// TestEmitAcceptsOpaqueAggregateInstructions checks package bootstrap lowering.
+func TestEmitAcceptsOpaqueAggregateInstructions(t *testing.T) {
 	module := &ir.Module{Functions: []*ir.Function{{
 		Name:   "main",
 		Return: "void",
@@ -79,12 +78,12 @@ func TestEmitRejectsUnsupportedFieldInstruction(t *testing.T) {
 			Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
 		}},
 	}}}
-	_, err := Emit(module)
-	if err == nil {
-		t.Fatal("expected emit to reject field instruction")
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "`field.age` is not supported") {
-		t.Fatalf("got %q", err.Error())
+	if !strings.Contains(got, "ret i32 0") {
+		t.Fatalf("got:\n%s", got)
 	}
 }
 
@@ -138,12 +137,6 @@ const whileSource = `fn main() {
         print(i);
         i = i + 1;
     }
-}`
-
-const structSource = `struct User { age: i64; }
-fn main() {
-    let user = User { age: 30 };
-    print(1);
 }`
 
 const arenaSource = `struct User { age: i64; }

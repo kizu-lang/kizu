@@ -196,6 +196,137 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildTargetNativeProcessArgCount checks hosted native process argv plumbing.
+func TestBuildTargetNativeProcessArgCount(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	source := filepath.Join(t.TempDir(), "argc.kizu")
+	code := []byte(`fn main() {
+    print(std::process::arg_count());
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "argc")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output, "a", "b")
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, out)
+	}
+	if string(out) != "3\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestBuildTargetNativeFSReadWrite checks hosted native explicit-Io file primitives.
+func TestBuildTargetNativeFSReadWrite(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	dir := t.TempDir()
+	written := filepath.Join(dir, "written.txt")
+	source := filepath.Join(dir, "fs.kizu")
+	code := `fn main() -> !void {
+    let io = std::io::blocking();
+    try std::fs::write_file(io, "` + written + `", "stage2 llvm");
+    let text = try std::fs::read_file(io, "` + written + `");
+    print(text);
+    return;
+}`
+	if err := os.WriteFile(source, []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "fs")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, out)
+	}
+	if string(out) != "stage2 llvm\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestSelfhostStage1ReadsSourceTree checks the generated native seed reads selfhost sources.
+func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	repoRoot := filepath.Clean(filepath.Join("..", ".."))
+	dir := t.TempDir()
+	stage1 := filepath.Join(dir, "kizu-stage1")
+	stage2 := filepath.Join(dir, "stage2.ll")
+	stage2Bin := filepath.Join(dir, "kizu-stage2")
+	stage3 := filepath.Join(dir, "stage3.ll")
+
+	build := exec.Command(
+		"go", "run", "./cmd/kizu", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", stage1, "selfhost",
+	)
+	build.Dir = repoRoot
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage1 build failed: %v\n%s", err, out)
+	}
+
+	run := exec.Command(stage1, stage2)
+	run.Dir = repoRoot
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage1 executable failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(stage2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "define i32 @main") {
+		t.Fatalf("stage2 artifact does not look like LLVM IR:\n%s", data)
+	}
+	if !strings.Contains(string(data), "fopen(ptr %source0, ptr %readmode)") ||
+		!strings.Contains(string(data), "fopen(ptr %source8, ptr %readmode)") {
+		t.Fatalf("stage2 artifact does not read the selfhost source tree:\n%s", data)
+	}
+
+	link := exec.Command("clang", stage2, "-o", stage2Bin)
+	out, err = link.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage2 link failed: %v\n%s", err, out)
+	}
+	run = exec.Command(stage2Bin, stage3)
+	run.Dir = repoRoot
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage2 executable failed: %v\n%s", err, out)
+	}
+	data, err = os.ReadFile(stage3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "define i32 @main") {
+		t.Fatalf("stage3 artifact does not look like LLVM IR:\n%s", data)
+	}
+}
+
 // TestBuildTargetNativeRejectsUnsupportedModes checks planned Zig-style modes are explicit.
 func TestBuildTargetNativeRejectsUnsupportedModes(t *testing.T) {
 	cases := []struct {
@@ -281,11 +412,11 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 
 // TestBuildTargetNativeRejectsUnsupportedFeature checks native build fails before clang.
 func TestBuildTargetNativeRejectsUnsupportedFeature(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "struct.kizu")
+	source := filepath.Join(t.TempDir(), "arena.kizu")
 	code := []byte(`struct User { age: i64; }
 fn main() {
-    let user = User { age: 30 };
-    print(user.age);
+    let users = arena<User>();
+    return;
 }`)
 	if err := os.WriteFile(source, code, 0o644); err != nil {
 		t.Fatal(err)
@@ -295,7 +426,7 @@ fn main() {
 	if err == nil {
 		t.Fatalf("expected native build to fail\n%s", out)
 	}
-	want := "llvm error: `struct.new` is not supported by the LLVM backend yet"
+	want := "llvm error: `arena.new` is not supported by the LLVM backend yet"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
 	}

@@ -30,6 +30,16 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std.builtin.process_arg_count":  {Return: "i64"},
 	"std.builtin.process_arg":        {Args: []ArgKind{ArgI64}, Return: "![]const u8"},
 	"std.builtin.process_env":        {Args: []ArgKind{ArgBytes}, Return: "![]const u8"},
+	"std.builtin.io_blocking":        {Return: "Io"},
+	"std.builtin.io_threaded":        {Return: "Io"},
+	"std.builtin.io_failing":         {Return: "Io"},
+	"std.builtin.fs_read_file":       {Args: []ArgKind{ArgIo, ArgBytes}, Return: "![]const u8"},
+	"std.builtin.fs_write_file":      {Args: []ArgKind{ArgIo, ArgBytes, ArgBytes}, Return: "!void"},
+	"std.builtin.fs_exists":          {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!bool"},
+	"std.builtin.fs_metadata":        {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!std::fs::Metadata"},
+	"std.builtin.fs_create_dir":      {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!void"},
+	"std.builtin.fs_remove_dir":      {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!void"},
+	"std.builtin.fs_remove_file":     {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!void"},
 }
 
 var removedExact = map[string]string{

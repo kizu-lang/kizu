@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
 // Lower converts a checked Kizu AST into typed SSA IR.
@@ -16,6 +17,7 @@ type lowerer struct {
 	program    *ast.Program
 	module     *Module
 	signatures map[string]Signature
+	enums      map[string]map[string]bool
 	current    *Function
 	block      *Block
 	env        map[string]Value
@@ -36,6 +38,7 @@ func newLowerer(program *ast.Program) *lowerer {
 		program:    program,
 		module:     &Module{Structs: map[string]Struct{}},
 		signatures: map[string]Signature{},
+		enums:      map[string]map[string]bool{},
 	}
 }
 
@@ -65,10 +68,21 @@ func (l *lowerer) collectDecls() {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
 			l.module.Structs[d.Name] = lowerStruct(d)
+		case *ast.EnumDecl:
+			l.enums[d.Name] = enumTags(d)
 		case *ast.FunctionDecl:
 			l.signatures[d.Name] = lowerSignature(d)
 		}
 	}
+}
+
+// enumTags converts one enum declaration to a membership set.
+func enumTags(decl *ast.EnumDecl) map[string]bool {
+	tags := map[string]bool{}
+	for _, tag := range decl.Tags {
+		tags[tag] = true
+	}
+	return tags
 }
 
 // lowerStruct converts an AST struct declaration to IR metadata.
@@ -186,6 +200,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		return l.lowerCastExpr(e)
 	case *ast.TryExpr:
 		return l.lowerTryExpr(e)
+	case *ast.IndexExpr:
+		return l.lowerIndexExpr(e)
 	case *ast.StructLiteralExpr:
 		return l.lowerStructLiteralExpr(e)
 	case *ast.FieldExpr:
@@ -197,6 +213,22 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression %T", expr)
 	}
+}
+
+// lowerIndexExpr lowers byte indexing and keeps slices as the original pointer.
+func (l *lowerer) lowerIndexExpr(expr *ast.IndexExpr) (Value, error) {
+	target, err := l.lowerExpr(expr.Target)
+	if err != nil {
+		return Value{}, err
+	}
+	if expr.Slice {
+		return target, nil
+	}
+	index, err := l.lowerExpr(expr.Index)
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("index.byte", "u8", []Value{target, index}, ""), nil
 }
 
 // lowerLiteralExpr lowers scalar literals.
@@ -264,6 +296,11 @@ func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 // lowerCallExpr lowers builtin, user, and method calls.
 func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
+		if field.Namespace {
+			if value, ok, err := l.lowerQualifiedCallExpr(field, expr.Args); ok || err != nil {
+				return value, err
+			}
+		}
 		return l.lowerMethodCallExpr(field, expr.Args)
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
@@ -282,6 +319,32 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 		ret = sig.Return
 	}
 	return l.emit("call."+name.Name, ret, args, ""), nil
+}
+
+// lowerQualifiedCallExpr lowers namespace-qualified user function calls.
+func (l *lowerer) lowerQualifiedCallExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+) (Value, bool, error) {
+	name, ok := qualifiedName(field)
+	if !ok {
+		return Value{}, false, nil
+	}
+	if _, ok := l.signatures[name]; !ok {
+		if signature, ok := stdprim.SimpleCoreSignatures[name]; ok {
+			loweredArgs, err := l.lowerArgs(args)
+			if err != nil {
+				return Value{}, true, err
+			}
+			return l.emit("call."+name, signature.Return, loweredArgs, ""), true, nil
+		}
+		return Value{}, false, nil
+	}
+	loweredArgs, err := l.lowerArgs(args)
+	if err != nil {
+		return Value{}, true, err
+	}
+	return l.emit("call."+name, l.signatures[name].Return, loweredArgs, ""), true, nil
 }
 
 // lowerTryExpr lowers error-union propagation as an explicit IR instruction.
@@ -334,12 +397,49 @@ func (l *lowerer) lowerStructLiteralExpr(expr *ast.StructLiteralExpr) (Value, er
 
 // lowerFieldExpr lowers struct field reads.
 func (l *lowerer) lowerFieldExpr(expr *ast.FieldExpr) (Value, error) {
+	if expr.Namespace {
+		if value, ok := l.lowerEnumLiteral(expr); ok {
+			return value, nil
+		}
+	}
 	receiver, err := l.lowerExpr(expr.Receiver)
 	if err != nil {
 		return Value{}, err
 	}
 	fieldType := l.fieldType(receiver.Type, expr.Name)
 	return l.emit("field."+expr.Name, fieldType, []Value{receiver}, ""), nil
+}
+
+// lowerEnumLiteral lowers Enum::Tag namespace expressions.
+func (l *lowerer) lowerEnumLiteral(expr *ast.FieldExpr) (Value, bool) {
+	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return Value{}, false
+	}
+	tags, ok := l.enums[ident.Name]
+	if !ok || !tags[expr.Name] {
+		return Value{}, false
+	}
+	return l.emitConst(ident.Name, expr.Name), true
+}
+
+// qualifiedName renders a namespace chain as an internal function key.
+func qualifiedName(expr ast.Expression) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name, true
+	case *ast.FieldExpr:
+		if !e.Namespace {
+			return "", false
+		}
+		left, ok := qualifiedName(e.Receiver)
+		if !ok {
+			return "", false
+		}
+		return left + "." + e.Name, true
+	default:
+		return "", false
+	}
 }
 
 // lowerArgs lowers call arguments from left to right.

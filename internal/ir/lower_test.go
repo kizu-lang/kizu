@@ -69,6 +69,23 @@ entry:
 	}
 }
 
+// TestLowerLogicalWhileTerminators checks short-circuit loop conditions end every block.
+func TestLowerLogicalWhileTerminators(t *testing.T) {
+	module := lowerSource(t, `fn main() {
+    var i = 0;
+    while i < 3 and i >= 0 {
+        i = i + 1;
+    }
+}`)
+	for _, fn := range module.Functions {
+		for _, block := range fn.Blocks {
+			if block.Terminator.Op == "" {
+				t.Fatalf("block %s in %s has no terminator:\n%s", block.Name, fn.Name, Dump(module))
+			}
+		}
+	}
+}
+
 // lowerSource parses, checks, and lowers a source snippet.
 func lowerSource(t *testing.T, source string) *Module {
 	t.Helper()
