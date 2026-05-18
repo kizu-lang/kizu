@@ -301,11 +301,14 @@ func lexerSource(info lexerPackage) string {
 	out.WriteString("    };\n")
 	out.WriteString("}\n\n")
 	out.WriteString("pub fn NextToken(self: Lexer) -> token::Token {\n")
-	out.WriteString("    return token::EOFToken();\n")
+	out.WriteString("    return token_at(self.input, self.position, self.line, self.column);\n")
 	out.WriteString("}\n")
 	out.WriteString("\n")
 	out.WriteString(firstTokenSource())
+	out.WriteString(lexerTokenAtSource())
 	out.WriteString(firstTokenCodeSource())
+	out.WriteString(lexerPunctuationSource())
+	out.WriteString(lexerPositionPunctuationSource())
 	out.WriteString(lexerHelpersSource())
 	return out.String()
 }
@@ -338,6 +341,47 @@ func firstTokenSource() string {
         return make_token(token::Type::Int, input[start..end]);
     }
     return punctuation_token(input, start, length);
+}
+
+`
+}
+
+// lexerTokenAtSource returns the Kizu source for the position-aware token scanner.
+func lexerTokenAtSource() string {
+	return `fn token_at(input: []const u8, position: i64, line: i64, column: i64) -> token::Token {
+    let length = std::builtin::mem_len(input);
+    var start = position;
+    var token_line = line;
+    var token_column = column;
+    while start < length and is_space(input[start]) {
+        if input[start] == cast<u8>(10) {
+            token_line = token_line + 1;
+            token_column = 0;
+        } else {
+            token_column = token_column + 1;
+        }
+        start = start + 1;
+    }
+    if start >= length {
+        return token::EOFToken();
+    }
+    let ch = input[start];
+    if is_letter(ch) {
+        var end = start;
+        while end < length and is_ident_byte(input[end]) {
+            end = end + 1;
+        }
+        let literal = input[start..end];
+        return make_token_at(token::LookupIdent(literal), literal, token_line, token_column + 1);
+    }
+    if is_digit(ch) {
+        var end = start;
+        while end < length and is_digit(input[end]) {
+            end = end + 1;
+        }
+        return make_token_at(token::Type::Int, input[start..end], token_line, token_column + 1);
+    }
+    return punctuation_token_at(input, start, length, token_line, token_column + 1);
 }
 
 `
@@ -376,8 +420,8 @@ func firstTokenCodeSource() string {
 `
 }
 
-// lexerHelpersSource returns Kizu helpers mirroring the small Go lexer subset.
-func lexerHelpersSource() string {
+// lexerPunctuationSource returns Kizu punctuation scanning helpers.
+func lexerPunctuationSource() string {
 	return `fn punctuation_token(input: []const u8, start: i64, length: i64) -> token::Token {
     let ch = input[start];
     if ch == cast<u8>(40) {
@@ -411,7 +455,56 @@ fn make_token(kind: token::Type, literal: []const u8) -> token::Token {
     return token::New(kind, literal, 1, 1);
 }
 
-fn is_ident_byte(ch: u8) -> bool {
+`
+}
+
+// lexerPositionPunctuationSource returns position-aware punctuation helpers.
+func lexerPositionPunctuationSource() string {
+	return `fn punctuation_token_at(
+    input: []const u8,
+    start: i64,
+    length: i64,
+    line: i64,
+    column: i64
+) -> token::Token {
+    let ch = input[start];
+    if ch == cast<u8>(40) {
+        return make_token_at(token::Type::LParen, input[start..start + 1], line, column);
+    }
+    if ch == cast<u8>(41) {
+        return make_token_at(token::Type::RParen, input[start..start + 1], line, column);
+    }
+    if ch == cast<u8>(123) {
+        return make_token_at(token::Type::LBrace, input[start..start + 1], line, column);
+    }
+    if ch == cast<u8>(125) {
+        return make_token_at(token::Type::RBrace, input[start..start + 1], line, column);
+    }
+    if ch == cast<u8>(58) and start + 1 < length and input[start + 1] == cast<u8>(58) {
+        return make_token_at(token::Type::DoubleColon, input[start..start + 2], line, column);
+    }
+    if ch == cast<u8>(45) and start + 1 < length and input[start + 1] == cast<u8>(62) {
+        return make_token_at(token::Type::Arrow, input[start..start + 2], line, column);
+    }
+    if ch == cast<u8>(61) and start + 1 < length and input[start + 1] == cast<u8>(61) {
+        return make_token_at(token::Type::Eq, input[start..start + 2], line, column);
+    }
+    if ch == cast<u8>(61) {
+        return make_token_at(token::Type::Assign, input[start..start + 1], line, column);
+    }
+    return make_token_at(token::Type::Illegal, input[start..start + 1], line, column);
+}
+
+fn make_token_at(kind: token::Type, literal: []const u8, line: i64, column: i64) -> token::Token {
+    return token::New(kind, literal, line, column);
+}
+
+`
+}
+
+// lexerHelpersSource returns Kizu byte classification helpers.
+func lexerHelpersSource() string {
+	return `fn is_ident_byte(ch: u8) -> bool {
     return is_letter(ch) or is_digit(ch);
 }
 
