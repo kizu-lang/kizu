@@ -638,8 +638,6 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
 		return readLiteralType(e)
-	case *ast.IfExpr:
-		return c.readIfExpr(e, env)
 	case *ast.ComptimeExpr:
 		return c.readComptimeExpr(e, env)
 	case *ast.IdentExpr:
@@ -749,9 +747,6 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 
 // moveNonIdentExpr handles move contexts for compound expressions.
 func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, error) {
-	if ifExpr, ok := expr.(*ast.IfExpr); ok {
-		return c.moveIfExpr(ifExpr, env)
-	}
 	if deref, ok := expr.(*ast.DerefExpr); ok {
 		return c.moveDerefExpr(deref, env)
 	}
@@ -768,71 +763,6 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 		return c.moveFieldExpr(field, env)
 	}
 	return c.readExpr(expr, env)
-}
-
-// readIfExpr reads branch values without consuming non-copy branch results.
-func (c *Checker) readIfExpr(expr *ast.IfExpr, env *scope) (string, error) {
-	return c.checkIfExprOwnership(expr, env, false)
-}
-
-// moveIfExpr consumes the selected branch value and merges possible moves.
-func (c *Checker) moveIfExpr(expr *ast.IfExpr, env *scope) (string, error) {
-	return c.checkIfExprOwnership(expr, env, true)
-}
-
-// checkIfExprOwnership validates branch ownership effects.
-func (c *Checker) checkIfExprOwnership(
-	expr *ast.IfExpr,
-	env *scope,
-	moveResult bool,
-) (string, error) {
-	if _, err := c.readExpr(expr.Condition, env); err != nil {
-		return "", err
-	}
-	if expr.Alternative == nil {
-		return "", fmt.Errorf("move error: if expression requires else branch")
-	}
-	left := env.clone()
-	leftType, err := c.checkIfExprBlock(expr.Consequence, left.child(), moveResult)
-	if err != nil {
-		return "", err
-	}
-	right := env.clone()
-	rightType, err := c.checkIfExprBlock(expr.Alternative, right.child(), moveResult)
-	if err != nil {
-		return "", err
-	}
-	env.mergeMovedFrom(left)
-	env.mergeMovedFrom(right)
-	if leftType != rightType {
-		return "", fmt.Errorf("move error: if expression branch types differ")
-	}
-	return leftType, nil
-}
-
-// checkIfExprBlock checks statements before the final branch value.
-func (c *Checker) checkIfExprBlock(
-	block *ast.BlockStmt,
-	env *scope,
-	moveResult bool,
-) (string, error) {
-	if block == nil || len(block.Statements) == 0 {
-		return "", fmt.Errorf("move error: if expression branch must end with a value")
-	}
-	last := len(block.Statements) - 1
-	for _, stmt := range block.Statements[:last] {
-		if err := c.checkStmt(stmt, env); err != nil {
-			return "", err
-		}
-	}
-	exprStmt, ok := block.Statements[last].(*ast.ExprStmt)
-	if !ok {
-		return "", fmt.Errorf("move error: if expression branch must end with a value")
-	}
-	if moveResult {
-		return c.moveExpr(exprStmt.Expr, env)
-	}
-	return c.readExpr(exprStmt.Expr, env)
 }
 
 // moveDerefExpr rejects moving a non-copy value out through a local borrow.
@@ -4048,10 +3978,6 @@ func exprIdentUses(expr ast.Expression) []string {
 		return exprIdentUses(e.Receiver)
 	case *ast.DerefExpr:
 		return exprIdentUses(e.Receiver)
-	case *ast.IfExpr:
-		uses := exprIdentUses(e.Condition)
-		uses = append(uses, blockIdentUses(e.Consequence)...)
-		return append(uses, blockIdentUses(e.Alternative)...)
 	case *ast.ComptimeExpr:
 		return exprIdentUses(e.Expr)
 	default:

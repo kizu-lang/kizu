@@ -576,22 +576,6 @@ func (e *BoolExpr) String() string {
 	return "false"
 }
 
-// IfExpr represents a conditional expression with a value in each branch.
-type IfExpr struct {
-	Condition   Expression
-	Consequence *BlockStmt
-	Alternative *BlockStmt
-}
-
-// expressionNode marks IfExpr as an expression node.
-func (*IfExpr) expressionNode() {}
-
-// String returns a compact debug representation of the if expression.
-func (e *IfExpr) String() string {
-	return fmt.Sprintf("if %s %s else %s",
-		e.Condition.String(), e.Consequence.String(), e.Alternative.String())
-}
-
 // ComptimeExpr represents an expression evaluated during compilation.
 type ComptimeExpr struct {
 	Expr Expression

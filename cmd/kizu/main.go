@@ -775,10 +775,6 @@ func renameStdExpr(module string, expr ast.Expression) {
 	case *ast.BinaryExpr:
 		renameStdExpr(module, e.Left)
 		renameStdExpr(module, e.Right)
-	case *ast.IfExpr:
-		renameStdExpr(module, e.Condition)
-		renameStdBlockExprs(module, e.Consequence)
-		renameStdBlockExprs(module, e.Alternative)
 	case *ast.ComptimeExpr:
 		renameStdExpr(module, e.Expr)
 	case *ast.CallExpr:

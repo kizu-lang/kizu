@@ -520,7 +520,7 @@ v0.1 の `union` は次に限定します。
 
 ### 6.9 if
 
-Kizu v0.1 の `if` は statement と expression の両方で使えます。
+Kizu v0.1 の `if` は statement です。
 
 ```kizu
 if age >= 20 {
@@ -530,19 +530,8 @@ if age >= 20 {
 }
 ```
 
-expression 位置の `if` は `else` が必須です。
-各 branch block の最後の expression statement が branch value になります。
-
-```kizu
-let level = if age >= 20 {
-    1;
-} else {
-    0;
-};
-```
-
-両 branch の value type は一致しなければなりません。
-branch 内で move された値は、`if` expression の外側でも moved として扱います。
+値を返したい場合は、関数から `return` するか、`var` binding に明示的に代入します。
+Kizu v0.1 では `if` expression と三項演算子は採用しません。
 
 ### 6.9.1 bool 演算
 
