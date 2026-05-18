@@ -365,6 +365,7 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStageArtifactsEqual(t, stage2Data, data)
+	assertStage2CanWriteWithoutInputCopy(t, repoRoot, stage2Bin, dir)
 }
 
 // assertStage2LLVMReadsSources checks that the stage2 IR depends on compiler source inputs.
@@ -400,6 +401,41 @@ func assertStageArtifactsEqual(t *testing.T, stage2 []byte, stage3 []byte) {
 	t.Helper()
 	if string(stage2) != string(stage3) {
 		t.Fatalf("stage2 and stage3 artifacts differ\nstage2:\n%s\nstage3:\n%s", stage2, stage3)
+	}
+}
+
+// assertStage2CanWriteWithoutInputCopy checks stage2 can emit after source scan alone.
+func assertStage2CanWriteWithoutInputCopy(
+	t *testing.T,
+	repoRoot string,
+	stage2Bin string,
+	dir string,
+) {
+	t.Helper()
+	sourceOut := filepath.Join(dir, "stage3-source.ll")
+	sourceBin := filepath.Join(dir, "kizu-stage3-source")
+	run := exec.Command(stage2Bin, sourceOut)
+	run.Dir = repoRoot
+	out, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage2 source-only executable failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(sourceOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "; kizu selfhost source metric ") {
+		t.Fatalf("source-only stage2 artifact unexpectedly copied stage2 input:\n%s", data)
+	}
+	link := exec.Command("clang", sourceOut, "-o", sourceBin)
+	out, err = link.CombinedOutput()
+	if err != nil {
+		t.Fatalf("source-only stage2 link failed: %v\n%s", err, out)
+	}
+	run = exec.Command(sourceBin)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("source-only stage2 output failed: %v\n%s", err, out)
 	}
 }
 
