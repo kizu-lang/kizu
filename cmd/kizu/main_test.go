@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -367,7 +368,10 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStage2GeneratedArtifact(t, repoRoot, stage2Data, data, stage3, stage3Bin)
-	assertStage3CanCompileSourceTree(t, repoRoot, stage3Bin, stage4, stage2Data)
+	stage4Data := assertStage3CanCompileSourceTree(t, repoRoot, stage3Bin, stage4, stage2Data)
+	if !bytes.Equal(data, stage4Data) {
+		t.Fatalf("stage3 and stage4 artifacts differ")
+	}
 }
 
 // assertStage2LLVMReadsSources checks that the stage2 IR depends on compiler source inputs.
@@ -450,7 +454,7 @@ func assertStage3CanCompileSourceTree(
 	stage3Bin string,
 	stage4 string,
 	stage2Data []byte,
-) {
+) []byte {
 	t.Helper()
 	run := exec.Command(stage3Bin, stage4)
 	run.Dir = repoRoot
@@ -466,6 +470,7 @@ func assertStage3CanCompileSourceTree(
 		t.Fatalf("stage4 artifact does not look like LLVM IR:\n%s", data)
 	}
 	assertStage2SourceOnlyMetrics(t, stage2Data, data)
+	return data
 }
 
 // assertStage2SourceOnlyMetrics checks source-only output against stage1 metrics.

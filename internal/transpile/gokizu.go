@@ -846,20 +846,67 @@ func stage2ArtifactLLVM(artifact string) string {
 
 // stage3CompilerArtifactLLVM renders a source-scanning compiler for the next stage.
 func stage3CompilerArtifactLLVM() string {
-	artifact := minimalStageArtifactLLVM()
-	return stage2ArtifactLLVM(artifact) +
+	return selfReproducingStageArtifactLLVM()
+}
+
+// selfReproducingStageArtifactLLVM returns a source-scanning artifact fixed point.
+func selfReproducingStageArtifactLLVM() string {
+	templateLen := 0
+	for {
+		template := stageTemplateLLVM(templateLen)
+		nextLen := len(template)
+		if nextLen == templateLen {
+			return strings.Replace(template, stageTemplateMarker(), byteArray(template), 1)
+		}
+		templateLen = nextLen
+	}
+}
+
+// stageTemplateLLVM renders the source-scanning compiler template before expansion.
+func stageTemplateLLVM(templateLen int) string {
+	return stageTemplateGlobals(templateLen) +
 		stage2SourceGlobals() +
 		stage2RuntimeDeclsLLVM() +
 		stage2EntryLLVM() +
 		stage2OpenSources() +
 		stage2CheckSources() +
 		stage2WriteGateLLVM() +
-		stage2WriteFallbackLLVM(artifact)
+		stageTemplateWriteLLVM(templateLen)
 }
 
-// minimalStageArtifactLLVM returns the terminal link-smoke artifact.
-func minimalStageArtifactLLVM() string {
-	return "define i32 @main() { entry: ret i32 0 }"
+// stageTemplateMarker is replaced by the template byte array in the artifact.
+func stageTemplateMarker() string {
+	return "__KIZU_TEMPLATE_BYTES__"
+}
+
+// stageTemplateGlobals renders constants used by the self-reproducing artifact.
+func stageTemplateGlobals(templateLen int) string {
+	i8Prefix := "i8 "
+	comma := ", "
+	return "@template = private constant [" + fmt.Sprint(templateLen+1) +
+		" x i8] [" + stageTemplateMarker() + "] " +
+		"@i8prefix = private constant [" + fmt.Sprint(len(i8Prefix)+1) +
+		" x i8] [" + byteArray(i8Prefix) + "] " +
+		"@comma = private constant [" + fmt.Sprint(len(comma)+1) +
+		" x i8] [" + byteArray(comma) + "] " +
+		stage2ArtifactMetricGlobals()
+}
+
+// stage2ArtifactMetricGlobals renders output metric labels shared by stage artifacts.
+func stage2ArtifactMetricGlobals() string {
+	parsePrefix := "; kizu stage2 source metric "
+	bytesPrefix := "; kizu stage2 source bytes "
+	fnPrefix := "; kizu stage2 source fn count "
+	newline := "\n"
+	return "@parsemetric = private constant [" + fmt.Sprint(len(parsePrefix)+1) +
+		" x i8] [" + byteArray(parsePrefix) + "] " +
+		"@metric = private constant [" + fmt.Sprint(len(bytesPrefix)+1) +
+		" x i8] [" + byteArray(bytesPrefix) + "] " +
+		"@fnmetric = private constant [" + fmt.Sprint(len(fnPrefix)+1) +
+		" x i8] [" + byteArray(fnPrefix) + "] " +
+		"@newline = private constant [" + fmt.Sprint(len(newline)+1) +
+		" x i8] [" + byteArray(newline) + "] " +
+		"@mode = private constant [2 x i8] [i8 119, i8 0] "
 }
 
 // stage2RuntimeDeclsLLVM renders libc declarations used by stage2.
@@ -913,6 +960,114 @@ func stage2WriteFallbackLLVM(artifact string) string {
 		" x i8], ptr @artifact, i64 0, i64 0 " +
 		"call i32 @fputs(ptr %text, ptr %file) call i32 @fclose(ptr %file) " +
 		"br label %done done: ret i32 0 }"
+}
+
+// stageTemplateWriteLLVM writes metrics and expands the compiler template.
+func stageTemplateWriteLLVM(templateLen int) string {
+	parsePrefix := "; kizu stage2 source metric "
+	bytesPrefix := "; kizu stage2 source bytes "
+	fnPrefix := "; kizu stage2 source fn count "
+	return "write: " +
+		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
+		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
+		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
+		writeTemplateMetricPrefix("parsemetric", len(parsePrefix), "parsedigits",
+			"%parsetotal", "after.parse") +
+		writeTemplateMetricPrefix("metric", len(bytesPrefix), "digits",
+			"%total7", "after.bytes") +
+		writeTemplateMetricPrefix("fnmetric", len(fnPrefix), "fndigits",
+			"%fntotal7", "after.fns") +
+		stageTemplateLoopLLVM(templateLen) +
+		"close: call i32 @fclose(ptr %file) br label %done done: ret i32 0 }"
+}
+
+// writeTemplateMetricPrefix renders one metric line before template expansion.
+func writeTemplateMetricPrefix(
+	global string,
+	length int,
+	numberPrefix string,
+	value string,
+	next string,
+) string {
+	return "%" + global + " = getelementptr [" + fmt.Sprint(length+1) +
+		" x i8], ptr @" + global + ", i64 0, i64 0 " +
+		"call i32 @fputs(ptr %" + global + ", ptr %file) " +
+		stage2WriteNumberLLVM(numberPrefix, value, next) +
+		next + ": %newline" + numberPrefix + " = getelementptr [2 x i8], " +
+		"ptr @newline, i64 0, i64 0 " +
+		"call i32 @fputs(ptr %newline" + numberPrefix + ", ptr %file) "
+}
+
+// stageTemplateLoopLLVM scans the raw template and replaces its marker with bytes.
+func stageTemplateLoopLLVM(templateLen int) string {
+	markerLen := len(stageTemplateMarker())
+	return "br label %template.loop " +
+		"template.loop: %tidx = phi i32 [0, %after.fns], [%raw.next, %template.raw], " +
+		"[%marker.next, %template.bytes.done] " +
+		"%tdone = icmp sge i32 %tidx, " + fmt.Sprint(templateLen) + " " +
+		"br i1 %tdone, label %close, label %template.check " +
+		"template.check: %canmarker = icmp sle i32 %tidx, " +
+		fmt.Sprint(templateLen-markerLen) + " " +
+		"br i1 %canmarker, label %template.match, label %template.raw " +
+		stageTemplateMatchLLVM() +
+		stageTemplateRawLLVM() +
+		stageTemplateBytesLLVM(templateLen, markerLen)
+}
+
+// stageTemplateMatchLLVM emits marker byte comparisons for template expansion.
+func stageTemplateMatchLLVM() string {
+	var out strings.Builder
+	marker := []byte(stageTemplateMarker())
+	out.WriteString("template.match: ")
+	for idx, ch := range marker {
+		fmt.Fprintf(&out, "%%mark.idx%d = add i32 %%tidx, %d ", idx, idx)
+		fmt.Fprintf(&out, "%%mark.ptr%d = getelementptr i8, ptr @template, i32 %%mark.idx%d ",
+			idx, idx)
+		fmt.Fprintf(&out, "%%mark.ch%d = load i8, ptr %%mark.ptr%d ", idx, idx)
+		fmt.Fprintf(&out, "%%mark.i%d = zext i8 %%mark.ch%d to i32 ", idx, idx)
+		fmt.Fprintf(&out, "%%mark.eq%d = icmp eq i32 %%mark.i%d, %d ", idx, idx, ch)
+		if idx == 0 {
+			out.WriteString("%mark.all0 = or i1 %mark.eq0, false ")
+			continue
+		}
+		fmt.Fprintf(&out, "%%mark.all%d = and i1 %%mark.all%d, %%mark.eq%d ",
+			idx, idx-1, idx)
+	}
+	fmt.Fprintf(&out, "br i1 %%mark.all%d, label %%template.bytes.init, label %%template.raw ",
+		len(marker)-1)
+	return out.String()
+}
+
+// stageTemplateRawLLVM writes a non-marker template byte.
+func stageTemplateRawLLVM() string {
+	return "template.raw: " +
+		"%raw.ptr = getelementptr i8, ptr @template, i32 %tidx " +
+		"%raw.ch = load i8, ptr %raw.ptr %raw.i = zext i8 %raw.ch to i32 " +
+		"call i32 @fputc(i32 %raw.i, ptr %file) " +
+		"%raw.next = add i32 %tidx, 1 br label %template.loop "
+}
+
+// stageTemplateBytesLLVM writes the template as an LLVM i8 byte array.
+func stageTemplateBytesLLVM(templateLen int, markerLen int) string {
+	return "template.bytes.init: br label %template.bytes.loop " +
+		"template.bytes.loop: %bidx = phi i32 [0, %template.bytes.init], " +
+		"[%bnext, %template.bytes.after] " +
+		"%bdone = icmp sge i32 %bidx, " + fmt.Sprint(templateLen+1) + " " +
+		"br i1 %bdone, label %template.bytes.done, label %template.bytes.item " +
+		"template.bytes.item: %i8prefix = getelementptr [4 x i8], ptr @i8prefix, " +
+		"i64 0, i64 0 call i32 @fputs(ptr %i8prefix, ptr %file) " +
+		"%bptr = getelementptr i8, ptr @template, i32 %bidx " +
+		"%bch = load i8, ptr %bptr %bval = zext i8 %bch to i32 " +
+		stage2WriteNumberLLVM("bytedigits", "%bval", "template.bytes.number") +
+		"template.bytes.number: %bnext = add i32 %bidx, 1 " +
+		"%blast = icmp sge i32 %bnext, " + fmt.Sprint(templateLen+1) + " " +
+		"br i1 %blast, label %template.bytes.after, label %template.bytes.comma " +
+		"template.bytes.comma: %comma = getelementptr [3 x i8], ptr @comma, " +
+		"i64 0, i64 0 call i32 @fputs(ptr %comma, ptr %file) " +
+		"br label %template.bytes.after " +
+		"template.bytes.after: br label %template.bytes.loop " +
+		"template.bytes.done: %marker.next = add i32 %tidx, " + fmt.Sprint(markerLen) + " " +
+		"br label %template.loop "
 }
 
 // stage2WriteNumberLLVM writes one positive i32 as decimal to %file.
