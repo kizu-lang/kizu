@@ -2352,6 +2352,11 @@ func (c *Checker) checkTypeApplyCallExpr(
 	); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkBuiltinTypeApply(
+		name, expr.TypeArg, args, env, unsafe,
+	); ok || err != nil {
+		return typ, err
+	}
 	switch name {
 	case "std.array.Array":
 		arg, err := c.parseType(expr.TypeArg)
@@ -2367,22 +2372,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 		}
 		typ, _, err := c.checkMapConstructor(Type(mapArgs[1]), args, env, unsafe)
 		return typ, err
-	case "std.builtin.channel":
-		if !c.currentStd {
-			return "", fmt.Errorf("type error: `%s` is reserved; use std::channel", name)
-		}
-		arg, err := c.parseType(expr.TypeArg)
-		if err != nil {
-			return "", err
-		}
-		return checkNoArgConstructor(name, args, Type(fmt.Sprintf("Channel<%s>", arg)))
-	case "std.atomic.Atomic":
-		arg, err := c.parseType(expr.TypeArg)
-		if err != nil {
-			return "", err
-		}
-		typ, _, err := c.checkAtomic(arg, args, env, unsafe)
-		return typ, err
 	case "std.sync.Mutex":
 		arg, err := c.parseType(expr.TypeArg)
 		if err != nil {
@@ -2392,6 +2381,40 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	default:
 		return "", fmt.Errorf("type error: `%s` does not take a type argument", name)
+	}
+}
+
+// checkBuiltinTypeApply validates std-only generic runtime primitives.
+func (c *Checker) checkBuiltinTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	switch name {
+	case "std.builtin.channel":
+		if !c.currentStd {
+			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::channel", name)
+		}
+		arg, err := c.parseType(typeArg)
+		if err != nil {
+			return "", true, err
+		}
+		typ, err := checkNoArgConstructor(name, args, Type(fmt.Sprintf("Channel<%s>", arg)))
+		return typ, true, err
+	case "std.builtin.atomic":
+		if !c.currentStd {
+			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::atomic", name)
+		}
+		arg, err := c.parseType(typeArg)
+		if err != nil {
+			return "", true, err
+		}
+		typ, _, err := c.checkAtomic(arg, args, env, unsafe)
+		return typ, true, err
+	default:
+		return "", false, nil
 	}
 }
 
@@ -2414,6 +2437,9 @@ func (c *Checker) checkGenericUserTypeApply(
 	if err != nil {
 		return "", true, err
 	}
+	if err := c.checkGenericWrapperTypeArg(name, arg); err != nil {
+		return "", true, err
+	}
 	if len(args) != len(fn.params) {
 		return "", true, userCallArityError(name, fn, len(args))
 	}
@@ -2424,6 +2450,17 @@ func (c *Checker) checkGenericUserTypeApply(
 		}
 	}
 	return substituteTypeParams(fn.returnType, subst), true, nil
+}
+
+// checkGenericWrapperTypeArg validates std wrapper-specific type argument contracts.
+func (c *Checker) checkGenericWrapperTypeArg(name string, arg Type) error {
+	switch name {
+	case "std.atomic.Atomic":
+		if !isAtomicSupportedType(arg) {
+			return fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", arg)
+		}
+	}
+	return nil
 }
 
 // checkGenericUserArg validates an instantiated generic wrapper argument.
@@ -3869,7 +3906,7 @@ func (c *Checker) checkAtomic(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if !isAtomicSupportedType(elem) {
+	if !c.typeParams[string(elem)] && !isAtomicSupportedType(elem) {
 		return "", true, fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", elem)
 	}
 	if len(args) != 1 {

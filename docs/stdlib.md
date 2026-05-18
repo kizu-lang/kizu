@@ -101,6 +101,7 @@ Current builtin thinning candidates:
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
 | `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for` | Host primitive | Public constructors and `parallel_for` live in `std/src/task.kizu`; direct user calls are rejected |
 | `std::builtin::channel<T>` | Runtime primitive | Public `std::channel::Channel<T>()` lives in `std/src/channel.kizu`; direct user calls are rejected |
+| `std::builtin::atomic<T>` | Runtime primitive | Public `std::atomic::Atomic<T>(value)` lives in `std/src/atomic.kizu`; direct user calls are rejected |
 
 `std::testing` now performs assertion checks and message construction in
 `std/src/testing.kizu`. Equality diagnostics are built with `std::fmt` into an
@@ -120,10 +121,10 @@ uses a `comptime Function` parameter to forward the worker name through
 `std/src/task.kizu`. `parallel_map` remains a public Go branch until Kizu can
 forward both function names and mutable partition access without moving the
 partition value; that blocker is tracked by #372. `std::channel::Channel<T>()`
-now uses source-level type-argument forwarding through `std/src/channel.kizu`.
-Generic constructor wrappers for Array, Map, Mutex, and Atomic still require
-source-level type-argument forwarding before they can move without builtin
-camouflage; that blocker is tracked by #371.
+and `std::atomic::Atomic<T>(value)` now use source-level type-argument
+forwarding through Kizu std source. Generic constructor wrappers for Array, Map,
+and Mutex still require source-level type-argument forwarding before they can
+move without builtin camouflage; that blocker is tracked by #371.
 
 ## Builtin Registry
 
@@ -143,7 +144,7 @@ camouflage; that blocker is tracked by #371.
 | `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor wrapper; Go owned message queue and boundary checks | keep queue primitive trusted; method wrappers still tracked by #360 |
 | `std::thread` | `scoped` | host thread boundary and join semantics | trusted primitive; wrapper split tracked by #360 |
 | `std::sync` | `Mutex<T>` | shared mutable state primitive and copy-value restrictions | trusted primitive; wrapper split tracked by #360 |
-| `std::atomic` | `Atomic<T>` | atomic storage, seq_cst operations, supported type set | trusted primitive; ordering API and wrapper split tracked by #360 |
+| `std::atomic` | `Atomic<T>` | Kizu constructor wrapper; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API and method wrappers tracked by #360 |
 
 ## Source Layout Target
 
