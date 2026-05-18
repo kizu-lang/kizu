@@ -624,6 +624,7 @@ func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
 			renameStdFunction(module, d)
+			d.Std = true
 		case *ast.ImplDecl:
 			renameStdImpl(module, d)
 		default:
@@ -646,6 +647,7 @@ func renameStdImpl(module string, decl *ast.ImplDecl) {
 	decl.TypeName = qualifyStdTypeName(module, decl.TypeName)
 	for _, method := range decl.Methods {
 		method.Public = false
+		method.Std = true
 		renameStdFunctionTypes(module, method)
 	}
 }

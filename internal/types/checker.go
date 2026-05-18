@@ -114,6 +114,7 @@ type Checker struct {
 	impls         map[string]map[string]*functionType
 	satisfactions map[string]map[string]bool
 	currentReturn Type
+	currentStd    bool
 	loopLabels    []string
 }
 
@@ -778,11 +779,14 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		}
 	}
 	previousReturn := c.currentReturn
+	previousStd := c.currentStd
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
+	c.currentStd = fn.decl.Std
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
+		c.currentStd = previousStd
 		c.loopLabels = previousLoops
 	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
@@ -2720,6 +2724,9 @@ func (c *Checker) checkStringStorageBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
+	if strings.HasPrefix(name, "std.builtin.string_") && !c.currentStd {
+		return "", true, fmt.Errorf("type error: `%s` is reserved for std::string", name)
+	}
 	switch name {
 	case "std.builtin.string_append_bytes":
 		return c.checkStringStorageBytes(name, args, env, unsafe)

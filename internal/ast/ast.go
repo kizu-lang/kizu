@@ -68,6 +68,7 @@ type FunctionDecl struct {
 	Unsafe     bool
 	ExternABI  string
 	Public     bool
+	Std        bool
 }
 
 // declNode marks FunctionDecl as a declaration node.
