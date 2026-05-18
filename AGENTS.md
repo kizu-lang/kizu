@@ -21,8 +21,7 @@ Rust 風の安全性のうち、次を限定して採用します。
 
 ## 最優先方針
 
-作りすぎないこと。
-
+go compilerを薄く保ち、常にkizu self-host compilerを意識した実装をすること。(機械的に変換できるか？を念頭にしてください)
 基本の実行経路は、次が動く CLI です。
 
 ```sh
@@ -58,6 +57,7 @@ Kizu 固有の Codex skill は `.codex/skills/kizu-language-design/` を正と�
 
 stdlib API の現状整理と Kizu 製 std への移行方針は `docs/stdlib.md` を参照してください。
 新しい `std::...` builtin を追加する場合は、同じ変更で registry、examples、conformance を更新してください。
+新しい `std::...` builtin を追加する場合は、極力kizuで実装し、goを薄く保ってください
 新しい positive example は原則 `std::testing` assertion style にし、CLI 出力自体を検証する例だけ stdout conformance を使ってください。
 
 開発は branch / Pull Request ベースで進めます。
