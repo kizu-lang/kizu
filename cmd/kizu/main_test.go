@@ -318,6 +318,8 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	stage2 := filepath.Join(dir, "stage2.ll")
 	stage2Bin := filepath.Join(dir, "kizu-stage2")
 	stage3 := filepath.Join(dir, "stage3.ll")
+	stage3Bin := filepath.Join(dir, "kizu-stage3")
+	stage4 := filepath.Join(dir, "stage4.ll")
 
 	build := exec.Command(
 		"go", "run", "./cmd/kizu", "build", "--target", "native",
@@ -364,7 +366,8 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertStage2GeneratedArtifact(t, repoRoot, stage2Data, data, stage3, dir)
+	assertStage2GeneratedArtifact(t, repoRoot, stage2Data, data, stage3, stage3Bin)
+	assertStage3CanCompileSourceTree(t, repoRoot, stage3Bin, stage4, stage2Data)
 }
 
 // assertStage2LLVMReadsSources checks that the stage2 IR depends on compiler source inputs.
@@ -408,7 +411,7 @@ func assertStage2GeneratedArtifact(
 	stage2Data []byte,
 	data []byte,
 	stage3 string,
-	dir string,
+	stage3Bin string,
 ) {
 	t.Helper()
 	if strings.Contains(string(data), "; kizu selfhost source metric ") {
@@ -423,19 +426,46 @@ func assertStage2GeneratedArtifact(
 	if !strings.Contains(string(data), "; kizu stage2 source fn count ") {
 		t.Fatalf("stage2 generated artifact does not include source fn count:\n%s", data)
 	}
+	if !strings.Contains(string(data), "fopen(ptr %source8, ptr %readmode)") {
+		t.Fatalf("stage2 generated artifact is not a source-scanning compiler:\n%s", data)
+	}
 	assertStage2SourceOnlyMetrics(t, stage2Data, data)
-	sourceBin := filepath.Join(dir, "kizu-stage3")
-	link := exec.Command("clang", stage3, "-o", sourceBin)
+	link := exec.Command("clang", stage3, "-o", stage3Bin)
 	out, err := link.CombinedOutput()
 	if err != nil {
 		t.Fatalf("stage2 generated artifact link failed: %v\n%s", err, out)
 	}
-	run := exec.Command(sourceBin)
+	run := exec.Command(stage3Bin)
 	run.Dir = repoRoot
 	out, err = run.CombinedOutput()
 	if err != nil {
 		t.Fatalf("stage2 generated artifact output failed: %v\n%s", err, out)
 	}
+}
+
+// assertStage3CanCompileSourceTree checks the stage2 output can compile the same sources.
+func assertStage3CanCompileSourceTree(
+	t *testing.T,
+	repoRoot string,
+	stage3Bin string,
+	stage4 string,
+	stage2Data []byte,
+) {
+	t.Helper()
+	run := exec.Command(stage3Bin, stage4)
+	run.Dir = repoRoot
+	out, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage3 executable failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(stage4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "define i32 @main") {
+		t.Fatalf("stage4 artifact does not look like LLVM IR:\n%s", data)
+	}
+	assertStage2SourceOnlyMetrics(t, stage2Data, data)
 }
 
 // assertStage2SourceOnlyMetrics checks source-only output against stage1 metrics.

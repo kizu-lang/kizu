@@ -812,21 +812,21 @@ fn append_i64(out: std::string::String, value: i64) -> !std::string::String {
 
 // stage2WriterLLVMChunks returns Kizu-emitted LLVM pieces for the stage2 writer.
 func stage2WriterLLVMChunks() []string {
+	artifact := stage3CompilerArtifactLLVM()
 	return []string{
-		stage2ArtifactLLVM(),
+		stage2ArtifactLLVM(artifact),
 		stage2SourceGlobals(),
 		stage2RuntimeDeclsLLVM(),
 		stage2EntryLLVM(),
 		stage2OpenSources(),
 		stage2CheckSources(),
 		stage2WriteGateLLVM(),
-		stage2WriteFallbackLLVM(),
+		stage2WriteFallbackLLVM(artifact),
 	}
 }
 
 // stage2ArtifactLLVM renders the fallback stage artifact constant.
-func stage2ArtifactLLVM() string {
-	artifact := "define i32 @main() { entry: ret i32 0 }"
+func stage2ArtifactLLVM(artifact string) string {
 	parsePrefix := "; kizu stage2 source metric "
 	bytesPrefix := "; kizu stage2 source bytes "
 	fnPrefix := "; kizu stage2 source fn count "
@@ -842,6 +842,24 @@ func stage2ArtifactLLVM() string {
 		"@newline = private constant [" + fmt.Sprint(len(newline)+1) +
 		" x i8] [" + byteArray(newline) + "] " +
 		"@mode = private constant [2 x i8] [i8 119, i8 0] "
+}
+
+// stage3CompilerArtifactLLVM renders a source-scanning compiler for the next stage.
+func stage3CompilerArtifactLLVM() string {
+	artifact := minimalStageArtifactLLVM()
+	return stage2ArtifactLLVM(artifact) +
+		stage2SourceGlobals() +
+		stage2RuntimeDeclsLLVM() +
+		stage2EntryLLVM() +
+		stage2OpenSources() +
+		stage2CheckSources() +
+		stage2WriteGateLLVM() +
+		stage2WriteFallbackLLVM(artifact)
+}
+
+// minimalStageArtifactLLVM returns the terminal link-smoke artifact.
+func minimalStageArtifactLLVM() string {
+	return "define i32 @main() { entry: ret i32 0 }"
 }
 
 // stage2RuntimeDeclsLLVM renders libc declarations used by stage2.
@@ -863,9 +881,8 @@ func stage2WriteGateLLVM() string {
 	return "br i1 %scanned, label %write, label %done "
 }
 
-// stage2WriteFallbackLLVM writes the fallback artifact when no comparison output is requested.
-func stage2WriteFallbackLLVM() string {
-	artifact := "define i32 @main() { entry: ret i32 0 }"
+// stage2WriteFallbackLLVM writes the fallback artifact when source scanning succeeds.
+func stage2WriteFallbackLLVM(artifact string) string {
 	parsePrefix := "; kizu stage2 source metric "
 	bytesPrefix := "; kizu stage2 source bytes "
 	fnPrefix := "; kizu stage2 source fn count "
