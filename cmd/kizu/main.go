@@ -558,6 +558,9 @@ func sourceStdModules(path string) ([]string, error) {
 	if strings.Contains(text, "std::path::") {
 		modules = append(modules, "path")
 	}
+	if strings.Contains(text, "std::testing::") {
+		modules = append(modules, "testing")
+	}
 	return modules, nil
 }
 

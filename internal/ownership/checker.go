@@ -1012,15 +1012,15 @@ func (c *Checker) checkTestingBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.testing.expect":
+	case "std.builtin.testing_expect":
 		return c.checkTestingArgs(name, args, env, "bool")
-	case "std.testing.expect_equal_i64":
+	case "std.builtin.testing_expect_equal_i64":
 		return c.checkTestingArgs(name, args, env, "i64", "i64")
-	case "std.testing.expect_equal_bool":
+	case "std.builtin.testing_expect_equal_bool":
 		return c.checkTestingArgs(name, args, env, "bool", "bool")
-	case "std.testing.expect_equal_bytes":
+	case "std.builtin.testing_expect_equal_bytes":
 		return c.checkTestingArgs(name, args, env, "[]const u8", "[]const u8")
-	case "std.testing.fail":
+	case "std.builtin.testing_fail":
 		return c.checkTestingArgs(name, args, env, "[]const u8")
 	default:
 		return "", false, nil

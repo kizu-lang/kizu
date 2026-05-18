@@ -1654,15 +1654,15 @@ func (c *Checker) checkTestingBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.testing.expect":
+	case "std.builtin.testing_expect":
 		return c.checkTestingArgs(name, args, env, unsafe, typeBool)
-	case "std.testing.expect_equal_i64":
+	case "std.builtin.testing_expect_equal_i64":
 		return c.checkTestingArgs(name, args, env, unsafe, typeI64, typeI64)
-	case "std.testing.expect_equal_bool":
+	case "std.builtin.testing_expect_equal_bool":
 		return c.checkTestingArgs(name, args, env, unsafe, typeBool, typeBool)
-	case "std.testing.expect_equal_bytes":
+	case "std.builtin.testing_expect_equal_bytes":
 		return c.checkTestingArgs(name, args, env, unsafe, typeByteString, typeByteString)
-	case "std.testing.fail":
+	case "std.builtin.testing_fail":
 		return c.checkTestingArgs(name, args, env, unsafe, typeByteString)
 	default:
 		return "", false, nil

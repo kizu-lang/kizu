@@ -942,19 +942,19 @@ func (i *Interpreter) evalTestingBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.testing.expect":
+	case "std.builtin.testing_expect":
 		value, err := i.evalTestingOne(name, args, env, kindBool)
 		if err != nil || value.b {
 			return voidValue(), true, err
 		}
 		return errorUnionValue("expected condition to be true"), true, nil
-	case "std.testing.expect_equal_i64":
+	case "std.builtin.testing_expect_equal_i64":
 		return i.evalTestingEqual(name, args, env, kindInt)
-	case "std.testing.expect_equal_bool":
+	case "std.builtin.testing_expect_equal_bool":
 		return i.evalTestingEqual(name, args, env, kindBool)
-	case "std.testing.expect_equal_bytes":
+	case "std.builtin.testing_expect_equal_bytes":
 		return i.evalTestingEqual(name, args, env, kindString)
-	case "std.testing.fail":
+	case "std.builtin.testing_fail":
 		value, err := i.evalTestingOne(name, args, env, kindString)
 		if err != nil {
 			return voidValue(), true, err
