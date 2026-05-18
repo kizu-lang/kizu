@@ -913,7 +913,11 @@ func (c *Checker) checkUserCall(
 	}
 	defer releaseBorrows(borrowed)
 	for idx, arg := range args {
-		if fn.params[idx].comptime {
+		if fn.params[idx].typeName == "Function" && fn.params[idx].comptime {
+			if err := c.checkFunctionNameParam(name, fn, idx, arg); err != nil {
+				return "", err
+			}
+		} else if fn.params[idx].comptime {
 			_, err = c.readExpr(arg, env)
 		} else if fn.params[idx].borrow {
 			_, err = c.readExpr(arg, env)
@@ -925,6 +929,34 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	return returnTypeName(fn), nil
+}
+
+// checkFunctionNameParam validates a comptime Function argument without moving locals.
+func (c *Checker) checkFunctionNameParam(
+	name string,
+	fn *functionInfo,
+	idx int,
+	arg ast.Expression,
+) error {
+	target, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return fmt.Errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
+	}
+	targetFn := c.functions[target.Name]
+	if targetFn == nil {
+		return fmt.Errorf("move error: undefined function `%s`", target.Name)
+	}
+	if !strings.HasPrefix(name, "std.task.") {
+		return nil
+	}
+	paramName := ""
+	if fn.decl != nil && idx < len(fn.decl.Params) {
+		paramName = fn.decl.Params[idx].Name
+	}
+	if paramName == "worker" {
+		return nil
+	}
+	return nil
 }
 
 // checkFieldCallExpr validates calls whose callee is a dotted expression.
@@ -1303,7 +1335,7 @@ func (c *Checker) checkTaskBuiltin(
 		return c.checkPartitionMut(args, env)
 	case "std.builtin.task_local_buffer":
 		return c.checkLocalBuffer(args, env)
-	case "std.task.parallel_for":
+	case "std.builtin.task_parallel_for":
 		return c.checkParallelFor(args, env)
 	case "std.task.parallel_map":
 		return c.checkParallelMap(args, env)
@@ -3141,13 +3173,16 @@ func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, b
 			return "", true, err
 		}
 	}
-	target, ok := args[3].(*ast.IdentExpr)
+	target, forwarded, ok := c.resolveFunctionNameArg(args[3], env)
 	if !ok {
 		return "", true, fmt.Errorf("parallel error: `std::task::parallel_for` expects function name")
 	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target.Name)
+	fn := c.functions[target]
+	if fn == nil && !forwarded {
+		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target)
+	}
+	if forwarded {
+		return "!void", true, nil
 	}
 	return returnTypeName(fn), true, nil
 }
@@ -3162,15 +3197,35 @@ func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, b
 			return "", true, err
 		}
 	}
-	target, ok := args[4].(*ast.IdentExpr)
+	target, forwarded, ok := c.resolveFunctionNameArg(args[4], env)
 	if !ok {
 		return "", true, fmt.Errorf("parallel error: `std::task::parallel_map` expects function name")
 	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target.Name)
+	fn := c.functions[target]
+	if fn == nil && !forwarded {
+		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target)
+	}
+	if forwarded {
+		return "", true, fmt.Errorf(
+			"parallel error: `std::task::parallel_map` cannot forward Function yet",
+		)
 	}
 	return returnTypeName(fn), true, nil
+}
+
+// resolveFunctionNameArg accepts direct functions or comptime Function parameters.
+func (c *Checker) resolveFunctionNameArg(arg ast.Expression, env *scope) (string, bool, bool) {
+	target, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return "", false, false
+	}
+	if value, ok := env.lookup(target.Name); ok && value.typeName == "Function" {
+		return target.Name, true, true
+	}
+	if c.functions[target.Name] != nil {
+		return target.Name, false, true
+	}
+	return target.Name, false, true
 }
 
 // checkThreadScoped validates explicit thread boundary ownership effects.

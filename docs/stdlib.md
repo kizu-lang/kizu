@@ -99,7 +99,7 @@ Current builtin thinning candidates:
 | `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
-| `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer` | Host primitive | Public constructors live in `std/src/task.kizu`; direct user calls are rejected |
+| `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for` | Host primitive | Public constructors and `parallel_for` live in `std/src/task.kizu`; direct user calls are rejected |
 
 `std::testing` now performs assertion checks and message construction in
 `std/src/testing.kizu`. Equality diagnostics are built with `std::fmt` into an
@@ -115,11 +115,13 @@ ordinary stdlib logic. Splitting their ergonomic public wrappers into Kizu
 source is tracked by #360 and must not leave dual public paths behind. The
 task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
 Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
-and `parallel_map` remain public Go branches until Kizu can pass function names
-through wrapper functions without losing the original task body identity; that
-blocker is tracked by #372. Generic constructor wrappers for Array, Map,
-Channel, Mutex, and Atomic require source-level type-argument forwarding before
-they can move without builtin camouflage; that blocker is tracked by #371.
+uses a `comptime Function` parameter to forward the worker name through
+`std/src/task.kizu`. `parallel_map` remains a public Go branch until Kizu can
+forward both function names and mutable partition access without moving the
+partition value; that blocker is tracked by #372. Generic constructor wrappers
+for Array, Map, Channel, Mutex, and Atomic require source-level type-argument
+forwarding before they can move without builtin camouflage; that blocker is
+tracked by #371.
 
 ## Builtin Registry
 
@@ -135,7 +137,7 @@ they can move without builtin camouflage; that blocker is tracked by #371.
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
-| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; finish `parallel_for` / `parallel_map` wrapper split after function-name parameters are representable |
+| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors and `parallel_for`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; finish `parallel_map` wrapper split after mutable partition forwarding is representable |
 | `std::channel` | `Channel<T>`, `send`, `recv` | owned message queue and boundary checks | keep queue primitive; wrapper split tracked by #360 |
 | `std::thread` | `scoped` | host thread boundary and join semantics | trusted primitive; wrapper split tracked by #360 |
 | `std::sync` | `Mutex<T>` | shared mutable state primitive and copy-value restrictions | trusted primitive; wrapper split tracked by #360 |

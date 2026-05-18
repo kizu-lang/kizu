@@ -1226,6 +1226,12 @@ comptime if 1 + 1 == 2 {
 v0.1 の `comptime` expression は、整数、真偽値、文字列、単項演算、二項演算だけを評価します。
 runtime local value は `comptime` expression から参照できません。
 
+`comptime Function` parameter is a restricted function-name token for std
+wrappers that must forward a named function to a trusted primitive. It is not a
+closure, cannot capture locals, and cannot be stored in runtime data. A
+`Function` parameter must be marked `comptime`, and the argument must be a
+top-level function name.
+
 `comptime if` は、コンパイル時に選ばれた branch だけを検査し、lowering します。
 これは token stream や AST を書き換える macro ではありません。
 
