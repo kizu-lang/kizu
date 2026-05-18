@@ -1220,6 +1220,10 @@ argument is forwarded to an explicit trusted primitive:
 pub fn Channel<T>() -> Channel<T> {
     return std::builtin::channel<T>();
 }
+
+pub fn Atomic<T>(value: T) -> Atomic<T> {
+    return std::builtin::atomic<T>(value);
+}
 ```
 
 This is not a general monomorphization system. v0.2 uses it only to move public

@@ -1607,7 +1607,10 @@ func (c *Checker) checkTypeApplyCallExpr(
 			return "", err
 		}
 		return fmt.Sprintf("Channel<%s>", expr.TypeArg), nil
-	case "std.atomic.Atomic":
+	case "std.builtin.atomic":
+		if !c.currentStd {
+			return "", fmt.Errorf("move error: `%s` is reserved; use std::atomic", name)
+		}
 		typ, _, err := c.checkAtomic(expr.TypeArg, args, env)
 		return typ, err
 	case "std.sync.Mutex":
@@ -1636,6 +1639,9 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
+	if err := c.checkGenericWrapperTypeArg(name, typeArg); err != nil {
+		return "", true, err
+	}
 	subst := map[string]string{fn.decl.TypeParams[0]: typeArg}
 	for idx, arg := range args {
 		if err := c.checkGenericUserArg(name, fn, subst, idx, arg, env); err != nil {
@@ -1643,6 +1649,17 @@ func (c *Checker) checkGenericUserTypeApply(
 		}
 	}
 	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
+}
+
+// checkGenericWrapperTypeArg validates std wrapper-specific ownership contracts.
+func (c *Checker) checkGenericWrapperTypeArg(name string, typeArg string) error {
+	switch name {
+	case "std.atomic.Atomic":
+		if !isAtomicSupportedType(typeArg) {
+			return fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArg)
+		}
+	}
+	return nil
 }
 
 // checkGenericUserArg validates an instantiated generic wrapper argument.
@@ -3339,7 +3356,7 @@ func (c *Checker) checkAtomic(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	if !isAtomicSupportedType(elem) {
+	if elem != "T" && !isAtomicSupportedType(elem) {
 		return "", true, fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", elem)
 	}
 	if len(args) != 1 {

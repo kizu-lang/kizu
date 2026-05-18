@@ -1648,6 +1648,8 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	switch name {
 	case "std.builtin.channel":
 		return callChannelFromExprs(i.resolveTypeArg(expr.TypeArg), args), nil
+	case "std.builtin.atomic":
+		return i.evalAtomic(i.resolveTypeArg(expr.TypeArg), args, env)
 	case "std.array.Array":
 		return i.evalArrayConstructor(expr.TypeArg, args, env)
 	case "std.map.Map":
@@ -1658,7 +1660,10 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 		}
 		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	case "std.atomic.Atomic":
-		return i.evalAtomic(expr.TypeArg, args, env)
+		if fn := i.functions[name]; fn != nil && len(fn.TypeParams) == 1 {
+			return i.callTypeApplyFunction(fn, expr.TypeArg, args, env)
+		}
+		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	case "std.sync.Mutex":
 		return i.evalMutex(expr.TypeArg, args, env)
 	default:
