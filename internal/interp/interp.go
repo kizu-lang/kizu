@@ -190,6 +190,16 @@ func (i *Interpreter) callFunctionExpr(
 
 // evalCallArg evaluates owned arguments or creates a local borrow reference.
 func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env) (Value, error) {
+	if param.Comptime && param.TypeName == "Function" {
+		target, ok := arg.(*ast.IdentExpr)
+		if !ok {
+			return voidValue(), fmt.Errorf("runtime error: Function argument must be a function name")
+		}
+		if _, ok := i.functions[target.Name]; !ok {
+			return voidValue(), fmt.Errorf("runtime error: undefined function `%s`", target.Name)
+		}
+		return functionNameValue(target.Name), nil
+	}
 	if !param.Borrow {
 		return i.evalExpr(arg, env)
 	}
@@ -1297,7 +1307,7 @@ func (i *Interpreter) evalTaskBuiltin(
 	case "std.builtin.task_local_buffer":
 		value, err := i.evalLocalBuffer(args, env)
 		return value, true, err
-	case "std.task.parallel_for":
+	case "std.builtin.task_parallel_for":
 		value, err := i.evalParallelFor(args, env)
 		return value, true, err
 	case "std.task.parallel_map":
@@ -1966,12 +1976,15 @@ func (i *Interpreter) evalParallelFor(args []ast.Expression, env *Env) (Value, e
 	if err != nil {
 		return voidValue(), err
 	}
-	target, ok := args[3].(*ast.IdentExpr)
+	worker, ok, err := i.evalFunctionNameArg(args[3], env)
+	if err != nil {
+		return voidValue(), err
+	}
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: parallel_for expects function name")
 	}
 	for idx := start; idx < end; idx++ {
-		value, err := i.callFunction(target.Name, []Value{intValue(idx)})
+		value, err := i.callFunction(worker, []Value{intValue(idx)})
 		if err != nil {
 			return voidValue(), err
 		}
@@ -2001,11 +2014,33 @@ func (i *Interpreter) evalParallelMap(args []ast.Expression, env *Env) (Value, e
 	if err != nil {
 		return voidValue(), err
 	}
-	target, ok := args[4].(*ast.IdentExpr)
+	worker, ok, err := i.evalFunctionNameArg(args[4], env)
+	if err != nil {
+		return voidValue(), err
+	}
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: parallel_map expects function name")
 	}
-	return i.fillPartition(partition.partition, start, end, target.Name)
+	return i.fillPartition(partition.partition, start, end, worker)
+}
+
+// evalFunctionNameArg resolves direct function names and forwarded Function parameters.
+func (i *Interpreter) evalFunctionNameArg(arg ast.Expression, env *Env) (string, bool, error) {
+	target, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return "", false, nil
+	}
+	value, err := i.evalExpr(arg, env)
+	if err == nil && value.kind == kindFunctionName {
+		return value.s, true, nil
+	}
+	if _, ok := i.functions[target.Name]; ok {
+		return target.Name, true, nil
+	}
+	if err != nil {
+		return "", true, err
+	}
+	return "", false, nil
 }
 
 // fillPartition runs the worker over a bounds-checked slot range.

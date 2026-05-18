@@ -12,6 +12,7 @@ type Type string
 
 const (
 	typeBool       Type = "bool"
+	typeFunction   Type = "Function"
 	typeI64        Type = "i64"
 	typeU8         Type = "u8"
 	typeByteString Type = "[]const u8"
@@ -35,6 +36,7 @@ var knownTypes = map[Type]bool{
 	"isize":               true,
 	"f32":                 true,
 	"f64":                 true,
+	typeFunction:          true,
 	"Io":                  true,
 	"Allocator":           true,
 	"std::fs::Metadata":   true,
@@ -497,8 +499,13 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 	}
 	c.structs[decl.Name] = decl
 	for _, field := range decl.Fields {
-		if _, err := c.parseType(field.TypeName); err != nil {
+		typ, err := c.parseType(field.TypeName)
+		if err != nil {
 			return err
+		}
+		if typ == typeFunction {
+			return fmt.Errorf("type error: struct field `%s.%s` cannot store Function",
+				decl.Name, field.Name)
 		}
 	}
 	return nil
@@ -518,6 +525,9 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		if paramType == typeVoid {
 			return nil, fmt.Errorf("type error: parameter `%s` cannot have type void", param.Name)
 		}
+		if err := checkFunctionParamPolicy(fn, param, paramType); err != nil {
+			return nil, err
+		}
 		if _, ok := dynContract(paramType); ok && !param.Borrow {
 			return nil, fmt.Errorf("type error: Dyn parameter `%s` must be borrowed", param.Name)
 		}
@@ -534,11 +544,31 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 			return nil, err
 		}
 	}
+	if ret == typeFunction {
+		return nil, fmt.Errorf("type error: function `%s` cannot return Function", fn.Name)
+	}
 	return &functionType{
 		name: fn.Name, params: params, borrowParams: borrowParams,
 		mutBorrowParams: mutBorrowParams, comptimeParams: comptimeParams,
 		returnType: ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
+}
+
+// checkFunctionParamPolicy keeps Function as a std-only compile-time token.
+func checkFunctionParamPolicy(fn *ast.FunctionDecl, param ast.Param, typ Type) error {
+	if typ != typeFunction {
+		return nil
+	}
+	if !fn.Std {
+		return fmt.Errorf("type error: Function parameter `%s` is reserved for std", param.Name)
+	}
+	if !param.Comptime {
+		return fmt.Errorf("type error: Function parameter `%s` must be comptime", param.Name)
+	}
+	if param.Borrow || param.MutBorrow {
+		return fmt.Errorf("type error: Function parameter `%s` cannot be borrowed", param.Name)
+	}
+	return nil
 }
 
 // parseType validates a source-level type name.
@@ -2018,7 +2048,7 @@ func (c *Checker) checkTaskBuiltin(
 		return c.checkPartitionMut(args, env, unsafe)
 	case "std.builtin.task_local_buffer":
 		return c.checkLocalBuffer(args, env, unsafe)
-	case "std.task.parallel_for":
+	case "std.builtin.task_parallel_for":
 		return c.checkParallelFor(args, env, unsafe)
 	case "std.task.parallel_map":
 		return c.checkParallelMap(args, env, unsafe)
@@ -2352,31 +2382,92 @@ func (c *Checker) checkUserCall(
 		return "", userCallArityError(name, fn, len(args))
 	}
 	for idx, arg := range args {
-		if fn.mutBorrowParams[idx] {
-			if err := requireMutableBorrowArg(arg, env); err != nil {
-				return "", err
-			}
-		}
-		got, err := c.checkExpr(arg, env, unsafe)
-		if err != nil {
+		if err := c.checkUserCallArg(name, fn, idx, arg, env, unsafe); err != nil {
 			return "", err
-		}
-		if fn.comptimeParams[idx] {
-			if _, err := evalComptime(arg); err != nil {
-				return "", err
-			}
-		}
-		if contractName, ok := dynContract(fn.params[idx]); ok {
-			if !c.satisfies(contractName, got) {
-				return "", fmt.Errorf("type error: %s does not satisfy `%s`", got, contractName)
-			}
-			continue
-		}
-		if got != fn.params[idx] {
-			return "", userCallArgError(name, fn, idx, got)
 		}
 	}
 	return fn.returnType, nil
+}
+
+// checkUserCallArg validates one declared function argument.
+func (c *Checker) checkUserCallArg(
+	name string,
+	fn *functionType,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	if fn.mutBorrowParams[idx] {
+		if err := requireMutableBorrowArg(arg, env); err != nil {
+			return err
+		}
+	}
+	if fn.params[idx] == typeFunction && fn.comptimeParams[idx] {
+		return c.checkFunctionNameParam(name, fn, idx, arg)
+	}
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if fn.comptimeParams[idx] {
+		if _, err := evalComptime(arg); err != nil {
+			return err
+		}
+	}
+	if contractName, ok := dynContract(fn.params[idx]); ok {
+		if !c.satisfies(contractName, got) {
+			return fmt.Errorf("type error: %s does not satisfy `%s`", got, contractName)
+		}
+		return nil
+	}
+	if got != fn.params[idx] {
+		return userCallArgError(name, fn, idx, got)
+	}
+	return nil
+}
+
+// checkFunctionNameParam validates a comptime Function argument without creating closures.
+func (c *Checker) checkFunctionNameParam(
+	name string,
+	fn *functionType,
+	idx int,
+	arg ast.Expression,
+) error {
+	target, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return fmt.Errorf("type error: `%s` expects function name", diagnosticName(name))
+	}
+	targetFn := c.functions[target.Name]
+	if targetFn == nil {
+		return fmt.Errorf("type error: undefined function `%s`", target.Name)
+	}
+	return c.checkStdFunctionNameParam(name, fn, idx, target.Name, targetFn)
+}
+
+// checkStdFunctionNameParam preserves worker contracts for std wrapper functions.
+func (c *Checker) checkStdFunctionNameParam(
+	name string,
+	fn *functionType,
+	idx int,
+	target string,
+	targetFn *functionType,
+) error {
+	paramName := ""
+	if fn.decl != nil && idx < len(fn.decl.Params) {
+		paramName = fn.decl.Params[idx].Name
+	}
+	switch {
+	case name == "std.task.parallel_for" && paramName == "worker":
+		if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
+			return fmt.Errorf("type error: parallel worker `%s` must accept i64", target)
+		}
+		_, err := c.parallelReturnType(targetFn)
+		return err
+	case name == "std.task.parallel_map" && paramName == "worker":
+		return fmt.Errorf("type error: `std::task::parallel_map` cannot forward Function yet")
+	}
+	return nil
 }
 
 // userCallArityError reports declared function arity using source signatures when useful.
@@ -3573,18 +3664,20 @@ func (c *Checker) checkParallelFor(
 	if err := c.checkIoAndRange(args, env, unsafe, "std::task::parallel_for"); err != nil {
 		return "", true, err
 	}
-	target, ok := args[3].(*ast.IdentExpr)
+	target, targetFn, forwarded, ok := c.resolveFunctionNameArg(args[3], env)
 	if !ok {
 		return "", true, fmt.Errorf("type error: `std::task::parallel_for` expects function name")
 	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		return "", true, fmt.Errorf("type error: undefined function `%s`", target.Name)
+	if targetFn == nil && !forwarded {
+		return "", true, fmt.Errorf("type error: undefined function `%s`", target)
 	}
-	if len(fn.params) != 1 || fn.params[0] != typeI64 {
-		return "", true, fmt.Errorf("type error: parallel worker `%s` must accept i64", target.Name)
+	if forwarded {
+		return "!void", true, nil
 	}
-	typ, err := c.parallelReturnType(fn)
+	if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
+		return "", true, fmt.Errorf("type error: parallel worker `%s` must accept i64", target)
+	}
+	typ, err := c.parallelReturnType(targetFn)
 	return typ, true, err
 }
 
@@ -3600,21 +3693,41 @@ func (c *Checker) checkParallelMap(
 	if err := c.checkIoAndPartitionRange(args, env, unsafe); err != nil {
 		return "", true, err
 	}
-	target, ok := args[4].(*ast.IdentExpr)
+	target, targetFn, forwarded, ok := c.resolveFunctionNameArg(args[4], env)
 	if !ok {
 		return "", true, fmt.Errorf("type error: `std::task::parallel_map` expects function name")
 	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		return "", true, fmt.Errorf("type error: undefined function `%s`", target.Name)
+	if targetFn == nil && !forwarded {
+		return "", true, fmt.Errorf("type error: undefined function `%s`", target)
 	}
-	if len(fn.params) != 1 || fn.params[0] != typeI64 {
-		return "", true, fmt.Errorf("type error: parallel map worker `%s` must accept i64", target.Name)
+	if forwarded {
+		return "", true, fmt.Errorf("type error: `std::task::parallel_map` cannot forward Function yet")
 	}
-	if fn.returnType != typeI64 {
-		return "", true, fmt.Errorf("type error: parallel map worker `%s` must return i64", target.Name)
+	if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
+		return "", true, fmt.Errorf("type error: parallel map worker `%s` must accept i64", target)
+	}
+	if targetFn.returnType != typeI64 {
+		return "", true, fmt.Errorf("type error: parallel map worker `%s` must return i64", target)
 	}
 	return typeVoid, true, nil
+}
+
+// resolveFunctionNameArg accepts direct functions or comptime Function parameters.
+func (c *Checker) resolveFunctionNameArg(
+	arg ast.Expression,
+	env *scope,
+) (string, *functionType, bool, bool) {
+	target, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return "", nil, false, false
+	}
+	if typ, ok := env.lookup(target.Name); ok && typ == typeFunction {
+		return target.Name, nil, true, true
+	}
+	if fn := c.functions[target.Name]; fn != nil {
+		return target.Name, fn, false, true
+	}
+	return target.Name, nil, false, true
 }
 
 // checkThreadScoped validates explicit low-level scoped thread boundaries.

@@ -163,6 +163,8 @@ go test ./...
 | bare `Io()` constructor is rejected | `negative/io_builtin_constructor.kizu` | `std::io::blocking` |
 | evented Io is not implemented in v0.1 | `negative/io_evented_unimplemented.kizu` | `not implemented` |
 | task host primitives are reserved | `negative/std_task_builtin_direct_call.kizu` | `reserved; use std::task` |
+| parallel task host primitives are reserved | `negative/std_task_parallel_for_builtin_direct_call.kizu` | `reserved; use std::task` |
+| `Function` parameters are std-only | `negative/function_parameter_runtime.kizu` | `reserved for std` |
 | task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |
 | old spawn Io argument is rejected | `negative/task_spawn_old_io_arg.kizu` | `function name` |
 | file read requires Io | `negative/fs_read_without_io.kizu` | `expects Io` |

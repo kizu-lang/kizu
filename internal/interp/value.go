@@ -29,6 +29,7 @@ const (
 	kindArray
 	kindMap
 	kindRef
+	kindFunctionName
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
@@ -406,4 +407,9 @@ func mutexValue(typeName string, value Value) Value {
 // refValue returns a local borrow reference to a runtime binding.
 func refValue(binding *binding) Value {
 	return Value{kind: kindRef, ref: binding}
+}
+
+// functionNameValue carries a checked compile-time function reference through std wrappers.
+func functionNameValue(name string) Value {
+	return Value{kind: kindFunctionName, s: name}
 }
