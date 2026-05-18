@@ -427,6 +427,9 @@ func assertStage2CanWriteWithoutInputCopy(
 	if strings.Contains(string(data), "; kizu selfhost source metric ") {
 		t.Fatalf("source-only stage2 artifact unexpectedly copied stage2 input:\n%s", data)
 	}
+	if !strings.Contains(string(data), "; kizu stage2 source bytes ") {
+		t.Fatalf("source-only stage2 artifact does not include source byte total:\n%s", data)
+	}
 	link := exec.Command("clang", sourceOut, "-o", sourceBin)
 	out, err = link.CombinedOutput()
 	if err != nil {

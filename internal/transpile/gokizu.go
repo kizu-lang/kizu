@@ -807,8 +807,14 @@ func stage2WriterLLVMChunks() []string {
 // stage2ArtifactLLVM renders the fallback stage artifact constant.
 func stage2ArtifactLLVM() string {
 	artifact := "define i32 @main() { entry: ret i32 0 }"
+	prefix := "; kizu stage2 source bytes "
+	newline := "\n"
 	return "@artifact = private constant [" + fmt.Sprint(len(artifact)+1) +
 		" x i8] [" + byteArray(artifact) + "] " +
+		"@metric = private constant [" + fmt.Sprint(len(prefix)+1) +
+		" x i8] [" + byteArray(prefix) + "] " +
+		"@newline = private constant [" + fmt.Sprint(len(newline)+1) +
+		" x i8] [" + byteArray(newline) + "] " +
 		"@mode = private constant [2 x i8] [i8 119, i8 0] "
 }
 
@@ -835,10 +841,31 @@ func stage2CopyGateLLVM() string {
 // stage2WriteFallbackLLVM writes the fallback artifact when no comparison output is requested.
 func stage2WriteFallbackLLVM() string {
 	artifact := "define i32 @main() { entry: ret i32 0 }"
+	prefix := "; kizu stage2 source bytes "
+	newline := "\n"
 	return "write: " +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
 		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
 		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
+		"%metric = getelementptr [" + fmt.Sprint(len(prefix)+1) +
+		" x i8], ptr @metric, i64 0, i64 0 " +
+		"call i32 @fputs(ptr %metric, ptr %file) " +
+		"br label %digits.init " +
+		"digits.init: br label %digits.scale " +
+		"digits.scale: %div = phi i32 [1, %digits.init], [%div.next, %digits.grow] " +
+		"%div.next = mul i32 %div, 10 %more = icmp sle i32 %div.next, %total7 " +
+		"br i1 %more, label %digits.grow, label %digits.emit " +
+		"digits.grow: br label %digits.scale " +
+		"digits.emit: %emit.div = phi i32 [%div, %digits.scale], [%emit.next, %digit.byte] " +
+		"%rem = phi i32 [%total7, %digits.scale], [%next.rem, %digit.byte] " +
+		"%done.digits = icmp sle i32 %emit.div, 0 " +
+		"br i1 %done.digits, label %digits.done, label %digit.byte " +
+		"digit.byte: %digit = sdiv i32 %rem, %emit.div " +
+		"%ascii = add i32 %digit, 48 call i32 @fputc(i32 %ascii, ptr %file) " +
+		"%used = mul i32 %digit, %emit.div %next.rem = sub i32 %rem, %used " +
+		"%emit.next = sdiv i32 %emit.div, 10 br label %digits.emit " +
+		"digits.done: %newline = getelementptr [" + fmt.Sprint(len(newline)+1) +
+		" x i8], ptr @newline, i64 0, i64 0 call i32 @fputs(ptr %newline, ptr %file) " +
 		"%text = getelementptr [" + fmt.Sprint(len(artifact)+1) +
 		" x i8], ptr @artifact, i64 0, i64 0 " +
 		"call i32 @fputs(ptr %text, ptr %file) call i32 @fclose(ptr %file) " +
