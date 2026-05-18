@@ -542,6 +542,29 @@ let level = if age >= 20 {
 両 branch の value type は一致しなければなりません。
 branch 内で move された値は、`if` expression の外側でも moved として扱います。
 
+### 6.9.1 bool 演算
+
+Kizu は boolean logic に `&&` と `||` を使います。
+両辺は `bool` でなければなりません。
+`&&` と `||` は短絡評価します。
+
+優先順位は低い順に次の通りです。
+
+```text
+||
+&&
+== !=
+< <= > >=
+```
+
+例:
+
+```kizu
+if age >= 20 && age < 130 || admin {
+    print("ok");
+}
+```
+
 ### 6.10 while
 
 ```kizu
