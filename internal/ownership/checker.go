@@ -728,7 +728,7 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	value, ok := env.lookup(ident.Name)
 	if !ok {
 		if ident.Name == "void" {
-			return "void", nil
+			return "", fmt.Errorf("move error: void is not a value")
 		}
 		return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
 	}
@@ -3383,7 +3383,7 @@ func readIdent(name string, env *scope) (string, error) {
 		return value.typeName, nil
 	}
 	if name == "void" {
-		return "void", nil
+		return "", fmt.Errorf("move error: void is not a value")
 	}
 	return "", fmt.Errorf("move error: undefined variable `%s`", name)
 }

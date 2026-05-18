@@ -737,7 +737,7 @@ func evalIdent(name string, env *Env) (Value, error) {
 		return value, nil
 	}
 	if name == "void" {
-		return voidValue(), nil
+		return voidValue(), fmt.Errorf("runtime error: void is not a value")
 	}
 	return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", name)
 }

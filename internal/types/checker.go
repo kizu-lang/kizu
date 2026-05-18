@@ -1133,10 +1133,13 @@ func (c *Checker) checkReturnStmt(
 	unsafe bool,
 ) (bool, error) {
 	if stmt.Value == nil {
-		if want != typeVoid {
-			return false, fmt.Errorf("type error: return expects %s, got void", want)
+		if acceptsBareReturn(want) {
+			return true, nil
 		}
-		return true, nil
+		return false, fmt.Errorf("type error: return expects %s, got void", want)
+	}
+	if ident, ok := stmt.Value.(*ast.IdentExpr); ok && ident.Name == "void" {
+		return false, fmt.Errorf("type error: void is not a value; use `return;`")
 	}
 	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
@@ -1154,6 +1157,20 @@ func (c *Checker) checkReturnStmt(
 		return false, fmt.Errorf("type error: return expects %s, got %s", want, got)
 	}
 	return true, nil
+}
+
+// acceptsBareReturn reports whether return without a value satisfies a result type.
+func acceptsBareReturn(want Type) bool {
+	if want == typeVoid {
+		return true
+	}
+	if elem, ok := errorUnionElement(want); ok && elem == string(typeVoid) {
+		return true
+	}
+	if _, elem, ok := errorUnionParts(want); ok && elem == string(typeVoid) {
+		return true
+	}
+	return false
 }
 
 // checkIfStmt validates a branch and tracks whether both arms return.
@@ -1532,7 +1549,7 @@ func checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) {
 		return typ, nil
 	}
 	if expr.Name == "void" {
-		return typeVoid, nil
+		return "", fmt.Errorf("type error: void is not a value")
 	}
 	return "", fmt.Errorf("type error: undefined variable `%s`", expr.Name)
 }

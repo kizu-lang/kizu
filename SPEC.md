@@ -343,6 +343,7 @@ fn bad_add(a: i64, b: i64) -> i64 {
 
 `void` 関数では `return` を省略できます。
 早期 return が必要な場合は `return` を書きます。
+`void` は値ではないため、`return void;` は使いません。
 
 ```kizu
 fn log(message: []const u8) -> void {
@@ -389,8 +390,8 @@ import app::lexer;
 import app::parser::ast;
 
 pub fn main() -> void {
-    let tokens = try lexer::lex("fn main() -> void { return void; }");
-    return void;
+    let tokens = try lexer::lex("fn main() -> void { return; }");
+    return;
 }
 ```
 
@@ -1004,7 +1005,7 @@ fn read_port(ok: bool) -> ConfigError!i64 {
 fn main() -> ConfigError!void {
     let port = try read_port(true);
     print(port);
-    return void;
+    return;
 }
 ```
 
@@ -1022,6 +1023,7 @@ fn main() -> ConfigError!void {
 * `error(message)` は message bytes を error payload に copy して所有する
 * `error(message)` は borrow view を保持しないため、local `String.as_bytes()` view から
   diagnostic を作れる
+* `!void` の成功 return は `return;` と書く
 * exception / stack unwinding は使わない
 * `option<T>` は型名として予約するが、v0.1 では runtime helper を実装しない
 
@@ -1715,7 +1717,7 @@ impl File {
 ```kizu
 fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
     let n = writer.write(bytes);
-    return void;
+    return;
 }
 ```
 
