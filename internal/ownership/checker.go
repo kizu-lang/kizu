@@ -1035,7 +1035,7 @@ func (c *Checker) checkQualifiedStdRuntimeStateBuiltin(
 	return "", false, nil
 }
 
-// checkQualifiedStdBuiltin validates fs, path, and mem ownership effects.
+// checkQualifiedStdBuiltin validates fs and mem ownership effects.
 func (c *Checker) checkQualifiedStdBuiltin(
 	name string,
 	args []ast.Expression,
@@ -1047,7 +1047,7 @@ func (c *Checker) checkQualifiedStdBuiltin(
 	if typ, ok, err := c.checkFsBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
-	return c.checkPathBuiltin(name, args, env)
+	return "", false, nil
 }
 
 // checkTestingBuiltin reads assertion arguments without taking ownership.
@@ -1231,45 +1231,6 @@ func (c *Checker) checkFsBuiltin(
 	default:
 		return "", false, nil
 	}
-}
-
-// checkPathBuiltin reads pure std::path arguments without moving them.
-func (c *Checker) checkPathBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	switch name {
-	case "std.builtin.path_join":
-		return c.checkPathArgs(name, args, env, 2)
-	case "std.builtin.path_clean":
-		return c.checkPathArgs(name, args, env, 1)
-	default:
-		return "", false, nil
-	}
-}
-
-// checkPathArgs validates []const u8 path helper arguments.
-func (c *Checker) checkPathArgs(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	want int,
-) (string, bool, error) {
-	if len(args) != want {
-		return "", true, fmt.Errorf("move error: `%s` expects %d []const u8 args", name, want)
-	}
-	for idx, arg := range args {
-		got, err := c.readExpr(arg, env)
-		if err != nil {
-			return "", true, err
-		}
-		if got != "[]const u8" {
-			return "", true, fmt.Errorf("move error: `%s` arg %d expects []const u8, got %s",
-				name, idx+1, got)
-		}
-	}
-	return "[]const u8", true, nil
 }
 
 // checkIoWriteBuiltin validates explicit-Io stdio helpers.
@@ -1691,6 +1652,8 @@ func (c *Checker) checkStringStorageBuiltin(
 	case "std.builtin.string_append_byte":
 		return c.checkStringStorageArgs(name, args, env, "!void", "u8")
 	case "std.builtin.string_reserve":
+		return c.checkStringStorageArgs(name, args, env, "!void", "i64")
+	case "std.builtin.string_truncate":
 		return c.checkStringStorageArgs(name, args, env, "!void", "i64")
 	case "std.builtin.string_len", "std.builtin.string_capacity":
 		return c.checkStringStorageArgs(name, args, env, "i64")
@@ -2138,7 +2101,7 @@ func (c *Checker) checkStringMethod(
 	env *scope,
 ) (string, error) {
 	switch name {
-	case "append_bytes", "append_byte", "reserve":
+	case "append_bytes", "append_byte", "reserve", "truncate":
 		if err := checkStringMutationAllowed(str, name); err != nil {
 			return "", err
 		}
@@ -2202,7 +2165,7 @@ func checkStringNoArgs(name string, args []ast.Expression) error {
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "reserve", "clear", "deinit":
+	case "append_bytes", "append_byte", "reserve", "truncate", "clear", "deinit":
 		return true
 	default:
 		return false

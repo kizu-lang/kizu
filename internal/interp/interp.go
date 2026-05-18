@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/kizu-lang/kizu/internal/ast"
-	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
 // Interpreter executes a parsed Kizu program.
@@ -1013,9 +1012,6 @@ func (i *Interpreter) evalQualifiedCoreBuiltin(
 	if value, ok, err := i.evalFsBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
-	if value, ok, err := i.evalPathBuiltin(name, args, env); ok || err != nil {
-		return value, ok, err
-	}
 	if value, ok, err := i.evalMemBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
@@ -1350,23 +1346,6 @@ func (i *Interpreter) evalFsBuiltin(
 	}
 }
 
-// evalPathBuiltin evaluates pure std::path helpers.
-func (i *Interpreter) evalPathBuiltin(
-	name string,
-	args []ast.Expression,
-	env *Env,
-) (Value, bool, error) {
-	switch name {
-	case "std.builtin.path_join":
-		value, err := i.evalPathJoin(args, env)
-		return value, true, err
-	case "std.builtin.path_clean":
-		return i.evalPathUnary(name, args, env, stdprim.PathClean)
-	default:
-		return voidValue(), false, nil
-	}
-}
-
 // evalIoHelperBuiltin evaluates explicit-Io stdio helpers.
 func (i *Interpreter) evalIoHelperBuiltin(
 	name string,
@@ -1563,39 +1542,6 @@ func (i *Interpreter) evalFsRemove(args []ast.Expression, env *Env, name string)
 		return errorUnionValue(err.Error()), nil
 	}
 	return voidValue(), nil
-}
-
-// evalPathJoin joins two slash-separated path fragments.
-func (i *Interpreter) evalPathJoin(args []ast.Expression, env *Env) (Value, error) {
-	if len(args) != 2 {
-		return voidValue(), fmt.Errorf("runtime error: std::path::join expects 2 args")
-	}
-	left, err := i.evalPathArg(args[0], env, "std::path::join")
-	if err != nil {
-		return voidValue(), err
-	}
-	right, err := i.evalPathArg(args[1], env, "std::path::join")
-	if err != nil {
-		return voidValue(), err
-	}
-	return stringValue(stdprim.PathJoin(left, right)), nil
-}
-
-// evalPathUnary evaluates one-argument path helpers.
-func (i *Interpreter) evalPathUnary(
-	name string,
-	args []ast.Expression,
-	env *Env,
-	fn func(string) string,
-) (Value, bool, error) {
-	if len(args) != 1 {
-		return voidValue(), true, fmt.Errorf("runtime error: %s expects 1 arg", name)
-	}
-	value, err := i.evalPathArg(args[0], env, name)
-	if err != nil {
-		return voidValue(), true, err
-	}
-	return stringValue(fn(value)), true, nil
 }
 
 // evalPathArg evaluates one []const u8 path helper argument.
@@ -2552,6 +2498,9 @@ func (i *Interpreter) evalStringStorageBuiltin(
 	case "std.builtin.string_reserve":
 		value, err := i.evalStringReserve(str, args[1:], env)
 		return value, true, err
+	case "std.builtin.string_truncate":
+		value, err := i.evalStringTruncate(str, args[1:], env)
+		return value, true, err
 	case "std.builtin.string_len":
 		return intValue(int64(len(str.ownedStr.bytes))), true, requireNoArgs("String.len", args[1:])
 	case "std.builtin.string_capacity":
@@ -2629,6 +2578,26 @@ func (i *Interpreter) evalStringReserve(
 		return errorUnionValue("String.reserve expects non-negative i64"), nil
 	}
 	str.ownedStr.ensureCapacity(len(str.ownedStr.bytes) + int(value.i))
+	return voidValue(), nil
+}
+
+// evalStringTruncate shortens an owned String while preserving capacity.
+func (i *Interpreter) evalStringTruncate(
+	str Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: String.truncate expects 1 arg")
+	}
+	value, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if value.kind != kindInt || value.i < 0 || value.i > int64(len(str.ownedStr.bytes)) {
+		return errorUnionValue("String.truncate length out of bounds"), nil
+	}
+	str.ownedStr.bytes = str.ownedStr.bytes[:value.i]
 	return voidValue(), nil
 }
 

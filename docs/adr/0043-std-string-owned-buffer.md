@@ -20,6 +20,7 @@ std::string::String(allocator: Allocator) -> std::string::String
 string.append_bytes(bytes: []const u8) -> !void
 string.append_byte(byte: u8) -> !void
 string.reserve(additional: i64) -> !void
+string.truncate(length: i64) -> !void
 string.len() -> i64
 string.capacity() -> i64
 string.as_bytes() -> []const u8
@@ -30,7 +31,8 @@ string.deinit() -> void
 The constructor requires an explicit allocator capability. `append_bytes` copies
 from a read-only byte slice and does not move the source. `append_byte` appends
 one byte. `reserve` requests capacity for at least `additional` more bytes.
-Allocation failure is represented as `!void`.
+`truncate` shortens the buffer while preserving capacity and fails if `length`
+is outside `0..len`. Allocation failure is represented as `!void`.
 
 `std::string::String` is non-copy and move-only. Copying a `String` would require
 either hidden allocation or shared ownership, so safe Kizu treats it as an owned
@@ -44,16 +46,17 @@ let bytes = string.as_bytes();
 ```
 
 Direct use such as `print(string.as_bytes())` or `return string.as_bytes()` is
-rejected. While the local view is alive, `append_bytes`, `append_byte`, `clear`,
-and `deinit` are rejected. Last-use borrow release allows mutation after the
-view's final use.
+rejected. While the local view is alive, `append_bytes`, `append_byte`,
+`truncate`, `clear`, and `deinit` are rejected. Last-use borrow release allows
+mutation after the view's final use.
 
-`append_bytes`, `append_byte`, `reserve`, and `clear` may be called on an owned
-local `String` or through `&mut std::string::String`. `clear` sets length to
-zero while keeping capacity for reuse. `capacity` exposes current capacity for
-allocation planning. `deinit` requires an owned local receiver because a
-borrowed callee cannot invalidate the caller's binding. After `deinit`, the
-binding is treated as moved/deinitialized and cannot be used again.
+`append_bytes`, `append_byte`, `reserve`, `truncate`, and `clear` may be called
+on an owned local `String` or through `&mut std::string::String`. `clear` sets
+length to zero while keeping capacity for reuse. `capacity` exposes current
+capacity for allocation planning. `deinit` requires an owned local receiver
+because a borrowed callee cannot invalidate the caller's binding. After
+`deinit`, the binding is treated as moved/deinitialized and cannot be used
+again.
 
 `std::string::String` is bytes-first in v0.2. It does not validate UTF-8, expose
 raw pointers, or implicitly convert to a C ABI string.
@@ -78,6 +81,7 @@ implemented.
 - Safe byte views do not outlive or race with String mutation/deinit.
 - The self-host compiler can build simple diagnostics without hidden runtime
   allocation behavior.
-- `std::path::join`, `std::path::clean`, and testing diagnostics can be moved
-  from Go only after `reserve` and capacity-aware buffer behavior are
-  implemented and covered by conformance.
+- `std::path::join` and `std::path::clean` can be Kizu-owned by returning
+  `!std::string::String` from an explicit allocator-backed buffer.
+- testing diagnostics can move from Go after byte formatting helpers are
+  implemented on top of `String`.

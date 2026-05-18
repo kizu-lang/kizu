@@ -13,12 +13,17 @@ standard-library APIs.
 `std::path` is pure and does not touch the filesystem.
 
 ```text
-std::path::join(left: []const u8, right: []const u8) -> []const u8
-std::path::clean(path: []const u8) -> []const u8
+std::path::join(allocator: Allocator, left: []const u8, right: []const u8)
+  -> !std::string::String
+std::path::clean(allocator: Allocator, path: []const u8) -> !std::string::String
 std::path::basename(path: []const u8) -> []const u8
 std::path::dirname(path: []const u8) -> []const u8
 std::path::extension(path: []const u8) -> []const u8
 ```
+
+`join` and `clean` construct owned bytes, so allocation is explicit through the
+caller-provided allocator. Callers pass `result.as_bytes()` to APIs that need
+`[]const u8` and deinitialize the returned `String` after the final view use.
 
 `std::fs` always requires explicit `Io`.
 
