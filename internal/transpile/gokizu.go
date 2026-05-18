@@ -616,12 +616,15 @@ func stage2WriterLLVM() string {
 		"@mode = private constant [2 x i8] [i8 119, i8 0] " +
 		"@readmode = private constant [2 x i8] [i8 114, i8 0] " +
 		"declare ptr @fopen(ptr, ptr) declare i32 @fputs(ptr, ptr) " +
-		"declare i32 @fgetc(ptr) declare i32 @fclose(ptr) " +
+		"declare i32 @fgetc(ptr) declare i32 @fputc(i32, ptr) declare i32 @fclose(ptr) " +
 		"define i32 @main(i32 %argc, ptr %argv) { " +
-		"entry: %has = icmp sgt i32 %argc, 1 br i1 %has, label %write, label %done " +
-		"write: %readmode = getelementptr [2 x i8], ptr @readmode, i64 0, i64 0 " +
+		"entry: %has = icmp sgt i32 %argc, 1 br i1 %has, label %scan, label %done " +
+		"scan: %readmode = getelementptr [2 x i8], ptr @readmode, i64 0, i64 0 " +
 		stage2OpenSources() +
 		stage2CheckSources() +
+		"%copy = icmp sgt i32 %argc, 2 br i1 %copy, label %copy.in, label %write " +
+		stage2CopyInputLLVM() +
+		"write: " +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
 		"%mode = getelementptr [" + fmt.Sprint(2) + " x i8], ptr @mode, i64 0, i64 0 " +
 		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
@@ -629,6 +632,22 @@ func stage2WriterLLVM() string {
 		" x i8], ptr @artifact, i64 0, i64 0 " +
 		"call i32 @fputs(ptr %text, ptr %file) call i32 @fclose(ptr %file) " +
 		"br label %done done: ret i32 0 }"
+}
+
+// stage2CopyInputLLVM copies argv[1] to argv[2] for stage artifact comparison.
+func stage2CopyInputLLVM() string {
+	return "copy.in: %in.slot = getelementptr ptr, ptr %argv, i64 1 " +
+		"%in.path = load ptr, ptr %in.slot " +
+		"%out.slot = getelementptr ptr, ptr %argv, i64 2 " +
+		"%out.path = load ptr, ptr %out.slot " +
+		"%in.file = call ptr @fopen(ptr %in.path, ptr %readmode) " +
+		"%mode.copy = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
+		"%out.file = call ptr @fopen(ptr %out.path, ptr %mode.copy) " +
+		"br label %copy.loop copy.loop: %ch = call i32 @fgetc(ptr %in.file) " +
+		"%eof = icmp slt i32 %ch, 0 br i1 %eof, label %copy.done, label %copy.byte " +
+		"copy.byte: call i32 @fputc(i32 %ch, ptr %out.file) br label %copy.loop " +
+		"copy.done: call i32 @fclose(ptr %in.file) call i32 @fclose(ptr %out.file) " +
+		"br label %done "
 }
 
 // stage2SourceGlobals returns one path constant for each self-host source.

@@ -316,7 +316,7 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stage2 link failed: %v\n%s", err, out)
 	}
-	run = exec.Command(stage2Bin, stage3)
+	run = exec.Command(stage2Bin, stage2, stage3)
 	run.Dir = repoRoot
 	out, err = run.CombinedOutput()
 	if err != nil {
@@ -328,6 +328,19 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "define i32 @main") {
 		t.Fatalf("stage3 artifact does not look like LLVM IR:\n%s", data)
+	}
+	stage2Data, err := os.ReadFile(stage2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStageArtifactsEqual(t, stage2Data, data)
+}
+
+// assertStageArtifactsEqual checks stage output stability for the bootstrap smoke.
+func assertStageArtifactsEqual(t *testing.T, stage2 []byte, stage3 []byte) {
+	t.Helper()
+	if string(stage2) != string(stage3) {
+		t.Fatalf("stage2 and stage3 artifacts differ\nstage2:\n%s\nstage3:\n%s", stage2, stage3)
 	}
 }
 
