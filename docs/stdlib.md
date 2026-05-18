@@ -92,8 +92,8 @@ Current builtin thinning candidates:
 | `std::builtin::path_clean` | Blocked-by-language | Keep until path normalization can be implemented without hidden allocation |
 | `std::builtin::path_join` | Blocked-by-language | Keep until owned string/buffer construction exists |
 | `std::builtin::mem_len` | Host primitive for now | Keep as slice metadata access |
-| `std::builtin::mem_byte_at` | Host primitive for now | Keep as checked byte access until indexing is language-level |
-| `std::builtin::mem_slice` | Host primitive for now | Keep as checked slice construction |
+| `std::builtin::mem_byte_at` | Blocked-by-language | Replace with checked index syntax from ADR-0053 |
+| `std::builtin::mem_slice` | Blocked-by-language | Replace with checked slice syntax from ADR-0053 |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |

@@ -669,7 +669,35 @@ slice<T>
 v0.1 では full generics を実装しません。
 `arena<T>`、`handle<T>`、`!T`、raw pointer 型は専用の型構文として扱います。
 
-### 7.1 明示 cast
+### 7.1 index / slice expression
+
+Kizu は checked index と checked slice syntax を持ちます。
+
+```kizu
+let byte = try bytes[index];
+let part = try bytes[start..end];
+let tail = try bytes[start..];
+let head = try bytes[..end];
+```
+
+v0.2 の最初の対象は `[]const u8` です。
+
+```text
+[]const u8 [ i64 ] -> !u8
+[]const u8 [ i64 .. i64 ] -> ![]const u8
+```
+
+slice bounds は half-open です。
+`start..end` は `start` を含み、`end` を含みません。
+
+safe Kizu では unchecked bounds access を許しません。
+負の index、負の bound、`start > end`、`end > len` は error を返します。
+`bytes[i]` と `bytes[a..b]` は `!T` を返すため、通常は `try` で扱います。
+
+v0.2 では mutable indexed assignment、indexed borrow、`std::array::Array<T>` への
+直接 indexing は後続に分離します。
+
+### 7.2 明示 cast
 
 Kizu は暗黙の numeric promotion をしません。
 異なる numeric type の間で値を渡す場合は、明示的に `cast<T>(value)` を使います。
@@ -787,7 +815,8 @@ borrow のルール:
 * field borrow 中でも disjoint field assignment は許可する
 * field borrow 中の owner 全体の move と同一 field assignment は禁止する
 * v0.1 は `&user.profile.name` のような nested field borrow を拒否する
-* v0.1 は indexed borrow syntax を実装しない。将来 `&items[0]` を追加する場合は、
+* v0.2 の index / slice expression は read-only checked access から始める
+* indexed borrow syntax はまだ実装しない。将来 `&items[0]` を追加する場合は、
   専用の安全ルールと regression coverage を先に追加する
 
 明示 dereference は Zig に合わせて postfix の `.*` を使います。
@@ -1248,6 +1277,8 @@ std::mem::trim_ascii(bytes: []const u8) -> []const u8
 
 `std::mem` の safe API は raw pointer を返しません。
 `std::mem::slice` と `std::mem::byte_at` は境界外アクセスを `!T` として返します。
+checked index / slice syntax の実装後は、Kizu std source では
+`try bytes[index]` と `try bytes[start..end]` を優先します。
 allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
 mutable slice の仕様後に実装します。
 
