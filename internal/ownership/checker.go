@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
 // Checker validates ownership and move rules for a parsed program.
@@ -1085,43 +1086,67 @@ func (c *Checker) checkMemBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	switch name {
-	case "std.builtin.mem_page_allocator":
-		_, err := checkNoArgOwnershipCall(name, args)
-		if err != nil {
-			return "", true, err
-		}
-		return "Allocator", true, nil
-	case "std.builtin.mem_len":
-		return c.checkMemByteArgs(name, args, env, 1, "i64")
-	default:
-		return "", false, nil
-	}
+	return c.checkSimpleCoreBuiltin(name, args, env)
 }
 
-// checkMemByteArgs reads byte-slice arguments without consuming them.
-func (c *Checker) checkMemByteArgs(
+// checkSimpleCoreBuiltin validates declarative core primitive ownership effects.
+func (c *Checker) checkSimpleCoreBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	want int,
-	result string,
 ) (string, bool, error) {
-	if len(args) != want {
-		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
-			name, want, len(args))
+	signature, ok := stdprim.SimpleCoreSignatures[name]
+	if !ok {
+		return "", false, nil
+	}
+	if len(args) != len(signature.Args) {
+		return "", true, fmt.Errorf("move error: `%s` expects %s", name,
+			coreOwnershipArgsText(signature.Args))
 	}
 	for idx, arg := range args {
-		got, err := c.readExpr(arg, env)
-		if err != nil {
+		if err := c.checkCoreArg(name, idx, signature.Args[idx], arg, env); err != nil {
 			return "", true, err
 		}
-		if got != "[]const u8" {
-			return "", true, fmt.Errorf("move error: `%s` arg %d expects []const u8, got %s",
-				name, idx+1, got)
-		}
 	}
-	return result, true, nil
+	return signature.Return, true, nil
+}
+
+// checkCoreArg reads one declarative primitive argument without moving it.
+func (c *Checker) checkCoreArg(
+	name string,
+	index int,
+	want stdprim.ArgKind,
+	arg ast.Expression,
+	env *scope,
+) error {
+	if want == stdprim.ArgIo {
+		return c.checkIoArg(arg, env, name)
+	}
+	got, err := c.readExpr(arg, env)
+	if err != nil {
+		return err
+	}
+	if got != string(want) {
+		return fmt.Errorf("move error: `%s` arg %d expects %s, got %s",
+			name, index+1, want, got)
+	}
+	return nil
+}
+
+// coreOwnershipArgsText renders declarative primitive arguments for diagnostics.
+func coreOwnershipArgsText(args []stdprim.ArgKind) string {
+	if len(args) == 0 {
+		return "0 args"
+	}
+	parts := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == stdprim.ArgIo {
+			parts = append(parts, "io")
+			continue
+		}
+		parts = append(parts, string(arg))
+	}
+	return strings.Join(parts, " and ")
 }
 
 // checkFsBuiltin validates ownership for filesystem host primitives.
@@ -1152,52 +1177,7 @@ func (c *Checker) checkIoWriteBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	switch name {
-	case "std.builtin.io_write_stdout", "std.builtin.io_write_stderr":
-		return c.checkIoBytesCall(name, args, env)
-	case "std.builtin.io_read_stdin":
-		return c.checkIoOnlyCall(name, args, env, "![]const u8")
-	default:
-		return "", false, nil
-	}
-}
-
-// checkIoBytesCall validates an Io plus bytes call without moving bytes.
-func (c *Checker) checkIoBytesCall(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if len(args) != 2 {
-		return "", true, fmt.Errorf("move error: `%s` expects io and bytes", name)
-	}
-	if err := c.checkIoArg(args[0], env, name); err != nil {
-		return "", true, err
-	}
-	got, err := c.readExpr(args[1], env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "[]const u8" {
-		return "", true, fmt.Errorf("move error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	return "!void", true, nil
-}
-
-// checkIoOnlyCall validates a call that only takes Io.
-func (c *Checker) checkIoOnlyCall(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	result string,
-) (string, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("move error: `%s` expects io", name)
-	}
-	if err := c.checkIoArg(args[0], env, name); err != nil {
-		return "", true, err
-	}
-	return result, true, nil
+	return c.checkSimpleCoreBuiltin(name, args, env)
 }
 
 // checkProcessBuiltin validates minimal process helpers.
@@ -1206,59 +1186,7 @@ func (c *Checker) checkProcessBuiltin(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
-	switch name {
-	case "std.builtin.process_arg_count":
-		_, err := checkNoArgOwnershipCall(name, args)
-		return "i64", true, err
-	case "std.builtin.process_arg":
-		return c.checkProcessI64Arg(name, args, env, "![]const u8")
-	case "std.builtin.process_env":
-		return c.checkProcessBytesArg(name, args, env, "![]const u8")
-	case "std.builtin.process_exit_code":
-		return c.checkProcessI64Arg(name, args, env, "i64")
-	default:
-		return "", false, nil
-	}
-}
-
-// checkProcessI64Arg validates one i64 process argument.
-func (c *Checker) checkProcessI64Arg(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	result string,
-) (string, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("move error: `%s` expects i64", name)
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "i64" {
-		return "", true, fmt.Errorf("move error: `%s` expects i64, got %s", name, got)
-	}
-	return result, true, nil
-}
-
-// checkProcessBytesArg validates one []const u8 process argument.
-func (c *Checker) checkProcessBytesArg(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	result string,
-) (string, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("move error: `%s` expects []const u8", name)
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "[]const u8" {
-		return "", true, fmt.Errorf("move error: `%s` expects []const u8, got %s", name, got)
-	}
-	return result, true, nil
+	return c.checkSimpleCoreBuiltin(name, args, env)
 }
 
 // checkTaskBuiltin validates ownership for task and data-parallel std calls.

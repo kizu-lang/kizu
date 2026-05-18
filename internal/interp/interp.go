@@ -1183,9 +1183,6 @@ func (i *Interpreter) evalProcessBuiltin(
 	case "std.builtin.process_env":
 		value, err := i.evalProcessEnv(args, env)
 		return value, true, err
-	case "std.builtin.process_exit_code":
-		value, err := i.evalProcessExitCode(args, env)
-		return value, true, err
 	default:
 		return voidValue(), false, nil
 	}
@@ -1455,18 +1452,6 @@ func (i *Interpreter) evalProcessEnv(args []ast.Expression, env *Env) (Value, er
 		return errorUnionValue("environment variable not found"), nil
 	}
 	return stringValue(value), nil
-}
-
-// evalProcessExitCode validates and returns a process exit code value.
-func (i *Interpreter) evalProcessExitCode(args []ast.Expression, env *Env) (Value, error) {
-	index, err := i.evalProcessIndex("std::process::exit_code", args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	if index < 0 || index > 255 {
-		return voidValue(), fmt.Errorf("runtime error: exit code must be between 0 and 255")
-	}
-	return intValue(int64(index)), nil
 }
 
 // evalProcessIndex evaluates one i64 process helper argument.

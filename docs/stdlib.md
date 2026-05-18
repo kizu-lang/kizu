@@ -98,7 +98,8 @@ Current builtin thinning candidates:
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
 | `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
-| `std::builtin::process_*` | Host primitive | Keep as host process boundary |
+| `std::builtin::process_arg_count`, `std::builtin::process_arg`, `std::builtin::process_env` | Host primitive | Keep as host process boundary |
+| `std::builtin::process_exit_code` | Removed | Implemented in `std/src/process.kizu` as a pure value helper |
 | `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for`, `std::builtin::task_parallel_map` | Host primitive | Public constructors, `parallel_for`, and `parallel_map` live in `std/src/task.kizu`; direct user calls are rejected |
 | `std::builtin::channel<T>`, `std::builtin::channel_send<T>`, `std::builtin::channel_recv<T>` | Runtime primitive | Public constructor and methods live in `std/src/channel.kizu`; direct user calls are rejected |
 | `std::builtin::atomic<T>`, `std::builtin::atomic_load<T>`, `std::builtin::atomic_store<T>` | Runtime primitive | Public constructor and methods live in `std/src/atomic.kizu`; direct user calls are rejected |
@@ -144,7 +145,7 @@ forwarding through Kizu std source.
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
-| `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
+| `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu`; only arg count, arg, and env use host primitives | keep host process access primitives trusted |
 | `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors, `parallel_for`, and `parallel_map`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; method wrappers tracked by #382 |
 | `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor and method wrappers over reserved `std::builtin::channel_*`; Go owned message queue and boundary checks | keep queue primitive trusted |
 | `std::thread` | `scoped<T>` | Kizu one-argument wrapper; Go host thread boundary and join semantics | keep thread boundary primitive trusted; broader argument forwarding tracked by #383 |

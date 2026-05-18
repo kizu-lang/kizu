@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	"github.com/kizu-lang/kizu/internal/stdprim"
 )
 
 // Type is the static type name used by the v0 checker.
@@ -1798,27 +1799,13 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if replacement, ok := removedBuiltinReplacement(name); ok {
+	if replacement, ok := stdprim.RemovedBuiltinReplacement(name); ok {
 		return "", true, fmt.Errorf("type error: `%s` was removed; use %s", name, replacement)
 	}
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
 	return c.checkStdConstructorBuiltin(name, args)
-}
-
-// removedBuiltinReplacement reports removed std::builtin APIs with their public wrapper.
-func removedBuiltinReplacement(name string) (string, bool) {
-	switch {
-	case strings.HasPrefix(name, "std.builtin.string_"):
-		return "std::string", true
-	case name == "std.builtin.mem_byte_at":
-		return "std::mem::byte_at", true
-	case name == "std.builtin.mem_slice":
-		return "std::mem::slice", true
-	default:
-		return "", false
-	}
 }
 
 // checkStdConstructorBuiltin validates miscellaneous std constructor calls.
@@ -1856,54 +1843,7 @@ func (c *Checker) checkIoBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	switch name {
-	case "std.builtin.io_write_stdout", "std.builtin.io_write_stderr":
-		return c.checkIoBytesCall(name, args, env, unsafe)
-	case "std.builtin.io_read_stdin":
-		return c.checkIoOnlyCall(name, args, env, unsafe, "![]const u8")
-	default:
-		return "", false, nil
-	}
-}
-
-// checkIoBytesCall validates an Io plus []const u8 call.
-func (c *Checker) checkIoBytesCall(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `%s` expects io and bytes", name)
-	}
-	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
-		return "", true, err
-	}
-	got, err := c.checkExpr(args[1], env, unsafe)
-	if err != nil {
-		return "", true, err
-	}
-	if got != typeByteString {
-		return "", true, fmt.Errorf("type error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	return "!void", true, nil
-}
-
-// checkIoOnlyCall validates a call that only takes Io.
-func (c *Checker) checkIoOnlyCall(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	result Type,
-) (Type, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `%s` expects io", name)
-	}
-	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
-		return "", true, err
-	}
-	return result, true, nil
+	return c.checkSimpleCoreBuiltin(name, args, env, unsafe)
 }
 
 // checkProcessBuiltin validates minimal process helpers for CLI prototypes.
@@ -1913,61 +1853,72 @@ func (c *Checker) checkProcessBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	switch name {
-	case "std.builtin.process_arg_count":
-		typ, err := checkNoArgConstructor(name, args, "i64")
-		return typ, true, err
-	case "std.builtin.process_arg":
-		return c.checkOneI64Arg(name, args, env, unsafe, "![]const u8")
-	case "std.builtin.process_env":
-		return c.checkOneBytesArg(name, args, env, unsafe, "![]const u8")
-	case "std.builtin.process_exit_code":
-		return c.checkOneI64Arg(name, args, env, unsafe, "i64")
-	default:
+	return c.checkSimpleCoreBuiltin(name, args, env, unsafe)
+}
+
+// checkSimpleCoreBuiltin validates declarative core primitive signatures.
+func (c *Checker) checkSimpleCoreBuiltin(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	signature, ok := stdprim.SimpleCoreSignatures[name]
+	if !ok {
 		return "", false, nil
 	}
+	if len(args) != len(signature.Args) {
+		return "", true, fmt.Errorf("type error: `%s` expects %s", name,
+			coreSignatureArgsText(signature.Args))
+	}
+	for idx, arg := range args {
+		if err := c.checkCoreArg(name, idx, signature.Args[idx], arg, env, unsafe); err != nil {
+			return "", true, err
+		}
+	}
+	return Type(signature.Return), true, nil
 }
 
-// checkOneI64Arg validates one i64 argument.
-func (c *Checker) checkOneI64Arg(
+// checkCoreArg validates one declarative primitive argument.
+func (c *Checker) checkCoreArg(
 	name string,
-	args []ast.Expression,
+	index int,
+	want stdprim.ArgKind,
+	arg ast.Expression,
 	env *scope,
 	unsafe bool,
-	result Type,
-) (Type, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `%s` expects i64", name)
+) error {
+	if want == stdprim.ArgIo {
+		return c.checkIoArg(arg, env, unsafe, name)
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	got, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {
-		return "", true, err
+		return err
 	}
-	if got != typeI64 {
-		return "", true, fmt.Errorf("type error: `%s` expects i64, got %s", name, got)
+	if got != Type(want) {
+		return fmt.Errorf("type error: `%s` arg %d expects %s, got %s",
+			name, index+1, want, got)
 	}
-	return result, true, nil
+	return nil
 }
 
-// checkOneBytesArg validates one []const u8 argument.
-func (c *Checker) checkOneBytesArg(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	result Type,
-) (Type, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `%s` expects []const u8", name)
+// coreSignatureArgsText renders declarative primitive arguments for diagnostics.
+func coreSignatureArgsText(args []stdprim.ArgKind) string {
+	if len(args) == 0 {
+		return "0 args"
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
-	if err != nil {
-		return "", true, err
+	parts := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case stdprim.ArgIo:
+			parts = append(parts, "io")
+		case stdprim.ArgBytes:
+			parts = append(parts, "[]const u8")
+		default:
+			parts = append(parts, string(arg))
+		}
 	}
-	if got != typeByteString {
-		return "", true, fmt.Errorf("type error: `%s` expects []const u8, got %s", name, got)
-	}
-	return result, true, nil
+	return strings.Join(parts, " and ")
 }
 
 // checkMemBuiltin validates allocation-free std::mem byte-slice helpers.
@@ -1977,41 +1928,7 @@ func (c *Checker) checkMemBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	switch name {
-	case "std.builtin.mem_page_allocator":
-		typ, err := checkNoArgConstructor(name, args, "Allocator")
-		return typ, true, err
-	case "std.builtin.mem_len":
-		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeI64)
-	default:
-		return "", false, nil
-	}
-}
-
-// checkMemByteArgs validates std::mem calls that only take byte slices.
-func (c *Checker) checkMemByteArgs(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	want int,
-	result Type,
-) (Type, bool, error) {
-	if len(args) != want {
-		return "", true, fmt.Errorf("type error: `%s` expects %d args, got %d",
-			name, want, len(args))
-	}
-	for idx, arg := range args {
-		got, err := c.checkExpr(arg, env, unsafe)
-		if err != nil {
-			return "", true, err
-		}
-		if got != typeByteString {
-			return "", true, fmt.Errorf("type error: `%s` arg %d expects []const u8, got %s",
-				name, idx+1, got)
-		}
-	}
-	return result, true, nil
+	return c.checkSimpleCoreBuiltin(name, args, env, unsafe)
 }
 
 // checkFsBuiltin validates filesystem host primitives with explicit Io.
