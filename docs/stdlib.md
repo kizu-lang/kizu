@@ -58,7 +58,7 @@ under `std/src`.
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
-| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | type/ownership/runtime builtin checks and byte operations | keep `page_allocator` as primitive; move pure byte helpers to `std/mem.kizu` once slice/view semantics are stable |
+| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu wrappers in `std/src/mem.kizu` over `std::builtin::mem_*` primitives | migrated wrapper module; keep allocator and checked byte operations trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; move ergonomic wrappers and tests to `std/array.kizu` after module resolver supports std sources |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `clear`, `len`, `as_bytes`, `deinit` | owned byte storage, view borrow tracking, deinit state | build on Array/slice primitives; keep raw allocation hidden |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; move wrapper and symbol-table shape to Kizu first |

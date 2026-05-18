@@ -1070,26 +1070,26 @@ func (i *Interpreter) evalMemBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.mem.page_allocator":
+	case "std.builtin.mem_page_allocator":
 		return callAllocatorFromExprs(args), true, nil
-	case "std.mem.len":
+	case "std.builtin.mem_len":
 		value, err := i.evalMemLen(args, env)
 		return value, true, err
-	case "std.mem.byte_at":
+	case "std.builtin.mem_byte_at":
 		value, err := i.evalMemByteAt(args, env)
 		return value, true, err
-	case "std.mem.equal_bytes":
+	case "std.builtin.mem_equal_bytes":
 		value, err := i.evalMemCompare(args, env, func(left string, right string) bool {
 			return left == right
 		})
 		return value, true, err
-	case "std.mem.starts_with":
+	case "std.builtin.mem_starts_with":
 		value, err := i.evalMemStartsWith(args, env)
 		return value, true, err
-	case "std.mem.slice":
+	case "std.builtin.mem_slice":
 		value, err := i.evalMemSlice(args, env)
 		return value, true, err
-	case "std.mem.trim_ascii":
+	case "std.builtin.mem_trim_ascii":
 		value, err := i.evalMemTrimASCII(args, env)
 		return value, true, err
 	default:

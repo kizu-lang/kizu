@@ -418,14 +418,14 @@ func parsePathWithStd(path string) (*ast.Program, []string, error) {
 	if err != nil || len(errs) > 0 {
 		return program, errs, err
 	}
-	usesStdPath, err := sourceUsesStdPath(path)
+	modules, err := sourceStdModules(path)
 	if err != nil {
 		return program, nil, err
 	}
-	if !usesStdPath {
+	if len(modules) == 0 {
 		return program, nil, nil
 	}
-	stdDecls, stdErrs, err := parseStdPathDecls()
+	stdDecls, stdErrs, err := parseStdDecls(modules)
 	if err != nil || len(stdErrs) > 0 {
 		return program, stdErrs, err
 	}
@@ -433,18 +433,39 @@ func parsePathWithStd(path string) (*ast.Program, []string, error) {
 	return program, nil, nil
 }
 
-// sourceUsesStdPath reports whether a source file references std::path wrappers.
-func sourceUsesStdPath(path string) (bool, error) {
+// sourceStdModules reports which Kizu std wrapper modules a source references.
+func sourceStdModules(path string) ([]string, error) {
 	source, err := os.ReadFile(path)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return strings.Contains(string(source), "std::path::"), nil
+	text := string(source)
+	modules := []string{}
+	if strings.Contains(text, "std::mem::") {
+		modules = append(modules, "mem")
+	}
+	if strings.Contains(text, "std::path::") {
+		modules = append(modules, "path")
+	}
+	return modules, nil
 }
 
-// parseStdPathDecls loads std::path wrappers from Kizu source.
-func parseStdPathDecls() ([]ast.Decl, []string, error) {
-	path, err := findRepoFile("std/src/path.kizu")
+// parseStdDecls loads selected std wrappers from Kizu source.
+func parseStdDecls(modules []string) ([]ast.Decl, []string, error) {
+	decls := []ast.Decl{}
+	for _, module := range modules {
+		moduleDecls, errs, err := parseStdModuleDecls(module)
+		if err != nil || len(errs) > 0 {
+			return nil, errs, err
+		}
+		decls = append(decls, moduleDecls...)
+	}
+	return decls, nil, nil
+}
+
+// parseStdModuleDecls loads one std wrapper module from Kizu source.
+func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
+	path, err := findRepoFile("std/src/" + module + ".kizu")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -456,9 +477,9 @@ func parseStdPathDecls() ([]ast.Decl, []string, error) {
 	for _, decl := range program.Decls {
 		fn, ok := decl.(*ast.FunctionDecl)
 		if !ok {
-			return nil, nil, fmt.Errorf("std path error: unsupported declaration %T", decl)
+			return nil, nil, fmt.Errorf("std %s error: unsupported declaration %T", module, decl)
 		}
-		fn.Name = "std.path." + fn.Name
+		fn.Name = "std." + module + "." + fn.Name
 		fn.Public = false
 		decls = append(decls, fn)
 	}

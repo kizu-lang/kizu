@@ -1919,18 +1919,18 @@ func (c *Checker) checkMemBuiltin(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
-	case "std.mem.page_allocator":
+	case "std.builtin.mem_page_allocator":
 		typ, err := checkNoArgConstructor(name, args, "Allocator")
 		return typ, true, err
-	case "std.mem.len":
+	case "std.builtin.mem_len":
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeI64)
-	case "std.mem.byte_at":
+	case "std.builtin.mem_byte_at":
 		return c.checkMemByteIndex(name, args, env, unsafe, "!u8")
-	case "std.mem.equal_bytes", "std.mem.starts_with":
+	case "std.builtin.mem_equal_bytes", "std.builtin.mem_starts_with":
 		return c.checkMemByteArgs(name, args, env, unsafe, 2, typeBool)
-	case "std.mem.slice":
+	case "std.builtin.mem_slice":
 		return c.checkMemSlice(args, env, unsafe)
-	case "std.mem.trim_ascii":
+	case "std.builtin.mem_trim_ascii":
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeByteString)
 	default:
 		return "", false, nil
@@ -1995,7 +1995,7 @@ func (c *Checker) checkMemSlice(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if err := c.checkMemSliceShape("std.mem.slice", args, env, unsafe); err != nil {
+	if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env, unsafe); err != nil {
 		return "", true, err
 	}
 	return "![]const u8", true, nil

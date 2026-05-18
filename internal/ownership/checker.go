@@ -1074,24 +1074,24 @@ func (c *Checker) checkMemBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.mem.page_allocator":
+	case "std.builtin.mem_page_allocator":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return "Allocator", true, nil
-	case "std.mem.len":
+	case "std.builtin.mem_len":
 		return c.checkMemByteArgs(name, args, env, 1, "i64")
-	case "std.mem.byte_at":
+	case "std.builtin.mem_byte_at":
 		return c.checkMemByteIndex(name, args, env, "!u8")
-	case "std.mem.equal_bytes", "std.mem.starts_with":
+	case "std.builtin.mem_equal_bytes", "std.builtin.mem_starts_with":
 		return c.checkMemByteArgs(name, args, env, 2, "bool")
-	case "std.mem.slice":
-		if err := c.checkMemSliceShape("std.mem.slice", args, env); err != nil {
+	case "std.builtin.mem_slice":
+		if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env); err != nil {
 			return "", true, err
 		}
 		return "![]const u8", true, nil
-	case "std.mem.trim_ascii":
+	case "std.builtin.mem_trim_ascii":
 		return c.checkMemByteArgs(name, args, env, 1, "[]const u8")
 	default:
 		return "", false, nil
