@@ -87,6 +87,22 @@ func TestEmitAcceptsOpaqueAggregateInstructions(t *testing.T) {
 	}
 }
 
+// TestEmitResolvesLocalAggregateFields checks local struct fields are concrete values.
+func TestEmitResolvesLocalAggregateFields(t *testing.T) {
+	module := lowerSource(t, `struct User { score: i64; }
+fn main() {
+    let user = User { score: 7 };
+    print(user.score);
+}`)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if !strings.Contains(got, "call void @kizu_print_int(i64 7)") {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
 // lowerSource parses, checks, and lowers a source snippet.
 func lowerSource(t *testing.T, source string) *ir.Module {
 	t.Helper()

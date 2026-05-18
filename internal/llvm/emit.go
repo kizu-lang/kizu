@@ -41,6 +41,7 @@ type valueInfo struct {
 	typ     string
 	operand string
 	length  int
+	fields  map[string]valueInfo
 }
 
 // emit writes declarations and function definitions.
@@ -669,14 +670,32 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 	return nil
 }
 
-// writeStructNew stores an opaque placeholder for aggregate values.
+// writeStructNew records aggregate fields for local field reads.
 func (e *emitter) writeStructNew(instr *ir.Instr) error {
-	e.values[instr.Result.Name] = zeroValue(instr.Result.Type)
+	fields := map[string]valueInfo{}
+	for _, field := range instr.Fields {
+		fields[field.Name] = e.value(field.Value)
+	}
+	e.values[instr.Result.Name] = valueInfo{
+		typ:     instr.Result.Type,
+		operand: "null",
+		fields:  fields,
+	}
 	return nil
 }
 
-// writeField stores a typed placeholder for aggregate field reads.
+// writeField resolves fields from local aggregate construction.
 func (e *emitter) writeField(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: field read expects receiver")
+	}
+	receiver := e.value(instr.Args[0])
+	name := strings.TrimPrefix(instr.Op, "field.")
+	if field, ok := receiver.fields[name]; ok {
+		field.typ = instr.Result.Type
+		e.values[instr.Result.Name] = field
+		return nil
+	}
 	e.values[instr.Result.Name] = zeroValue(instr.Result.Type)
 	return nil
 }

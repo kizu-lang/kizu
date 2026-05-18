@@ -40,23 +40,9 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn parse_score")
 	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "pub fn token_path")
 	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "selfhost/src/compiler.kizu")
-	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "return parsed >= 100")
-	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn known_type")
-	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", `if name == "i64"`)
-	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn numeric_type")
-	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn copy_type")
-	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "return parsed")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "if module <= 0")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "std::string::String")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "append_i64")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "kizu stage source bytes")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "try out.append_bytes")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "declare ptr @fopen")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fopen(ptr %source8, ptr %readmode)")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fgetc(ptr %srcfile8)")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "@parsemetric")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "%parsetotal")
-	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "br i1 %scanned, label %write")
+	assertGeneratedCheckerSource(t, outDir)
+	assertGeneratedCompilerSource(t, outDir)
+	assertGeneratedEmitSource(t, outDir)
 }
 
 // TestCheckedInSelfhostDoesNotEmitGoDriver checks the committed bootstrap seed
@@ -93,6 +79,40 @@ func assertGeneratedSourceContains(t *testing.T, dir string, name string, want s
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("%s does not contain %q", name, want)
 	}
+}
+
+// assertGeneratedCheckerSource checks generated type-checker bootstrap logic.
+func assertGeneratedCheckerSource(t *testing.T, outDir string) {
+	t.Helper()
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "return parsed >= 100")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn known_type")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", `if name == "i64"`)
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn numeric_type")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn copy_type")
+}
+
+// assertGeneratedCompilerSource checks generated selfhost compiler pipeline logic.
+func assertGeneratedCompilerSource(t *testing.T, outDir string) {
+	t.Helper()
+	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "pub struct SourceMetrics")
+	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.parsed")
+	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "return parsed")
+}
+
+// assertGeneratedEmitSource checks generated LLVM emitter bootstrap logic.
+func assertGeneratedEmitSource(t *testing.T, outDir string) {
+	t.Helper()
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "if module <= 0")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "std::string::String")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "append_i64")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "kizu stage source bytes")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "try out.append_bytes")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "declare ptr @fopen")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fopen(ptr %source8, ptr %readmode)")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fgetc(ptr %srcfile8)")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "@parsemetric")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "%parsetotal")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "br i1 %scanned, label %write")
 }
 
 // generatedSourcePaths returns every generated file under dir.

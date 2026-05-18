@@ -108,8 +108,8 @@ blocker:
 
 ## Current Bootstrap Evidence
 
-最終更新: `feat/selfhost-bootstrap-chain` で selfhost manifest を stage input graph に
-含めた working tree 時点。
+最終更新: `feat/selfhost-bootstrap-chain` で selfhost manifest を stage input graph に含め、
+compiler-local `SourceMetrics` を追加した working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
@@ -117,7 +117,8 @@ pipeline ではなく、Go が生成した source-scanning LLVM template に依�
 parser metric は parser-local な部分文字列 scan ではなく、selfhost lexer の identifier
 scan helper で keyword token count に寄せているが、まだ AST parser ではない。stage1 と
 stage2 以降の metric は `selfhost/kizu.toml` と `selfhost/src/*.kizu` の両方を stage input
-として読む。
+として読む。Go LLVM backend は local struct literal の field read を具体値として扱えるが、
+cross-function struct return はまだ bootstrap pipeline の前提にしていない。
 
 実行した command:
 
@@ -171,8 +172,8 @@ stage3_vs_stage4_bytes=0
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 1035
-; kizu stage source bytes 1130914
+; kizu stage source metric 1041
+; kizu stage source bytes 1131092
 ; kizu stage source fn count 62
 ```
 
@@ -183,6 +184,9 @@ remaining Go / template dependency:
 - `selfhost/src/emit.kizu` still appends a generated LLVM template rather than lowering a real IR.
 - stage2 reads `selfhost/kizu.toml` and the selfhost source tree and scans them, but it does not
   execute the Kizu parser, resolver, checker, lowering, and LLVM emitter as a compiler pipeline.
+- `selfhost/src/compiler.kizu` uses a local `SourceMetrics` aggregate, but parser/checker/lower
+  boundaries still pass scalar summaries because native cross-function struct returns are not
+  implemented.
 - Go native backend and hosted runtime still build `target/selfhost/kizu-stage1`.
 - The generated Kizu parser/checker/lower are partial surfaces, not production replacements for
   `internal/parser`, `internal/types`, or backend lowering.
