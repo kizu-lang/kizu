@@ -1879,8 +1879,7 @@ func (c *Checker) checkPathBuiltin(
 	switch name {
 	case "std.builtin.path_join":
 		return c.checkPathBytesArgs(name, args, env, unsafe, 2)
-	case "std.builtin.path_clean", "std.builtin.path_basename",
-		"std.builtin.path_dirname", "std.builtin.path_extension":
+	case "std.builtin.path_clean":
 		return c.checkPathBytesArgs(name, args, env, unsafe, 1)
 	default:
 		return "", false, nil

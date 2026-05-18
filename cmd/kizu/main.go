@@ -553,21 +553,32 @@ func sourceStdModules(path string) ([]string, error) {
 	text := string(source)
 	modules := []string{}
 	if strings.Contains(text, "std::mem::") {
-		modules = append(modules, "mem")
+		modules = appendStdModule(modules, "mem")
 	}
 	if strings.Contains(text, "std::path::") {
-		modules = append(modules, "path")
+		modules = appendStdModule(modules, "mem")
+		modules = appendStdModule(modules, "path")
 	}
 	if strings.Contains(text, "std::io::") {
-		modules = append(modules, "io")
+		modules = appendStdModule(modules, "io")
 	}
 	if strings.Contains(text, "std::process::") {
-		modules = append(modules, "process")
+		modules = appendStdModule(modules, "process")
 	}
 	if strings.Contains(text, "std::testing::") {
-		modules = append(modules, "testing")
+		modules = appendStdModule(modules, "testing")
 	}
 	return modules, nil
+}
+
+// appendStdModule appends a std wrapper module once while preserving order.
+func appendStdModule(modules []string, module string) []string {
+	for _, existing := range modules {
+		if existing == module {
+			return modules
+		}
+	}
+	return append(modules, module)
 }
 
 // parseStdDecls loads selected std wrappers from Kizu source.
