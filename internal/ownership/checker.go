@@ -1435,8 +1435,10 @@ func (c *Checker) checkArrayConstructor(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if err := c.rejectArrayElementType(elem); err != nil {
-		return "", err
+	if elem != "T" {
+		if err := c.rejectArrayElementType(elem); err != nil {
+			return "", err
+		}
 	}
 	if len(args) != 1 {
 		return "", fmt.Errorf("move error: `std::array::Array<%s>` expects allocator", elem)
@@ -1594,8 +1596,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	}
 	switch name {
-	case "std.array.Array":
-		return c.checkArrayConstructor(expr.TypeArg, args, env)
 	case "std.map.Map":
 		return c.checkMapConstructor(expr.TypeArg, args, env)
 	case "std.builtin.channel":
@@ -1619,6 +1619,11 @@ func (c *Checker) checkTypeApplyCallExpr(
 		}
 		typ, _, err := c.checkMutex(expr.TypeArg, args, env)
 		return typ, err
+	case "std.builtin.array":
+		if !c.currentStd {
+			return "", fmt.Errorf("move error: `%s` is reserved; use std::array", name)
+		}
+		return c.checkArrayConstructor(expr.TypeArg, args, env)
 	default:
 		return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
 	}
@@ -1657,6 +1662,8 @@ func (c *Checker) checkGenericUserTypeApply(
 // checkGenericWrapperTypeArg validates std wrapper-specific ownership contracts.
 func (c *Checker) checkGenericWrapperTypeArg(name string, typeArg string) error {
 	switch name {
+	case "std.array.Array":
+		return c.rejectArrayElementType(typeArg)
 	case "std.atomic.Atomic":
 		if !isAtomicSupportedType(typeArg) {
 			return fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArg)
