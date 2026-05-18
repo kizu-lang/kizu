@@ -434,6 +434,9 @@ func assertStage2CanWriteWithoutInputCopy(
 	if !strings.Contains(string(data), "; kizu stage2 source bytes ") {
 		t.Fatalf("source-only stage2 artifact does not include source byte total:\n%s", data)
 	}
+	if !strings.Contains(string(data), "; kizu stage2 source fn count ") {
+		t.Fatalf("source-only stage2 artifact does not include source fn count:\n%s", data)
+	}
 	stage2BytesLine := firstLineContaining(string(stage2Data), "; kizu selfhost source bytes ")
 	sourceBytesLine := strings.Replace(
 		firstLineContaining(string(data), "; kizu stage2 source bytes "),
@@ -444,6 +447,17 @@ func assertStage2CanWriteWithoutInputCopy(
 	if stage2BytesLine != sourceBytesLine {
 		t.Fatalf("source byte totals differ: stage2 %q source-only %q",
 			stage2BytesLine, sourceBytesLine)
+	}
+	stage2FnsLine := firstLineContaining(string(stage2Data), "; kizu selfhost source fn count ")
+	sourceFnsLine := strings.Replace(
+		firstLineContaining(string(data), "; kizu stage2 source fn count "),
+		"; kizu stage2 source fn count ",
+		"; kizu selfhost source fn count ",
+		1,
+	)
+	if stage2FnsLine != sourceFnsLine {
+		t.Fatalf("source fn counts differ: stage2 %q source-only %q",
+			stage2FnsLine, sourceFnsLine)
 	}
 	link := exec.Command("clang", sourceOut, "-o", sourceBin)
 	out, err = link.CombinedOutput()

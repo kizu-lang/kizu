@@ -678,12 +678,17 @@ func compilerTreeSource() string {
         std::mem::len(checker_source) + std::mem::len(lower_source) +
         std::mem::len(emit_source) + std::mem::len(compiler_source) +
         std::mem::len(main_source);
+    let source_fns = parser::function_count(token_source) + parser::function_count(lexer_source) +
+        parser::function_count(parser_source) + parser::function_count(resolver_source) +
+        parser::function_count(checker_source) + parser::function_count(lower_source) +
+        parser::function_count(emit_source) + parser::function_count(compiler_source) +
+        parser::function_count(main_source);
 
     let parsed = token_parse + lexer_parse + parser_parse + resolver_parse +
         checker_parse + lower_parse + emit_parse + compiler_parse + main_parse;
     let checked = checker::check_entry(parsed);
     let module = lower::lower_entry(checked, parsed);
-    let artifact = try emit::llvm(allocator, module, source_bytes);
+    let artifact = try emit::llvm(allocator, module, source_bytes, source_fns);
     let artifact_bytes = artifact.as_bytes();
     try std::fs::write_file(io, output, artifact_bytes);
     return;
@@ -698,7 +703,7 @@ func compilerEmitStage2Source() string {
     let allocator = std::mem::page_allocator();
     let checked = checker::check_entry(1);
     let module = lower::lower_entry(checked, 1);
-    let artifact = try emit::llvm(allocator, module, 0);
+    let artifact = try emit::llvm(allocator, module, 0, 0);
     let artifact_bytes = artifact.as_bytes();
     print(artifact_bytes);
     return;
@@ -755,7 +760,12 @@ func emitSource() string {
 	var out bytes.Buffer
 	out.WriteString(`import selfhost::lower;
 
-pub fn llvm(allocator: Allocator, module: i64, source_bytes: i64) -> !std::string::String {
+pub fn llvm(
+    allocator: Allocator,
+    module: i64,
+    source_bytes: i64,
+    source_fns: i64
+) -> !std::string::String {
     if module <= 0 {
         var failed = std::string::String(allocator);
         try failed.append_bytes("define i32 @main() { entry: ret i32 1 }");
@@ -767,6 +777,9 @@ pub fn llvm(allocator: Allocator, module: i64, source_bytes: i64) -> !std::strin
     try out.append_byte(cast<u8>(10));
     try out.append_bytes("; kizu selfhost source bytes ");
     out = try append_i64(out, source_bytes);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("; kizu selfhost source fn count ");
+    out = try append_i64(out, source_fns);
     try out.append_byte(cast<u8>(10));
 `)
 	for _, chunk := range stage2WriterLLVMChunks() {
@@ -815,12 +828,15 @@ func stage2WriterLLVMChunks() []string {
 // stage2ArtifactLLVM renders the fallback stage artifact constant.
 func stage2ArtifactLLVM() string {
 	artifact := "define i32 @main() { entry: ret i32 0 }"
-	prefix := "; kizu stage2 source bytes "
+	bytesPrefix := "; kizu stage2 source bytes "
+	fnPrefix := "; kizu stage2 source fn count "
 	newline := "\n"
 	return "@artifact = private constant [" + fmt.Sprint(len(artifact)+1) +
 		" x i8] [" + byteArray(artifact) + "] " +
-		"@metric = private constant [" + fmt.Sprint(len(prefix)+1) +
-		" x i8] [" + byteArray(prefix) + "] " +
+		"@metric = private constant [" + fmt.Sprint(len(bytesPrefix)+1) +
+		" x i8] [" + byteArray(bytesPrefix) + "] " +
+		"@fnmetric = private constant [" + fmt.Sprint(len(fnPrefix)+1) +
+		" x i8] [" + byteArray(fnPrefix) + "] " +
 		"@newline = private constant [" + fmt.Sprint(len(newline)+1) +
 		" x i8] [" + byteArray(newline) + "] " +
 		"@mode = private constant [2 x i8] [i8 119, i8 0] "
@@ -849,35 +865,57 @@ func stage2CopyGateLLVM() string {
 // stage2WriteFallbackLLVM writes the fallback artifact when no comparison output is requested.
 func stage2WriteFallbackLLVM() string {
 	artifact := "define i32 @main() { entry: ret i32 0 }"
-	prefix := "; kizu stage2 source bytes "
+	bytesPrefix := "; kizu stage2 source bytes "
+	fnPrefix := "; kizu stage2 source fn count "
 	newline := "\n"
 	return "write: " +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
 		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
 		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
-		"%metric = getelementptr [" + fmt.Sprint(len(prefix)+1) +
+		"%metric = getelementptr [" + fmt.Sprint(len(bytesPrefix)+1) +
 		" x i8], ptr @metric, i64 0, i64 0 " +
 		"call i32 @fputs(ptr %metric, ptr %file) " +
-		"br label %digits.init " +
-		"digits.init: br label %digits.scale " +
-		"digits.scale: %div = phi i32 [1, %digits.init], [%div.next, %digits.grow] " +
-		"%div.next = mul i32 %div, 10 %more = icmp sle i32 %div.next, %total7 " +
-		"br i1 %more, label %digits.grow, label %digits.emit " +
-		"digits.grow: br label %digits.scale " +
-		"digits.emit: %emit.div = phi i32 [%div, %digits.scale], [%emit.next, %digit.byte] " +
-		"%rem = phi i32 [%total7, %digits.scale], [%next.rem, %digit.byte] " +
-		"%done.digits = icmp sle i32 %emit.div, 0 " +
-		"br i1 %done.digits, label %digits.done, label %digit.byte " +
-		"digit.byte: %digit = sdiv i32 %rem, %emit.div " +
-		"%ascii = add i32 %digit, 48 call i32 @fputc(i32 %ascii, ptr %file) " +
-		"%used = mul i32 %digit, %emit.div %next.rem = sub i32 %rem, %used " +
-		"%emit.next = sdiv i32 %emit.div, 10 br label %digits.emit " +
-		"digits.done: %newline = getelementptr [" + fmt.Sprint(len(newline)+1) +
+		stage2WriteNumberLLVM("digits", "%total7", "after.bytes") +
+		"after.bytes: %newline1 = getelementptr [" + fmt.Sprint(len(newline)+1) +
+		" x i8], ptr @newline, i64 0, i64 0 call i32 @fputs(ptr %newline1, ptr %file) " +
+		"%fnmetric = getelementptr [" + fmt.Sprint(len(fnPrefix)+1) +
+		" x i8], ptr @fnmetric, i64 0, i64 0 " +
+		"call i32 @fputs(ptr %fnmetric, ptr %file) " +
+		stage2WriteNumberLLVM("fndigits", "%fntotal7", "after.fns") +
+		"after.fns: %newline = getelementptr [" + fmt.Sprint(len(newline)+1) +
 		" x i8], ptr @newline, i64 0, i64 0 call i32 @fputs(ptr %newline, ptr %file) " +
 		"%text = getelementptr [" + fmt.Sprint(len(artifact)+1) +
 		" x i8], ptr @artifact, i64 0, i64 0 " +
 		"call i32 @fputs(ptr %text, ptr %file) call i32 @fclose(ptr %file) " +
 		"br label %done done: ret i32 0 }"
+}
+
+// stage2WriteNumberLLVM writes one positive i32 as decimal to %file.
+func stage2WriteNumberLLVM(prefix string, value string, next string) string {
+	return "br label %" + prefix + ".init " +
+		prefix + ".init: br label %" + prefix + ".scale " +
+		prefix + ".scale: %" + prefix + ".div = phi i32 [1, %" + prefix +
+		".init], [%" + prefix + ".div.next, %" + prefix + ".grow] " +
+		"%" + prefix + ".div.next = mul i32 %" + prefix + ".div, 10 " +
+		"%" + prefix + ".more = icmp sle i32 %" + prefix + ".div.next, " + value + " " +
+		"br i1 %" + prefix + ".more, label %" + prefix + ".grow, label %" +
+		prefix + ".emit " +
+		prefix + ".grow: br label %" + prefix + ".scale " +
+		prefix + ".emit: %" + prefix + ".emit.div = phi i32 [%" + prefix +
+		".div, %" + prefix + ".scale], [%" + prefix + ".emit.next, %" +
+		prefix + ".byte] " +
+		"%" + prefix + ".rem = phi i32 [" + value + ", %" + prefix +
+		".scale], [%" + prefix + ".next.rem, %" + prefix + ".byte] " +
+		"%" + prefix + ".done = icmp sle i32 %" + prefix + ".emit.div, 0 " +
+		"br i1 %" + prefix + ".done, label %" + next + ", label %" + prefix + ".byte " +
+		prefix + ".byte: %" + prefix + ".digit = sdiv i32 %" + prefix + ".rem, %" +
+		prefix + ".emit.div " +
+		"%" + prefix + ".ascii = add i32 %" + prefix + ".digit, 48 " +
+		"call i32 @fputc(i32 %" + prefix + ".ascii, ptr %file) " +
+		"%" + prefix + ".used = mul i32 %" + prefix + ".digit, %" + prefix + ".emit.div " +
+		"%" + prefix + ".next.rem = sub i32 %" + prefix + ".rem, %" + prefix + ".used " +
+		"%" + prefix + ".emit.next = sdiv i32 %" + prefix + ".emit.div, 10 " +
+		"br label %" + prefix + ".emit "
 }
 
 // stage2CopyInputLLVM copies argv[1] to argv[2] for stage artifact comparison.
@@ -936,6 +974,10 @@ func stage2CheckSources() string {
 	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
 		fmt.Fprintf(&out, "%%total%d = add i32 %%total%d, %%count%d ", idx-1, idx-2, idx)
 	}
+	out.WriteString("%fntotal0 = add i32 %fn0, %fn1 ")
+	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+		fmt.Fprintf(&out, "%%fntotal%d = add i32 %%fntotal%d, %%fn%d ", idx-1, idx-2, idx)
+	}
 	fmt.Fprintf(&out, "%%large = icmp sgt i32 %%total%d, 100 ", len(selfhostSourcePaths())-2)
 	fmt.Fprintf(&out, "%%scanned = and i1 %%all%d, %%large ", len(selfhostSourcePaths())-2)
 	for idx := range selfhostSourcePaths() {
@@ -956,10 +998,19 @@ func writeStage2SourceReadLoop(out *strings.Builder, idx int) {
 	}
 	fmt.Fprintf(out, "read%d.loop: %%count%d = phi i32 [0, %%%s], [%%next%d, %%read%d.byte] ",
 		idx, idx, prev, idx, idx)
+	fmt.Fprintf(out, "%%prev%d = phi i32 [0, %%%s], [%%ch%d, %%read%d.byte] ",
+		idx, prev, idx, idx)
+	fmt.Fprintf(out, "%%fn%d = phi i32 [0, %%%s], [%%fnnext%d, %%read%d.byte] ",
+		idx, prev, idx, idx)
 	fmt.Fprintf(out, "%%ch%d = call i32 @fgetc(ptr %%srcfile%d) ", idx, idx)
 	fmt.Fprintf(out, "%%eof%d = icmp slt i32 %%ch%d, 0 ", idx, idx)
 	fmt.Fprintf(out, "br i1 %%eof%d, label %%read%d.done, label %%read%d.byte ", idx, idx, idx)
 	fmt.Fprintf(out, "read%d.byte: %%next%d = add i32 %%count%d, 1 ", idx, idx, idx)
+	fmt.Fprintf(out, "%%isf%d = icmp eq i32 %%prev%d, 102 ", idx, idx)
+	fmt.Fprintf(out, "%%isn%d = icmp eq i32 %%ch%d, 110 ", idx, idx)
+	fmt.Fprintf(out, "%%ispair%d = and i1 %%isf%d, %%isn%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%pairint%d = zext i1 %%ispair%d to i32 ", idx, idx)
+	fmt.Fprintf(out, "%%fnnext%d = add i32 %%fn%d, %%pairint%d ", idx, idx, idx)
 	fmt.Fprintf(out, "br label %%read%d.loop ", idx)
 	fmt.Fprintf(out, "read%d.done: br label %%%s ", idx, next)
 	if idx+1 == len(selfhostSourcePaths()) {
