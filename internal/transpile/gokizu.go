@@ -1169,12 +1169,25 @@ pub fn parse_score(source: []const u8) -> i64 {
 func parserModuleSummarySource() string {
 	return `pub struct Module {
     pub score: i64,
+    pub first_token: i64,
+    pub declarations: i64,
     pub bytes: i64,
     pub functions: i64,
+    pub imports: i64,
+    pub structs: i64,
+    pub enums: i64,
+    pub braces: i64,
+    pub balance: i64,
     pub balanced: bool
 }
 
 pub fn parse_module(source: []const u8) -> Module {
+    let first = first_token_code(source);
+    let functions = function_count(source);
+    let imports = lexer::CountImport(source);
+    let structs = lexer::CountStruct(source);
+    let enums = lexer::CountEnum(source);
+    let declarations = functions * 5 + imports * 3 + structs * 2 + enums * 2;
     let balance = brace_balance(source);
     let braces = brace_count(source);
     var brace_metric = 0;
@@ -1182,9 +1195,16 @@ pub fn parse_module(source: []const u8) -> Module {
         brace_metric = braces;
     }
     return Module {
-        score: first_token_code(source) + declaration_score(source) + brace_metric,
+        score: first + declarations + brace_metric,
+        first_token: first,
+        declarations: declarations,
         bytes: std::mem::len(source),
-        functions: function_count(source),
+        functions: functions,
+        imports: imports,
+        structs: structs,
+        enums: enums,
+        braces: braces,
+        balance: balance,
         balanced: balance == 0
     };
 }
@@ -1261,7 +1281,10 @@ pub struct Compiler {
 pub struct SourceMetrics {
     pub parsed: i64,
     pub bytes: i64,
-    pub functions: i64
+    pub functions: i64,
+    pub declarations: i64,
+    pub braces: i64,
+    pub balanced: bool
 }
 
 pub fn Compiler(source: []const u8) -> Compiler {
@@ -1322,9 +1345,26 @@ func compilerTreeSource() string {
         functions: manifest_parse.functions + token_parse.functions + lexer_parse.functions +
             parser_parse.functions + resolver_parse.functions + checker_parse.functions +
             lower_parse.functions + emit_parse.functions + compiler_parse.functions +
-            main_parse.functions
+            main_parse.functions,
+        declarations: manifest_parse.declarations + token_parse.declarations +
+            lexer_parse.declarations + parser_parse.declarations + resolver_parse.declarations +
+            checker_parse.declarations + lower_parse.declarations + emit_parse.declarations +
+            compiler_parse.declarations + main_parse.declarations,
+        braces: manifest_parse.braces + token_parse.braces + lexer_parse.braces +
+            parser_parse.braces + resolver_parse.braces + checker_parse.braces +
+            lower_parse.braces + emit_parse.braces + compiler_parse.braces + main_parse.braces,
+        balanced: manifest_parse.balanced and token_parse.balanced and lexer_parse.balanced and
+            parser_parse.balanced and resolver_parse.balanced and checker_parse.balanced and
+            lower_parse.balanced and emit_parse.balanced and compiler_parse.balanced and
+            main_parse.balanced
     };
-    let checked = checker::check_entry(metrics.parsed);
+    let checked = checker::check_entry(
+        metrics.parsed,
+        metrics.functions,
+        metrics.declarations,
+        metrics.braces,
+        metrics.balanced
+    );
     let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, metrics.bytes, metrics.functions);
     let artifact_bytes = artifact.as_bytes();
@@ -1339,7 +1379,7 @@ func compilerTreeSource() string {
 func compilerEmitStage2Source() string {
 	return `pub fn emit_stage2() -> !void {
     let allocator = std::mem::page_allocator();
-    let checked = checker::check_entry(1);
+    let checked = checker::check_entry(1, 0, 0, 0, false);
     let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, 0, 0);
     let artifact_bytes = artifact.as_bytes();
@@ -1382,13 +1422,27 @@ func checkerSource(info typesPackage) string {
 	var out bytes.Buffer
 	out.WriteString(`pub struct CheckedModule {
     pub valid: bool,
-    pub score: i64
+    pub score: i64,
+    pub functions: i64,
+    pub declarations: i64,
+    pub braces: i64,
+    pub balanced: bool
 }
 
-pub fn check_entry(parsed: i64) -> CheckedModule {
+pub fn check_entry(
+    parsed: i64,
+    functions: i64,
+    declarations: i64,
+    braces: i64,
+    balanced: bool
+) -> CheckedModule {
     return CheckedModule {
-        valid: parsed >= 100,
-        score: parsed
+        valid: parsed >= 100 and balanced,
+        score: parsed,
+        functions: functions,
+        declarations: declarations,
+        braces: braces,
+        balanced: balanced
     };
 }
 `)
@@ -1417,17 +1471,26 @@ func lowerSource() string {
 	return `import selfhost::checker;
 
 pub struct Module {
-    pub score: i64
+    pub score: i64,
+    pub functions: i64,
+    pub declarations: i64,
+    pub braces: i64
 }
 
 pub fn lower_entry(checked: checker::CheckedModule) -> Module {
     if checked.valid {
         return Module {
-            score: checked.score
+            score: checked.score,
+            functions: checked.functions,
+            declarations: checked.declarations,
+            braces: checked.braces
         };
     }
     return Module {
-        score: 0
+        score: 0,
+        functions: checked.functions,
+        declarations: checked.declarations,
+        braces: checked.braces
     };
 }
 `

@@ -85,7 +85,8 @@ func assertGeneratedSourceContains(t *testing.T, dir string, name string, want s
 func assertGeneratedCheckerSource(t *testing.T, outDir string) {
 	t.Helper()
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub struct CheckedModule")
-	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "valid: parsed >= 100")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "valid: parsed >= 100 and balanced")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "declarations: declarations")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn known_type")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", `if name == "i64"`)
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn numeric_type")
@@ -96,10 +97,14 @@ func assertGeneratedCheckerSource(t *testing.T, outDir string) {
 func assertGeneratedCompilerSource(t *testing.T, outDir string) {
 	t.Helper()
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub struct Module")
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "first_token: first")
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "declarations: declarations")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "pub struct SourceMetrics")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.parsed")
+	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.declarations")
 	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "pub struct Module")
 	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "score: checked.score")
+	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "braces: checked.braces")
 }
 
 // assertGeneratedEmitSource checks generated LLVM emitter bootstrap logic.
