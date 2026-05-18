@@ -158,7 +158,7 @@ const errorUnionSource = `fn read() -> !i64 {
 fn main() -> !void {
     let value = try read();
     print(value);
-    return void;
+    return;
 }`
 
 const helloLLVM = `; Kizu LLVM IR

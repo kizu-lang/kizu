@@ -95,6 +95,20 @@ func TestCheckRejectsReturnAndOperatorErrors(t *testing.T) {
 			want: "function `bad` must return i64",
 		},
 		{
+			name: "return void literal",
+			source: `fn bad() -> !void {
+    return void;
+}`,
+			want: "void is not a value; use `return;`",
+		},
+		{
+			name: "missing error union void return",
+			source: `fn bad() -> !void {
+    print("done");
+}`,
+			want: "function `bad` must return !void",
+		},
+		{
 			name: "binary operands",
 			source: `fn main() {
     print(1 + "no");
@@ -744,6 +758,20 @@ func TestCheckAcceptsErrorUnionError(t *testing.T) {
 fn main() -> !i64 {
     let value = try parse();
     return value;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckAcceptsBareReturnForErrorUnionVoid keeps !void success value-free.
+func TestCheckAcceptsBareReturnForErrorUnionVoid(t *testing.T) {
+	source := `fn step() -> !void {
+    return;
+}
+fn main() -> !void {
+    try step();
+    return;
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)

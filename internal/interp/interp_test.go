@@ -298,7 +298,7 @@ func TestRunFsWriteAndRead(t *testing.T) {
     try std::builtin::fs_write_file(io, "__PATH__", "hello fs");
     let text = try std::builtin::fs_read_file(io, "__PATH__");
     print(text);
-    return void;
+    return;
 }`, "__PATH__", path)
 	got := runSource(t, source)
 	if got != "hello fs\n" {

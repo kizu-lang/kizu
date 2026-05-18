@@ -125,7 +125,7 @@ func TestParseIndexAndSliceExpressions(t *testing.T) {
     let part = bytes[0..5];
     let tail = bytes[2..];
     let head = bytes[..3];
-    return void;
+    return;
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
@@ -133,7 +133,7 @@ func TestParseIndexAndSliceExpressions(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `fn main() -> !void { let byte = bytes[0]; let part = bytes[0..5]; ` +
-		`let tail = bytes[2..]; let head = bytes[..3]; return void; }`
+		`let tail = bytes[2..]; let head = bytes[..3]; return; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
