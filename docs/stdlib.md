@@ -117,9 +117,10 @@ Stateful runtime APIs such as `std::array::Array`, `std::map::Map`,
 `std::thread::scoped<T>`, `std::sync::Mutex`, and `std::atomic::Atomic` still
 keep Go runtime primitives where they own runtime storage, scheduler,
 synchronization, and borrow-safety rules. Treat those primitives as explicit
-runtime boundaries, not ordinary stdlib logic. Splitting ergonomic public
-wrappers into Kizu source is tracked by #360 and must not leave dual public
-paths behind. The
+runtime boundaries, not ordinary stdlib logic. The first wrapper split was
+tracked by #360 and must not leave dual public paths behind. Remaining stateful
+method wrappers are tracked by #382, and broader `std::thread::scoped`
+argument forwarding is tracked by #383. The
 task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
 Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
 uses a `comptime Function` parameter to forward the worker name through
@@ -135,20 +136,20 @@ forwarding through Kizu std source.
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
 | `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, len, byte_at, and slice use trusted primitives | keep only capability, metadata, and recoverable-bounds primitives trusted |
-| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor wrapper; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; method wrappers tracked by #360 |
+| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor wrapper; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; method wrappers tracked by #382 |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
-| `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor wrapper; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; method wrappers tracked by #360 |
+| `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor wrapper; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; method wrappers tracked by #382 |
 | `std::testing` | `expect`, equality helpers, `fail` | Kizu source over `std::fmt` and `String` | keep Go limited to the runner and error-union reporting boundary |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
-| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors, `parallel_for`, and `parallel_map`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; method wrappers tracked by #360 |
-| `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor wrapper; Go owned message queue and boundary checks | keep queue primitive trusted; method wrappers still tracked by #360 |
-| `std::thread` | `scoped<T>` | Kizu one-argument wrapper; Go host thread boundary and join semantics | keep thread boundary primitive trusted; broader argument forwarding tracked by #360 |
-| `std::sync` | `Mutex<T>` | Kizu constructor wrapper; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted; method wrappers tracked by #360 |
-| `std::atomic` | `Atomic<T>` | Kizu constructor wrapper; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API and method wrappers tracked by #360 |
+| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors, `parallel_for`, and `parallel_map`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; method wrappers tracked by #382 |
+| `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor wrapper; Go owned message queue and boundary checks | keep queue primitive trusted; method wrappers tracked by #382 |
+| `std::thread` | `scoped<T>` | Kizu one-argument wrapper; Go host thread boundary and join semantics | keep thread boundary primitive trusted; broader argument forwarding tracked by #383 |
+| `std::sync` | `Mutex<T>` | Kizu constructor wrapper; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted; method wrappers tracked by #382 |
+| `std::atomic` | `Atomic<T>` | Kizu constructor wrapper; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API and method wrappers tracked by #382 |
 
 ## Source Layout Target
 
