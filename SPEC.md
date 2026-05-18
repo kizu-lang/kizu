@@ -1616,6 +1616,11 @@ target/
 `kizu check` は durable artifact をデフォルトでは生成しません。
 IR、WASM、native、C 出力は明示的な build command でだけ生成します。
 
+native build は Zig を参考に、target、ABI、libc mode、runtime mode、linker mode を
+明示的な build input として扱います。現時点の native backend は host `clang` と libc を
+使ってよいですが、将来の `--libc off` / freestanding build を一級の build mode として
+扱います。libc 依存は言語仕様に埋め込まず、build metadata と cache key に含めます。
+
 build cache key には、compiler version、manifest hash、resolved module graph hash、
 source hash、public interface hash、target、backend、optimization mode、stdlib hash
 を含めます。

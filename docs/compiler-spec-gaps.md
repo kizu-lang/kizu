@@ -97,6 +97,17 @@ Required user-facing commands:
 - `kizu cache prune`
 - `kizu why-rebuild`
 
+### Native Build Policy
+
+Source: [ADR-0052](adr/0052-zig-style-native-build-policy.md).
+
+- native builds are explicit through `kizu build --target native`
+- the current backend may use host `clang` and libc
+- no-libc / freestanding builds are a planned first-class mode
+- libc mode, runtime mode, target triple, ABI, linker, and optimization mode
+  are build inputs and cache-key inputs
+- unsupported lowered features must fail before invoking clang
+
 ### Bootstrap
 
 Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).
@@ -113,6 +124,10 @@ tests, and self-check/build.
 - Preserve byte spans and file IDs through compiler phases: #89.
 - Render multi-file diagnostics: #89.
 - Add artifact layout under `target/`: #90.
+- Add explicit native target metadata flags for triple, ABI, libc, runtime, and
+  linker mode.
+- Add no-libc / freestanding runtime support after hosted libc native builds are
+  stable.
 - Extend build cache keys with module graph and public interface hashes: #90.
 - Add bootstrap oracle tests for parser, diagnostics, type checking, ownership,
   IR, backend outputs, and module fixtures: #91.

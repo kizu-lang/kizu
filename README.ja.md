@@ -62,6 +62,8 @@ v0.1 の対象は interpreter-first の language core です。
 これらは将来の compiler work の土台ですが、まだ言語の正ではありません。
 LLVM と WASM は interpreter より限定された subset だけを扱います。native build は
 LLVM lowering 済み subset と小さな `kizu_print_*` runtime shim に限定します。
+現時点の native path は host `clang` と libc を使いますが、将来の no-libc /
+freestanding build は採用済みの build policy として扱います。
 
 現時点で open な v0.2 Issue はありません。将来の compiler migration work は、
 明確な受け入れ条件を持つ新しい GitHub Issues から開始します。
