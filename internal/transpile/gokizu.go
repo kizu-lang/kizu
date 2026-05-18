@@ -772,13 +772,13 @@ pub fn llvm(
         return failed;
     }
     var out = std::string::String(allocator);
-    try out.append_bytes("; kizu selfhost source metric ");
+    try out.append_bytes("; kizu stage source metric ");
     out = try append_i64(out, module);
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("; kizu selfhost source bytes ");
+    try out.append_bytes("; kizu stage source bytes ");
     out = try append_i64(out, source_bytes);
     try out.append_byte(cast<u8>(10));
-    try out.append_bytes("; kizu selfhost source fn count ");
+    try out.append_bytes("; kizu stage source fn count ");
     out = try append_i64(out, source_fns);
     try out.append_byte(cast<u8>(10));
 `)
@@ -812,36 +812,7 @@ fn append_i64(out: std::string::String, value: i64) -> !std::string::String {
 
 // stage2WriterLLVMChunks returns Kizu-emitted LLVM pieces for the stage2 writer.
 func stage2WriterLLVMChunks() []string {
-	artifact := stage3CompilerArtifactLLVM()
-	return []string{
-		stage2ArtifactLLVM(artifact),
-		stage2SourceGlobals(),
-		stage2RuntimeDeclsLLVM(),
-		stage2EntryLLVM(),
-		stage2OpenSources(),
-		stage2CheckSources(),
-		stage2WriteGateLLVM(),
-		stage2WriteFallbackLLVM(artifact),
-	}
-}
-
-// stage2ArtifactLLVM renders the fallback stage artifact constant.
-func stage2ArtifactLLVM(artifact string) string {
-	parsePrefix := "; kizu stage2 source metric "
-	bytesPrefix := "; kizu stage2 source bytes "
-	fnPrefix := "; kizu stage2 source fn count "
-	newline := "\n"
-	return "@artifact = private constant [" + fmt.Sprint(len(artifact)+1) +
-		" x i8] [" + byteArray(artifact) + "] " +
-		"@parsemetric = private constant [" + fmt.Sprint(len(parsePrefix)+1) +
-		" x i8] [" + byteArray(parsePrefix) + "] " +
-		"@metric = private constant [" + fmt.Sprint(len(bytesPrefix)+1) +
-		" x i8] [" + byteArray(bytesPrefix) + "] " +
-		"@fnmetric = private constant [" + fmt.Sprint(len(fnPrefix)+1) +
-		" x i8] [" + byteArray(fnPrefix) + "] " +
-		"@newline = private constant [" + fmt.Sprint(len(newline)+1) +
-		" x i8] [" + byteArray(newline) + "] " +
-		"@mode = private constant [2 x i8] [i8 119, i8 0] "
+	return []string{stage3CompilerArtifactLLVM()}
 }
 
 // stage3CompilerArtifactLLVM renders a source-scanning compiler for the next stage.
@@ -894,9 +865,9 @@ func stageTemplateGlobals(templateLen int) string {
 
 // stage2ArtifactMetricGlobals renders output metric labels shared by stage artifacts.
 func stage2ArtifactMetricGlobals() string {
-	parsePrefix := "; kizu stage2 source metric "
-	bytesPrefix := "; kizu stage2 source bytes "
-	fnPrefix := "; kizu stage2 source fn count "
+	parsePrefix := stageSourceMetricPrefix()
+	bytesPrefix := stageSourceBytesPrefix()
+	fnPrefix := stageSourceFnPrefix()
 	newline := "\n"
 	return "@parsemetric = private constant [" + fmt.Sprint(len(parsePrefix)+1) +
 		" x i8] [" + byteArray(parsePrefix) + "] " +
@@ -907,6 +878,21 @@ func stage2ArtifactMetricGlobals() string {
 		"@newline = private constant [" + fmt.Sprint(len(newline)+1) +
 		" x i8] [" + byteArray(newline) + "] " +
 		"@mode = private constant [2 x i8] [i8 119, i8 0] "
+}
+
+// stageSourceMetricPrefix labels the parse metric in every bootstrap stage.
+func stageSourceMetricPrefix() string {
+	return "; kizu stage source metric "
+}
+
+// stageSourceBytesPrefix labels the source byte total in every bootstrap stage.
+func stageSourceBytesPrefix() string {
+	return "; kizu stage source bytes "
+}
+
+// stageSourceFnPrefix labels the source function count in every bootstrap stage.
+func stageSourceFnPrefix() string {
+	return "; kizu stage source fn count "
 }
 
 // stage2RuntimeDeclsLLVM renders libc declarations used by stage2.
@@ -928,45 +914,11 @@ func stage2WriteGateLLVM() string {
 	return "br i1 %scanned, label %write, label %done "
 }
 
-// stage2WriteFallbackLLVM writes the fallback artifact when source scanning succeeds.
-func stage2WriteFallbackLLVM(artifact string) string {
-	parsePrefix := "; kizu stage2 source metric "
-	bytesPrefix := "; kizu stage2 source bytes "
-	fnPrefix := "; kizu stage2 source fn count "
-	newline := "\n"
-	return "write: " +
-		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
-		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +
-		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
-		"%parsemetric = getelementptr [" + fmt.Sprint(len(parsePrefix)+1) +
-		" x i8], ptr @parsemetric, i64 0, i64 0 " +
-		"call i32 @fputs(ptr %parsemetric, ptr %file) " +
-		stage2WriteNumberLLVM("parsedigits", "%parsetotal", "after.parse") +
-		"after.parse: %newline0 = getelementptr [" + fmt.Sprint(len(newline)+1) +
-		" x i8], ptr @newline, i64 0, i64 0 call i32 @fputs(ptr %newline0, ptr %file) " +
-		"%metric = getelementptr [" + fmt.Sprint(len(bytesPrefix)+1) +
-		" x i8], ptr @metric, i64 0, i64 0 " +
-		"call i32 @fputs(ptr %metric, ptr %file) " +
-		stage2WriteNumberLLVM("digits", "%total7", "after.bytes") +
-		"after.bytes: %newline1 = getelementptr [" + fmt.Sprint(len(newline)+1) +
-		" x i8], ptr @newline, i64 0, i64 0 call i32 @fputs(ptr %newline1, ptr %file) " +
-		"%fnmetric = getelementptr [" + fmt.Sprint(len(fnPrefix)+1) +
-		" x i8], ptr @fnmetric, i64 0, i64 0 " +
-		"call i32 @fputs(ptr %fnmetric, ptr %file) " +
-		stage2WriteNumberLLVM("fndigits", "%fntotal7", "after.fns") +
-		"after.fns: %newline = getelementptr [" + fmt.Sprint(len(newline)+1) +
-		" x i8], ptr @newline, i64 0, i64 0 call i32 @fputs(ptr %newline, ptr %file) " +
-		"%text = getelementptr [" + fmt.Sprint(len(artifact)+1) +
-		" x i8], ptr @artifact, i64 0, i64 0 " +
-		"call i32 @fputs(ptr %text, ptr %file) call i32 @fclose(ptr %file) " +
-		"br label %done done: ret i32 0 }"
-}
-
 // stageTemplateWriteLLVM writes metrics and expands the compiler template.
 func stageTemplateWriteLLVM(templateLen int) string {
-	parsePrefix := "; kizu stage2 source metric "
-	bytesPrefix := "; kizu stage2 source bytes "
-	fnPrefix := "; kizu stage2 source fn count "
+	parsePrefix := stageSourceMetricPrefix()
+	bytesPrefix := stageSourceBytesPrefix()
+	fnPrefix := stageSourceFnPrefix()
 	return "write: " +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
 		"%mode = getelementptr [2 x i8], ptr @mode, i64 0, i64 0 " +

@@ -322,35 +322,16 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	stage3Bin := filepath.Join(dir, "kizu-stage3")
 	stage4 := filepath.Join(dir, "stage4.ll")
 
-	build := exec.Command(
-		"go", "run", "./cmd/kizu", "build", "--target", "native",
-		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
-		"-o", stage1, "selfhost",
-	)
-	build.Dir = repoRoot
-	out, err := build.CombinedOutput()
-	if err != nil {
-		t.Fatalf("stage1 build failed: %v\n%s", err, out)
-	}
-
-	run := exec.Command(stage1, stage2)
-	run.Dir = repoRoot
-	out, err = run.CombinedOutput()
-	if err != nil {
-		t.Fatalf("stage1 executable failed: %v\n%s", err, out)
-	}
-	data, err := os.ReadFile(stage2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	buildSelfhostStage1(t, repoRoot, stage1)
+	data := runSelfhostStage(t, repoRoot, stage1, stage2, "stage1")
 	assertStage2LLVMReadsSources(t, data)
 
 	link := exec.Command("clang", stage2, "-o", stage2Bin)
-	out, err = link.CombinedOutput()
+	out, err := link.CombinedOutput()
 	if err != nil {
 		t.Fatalf("stage2 link failed: %v\n%s", err, out)
 	}
-	run = exec.Command(stage2Bin, stage3)
+	run := exec.Command(stage2Bin, stage3)
 	run.Dir = repoRoot
 	out, err = run.CombinedOutput()
 	if err != nil {
@@ -368,10 +349,50 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStage2GeneratedArtifact(t, repoRoot, stage2Data, data, stage3, stage3Bin)
+	if !bytes.Equal(stage2Data, data) {
+		t.Fatalf("stage2 and stage3 artifacts differ")
+	}
 	stage4Data := assertStage3CanCompileSourceTree(t, repoRoot, stage3Bin, stage4, stage2Data)
 	if !bytes.Equal(data, stage4Data) {
 		t.Fatalf("stage3 and stage4 artifacts differ")
 	}
+}
+
+// buildSelfhostStage1 builds the Go-seeded native selfhost executable.
+func buildSelfhostStage1(t *testing.T, repoRoot string, stage1 string) {
+	t.Helper()
+	build := exec.Command(
+		"go", "run", "./cmd/kizu", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", stage1, "selfhost",
+	)
+	build.Dir = repoRoot
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stage1 build failed: %v\n%s", err, out)
+	}
+}
+
+// runSelfhostStage runs a selfhost stage and returns the emitted LLVM artifact.
+func runSelfhostStage(
+	t *testing.T,
+	repoRoot string,
+	stageBin string,
+	output string,
+	label string,
+) []byte {
+	t.Helper()
+	run := exec.Command(stageBin, output)
+	run.Dir = repoRoot
+	out, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s executable failed: %v\n%s", label, err, out)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 // assertStage2LLVMReadsSources checks that the stage2 IR depends on compiler source inputs.
@@ -400,10 +421,10 @@ func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
 	if strings.Contains(text, "copy.in") {
 		t.Fatalf("stage2 artifact still includes input-copy path:\n%s", data)
 	}
-	if !strings.Contains(text, "; kizu selfhost source metric ") {
+	if !strings.Contains(text, "; kizu stage source metric ") {
 		t.Fatalf("stage2 artifact does not include source-derived metric:\n%s", data)
 	}
-	if !strings.Contains(text, "; kizu selfhost source bytes ") {
+	if !strings.Contains(text, "; kizu stage source bytes ") {
 		t.Fatalf("stage2 artifact does not include source byte total:\n%s", data)
 	}
 }
@@ -418,16 +439,13 @@ func assertStage2GeneratedArtifact(
 	stage3Bin string,
 ) {
 	t.Helper()
-	if strings.Contains(string(data), "; kizu selfhost source metric ") {
-		t.Fatalf("stage2 generated artifact unexpectedly copied stage2 input:\n%s", data)
-	}
-	if !strings.Contains(string(data), "; kizu stage2 source bytes ") {
+	if !strings.Contains(string(data), "; kizu stage source bytes ") {
 		t.Fatalf("stage2 generated artifact does not include source byte total:\n%s", data)
 	}
-	if !strings.Contains(string(data), "; kizu stage2 source metric ") {
+	if !strings.Contains(string(data), "; kizu stage source metric ") {
 		t.Fatalf("stage2 generated artifact does not include source metric:\n%s", data)
 	}
-	if !strings.Contains(string(data), "; kizu stage2 source fn count ") {
+	if !strings.Contains(string(data), "; kizu stage source fn count ") {
 		t.Fatalf("stage2 generated artifact does not include source fn count:\n%s", data)
 	}
 	if !strings.Contains(string(data), "fopen(ptr %source8, ptr %readmode)") {
@@ -476,35 +494,20 @@ func assertStage3CanCompileSourceTree(
 // assertStage2SourceOnlyMetrics checks source-only output against stage1 metrics.
 func assertStage2SourceOnlyMetrics(t *testing.T, stage2Data []byte, sourceData []byte) {
 	t.Helper()
-	stage2ParseLine := firstLineContaining(string(stage2Data), "; kizu selfhost source metric ")
-	sourceParseLine := strings.Replace(
-		firstLineContaining(string(sourceData), "; kizu stage2 source metric "),
-		"; kizu stage2 source metric ",
-		"; kizu selfhost source metric ",
-		1,
-	)
+	stage2ParseLine := firstLineContaining(string(stage2Data), "; kizu stage source metric ")
+	sourceParseLine := firstLineContaining(string(sourceData), "; kizu stage source metric ")
 	if stage2ParseLine != sourceParseLine {
 		t.Fatalf("source parse metrics differ: stage2 %q source-only %q",
 			stage2ParseLine, sourceParseLine)
 	}
-	stage2BytesLine := firstLineContaining(string(stage2Data), "; kizu selfhost source bytes ")
-	sourceBytesLine := strings.Replace(
-		firstLineContaining(string(sourceData), "; kizu stage2 source bytes "),
-		"; kizu stage2 source bytes ",
-		"; kizu selfhost source bytes ",
-		1,
-	)
+	stage2BytesLine := firstLineContaining(string(stage2Data), "; kizu stage source bytes ")
+	sourceBytesLine := firstLineContaining(string(sourceData), "; kizu stage source bytes ")
 	if stage2BytesLine != sourceBytesLine {
 		t.Fatalf("source byte totals differ: stage2 %q source-only %q",
 			stage2BytesLine, sourceBytesLine)
 	}
-	stage2FnsLine := firstLineContaining(string(stage2Data), "; kizu selfhost source fn count ")
-	sourceFnsLine := strings.Replace(
-		firstLineContaining(string(sourceData), "; kizu stage2 source fn count "),
-		"; kizu stage2 source fn count ",
-		"; kizu selfhost source fn count ",
-		1,
-	)
+	stage2FnsLine := firstLineContaining(string(stage2Data), "; kizu stage source fn count ")
+	sourceFnsLine := firstLineContaining(string(sourceData), "; kizu stage source fn count ")
 	if stage2FnsLine != sourceFnsLine {
 		t.Fatalf("source fn counts differ: stage2 %q source-only %q",
 			stage2FnsLine, sourceFnsLine)
