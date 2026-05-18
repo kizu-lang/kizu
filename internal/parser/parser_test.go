@@ -105,10 +105,10 @@ func TestParseIfExpression(t *testing.T) {
 // TestParseIndexAndSliceExpressions checks checked byte access syntax.
 func TestParseIndexAndSliceExpressions(t *testing.T) {
 	input := `fn main() -> !void {
-    let byte = try bytes[0];
-    let part = try bytes[0..5];
-    let tail = try bytes[2..];
-    let head = try bytes[..3];
+    let byte = bytes[0];
+    let part = bytes[0..5];
+    let tail = bytes[2..];
+    let head = bytes[..3];
     return void;
 }`
 	p := New(lexer.New(input))
@@ -116,8 +116,8 @@ func TestParseIndexAndSliceExpressions(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() -> !void { let byte = try bytes[0]; let part = try bytes[0..5]; ` +
-		`let tail = try bytes[2..]; let head = try bytes[..3]; return void; }`
+	want := `fn main() -> !void { let byte = bytes[0]; let part = bytes[0..5]; ` +
+		`let tail = bytes[2..]; let head = bytes[..3]; return void; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

@@ -674,17 +674,17 @@ v0.1 では full generics を実装しません。
 Kizu は checked index と checked slice syntax を持ちます。
 
 ```kizu
-let byte = try bytes[index];
-let part = try bytes[start..end];
-let tail = try bytes[start..];
-let head = try bytes[..end];
+let byte = bytes[index];
+let part = bytes[start..end];
+let tail = bytes[start..];
+let head = bytes[..end];
 ```
 
 v0.2 の最初の対象は `[]const u8` です。
 
 ```text
-[]const u8 [ i64 ] -> !u8
-[]const u8 [ i64 .. i64 ] -> ![]const u8
+[]const u8 [ i64 ] -> u8
+[]const u8 [ i64 .. i64 ] -> []const u8
 ```
 
 index / slice syntax は 1 次元 contiguous sequence に限定します。
@@ -696,8 +696,10 @@ slice bounds は half-open です。
 `start..end` は `start` を含み、`end` を含みません。
 
 safe Kizu では unchecked bounds access を許しません。
-負の index、負の bound、`start > end`、`end > len` は error を返します。
-`bytes[i]` と `bytes[a..b]` は `!T` を返すため、通常は `try` で扱います。
+負の index、負の bound、`start > end`、`end > len` は safety check failure として trap します。
+index / slice syntax は recoverable error を返しません。
+境界外を回復可能な値として扱いたい場合は、`std::mem::byte_at` や
+`std::mem::slice` のような明示 API を使います。
 
 v0.2 では mutable indexed assignment、indexed borrow、multi-dimensional slicing、
 `std::array::Array<T>` への直接 indexing は後続に分離します。
@@ -1283,7 +1285,7 @@ std::mem::trim_ascii(bytes: []const u8) -> []const u8
 `std::mem` の safe API は raw pointer を返しません。
 `std::mem::slice` と `std::mem::byte_at` は境界外アクセスを `!T` として返します。
 checked index / slice syntax の実装後は、Kizu std source では
-`try bytes[index]` と `try bytes[start..end]` を優先します。
+trap-on-bounds-failure の syntax と recoverable な `std::mem` API を用途で使い分けます。
 allocator、mutable slice、byte copy / zero / fill は、`std::array::Array<T>` と
 mutable slice の仕様後に実装します。
 
