@@ -365,7 +365,7 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStageArtifactsEqual(t, stage2Data, data)
-	assertStage2CanWriteWithoutInputCopy(t, repoRoot, stage2Bin, dir)
+	assertStage2CanWriteWithoutInputCopy(t, repoRoot, stage2Bin, dir, stage2Data)
 }
 
 // assertStage2LLVMReadsSources checks that the stage2 IR depends on compiler source inputs.
@@ -394,6 +394,9 @@ func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
 	if !strings.Contains(text, "; kizu selfhost source metric ") {
 		t.Fatalf("stage2 artifact does not include source-derived metric:\n%s", data)
 	}
+	if !strings.Contains(text, "; kizu selfhost source bytes ") {
+		t.Fatalf("stage2 artifact does not include source byte total:\n%s", data)
+	}
 }
 
 // assertStageArtifactsEqual checks stage output stability for the bootstrap smoke.
@@ -410,6 +413,7 @@ func assertStage2CanWriteWithoutInputCopy(
 	repoRoot string,
 	stage2Bin string,
 	dir string,
+	stage2Data []byte,
 ) {
 	t.Helper()
 	sourceOut := filepath.Join(dir, "stage3-source.ll")
@@ -430,6 +434,17 @@ func assertStage2CanWriteWithoutInputCopy(
 	if !strings.Contains(string(data), "; kizu stage2 source bytes ") {
 		t.Fatalf("source-only stage2 artifact does not include source byte total:\n%s", data)
 	}
+	stage2BytesLine := firstLineContaining(string(stage2Data), "; kizu selfhost source bytes ")
+	sourceBytesLine := strings.Replace(
+		firstLineContaining(string(data), "; kizu stage2 source bytes "),
+		"; kizu stage2 source bytes ",
+		"; kizu selfhost source bytes ",
+		1,
+	)
+	if stage2BytesLine != sourceBytesLine {
+		t.Fatalf("source byte totals differ: stage2 %q source-only %q",
+			stage2BytesLine, sourceBytesLine)
+	}
 	link := exec.Command("clang", sourceOut, "-o", sourceBin)
 	out, err = link.CombinedOutput()
 	if err != nil {
@@ -440,6 +455,16 @@ func assertStage2CanWriteWithoutInputCopy(
 	if err != nil {
 		t.Fatalf("source-only stage2 output failed: %v\n%s", err, out)
 	}
+}
+
+// firstLineContaining returns the first line with marker.
+func firstLineContaining(text string, marker string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, marker) {
+			return line
+		}
+	}
+	return ""
 }
 
 // TestBuildTargetNativeRejectsUnsupportedModes checks planned Zig-style modes are explicit.

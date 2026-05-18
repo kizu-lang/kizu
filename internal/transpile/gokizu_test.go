@@ -31,6 +31,7 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "if module <= 0")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "std::string::String")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "append_i64")
+	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "kizu selfhost source bytes")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "try out.append_bytes")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "declare ptr @fopen")
 	assertGeneratedSourceContains(t, outDir, "src/emit.kizu", "fopen(ptr %source8, ptr %readmode)")

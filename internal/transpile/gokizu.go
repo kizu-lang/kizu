@@ -673,12 +673,17 @@ func compilerTreeSource() string {
     let emit_parse = parse_module(emit_source);
     let compiler_parse = parse_module(compiler_source);
     let main_parse = parse_module(main_source);
+    let source_bytes = std::mem::len(token_source) + std::mem::len(lexer_source) +
+        std::mem::len(parser_source) + std::mem::len(resolver_source) +
+        std::mem::len(checker_source) + std::mem::len(lower_source) +
+        std::mem::len(emit_source) + std::mem::len(compiler_source) +
+        std::mem::len(main_source);
 
     let parsed = token_parse + lexer_parse + parser_parse + resolver_parse +
         checker_parse + lower_parse + emit_parse + compiler_parse + main_parse;
     let checked = checker::check_entry(parsed);
     let module = lower::lower_entry(checked, parsed);
-    let artifact = try emit::llvm(allocator, module);
+    let artifact = try emit::llvm(allocator, module, source_bytes);
     let artifact_bytes = artifact.as_bytes();
     try std::fs::write_file(io, output, artifact_bytes);
     return;
@@ -693,7 +698,7 @@ func compilerEmitStage2Source() string {
     let allocator = std::mem::page_allocator();
     let checked = checker::check_entry(1);
     let module = lower::lower_entry(checked, 1);
-    let artifact = try emit::llvm(allocator, module);
+    let artifact = try emit::llvm(allocator, module, 0);
     let artifact_bytes = artifact.as_bytes();
     print(artifact_bytes);
     return;
@@ -750,7 +755,7 @@ func emitSource() string {
 	var out bytes.Buffer
 	out.WriteString(`import selfhost::lower;
 
-pub fn llvm(allocator: Allocator, module: i64) -> !std::string::String {
+pub fn llvm(allocator: Allocator, module: i64, source_bytes: i64) -> !std::string::String {
     if module <= 0 {
         var failed = std::string::String(allocator);
         try failed.append_bytes("define i32 @main() { entry: ret i32 1 }");
@@ -759,6 +764,9 @@ pub fn llvm(allocator: Allocator, module: i64) -> !std::string::String {
     var out = std::string::String(allocator);
     try out.append_bytes("; kizu selfhost source metric ");
     out = try append_i64(out, module);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("; kizu selfhost source bytes ");
+    out = try append_i64(out, source_bytes);
     try out.append_byte(cast<u8>(10));
 `)
 	for _, chunk := range stage2WriterLLVMChunks() {
