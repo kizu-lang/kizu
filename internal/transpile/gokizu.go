@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -47,7 +48,8 @@ type tokenPackage struct {
 }
 
 type lexerPackage struct {
-	fields []field
+	fields      []field
+	punctuation []punctuationRule
 }
 
 type field struct {
@@ -58,6 +60,14 @@ type field struct {
 type keyword struct {
 	literal string
 	tag     string
+}
+
+type punctuationRule struct {
+	ch     int
+	next   int
+	tag    string
+	width  int
+	serial int
 }
 
 // readTokenPackage extracts token enum tags and the Token struct.
@@ -83,7 +93,7 @@ func readLexerPackage(path string) (lexerPackage, error) {
 	if len(fields) == 0 {
 		fields = []field{{name: "input", typ: "[]const u8"}, {name: "position", typ: "i64"}}
 	}
-	return lexerPackage{fields: fields}, nil
+	return lexerPackage{fields: fields, punctuation: collectPunctuationRules(file)}, nil
 }
 
 // parseGoFile parses one Go source file.
@@ -161,6 +171,195 @@ func keywordsFromValueSpec(value *ast.ValueSpec) []keyword {
 			continue
 		}
 		out = append(out, keyword{literal: strings.Trim(key.Value, `"`), tag: value.Name})
+	}
+	return out
+}
+
+// collectPunctuationRules extracts lexer punctuation maps from the Go lexer.
+func collectPunctuationRules(file *ast.File) []punctuationRule {
+	rules := []punctuationRule{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok || len(value.Names) != 1 {
+				continue
+			}
+			rules = append(rules, punctuationRulesFromSpec(value)...)
+		}
+	}
+	rules = append(rules,
+		punctuationRule{ch: '/', tag: "Slash", width: 1},
+		punctuationRule{ch: '=', next: '>', tag: "FatArrow", width: 2},
+	)
+	return normalizePunctuationRules(rules)
+}
+
+// punctuationRulesFromSpec extracts punctuation token rules from one Go var.
+func punctuationRulesFromSpec(value *ast.ValueSpec) []punctuationRule {
+	switch value.Names[0].Name {
+	case "singleCharTokens":
+		return singleCharRules(value)
+	case "compoundTokens":
+		return compoundRules(value)
+	default:
+		return nil
+	}
+}
+
+// singleCharRules extracts one-byte token rules.
+func singleCharRules(value *ast.ValueSpec) []punctuationRule {
+	lit, ok := onlyCompositeValue(value)
+	if !ok {
+		return nil
+	}
+	rules := []punctuationRule{}
+	for _, elt := range lit.Elts {
+		pair, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		ch, ok := runeLiteralValue(pair.Key)
+		tag, okTag := tokenSelectorName(pair.Value)
+		if ok && okTag {
+			rules = append(rules, punctuationRule{ch: ch, tag: tag, width: 1})
+		}
+	}
+	return rules
+}
+
+// compoundRules extracts two-byte token rules and their one-byte fallback.
+func compoundRules(value *ast.ValueSpec) []punctuationRule {
+	lit, ok := onlyCompositeValue(value)
+	if !ok {
+		return nil
+	}
+	rules := []punctuationRule{}
+	for _, elt := range lit.Elts {
+		pair, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		rules = append(rules, compoundRuleFromPair(pair)...)
+	}
+	return rules
+}
+
+// compoundRuleFromPair extracts compound and single fallback rules from one map pair.
+func compoundRuleFromPair(pair *ast.KeyValueExpr) []punctuationRule {
+	ch, ok := runeLiteralValue(pair.Key)
+	lit, okLit := pair.Value.(*ast.CompositeLit)
+	if !ok || !okLit {
+		return nil
+	}
+	fields := compoundFields(lit)
+	next, okNext := fields["nextRune"].(int)
+	compound, okCompound := fields["compound"].(string)
+	single, okSingle := fields["single"].(string)
+	rules := []punctuationRule{}
+	if okNext && okCompound {
+		rules = append(rules, punctuationRule{ch: ch, next: next, tag: compound, width: 2})
+	}
+	if okSingle {
+		rules = append(rules, punctuationRule{ch: ch, tag: single, width: 1})
+	}
+	return rules
+}
+
+// compoundFields extracts keyed fields from a compoundToken literal.
+func compoundFields(lit *ast.CompositeLit) map[string]any {
+	fields := map[string]any{}
+	for _, elt := range lit.Elts {
+		pair, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		name, ok := pair.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		switch name.Name {
+		case "next":
+			if ch, ok := runeLiteralValue(pair.Value); ok {
+				fields["nextRune"] = ch
+			}
+		case "compound", "single":
+			if tag, ok := tokenSelectorName(pair.Value); ok {
+				fields[name.Name] = tag
+			}
+		}
+	}
+	return fields
+}
+
+// onlyCompositeValue returns the sole composite literal from a value spec.
+func onlyCompositeValue(value *ast.ValueSpec) (*ast.CompositeLit, bool) {
+	if len(value.Values) != 1 {
+		return nil, false
+	}
+	lit, ok := value.Values[0].(*ast.CompositeLit)
+	return lit, ok
+}
+
+// runeLiteralValue extracts an ASCII rune literal value.
+func runeLiteralValue(expr ast.Expr) (int, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.CHAR {
+		return 0, false
+	}
+	text, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return 0, false
+	}
+	runes := []rune(text)
+	if len(runes) != 1 || runes[0] > 127 {
+		return 0, false
+	}
+	return int(runes[0]), true
+}
+
+// tokenSelectorName extracts token.X selector names.
+func tokenSelectorName(expr ast.Expr) (string, bool) {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != "token" {
+		return "", false
+	}
+	return sel.Sel.Name, true
+}
+
+// normalizePunctuationRules orders rules and removes duplicate fallbacks.
+func normalizePunctuationRules(rules []punctuationRule) []punctuationRule {
+	for idx := range rules {
+		rules[idx].serial = idx
+	}
+	sort.SliceStable(rules, func(i int, j int) bool {
+		if rules[i].width != rules[j].width {
+			return rules[i].width > rules[j].width
+		}
+		if rules[i].ch != rules[j].ch {
+			return rules[i].ch < rules[j].ch
+		}
+		if rules[i].next != rules[j].next {
+			return rules[i].next < rules[j].next
+		}
+		return rules[i].serial < rules[j].serial
+	})
+	seen := map[string]bool{}
+	out := make([]punctuationRule, 0, len(rules))
+	for _, rule := range rules {
+		key := fmt.Sprintf("%d:%d:%d:%s", rule.width, rule.ch, rule.next, rule.tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, rule)
 	}
 	return out
 }
@@ -307,8 +506,8 @@ func lexerSource(info lexerPackage) string {
 	out.WriteString(firstTokenSource())
 	out.WriteString(lexerTokenAtSource())
 	out.WriteString(firstTokenCodeSource())
-	out.WriteString(lexerPunctuationSource())
-	out.WriteString(lexerPositionPunctuationSource())
+	out.WriteString(lexerPunctuationSource(info.punctuation))
+	out.WriteString(lexerPositionPunctuationSource(info.punctuation))
 	out.WriteString(lexerHelpersSource())
 	return out.String()
 }
@@ -421,46 +620,66 @@ func firstTokenCodeSource() string {
 }
 
 // lexerPunctuationSource returns Kizu punctuation scanning helpers.
-func lexerPunctuationSource() string {
-	return `fn punctuation_token(input: []const u8, start: i64, length: i64) -> token::Token {
+func lexerPunctuationSource(rules []punctuationRule) string {
+	var out bytes.Buffer
+	out.WriteString(`fn punctuation_token(input: []const u8, start: i64, length: i64) -> token::Token {
     let ch = input[start];
-    if ch == cast<u8>(40) {
-        return make_token(token::Type::LParen, input[start..start + 1]);
-    }
-    if ch == cast<u8>(41) {
-        return make_token(token::Type::RParen, input[start..start + 1]);
-    }
-    if ch == cast<u8>(123) {
-        return make_token(token::Type::LBrace, input[start..start + 1]);
-    }
-    if ch == cast<u8>(125) {
-        return make_token(token::Type::RBrace, input[start..start + 1]);
-    }
-    if ch == cast<u8>(58) and start + 1 < length and input[start + 1] == cast<u8>(58) {
-        return make_token(token::Type::DoubleColon, input[start..start + 2]);
-    }
-    if ch == cast<u8>(45) and start + 1 < length and input[start + 1] == cast<u8>(62) {
-        return make_token(token::Type::Arrow, input[start..start + 2]);
-    }
-    if ch == cast<u8>(61) and start + 1 < length and input[start + 1] == cast<u8>(61) {
-        return make_token(token::Type::Eq, input[start..start + 2]);
-    }
-    if ch == cast<u8>(61) {
-        return make_token(token::Type::Assign, input[start..start + 1]);
-    }
-    return make_token(token::Type::Illegal, input[start..start + 1]);
+`)
+	writePunctuationCases(&out, rules, false)
+	out.WriteString(`    return make_token(token::Type::Illegal, input[start..start + 1]);
 }
 
 fn make_token(kind: token::Type, literal: []const u8) -> token::Token {
     return token::New(kind, literal, 1, 1);
 }
 
-`
+`)
+	return out.String()
+}
+
+// writePunctuationCases renders punctuation cases shared by lexer helpers.
+func writePunctuationCases(out *bytes.Buffer, rules []punctuationRule, positioned bool) {
+	for _, rule := range rules {
+		writePunctuationCase(out, rule, positioned)
+	}
+}
+
+// writePunctuationCase renders one generated punctuation rule.
+func writePunctuationCase(out *bytes.Buffer, rule punctuationRule, positioned bool) {
+	condition := fmt.Sprintf("ch == cast<u8>(%d)", rule.ch)
+	if rule.width == 2 {
+		condition += fmt.Sprintf(
+			" and start + 1 < length and input[start + 1] == cast<u8>(%d)",
+			rule.next,
+		)
+	}
+	end := "start + 1"
+	if rule.width == 2 {
+		end = "start + 2"
+	}
+	if positioned {
+		fmt.Fprintf(out, "    if %s {\n", condition)
+		fmt.Fprintf(out,
+			"        return make_token_at(token::Type::%s, input[start..%s], line, column);\n",
+			rule.tag, end)
+		out.WriteString("    }\n")
+		return
+	}
+	fmt.Fprintf(out, "    if %s {\n", condition)
+	fmt.Fprintf(out, "        return make_token(token::Type::%s, input[start..%s]);\n", rule.tag, end)
+	out.WriteString("    }\n")
+}
+
+// illegalPositionedTokenLine returns the positioned illegal-token fallback.
+func illegalPositionedTokenLine() string {
+	return "    return make_token_at(token::Type::Illegal, input[start..start + 1], " +
+		"line, column);\n"
 }
 
 // lexerPositionPunctuationSource returns position-aware punctuation helpers.
-func lexerPositionPunctuationSource() string {
-	return `fn punctuation_token_at(
+func lexerPositionPunctuationSource(rules []punctuationRule) string {
+	var out bytes.Buffer
+	out.WriteString(`fn punctuation_token_at(
     input: []const u8,
     start: i64,
     length: i64,
@@ -468,38 +687,17 @@ func lexerPositionPunctuationSource() string {
     column: i64
 ) -> token::Token {
     let ch = input[start];
-    if ch == cast<u8>(40) {
-        return make_token_at(token::Type::LParen, input[start..start + 1], line, column);
-    }
-    if ch == cast<u8>(41) {
-        return make_token_at(token::Type::RParen, input[start..start + 1], line, column);
-    }
-    if ch == cast<u8>(123) {
-        return make_token_at(token::Type::LBrace, input[start..start + 1], line, column);
-    }
-    if ch == cast<u8>(125) {
-        return make_token_at(token::Type::RBrace, input[start..start + 1], line, column);
-    }
-    if ch == cast<u8>(58) and start + 1 < length and input[start + 1] == cast<u8>(58) {
-        return make_token_at(token::Type::DoubleColon, input[start..start + 2], line, column);
-    }
-    if ch == cast<u8>(45) and start + 1 < length and input[start + 1] == cast<u8>(62) {
-        return make_token_at(token::Type::Arrow, input[start..start + 2], line, column);
-    }
-    if ch == cast<u8>(61) and start + 1 < length and input[start + 1] == cast<u8>(61) {
-        return make_token_at(token::Type::Eq, input[start..start + 2], line, column);
-    }
-    if ch == cast<u8>(61) {
-        return make_token_at(token::Type::Assign, input[start..start + 1], line, column);
-    }
-    return make_token_at(token::Type::Illegal, input[start..start + 1], line, column);
-}
+`)
+	writePunctuationCases(&out, rules, true)
+	out.WriteString(illegalPositionedTokenLine())
+	out.WriteString(`}
 
 fn make_token_at(kind: token::Type, literal: []const u8, line: i64, column: i64) -> token::Token {
     return token::New(kind, literal, line, column);
 }
 
-`
+`)
+	return out.String()
 }
 
 // lexerHelpersSource returns Kizu byte classification helpers.
