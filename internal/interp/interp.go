@@ -1045,21 +1045,16 @@ func (i *Interpreter) evalQualifiedRuntimeBuiltin(
 	if value, ok, err := i.evalTaskBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
-	return i.evalMiscQualifiedBuiltin(name, args, env)
+	return i.evalMiscQualifiedBuiltin(name)
 }
 
 // evalMiscQualifiedBuiltin evaluates remaining qualified std constructor stubs.
 func (i *Interpreter) evalMiscQualifiedBuiltin(
 	name string,
-	args []ast.Expression,
-	env *Env,
 ) (Value, bool, error) {
 	switch name {
 	case "std.channel.Channel":
 		return errorUnionValue("use std::channel::Channel<T>()"), true, nil
-	case "std.thread.scoped":
-		value, err := i.evalThreadScoped(args, env)
-		return value, true, err
 	case "std.atomic.Atomic":
 		return errorUnionValue("use std::atomic::Atomic<T>(value)"), true, nil
 	case "std.atomic.AtomicI64":
@@ -1697,6 +1692,9 @@ func (i *Interpreter) evalBuiltinTypeApply(
 	case "std.builtin.map":
 		value, err := i.evalMapConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
+	case "std.builtin.thread_scoped":
+		value, err := i.evalThreadScopedTyped(args, env)
+		return value, true, err
 	default:
 		return voidValue(), false, nil
 	}
@@ -2138,23 +2136,26 @@ func (i *Interpreter) fillPartition(
 	return voidValue(), nil
 }
 
-// evalThreadScoped runs a function synchronously with an explicit thread boundary.
-func (i *Interpreter) evalThreadScoped(args []ast.Expression, env *Env) (Value, error) {
-	if len(args) < 2 {
-		return voidValue(), fmt.Errorf("runtime error: std::thread::scoped expects io and function")
+// evalThreadScopedTyped runs the std-only one-argument scoped thread primitive.
+func (i *Interpreter) evalThreadScopedTyped(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 3 {
+		return voidValue(), fmt.Errorf("runtime error: std::thread::scoped expects io, function, and arg")
 	}
 	if _, err := i.evalExpr(args[0], env); err != nil {
 		return voidValue(), err
 	}
-	target, ok := args[1].(*ast.IdentExpr)
-	if !ok {
-		return voidValue(), fmt.Errorf("runtime error: std::thread::scoped expects function name")
-	}
-	values, err := i.evalArgs(args[2:], env)
+	worker, ok, err := i.evalFunctionNameArg(args[1], env)
 	if err != nil {
 		return voidValue(), err
 	}
-	return i.callFunction(target.Name, values)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: std::thread::scoped expects function name")
+	}
+	value, err := i.evalExpr(args[2], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.callFunction(worker, []Value{value})
 }
 
 // evalAtomic constructs a seq_cst primitive atomic value.

@@ -64,7 +64,7 @@ std::task::Queue          deterministic deferred task queue
 std::task::parallel_for   safe data parallelism
 std::task::parallel_map   disjoint partition output
 std::channel::Channel<T>  owned message passing
-std::thread::scoped       scoped thread boundary
+std::thread::scoped<T>    scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
 std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
@@ -72,7 +72,7 @@ std::fs::read_file        explicit-Io file read returning ![]const u8
 std::fs::write_file       explicit-Io file write returning !void
 ```
 
-`std::thread::scoped`、`std::atomic::Atomic<T>`、`std::sync::Mutex<T>` は必要だが、
+`std::thread::scoped<T>`、`std::atomic::Atomic<T>`、`std::sync::Mutex<T>` は必要だが、
 v0.1 では safe structured API の境界を固定するための API として扱う。
 ユーザーに raw thread sharing を中心に書かせない。
 

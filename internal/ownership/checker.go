@@ -1026,8 +1026,6 @@ func (c *Checker) checkQualifiedStdCoreBuiltin(
 	switch name {
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("move error: use `std::channel::Channel<T>()`")
-	case "std.thread.scoped":
-		return c.checkThreadScoped(args, env)
 	default:
 		return "", false, nil
 	}
@@ -1595,41 +1593,94 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if typ, ok, err := c.checkGenericUserTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkBuiltinMapTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkBuiltinThreadScopedTypeApply(
+		name, expr.TypeArg, args, env,
+	); ok || err != nil {
+		return typ, err
+	}
+	if typ, ok, err := c.checkBuiltinContainerTypeApply(
+		name, expr.TypeArg, args, env,
+	); ok || err != nil {
+		return typ, err
+	}
+	return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
+}
+
+// checkBuiltinContainerTypeApply validates std-only generic container primitives.
+func (c *Checker) checkBuiltinContainerTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
 	switch name {
 	case "std.builtin.channel":
 		if !c.currentStd {
-			return "", fmt.Errorf("move error: `%s` is reserved; use std::channel", name)
+			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::channel", name)
 		}
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
-			return "", err
+			return "", true, err
 		}
-		return fmt.Sprintf("Channel<%s>", expr.TypeArg), nil
+		return fmt.Sprintf("Channel<%s>", typeArg), true, nil
 	case "std.builtin.atomic":
 		if !c.currentStd {
-			return "", fmt.Errorf("move error: `%s` is reserved; use std::atomic", name)
+			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::atomic", name)
 		}
-		typ, _, err := c.checkAtomic(expr.TypeArg, args, env)
-		return typ, err
+		typ, _, err := c.checkAtomic(typeArg, args, env)
+		return typ, true, err
 	case "std.builtin.mutex":
 		if !c.currentStd {
-			return "", fmt.Errorf("move error: `%s` is reserved; use std::sync", name)
+			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::sync", name)
 		}
-		typ, _, err := c.checkMutex(expr.TypeArg, args, env)
-		return typ, err
+		typ, _, err := c.checkMutex(typeArg, args, env)
+		return typ, true, err
 	case "std.builtin.array":
 		if !c.currentStd {
-			return "", fmt.Errorf("move error: `%s` is reserved; use std::array", name)
+			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::array", name)
 		}
-		return c.checkArrayConstructor(expr.TypeArg, args, env)
-	case "std.builtin.map":
-		if !c.currentStd {
-			return "", fmt.Errorf("move error: `%s` is reserved; use std::map", name)
-		}
-		return c.checkMapConstructorAllowTypeParams(expr.TypeArg, args, env)
+		typ, err := c.checkArrayConstructor(typeArg, args, env)
+		return typ, true, err
 	default:
-		return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
+		return "", false, nil
 	}
+}
+
+// checkBuiltinMapTypeApply validates the std-only Map runtime primitive.
+func (c *Checker) checkBuiltinMapTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if name != "std.builtin.map" {
+		return "", false, nil
+	}
+	if !c.currentStd {
+		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::map", name)
+	}
+	typ, err := c.checkMapConstructorAllowTypeParams(typeArg, args, env)
+	return typ, true, err
+}
+
+// checkBuiltinThreadScopedTypeApply validates the std-only scoped thread primitive.
+func (c *Checker) checkBuiltinThreadScopedTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if name != "std.builtin.thread_scoped" {
+		return "", false, nil
+	}
+	if !c.currentStd {
+		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::thread", name)
+	}
+	typ, err := c.checkThreadScopedTyped(typeArg, args, env)
+	return typ, true, err
 }
 
 // checkGenericUserTypeApply validates ownership for source std generic wrappers.
@@ -1699,21 +1750,70 @@ func (c *Checker) checkGenericUserArg(
 	arg ast.Expression,
 	env *scope,
 ) error {
+	want := substituteOwnershipType(fn.params[idx].typeName, subst)
+	if want == "Function" && fn.params[idx].comptime {
+		return c.checkGenericFunctionNameArg(name, fn, subst, idx, arg)
+	}
 	if name == "std.sync.Mutex" {
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
 			return err
 		}
 	}
+	if name == "std.thread.scoped" && idx == 2 {
+		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
+			return err
+		}
+		got, err := c.moveExpr(arg, env)
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return fmt.Errorf("move error: arg %d of `%s` expects %s, got %s",
+				idx+1, name, want, got)
+		}
+		return nil
+	}
 	got, err := c.readExpr(arg, env)
 	if err != nil {
 		return err
 	}
-	want := substituteOwnershipType(fn.params[idx].typeName, subst)
 	if got != want {
 		return fmt.Errorf("move error: arg %d of `%s` expects %s, got %s",
 			idx+1, name, want, got)
 	}
 	return nil
+}
+
+// checkGenericFunctionNameArg validates Function args in generic std wrappers.
+func (c *Checker) checkGenericFunctionNameArg(
+	name string,
+	fn *functionInfo,
+	subst map[string]string,
+	idx int,
+	arg ast.Expression,
+) error {
+	target, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return fmt.Errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
+	}
+	targetFn := c.functions[target.Name]
+	if targetFn == nil {
+		return fmt.Errorf("move error: undefined function `%s`", target.Name)
+	}
+	if name == "std.thread.scoped" && ownershipFunctionParamName(fn, idx) == "worker" {
+		return c.checkThreadScopedWorker(
+			substituteOwnershipType(returnTypeName(fn), subst), target.Name, targetFn,
+		)
+	}
+	return nil
+}
+
+// ownershipFunctionParamName returns the source parameter name when available.
+func ownershipFunctionParamName(fn *functionInfo, idx int) string {
+	if fn.decl == nil || idx >= len(fn.decl.Params) {
+		return ""
+	}
+	return fn.decl.Params[idx].Name
 }
 
 // checkBuiltinCall validates ownership effects for builtin calls.
@@ -3349,38 +3449,48 @@ func (c *Checker) resolveFunctionNameArg(arg ast.Expression, env *scope) (string
 	return target.Name, false, true
 }
 
-// checkThreadScoped validates explicit thread boundary ownership effects.
-func (c *Checker) checkThreadScoped(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) < 2 {
-		return "", true, fmt.Errorf("thread error: `std::thread::scoped` expects io and function")
+// checkThreadScopedTyped validates ownership for the std-only scoped primitive.
+func (c *Checker) checkThreadScopedTyped(
+	argType string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 3 {
+		return "", fmt.Errorf("thread error: `std::thread::scoped` expects io, function, and arg")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
-		return "", true, err
+		return "", err
 	}
-	target, ok := args[1].(*ast.IdentExpr)
-	if !ok {
-		return "", true, fmt.Errorf("thread error: `std::thread::scoped` expects function name")
+	if _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
+		return "", fmt.Errorf("thread error: `std::thread::scoped` expects function name")
 	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		return "", true, fmt.Errorf("thread error: undefined function `%s`", target.Name)
+	got, err := c.moveExpr(args[2], env)
+	if err != nil {
+		return "", err
 	}
-	if len(args[2:]) != len(fn.params) {
-		return "", true, fmt.Errorf("thread error: `%s` expects %d args, got %d",
-			target.Name, len(fn.params), len(args[2:]))
+	if got != argType {
+		return "", fmt.Errorf("thread error: arg 1 of `std::thread::scoped` expects %s, got %s",
+			argType, got)
 	}
-	for idx, arg := range args[2:] {
-		if fn.params[idx].borrow {
-			return "", true, fmt.Errorf("thread error: thread cannot capture borrow parameter")
-		}
-		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
-			return "", true, err
-		}
-		if _, err := c.moveExpr(arg, env); err != nil {
-			return "", true, err
-		}
+	return argType, nil
+}
+
+// checkThreadScopedWorker validates the one-argument scoped worker signature.
+func (c *Checker) checkThreadScopedWorker(
+	typeName string,
+	target string,
+	targetFn *functionInfo,
+) error {
+	if len(targetFn.params) != 1 || targetFn.params[0].typeName != typeName {
+		return fmt.Errorf("thread error: thread worker `%s` must accept %s", target, typeName)
 	}
-	return returnTypeName(fn), true, nil
+	if targetFn.params[0].borrow || targetFn.params[0].mutBorrow {
+		return fmt.Errorf("thread error: thread cannot capture borrow parameter `%s`", target)
+	}
+	if returnTypeName(targetFn) != typeName {
+		return fmt.Errorf("thread error: thread worker `%s` must return %s", target, typeName)
+	}
+	return nil
 }
 
 // checkAtomic validates ownership for a seq_cst atomic constructor.
