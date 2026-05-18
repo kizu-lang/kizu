@@ -2071,50 +2071,71 @@ func (c *Checker) checkStringMethod(
 	env *scope,
 ) (string, error) {
 	switch name {
-	case "append_bytes":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.append_bytes` cannot run while string is borrowed")
+	case "append_bytes", "append_byte", "reserve":
+		if err := checkStringMutationAllowed(str, name); err != nil {
+			return "", err
 		}
-		return c.checkStringBytesArg(name, args, env)
-	case "append_byte":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.append_byte` cannot run while string is borrowed")
-		}
-		return c.checkStringByteArg(name, args, env)
-	case "len":
-		if len(args) != 0 {
-			return "", fmt.Errorf("string error: `String.len` expects 0 args, got %d", len(args))
+		return c.checkStringAppendOrReserve(name, args, env)
+	case "len", "capacity":
+		if err := checkStringNoArgs(name, args); err != nil {
+			return "", err
 		}
 		return "i64", nil
 	case "as_bytes":
 		return "", fmt.Errorf(
 			"string error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
-	case "clear":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.clear` cannot run while string is borrowed")
+	case "clear", "deinit":
+		if err := checkStringMutationAllowed(str, name); err != nil {
+			return "", err
 		}
-		if len(args) != 0 {
-			return "", fmt.Errorf("string error: `String.clear` expects 0 args, got %d", len(args))
+		if err := checkStringNoArgs(name, args); err != nil {
+			return "", err
 		}
-		return "void", nil
-	case "deinit":
-		if str.hasAnyBorrow() {
-			return "", fmt.Errorf("string error: `String.deinit` cannot run while string is borrowed")
+		if name == "deinit" {
+			str.moved = true
 		}
-		if len(args) != 0 {
-			return "", fmt.Errorf("string error: `String.deinit` expects 0 args, got %d", len(args))
-		}
-		str.moved = true
 		return "void", nil
 	default:
 		return "", fmt.Errorf("string error: String has no method `%s`", name)
 	}
 }
 
+// checkStringAppendOrReserve validates one-argument String mutators.
+func (c *Checker) checkStringAppendOrReserve(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
+	case "append_bytes":
+		return c.checkStringBytesArg(name, args, env)
+	case "append_byte":
+		return c.checkStringByteArg(name, args, env)
+	default:
+		return c.checkStringReserveArg(name, args, env)
+	}
+}
+
+// checkStringMutationAllowed rejects mutation while a byte view is alive.
+func checkStringMutationAllowed(str *binding, name string) error {
+	if str.hasAnyBorrow() {
+		return fmt.Errorf("string error: `String.%s` cannot run while string is borrowed", name)
+	}
+	return nil
+}
+
+// checkStringNoArgs validates no-argument String methods.
+func checkStringNoArgs(name string, args []ast.Expression) error {
+	if len(args) != 0 {
+		return fmt.Errorf("string error: `String.%s` expects 0 args, got %d", name, len(args))
+	}
+	return nil
+}
+
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "clear", "deinit":
+	case "append_bytes", "append_byte", "reserve", "clear", "deinit":
 		return true
 	default:
 		return false
@@ -2136,6 +2157,25 @@ func (c *Checker) checkStringBytesArg(
 	}
 	if got != "[]const u8" {
 		return "", fmt.Errorf("string error: `String.%s` expects []const u8, got %s", name, got)
+	}
+	return "!void", nil
+}
+
+// checkStringReserveArg validates reserve without moving the count.
+func (c *Checker) checkStringReserveArg(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "i64" {
+		return "", fmt.Errorf("string error: `String.%s` expects i64, got %s", name, got)
 	}
 	return "!void", nil
 }
