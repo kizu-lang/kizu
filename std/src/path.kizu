@@ -1,11 +1,145 @@
-// join joins slash-separated path fragments.
-pub fn join(left: []const u8, right: []const u8) -> []const u8 {
-    return std::builtin::path_join(left, right);
+// join joins slash-separated path fragments into an owned String.
+pub fn join(
+    allocator: Allocator,
+    left: []const u8,
+    right: []const u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    let left_len = std::mem::len(left);
+    let right_len = std::mem::len(right);
+    let absolute = (left_len > 0 and std::path::is_slash(left[0])) or
+        (left_len == 0 and right_len > 0 and std::path::is_slash(right[0]));
+    if absolute {
+        try out.append_byte(cast<u8>(47));
+    }
+    var starts = std::array::Array<i64>(allocator);
+    var depth = 0;
+    var pass = 0;
+    while pass < 2 {
+        let path = if pass == 0 {
+            left;
+        } else {
+            right;
+        };
+        var index = 0;
+        let length = std::mem::len(path);
+        while index < length {
+            while index < length and std::path::is_slash(path[index]) {
+                index = index + 1;
+            }
+            let start = index;
+            while index < length and !std::path::is_slash(path[index]) {
+                index = index + 1;
+            }
+            if start == index {
+                continue;
+            }
+
+            let segment = path[start..index];
+            if std::mem::equal_bytes(segment, ".") {
+                continue;
+            }
+            if std::mem::equal_bytes(segment, "..") {
+                if depth == 0 {
+                    if !absolute {
+                        let before_dotdot = out.len();
+                        if before_dotdot > 0 and !(absolute and before_dotdot == 1) {
+                            try out.append_byte(cast<u8>(47));
+                        }
+                        try out.append_bytes(segment);
+                    }
+                    continue;
+                }
+                depth = depth - 1;
+                let parent = try starts.get(depth);
+                try out.truncate(parent);
+                continue;
+            }
+
+            let before_segment = out.len();
+            if before_segment > 0 and !(absolute and before_segment == 1) {
+                try out.append_byte(cast<u8>(47));
+            }
+            let segment_start = before_segment;
+            try out.append_bytes(segment);
+            if depth < starts.len() {
+                try starts.set(depth, segment_start);
+            } else {
+                try starts.append(segment_start);
+            }
+            depth = depth + 1;
+        }
+        pass = pass + 1;
+    }
+    if out.len() == 0 {
+        try out.append_bytes(".");
+    }
+    starts.deinit();
+    return out;
 }
 
-// clean normalizes a slash-separated path.
-pub fn clean(path: []const u8) -> []const u8 {
-    return std::builtin::path_clean(path);
+// clean normalizes a slash-separated path into an owned String.
+pub fn clean(allocator: Allocator, path: []const u8) -> !std::string::String {
+    var out = std::string::String(allocator);
+    let length = std::mem::len(path);
+    let absolute = length > 0 and std::path::is_slash(path[0]);
+    if absolute {
+        try out.append_byte(cast<u8>(47));
+    }
+
+    var starts = std::array::Array<i64>(allocator);
+    var index = 0;
+    var depth = 0;
+    while index < length {
+        while index < length and std::path::is_slash(path[index]) {
+            index = index + 1;
+        }
+        let start = index;
+        while index < length and !std::path::is_slash(path[index]) {
+            index = index + 1;
+        }
+        if start == index {
+            continue;
+        }
+
+        let segment = path[start..index];
+        if std::mem::equal_bytes(segment, ".") {
+            continue;
+        }
+        if std::mem::equal_bytes(segment, "..") {
+            if depth == 0 {
+                if !absolute {
+                    let before_dotdot = out.len();
+                    if before_dotdot > 0 and !(absolute and before_dotdot == 1) {
+                        try out.append_byte(cast<u8>(47));
+                    }
+                    try out.append_bytes(segment);
+                }
+                continue;
+            }
+            depth = depth - 1;
+            let parent = try starts.get(depth);
+            try out.truncate(parent);
+            continue;
+        }
+        let before_segment = out.len();
+        if before_segment > 0 and !(absolute and before_segment == 1) {
+            try out.append_byte(cast<u8>(47));
+        }
+        let segment_start = before_segment;
+        try out.append_bytes(segment);
+        if depth < starts.len() {
+            try starts.set(depth, segment_start);
+        } else {
+            try starts.append(segment_start);
+        }
+        depth = depth + 1;
+    }
+    if out.len() == 0 {
+        try out.append_bytes(".");
+    }
+    starts.deinit();
+    return out;
 }
 
 // basename returns the final slash-separated path element.

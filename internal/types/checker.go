@@ -1677,9 +1677,6 @@ func (c *Checker) checkStdCoreBuiltin(
 	if typ, ok, err := c.checkFsBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
-	if typ, ok, err := c.checkPathBuiltin(name, args, env, unsafe); ok || err != nil {
-		return typ, ok, err
-	}
 	if typ, ok, err := c.checkMemBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
@@ -1870,47 +1867,6 @@ func (c *Checker) checkProcessBuiltin(
 	default:
 		return "", false, nil
 	}
-}
-
-// checkPathBuiltin validates pure std::path helpers.
-func (c *Checker) checkPathBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	switch name {
-	case "std.builtin.path_join":
-		return c.checkPathBytesArgs(name, args, env, unsafe, 2)
-	case "std.builtin.path_clean":
-		return c.checkPathBytesArgs(name, args, env, unsafe, 1)
-	default:
-		return "", false, nil
-	}
-}
-
-// checkPathBytesArgs validates pure path helpers over []const u8.
-func (c *Checker) checkPathBytesArgs(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	want int,
-) (Type, bool, error) {
-	if len(args) != want {
-		return "", true, fmt.Errorf("type error: `%s` expects %d []const u8 args", name, want)
-	}
-	for idx, arg := range args {
-		got, err := c.checkExpr(arg, env, unsafe)
-		if err != nil {
-			return "", true, err
-		}
-		if got != typeByteString {
-			return "", true, fmt.Errorf("type error: `%s` arg %d expects []const u8, got %s",
-				name, idx+1, got)
-		}
-	}
-	return typeByteString, true, nil
 }
 
 // checkOneI64Arg validates one i64 argument.
@@ -2806,6 +2762,8 @@ func (c *Checker) checkStringStorageBuiltin(
 		return c.checkStringStorageByte(name, args, env, unsafe)
 	case "std.builtin.string_reserve":
 		return c.checkStringStorageReserve(name, args, env, unsafe)
+	case "std.builtin.string_truncate":
+		return c.checkStringStorageTruncate(name, args, env, unsafe)
 	case "std.builtin.string_len", "std.builtin.string_capacity":
 		return c.checkStringStorageNoArgResult(name, args, env, unsafe, typeI64)
 	case "std.builtin.string_as_bytes":
@@ -2845,6 +2803,19 @@ func (c *Checker) checkStringStorageByte(
 
 // checkStringStorageReserve validates String plus i64 primitive calls.
 func (c *Checker) checkStringStorageReserve(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if err := c.checkStringStorageArgs(name, args, env, unsafe, typeI64); err != nil {
+		return "", true, err
+	}
+	return "!void", true, nil
+}
+
+// checkStringStorageTruncate validates String plus i64 primitive calls.
+func (c *Checker) checkStringStorageTruncate(
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -2950,6 +2921,11 @@ func (c *Checker) checkStringMethod(
 	case "as_bytes":
 		return "", fmt.Errorf(
 			"type error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
+	case "truncate":
+		if err := c.checkStringReserveArg(name, args, env, unsafe); err != nil {
+			return "", err
+		}
+		return "!void", nil
 	case "clear", "deinit":
 		if len(args) != 0 {
 			return "", fmt.Errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
@@ -2963,7 +2939,7 @@ func (c *Checker) checkStringMethod(
 // isStringMutatingMethod reports whether a String method can change owned storage.
 func isStringMutatingMethod(name string) bool {
 	switch name {
-	case "append_bytes", "append_byte", "reserve", "clear", "deinit":
+	case "append_bytes", "append_byte", "reserve", "truncate", "clear", "deinit":
 		return true
 	default:
 		return false

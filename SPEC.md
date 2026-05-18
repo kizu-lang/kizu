@@ -1267,6 +1267,7 @@ std::string::String(allocator: Allocator) -> std::string::String
 string.append_bytes(bytes: []const u8) -> !void
 string.append_byte(byte: u8) -> !void
 string.reserve(additional: i64) -> !void
+string.truncate(length: i64) -> !void
 string.len() -> i64
 string.capacity() -> i64
 string.as_bytes() -> []const u8
@@ -1280,11 +1281,12 @@ string.deinit() -> void
 `append_bytes` は source の `[]const u8` を move せず、owned buffer に copy します。
 `append_byte` は 1 byte を追加します。
 `reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
+`truncate` は length を短くし、capacity は保持します。範囲外の length は `!void` error です。
 `capacity` は現在の capacity を `i64` で返します。
 `as_bytes` は owned buffer への local read-only view です。
 `as_bytes` の戻り値は local binding に束縛する必要があります。
-view が生きている間は `append_bytes`、`append_byte`、`clear`、`deinit` を禁止します。
-`append_bytes`、`append_byte`、`reserve`、`clear` は owned local `String` または
+view が生きている間は `append_bytes`、`append_byte`、`truncate`、`clear`、`deinit` を禁止します。
+`append_bytes`、`append_byte`、`reserve`、`truncate`、`clear` は owned local `String` または
 `&mut std::string::String` から呼べます。
 `clear` は length を 0 にしますが、capacity は保持します。
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
@@ -1518,12 +1520,14 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 `std::path`:
 
-* `std::path::join(left, right)` は `[]const u8` を返す
-* `std::path::clean(path)` は `[]const u8` を返す
+* `std::path::join(allocator, left, right)` は `!std::string::String` を返す
+* `std::path::clean(allocator, path)` は `!std::string::String` を返す
 * `std::path::basename(path)` は `[]const u8` を返す
 * `std::path::dirname(path)` は `[]const u8` を返す
 * `std::path::extension(path)` は `[]const u8` を返す
 * path helper は pure helper であり、filesystem を読まない
+* `join` と `clean` は owned buffer を構築するため、allocator を明示し、allocation
+  failure を `!T` error として返す
 
 `std::io` / `std::process`:
 
