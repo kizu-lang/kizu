@@ -108,11 +108,14 @@ blocker:
 
 ## Current Bootstrap Evidence
 
-最終更新: `feat/selfhost-bootstrap-chain` の `2789672 Transpile checker type sets` 時点。
+最終更新: `feat/selfhost-bootstrap-chain` の `b1e1c87` に keyword-boundary parser
+metric 変更を重ねた working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
 pipeline ではなく、Go が生成した source-scanning LLVM template に依存している。
+parser metric は単純な部分文字列ではなく、identifier boundary を見る keyword token
+count に寄せているが、まだ AST parser ではない。
 
 実行した command:
 
@@ -157,18 +160,18 @@ artifact comparison:
 stage2_vs_stage3_bytes=0
 stage3_vs_stage4_bytes=0
 
- 535892 target/selfhost/stage2.ll
- 535892 target/selfhost/stage3.ll
- 535892 target/selfhost/stage4.ll
-1607676 total
+1002008 target/selfhost/stage2.ll
+1002008 target/selfhost/stage3.ll
+1002008 target/selfhost/stage4.ll
+3006024 total
 ```
 
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 2996
-; kizu stage source bytes 565659
-; kizu stage source fn count 248
+; kizu stage source metric 1038
+; kizu stage source bytes 1032883
+; kizu stage source fn count 64
 ```
 
 remaining Go / template dependency:

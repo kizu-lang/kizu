@@ -1066,7 +1066,7 @@ fn count_word_fn(source: []const u8) -> i64 {
     var index = 0;
     var count = 0;
     while index + 1 < length {
-        if source[index] == cast<u8>(102) and source[index + 1] == cast<u8>(110) {
+        if matches_fn(source, index) {
             count = count + 1;
         }
         index = index + 1;
@@ -1157,21 +1157,58 @@ fn brace_count(source: []const u8) -> i64 {
 
 // parserMatchSource renders fixed byte-pattern recognizers for Kizu keywords.
 func parserMatchSource() string {
-	return `fn matches_import(source: []const u8, index: i64) -> bool {
-    return source[index] == cast<u8>(105) and source[index + 1] == cast<u8>(109) and
+	return `fn matches_fn(source: []const u8, index: i64) -> bool {
+    return keyword_start(source, index) and keyword_end(source, index, 2) and
+        source[index] == cast<u8>(102) and source[index + 1] == cast<u8>(110);
+}
+
+fn matches_import(source: []const u8, index: i64) -> bool {
+    return keyword_start(source, index) and keyword_end(source, index, 6) and
+        source[index] == cast<u8>(105) and source[index + 1] == cast<u8>(109) and
         source[index + 2] == cast<u8>(112) and source[index + 3] == cast<u8>(111) and
         source[index + 4] == cast<u8>(114) and source[index + 5] == cast<u8>(116);
 }
 
 fn matches_struct(source: []const u8, index: i64) -> bool {
-    return source[index] == cast<u8>(115) and source[index + 1] == cast<u8>(116) and
+    return keyword_start(source, index) and keyword_end(source, index, 6) and
+        source[index] == cast<u8>(115) and source[index + 1] == cast<u8>(116) and
         source[index + 2] == cast<u8>(114) and source[index + 3] == cast<u8>(117) and
         source[index + 4] == cast<u8>(99) and source[index + 5] == cast<u8>(116);
 }
 
 fn matches_enum(source: []const u8, index: i64) -> bool {
-    return source[index] == cast<u8>(101) and source[index + 1] == cast<u8>(110) and
+    return keyword_start(source, index) and keyword_end(source, index, 4) and
+        source[index] == cast<u8>(101) and source[index + 1] == cast<u8>(110) and
         source[index + 2] == cast<u8>(117) and source[index + 3] == cast<u8>(109);
+}
+
+fn keyword_start(source: []const u8, index: i64) -> bool {
+    if index == 0 {
+        return true;
+    }
+    if is_ident_byte(source[index - 1]) {
+        return false;
+    }
+    return true;
+}
+
+fn keyword_end(source: []const u8, index: i64, width: i64) -> bool {
+    let end = index + width;
+    let length = std::builtin::mem_len(source);
+    if end >= length {
+        return true;
+    }
+    if is_ident_byte(source[end]) {
+        return false;
+    }
+    return true;
+}
+
+fn is_ident_byte(ch: u8) -> bool {
+    return (ch >= cast<u8>(97) and ch <= cast<u8>(122)) or
+        (ch >= cast<u8>(65) and ch <= cast<u8>(90)) or
+        (ch >= cast<u8>(48) and ch <= cast<u8>(57)) or
+        ch == cast<u8>(95);
 }
 `
 }
@@ -1722,7 +1759,7 @@ func writeStage2SourceReadLoop(out *strings.Builder, idx int) {
 
 // writeStage2ReadPhis emits scan state for one source file.
 func writeStage2ReadPhis(out *strings.Builder, idx int, prev string) {
-	for slot := 1; slot <= 5; slot++ {
+	for slot := 1; slot <= 7; slot++ {
 		fmt.Fprintf(out, "%%prev%d_%d = phi i32 [0, %%%s], [%%nextprev%d_%d, %%read%d.byte] ",
 			idx, slot, prev, idx, slot, idx)
 	}
@@ -1779,19 +1816,15 @@ func writeStage2FirstTokenSelect(out *strings.Builder, idx int) {
 
 // writeStage2WordCounters emits declaration keyword counters.
 func writeStage2WordCounters(out *strings.Builder, idx int) {
-	writeStage2PairCounter(out, idx)
+	writeStage2FnCounter(out, idx)
 	writeStage2ImportCounter(out, idx)
 	writeStage2StructCounter(out, idx)
 	writeStage2EnumCounter(out, idx)
 }
 
-// writeStage2PairCounter emits the parser function-count metric.
-func writeStage2PairCounter(out *strings.Builder, idx int) {
-	fmt.Fprintf(out, "%%isf%d = icmp eq i32 %%prev%d_1, 102 ", idx, idx)
-	fmt.Fprintf(out, "%%isn%d = icmp eq i32 %%ch%d, 110 ", idx, idx)
-	fmt.Fprintf(out, "%%ispair%d = and i1 %%isf%d, %%isn%d ", idx, idx, idx)
-	fmt.Fprintf(out, "%%pairint%d = zext i1 %%ispair%d to i32 ", idx, idx)
-	fmt.Fprintf(out, "%%fnnext%d = add i32 %%fn%d, %%pairint%d ", idx, idx, idx)
+// writeStage2FnCounter emits the parser function-count metric.
+func writeStage2FnCounter(out *strings.Builder, idx int) {
+	writeStage2CharMatch(out, idx, "fn", []int{102, 110})
 }
 
 // writeStage2ImportCounter emits the parser import keyword metric.
@@ -1811,19 +1844,39 @@ func writeStage2EnumCounter(out *strings.Builder, idx int) {
 
 // writeStage2CharMatch emits a rolling literal counter.
 func writeStage2CharMatch(out *strings.Builder, idx int, name string, chars []int) {
-	last := len(chars) - 1
-	fmt.Fprintf(out, "%%%s%d_c%d = icmp eq i32 %%ch%d, %d ", name, idx, last, idx, chars[last])
-	prev := fmt.Sprintf("%%%s%d_c%d", name, idx, last)
-	for pos := last - 1; pos >= 0; pos-- {
-		slot := last - pos
+	writeStage2NonIdent(out, fmt.Sprintf("%s%d_end", name, idx), fmt.Sprintf("%%ch%d", idx))
+	writeStage2NonIdent(out, fmt.Sprintf("%s%d_start", name, idx),
+		fmt.Sprintf("%%prev%d_%d", idx, len(chars)+1))
+	prev := fmt.Sprintf("%%%s%d_end", name, idx)
+	for pos := len(chars) - 1; pos >= 0; pos-- {
+		slot := len(chars) - pos
 		fmt.Fprintf(out, "%%%s%d_c%d = icmp eq i32 %%prev%d_%d, %d ",
 			name, idx, pos, idx, slot, chars[pos])
 		fmt.Fprintf(out, "%%%s%d_m%d = and i1 %s, %%%s%d_c%d ",
 			name, idx, pos, prev, name, idx, pos)
 		prev = fmt.Sprintf("%%%s%d_m%d", name, idx, pos)
 	}
-	fmt.Fprintf(out, "%%%smatch%d = zext i1 %s to i32 ", name, idx, prev)
+	fmt.Fprintf(out, "%%%s%d_match = and i1 %s, %%%s%d_start ", name, idx, prev, name, idx)
+	fmt.Fprintf(out, "%%%smatch%d = zext i1 %%%s%d_match to i32 ", name, idx, name, idx)
 	fmt.Fprintf(out, "%%%snext%d = add i32 %%%s%d, %%%smatch%d ", name, idx, name, idx, name, idx)
+}
+
+// writeStage2NonIdent emits a boolean that is true when value is not an identifier byte.
+func writeStage2NonIdent(out *strings.Builder, name string, value string) {
+	fmt.Fprintf(out, "%%%s_lo = icmp uge i32 %s, 97 ", name, value)
+	fmt.Fprintf(out, "%%%s_lz = icmp ule i32 %s, 122 ", name, value)
+	fmt.Fprintf(out, "%%%s_lower = and i1 %%%s_lo, %%%s_lz ", name, name, name)
+	fmt.Fprintf(out, "%%%s_uo = icmp uge i32 %s, 65 ", name, value)
+	fmt.Fprintf(out, "%%%s_uz = icmp ule i32 %s, 90 ", name, value)
+	fmt.Fprintf(out, "%%%s_upper = and i1 %%%s_uo, %%%s_uz ", name, name, name)
+	fmt.Fprintf(out, "%%%s_do = icmp uge i32 %s, 48 ", name, value)
+	fmt.Fprintf(out, "%%%s_dz = icmp ule i32 %s, 57 ", name, value)
+	fmt.Fprintf(out, "%%%s_digit = and i1 %%%s_do, %%%s_dz ", name, name, name)
+	fmt.Fprintf(out, "%%%s_letter = or i1 %%%s_lower, %%%s_upper ", name, name, name)
+	fmt.Fprintf(out, "%%%s_alnum = or i1 %%%s_letter, %%%s_digit ", name, name, name)
+	fmt.Fprintf(out, "%%%s_us = icmp eq i32 %s, 95 ", name, value)
+	fmt.Fprintf(out, "%%%s_ident = or i1 %%%s_alnum, %%%s_us ", name, name, name)
+	fmt.Fprintf(out, "%%%s = xor i1 %%%s_ident, true ", name, name)
 }
 
 // writeStage2BraceCounters emits brace count and balance metrics.
@@ -1842,7 +1895,7 @@ func writeStage2BraceCounters(out *strings.Builder, idx int) {
 // writeStage2PrevUpdates advances the rolling byte window.
 func writeStage2PrevUpdates(out *strings.Builder, idx int) {
 	fmt.Fprintf(out, "%%nextprev%d_1 = add i32 %%ch%d, 0 ", idx, idx)
-	for slot := 2; slot <= 5; slot++ {
+	for slot := 2; slot <= 7; slot++ {
 		fmt.Fprintf(out, "%%nextprev%d_%d = add i32 %%prev%d_%d, 0 ", idx, slot, idx, slot-1)
 	}
 }
