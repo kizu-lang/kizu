@@ -1359,12 +1359,6 @@ func (i *Interpreter) evalPathBuiltin(
 		return value, true, err
 	case "std.builtin.path_clean":
 		return i.evalPathUnary(name, args, env, stdprim.PathClean)
-	case "std.builtin.path_basename":
-		return i.evalPathUnary(name, args, env, stdprim.PathBase)
-	case "std.builtin.path_dirname":
-		return i.evalPathUnary(name, args, env, stdprim.PathDir)
-	case "std.builtin.path_extension":
-		return i.evalPathUnary(name, args, env, stdprim.PathExt)
 	default:
 		return voidValue(), false, nil
 	}

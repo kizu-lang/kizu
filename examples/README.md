@@ -63,6 +63,7 @@ go test ./...
 | explicit-Io file read | `fs_read.kizu` | reads a fixture through `std::fs::read_file` |
 | task-based file read | `fs_task.kizu` | reads a fixture from a spawned task |
 | pure path helpers | `std_path.kizu` | joins, cleans, and decomposes slash-separated paths |
+| path edge cases | `std_path_edges.kizu` | asserts root, empty path, trailing slash, and extension behavior |
 | explicit-Io fs helpers | `std_fs_path.kizu` | checks existence, metadata, create_dir, and remove_dir |
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |

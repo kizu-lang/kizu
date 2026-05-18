@@ -85,9 +85,9 @@ Current builtin thinning candidates:
 | `std::builtin::mem_equal_bytes` | Removed | Implemented in `std/src/mem.kizu` |
 | `std::builtin::mem_starts_with` | Removed | Implemented in `std/src/mem.kizu` |
 | `std::builtin::mem_trim_ascii` | Removed | Implemented in `std/src/mem.kizu` |
-| `std::builtin::path_basename` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
-| `std::builtin::path_dirname` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
-| `std::builtin::path_extension` | Kizu-movable | Move after `std::mem` byte search helpers are Kizu-side |
+| `std::builtin::path_basename` | Removed | Implemented in `std/src/path.kizu` |
+| `std::builtin::path_dirname` | Removed | Implemented in `std/src/path.kizu` |
+| `std::builtin::path_extension` | Removed | Implemented in `std/src/path.kizu` |
 | `std::builtin::testing_expect*` | Kizu-movable | Move formatting once string/diagnostic construction exists in Kizu |
 | `std::builtin::path_clean` | Blocked-by-language | Keep until path normalization can be implemented without hidden allocation |
 | `std::builtin::path_join` | Blocked-by-language | Keep until owned string/buffer construction exists |
@@ -108,7 +108,7 @@ Current builtin thinning candidates:
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; move wrapper and symbol-table shape to Kizu first |
 | `std::testing` | `expect`, `expect_equal_i64`, `expect_equal_bool`, `expect_equal_bytes`, `fail` | Kizu wrappers in `std/src/testing.kizu` over `std::builtin::testing_*` primitives | migrated wrapper module; keep assertion formatting and `!void` error construction trusted |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | host filesystem calls through explicit `Io` | keep host calls primitive; move path/type validation and error shaping to Kizu wrappers |
-| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu wrappers in `std/src/path.kizu` over `std::builtin::path_*` primitives | first migrated std module; keep Go public `std::path::*` branches out |
+| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` use trusted primitives | keep `join` and `clean` trusted until owned string/buffer construction exists |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
 | `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | structured task state, runtime scheduling, safety boundaries | keep scheduling primitives trusted; move high-level structured wrappers once module and borrow diagnostics are mature |
