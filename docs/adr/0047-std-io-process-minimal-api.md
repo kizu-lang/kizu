@@ -30,8 +30,9 @@ std::process::exit_code(code: i64) -> i64
 `kizu run <file> -- args...` and `kizu test <file> -- args...` pass explicit
 program arguments into the interpreter.
 
-`std::process::exit_code` validates the conventional `0..255` range and returns
-the code value in v0.2. It does not terminate the interpreter yet.
+`std::process::exit_code` returns the code value in v0.2. It does not terminate
+the interpreter yet. Final process exit validation belongs to the runner that
+turns this value into an actual host exit status.
 
 ## Consequences
 

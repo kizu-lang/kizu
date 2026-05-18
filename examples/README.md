@@ -187,6 +187,7 @@ go test ./...
 | fs helpers require Io | `negative/std_fs_exists_without_io.kizu` | `expects Io` |
 | stdio helpers surface failing Io | `negative/std_io_failing_write.kizu` | `io runtime is failing` |
 | process arg access is bounds-checked | `negative/std_process_arg_bounds.kizu` | `process arg index out of bounds` |
+| process exit code builtin is removed | `negative/std_process_exit_code_builtin_direct_call.kizu` | `was removed` |
 | byte-slice helper args must be `[]const u8` | `negative/std_mem_wrong_type.kizu` | `expects []const u8` |
 | byte access builtin is removed | `negative/std_mem_byte_at_builtin_direct_call.kizu` | `was removed` |
 | byte slice builtin is removed | `negative/std_mem_slice_builtin_direct_call.kizu` | `was removed` |
