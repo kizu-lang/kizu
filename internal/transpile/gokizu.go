@@ -622,7 +622,8 @@ func stage2WriterLLVM() string {
 		"scan: %readmode = getelementptr [2 x i8], ptr @readmode, i64 0, i64 0 " +
 		stage2OpenSources() +
 		stage2CheckSources() +
-		"%copy = icmp sgt i32 %argc, 2 br i1 %copy, label %copy.in, label %write " +
+		"%copy = icmp sgt i32 %argc, 2 " +
+		"%ready = and i1 %all7, %copy br i1 %ready, label %copy.in, label %write " +
 		stage2CopyInputLLVM() +
 		"write: " +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
@@ -678,6 +679,10 @@ func stage2CheckSources() string {
 	var out strings.Builder
 	for idx := range selfhostSourcePaths() {
 		fmt.Fprintf(&out, "%%ok%d = icmp sge i32 %%byte%d, 0 ", idx, idx)
+	}
+	out.WriteString("%all0 = and i1 %ok0, %ok1 ")
+	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
+		fmt.Fprintf(&out, "%%all%d = and i1 %%all%d, %%ok%d ", idx-1, idx-2, idx)
 	}
 	for idx := range selfhostSourcePaths() {
 		fmt.Fprintf(&out, "call i32 @fclose(ptr %%srcfile%d) ", idx)

@@ -299,17 +299,7 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "define i32 @main") {
-		t.Fatalf("stage2 artifact does not look like LLVM IR:\n%s", data)
-	}
-	if !strings.Contains(string(data), "fopen(ptr %source0, ptr %readmode)") ||
-		!strings.Contains(string(data), "fopen(ptr %source8, ptr %readmode)") {
-		t.Fatalf("stage2 artifact does not read the selfhost source tree:\n%s", data)
-	}
-	if !strings.Contains(string(data), "fgetc(ptr %srcfile0)") ||
-		!strings.Contains(string(data), "fgetc(ptr %srcfile8)") {
-		t.Fatalf("stage2 artifact does not scan source contents:\n%s", data)
-	}
+	assertStage2LLVMReadsSources(t, data)
 
 	link := exec.Command("clang", stage2, "-o", stage2Bin)
 	out, err = link.CombinedOutput()
@@ -334,6 +324,26 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStageArtifactsEqual(t, stage2Data, data)
+}
+
+// assertStage2LLVMReadsSources checks that the stage2 IR depends on compiler source inputs.
+func assertStage2LLVMReadsSources(t *testing.T, data []byte) {
+	t.Helper()
+	text := string(data)
+	if !strings.Contains(text, "define i32 @main") {
+		t.Fatalf("stage2 artifact does not look like LLVM IR:\n%s", data)
+	}
+	if !strings.Contains(text, "fopen(ptr %source0, ptr %readmode)") ||
+		!strings.Contains(text, "fopen(ptr %source8, ptr %readmode)") {
+		t.Fatalf("stage2 artifact does not read the selfhost source tree:\n%s", data)
+	}
+	if !strings.Contains(text, "fgetc(ptr %srcfile0)") ||
+		!strings.Contains(text, "fgetc(ptr %srcfile8)") {
+		t.Fatalf("stage2 artifact does not scan source contents:\n%s", data)
+	}
+	if !strings.Contains(text, "%ready = and i1 %all7, %copy") {
+		t.Fatalf("stage2 artifact does not gate copy on source scan:\n%s", data)
+	}
 }
 
 // assertStageArtifactsEqual checks stage output stability for the bootstrap smoke.
