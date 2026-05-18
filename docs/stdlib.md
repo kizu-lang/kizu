@@ -96,7 +96,7 @@ Current builtin thinning candidates:
 | `std::builtin::mem_byte_at` | Host primitive for now | Recoverable alternative to trapping index syntax |
 | `std::builtin::mem_slice` | Host primitive for now | Recoverable alternative to trapping slice syntax |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
-| `std::builtin::string_*` | Host storage primitive for now | Keep owned byte storage, capacity, view, constructor, and cleanup boundary trusted; public wrappers live in `std/src/string.kizu` |
+| `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
 
@@ -119,12 +119,12 @@ source is tracked by #360 and must not leave dual public paths behind.
 | --- | --- | --- | --- |
 | `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, len, byte_at, and slice use trusted primitives | keep only capability, metadata, and recoverable-bounds primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage primitives trusted; wrapper split tracked by #360 |
-| `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu wrappers in `std/src/string.kizu` over `std::builtin::string_*` owned byte storage primitives | use as the explicit owned byte buffer for path construction and diagnostics; keep storage/capacity/view/deinit rules trusted |
+| `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough; wrapper split tracked by #360 |
 | `std::testing` | `expect`, equality helpers, `fail` | Kizu source over `std::fmt` and `String` | keep Go limited to the runner and error-union reporting boundary |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
-| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator/string storage primitives trusted |
+| `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
 | `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | structured task state, runtime scheduling, safety boundaries | keep scheduling primitives trusted; wrapper split tracked by #360 |
@@ -192,17 +192,22 @@ Before replacing a Go builtin with Kizu source, the following must be true:
 
 ## Byte Storage Boundary
 
-`std::string::String` is the current Kizu-facing owned byte buffer. Its public
-API lives in Kizu source, but its backing allocation, capacity, local view, and
-cleanup operations remain trusted storage primitives. ADR 0056 keeps that
-boundary narrow and rejects a public `std::mem::OwnedBytes` type until mutable
-slice, raw storage provenance, and generic container rules are specified.
+`std::string::String` is the current Kizu-facing owned byte buffer. ADR 0057
+moves its behavior into Kizu source over private `std::array::Array<u8>`
+storage. The remaining trusted boundary is Array storage, not string-specific
+Go logic. ADR 0056 still rejects a public `std::mem::OwnedBytes` type until
+mutable slice, raw storage provenance, and generic container rules are
+specified.
+
+The Kizu `String` implementation uses std-only Array storage helpers for
+reserve, truncate, clear, and byte-slice exposure. Those helpers are not public
+`std::array` API in v0.2.
 
 The migration path is:
 
-- keep `String` public behavior in Kizu source over `std::builtin::string_*`
-- keep `std::builtin::string_*` reserved to std source so user code cannot
-  bypass wrapper borrow and move checks
+- keep `String` public behavior in Kizu source over private Array storage
+- keep `std::builtin::string_*` removed so user code cannot bypass wrapper
+  borrow and move checks
 - add regression coverage for each storage safety rule before expanding the
   primitive set
 - use `String` for diagnostic and byte-building needs in the self-host frontend

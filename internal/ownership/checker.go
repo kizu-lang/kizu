@@ -1027,9 +1027,6 @@ func (c *Checker) checkQualifiedStdRuntimeStateBuiltin(
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
-	if typ, ok, err := c.checkStringStorageBuiltin(name, args, env); ok || err != nil {
-		return typ, ok, err
-	}
 	return "", false, nil
 }
 
@@ -1046,22 +1043,6 @@ func (c *Checker) checkQualifiedStdBuiltin(
 		return typ, ok, err
 	}
 	return "", false, nil
-}
-
-// checkStringConstructor validates std::string::String(allocator) ownership.
-func (c *Checker) checkStringConstructor(args []ast.Expression, env *scope) (string, bool, error) {
-	if len(args) != 1 {
-		return "", true, fmt.Errorf("move error: `std::string::String` expects allocator")
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "Allocator" {
-		return "", true, fmt.Errorf("move error: `std::string::String` expects Allocator, got %s",
-			got)
-	}
-	return "std::string::String", true, nil
 }
 
 // checkMemBuiltin validates ownership effects for allocation-free std::mem calls.
@@ -1592,68 +1573,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 	}
 }
 
-// checkStringStorageBuiltin validates trusted String storage primitives.
-func (c *Checker) checkStringStorageBuiltin(
-	name string,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if strings.HasPrefix(name, "std.builtin.string_") && !c.currentStd {
-		return "", true, fmt.Errorf("move error: `%s` is reserved for std::string", name)
-	}
-	switch name {
-	case "std.builtin.string_new":
-		return c.checkStringConstructor(args, env)
-	case "std.builtin.string_append_bytes":
-		return c.checkStringStorageArgs(name, args, env, "!void", "[]const u8")
-	case "std.builtin.string_append_byte":
-		return c.checkStringStorageArgs(name, args, env, "!void", "u8")
-	case "std.builtin.string_reserve":
-		return c.checkStringStorageArgs(name, args, env, "!void", "i64")
-	case "std.builtin.string_truncate":
-		return c.checkStringStorageArgs(name, args, env, "!void", "i64")
-	case "std.builtin.string_len", "std.builtin.string_capacity":
-		return c.checkStringStorageArgs(name, args, env, "i64")
-	case "std.builtin.string_as_bytes":
-		return c.checkStringStorageArgs(name, args, env, "[]const u8")
-	case "std.builtin.string_clear", "std.builtin.string_deinit":
-		return c.checkStringStorageArgs(name, args, env, "void")
-	default:
-		return "", false, nil
-	}
-}
-
-// checkStringStorageArgs reads primitive String arguments without moving them.
-func (c *Checker) checkStringStorageArgs(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	result string,
-	extra ...string,
-) (string, bool, error) {
-	if len(args) != 1+len(extra) {
-		return "", true, fmt.Errorf("move error: `%s` expects %d args", name, 1+len(extra))
-	}
-	got, err := c.readExpr(args[0], env)
-	if err != nil {
-		return "", true, err
-	}
-	if got != "std::string::String" {
-		return "", true, fmt.Errorf("move error: `%s` expects String, got %s", name, got)
-	}
-	for idx, want := range extra {
-		got, err := c.readExpr(args[idx+1], env)
-		if err != nil {
-			return "", true, err
-		}
-		if got != want {
-			return "", true, fmt.Errorf("move error: `%s` arg %d expects %s, got %s",
-				name, idx+2, want, got)
-		}
-	}
-	return result, true, nil
-}
-
 // checkBuiltinCall validates ownership effects for builtin calls.
 func (c *Checker) checkBuiltinCall(
 	name string,
@@ -1961,6 +1880,9 @@ func (c *Checker) checkMethodCallExpr(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if typ, ok, err := c.checkStdFieldStorageMethod(field, args, env); ok || err != nil {
+		return typ, err
+	}
 	receiver, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("arena error: arena method receiver must be a local binding")
@@ -1993,6 +1915,31 @@ func (c *Checker) checkMethodCallExpr(
 	default:
 		return "", fmt.Errorf("arena error: unknown arena method `%s`", field.Name)
 	}
+}
+
+// checkStdFieldStorageMethod allows std wrappers to mutate private storage fields.
+func (c *Checker) checkStdFieldStorageMethod(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if !c.currentStd {
+		return "", false, nil
+	}
+	if _, ok := field.Receiver.(*ast.FieldExpr); !ok {
+		return "", false, nil
+	}
+	receiverType, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return "", true, err
+	}
+	base, elem, ok := splitGenericType(receiverType)
+	if !ok || base != "std::array::Array" {
+		return "", false, nil
+	}
+	array := &binding{typeName: receiverType}
+	typ, err := c.checkArrayMethod(array, elem, field.Name, args, env)
+	return typ, true, err
 }
 
 // checkNonArenaMethod validates methods on non-arena owned values.
@@ -2430,6 +2377,9 @@ func (c *Checker) checkArrayMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if isStdArrayStorageMethod(name) {
+		return c.checkStdArrayStorageMethod(array, elem, name, args, env)
+	}
 	switch name {
 	case "append":
 		return c.checkArrayAppend(array, elem, args, env)
@@ -2447,16 +2397,74 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArraySet(array, elem, args, env)
 	case "deinit":
 		if array.hasAnyBorrow() {
-			return "", fmt.Errorf("array error: `Array.deinit` cannot run while array is borrowed")
+			return "", fmt.Errorf("array error: `Array.%s` cannot run while array is borrowed", name)
 		}
 		if len(args) != 0 {
-			return "", fmt.Errorf("array error: `Array.deinit` expects 0 args, got %d", len(args))
+			return "", fmt.Errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
-		array.moved = true
+		if name == "deinit" {
+			array.moved = true
+		}
 		return "void", nil
 	default:
 		return "", fmt.Errorf("array error: Array has no method `%s`", name)
 	}
+}
+
+// checkStdArrayStorageMethod validates Array helpers reserved to std source.
+func (c *Checker) checkStdArrayStorageMethod(
+	array *binding,
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if !c.currentStd {
+		return "", fmt.Errorf("array error: Array has no method `%s`", name)
+	}
+	switch name {
+	case "reserve", "truncate":
+		return c.checkArrayCountMutation(array, name, args, env)
+	case "clear":
+		if array.hasAnyBorrow() {
+			return "", fmt.Errorf("array error: `Array.clear` cannot run while array is borrowed")
+		}
+		if len(args) != 0 {
+			return "", fmt.Errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
+		}
+		return "void", nil
+	default:
+		if elem != "u8" {
+			return "", fmt.Errorf("array error: `Array.as_bytes` requires Array<u8>")
+		}
+		return c.checkArrayReadNoArgs(array, name, args)
+	}
+}
+
+// isStdArrayStorageMethod reports methods reserved for std-owned storage wrappers.
+func isStdArrayStorageMethod(name string) bool {
+	return name == "reserve" || name == "truncate" || name == "clear" || name == "as_bytes"
+}
+
+// checkArrayCountMutation validates one-count Array mutations.
+func (c *Checker) checkArrayCountMutation(
+	array *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if array.hasAnyBorrow() {
+		return "", fmt.Errorf("array error: `Array.%s` cannot run while array is borrowed", name)
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
+	}
+	if got, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	} else if got != "i64" {
+		return "", fmt.Errorf("array error: `Array.%s` expects i64, got %s", name, got)
+	}
+	return "!void", nil
 }
 
 // checkArrayAppend validates append mutation and element move.

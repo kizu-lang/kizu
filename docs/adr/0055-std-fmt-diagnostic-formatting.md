@@ -50,7 +50,7 @@ or implicit conversion to C strings.
 - `std::testing` can construct value-aware assertion diagnostics in Kizu source
   and delete `std::builtin::testing_*` formatting behavior after this API exists.
 - Diagnostic construction stays explicit about ownership and allocation.
-- The Go implementation may keep only the `String` storage primitives and other
+- The Go implementation may keep only lower-level storage primitives and other
   host/runtime boundaries; scalar formatting should be Kizu-movable behavior.
 - Future formatting expansion must remain explicit and should be motivated by
   self-host compiler needs before adding surface area.

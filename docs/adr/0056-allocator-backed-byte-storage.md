@@ -1,6 +1,7 @@
 # ADR 0056: allocator-backed byte storage boundary
 
-Status: 提案
+Status: Superseded for `std::string::String` by ADR 0057; still relevant for
+future public byte storage APIs.
 
 ## Context
 
@@ -79,6 +80,8 @@ A global or implicit byte builder would hide allocation and cleanup. That
 conflicts with Kizu's explicit allocator and cleanup policy.
 
 ### Kizu `String` Over `std::array::Array<u8>`
+
+This section is superseded for `std::string::String` by ADR 0057.
 
 This is attractive long term, but v0.2 `Array<T>` is itself Go-backed storage and
 has element and borrow restrictions that are not yet suitable as the foundation

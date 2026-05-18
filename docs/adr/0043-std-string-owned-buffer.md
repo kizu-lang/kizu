@@ -28,6 +28,10 @@ string.clear() -> void
 string.deinit() -> void
 ```
 
+ADR 0057 moves this behavior into `std/src/string.kizu` over private
+`std::array::Array<u8>` storage. Go no longer owns string-specific runtime
+behavior.
+
 The constructor requires an explicit allocator capability. `append_bytes` copies
 from a read-only byte slice and does not move the source. `append_byte` appends
 one byte. `reserve` requests capacity for at least `additional` more bytes.
