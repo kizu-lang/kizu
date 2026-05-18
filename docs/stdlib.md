@@ -105,6 +105,7 @@ Current builtin thinning candidates:
 | `std::builtin::mutex<T>` | Runtime primitive | Public `std::sync::Mutex<T>(value)` lives in `std/src/sync.kizu`; direct user calls are rejected |
 | `std::builtin::array<T>` | Runtime primitive | Public `std::array::Array<T>(allocator)` lives in `std/src/array.kizu`; direct user calls are rejected |
 | `std::builtin::map<K, V>` | Runtime primitive | Public `std::map::Map<K, V>(allocator)` lives in `std/src/map.kizu`; direct user calls are rejected |
+| `std::builtin::thread_scoped<T>` | Runtime primitive | Public `std::thread::scoped<T>(io, worker, arg)` lives in `std/src/thread.kizu`; direct user calls are rejected |
 
 `std::testing` now performs assertion checks and message construction in
 `std/src/testing.kizu`. Equality diagnostics are built with `std::fmt` into an
@@ -112,20 +113,22 @@ explicit allocator-backed `std::string::String`; Go remains only the test runner
 and error-union reporting boundary, not the assertion implementation.
 
 Stateful runtime APIs such as `std::array::Array`, `std::map::Map`,
-`std::task::parallel_for`, `std::task::parallel_map`, `std::channel::Channel`, `std::thread::scoped`,
-`std::sync::Mutex`, and `std::atomic::Atomic` still keep Go runtime primitives
-where they own runtime storage, scheduler, synchronization, and borrow-safety
-rules. Treat those primitives as explicit runtime boundaries, not ordinary
-stdlib logic. Splitting their ergonomic public wrappers into Kizu source is
-tracked by #360 and must not leave dual public paths behind. The
+`std::task::parallel_for`, `std::task::parallel_map`, `std::channel::Channel`,
+`std::thread::scoped<T>`, `std::sync::Mutex`, and `std::atomic::Atomic` still
+keep Go runtime primitives where they own runtime storage, scheduler,
+synchronization, and borrow-safety rules. Treat those primitives as explicit
+runtime boundaries, not ordinary stdlib logic. Splitting ergonomic public
+wrappers into Kizu source is tracked by #360 and must not leave dual public
+paths behind. The
 task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
 Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
 uses a `comptime Function` parameter to forward the worker name through
 `std/src/task.kizu`. `parallel_map` uses an explicit `&mut Partition` parameter
 to mutate partition output without moving the owner. `std::channel::Channel<T>()`,
-`std::atomic::Atomic<T>(value)`, `std::sync::Mutex<T>(value)`, and
-`std::array::Array<T>(allocator)`, and `std::map::Map<K, V>(allocator)` now use
-source-level type-argument forwarding through Kizu std source.
+`std::atomic::Atomic<T>(value)`, `std::sync::Mutex<T>(value)`,
+`std::array::Array<T>(allocator)`, `std::map::Map<K, V>(allocator)`, and
+`std::thread::scoped<T>(io, worker, arg)` now use source-level type-argument
+forwarding through Kizu std source.
 
 ## Builtin Registry
 
@@ -143,7 +146,7 @@ source-level type-argument forwarding through Kizu std source.
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
 | `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors, `parallel_for`, and `parallel_map`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; method wrappers tracked by #360 |
 | `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor wrapper; Go owned message queue and boundary checks | keep queue primitive trusted; method wrappers still tracked by #360 |
-| `std::thread` | `scoped` | host thread boundary and join semantics | trusted primitive; wrapper split tracked by #360 |
+| `std::thread` | `scoped<T>` | Kizu one-argument wrapper; Go host thread boundary and join semantics | keep thread boundary primitive trusted; broader argument forwarding tracked by #360 |
 | `std::sync` | `Mutex<T>` | Kizu constructor wrapper; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted; method wrappers tracked by #360 |
 | `std::atomic` | `Atomic<T>` | Kizu constructor wrapper; Go atomic storage, seq_cst operations, supported type set | keep atomic storage primitive trusted; ordering API and method wrappers tracked by #360 |
 

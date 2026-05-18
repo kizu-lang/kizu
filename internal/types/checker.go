@@ -1784,15 +1784,13 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
-	return c.checkStdConstructorBuiltin(name, args, env, unsafe)
+	return c.checkStdConstructorBuiltin(name, args)
 }
 
 // checkStdConstructorBuiltin validates miscellaneous std constructor calls.
 func (c *Checker) checkStdConstructorBuiltin(
 	name string,
 	args []ast.Expression,
-	env *scope,
-	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
@@ -1806,8 +1804,6 @@ func (c *Checker) checkStdConstructorBuiltin(
 		return "", true, fmt.Errorf("type error: use `std::map::Map<K, V>(allocator)`")
 	case "std.channel.Channel":
 		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
-	case "std.thread.scoped":
-		return c.checkThreadScoped(args, env, unsafe)
 	case "std.atomic.Atomic":
 		return "", true, fmt.Errorf("type error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
@@ -2362,6 +2358,11 @@ func (c *Checker) checkTypeApplyCallExpr(
 	); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkBuiltinThreadScopedTypeApply(
+		name, expr.TypeArg, args, env, unsafe,
+	); ok || err != nil {
+		return typ, err
+	}
 	if typ, ok, err := c.checkBuiltinTypeApply(
 		name, expr.TypeArg, args, env, unsafe,
 	); ok || err != nil {
@@ -2458,6 +2459,28 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	return typ, true, err
 }
 
+// checkBuiltinThreadScopedTypeApply validates the std-only scoped thread primitive.
+func (c *Checker) checkBuiltinThreadScopedTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if name != "std.builtin.thread_scoped" {
+		return "", false, nil
+	}
+	if !c.currentStd {
+		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::thread", name)
+	}
+	arg, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	typ, _, err := c.checkThreadScopedTyped(arg, args, env, unsafe)
+	return typ, true, err
+}
+
 // checkGenericUserTypeApply validates source-defined std generic wrappers.
 func (c *Checker) checkGenericUserTypeApply(
 	name string,
@@ -2541,7 +2564,15 @@ func (c *Checker) checkGenericUserArg(
 	unsafe bool,
 ) error {
 	want := substituteTypeParams(fn.params[idx], subst)
+	if want == typeFunction && fn.comptimeParams[idx] {
+		return c.checkGenericFunctionNameArg(name, fn, subst, idx, arg)
+	}
 	if name == "std.sync.Mutex" {
+		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
+			return err
+		}
+	}
+	if name == "std.thread.scoped" && idx == 2 {
 		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
 			return err
 		}
@@ -2558,6 +2589,38 @@ func (c *Checker) checkGenericUserArg(
 		return userCallArgError(name, fn, idx, got)
 	}
 	return nil
+}
+
+// checkGenericFunctionNameArg validates Function arguments in generic std wrappers.
+func (c *Checker) checkGenericFunctionNameArg(
+	name string,
+	fn *functionType,
+	subst map[string]Type,
+	idx int,
+	arg ast.Expression,
+) error {
+	target, ok := arg.(*ast.IdentExpr)
+	if !ok {
+		return fmt.Errorf("type error: `%s` expects function name", diagnosticName(name))
+	}
+	targetFn := c.functions[target.Name]
+	if targetFn == nil {
+		return fmt.Errorf("type error: undefined function `%s`", target.Name)
+	}
+	if name == "std.thread.scoped" && typeFunctionParamName(fn, idx) == "worker" {
+		return c.checkThreadScopedWorker(
+			substituteTypeParams(fn.returnType, subst), target.Name, targetFn,
+		)
+	}
+	return c.checkStdFunctionNameParam(name, fn, idx, target.Name, targetFn)
+}
+
+// typeFunctionParamName returns the source parameter name when available.
+func typeFunctionParamName(fn *functionType, idx int) string {
+	if fn.decl == nil || idx >= len(fn.decl.Params) {
+		return ""
+	}
+	return fn.decl.Params[idx].Name
 }
 
 // checkErrorCall validates error-union error construction.
@@ -3983,31 +4046,31 @@ func (c *Checker) resolveFunctionNameArg(
 	return target.Name, nil, false, true
 }
 
-// checkThreadScoped validates explicit low-level scoped thread boundaries.
-func (c *Checker) checkThreadScoped(
+// checkThreadScopedTyped validates the std-only one-argument scoped thread primitive.
+func (c *Checker) checkThreadScopedTyped(
+	argType Type,
 	args []ast.Expression,
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if len(args) < 2 {
-		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects io and function")
+	if len(args) != 3 {
+		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects io, function, and arg")
 	}
-	ioType, err := c.checkExpr(args[0], env, unsafe)
+	if err := c.checkIoArg(args[0], env, unsafe, "std::thread::scoped"); err != nil {
+		return "", true, err
+	}
+	if _, _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
+		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects function name")
+	}
+	got, err := c.checkExpr(args[2], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
-	if ioType != "Io" {
-		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects Io, got %s", ioType)
+	if got != argType {
+		return "", true, fmt.Errorf("type error: arg 1 of `std::thread::scoped` expects %s, got %s",
+			argType, got)
 	}
-	target, ok := args[1].(*ast.IdentExpr)
-	if !ok {
-		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects function name")
-	}
-	fn := c.functions[target.Name]
-	if fn == nil {
-		return "", true, fmt.Errorf("type error: undefined function `%s`", target.Name)
-	}
-	return c.checkThreadScopedArgs(target.Name, fn, args[2:], env, unsafe)
+	return argType, true, nil
 }
 
 // checkAtomic validates the v0.1 seq_cst atomic constructor.
@@ -4362,35 +4425,22 @@ func (c *Checker) parallelReturnType(fn *functionType) (Type, error) {
 	return "", fmt.Errorf("type error: parallel worker `%s` must return void or !void", fn.name)
 }
 
-// checkThreadScopedArgs validates explicit low-level thread boundary arguments.
-func (c *Checker) checkThreadScopedArgs(
-	name string,
-	fn *functionType,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if len(args) != len(fn.params) {
-		return "", true, fmt.Errorf("type error: `%s` expects %d args, got %d",
-			name, len(fn.params), len(args))
+// checkThreadScopedWorker validates the one-argument scoped worker signature.
+func (c *Checker) checkThreadScopedWorker(
+	typ Type,
+	target string,
+	targetFn *functionType,
+) error {
+	if len(targetFn.params) != 1 || targetFn.params[0] != typ {
+		return fmt.Errorf("type error: thread worker `%s` must accept %s", target, typ)
 	}
-	for idx, arg := range args {
-		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
-			return "", true, fmt.Errorf("type error: thread cannot capture borrow parameter `%s`", name)
-		}
-		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
-			return "", true, err
-		}
-		got, err := c.checkExpr(arg, env, unsafe)
-		if err != nil {
-			return "", true, err
-		}
-		if got != fn.params[idx] {
-			return "", true, fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
-				idx+1, name, fn.params[idx], got)
-		}
+	if targetFn.borrowParams[0] || targetFn.mutBorrowParams[0] {
+		return fmt.Errorf("type error: thread cannot capture borrow parameter `%s`", target)
 	}
-	return fn.returnType, true, nil
+	if targetFn.returnType != typ {
+		return fmt.Errorf("type error: thread worker `%s` must return %s", target, typ)
+	}
+	return nil
 }
 
 // rejectThreadBoundaryArg rejects values unsafe to move across concurrency boundaries.

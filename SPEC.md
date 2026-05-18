@@ -1517,7 +1517,7 @@ std::task::Queue          deterministic deferred task queue
 std::task::parallel_for   safe data parallelism
 std::task::parallel_map   disjoint partition output
 std::channel::Channel<T>  owned message passing
-std::thread::scoped       scoped thread boundary
+std::thread::scoped<T>    scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
 std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
@@ -1559,7 +1559,7 @@ let ch = std::channel::Channel<i64>();
 ch.send(1);
 let n = ch.recv();
 
-let result = std::thread::scoped(io, worker, 41);
+let result = std::thread::scoped<i64>(io, worker, 41);
 let lock = std::sync::Mutex<i64>(3);
 let atomic = std::atomic::Atomic<i64>(0);
 ```
@@ -1644,8 +1644,9 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 Low-level concurrency boundary:
 
-* `std::thread::scoped` is scoped and joined by construction
-* `std::thread::scoped(io, fn, args...)` は `fn(args...)` の結果を返す
+* `std::thread::scoped<T>` is scoped and joined by construction
+* v0.2 の `std::thread::scoped<T>(io, fn, arg)` は 1 引数 worker に限定し、
+  `fn(arg)` の結果を返す
 * v0.1 interpreter では OS thread を作らず同期評価してよい
 * `std::sync::Mutex<T>` は explicit shared-mutable-state wrapper
 * v0.1 の `Mutex<T>` は copy value だけを受け取る

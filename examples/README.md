@@ -274,6 +274,12 @@ go test ./...
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |
 | scoped thread cannot capture mutex values | `negative/thread_scoped_mutex.kizu` | `Mutex` |
+| scoped thread workers must accept `T` | `negative/thread_scoped_wrong_worker_arg.kizu` | `must accept i64` |
+| scoped thread workers must return `T` | `negative/thread_scoped_wrong_worker_return.kizu` | `must return i64` |
+| scoped thread workers must exist | `negative/thread_scoped_undefined_worker.kizu` | `undefined function` |
+| scoped thread workers must be names | `negative/thread_scoped_non_function_name.kizu` | `function name` |
+| scoped thread moves owned args | `negative/thread_scoped_moves_arg.kizu` | `moved value` |
+| scoped thread host primitives are reserved | `negative/std_thread_scoped_builtin_direct_call.kizu` | `reserved; use std::thread` |
 | atomic store must match `T` | `negative/atomic_store_wrong_type.kizu` | `atomic.store` |
 | old atomic name is rejected | `negative/atomic_old_name.kizu` | `Atomic<i64>` |
 | atomic constructor requires `T` | `negative/atomic_untyped_constructor.kizu` | `Atomic<T>` |
