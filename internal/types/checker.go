@@ -1798,13 +1798,27 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if strings.HasPrefix(name, "std.builtin.string_") {
-		return "", true, fmt.Errorf("type error: `%s` was removed; use std::string", name)
+	if replacement, ok := removedBuiltinReplacement(name); ok {
+		return "", true, fmt.Errorf("type error: `%s` was removed; use %s", name, replacement)
 	}
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
 	return c.checkStdConstructorBuiltin(name, args)
+}
+
+// removedBuiltinReplacement reports removed std::builtin APIs with their public wrapper.
+func removedBuiltinReplacement(name string) (string, bool) {
+	switch {
+	case strings.HasPrefix(name, "std.builtin.string_"):
+		return "std::string", true
+	case name == "std.builtin.mem_byte_at":
+		return "std::mem::byte_at", true
+	case name == "std.builtin.mem_slice":
+		return "std::mem::slice", true
+	default:
+		return "", false
+	}
 }
 
 // checkStdConstructorBuiltin validates miscellaneous std constructor calls.
@@ -1969,10 +1983,6 @@ func (c *Checker) checkMemBuiltin(
 		return typ, true, err
 	case "std.builtin.mem_len":
 		return c.checkMemByteArgs(name, args, env, unsafe, 1, typeI64)
-	case "std.builtin.mem_byte_at":
-		return c.checkMemByteIndex(name, args, env, unsafe, "!u8")
-	case "std.builtin.mem_slice":
-		return c.checkMemSlice(args, env, unsafe)
 	default:
 		return "", false, nil
 	}
@@ -2002,71 +2012,6 @@ func (c *Checker) checkMemByteArgs(
 		}
 	}
 	return result, true, nil
-}
-
-// checkMemByteIndex validates std::mem helpers that read one byte by index.
-func (c *Checker) checkMemByteIndex(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-	result Type,
-) (Type, bool, error) {
-	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `%s` expects bytes and index", name)
-	}
-	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
-		return "", true, err
-	} else if got != typeByteString {
-		return "", true, fmt.Errorf("type error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	got, err := c.checkExpr(args[1], env, unsafe)
-	if err != nil {
-		return "", true, err
-	}
-	if got != typeI64 {
-		return "", true, fmt.Errorf("type error: `%s` expects i64 index, got %s", name, got)
-	}
-	return result, true, nil
-}
-
-// checkMemSlice validates recoverable slicing of []const u8.
-func (c *Checker) checkMemSlice(
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) (Type, bool, error) {
-	if err := c.checkMemSliceShape("std.builtin.mem_slice", args, env, unsafe); err != nil {
-		return "", true, err
-	}
-	return "![]const u8", true, nil
-}
-
-// checkMemSliceShape validates bytes, start, and end/index arguments.
-func (c *Checker) checkMemSliceShape(
-	name string,
-	args []ast.Expression,
-	env *scope,
-	unsafe bool,
-) error {
-	if len(args) != 3 {
-		return fmt.Errorf("type error: `%s` expects bytes, start, and end", name)
-	}
-	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
-		return err
-	} else if got != typeByteString {
-		return fmt.Errorf("type error: `%s` expects []const u8 bytes, got %s", name, got)
-	}
-	for idx, label := range []string{"start", "end"} {
-		got, err := c.checkExpr(args[idx+1], env, unsafe)
-		if err != nil {
-			return err
-		}
-		if got != typeI64 {
-			return fmt.Errorf("type error: `%s` expects i64 %s, got %s", name, label, got)
-		}
-	}
-	return nil
 }
 
 // checkFsBuiltin validates filesystem host primitives with explicit Io.
