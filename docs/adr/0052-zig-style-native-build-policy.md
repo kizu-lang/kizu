@@ -37,9 +37,12 @@ Initial command shape:
 kizu build --target native \
   [--opt] \
   [--triple <arch-os-abi>] \
+  [--cpu <cpu>] \
+  [--abi <abi>] \
   [--libc on|off] \
   [--runtime hosted|freestanding] \
   [--emit exe|obj|llvm] \
+  [--linker clang] \
   [-o <out>] \
   <file>
 ```
@@ -55,14 +58,21 @@ kizu build \
   --libc on|off \
   --runtime hosted|freestanding \
   --emit exe|obj|llvm \
+  --linker <linker> \
   [-o <out>] \
   <file>
 ```
 
-Only `--libc on --runtime hosted --emit exe` is implemented today.
-`--libc off`, `--runtime freestanding`, and object/native LLVM artifact modes
-are accepted as explicit command-line vocabulary but rejected until they have
-real backend support.
+Only `--libc on --runtime hosted --emit exe --linker clang` is implemented
+today. `--cpu`, `--abi`, `--libc off`, `--runtime freestanding`, non-clang
+linkers, and object/native LLVM artifact modes are accepted as explicit
+command-line vocabulary but rejected until they have real backend support.
+
+Each native build writes `<output>.kizu-build.json` next to the executable. The
+metadata records target, triple, CPU, ABI, libc mode, runtime mode, emit mode,
+linker, output path, and the invoked linker command. This sidecar is part of the
+explicit build contract and will become a cache-key input when native artifact
+caching is implemented.
 
 `--libc on` means the build may use C runtime and libc symbols. `--libc off`
 means generated code and the selected Kizu runtime must not require libc.

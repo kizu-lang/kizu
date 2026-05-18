@@ -78,7 +78,7 @@ func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [options] <file>")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [native-options] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target wasm32-wasi [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu cache <status|prune>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu why-rebuild <file>")
@@ -294,7 +294,8 @@ func emitNativeFile(args []string) error {
 	}
 	if err := native.Build(native.Options{
 		LLVMIR: llvmIR, Output: options.Output, Triple: options.Triple,
-		LibC: options.LibC, Runtime: options.Runtime, Emit: options.Emit,
+		CPU: options.CPU, ABI: options.ABI, LibC: options.LibC,
+		Runtime: options.Runtime, Emit: options.Emit, Linker: options.Linker,
 	}); err != nil {
 		return err
 	}
@@ -319,15 +320,18 @@ type nativeBuildArgs struct {
 	Path    string
 	Output  string
 	Triple  string
+	CPU     string
+	ABI     string
 	LibC    string
 	Runtime string
 	Emit    string
+	Linker  string
 	Opt     bool
 }
 
 // parseNativeBuildArgs parses native build flags and derives defaults.
 func parseNativeBuildArgs(args []string) (nativeBuildArgs, error) {
-	options := nativeBuildArgs{LibC: "on", Runtime: "hosted", Emit: "exe"}
+	options := nativeBuildArgs{LibC: "on", Runtime: "hosted", Emit: "exe", Linker: "clang"}
 	for i := 0; i < len(args); i++ {
 		var err error
 		switch args[i] {
@@ -337,12 +341,18 @@ func parseNativeBuildArgs(args []string) (nativeBuildArgs, error) {
 			i, options.Output, err = nextNativeArg(args, i, "-o")
 		case "--triple":
 			i, options.Triple, err = nextNativeArg(args, i, "--triple")
+		case "--cpu":
+			i, options.CPU, err = nextNativeArg(args, i, "--cpu")
+		case "--abi":
+			i, options.ABI, err = nextNativeArg(args, i, "--abi")
 		case "--libc":
 			i, options.LibC, err = nextNativeArg(args, i, "--libc")
 		case "--runtime":
 			i, options.Runtime, err = nextNativeArg(args, i, "--runtime")
 		case "--emit":
 			i, options.Emit, err = nextNativeArg(args, i, "--emit")
+		case "--linker":
+			i, options.Linker, err = nextNativeArg(args, i, "--linker")
 		default:
 			if options.Path != "" {
 				usage()
