@@ -879,8 +879,8 @@ func stage2OpenSources() string {
 			idx, len(path)+1, idx)
 		fmt.Fprintf(&out, "%%srcfile%d = call ptr @fopen(ptr %%source%d, ptr %%readmode) ",
 			idx, idx)
-		fmt.Fprintf(&out, "%%byte%d = call i32 @fgetc(ptr %%srcfile%d) ", idx, idx)
 	}
+	out.WriteString("br label %read0.loop ")
 	return out.String()
 }
 
@@ -888,7 +888,10 @@ func stage2OpenSources() string {
 func stage2CheckSources() string {
 	var out strings.Builder
 	for idx := range selfhostSourcePaths() {
-		fmt.Fprintf(&out, "%%ok%d = icmp sge i32 %%byte%d, 0 ", idx, idx)
+		writeStage2SourceReadLoop(&out, idx)
+	}
+	for idx := range selfhostSourcePaths() {
+		fmt.Fprintf(&out, "%%ok%d = icmp sgt i32 %%count%d, 0 ", idx, idx)
 	}
 	out.WriteString("%all0 = and i1 %ok0, %ok1 ")
 	for idx := 2; idx < len(selfhostSourcePaths()); idx++ {
@@ -898,6 +901,29 @@ func stage2CheckSources() string {
 		fmt.Fprintf(&out, "call i32 @fclose(ptr %%srcfile%d) ", idx)
 	}
 	return out.String()
+}
+
+// writeStage2SourceReadLoop emits one full-file byte scan for a self-host source.
+func writeStage2SourceReadLoop(out *strings.Builder, idx int) {
+	prev := "scan"
+	if idx > 0 {
+		prev = fmt.Sprintf("read%d.done", idx-1)
+	}
+	next := "after.reads"
+	if idx+1 < len(selfhostSourcePaths()) {
+		next = fmt.Sprintf("read%d.loop", idx+1)
+	}
+	fmt.Fprintf(out, "read%d.loop: %%count%d = phi i32 [0, %%%s], [%%next%d, %%read%d.byte] ",
+		idx, idx, prev, idx, idx)
+	fmt.Fprintf(out, "%%ch%d = call i32 @fgetc(ptr %%srcfile%d) ", idx, idx)
+	fmt.Fprintf(out, "%%eof%d = icmp slt i32 %%ch%d, 0 ", idx, idx)
+	fmt.Fprintf(out, "br i1 %%eof%d, label %%read%d.done, label %%read%d.byte ", idx, idx, idx)
+	fmt.Fprintf(out, "read%d.byte: %%next%d = add i32 %%count%d, 1 ", idx, idx, idx)
+	fmt.Fprintf(out, "br label %%read%d.loop ", idx)
+	fmt.Fprintf(out, "read%d.done: br label %%%s ", idx, next)
+	if idx+1 == len(selfhostSourcePaths()) {
+		out.WriteString("after.reads: ")
+	}
 }
 
 // selfhostSourcePaths lists the compiler source tree read by stage1 and stage2.
