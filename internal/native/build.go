@@ -130,6 +130,7 @@ func writeMetadata(options Options, command []string) error {
 const runtimeSource = `
 #include <stdint.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -156,6 +157,117 @@ void kizu_print_cstring(const unsigned char *s) {
     }
     fputs((const char *)s, stdout);
     fputc('\n', stdout);
+}
+
+typedef struct {
+    unsigned char *data;
+    int64_t len;
+    int64_t cap;
+} KizuString;
+
+static void kizu_string_ensure(KizuString *s, int64_t additional) {
+    if (s == 0 || additional < 0) {
+        return;
+    }
+    int64_t need = s->len + additional + 1;
+    if (need <= s->cap) {
+        return;
+    }
+    int64_t cap = s->cap;
+    if (cap < 32) {
+        cap = 32;
+    }
+    while (cap < need) {
+        cap = cap * 2;
+    }
+    unsigned char *data = (unsigned char *)realloc(s->data, (size_t)cap);
+    if (data == 0) {
+        return;
+    }
+    s->data = data;
+    s->cap = cap;
+    s->data[s->len] = 0;
+}
+
+KizuString *kizu_string_new(void) {
+    KizuString *s = (KizuString *)calloc(1, sizeof(KizuString));
+    kizu_string_ensure(s, 0);
+    return s;
+}
+
+void kizu_string_append_bytes(KizuString *s, const unsigned char *bytes) {
+    if (s == 0 || bytes == 0) {
+        return;
+    }
+    int64_t length = (int64_t)strlen((const char *)bytes);
+    kizu_string_ensure(s, length);
+    if (s->data == 0 || s->len + length + 1 > s->cap) {
+        return;
+    }
+    memcpy(s->data + s->len, bytes, (size_t)length);
+    s->len += length;
+    s->data[s->len] = 0;
+}
+
+void kizu_string_append_byte(KizuString *s, unsigned char byte) {
+    if (s == 0) {
+        return;
+    }
+    kizu_string_ensure(s, 1);
+    if (s->data == 0 || s->len + 2 > s->cap) {
+        return;
+    }
+    s->data[s->len] = byte;
+    s->len += 1;
+    s->data[s->len] = 0;
+}
+
+void kizu_string_reserve(KizuString *s, int64_t additional) {
+    kizu_string_ensure(s, additional);
+}
+
+void kizu_string_truncate(KizuString *s, int64_t length) {
+    if (s == 0 || length < 0 || length > s->len) {
+        return;
+    }
+    s->len = length;
+    if (s->data != 0) {
+        s->data[s->len] = 0;
+    }
+}
+
+void kizu_string_clear(KizuString *s) {
+    kizu_string_truncate(s, 0);
+}
+
+void kizu_string_deinit(KizuString *s) {
+    if (s == 0) {
+        return;
+    }
+    free(s->data);
+    free(s);
+}
+
+const unsigned char *kizu_string_as_bytes(KizuString *s) {
+    if (s == 0 || s->data == 0) {
+        return (const unsigned char *)"";
+    }
+    s->data[s->len] = 0;
+    return s->data;
+}
+
+int64_t kizu_string_len(KizuString *s) {
+    if (s == 0) {
+        return 0;
+    }
+    return s->len;
+}
+
+int64_t kizu_string_capacity(KizuString *s) {
+    if (s == 0) {
+        return 0;
+    }
+    return s->cap;
 }
 
 void kizu_process_init(int argc, char **argv) {

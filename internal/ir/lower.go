@@ -2,6 +2,7 @@ package ir
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdprim"
@@ -303,6 +304,9 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 		}
 		return l.lowerMethodCallExpr(field, expr.Args)
 	}
+	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		return l.lowerTypeApplyCallExpr(typeApply, expr.Args)
+	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
 		return Value{}, fmt.Errorf("ir error: callee must be a function name")
@@ -340,11 +344,67 @@ func (l *lowerer) lowerQualifiedCallExpr(
 		}
 		return Value{}, false, nil
 	}
+	if value, ok, err := l.lowerDirectStdCall(name, args); ok || err != nil {
+		return value, ok, err
+	}
+	if name == "std.string.String" {
+		loweredArgs, err := l.lowerArgs(args)
+		if err != nil {
+			return Value{}, true, err
+		}
+		return l.emit("string.new", "std::string::String", loweredArgs, ""), true, nil
+	}
 	loweredArgs, err := l.lowerArgs(args)
 	if err != nil {
 		return Value{}, true, err
 	}
 	return l.emit("call."+name, l.signatures[name].Return, loweredArgs, ""), true, nil
+}
+
+// lowerDirectStdCall bypasses wrappers whose native behavior is already primitive.
+func (l *lowerer) lowerDirectStdCall(
+	name string,
+	args []ast.Expression,
+) (Value, bool, error) {
+	switch name {
+	case "std.mem.page_allocator":
+		return l.emit("call.std.builtin.mem_page_allocator", "Allocator", nil, ""), true, nil
+	case "std.mem.len":
+		loweredArgs, err := l.lowerArgs(args)
+		if err != nil {
+			return Value{}, true, err
+		}
+		return l.emit("call.std.builtin.mem_len", "i64", loweredArgs, ""), true, nil
+	default:
+		return Value{}, false, nil
+	}
+}
+
+// lowerTypeApplyCallExpr lowers generic std wrapper constructors.
+func (l *lowerer) lowerTypeApplyCallExpr(
+	expr *ast.TypeApplyExpr,
+	args []ast.Expression,
+) (Value, error) {
+	name, ok := qualifiedName(expr.Callee)
+	if !ok {
+		return Value{}, fmt.Errorf("ir error: unsupported type application `%s`", expr.String())
+	}
+	loweredArgs, err := l.lowerArgs(args)
+	if err != nil {
+		return Value{}, err
+	}
+	switch name {
+	case "std.array.Array", "std.builtin.array":
+		return l.emit("array.new", "std::array::Array<"+expr.TypeArg+">", loweredArgs, ""), nil
+	case "std.map.Map", "std.builtin.map":
+		return l.emit("map.new", "std::map::Map<"+expr.TypeArg+">", loweredArgs, ""), nil
+	default:
+		ret := "void"
+		if sig, ok := l.signatures[name]; ok {
+			ret = sig.Return
+		}
+		return l.emit("call."+name, ret, loweredArgs, ""), nil
+	}
 }
 
 // lowerTryExpr lowers error-union propagation as an explicit IR instruction.
@@ -370,6 +430,12 @@ func (l *lowerer) lowerMethodCallExpr(
 		return Value{}, err
 	}
 	allArgs := append([]Value{receiver}, loweredArgs...)
+	if receiver.Type == "std::string::String" {
+		return l.lowerStringMethodCall(field.Name, allArgs)
+	}
+	if strings.HasPrefix(receiver.Type, "std::array::Array<") {
+		return l.lowerArrayMethodCall(receiver.Type, field.Name, allArgs)
+	}
 	switch field.Name {
 	case "add":
 		return l.emit("arena.add", handleType(receiver.Type), allArgs, ""), nil
@@ -377,6 +443,45 @@ func (l *lowerer) lowerMethodCallExpr(
 		return l.emit("arena.get", arenaElementType(receiver.Type), allArgs, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
+	}
+}
+
+// lowerStringMethodCall lowers native string builder operations.
+func (l *lowerer) lowerStringMethodCall(name string, args []Value) (Value, error) {
+	switch name {
+	case "append_bytes", "append_byte", "reserve", "truncate":
+		return l.emit("string."+name, "!void", args, ""), nil
+	case "clear", "deinit":
+		return l.emit("string."+name, "void", args, ""), nil
+	case "as_bytes":
+		return l.emit("string.as_bytes", "[]const u8", args, ""), nil
+	case "len", "capacity":
+		return l.emit("string."+name, "i64", args, ""), nil
+	default:
+		return Value{}, fmt.Errorf("ir error: unknown String method `%s`", name)
+	}
+}
+
+// lowerArrayMethodCall lowers std Array wrapper methods to trusted primitives.
+func (l *lowerer) lowerArrayMethodCall(receiver string, name string, args []Value) (Value, error) {
+	elem := strings.TrimSuffix(strings.TrimPrefix(receiver, "std::array::Array<"), ">")
+	switch name {
+	case "append", "reserve", "truncate":
+		return l.emit("call.std.builtin.array_"+name, "!void", args, elem), nil
+	case "clear", "deinit":
+		return l.emit("call.std.builtin.array_"+name, "void", args, elem), nil
+	case "len", "capacity":
+		return l.emit("call.std.builtin.array_"+name, "i64", args, elem), nil
+	case "as_bytes":
+		return l.emit("call.std.builtin.array_as_bytes", "[]const u8", args, elem), nil
+	case "get":
+		return l.emit("call.std.builtin.array_get", "!"+elem, args, elem), nil
+	case "at", "at_mut":
+		return l.emit("call.std.builtin.array_"+name, elem, args, elem), nil
+	case "set":
+		return l.emit("call.std.builtin.array_set", "!void", args, elem), nil
+	default:
+		return Value{}, fmt.Errorf("ir error: unknown Array method `%s`", name)
 	}
 }
 

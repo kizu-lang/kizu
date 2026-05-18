@@ -32,6 +32,7 @@ type emitter struct {
 	needsProcess   bool
 	needsFS        bool
 	needsMem       bool
+	needsString    bool
 	currentMain    bool
 	currentReturn  string
 }
@@ -48,6 +49,9 @@ func (e *emitter) emit() error {
 	e.collectRuntimeNeeds()
 	e.writeHeader()
 	for _, fn := range e.module.Functions {
+		if shouldSkipHostedStdFunction(fn.Name) {
+			continue
+		}
 		if err := e.writeFunction(fn); err != nil {
 			return err
 		}
@@ -69,6 +73,9 @@ func (e *emitter) collectRuntimeNeeds() {
 				}
 				if instr.Op == "call.std.builtin.mem_len" {
 					e.needsMem = true
+				}
+				if strings.HasPrefix(instr.Op, "string.") {
+					e.needsString = true
 				}
 			}
 		}
@@ -122,6 +129,26 @@ func (e *emitter) writeHeader() {
 	if e.needsMem {
 		e.out.WriteString("declare i64 @kizu_mem_len(ptr)\n\n")
 	}
+	if e.needsString {
+		e.out.WriteString("declare ptr @kizu_string_new()\n")
+		e.out.WriteString("declare void @kizu_string_append_bytes(ptr, ptr)\n")
+		e.out.WriteString("declare void @kizu_string_append_byte(ptr, i8)\n")
+		e.out.WriteString("declare void @kizu_string_reserve(ptr, i64)\n")
+		e.out.WriteString("declare void @kizu_string_truncate(ptr, i64)\n")
+		e.out.WriteString("declare void @kizu_string_clear(ptr)\n")
+		e.out.WriteString("declare void @kizu_string_deinit(ptr)\n")
+		e.out.WriteString("declare ptr @kizu_string_as_bytes(ptr)\n")
+		e.out.WriteString("declare i64 @kizu_string_len(ptr)\n")
+		e.out.WriteString("declare i64 @kizu_string_capacity(ptr)\n\n")
+	}
+}
+
+// shouldSkipHostedStdFunction omits source wrappers replaced by native runtime calls.
+func shouldSkipHostedStdFunction(name string) bool {
+	return strings.HasPrefix(name, "std.string.") ||
+		strings.HasPrefix(name, "std.array.") ||
+		name == "std.mem.byte_at" ||
+		name == "std.mem.slice"
 }
 
 // sortedStringLiterals returns string constants in global-name order.
@@ -193,6 +220,16 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeBinary(instr)
 	case strings.HasPrefix(instr.Op, "call."):
 		return e.writeCall(instr)
+	case strings.HasPrefix(instr.Op, "string."):
+		return e.writeStringOp(instr)
+	default:
+		return e.writeNonCallInstr(instr)
+	}
+}
+
+// writeNonCallInstr writes non-call instructions that need no name dispatch.
+func (e *emitter) writeNonCallInstr(instr *ir.Instr) error {
+	switch {
 	case instr.Op == "cast":
 		return e.writeCast(instr)
 	case instr.Op == "phi":
@@ -312,6 +349,10 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if name == "std.builtin.mem_len" {
 		return e.writeMemLen(instr)
 	}
+	if name == "std.builtin.mem_page_allocator" {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: "null"}
+		return nil
+	}
 	if strings.HasPrefix(name, "std.builtin.fs_") || strings.HasPrefix(name, "std.builtin.io_") {
 		return e.writeHostedBuiltin(name, instr)
 	}
@@ -350,6 +391,105 @@ func (e *emitter) writeHostedBuiltin(name string, instr *ir.Instr) error {
 	default:
 		return fmt.Errorf("llvm error: unsupported hosted builtin `%s`", name)
 	}
+	return nil
+}
+
+// writeStringOp emits native hosted String builder runtime calls.
+func (e *emitter) writeStringOp(instr *ir.Instr) error {
+	name := strings.TrimPrefix(instr.Op, "string.")
+	switch name {
+	case "new":
+		resultName := localName(instr.Result.Name)
+		fmt.Fprintf(&e.out, "  %s = call ptr @kizu_string_new()\n", resultName)
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	case "append_bytes":
+		return e.writeStringAppendBytes(instr)
+	case "append_byte":
+		return e.writeStringAppendByte(instr)
+	case "reserve", "truncate":
+		return e.writeStringI64Mutation(name, instr)
+	case "clear", "deinit":
+		return e.writeStringNoArgMutation(name, instr)
+	case "as_bytes":
+		return e.writeStringAsBytes(instr)
+	case "len", "capacity":
+		return e.writeStringI64Query(name, instr)
+	default:
+		return fmt.Errorf("llvm error: unsupported String op `%s`", name)
+	}
+	return nil
+}
+
+// writeStringAppendBytes appends one C string to a hosted String.
+func (e *emitter) writeStringAppendBytes(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: String.append_bytes expects receiver and bytes")
+	}
+	receiver := e.value(instr.Args[0])
+	bytes := e.value(instr.Args[1])
+	fmt.Fprintf(&e.out, "  call void @kizu_string_append_bytes(ptr %s, ptr %s)\n",
+		receiver.operand, bytes.operand)
+	return e.writeHostedVoidResult(instr)
+}
+
+// writeStringAppendByte appends one byte to a hosted String.
+func (e *emitter) writeStringAppendByte(instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: String.append_byte expects receiver and byte")
+	}
+	receiver := e.value(instr.Args[0])
+	byte := e.value(instr.Args[1])
+	fmt.Fprintf(&e.out, "  call void @kizu_string_append_byte(ptr %s, i8 %s)\n",
+		receiver.operand, byte.operand)
+	return e.writeHostedVoidResult(instr)
+}
+
+// writeStringI64Mutation emits reserve and truncate calls.
+func (e *emitter) writeStringI64Mutation(name string, instr *ir.Instr) error {
+	if len(instr.Args) != 2 {
+		return fmt.Errorf("llvm error: String.%s expects receiver and i64", name)
+	}
+	receiver := e.value(instr.Args[0])
+	value := e.value(instr.Args[1])
+	fmt.Fprintf(&e.out, "  call void @kizu_string_%s(ptr %s, i64 %s)\n",
+		name, receiver.operand, value.operand)
+	return e.writeHostedVoidResult(instr)
+}
+
+// writeStringNoArgMutation emits clear and deinit calls.
+func (e *emitter) writeStringNoArgMutation(name string, instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: String.%s expects receiver", name)
+	}
+	receiver := e.value(instr.Args[0])
+	fmt.Fprintf(&e.out, "  call void @kizu_string_%s(ptr %s)\n", name, receiver.operand)
+	e.values[instr.Result.Name] = zeroValue(instr.Result.Type)
+	return nil
+}
+
+// writeStringAsBytes exposes the String storage as a NUL-terminated byte view.
+func (e *emitter) writeStringAsBytes(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: String.as_bytes expects receiver")
+	}
+	receiver := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_string_as_bytes(ptr %s)\n",
+		resultName, receiver.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName, length: -1}
+	return nil
+}
+
+// writeStringI64Query emits len and capacity calls.
+func (e *emitter) writeStringI64Query(name string, instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: String.%s expects receiver", name)
+	}
+	receiver := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = call i64 @kizu_string_%s(ptr %s)\n",
+		resultName, name, receiver.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
 

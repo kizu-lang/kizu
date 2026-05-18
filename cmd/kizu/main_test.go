@@ -266,6 +266,47 @@ func TestBuildTargetNativeFSReadWrite(t *testing.T) {
 	}
 }
 
+// TestBuildTargetNativeStringBuilder checks hosted native String construction.
+func TestBuildTargetNativeStringBuilder(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	dir := t.TempDir()
+	written := filepath.Join(dir, "string.txt")
+	source := filepath.Join(dir, "string.kizu")
+	code := `fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    var text = std::string::String(allocator);
+    try text.append_bytes("define ");
+    try text.append_byte(cast<u8>(88));
+    let bytes = text.as_bytes();
+    try std::fs::write_file(io, "` + written + `", bytes);
+    return;
+}`
+	if err := os.WriteFile(source, []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "string")
+	build := exec.Command("go", "run", ".", "build", "--target", "native", "-o", output, source)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native string build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	out, err = run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native string executable failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "define X" {
+		t.Fatalf("got %q", data)
+	}
+}
+
 // TestSelfhostStage1ReadsSourceTree checks the generated native seed reads selfhost sources.
 func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
