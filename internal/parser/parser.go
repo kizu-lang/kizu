@@ -184,6 +184,13 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 		return fn
 	}
 	fn.Name = p.cur.Literal
+	if p.peek.Type == token.LT {
+		p.nextToken()
+		fn.TypeParams = p.parseTypeParamList()
+		if len(fn.TypeParams) == 0 || !p.expectTypeClose() {
+			return fn
+		}
+	}
 	if !p.expectPeek(token.LParen) {
 		return fn
 	}
@@ -1080,6 +1087,25 @@ func (p *Parser) parseTypeArgList() string {
 		p.nextToken()
 	}
 	return strings.Join(args, ", ")
+}
+
+// parseTypeParamList parses generic function type parameter names.
+func (p *Parser) parseTypeParamList() []string {
+	params := []string{}
+	p.nextToken()
+	for {
+		if p.cur.Type != token.Ident {
+			p.errorf("expected type parameter, got %s", p.cur.Type)
+			return nil
+		}
+		params = append(params, p.cur.Literal)
+		if p.peek.Type != token.Comma {
+			break
+		}
+		p.nextToken()
+		p.nextToken()
+	}
+	return params
 }
 
 // expectTypeClose consumes or accepts the closing generic angle bracket.
