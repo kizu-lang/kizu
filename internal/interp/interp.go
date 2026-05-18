@@ -1331,13 +1331,13 @@ func (i *Interpreter) evalIoHelperBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.io.write_stdout":
+	case "std.builtin.io_write_stdout":
 		value, err := i.evalIoWrite(args, env, i.out)
 		return value, true, err
-	case "std.io.write_stderr":
+	case "std.builtin.io_write_stderr":
 		value, err := i.evalIoWrite(args, env, os.Stderr)
 		return value, true, err
-	case "std.io.read_stdin":
+	case "std.builtin.io_read_stdin":
 		value, err := i.evalIoReadStdin(args, env)
 		return value, true, err
 	default:
@@ -1352,18 +1352,18 @@ func (i *Interpreter) evalProcessBuiltin(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
-	case "std.process.arg_count":
+	case "std.builtin.process_arg_count":
 		if len(args) != 0 {
 			return voidValue(), true, fmt.Errorf("runtime error: std::process::arg_count expects 0 args")
 		}
 		return intValue(int64(len(i.processArgs))), true, nil
-	case "std.process.arg":
+	case "std.builtin.process_arg":
 		value, err := i.evalProcessArg(args, env)
 		return value, true, err
-	case "std.process.env":
+	case "std.builtin.process_env":
 		value, err := i.evalProcessEnv(args, env)
 		return value, true, err
-	case "std.process.exit_code":
+	case "std.builtin.process_exit_code":
 		value, err := i.evalProcessExitCode(args, env)
 		return value, true, err
 	default:
@@ -1733,13 +1733,13 @@ func failingIoError(ioValue Value) (Value, bool) {
 // evalIoBuiltin evaluates std::io constructor calls.
 func evalIoBuiltin(name string, args []ast.Expression) (Value, bool) {
 	switch name {
-	case "std.io.blocking":
+	case "std.builtin.io_blocking":
 		return callIoFromExprs("blocking", args), true
-	case "std.io.threaded":
+	case "std.builtin.io_threaded":
 		return callIoFromExprs("threaded", args), true
-	case "std.io.failing":
+	case "std.builtin.io_failing":
 		return callIoFromExprs("failing", args), true
-	case "std.io.evented":
+	case "std.io.evented", "std.builtin.io_evented":
 		return errorUnionValue("std::io::evented is not implemented in v0.1"), true
 	default:
 		return voidValue(), false

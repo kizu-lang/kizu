@@ -278,7 +278,7 @@ func TestRuntimeRejectsInvalidArenaHandle(t *testing.T) {
 func TestRunFsWriteAndRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "note.txt")
 	source := strings.ReplaceAll(`fn main() -> !void {
-    let io = std::io::blocking();
+    let io = std::builtin::io_blocking();
     try std::fs::write_file(io, "__PATH__", "hello fs");
     let text = try std::fs::read_file(io, "__PATH__");
     print(text);

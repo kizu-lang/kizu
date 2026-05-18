@@ -1239,9 +1239,9 @@ func (c *Checker) checkIoWriteBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.io.write_stdout", "std.io.write_stderr":
+	case "std.builtin.io_write_stdout", "std.builtin.io_write_stderr":
 		return c.checkIoBytesCall(name, args, env)
-	case "std.io.read_stdin":
+	case "std.builtin.io_read_stdin":
 		return c.checkIoOnlyCall(name, args, env, "![]const u8")
 	default:
 		return "", false, nil
@@ -1293,14 +1293,14 @@ func (c *Checker) checkProcessBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
-	case "std.process.arg_count":
+	case "std.builtin.process_arg_count":
 		_, err := checkNoArgOwnershipCall(name, args)
 		return "i64", true, err
-	case "std.process.arg":
+	case "std.builtin.process_arg":
 		return c.checkProcessI64Arg(name, args, env, "![]const u8")
-	case "std.process.env":
+	case "std.builtin.process_env":
 		return c.checkProcessBytesArg(name, args, env, "![]const u8")
-	case "std.process.exit_code":
+	case "std.builtin.process_exit_code":
 		return c.checkProcessI64Arg(name, args, env, "i64")
 	default:
 		return "", false, nil
@@ -1594,13 +1594,13 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, name string) error 
 // checkIoBuiltin validates std::io constructor ownership effects.
 func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 	switch name {
-	case "std.io.blocking", "std.io.threaded", "std.io.failing":
+	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", true, err
 		}
 		return "Io", true, nil
-	case "std.io.evented":
+	case "std.io.evented", "std.builtin.io_evented":
 		return "", true, fmt.Errorf("move error: `std::io::evented` is not implemented in v0.1")
 	default:
 		return "", false, nil
