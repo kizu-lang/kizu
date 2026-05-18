@@ -687,6 +687,11 @@ v0.2 の最初の対象は `[]const u8` です。
 []const u8 [ i64 .. i64 ] -> ![]const u8
 ```
 
+index / slice syntax は 1 次元 contiguous sequence に限定します。
+`matrix[rows, cols]` のような multi-dimensional slicing、strided view、
+matrix view は言語構文として採用しません。
+多次元データは、将来の `std::matrix` などの標準ライブラリ型で明示 API として扱います。
+
 slice bounds は half-open です。
 `start..end` は `start` を含み、`end` を含みません。
 
@@ -694,8 +699,8 @@ safe Kizu では unchecked bounds access を許しません。
 負の index、負の bound、`start > end`、`end > len` は error を返します。
 `bytes[i]` と `bytes[a..b]` は `!T` を返すため、通常は `try` で扱います。
 
-v0.2 では mutable indexed assignment、indexed borrow、`std::array::Array<T>` への
-直接 indexing は後続に分離します。
+v0.2 では mutable indexed assignment、indexed borrow、multi-dimensional slicing、
+`std::array::Array<T>` への直接 indexing は後続に分離します。
 
 ### 7.2 明示 cast
 
