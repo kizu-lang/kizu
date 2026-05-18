@@ -1648,29 +1648,35 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	if value, ok, err := i.evalBuiltinTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
 		return value, err
 	}
+	if value, ok, err := i.evalGenericUserTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
+		return value, err
+	}
 	switch name {
-	case "std.array.Array":
-		return i.evalArrayConstructor(expr.TypeArg, args, env)
 	case "std.map.Map":
 		return i.evalMapConstructor(expr.TypeArg, args, env)
-	case "std.channel.Channel":
-		if fn := i.functions[name]; fn != nil && len(fn.TypeParams) == 1 {
-			return i.callTypeApplyFunction(fn, expr.TypeArg, args, env)
-		}
-		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
-	case "std.atomic.Atomic":
-		if fn := i.functions[name]; fn != nil && len(fn.TypeParams) == 1 {
-			return i.callTypeApplyFunction(fn, expr.TypeArg, args, env)
-		}
-		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
-	case "std.sync.Mutex":
-		if fn := i.functions[name]; fn != nil && len(fn.TypeParams) == 1 {
-			return i.callTypeApplyFunction(fn, expr.TypeArg, args, env)
-		}
-		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	}
+}
+
+// evalGenericUserTypeApply invokes source-defined one-parameter std wrappers.
+func (i *Interpreter) evalGenericUserTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	fn := i.functions[name]
+	if fn == nil || len(fn.TypeParams) == 0 {
+		return voidValue(), false, nil
+	}
+	if len(fn.TypeParams) != 1 {
+		return voidValue(), true, fmt.Errorf(
+			"runtime error: `%s` supports one type argument in v0.2", name,
+		)
+	}
+	value, err := i.callTypeApplyFunction(fn, typeArg, args, env)
+	return value, true, err
 }
 
 // evalBuiltinTypeApply evaluates std-only generic runtime primitives.
@@ -1688,6 +1694,9 @@ func (i *Interpreter) evalBuiltinTypeApply(
 		return value, true, err
 	case "std.builtin.mutex":
 		value, err := i.evalMutex(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
+	case "std.builtin.array":
+		value, err := i.evalArrayConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
 	default:
 		return voidValue(), false, nil

@@ -1221,6 +1221,10 @@ pub fn Channel<T>() -> Channel<T> {
     return std::builtin::channel<T>();
 }
 
+pub fn Array<T>(allocator: Allocator) -> std::array::Array<T> {
+    return std::builtin::array<T>(allocator);
+}
+
 pub fn Atomic<T>(value: T) -> Atomic<T> {
     return std::builtin::atomic<T>(value);
 }

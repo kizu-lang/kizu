@@ -2212,8 +2212,10 @@ func (c *Checker) checkArrayConstructor(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	if err := c.rejectArrayElementType(elem); err != nil {
-		return "", true, err
+	if !c.typeParams[string(elem)] {
+		if err := c.rejectArrayElementType(elem); err != nil {
+			return "", true, err
+		}
 	}
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("type error: `std::array::Array<%s>` expects allocator", elem)
@@ -2358,13 +2360,6 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	}
 	switch name {
-	case "std.array.Array":
-		arg, err := c.parseType(expr.TypeArg)
-		if err != nil {
-			return "", err
-		}
-		typ, _, err := c.checkArrayConstructor(arg, args, env, unsafe)
-		return typ, err
 	case "std.map.Map":
 		mapArgs, err := c.checkedMapArgs(expr.TypeArg)
 		if err != nil {
@@ -2423,6 +2418,16 @@ func (c *Checker) checkBuiltinTypeApply(
 		}
 		typ, _, err := c.checkMutex(arg, args, env, unsafe)
 		return typ, true, err
+	case "std.builtin.array":
+		if !c.currentStd {
+			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::array", name)
+		}
+		arg, err := c.parseType(typeArg)
+		if err != nil {
+			return "", true, err
+		}
+		typ, _, err := c.checkArrayConstructor(arg, args, env, unsafe)
+		return typ, true, err
 	default:
 		return "", false, nil
 	}
@@ -2465,6 +2470,8 @@ func (c *Checker) checkGenericUserTypeApply(
 // checkGenericWrapperTypeArg validates std wrapper-specific type argument contracts.
 func (c *Checker) checkGenericWrapperTypeArg(name string, arg Type) error {
 	switch name {
+	case "std.array.Array":
+		return c.rejectArrayElementType(arg)
 	case "std.atomic.Atomic":
 		if !isAtomicSupportedType(arg) {
 			return fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", arg)
