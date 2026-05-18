@@ -306,6 +306,10 @@ func TestSelfhostStage1ReadsSourceTree(t *testing.T) {
 		!strings.Contains(string(data), "fopen(ptr %source8, ptr %readmode)") {
 		t.Fatalf("stage2 artifact does not read the selfhost source tree:\n%s", data)
 	}
+	if !strings.Contains(string(data), "fgetc(ptr %srcfile0)") ||
+		!strings.Contains(string(data), "fgetc(ptr %srcfile8)") {
+		t.Fatalf("stage2 artifact does not scan source contents:\n%s", data)
+	}
 
 	link := exec.Command("clang", stage2, "-o", stage2Bin)
 	out, err = link.CombinedOutput()

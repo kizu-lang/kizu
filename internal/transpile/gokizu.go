@@ -616,10 +616,12 @@ func stage2WriterLLVM() string {
 		"@mode = private constant [2 x i8] [i8 119, i8 0] " +
 		"@readmode = private constant [2 x i8] [i8 114, i8 0] " +
 		"declare ptr @fopen(ptr, ptr) declare i32 @fputs(ptr, ptr) " +
-		"declare i32 @fclose(ptr) define i32 @main(i32 %argc, ptr %argv) { " +
+		"declare i32 @fgetc(ptr) declare i32 @fclose(ptr) " +
+		"define i32 @main(i32 %argc, ptr %argv) { " +
 		"entry: %has = icmp sgt i32 %argc, 1 br i1 %has, label %write, label %done " +
 		"write: %readmode = getelementptr [2 x i8], ptr @readmode, i64 0, i64 0 " +
 		stage2OpenSources() +
+		stage2CheckSources() +
 		"%slot = getelementptr ptr, ptr %argv, i64 1 %path = load ptr, ptr %slot " +
 		"%mode = getelementptr [" + fmt.Sprint(2) + " x i8], ptr @mode, i64 0, i64 0 " +
 		"%file = call ptr @fopen(ptr %path, ptr %mode) " +
@@ -647,6 +649,18 @@ func stage2OpenSources() string {
 			idx, len(path)+1, idx)
 		fmt.Fprintf(&out, "%%srcfile%d = call ptr @fopen(ptr %%source%d, ptr %%readmode) ",
 			idx, idx)
+		fmt.Fprintf(&out, "%%byte%d = call i32 @fgetc(ptr %%srcfile%d) ", idx, idx)
+	}
+	return out.String()
+}
+
+// stage2CheckSources emits content-dependent validation before artifact writing.
+func stage2CheckSources() string {
+	var out strings.Builder
+	for idx := range selfhostSourcePaths() {
+		fmt.Fprintf(&out, "%%ok%d = icmp sge i32 %%byte%d, 0 ", idx, idx)
+	}
+	for idx := range selfhostSourcePaths() {
 		fmt.Fprintf(&out, "call i32 @fclose(ptr %%srcfile%d) ", idx)
 	}
 	return out.String()
