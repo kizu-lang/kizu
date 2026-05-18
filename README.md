@@ -64,7 +64,8 @@ Experimental compiler and tooling pieces:
 These experimental pieces are not the language oracle yet. LLVM and WASM
 currently support more limited target subsets than the interpreter. Native
 builds are limited to the LLVM-lowered subset and a small `kizu_print_*`
-runtime shim.
+runtime shim. The current native path uses host `clang` and libc; future
+no-libc / freestanding builds are part of the accepted build policy.
 
 There are no open v0.2 issues at the time of writing. Future compiler migration
 work should start from new GitHub Issues with explicit acceptance criteria.
