@@ -62,6 +62,7 @@ func (p *Program) String() string {
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
 	Name       string
+	TypeParams []string
 	Params     []Param
 	ReturnType string
 	Body       *BlockStmt
@@ -84,6 +85,10 @@ func (d *FunctionDecl) String() string {
 	if d.ReturnType != "" {
 		ret = " -> " + d.ReturnType
 	}
+	typeParams := ""
+	if len(d.TypeParams) > 0 {
+		typeParams = "<" + strings.Join(d.TypeParams, ", ") + ">"
+	}
 	prefix := ""
 	if d.Public {
 		prefix += "pub "
@@ -92,11 +97,11 @@ func (d *FunctionDecl) String() string {
 		prefix += "unsafe "
 	}
 	if d.ExternABI != "" {
-		return fmt.Sprintf("%sextern %q fn %s(%s)%s",
-			prefix, d.ExternABI, d.Name, strings.Join(params, ", "), ret)
+		return fmt.Sprintf("%sextern %q fn %s%s(%s)%s",
+			prefix, d.ExternABI, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
-	return fmt.Sprintf("%sfn %s(%s)%s %s",
-		prefix, d.Name, strings.Join(params, ", "), ret, d.Body.String())
+	return fmt.Sprintf("%sfn %s%s(%s)%s %s",
+		prefix, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
 }
 
 // StructDecl represents a top-level struct declaration.

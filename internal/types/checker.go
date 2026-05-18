@@ -117,6 +117,7 @@ type Checker struct {
 	satisfactions map[string]map[string]bool
 	currentReturn Type
 	currentStd    bool
+	typeParams    map[string]bool
 	loopLabels    []string
 }
 
@@ -138,6 +139,7 @@ type functionType struct {
 	borrowParams    []bool
 	mutBorrowParams []bool
 	comptimeParams  []bool
+	typeParams      []string
 	returnType      Type
 	decl            *ast.FunctionDecl
 	unsafe          bool
@@ -513,6 +515,13 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 
 // newFunctionType converts a parsed function declaration into its static type.
 func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
+	if len(fn.TypeParams) > 0 && !fn.Std {
+		return nil, fmt.Errorf("type error: generic function `%s` is reserved for std", fn.Name)
+	}
+	previousTypeParams := c.typeParams
+	c.typeParams = typeParamSet(fn.TypeParams)
+	defer func() { c.typeParams = previousTypeParams }()
+
 	params := make([]Type, 0, len(fn.Params))
 	borrowParams := make([]bool, 0, len(fn.Params))
 	mutBorrowParams := make([]bool, 0, len(fn.Params))
@@ -550,6 +559,7 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	return &functionType{
 		name: fn.Name, params: params, borrowParams: borrowParams,
 		mutBorrowParams: mutBorrowParams, comptimeParams: comptimeParams,
+		typeParams: fn.TypeParams,
 		returnType: ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
 }
@@ -569,6 +579,31 @@ func checkFunctionParamPolicy(fn *ast.FunctionDecl, param ast.Param, typ Type) e
 		return fmt.Errorf("type error: Function parameter `%s` cannot be borrowed", param.Name)
 	}
 	return nil
+}
+
+// typeParamSet returns a lookup for function-level type parameters.
+func typeParamSet(params []string) map[string]bool {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(params))
+	for _, param := range params {
+		out[param] = true
+	}
+	return out
+}
+
+// substituteTypeParams instantiates the simple generic wrapper type spellings.
+func substituteTypeParams(typ Type, subst map[string]Type) Type {
+	if replacement, ok := subst[string(typ)]; ok {
+		return replacement
+	}
+	out := string(typ)
+	for name, replacement := range subst {
+		out = strings.ReplaceAll(out, "<"+name+">", "<"+string(replacement)+">")
+		out = strings.ReplaceAll(out, ", "+name+">", ", "+string(replacement)+">")
+	}
+	return Type(out)
 }
 
 // parseType validates a source-level type name.
@@ -596,6 +631,9 @@ func (c *Checker) parseType(name string) (Type, error) {
 	}
 	typ := Type(name)
 	if typ == typeSelf {
+		return typ, nil
+	}
+	if c.typeParams[name] {
 		return typ, nil
 	}
 	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil &&
@@ -810,13 +848,16 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	}
 	previousReturn := c.currentReturn
 	previousStd := c.currentStd
+	previousTypeParams := c.typeParams
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
 	c.currentStd = fn.decl.Std
+	c.typeParams = typeParamSet(fn.typeParams)
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
 		c.currentStd = previousStd
+		c.typeParams = previousTypeParams
 		c.loopLabels = previousLoops
 	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
@@ -1677,7 +1718,11 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if _, ok := c.functions[name]; !ok {
+	fn, ok := c.functions[name]
+	if !ok {
+		return "", false, nil
+	}
+	if len(fn.typeParams) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, args, env, unsafe)
@@ -2302,6 +2347,11 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if !ok {
 		return "", fmt.Errorf("type error: unsupported type application `%s`", expr.String())
 	}
+	if typ, ok, err := c.checkGenericUserTypeApply(
+		name, expr.TypeArg, args, env, unsafe,
+	); ok || err != nil {
+		return typ, err
+	}
 	switch name {
 	case "std.array.Array":
 		arg, err := c.parseType(expr.TypeArg)
@@ -2317,7 +2367,10 @@ func (c *Checker) checkTypeApplyCallExpr(
 		}
 		typ, _, err := c.checkMapConstructor(Type(mapArgs[1]), args, env, unsafe)
 		return typ, err
-	case "std.channel.Channel":
+	case "std.builtin.channel":
+		if !c.currentStd {
+			return "", fmt.Errorf("type error: `%s` is reserved; use std::channel", name)
+		}
 		arg, err := c.parseType(expr.TypeArg)
 		if err != nil {
 			return "", err
@@ -2340,6 +2393,58 @@ func (c *Checker) checkTypeApplyCallExpr(
 	default:
 		return "", fmt.Errorf("type error: `%s` does not take a type argument", name)
 	}
+}
+
+// checkGenericUserTypeApply validates source-defined one-parameter generic wrappers.
+func (c *Checker) checkGenericUserTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	fn := c.functions[name]
+	if fn == nil || len(fn.typeParams) == 0 {
+		return "", false, nil
+	}
+	if len(fn.typeParams) != 1 {
+		return "", true, fmt.Errorf("type error: `%s` supports one type argument in v0.2", name)
+	}
+	arg, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	if len(args) != len(fn.params) {
+		return "", true, userCallArityError(name, fn, len(args))
+	}
+	subst := map[string]Type{fn.typeParams[0]: arg}
+	for idx, expr := range args {
+		if err := c.checkGenericUserArg(name, fn, subst, idx, expr, env, unsafe); err != nil {
+			return "", true, err
+		}
+	}
+	return substituteTypeParams(fn.returnType, subst), true, nil
+}
+
+// checkGenericUserArg validates an instantiated generic wrapper argument.
+func (c *Checker) checkGenericUserArg(
+	name string,
+	fn *functionType,
+	subst map[string]Type,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+	unsafe bool,
+) error {
+	want := substituteTypeParams(fn.params[idx], subst)
+	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return userCallArgError(name, fn, idx, got)
+	}
+	return nil
 }
 
 // checkErrorCall validates error-union error construction.

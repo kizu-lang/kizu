@@ -987,7 +987,11 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
-	if _, ok := c.functions[name]; !ok {
+	fn, ok := c.functions[name]
+	if !ok {
+		return "", false, nil
+	}
+	if len(fn.decl.TypeParams) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, args, env)
@@ -1586,12 +1590,18 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if !ok {
 		return "", fmt.Errorf("move error: unsupported type application `%s`", expr.String())
 	}
+	if typ, ok, err := c.checkGenericUserTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
+		return typ, err
+	}
 	switch name {
 	case "std.array.Array":
 		return c.checkArrayConstructor(expr.TypeArg, args, env)
 	case "std.map.Map":
 		return c.checkMapConstructor(expr.TypeArg, args, env)
-	case "std.channel.Channel":
+	case "std.builtin.channel":
+		if !c.currentStd {
+			return "", fmt.Errorf("move error: `%s` is reserved; use std::channel", name)
+		}
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
 			return "", err
@@ -1606,6 +1616,54 @@ func (c *Checker) checkTypeApplyCallExpr(
 	default:
 		return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
 	}
+}
+
+// checkGenericUserTypeApply validates ownership for source generic wrappers.
+func (c *Checker) checkGenericUserTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	fn := c.functions[name]
+	if fn == nil || len(fn.decl.TypeParams) == 0 {
+		return "", false, nil
+	}
+	if len(fn.decl.TypeParams) != 1 {
+		return "", true, fmt.Errorf("move error: `%s` supports one type argument in v0.2", name)
+	}
+	if len(args) != len(fn.params) {
+		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
+			name, len(fn.params), len(args))
+	}
+	subst := map[string]string{fn.decl.TypeParams[0]: typeArg}
+	for idx, arg := range args {
+		if err := c.checkGenericUserArg(name, fn, subst, idx, arg, env); err != nil {
+			return "", true, err
+		}
+	}
+	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
+}
+
+// checkGenericUserArg validates an instantiated generic wrapper argument.
+func (c *Checker) checkGenericUserArg(
+	name string,
+	fn *functionInfo,
+	subst map[string]string,
+	idx int,
+	arg ast.Expression,
+	env *scope,
+) error {
+	got, err := c.readExpr(arg, env)
+	if err != nil {
+		return err
+	}
+	want := substituteOwnershipType(fn.params[idx].typeName, subst)
+	if got != want {
+		return fmt.Errorf("move error: arg %d of `%s` expects %s, got %s",
+			idx+1, name, want, got)
+	}
+	return nil
 }
 
 // checkBuiltinCall validates ownership effects for builtin calls.
@@ -3088,6 +3146,19 @@ func returnTypeName(fn *functionInfo) string {
 		return "void"
 	}
 	return fn.returnType
+}
+
+// substituteOwnershipType instantiates simple generic wrapper type spellings.
+func substituteOwnershipType(typeName string, subst map[string]string) string {
+	if replacement, ok := subst[typeName]; ok {
+		return replacement
+	}
+	out := typeName
+	for name, replacement := range subst {
+		out = strings.ReplaceAll(out, "<"+name+">", "<"+replacement+">")
+		out = strings.ReplaceAll(out, ", "+name+">", ", "+replacement+">")
+	}
+	return out
 }
 
 // isCopyType reports whether values of typeName can be reused after move contexts.

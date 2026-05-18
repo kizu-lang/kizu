@@ -1213,6 +1213,19 @@ fn sized(comptime n: i64) -> i64 {
 }
 ```
 
+Std source may define restricted one-parameter generic wrappers when the type
+argument is forwarded to an explicit trusted primitive:
+
+```kizu
+pub fn Channel<T>() -> Channel<T> {
+    return std::builtin::channel<T>();
+}
+```
+
+This is not a general monomorphization system. v0.2 uses it only to move public
+stdlib constructor spelling into Kizu source while keeping runtime storage as an
+explicit primitive boundary.
+
 comptime branch:
 
 ```kizu

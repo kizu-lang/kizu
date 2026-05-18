@@ -19,6 +19,7 @@ type Interpreter struct {
 	impls       map[string]map[string]*ast.FunctionDecl
 	enums       map[string]map[string]bool
 	unions      map[string]map[string]string
+	typeArgs    map[string]string
 	processArgs []string
 }
 
@@ -54,6 +55,7 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 		impls:       map[string]map[string]*ast.FunctionDecl{},
 		enums:       map[string]map[string]bool{},
 		unions:      map[string]map[string]string{},
+		typeArgs:    map[string]string{},
 		processArgs: append([]string{}, args...),
 	}
 }
@@ -1644,12 +1646,17 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 		return voidValue(), fmt.Errorf("runtime error: unsupported type application `%s`", expr.String())
 	}
 	switch name {
+	case "std.builtin.channel":
+		return callChannelFromExprs(i.resolveTypeArg(expr.TypeArg), args), nil
 	case "std.array.Array":
 		return i.evalArrayConstructor(expr.TypeArg, args, env)
 	case "std.map.Map":
 		return i.evalMapConstructor(expr.TypeArg, args, env)
 	case "std.channel.Channel":
-		return callChannelFromExprs(expr.TypeArg, args), nil
+		if fn := i.functions[name]; fn != nil && len(fn.TypeParams) == 1 {
+			return i.callTypeApplyFunction(fn, expr.TypeArg, args, env)
+		}
+		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	case "std.atomic.Atomic":
 		return i.evalAtomic(expr.TypeArg, args, env)
 	case "std.sync.Mutex":
@@ -1657,6 +1664,27 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	default:
 		return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
 	}
+}
+
+// callTypeApplyFunction invokes a one-parameter generic std wrapper.
+func (i *Interpreter) callTypeApplyFunction(
+	fn *ast.FunctionDecl,
+	typeArg string,
+	args []ast.Expression,
+	caller *Env,
+) (Value, error) {
+	previous := i.typeArgs
+	i.typeArgs = map[string]string{fn.TypeParams[0]: typeArg}
+	defer func() { i.typeArgs = previous }()
+	return i.callFunctionExpr(fn, args, caller)
+}
+
+// resolveTypeArg maps a wrapper type parameter to the caller-provided type.
+func (i *Interpreter) resolveTypeArg(typeArg string) string {
+	if replacement, ok := i.typeArgs[typeArg]; ok {
+		return replacement
+	}
+	return typeArg
 }
 
 // evalTryExpr unwraps a successful !T value or propagates an error.
