@@ -1341,7 +1341,7 @@ func (c *Checker) checkTaskBuiltin(
 		return c.checkLocalBuffer(args, env)
 	case "std.builtin.task_parallel_for":
 		return c.checkParallelFor(args, env)
-	case "std.task.parallel_map":
+	case "std.builtin.task_parallel_map":
 		return c.checkParallelMap(args, env)
 	default:
 		return "", false, nil
@@ -3329,9 +3329,7 @@ func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, b
 		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target)
 	}
 	if forwarded {
-		return "", true, fmt.Errorf(
-			"parallel error: `std::task::parallel_map` cannot forward Function yet",
-		)
+		return "void", true, nil
 	}
 	return returnTypeName(fn), true, nil
 }

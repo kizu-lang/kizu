@@ -2098,7 +2098,7 @@ func (c *Checker) checkTaskBuiltin(
 		return c.checkLocalBuffer(args, env, unsafe)
 	case "std.builtin.task_parallel_for":
 		return c.checkParallelFor(args, env, unsafe)
-	case "std.task.parallel_map":
+	case "std.builtin.task_parallel_map":
 		return c.checkParallelMap(args, env, unsafe)
 	default:
 		return "", false, nil
@@ -2683,7 +2683,7 @@ func (c *Checker) checkStdFunctionNameParam(
 		_, err := c.parallelReturnType(targetFn)
 		return err
 	case name == "std.task.parallel_map" && paramName == "worker":
-		return fmt.Errorf("type error: `std::task::parallel_map` cannot forward Function yet")
+		return c.checkParallelMapWorker(target, targetFn)
 	}
 	return nil
 }
@@ -3946,15 +3946,23 @@ func (c *Checker) checkParallelMap(
 		return "", true, fmt.Errorf("type error: undefined function `%s`", target)
 	}
 	if forwarded {
-		return "", true, fmt.Errorf("type error: `std::task::parallel_map` cannot forward Function yet")
+		return typeVoid, true, nil
 	}
-	if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
-		return "", true, fmt.Errorf("type error: parallel map worker `%s` must accept i64", target)
-	}
-	if targetFn.returnType != typeI64 {
-		return "", true, fmt.Errorf("type error: parallel map worker `%s` must return i64", target)
+	if err := c.checkParallelMapWorker(target, targetFn); err != nil {
+		return "", true, err
 	}
 	return typeVoid, true, nil
+}
+
+// checkParallelMapWorker validates the disjoint-output map worker signature.
+func (c *Checker) checkParallelMapWorker(target string, targetFn *functionType) error {
+	if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
+		return fmt.Errorf("type error: parallel map worker `%s` must accept i64", target)
+	}
+	if targetFn.returnType != typeI64 {
+		return fmt.Errorf("type error: parallel map worker `%s` must return i64", target)
+	}
+	return nil
 }
 
 // resolveFunctionNameArg accepts direct functions or comptime Function parameters.

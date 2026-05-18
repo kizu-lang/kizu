@@ -164,6 +164,7 @@ go test ./...
 | evented Io is not implemented in v0.1 | `negative/io_evented_unimplemented.kizu` | `not implemented` |
 | task host primitives are reserved | `negative/std_task_builtin_direct_call.kizu` | `reserved; use std::task` |
 | parallel task host primitives are reserved | `negative/std_task_parallel_for_builtin_direct_call.kizu` | `reserved; use std::task` |
+| parallel map host primitives are reserved | `negative/std_task_parallel_map_builtin_direct_call.kizu` | `reserved; use std::task` |
 | channel host primitives are reserved | `negative/std_channel_builtin_direct_call.kizu` | `reserved; use std::channel` |
 | atomic host primitives are reserved | `negative/std_atomic_builtin_direct_call.kizu` | `reserved; use std::atomic` |
 | mutex host primitives are reserved | `negative/std_mutex_builtin_direct_call.kizu` | `reserved; use std::sync` |
@@ -261,10 +262,14 @@ go test ./...
 | queue cannot capture safe raw pointers | `negative/queue_enqueue_pointer.kizu` | `raw pointer` |
 | parallel workers cannot require shared mutable state | `negative/parallel_shared_mutable.kizu` | `must accept i64` |
 | parallel map workers must return slot values | `negative/parallel_map_wrong_worker.kizu` | `must return i64` |
+| parallel map workers must accept indexes | `negative/parallel_map_wrong_worker_arg.kizu` | `must accept i64` |
+| parallel map workers must exist | `negative/parallel_map_undefined_worker.kizu` | `undefined function` |
+| parallel map workers must be names | `negative/parallel_map_non_function_name.kizu` | `function name` |
 | partition initialization is copy-only | `negative/partition_mut_non_i64.kizu` | `partition init expects i64` |
 | parallel worker errors propagate | `negative/parallel_for_error.kizu` | `parallel failed` |
 | partition slot access is bounds-checked | `negative/partition_index_out_of_bounds.kizu` | `out of bounds` |
 | parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
+| parallel map requires mutable partition owner | `negative/parallel_map_immutable_partition.kizu` | `&mut argument` |
 | local buffer access is bounds-checked | `negative/local_buffer_out_of_bounds.kizu` | `out of bounds` |
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |

@@ -88,7 +88,7 @@ blocking / threaded の違いは呼び出し側が選んだ `Io` と `TaskGroup`
 
 `std::task::parallel_for` は data-parallel API とする。disjoint output は
 `std::task::partition_mut(init: i64, count: i64)` と
-`std::task::parallel_map(io, partition, start, end, worker)` に閉じ込める。
+`std::task::parallel_map(io, partition: &mut Partition, start, end, worker)` に閉じ込める。
 worker-local scratch は `std::task::LocalBuffer` のような trusted std API に閉じ込める。
 collection / mutable slice への直接接続は v0.1 では行わず、ADR-0040 に従って
 `std::mem` と `std::array::Array<T>` の仕様後に設計する。

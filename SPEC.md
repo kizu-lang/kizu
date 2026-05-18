@@ -1632,7 +1632,8 @@ let atomic = std::atomic::Atomic<i64>(0);
 * v0.1 workers are `fn(i: i64) -> void` or `fn(i: i64) -> !void`
 * `std::task::partition_mut(init: i64, count: i64)` creates disjoint `i64` output slots
 * `partition.at(i)` reads or writes one checked slot
-* `std::task::parallel_map(io, partition, start, end, worker)` writes `worker(i)` to slot `i`
+* `std::task::parallel_map(io, partition, start, end, worker)` takes `partition`
+  as `&mut Partition` and writes `worker(i)` to slot `i`
 * `std::task::LocalBuffer` is the trusted boundary for worker-local scratch
 * first error propagation uses the existing `!void` / `try` model
 * the interpreter may execute workers sequentially while preserving the API contract

@@ -99,7 +99,7 @@ Current builtin thinning candidates:
 | `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_*` | Host primitive | Keep as host process boundary |
-| `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for` | Host primitive | Public constructors and `parallel_for` live in `std/src/task.kizu`; direct user calls are rejected |
+| `std::builtin::task_group`, `std::builtin::task_queue`, `std::builtin::task_partition_mut`, `std::builtin::task_local_buffer`, `std::builtin::task_parallel_for`, `std::builtin::task_parallel_map` | Host primitive | Public constructors, `parallel_for`, and `parallel_map` live in `std/src/task.kizu`; direct user calls are rejected |
 | `std::builtin::channel<T>` | Runtime primitive | Public `std::channel::Channel<T>()` lives in `std/src/channel.kizu`; direct user calls are rejected |
 | `std::builtin::atomic<T>` | Runtime primitive | Public `std::atomic::Atomic<T>(value)` lives in `std/src/atomic.kizu`; direct user calls are rejected |
 | `std::builtin::mutex<T>` | Runtime primitive | Public `std::sync::Mutex<T>(value)` lives in `std/src/sync.kizu`; direct user calls are rejected |
@@ -121,9 +121,8 @@ tracked by #360 and must not leave dual public paths behind. The
 task constructors `Group`, `Queue`, `partition_mut`, and `LocalBuffer` are now
 Kizu wrappers over reserved `std::builtin::task_*` primitives. `parallel_for`
 uses a `comptime Function` parameter to forward the worker name through
-`std/src/task.kizu`. `parallel_map` remains a public Go branch until Kizu can
-forward both function names and mutable partition access without moving the
-partition value; that blocker is tracked by #372. `std::channel::Channel<T>()`,
+`std/src/task.kizu`. `parallel_map` uses an explicit `&mut Partition` parameter
+to mutate partition output without moving the owner. `std::channel::Channel<T>()`,
 `std::atomic::Atomic<T>(value)`, `std::sync::Mutex<T>(value)`, and
 `std::array::Array<T>(allocator)`, and `std::map::Map<K, V>(allocator)` now use
 source-level type-argument forwarding through Kizu std source.
@@ -142,7 +141,7 @@ source-level type-argument forwarding through Kizu std source.
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
 | `std::process` | `arg_count`, `arg`, `env`, `exit_code` | Kizu wrappers in `std/src/process.kizu` over `std::builtin::process_*` primitives | migrated wrapper module; keep host process access and bounds checks trusted |
-| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors and `parallel_for`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; finish `parallel_map` wrapper split after mutable partition forwarding is representable |
+| `std::task` | `Group`, `Queue`, `partition_mut`, `LocalBuffer`, `parallel_for`, `parallel_map` | Kizu wrappers for task constructors, `parallel_for`, and `parallel_map`; Go scheduler, task state, data-parallel execution, and safety boundaries | keep scheduling primitives trusted; method wrappers tracked by #360 |
 | `std::channel` | `Channel<T>`, `send`, `recv` | Kizu constructor wrapper; Go owned message queue and boundary checks | keep queue primitive trusted; method wrappers still tracked by #360 |
 | `std::thread` | `scoped` | host thread boundary and join semantics | trusted primitive; wrapper split tracked by #360 |
 | `std::sync` | `Mutex<T>` | Kizu constructor wrapper; Go shared mutable state primitive and copy-value restrictions | keep mutex storage primitive trusted; method wrappers tracked by #360 |

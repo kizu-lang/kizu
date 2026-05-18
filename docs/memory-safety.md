@@ -153,7 +153,8 @@ policy.
 - Arena / handle thread-safe sharing is not part of v0.1.
 - `std::task::partition_mut(init, count)` creates checked disjoint output slots.
 - `partition.at(i)` bounds-checks slot access.
-- `std::task::parallel_map(io, partition, start, end, worker)` writes only into the
+- `std::task::parallel_map(io, partition, start, end, worker)` takes `partition`
+  as `&mut Partition` and writes only into the
   checked slot range.
 - v0.1 data parallelism is range and `Partition` based; it does not write
   directly into user collections or mutable slices.
