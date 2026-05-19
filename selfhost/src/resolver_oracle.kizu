@@ -1,0 +1,120 @@
+import selfhost::resolver;
+
+pub fn gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var symbols = std::map::Map<[]const u8, resolver::BindingKind>(allocator);
+    var visibility = std::map::Map<[]const u8, bool>(allocator);
+
+    try resolver::declare(
+        symbols,
+        visibility,
+        "selfhost::lexer",
+        resolver::BindingKind::Module,
+        true
+    );
+    try resolver::declare(
+        symbols,
+        visibility,
+        "selfhost::lexer::summarize",
+        resolver::BindingKind::Function,
+        true
+    );
+    try resolver::declare(
+        symbols,
+        visibility,
+        "selfhost::ast::AstSummary",
+        resolver::BindingKind::TypeName,
+        true
+    );
+    try resolver::declare(
+        symbols,
+        visibility,
+        "selfhost::resolver::scope",
+        resolver::BindingKind::Local,
+        false
+    );
+    try expect_resolved(symbols, visibility);
+    try expect_diagnostics(allocator);
+
+    let summary = resolver::summarize(symbols, 4);
+    try std::testing::expect_equal_i64(1, summary.modules);
+    try std::testing::expect_equal_i64(4, summary.symbols);
+    try std::testing::expect_equal_i64(4, summary.diagnostics);
+
+    symbols.deinit();
+    visibility.deinit();
+
+    print("resolver-symbols");
+    print(summary.symbols);
+    print("resolver-diagnostics");
+    print(summary.diagnostics);
+    print("resolver-related");
+    print(3);
+    return;
+}
+
+fn expect_resolved(
+    symbols: &std::map::Map<[]const u8, resolver::BindingKind>,
+    visibility: &std::map::Map<[]const u8, bool>
+) -> !void {
+    let module = try resolver::resolve_kind(symbols, "selfhost::lexer");
+    try std::testing::expect_equal_bool(true, module == resolver::BindingKind::Module);
+    let function = try resolver::resolve_kind(symbols, "selfhost::lexer::summarize");
+    try std::testing::expect_equal_bool(true, function == resolver::BindingKind::Function);
+    let type_name = try resolver::resolve_kind(symbols, "selfhost::ast::AstSummary");
+    try std::testing::expect_equal_bool(true, type_name == resolver::BindingKind::TypeName);
+    let local = try resolver::resolve_kind(symbols, "selfhost::resolver::scope");
+    try std::testing::expect_equal_bool(true, local == resolver::BindingKind::Local);
+    let public_symbol = try resolver::is_public(visibility, "selfhost::lexer::summarize");
+    try std::testing::expect_equal_bool(true, public_symbol);
+    let private_symbol = try resolver::is_public(visibility, "selfhost::resolver::scope");
+    try std::testing::expect_equal_bool(false, private_symbol);
+    return;
+}
+
+fn expect_diagnostics(allocator: Allocator) -> !void {
+    var missing = resolver::missing_symbol(allocator, "selfhost/src/main.kizu", 5, 12);
+    try expect_diagnostic(missing, "missing symbol", 0);
+
+    var duplicate = try resolver::duplicate_symbol(
+        allocator,
+        "selfhost/src/main.kizu",
+        10,
+        15,
+        2,
+        7
+    );
+    try expect_diagnostic(duplicate, "duplicate symbol", 1);
+
+    var private = try resolver::private_access(
+        allocator,
+        "selfhost/src/main.kizu",
+        20,
+        27,
+        1,
+        4
+    );
+    try expect_diagnostic(private, "private access", 1);
+
+    var cycle = try resolver::import_cycle(
+        allocator,
+        "selfhost/src/main.kizu",
+        30,
+        38,
+        40,
+        48
+    );
+    try expect_diagnostic(cycle, "import cycle", 1);
+    return;
+}
+
+fn expect_diagnostic(
+    diagnostic: std::kizu::diagnostic::Diagnostic,
+    message: []const u8,
+    related: i64
+) -> !void {
+    try std::testing::expect_equal_bytes(message, diagnostic.message);
+    try std::testing::expect_equal_i64(related, diagnostic.related_len());
+    diagnostic.deinit();
+    return;
+}

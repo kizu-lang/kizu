@@ -3,7 +3,7 @@
 This package is the source-owned home for Kizu compiler components that will
 eventually replace Go-owned frontend phases.
 
-The initial skeleton defines module boundaries only:
+The package currently defines these source-owned modules:
 
 - `selfhost::token`
 - `selfhost::lexer`
@@ -11,6 +11,7 @@ The initial skeleton defines module boundaries only:
 - `selfhost::parser`
 - `selfhost::diagnostic`
 - `selfhost::resolver`
+- `selfhost::resolver_oracle`
 - `selfhost::types`
 - `selfhost::ownership`
 - `selfhost::ir`
@@ -28,6 +29,11 @@ Array-backed `tokenize` path against the Go lexer.
 The parser and AST boundary is currently `std::kizu::{ast, parser}`. Parser
 success gates compare the Arena + NodeId AST summary for every `selfhost/src`
 source file, and parser error gates keep recoverable `!T` failures readable.
+
+The resolver boundary uses `std::map::Map<[]const u8, V>` for symbol and
+visibility tables. Resolver diagnostics use `std::kizu::diagnostic` and the
+oracle covers missing symbols, duplicate symbols, private access, and import
+cycles.
 
 Check the package with:
 

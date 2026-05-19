@@ -1,19 +1,132 @@
 import selfhost::ast;
-import selfhost::diagnostic;
+
+pub enum BindingKind {
+    Module
+    Function
+    TypeName
+    Local
+}
 
 pub struct ResolveSummary {
+    pub modules: i64;
     pub symbols: i64;
     pub diagnostics: i64;
 }
 
 pub fn resolve(tree: ast::AstSummary) -> ResolveSummary {
     return ResolveSummary {
+        modules: 1,
         symbols: tree.nodes,
         diagnostics: 0
     };
 }
 
-pub fn missing_symbol(path: []const u8) -> diagnostic::Diagnostic {
-    let primary = diagnostic::file_span(path, 0, 1);
-    return diagnostic::Diagnostic(primary, "missing symbol");
+pub fn declare(
+    symbols: &mut std::map::Map<[]const u8, BindingKind>,
+    visibility: &mut std::map::Map<[]const u8, bool>,
+    name: []const u8,
+    kind: BindingKind,
+    public: bool
+) -> !void {
+    if symbols.contains(name) {
+        return error("duplicate symbol");
+    }
+    try symbols.insert(name, kind);
+    try visibility.insert(name, public);
+    return;
+}
+
+pub fn resolve_kind(
+    symbols: &std::map::Map<[]const u8, BindingKind>,
+    name: []const u8
+) -> !BindingKind {
+    return symbols.get(name);
+}
+
+pub fn is_public(
+    visibility: &std::map::Map<[]const u8, bool>,
+    name: []const u8
+) -> !bool {
+    return visibility.get(name);
+}
+
+pub fn summarize(
+    symbols: &std::map::Map<[]const u8, BindingKind>,
+    diagnostics: i64
+) -> ResolveSummary {
+    return ResolveSummary {
+        modules: 1,
+        symbols: symbols.len(),
+        diagnostics: diagnostics
+    };
+}
+
+pub fn missing_symbol(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "missing symbol");
+}
+
+pub fn duplicate_symbol(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    previous_start: i64,
+    previous_end: i64
+) -> !std::kizu::diagnostic::Diagnostic {
+    var report = make_diagnostic(allocator, path, byte_start, byte_end, "duplicate symbol");
+    let previous = make_span(path, previous_start, previous_end);
+    try report.add_related(previous, "previous declaration");
+    return report;
+}
+
+pub fn private_access(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    declaration_start: i64,
+    declaration_end: i64
+) -> !std::kizu::diagnostic::Diagnostic {
+    var report = make_diagnostic(allocator, path, byte_start, byte_end, "private access");
+    let declaration = make_span(path, declaration_start, declaration_end);
+    try report.add_related(declaration, "private declaration");
+    return report;
+}
+
+pub fn import_cycle(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    edge_start: i64,
+    edge_end: i64
+) -> !std::kizu::diagnostic::Diagnostic {
+    var report = make_diagnostic(allocator, path, byte_start, byte_end, "import cycle");
+    let edge = make_span(path, edge_start, edge_end);
+    try report.add_related(edge, "cycle edge");
+    return report;
+}
+
+fn make_diagnostic(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    message: []const u8
+) -> std::kizu::diagnostic::Diagnostic {
+    let primary = make_span(path, byte_start, byte_end);
+    return std::kizu::diagnostic::Diagnostic(allocator, primary, message);
+}
+
+fn make_span(
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::FileSpan {
+    return std::kizu::diagnostic::file_span(0, path, byte_start, byte_end, 1, byte_start + 1);
 }

@@ -127,6 +127,46 @@ fn main(value: lexer::Token) -> void {
 	}
 }
 
+// TestCheckGraphRejectsDuplicateFunction checks local declaration collisions.
+func TestCheckGraphRejectsDuplicateFunction(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `fn parse() -> void {
+    return;
+}
+
+fn parse() -> void {
+    return;
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "duplicate function `app::parse`") {
+		t.Fatalf("got error %v, want duplicate function", err)
+	}
+}
+
+// TestCheckGraphRejectsImportCycle checks dependency cycles are rejected early.
+func TestCheckGraphRejectsImportCycle(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+
+fn main() -> void {
+    return;
+}
+`,
+		"src/lexer.kizu": `import app;
+
+pub struct Token {
+    pub kind: i64;
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "import cycle") {
+		t.Fatalf("got error %v, want import cycle", err)
+	}
+}
+
 // TestCheckGraphRejectsImportShadowing checks local names cannot hide imports.
 func TestCheckGraphRejectsImportShadowing(t *testing.T) {
 	root := moduleFixture(t, map[string]string{
