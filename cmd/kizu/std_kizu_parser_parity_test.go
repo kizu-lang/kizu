@@ -306,6 +306,7 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 		{name: "seed/two_fns", source: "fn one() {} fn two() {}"},
 		{name: "seed/fn_params_return", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
 		{name: "seed/fn_error_union_return", source: "fn main() -> !void {}"},
+		{name: "seed/fn_typed_error_union_return", source: "fn main() -> ConfigError!void {}"},
 		{name: "seed/fn_slice_param", source: "fn write(bytes: []const u8) {}"},
 		{name: "seed/fn_borrow_param", source: "fn read(value: &i64) {}"},
 		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &mut i64) {}"},
