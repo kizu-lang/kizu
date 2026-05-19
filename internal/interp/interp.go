@@ -584,7 +584,7 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	case *ast.CallExpr:
 		return i.evalCallExpr(e, env)
 	case *ast.CastExpr:
-		return i.evalExpr(e.Value, env)
+		return i.evalCastExpr(e, env)
 	case *ast.TryExpr:
 		return i.evalTryExpr(e, env)
 	case *ast.IndexExpr:
@@ -600,6 +600,24 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	default:
 		return i.evalControlExpr(expr, env)
 	}
+}
+
+// evalCastExpr evaluates casts, including explicit typed error adaptation.
+func (i *Interpreter) evalCastExpr(expr *ast.CastExpr, env *Env) (Value, error) {
+	value, err := i.evalExpr(expr.Value, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	errorType, _, ok := errorUnionParts(expr.TargetType)
+	if !ok || errorType == "" || value.kind != kindErrorUnion || value.errUnion == nil {
+		return value, nil
+	}
+	if value.errUnion.payload != nil {
+		return value, nil
+	}
+	payload := stringValue(value.errUnion.message)
+	wrapped := unionValue(errorType, "Message", &payload)
+	return typedErrorUnionValue(wrapped), nil
 }
 
 // evalControlExpr evaluates statement-compatible control flow in expression position.

@@ -49,6 +49,7 @@ go test ./...
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |
 | typed custom error propagation | `typed_error.kizu` | uses `ConfigError!i64` with `try` |
+| explicit typed error adaptation | `typed_error_cast.kizu` | maps `!T` into `ErrorType!T` with `cast` |
 | limited `comptime` | `comptime.kizu` | evaluates compile-time expressions |
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
@@ -148,6 +149,7 @@ single source file. Run them with `kizu check <package-root>`.
 | `try` requires an error-union-returning function | `negative/invalid_try.kizu` | `try requires` |
 | typed errors must match across `try` | `negative/typed_error_mismatch.kizu` | `cannot propagate` |
 | `error(message)` cannot build typed errors | `negative/typed_error_untyped_constructor.kizu` | `cannot construct typed error` |
+| typed error casts need a message variant | `negative/typed_error_cast_missing_message.kizu` | `requires CompileError::Message` |
 | invalid casts are rejected | `negative/invalid_cast.kizu` | `cannot cast` |
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |
 | pointer reads require `unsafe` | `negative/ptr_read_without_unsafe.kizu` | `requires unsafe block` |

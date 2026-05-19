@@ -296,6 +296,34 @@ fn main() -> CompileError!void {
 	}
 }
 
+// TestRunTypedErrorCastMapsUntypedError checks explicit message adaptation at runtime.
+func TestRunTypedErrorCastMapsUntypedError(t *testing.T) {
+	got, err := parseAndRun(`union CompileError {
+    Message([]const u8);
+}
+fn lower(ok: bool) -> !i64 {
+    if ok {
+        return 1;
+    }
+    return error("bad");
+}
+fn parse(ok: bool) -> CompileError!i64 {
+    let value = try cast<CompileError!i64>(lower(ok));
+    return value;
+}
+fn main() -> CompileError!void {
+    let value = try parse(false);
+    print(value);
+    return;
+}`)
+	if err == nil || err.Error() != "runtime error: CompileError::Message" {
+		t.Fatalf("got err %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty output", got)
+	}
+}
+
 // TestRuntimeErrorChecksMutableAssignment checks a short readable runtime error.
 func TestRuntimeErrorChecksMutableAssignment(t *testing.T) {
 	_, err := parseAndRun(`fn main() {

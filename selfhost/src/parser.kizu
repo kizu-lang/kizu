@@ -13,7 +13,7 @@ pub struct ParseDiagnosticSummary {
     pub end: i64;
 }
 
-pub fn parse_source(source: []const u8) -> !std::kizu::ast::ParseResult {
+pub fn parse_source(source: []const u8) -> ParseError!std::kizu::ast::ParseResult {
     let allocator = std::mem::page_allocator();
     return parse_file(allocator, "<memory>", source);
 }
@@ -22,9 +22,13 @@ pub fn parse_file(
     allocator: Allocator,
     path: []const u8,
     source: []const u8
-) -> !std::kizu::ast::ParseResult {
-    let file = std::kizu::ast::source_file(path, source);
-    return std::kizu::parser::parse_program(allocator, file);
+) -> ParseError!std::kizu::ast::ParseResult {
+    var tokens = try cast<ParseError!std::array::Array<std::kizu::lexer::Token>>(
+        lexer::tokenize(allocator, source)
+    );
+    let result = try parse_tokens(allocator, path, source, &tokens);
+    tokens.deinit();
+    return result;
 }
 
 pub fn parse_tokens(
@@ -32,10 +36,12 @@ pub fn parse_tokens(
     path: []const u8,
     source: []const u8,
     tokens: &std::array::Array<std::kizu::lexer::Token>
-) -> !std::kizu::ast::ParseResult {
+) -> ParseError!std::kizu::ast::ParseResult {
     try require_tokens(path, tokens);
     let file = std::kizu::ast::source_file(path, source);
-    return std::kizu::parser::parse_program(allocator, file);
+    return try cast<ParseError!std::kizu::ast::ParseResult>(
+        std::kizu::parser::parse_program(allocator, file)
+    );
 }
 
 pub fn summarize(
@@ -79,14 +85,14 @@ pub fn summarize_error(err: ParseError) -> ParseDiagnosticSummary {
 fn require_tokens(
     path: []const u8,
     tokens: &std::array::Array<std::kizu::lexer::Token>
-) -> !void {
+) -> ParseError!void {
     let token_count = tokens.len();
     if token_count < 1 {
-        return error("parser requires token array");
+        return diagnostic_error(path, 0, 0, "parser requires token array");
     }
-    let eof = try tokens.get(token_count - 1);
+    let eof = try cast<ParseError!std::kizu::lexer::Token>(tokens.get(token_count - 1));
     if !lexer::is_eof(eof) {
-        return error("parser requires EOF token");
+        return diagnostic_error(path, eof.start, eof.end, "parser requires EOF token");
     }
     return;
 }
