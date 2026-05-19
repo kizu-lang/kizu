@@ -31,6 +31,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostParserErrorOracle(t),
 		runSelfhostResolverOracle(t),
 		runSelfhostTypeOracle(t),
+		runSelfhostOwnershipOracle(t),
 	}
 	failures := 0
 	for _, result := range results {
@@ -199,6 +200,19 @@ func runSelfhostTypeOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "selfhost",
 		scanned:   9,
 		compared:  9,
+		failures:  failures,
+	}
+}
+
+// runSelfhostOwnershipOracle checks the Kizu-owned ownership component gate.
+func runSelfhostOwnershipOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostOwnershipGateFailures(t)
+	return selfhostOracleResult{
+		component: "ownership",
+		corpus:    "selfhost",
+		scanned:   7,
+		compared:  7,
 		failures:  failures,
 	}
 }

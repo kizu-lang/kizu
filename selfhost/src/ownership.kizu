@@ -1,13 +1,194 @@
 import selfhost::types;
 
+pub enum ResourceKind {
+    Value
+    Array
+    Map
+    String
+    Arena
+    Handle
+    BorrowedView
+}
+
+pub enum OwnershipState {
+    Available
+    Moved
+    SharedBorrowed
+    MutBorrowed
+    Deinitialized
+}
+
 pub struct OwnershipSummary {
+    pub resources: i64;
     pub checked_nodes: i64;
+    pub borrows: i64;
     pub errors: i64;
 }
 
 pub fn check(typed: types::TypeSummary) -> OwnershipSummary {
     return OwnershipSummary {
+        resources: typed.symbols,
         checked_nodes: typed.typed_nodes,
-        errors: 0
+        borrows: 0,
+        errors: typed.diagnostics
     };
+}
+
+pub fn declare_resource(
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>,
+    name: []const u8,
+    kind: ResourceKind
+) -> !void {
+    if states.contains(name) {
+        return error("duplicate resource");
+    }
+    try states.insert(name, OwnershipState::Available);
+    try kinds.insert(name, kind);
+    return;
+}
+
+pub fn move_value(
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    name: []const u8
+) -> !void {
+    let state = try states.get(name);
+    if state != OwnershipState::Available {
+        return error("move requires available value");
+    }
+    try states.insert(name, OwnershipState::Moved);
+    return;
+}
+
+pub fn shared_borrow(
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    name: []const u8
+) -> !void {
+    let state = try states.get(name);
+    if state == OwnershipState::MutBorrowed or state == OwnershipState::Moved {
+        return error("shared borrow blocked");
+    }
+    if state == OwnershipState::Deinitialized {
+        return error("borrow after deinit");
+    }
+    try states.insert(name, OwnershipState::SharedBorrowed);
+    return;
+}
+
+pub fn mut_borrow(
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    name: []const u8
+) -> !void {
+    let state = try states.get(name);
+    if state != OwnershipState::Available {
+        return error("mutable borrow requires available value");
+    }
+    try states.insert(name, OwnershipState::MutBorrowed);
+    return;
+}
+
+pub fn release_borrow(
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    name: []const u8
+) -> !void {
+    let state = try states.get(name);
+    if state == OwnershipState::SharedBorrowed or state == OwnershipState::MutBorrowed {
+        try states.insert(name, OwnershipState::Available);
+        return;
+    }
+    return error("release requires active borrow");
+}
+
+pub fn deinit_resource(
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    name: []const u8
+) -> !void {
+    let state = try states.get(name);
+    if state != OwnershipState::Available {
+        return error("deinit requires available value");
+    }
+    try states.insert(name, OwnershipState::Deinitialized);
+    return;
+}
+
+pub fn state_of(
+    states: &std::map::Map<[]const u8, OwnershipState>,
+    name: []const u8
+) -> !OwnershipState {
+    return states.get(name);
+}
+
+pub fn kind_of(
+    kinds: &std::map::Map<[]const u8, ResourceKind>,
+    name: []const u8
+) -> !ResourceKind {
+    return kinds.get(name);
+}
+
+pub fn summarize(
+    states: &std::map::Map<[]const u8, OwnershipState>,
+    borrows: i64,
+    errors: i64
+) -> OwnershipSummary {
+    return OwnershipSummary {
+        resources: states.len(),
+        checked_nodes: states.len(),
+        borrows: borrows,
+        errors: errors
+    };
+}
+
+pub fn use_after_move(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "use after move");
+}
+
+pub fn mutable_alias(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "mutable alias");
+}
+
+pub fn dangling_borrow(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "dangling borrow");
+}
+
+pub fn deinit_while_borrowed(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "deinit while borrowed");
+}
+
+fn make_diagnostic(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    message: []const u8
+) -> std::kizu::diagnostic::Diagnostic {
+    let primary = make_span(path, byte_start, byte_end);
+    return std::kizu::diagnostic::Diagnostic(allocator, primary, message);
+}
+
+fn make_span(
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::FileSpan {
+    return std::kizu::diagnostic::file_span(0, path, byte_start, byte_end, 1, byte_start + 1);
 }
