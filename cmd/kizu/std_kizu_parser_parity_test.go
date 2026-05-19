@@ -47,18 +47,30 @@ fn dump_node(
         Int(int_node) => try dump_leaf("Int", source, &node.span);
         String(string_node) => try dump_string(source, &node.span);
         TypeName(type_name) => try dump_leaf("TypeName", source, &node.span);
+        Bool(bool_node) => dump_bool(bool_node);
+        Prefix(prefix) => try dump_prefix(source, ast, prefix);
         Binary(binary) => try dump_binary(source, ast, binary);
+        FieldExpr(field_expr) => try dump_field_expr(source, ast, field_expr);
         Call(call) => try dump_call(source, ast, call);
+        TryExpr(try_expr) => try dump_try_expr(source, ast, try_expr);
+        ComptimeExpr(comptime_expr) => try dump_comptime_expr(source, ast, comptime_expr);
         Block(block) => try dump_block(source, ast, block);
         Return(return_node) => try dump_return(source, ast, return_node);
         ExprStmt(expr_stmt) => try dump_expr_stmt(source, ast, expr_stmt);
-        If(if_node) => print("If");
-        Let(let_node) => print("Let");
+        If(if_node) => try dump_if(source, ast, if_node);
+        Let(let_node) => try dump_let(source, ast, let_node);
+        Assign(assign_node) => try dump_assign(source, ast, assign_node);
+        While(while_node) => try dump_while(source, ast, while_node);
+        For(for_node) => try dump_for(source, ast, for_node);
+        Break(break_node) => try dump_break(source, ast, break_node);
+        Continue(continue_node) => try dump_continue(source, ast, continue_node);
         Param(param_node) => try dump_param(source, ast, param_node);
         Field(field_node) => print("Field");
         StructDecl(struct_decl) => print("StructDecl");
-        Match(match_node) => print("Match");
-        MatchArm(match_arm) => print("MatchArm");
+        Match(match_node) => try dump_match(source, ast, match_node);
+        MatchArm(match_arm) => try dump_match_arm(source, ast, match_arm);
+        Unsafe(unsafe_node) => try dump_unsafe(source, ast, unsafe_node);
+        ComptimeIf(comptime_if) => try dump_comptime_if(source, ast, comptime_if);
         Empty => print("Empty");
     }
     return;
@@ -108,6 +120,16 @@ fn dump_block(
     return;
 }
 
+fn dump_bool(bool_node: std::kizu::ast::BoolNode) -> void {
+    print("Bool");
+    if bool_node.value {
+        print("true");
+    } else {
+        print("false");
+    }
+    return;
+}
+
 fn dump_return(
     source: []const u8,
     ast: std::kizu::ast::Ast,
@@ -115,6 +137,91 @@ fn dump_return(
 ) -> !void {
     print("Return");
     try dump_node(source, ast, return_node.value);
+    return;
+}
+
+fn dump_if(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    if_node: std::kizu::ast::IfNode
+) -> !void {
+    print("If");
+    try dump_node(source, ast, if_node.condition);
+    try dump_node(source, ast, if_node.then_block);
+    try dump_node(source, ast, if_node.else_block);
+    return;
+}
+
+fn dump_let(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    let_node: std::kizu::ast::LetNode
+) -> !void {
+    print("Let");
+    if let_node.mutable {
+        print("Mutable");
+    } else {
+        print("Immutable");
+    }
+    try dump_node(source, ast, let_node.name);
+    try dump_node(source, ast, let_node.value);
+    return;
+}
+
+fn dump_assign(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    assign_node: std::kizu::ast::AssignNode
+) -> !void {
+    print("Assign");
+    try dump_node(source, ast, assign_node.target);
+    try dump_node(source, ast, assign_node.value);
+    return;
+}
+
+fn dump_while(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    while_node: std::kizu::ast::WhileNode
+) -> !void {
+    print("While");
+    try dump_node(source, ast, while_node.label);
+    try dump_node(source, ast, while_node.condition);
+    try dump_node(source, ast, while_node.body);
+    return;
+}
+
+fn dump_for(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    for_node: std::kizu::ast::ForNode
+) -> !void {
+    print("For");
+    try dump_node(source, ast, for_node.label);
+    try dump_node(source, ast, for_node.name);
+    try dump_node(source, ast, for_node.start);
+    try dump_node(source, ast, for_node.end);
+    try dump_node(source, ast, for_node.body);
+    return;
+}
+
+fn dump_break(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    break_node: std::kizu::ast::BreakNode
+) -> !void {
+    print("Break");
+    try dump_node(source, ast, break_node.label);
+    return;
+}
+
+fn dump_continue(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    continue_node: std::kizu::ast::ContinueNode
+) -> !void {
+    print("Continue");
+    try dump_node(source, ast, continue_node.label);
     return;
 }
 
@@ -126,10 +233,53 @@ fn dump_binary(
     print("Binary");
     match binary.op {
         Add => print("Add");
+        Sub => print("Sub");
         Mul => print("Mul");
+        Div => print("Div");
+        Mod => print("Mod");
+        Eq => print("Eq");
+        NotEq => print("NotEq");
+        LT => print("LT");
+        LTE => print("LTE");
+        GT => print("GT");
+        GTE => print("GTE");
+        And => print("And");
+        Or => print("Or");
     }
     try dump_node(source, ast, binary.left);
     try dump_node(source, ast, binary.right);
+    return;
+}
+
+fn dump_prefix(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    prefix: std::kizu::ast::PrefixNode
+) -> !void {
+    print("Prefix");
+    match prefix.op {
+        Not => print("Not");
+        Neg => print("Neg");
+        Borrow => print("Borrow");
+        MutBorrow => print("MutBorrow");
+    }
+    try dump_node(source, ast, prefix.right);
+    return;
+}
+
+fn dump_field_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    field_expr: std::kizu::ast::FieldExprNode
+) -> !void {
+    print("FieldExpr");
+    if field_expr.namespace {
+        print("Namespace");
+    } else {
+        print("Field");
+    }
+    try dump_node(source, ast, field_expr.receiver);
+    try dump_node(source, ast, field_expr.name);
     return;
 }
 
@@ -141,6 +291,71 @@ fn dump_call(
     print("Call");
     try dump_node(source, ast, call.callee);
     try dump_range(source, ast, call.args);
+    return;
+}
+
+fn dump_try_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    try_expr: std::kizu::ast::TryExprNode
+) -> !void {
+    print("TryExpr");
+    try dump_node(source, ast, try_expr.value);
+    return;
+}
+
+fn dump_comptime_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    comptime_expr: std::kizu::ast::ComptimeExprNode
+) -> !void {
+    print("ComptimeExpr");
+    try dump_node(source, ast, comptime_expr.value);
+    return;
+}
+
+fn dump_match(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    match_node: std::kizu::ast::MatchNode
+) -> !void {
+    print("Match");
+    try dump_node(source, ast, match_node.value);
+    try dump_range(source, ast, match_node.arms);
+    return;
+}
+
+fn dump_match_arm(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    match_arm: std::kizu::ast::MatchArmNode
+) -> !void {
+    print("MatchArm");
+    try dump_node(source, ast, match_arm.pattern);
+    try dump_node(source, ast, match_arm.binding);
+    try dump_node(source, ast, match_arm.body);
+    return;
+}
+
+fn dump_unsafe(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    unsafe_node: std::kizu::ast::UnsafeNode
+) -> !void {
+    print("Unsafe");
+    try dump_node(source, ast, unsafe_node.body);
+    return;
+}
+
+fn dump_comptime_if(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    comptime_if: std::kizu::ast::ComptimeIfNode
+) -> !void {
+    print("ComptimeIf");
+    try dump_node(source, ast, comptime_if.condition);
+    try dump_node(source, ast, comptime_if.then_block);
+    try dump_node(source, ast, comptime_if.else_block);
     return;
 }
 
@@ -328,6 +543,36 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 			name:   "seed/fn_return_binary_call",
 			source: "fn main() { return add(1, x) + y; }",
 		},
+		{
+			name:   "seed/fn_return_void_try",
+			source: "fn step() -> !void { return; } fn main() -> !void { try step(); return; }",
+		},
+		{
+			name: "seed/fn_let_assignment_bool_qualified_call",
+			source: "fn main() -> !void { let ok = true; var age = 30; " +
+				"age = age + 1; try std::testing::expect(ok); return; }",
+		},
+		{
+			name: "seed/fn_if_else_logical",
+			source: "fn main() { let age = 20; if age >= 20 and true { " +
+				"print(\"adult\"); } else { print(\"minor\"); } }",
+		},
+		{
+			name: "seed/fn_while_break_continue_label",
+			source: "fn main() { var i = 0; outer: while i < 3 { i = i + 1; " +
+				"if i == 2 { continue; } break :outer; } }",
+		},
+		{name: "seed/fn_for_range", source: "fn main() { for 0..5 |i| { print(i); } }"},
+		{
+			name: "seed/fn_match_statement",
+			source: "fn main() { let color = Color::Blue; match color { " +
+				"Red => print(\"red\"); Blue(value) => print(value); } }",
+		},
+		{
+			name: "seed/fn_unsafe_comptime_if",
+			source: "fn main() { unsafe { print(1); } comptime if 1 + 1 == 2 { " +
+				"print(comptime 8); } else { print(0); } }",
+		},
 	}
 	for index := range seeds {
 		want, reason, parseErrs := summarizeGoParserSubset(seeds[index].source)
@@ -494,7 +739,7 @@ func parserParityParamTypeName(param kizuast.Param) string {
 	}
 }
 
-// summarizeBlockSubset summarizes a block containing only return statements.
+// summarizeBlockSubset summarizes one statement block.
 func summarizeBlockSubset(block *kizuast.BlockStmt) ([]string, string) {
 	lines := []string{"Block", "Range", strconv.Itoa(len(block.Statements))}
 	for _, stmt := range block.Statements {
@@ -510,32 +755,237 @@ func summarizeBlockSubset(block *kizuast.BlockStmt) ([]string, string) {
 // summarizeStatementSubset summarizes statements supported by std::kizu::parser.
 func summarizeStatementSubset(stmt kizuast.Statement) ([]string, string) {
 	switch node := stmt.(type) {
+	case *kizuast.LetStmt:
+		return summarizeLetSubset(node)
+	case *kizuast.AssignStmt:
+		return summarizeAssignSubset(node)
 	case *kizuast.ReturnStmt:
-		if node.Value == nil {
-			return nil, "return without value"
-		}
-		value, reason := summarizeExprSubset(node.Value)
-		if reason != "" {
-			return nil, reason
-		}
-		return append([]string{"Return"}, value...), ""
+		return summarizeReturnSubset(node)
 	case *kizuast.ExprStmt:
-		value, reason := summarizeExprSubset(node.Expr)
+		return summarizeExprStmtSubset(node)
+	case *kizuast.IfStmt:
+		return summarizeIfSubset(node)
+	case *kizuast.WhileStmt:
+		return summarizeWhileSubset(node)
+	case *kizuast.ForStmt:
+		return summarizeForSubset(node)
+	case *kizuast.BreakStmt:
+		return append([]string{"Break"}, summarizeOptionalName(node.Label)...), ""
+	case *kizuast.ContinueStmt:
+		return append([]string{"Continue"}, summarizeOptionalName(node.Label)...), ""
+	case *kizuast.MatchStmt:
+		return summarizeMatchSubset(node)
+	case *kizuast.UnsafeStmt:
+		body, reason := summarizeBlockSubset(node.Body)
 		if reason != "" {
 			return nil, reason
 		}
-		return append([]string{"ExprStmt"}, value...), ""
+		return append([]string{"Unsafe"}, body...), ""
+	case *kizuast.ComptimeIfStmt:
+		return summarizeComptimeIfSubset(node)
 	default:
 		return nil, "statement outside std parser subset"
 	}
 }
 
+// summarizeLetSubset summarizes let and var declarations.
+func summarizeLetSubset(node *kizuast.LetStmt) ([]string, string) {
+	value, reason := summarizeExprSubset(node.Value)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{"Let", parserParityMutability(node.Mutable), "Var", node.Name}
+	return append(lines, value...), ""
+}
+
+// summarizeAssignSubset summarizes assignment statements.
+func summarizeAssignSubset(node *kizuast.AssignStmt) ([]string, string) {
+	target, reason := summarizeExprSubset(node.Target)
+	if reason != "" {
+		return nil, reason
+	}
+	value, reason := summarizeExprSubset(node.Value)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"Assign"}, target...)
+	return append(lines, value...), ""
+}
+
+// summarizeReturnSubset summarizes explicit return statements.
+func summarizeReturnSubset(node *kizuast.ReturnStmt) ([]string, string) {
+	if node.Value == nil {
+		return []string{"Return", "Empty"}, ""
+	}
+	value, reason := summarizeExprSubset(node.Value)
+	if reason != "" {
+		return nil, reason
+	}
+	return append([]string{"Return"}, value...), ""
+}
+
+// summarizeExprStmtSubset summarizes expression statements.
+func summarizeExprStmtSubset(node *kizuast.ExprStmt) ([]string, string) {
+	value, reason := summarizeExprSubset(node.Expr)
+	if reason != "" {
+		return nil, reason
+	}
+	return append([]string{"ExprStmt"}, value...), ""
+}
+
+// parserParityMutability maps let/var mutability to summary labels.
+func parserParityMutability(mutable bool) string {
+	if mutable {
+		return "Mutable"
+	}
+	return "Immutable"
+}
+
+// summarizeOptionalName summarizes optional labels and bindings.
+func summarizeOptionalName(name string) []string {
+	if name == "" {
+		return []string{"Empty"}
+	}
+	return []string{"Var", name}
+}
+
+// summarizeIfSubset summarizes a statement-position if branch.
+func summarizeIfSubset(node *kizuast.IfStmt) ([]string, string) {
+	condition, reason := summarizeExprSubset(node.Condition)
+	if reason != "" {
+		return nil, reason
+	}
+	consequence, reason := summarizeBlockSubset(node.Consequence)
+	if reason != "" {
+		return nil, reason
+	}
+	alternative, reason := summarizeOptionalBlockSubset(node.Alternative)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"If"}, condition...)
+	lines = append(lines, consequence...)
+	return append(lines, alternative...), ""
+}
+
+// summarizeComptimeIfSubset summarizes a comptime-selected statement branch.
+func summarizeComptimeIfSubset(node *kizuast.ComptimeIfStmt) ([]string, string) {
+	condition, reason := summarizeExprSubset(node.Condition)
+	if reason != "" {
+		return nil, reason
+	}
+	consequence, reason := summarizeBlockSubset(node.Consequence)
+	if reason != "" {
+		return nil, reason
+	}
+	alternative, reason := summarizeOptionalBlockSubset(node.Alternative)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"ComptimeIf"}, condition...)
+	lines = append(lines, consequence...)
+	return append(lines, alternative...), ""
+}
+
+// summarizeOptionalBlockSubset summarizes a block or the AST Empty sentinel.
+func summarizeOptionalBlockSubset(block *kizuast.BlockStmt) ([]string, string) {
+	if block == nil {
+		return []string{"Empty"}, ""
+	}
+	return summarizeBlockSubset(block)
+}
+
+// summarizeWhileSubset summarizes a while loop.
+func summarizeWhileSubset(node *kizuast.WhileStmt) ([]string, string) {
+	condition, reason := summarizeExprSubset(node.Condition)
+	if reason != "" {
+		return nil, reason
+	}
+	body, reason := summarizeBlockSubset(node.Body)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"While"}, summarizeOptionalName(node.Label)...)
+	lines = append(lines, condition...)
+	return append(lines, body...), ""
+}
+
+// summarizeForSubset summarizes a bounded range loop.
+func summarizeForSubset(node *kizuast.ForStmt) ([]string, string) {
+	start, reason := summarizeExprSubset(node.Start)
+	if reason != "" {
+		return nil, reason
+	}
+	end, reason := summarizeExprSubset(node.End)
+	if reason != "" {
+		return nil, reason
+	}
+	body, reason := summarizeBlockSubset(node.Body)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"For"}, summarizeOptionalName(node.Label)...)
+	lines = append(lines, "Var", node.Name)
+	lines = append(lines, start...)
+	lines = append(lines, end...)
+	return append(lines, body...), ""
+}
+
+// summarizeMatchSubset summarizes a simple match statement.
+func summarizeMatchSubset(node *kizuast.MatchStmt) ([]string, string) {
+	value, reason := summarizeExprSubset(node.Value)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"Match"}, value...)
+	lines = append(lines, "Range", strconv.Itoa(len(node.Arms)))
+	for _, arm := range node.Arms {
+		next, reason := summarizeMatchArmSubset(arm)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
+	}
+	return lines, ""
+}
+
+// summarizeMatchArmSubset summarizes one tag arm.
+func summarizeMatchArmSubset(arm kizuast.MatchArm) ([]string, string) {
+	body, reason := summarizeStatementSubset(arm.Body)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{"MatchArm", "Var", arm.Tag}
+	lines = append(lines, summarizeOptionalName(arm.Binding)...)
+	return append(lines, body...), ""
+}
+
 // summarizeExprSubset summarizes expressions supported by std::kizu::parser.
 func summarizeExprSubset(expr kizuast.Expression) ([]string, string) {
-	if binary, ok := expr.(*kizuast.BinaryExpr); ok {
-		return summarizeBinarySubset(binary)
+	switch node := expr.(type) {
+	case *kizuast.BinaryExpr:
+		return summarizeBinarySubset(node)
+	case *kizuast.PrefixExpr:
+		return summarizePrefixSubset(node)
+	case *kizuast.TryExpr:
+		value, reason := summarizeExprSubset(node.Value)
+		if reason != "" {
+			return nil, reason
+		}
+		return append([]string{"TryExpr"}, value...), ""
+	case *kizuast.ComptimeExpr:
+		value, reason := summarizeExprSubset(node.Expr)
+		if reason != "" {
+			return nil, reason
+		}
+		return append([]string{"ComptimeExpr"}, value...), ""
+	case *kizuast.IfStmt:
+		return nil, "if expression outside std parser subset"
+	case *kizuast.MatchStmt:
+		return nil, "match expression outside std parser subset"
+	default:
+		return summarizePrimarySubset(expr)
 	}
-	return summarizePrimarySubset(expr)
 }
 
 // summarizeBinarySubset summarizes supported binary expressions.
@@ -562,14 +1012,65 @@ func parserParityBinaryOp(op string) (string, bool) {
 	switch op {
 	case "+":
 		return "Add", true
+	case "-":
+		return "Sub", true
 	case "*":
 		return "Mul", true
+	case "/":
+		return "Div", true
+	case "%":
+		return "Mod", true
+	case "==":
+		return "Eq", true
+	case "!=":
+		return "NotEq", true
+	case "<":
+		return "LT", true
+	case "<=":
+		return "LTE", true
+	case ">":
+		return "GT", true
+	case ">=":
+		return "GTE", true
+	case "and":
+		return "And", true
+	case "or":
+		return "Or", true
 	default:
 		return "", false
 	}
 }
 
-// summarizePrimarySubset summarizes identifiers, integers, and calls.
+// summarizePrefixSubset summarizes prefix operations.
+func summarizePrefixSubset(expr *kizuast.PrefixExpr) ([]string, string) {
+	op, ok := parserParityPrefixOp(expr.Operator)
+	if !ok {
+		return nil, "prefix operator outside std parser subset"
+	}
+	right, reason := summarizeExprSubset(expr.Right)
+	if reason != "" {
+		return nil, reason
+	}
+	return append([]string{"Prefix", op}, right...), ""
+}
+
+// parserParityPrefixOp maps shared prefix operators to summary labels.
+func parserParityPrefixOp(op string) (string, bool) {
+	switch op {
+	case "!":
+		return "Not", true
+	case "-":
+		return "Neg", true
+	case "&":
+		return "Borrow", true
+	case "&mut":
+		return "MutBorrow", true
+	default:
+		return "", false
+	}
+}
+
+// summarizePrimarySubset summarizes primary expressions and calls.
 func summarizePrimarySubset(expr kizuast.Expression) ([]string, string) {
 	switch node := expr.(type) {
 	case *kizuast.IdentExpr:
@@ -584,6 +1085,13 @@ func summarizePrimarySubset(expr kizuast.Expression) ([]string, string) {
 		return []string{"Int", node.Value}, ""
 	case *kizuast.StringExpr:
 		return []string{"String", node.Value}, ""
+	case *kizuast.BoolExpr:
+		if node.Value {
+			return []string{"Bool", "true"}, ""
+		}
+		return []string{"Bool", "false"}, ""
+	case *kizuast.FieldExpr:
+		return summarizeFieldExprSubset(node)
 	case *kizuast.CallExpr:
 		return summarizeCallSubset(node)
 	default:
@@ -591,13 +1099,29 @@ func summarizePrimarySubset(expr kizuast.Expression) ([]string, string) {
 	}
 }
 
-// summarizeCallSubset summarizes calls whose callee is a plain identifier.
+// summarizeFieldExprSubset summarizes namespace and field selection.
+func summarizeFieldExprSubset(expr *kizuast.FieldExpr) ([]string, string) {
+	receiver, reason := summarizeExprSubset(expr.Receiver)
+	if reason != "" {
+		return nil, reason
+	}
+	mode := "Field"
+	if expr.Namespace {
+		mode = "Namespace"
+	}
+	lines := []string{"FieldExpr", mode}
+	lines = append(lines, receiver...)
+	return append(lines, "Var", expr.Name), ""
+}
+
+// summarizeCallSubset summarizes calls with a supported callee expression.
 func summarizeCallSubset(expr *kizuast.CallExpr) ([]string, string) {
-	callee, ok := expr.Callee.(*kizuast.IdentExpr)
-	if !ok || !isStdParserIdent(callee.Name) {
+	callee, reason := summarizeExprSubset(expr.Callee)
+	if reason != "" {
 		return nil, "call callee outside std parser subset"
 	}
-	lines := []string{"Call", "Var", callee.Name, "Range", strconv.Itoa(len(expr.Args))}
+	lines := append([]string{"Call"}, callee...)
+	lines = append(lines, "Range", strconv.Itoa(len(expr.Args)))
 	for _, arg := range expr.Args {
 		next, reason := summarizeExprSubset(arg)
 		if reason != "" {
@@ -615,7 +1139,7 @@ func isStdParserSpace(r rune) bool {
 
 // isStdParserPunctuation reports punctuation understood by std::kizu::lexer.
 func isStdParserPunctuation(r rune) bool {
-	return strings.ContainsRune("{}();,:!&[]<>?+*-", r)
+	return strings.ContainsRune("{}();,:!&[]<>?+*-=/>%.|", r)
 }
 
 // isStdParserWordRune reports identifier and number bytes understood by the std lexer.

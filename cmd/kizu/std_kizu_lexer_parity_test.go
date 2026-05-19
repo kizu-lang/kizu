@@ -39,7 +39,23 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
         Eof => return true;
         Fn => return false;
+        Let => return false;
+        Var => return false;
         Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
         Ident => return false;
         Number => return false;
         String => return false;
@@ -51,16 +67,28 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         Comma => return false;
         Colon => return false;
         DoubleColon => return false;
+        Assign => return false;
         Arrow => return false;
+        FatArrow => return false;
         Bang => return false;
+        Eq => return false;
+        NotEq => return false;
         Amp => return false;
         LBracket => return false;
         RBracket => return false;
         LT => return false;
+        LTE => return false;
         GT => return false;
+        GTE => return false;
         Question => return false;
         Plus => return false;
+        Minus => return false;
         Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
         Mut => return false;
     }
 }
@@ -68,7 +96,23 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
 fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
     match token.kind {
         Fn => print("Fn");
+        Let => print("Let");
+        Var => print("Var");
         Return => print("Return");
+        If => print("If");
+        Else => print("Else");
+        While => print("While");
+        For => print("For");
+        Break => print("Break");
+        Continue => print("Continue");
+        Match => print("Match");
+        Unsafe => print("Unsafe");
+        Comptime => print("Comptime");
+        Try => print("Try");
+        True => print("True");
+        False => print("False");
+        And => print("And");
+        Or => print("Or");
         Ident => print("Ident");
         Number => print("Number");
         String => print("String");
@@ -80,16 +124,28 @@ fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
         Comma => print("Comma");
         Colon => print("Colon");
         DoubleColon => print("DoubleColon");
+        Assign => print("Assign");
         Arrow => print("Arrow");
+        FatArrow => print("FatArrow");
         Bang => print("Bang");
+        Eq => print("Eq");
+        NotEq => print("NotEq");
         Amp => print("Amp");
         LBracket => print("LBracket");
         RBracket => print("RBracket");
         LT => print("LT");
+        LTE => print("LTE");
         GT => print("GT");
+        GTE => print("GTE");
         Question => print("Question");
         Plus => print("Plus");
+        Minus => print("Minus");
         Asterisk => print("Asterisk");
+        Slash => print("Slash");
+        Percent => print("Percent");
+        Dot => print("Dot");
+        Range => print("Range");
+        Pipe => print("Pipe");
         Mut => print("Mut");
         Eof => print("Eof");
     }
@@ -114,7 +170,23 @@ type lexerParityStats struct {
 
 var lexerParityTokenKinds = map[token.Type]string{
 	token.Function:    "Fn",
+	token.Let:         "Let",
+	token.Var:         "Var",
 	token.Return:      "Return",
+	token.If:          "If",
+	token.Else:        "Else",
+	token.While:       "While",
+	token.For:         "For",
+	token.Break:       "Break",
+	token.Continue:    "Continue",
+	token.Match:       "Match",
+	token.Unsafe:      "Unsafe",
+	token.Comptime:    "Comptime",
+	token.Try:         "Try",
+	token.True:        "True",
+	token.False:       "False",
+	token.And:         "And",
+	token.Or:          "Or",
 	token.Ident:       "Ident",
 	token.Int:         "Number",
 	token.String:      "String",
@@ -126,16 +198,28 @@ var lexerParityTokenKinds = map[token.Type]string{
 	token.Comma:       "Comma",
 	token.Colon:       "Colon",
 	token.DoubleColon: "DoubleColon",
+	token.Assign:      "Assign",
 	token.Arrow:       "Arrow",
+	token.FatArrow:    "FatArrow",
 	token.Bang:        "Bang",
+	token.Eq:          "Eq",
+	token.NotEq:       "NotEq",
 	token.Amp:         "Amp",
 	token.LBracket:    "LBracket",
 	token.RBracket:    "RBracket",
 	token.LT:          "LT",
+	token.LTE:         "LTE",
 	token.GT:          "GT",
+	token.GTE:         "GTE",
 	token.Question:    "Question",
 	token.Plus:        "Plus",
+	token.Minus:       "Minus",
 	token.Asterisk:    "Asterisk",
+	token.Slash:       "Slash",
+	token.Percent:     "Percent",
+	token.Dot:         "Dot",
+	token.Range:       "Range",
+	token.Pipe:        "Pipe",
 	token.Mut:         "Mut",
 	token.EOF:         "Eof",
 }
@@ -226,6 +310,15 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/type_tokens", source: "fn f(a: &mut []const std::array::Array<i64>) -> !void {}"},
 		{name: "seed/string_call", source: `fn main() { print("hello"); }`},
 		{name: "seed/binary_precedence", source: "fn main() { print(1 + 2 * 3); }"},
+		{
+			name: "seed/statement_tokens",
+			source: "fn main() { let x = true; var y = false; " +
+				"if x and !y { try step(); } else { y = y or false; } " +
+				"while y != true { break; continue; } for 0..3 |i| { print(i); } " +
+				"match x { Yes => print(\"yes\"); } unsafe { return; } " +
+				"comptime if 1 <= 2 { return; } }",
+		},
+		{name: "seed/operator_tokens", source: "a = b - c / d % e != f <= g > h >= i.x .. j | k => l"},
 	}
 	for index := range seeds {
 		want, reason := summarizeGoLexerSubset(seeds[index].source)
