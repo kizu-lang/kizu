@@ -39,6 +39,12 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
         Eof => return true;
         Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
         Let => return false;
         Var => return false;
         Return => return false;
@@ -96,6 +102,12 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
 fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
     match token.kind {
         Fn => print("Fn");
+        Import => print("Import");
+        Pub => print("Pub");
+        Struct => print("Struct");
+        Enum => print("Enum");
+        Union => print("Union");
+        Extern => print("Extern");
         Let => print("Let");
         Var => print("Var");
         Return => print("Return");
@@ -170,6 +182,12 @@ type lexerParityStats struct {
 
 var lexerParityTokenKinds = map[token.Type]string{
 	token.Function:    "Fn",
+	token.Import:      "Import",
+	token.Public:      "Pub",
+	token.Struct:      "Struct",
+	token.Enum:        "Enum",
+	token.Union:       "Union",
+	token.Extern:      "Extern",
 	token.Let:         "Let",
 	token.Var:         "Var",
 	token.Return:      "Return",
@@ -319,6 +337,12 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 				"comptime if 1 <= 2 { return; } }",
 		},
 		{name: "seed/operator_tokens", source: "a = b - c / d % e != f <= g > h >= i.x .. j | k => l"},
+		{
+			name: "seed/declaration_tokens",
+			source: "import app::lexer; pub struct User { pub name: []const u8; } " +
+				"enum Color { Red; Blue; } union Shape { Point; Circle(i64); } " +
+				"extern \"c\" fn puts(s: ptr<const u8>) -> i32",
+		},
 	}
 	for index := range seeds {
 		want, reason := summarizeGoLexerSubset(seeds[index].source)

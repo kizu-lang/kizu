@@ -1007,7 +1007,8 @@ func qualifyStdTypeName(module string, typ string) string {
 			"BinaryNode", "FieldExprNode", "CallNode", "TryExprNode", "ComptimeExprNode",
 			"BlockNode", "IfNode", "LetNode", "AssignNode", "ReturnNode", "ExprStmtNode",
 			"WhileNode", "ForNode", "BreakNode", "ContinueNode", "ParamNode", "FieldNode",
-			"StructDeclNode", "MatchNode", "MatchArmNode", "UnsafeNode", "ComptimeIfNode",
+			"StructDeclNode", "ImportDeclNode", "EnumDeclNode", "UnionDeclNode",
+			"UnionVariantNode", "MatchNode", "MatchArmNode", "UnsafeNode", "ComptimeIfNode",
 			"FnDeclNode",
 			"ParseResult":
 			return "std::kizu::ast::" + typ
