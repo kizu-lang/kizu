@@ -256,6 +256,20 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsLifetimeBorrowReturns checks explicit shared and mutable borrow returns.
+func TestCheckAcceptsLifetimeBorrowReturns(t *testing.T) {
+	source := `fn shared<'a>(value: &'a i64) -> &'a i64 {
+    return value;
+}
+fn mutable<'a>(value: &'a mut i64) -> &'a mut i64 {
+    return value;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsLifetimeDeclarationErrors keeps lifetime signatures explicit.
 func TestCheckRejectsLifetimeDeclarationErrors(t *testing.T) {
 	cases := []struct {
@@ -277,6 +291,40 @@ func TestCheckRejectsLifetimeDeclarationErrors(t *testing.T) {
 			name:   "unused lifetime",
 			source: `fn unused<'a>() -> void { return; }`,
 			want:   "lifetime 'a on `unused` is unused",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsLifetimeEscapeErrors rejects untied lifetime provenance.
+func TestCheckRejectsLifetimeEscapeErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "return source lacks lifetime",
+			source: `fn bad<'a>(left: []'a const u8, right: []const u8) -> []'a const u8 {
+    return right;
+}`,
+			want: "return lifetime 'a is not tied to returned value",
+		},
+		{
+			name: "field source lacks lifetime",
+			source: `struct View<'a> { bytes: []'a const u8 }
+fn bad(bytes: []const u8) {
+    let view = View { bytes: bytes };
+    print(view.bytes);
+}`,
+			want: "field `View.bytes` lifetime 'a is not tied to initializer",
+		},
+		{
+			name: "channel boundary",
+			source: `fn bad<'a>(channel: Channel<[]'a const u8>, bytes: []'a const u8) {
+    channel.send(bytes);
+}`,
+			want: "lifetime view cannot cross concurrency boundary",
 		},
 	}
 	runErrorCases(t, cases)

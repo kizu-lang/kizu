@@ -28,8 +28,8 @@ array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
 array.get(index: i64) -> !T
-array.at(index: i64) -> !&T
-array.at_mut(index: i64) -> !&mut T
+array.at<'a>(index: i64) -> !&'a T
+array.at_mut<'a>(index: i64) -> !&'a mut T
 array.set(index: i64, value: T) -> !void
 array.deinit() -> void
 ```

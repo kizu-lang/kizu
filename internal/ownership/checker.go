@@ -10,13 +10,14 @@ import (
 
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
-	functions  map[string]*functionInfo
-	structs    map[string]map[string]string
-	enums      map[string]map[string]bool
-	unions     map[string]map[string]string
-	nextID     int
-	loopDepth  int
-	currentStd bool
+	functions       map[string]*functionInfo
+	structs         map[string]map[string]string
+	enums           map[string]map[string]bool
+	unions          map[string]map[string]string
+	nextID          int
+	loopDepth       int
+	currentFunction *functionInfo
+	currentStd      bool
 }
 
 type functionInfo struct {
@@ -130,11 +131,11 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 		}
 		fields := map[string]string{}
 		for _, field := range st.Fields {
-			if field.Borrow {
+			if field.Borrow && (len(st.LifetimeParams) == 0 || field.BorrowLifetime == "") {
 				return fmt.Errorf("borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
-			fields[field.Name] = field.TypeName
+			fields[field.Name] = fieldOwnershipType(field)
 		}
 		c.structs[st.Name] = fields
 	}
@@ -175,10 +176,13 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		env.define(value)
 	}
 	previousLoopDepth := c.loopDepth
+	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	c.loopDepth = 0
+	c.currentFunction = fn
 	c.currentStd = fn.decl.Std
 	defer func() { c.loopDepth = previousLoopDepth }()
+	defer func() { c.currentFunction = previousFunction }()
 	defer func() { c.currentStd = previousStd }()
 	return c.checkBlock(fn.decl.Body, env)
 }
@@ -235,6 +239,9 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	if ident, ok := stmt.Value.(*ast.IdentExpr); ok {
 		value, exists := env.lookup(ident.Name)
 		if exists && value.borrowedParam {
+			if c.borrowedReturnAllowed(ident.Name, value) {
+				return nil
+			}
 			return fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
 		}
 		if exists && value.handleArenaID != 0 {
@@ -246,6 +253,33 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	}
 	_, err := c.moveExpr(stmt.Value, env)
 	return err
+}
+
+// borrowedReturnAllowed permits returning an explicit-lifetime borrow parameter.
+func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
+	if c.currentFunction == nil {
+		return false
+	}
+	lifetime, mutable, inner, ok := explicitOwnershipBorrowType(returnTypeName(c.currentFunction))
+	if !ok || lifetime == "" {
+		return false
+	}
+	if mutable && !value.mutBorrow {
+		return false
+	}
+	if !sameOwnershipType(value.typeName, inner) {
+		return false
+	}
+	for _, param := range c.currentFunction.decl.Params {
+		if param.Name != name || !param.Borrow || param.BorrowLifetime != lifetime {
+			continue
+		}
+		if mutable && !param.MutBorrow {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // checkLetStmt moves the initializer into a new binding when needed.
@@ -266,6 +300,13 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if target, ok := c.stringViewInitializer(stmt.Value, env); ok {
 		return c.checkStringViewLetStmt(stmt, target, env)
 	}
+	target, field, elem, mutable, ok, err = c.returnedBorrowInitializer(stmt.Value, env)
+	if ok || err != nil {
+		if err != nil {
+			return err
+		}
+		return c.checkReturnedBorrowLetStmt(stmt, target, field, elem, mutable, env)
+	}
 	typeName, err := c.moveExpr(stmt.Value, env)
 	if err != nil {
 		return err
@@ -275,6 +316,91 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	c.setArenaProvenance(value, stmt.Value, env)
 	env.define(value)
 	return nil
+}
+
+// checkReturnedBorrowLetStmt binds a function-returned borrow to its source owner.
+func (c *Checker) checkReturnedBorrowLetStmt(
+	stmt *ast.LetStmt,
+	target *binding,
+	field string,
+	elem string,
+	mutable bool,
+	env *scope,
+) error {
+	if err := checkBorrowConflictForField(target, field, mutable); err != nil {
+		return err
+	}
+	c.activateBorrow(target, field, mutable)
+	value := c.newBinding(stmt.Name, elem)
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.borrowTarget = target
+	value.borrowField = field
+	value.mutBorrow = mutable
+	env.define(value)
+	return nil
+}
+
+// returnedBorrowInitializer recognizes calls returning an explicit-lifetime borrow.
+func (c *Checker) returnedBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+) (*binding, string, string, bool, bool, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, "", "", false, false, nil
+	}
+	name, fn := c.calledFunction(call.Callee)
+	if fn == nil {
+		return nil, "", "", false, false, nil
+	}
+	lifetime, mutable, elem, ok := explicitOwnershipBorrowType(returnTypeName(fn))
+	if !ok {
+		return nil, "", "", false, false, nil
+	}
+	idx := borrowReturnParamIndex(fn, lifetime, mutable)
+	if idx < 0 || idx >= len(call.Args) {
+		return nil, "", "", false, true,
+			fmt.Errorf("borrow error: `%s` return lifetime has no source parameter", name)
+	}
+	target, field, err := c.borrowTarget(call.Args[idx], env)
+	if err != nil {
+		return nil, "", "", false, true, err
+	}
+	if _, err := c.checkUserCall(name, call.Args, env); err != nil {
+		return nil, "", "", false, true, err
+	}
+	return target, field, elem, mutable, true, nil
+}
+
+// calledFunction resolves direct and namespace-qualified source function calls.
+func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) {
+	switch e := callee.(type) {
+	case *ast.IdentExpr:
+		return e.Name, c.functions[e.Name]
+	case *ast.FieldExpr:
+		name, ok := qualifiedName(e)
+		if !ok {
+			return "", nil
+		}
+		return name, c.functions[name]
+	default:
+		return "", nil
+	}
+}
+
+// borrowReturnParamIndex finds the parameter that owns a returned borrow lifetime.
+func borrowReturnParamIndex(fn *functionInfo, lifetime string, mutable bool) int {
+	for idx, param := range fn.decl.Params {
+		if !param.Borrow || param.BorrowLifetime != lifetime {
+			continue
+		}
+		if mutable && !param.MutBorrow {
+			continue
+		}
+		return idx
+	}
+	return -1
 }
 
 // checkStringViewLetStmt binds a local byte view and activates the String owner.
@@ -588,7 +714,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		return err
 	}
 	if target, ok := directAssignmentRoot(stmt.Target, env); ok {
-		if target.hasAnyBorrow() && !c.isCopyType(target.typeName) {
+		if target.hasAnyBorrow() {
 			return fmt.Errorf("borrow error: value `%s` cannot be assigned while borrowed",
 				target.name)
 		}
@@ -1102,6 +1228,9 @@ func (c *Checker) checkUserCall(
 		} else if fn.params[idx].comptime {
 			_, err = c.readExpr(arg, env)
 		} else if fn.params[idx].borrow {
+			if fn.params[idx].mutBorrow {
+				continue
+			}
 			_, err = c.readExpr(arg, env)
 		} else if isAstType(fn.params[idx].typeName) {
 			_, err = c.readExpr(arg, env)
@@ -1546,6 +1675,9 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 		return nil
 	}
 	seen[typeName] = true
+	if hasOwnershipExplicitNonStaticLifetime(typeName) {
+		return fmt.Errorf("array error: Array element cannot store lifetime view in v0.2")
+	}
 	if isAstNodeIDType(typeName) {
 		return nil
 	}
@@ -2120,6 +2252,10 @@ func (c *Checker) checkGenericUserTypeApply(
 // checkGenericWrapperTypeArgs validates std wrapper-specific ownership contracts.
 func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) error {
 	switch name {
+	case "std.channel.Channel":
+		if hasOwnershipExplicitNonStaticLifetime(typeArgs[0]) {
+			return fmt.Errorf("thread error: lifetime view cannot cross concurrency boundary")
+		}
 	case "std.array.Array":
 		return c.rejectArrayElementType(typeArgs[0])
 	case "std.atomic.Atomic":
@@ -2431,7 +2567,7 @@ func (c *Checker) checkAssignmentBorrowConflict(expr ast.Expression, env *scope)
 		return nil
 	}
 	if field == "" {
-		if root.hasAnyBorrow() && !c.isCopyType(root.typeName) {
+		if root.hasAnyBorrow() {
 			return fmt.Errorf("borrow error: value `%s` cannot be assigned while borrowed", root.name)
 		}
 		return nil
@@ -4283,6 +4419,10 @@ func readIdent(name string, env *scope) (string, error) {
 		if value.moved {
 			return "", fmt.Errorf("move error: moved value `%s` was used", name)
 		}
+		if value.activeMutBorrows > 0 || len(value.fieldMutBorrows) > 0 {
+			return "", fmt.Errorf("borrow error: value `%s` cannot be read while mutably borrowed",
+				name)
+		}
 		return value.typeName, nil
 	}
 	if name == "void" {
@@ -4370,6 +4510,101 @@ func sameOwnershipType(left string, right string) bool {
 		return true
 	}
 	return eraseOwnershipLifetimes(left) == eraseOwnershipLifetimes(right)
+}
+
+// fieldOwnershipType returns the full field type, including borrow prefixes.
+func fieldOwnershipType(field ast.Field) string {
+	if !field.Borrow {
+		return field.TypeName
+	}
+	if field.BorrowLifetime == "" {
+		if field.MutBorrow {
+			return "&mut " + field.TypeName
+		}
+		return "&" + field.TypeName
+	}
+	if field.MutBorrow {
+		return "&" + field.BorrowLifetime + " mut " + field.TypeName
+	}
+	return "&" + field.BorrowLifetime + " " + field.TypeName
+}
+
+// explicitOwnershipBorrowType extracts &'a T and &'a mut T spellings.
+func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
+	if !strings.HasPrefix(typeName, "&'") {
+		return "", false, "", false
+	}
+	lifetime, rest, ok := splitOwnershipLifetimePrefix(strings.TrimPrefix(typeName, "&"))
+	if !ok {
+		return "", false, "", false
+	}
+	mutable := false
+	if strings.HasPrefix(rest, "mut ") {
+		mutable = true
+		rest = strings.TrimPrefix(rest, "mut ")
+	}
+	if rest == "" {
+		return "", false, "", false
+	}
+	return lifetime, mutable, rest, true
+}
+
+// splitOwnershipLifetimePrefix extracts the leading lifetime from a type fragment.
+func splitOwnershipLifetimePrefix(text string) (string, string, bool) {
+	if !strings.HasPrefix(text, "'") {
+		return "", text, false
+	}
+	end := strings.IndexByte(text, ' ')
+	if end < 0 {
+		return "", "", false
+	}
+	lifetime := text[:end]
+	if !isOwnershipLifetimeName(lifetime) {
+		return "", "", false
+	}
+	return lifetime, strings.TrimSpace(text[end+1:]), true
+}
+
+// hasOwnershipExplicitNonStaticLifetime reports whether typeName carries a scoped lifetime.
+func hasOwnershipExplicitNonStaticLifetime(typeName string) bool {
+	for lifetime := range explicitOwnershipLifetimes(typeName) {
+		if lifetime != "'static" {
+			return true
+		}
+	}
+	return false
+}
+
+// explicitOwnershipLifetimes extracts lifetime tokens from a type spelling.
+func explicitOwnershipLifetimes(typeName string) map[string]bool {
+	out := map[string]bool{}
+	for idx := 0; idx < len(typeName); {
+		if typeName[idx] != '\'' {
+			idx++
+			continue
+		}
+		end := skipOwnershipLifetimeName(typeName, idx)
+		lifetime := typeName[idx:end]
+		if isOwnershipLifetimeName(lifetime) {
+			out[lifetime] = true
+		}
+		idx = end
+	}
+	return out
+}
+
+// isOwnershipLifetimeName reports whether name is an apostrophe-prefixed lifetime.
+func isOwnershipLifetimeName(name string) bool {
+	if len(name) < 2 || name[0] != '\'' || name == "'_" {
+		return false
+	}
+	for idx, ch := range name[1:] {
+		if !(ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' ||
+			idx > 0 && ch >= '0' && ch <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // eraseOwnershipLifetimes removes explicit lifetimes from ownership type strings.
@@ -4718,6 +4953,9 @@ func (c *Checker) rejectConcurrencyBoundaryArg(arg ast.Expression, env *scope) e
 func (c *Checker) rejectConcurrencyBoundaryType(typeName string, seen map[string]bool) error {
 	if isRawPointerType(typeName) {
 		return fmt.Errorf("thread error: raw pointer cannot cross concurrency boundary")
+	}
+	if hasOwnershipExplicitNonStaticLifetime(typeName) {
+		return fmt.Errorf("thread error: lifetime view cannot cross concurrency boundary")
 	}
 	if seen[typeName] {
 		return nil

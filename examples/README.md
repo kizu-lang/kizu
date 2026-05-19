@@ -68,6 +68,9 @@ go test ./...
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
+| explicit lifetime slice view | `lifetime_view.kizu` | returns a `[]'a const u8` view tied to its source |
+| explicit lifetime borrow return | `lifetime_borrow_return.kizu` | returns shared and mutable borrows tied to local owners |
+| lifetime borrow fields | `lifetime_borrow_fields.kizu` | check-only struct and union borrow field declarations |
 | checked index / slice syntax | `slice_syntax.kizu` | asserts trapping `[]const u8` indexing and slicing through `bytes[...]` |
 | boolean logic | `logical.kizu` | asserts `and` / `or` precedence and short-circuit shape |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
@@ -88,7 +91,6 @@ go test ./...
 | deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
 | safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
-| explicit lifetime view | `lifetime_view.kizu` | returns a borrowed slice view with `[]'a const u8` |
 
 ## Package-Shaped Examples
 
@@ -244,6 +246,12 @@ single source file. Run them with `kizu check <package-root>`.
 | string byte views block deinit | `negative/std_string_deinit_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views cannot escape through return | `negative/std_string_as_bytes_return_escape.kizu` | `String.as_bytes` must be bound |
 | string byte views cannot be used directly | `negative/std_string_as_bytes_direct_use.kizu` | `String.as_bytes` must be bound |
+| lifetime return must name its source | `negative/lifetime_return_unbound_source.kizu` | `return lifetime` |
+| lifetime return cannot use local string view | `negative/lifetime_return_dangling_string_view.kizu` | `return lifetime` |
+| lifetime borrow fields need type lifetimes | `negative/lifetime_borrow_field_missing_param.kizu` | `requires struct lifetime parameter` |
+| lifetime views cannot cross channels | `negative/lifetime_channel_escape.kizu` | `lifetime view cannot cross concurrency boundary` |
+| lifetime views cannot cross comptime | `negative/lifetime_comptime_escape.kizu` | `lifetime view cannot cross comptime boundary` |
+| mutable lifetime view blocks parent read | `negative/lifetime_mut_return_alias.kizu` | `cannot be read while mutably borrowed` |
 | shared string borrows cannot deinit | `negative/std_string_deinit_through_shared_borrow.kizu` | `requires owned String receiver` |
 | mutable string borrows cannot deinit | `negative/std_string_deinit_through_mut_borrow.kizu` | `requires owned String receiver` |
 | shared string borrows cannot append | `negative/std_string_append_through_shared_borrow.kizu` | `requires mutable String receiver` |
