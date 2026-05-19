@@ -1004,7 +1004,8 @@ func qualifyStdTypeName(module string, typ string) string {
 		case "SourceFile", "Span", "TokenId", "SymbolId", "BinaryOp", "ChildRange",
 			"NodeId", "Ast", "AstNode", "AstData", "IntNode", "VarNode", "BinaryNode",
 			"CallNode", "BlockNode", "IfNode", "LetNode", "ReturnNode", "ParamNode",
-			"FieldNode", "MatchNode", "MatchArmNode", "FnDeclNode", "ParseResult":
+			"FieldNode", "StructDeclNode", "MatchNode", "MatchArmNode", "FnDeclNode",
+			"ParseResult":
 			return "std::kizu::ast::" + typ
 		}
 	}

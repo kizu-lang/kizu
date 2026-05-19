@@ -4845,6 +4845,7 @@ func isAstScalarType(typ Type) bool {
 		"ReturnNode", "std::kizu::ast::ReturnNode",
 		"ParamNode", "std::kizu::ast::ParamNode",
 		"FieldNode", "std::kizu::ast::FieldNode",
+		"StructDeclNode", "std::kizu::ast::StructDeclNode",
 		"MatchNode", "std::kizu::ast::MatchNode",
 		"MatchArmNode", "std::kizu::ast::MatchArmNode",
 		"FnDeclNode", "std::kizu::ast::FnDeclNode",

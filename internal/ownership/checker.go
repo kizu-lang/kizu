@@ -2757,6 +2757,10 @@ func (c *Checker) checkAstAddMethod(
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
+	case "add_struct_decl":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
 	case "add_match":
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
@@ -3920,7 +3924,7 @@ func astNodeIDMethod(name string) bool {
 	switch name {
 	case "add_node", "add_int", "add_var", "add_binary", "add_call",
 		"add_block", "add_return", "add_param", "add_field", "add_match",
-		"add_match_arm", "add_fn_decl", "add_empty":
+		"add_struct_decl", "add_match_arm", "add_fn_decl", "add_empty":
 		return true
 	default:
 		return false
@@ -4112,6 +4116,7 @@ func isAstScalarType(typeName string) bool {
 		"ReturnNode", "std::kizu::ast::ReturnNode",
 		"ParamNode", "std::kizu::ast::ParamNode",
 		"FieldNode", "std::kizu::ast::FieldNode",
+		"StructDeclNode", "std::kizu::ast::StructDeclNode",
 		"MatchNode", "std::kizu::ast::MatchNode",
 		"MatchArmNode", "std::kizu::ast::MatchArmNode",
 		"FnDeclNode", "std::kizu::ast::FnDeclNode",

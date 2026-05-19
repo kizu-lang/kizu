@@ -34,7 +34,7 @@ fn parse_fn_decl_result(
     let name = std::kizu::lexer::next_token(text, fn_token);
     match name.kind {
         Fn => return error("expected function name");
-        Ident => return std::kizu::parser::parse_fn_body_result(ast, text, fn_token, name);
+        Ident => return std::kizu::parser::parse_fn_body_result(allocator, ast, text, fn_token, name);
         Eof => return error("expected function name");
         Return => return error("expected function name");
         Number => return error("expected function name");
@@ -69,6 +69,7 @@ fn parse_empty_result(
 }
 
 fn parse_fn_body_result(
+    allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []const u8,
     fn_token: std::kizu::lexer::Token,
@@ -79,7 +80,7 @@ fn parse_fn_body_result(
         std::kizu::ast::symbol_id(name.start)
     );
     let params = try std::kizu::parser::parse_optional_params(ast, text, std::kizu::lexer::next_token(text, name));
-    let body = try std::kizu::parser::parse_optional_block(ast, text, params.next);
+    let body = try std::kizu::parser::parse_optional_block(allocator, ast, text, params.next);
     let root = ast.add_fn_decl(std::kizu::ast::span(fn_token.start, body.next.end), name_node, params.range, body.node);
     return std::kizu::ast::parse_result(ast, root);
 }
@@ -128,12 +129,13 @@ fn parse_empty_params(
 }
 
 fn parse_optional_block(
+    allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []const u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
-        LBrace => return std::kizu::parser::parse_block(ast, text, token);
+        LBrace => return std::kizu::parser::parse_block(allocator, ast, text, token);
         Eof => return std::kizu::parser::empty_parse_node(ast, token);
         Fn => return error("expected block");
         Return => return error("expected block");
@@ -149,14 +151,52 @@ fn parse_optional_block(
 }
 
 fn parse_block(
+    allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []const u8,
     open: std::kizu::lexer::Token
 ) -> !ParseNode {
-    let first = std::kizu::lexer::next_token(text, open);
-    match first.kind {
-        RBrace => return std::kizu::parser::empty_block(ast, text, open, first);
-        Return => return std::kizu::parser::return_block(ast, text, open, first);
+    var statements = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    var token = std::kizu::lexer::next_token(text, open);
+    while std::kizu::parser::is_return_token(token) {
+        let statement = try std::kizu::parser::parse_return(ast, text, token);
+        try statements.append(statement.node);
+        token = statement.next;
+    }
+    let close = try std::kizu::parser::expect_block_close(token);
+    let child_start = ast.begin_children();
+    var index = 0;
+    while index < statements.len() {
+        try ast.add_child(try statements.get(index));
+        index = index + 1;
+    }
+    statements.deinit();
+    let range = ast.finish_children(child_start);
+    let node = ast.add_block(std::kizu::ast::span(open.start, close.end), range);
+    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, close));
+}
+
+fn is_return_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Return => return true;
+        Fn => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return false;
+        Plus => return false;
+        Eof => return false;
+    }
+}
+
+fn expect_block_close(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
+    match token.kind {
+        RBrace => return token;
+        Return => return error("expected statement");
         Eof => return error("expected right brace");
         Fn => return error("expected statement");
         Ident => return error("expected statement");
@@ -168,92 +208,6 @@ fn parse_block(
         Comma => return error("expected statement");
         Plus => return error("expected statement");
     }
-}
-
-fn empty_block(
-    ast: std::kizu::ast::Ast,
-    text: []const u8,
-    open: std::kizu::lexer::Token,
-    close: std::kizu::lexer::Token
-) -> ParseNode {
-    let child_start = ast.begin_children();
-    let range = ast.finish_children(child_start);
-    let node = ast.add_block(std::kizu::ast::span(open.start, close.end), range);
-    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, close));
-}
-
-fn return_block(
-    ast: std::kizu::ast::Ast,
-    text: []const u8,
-    open: std::kizu::lexer::Token,
-    token: std::kizu::lexer::Token
-) -> !ParseNode {
-    let first = try std::kizu::parser::parse_return(ast, text, token);
-    match first.next.kind {
-        RBrace => return std::kizu::parser::finish_one_statement_block(ast, text, open, first);
-        Return => return std::kizu::parser::two_return_block(ast, text, open, first);
-        Fn => return error("expected right brace");
-        Ident => return error("expected right brace");
-        Number => return error("expected right brace");
-        LBrace => return error("expected right brace");
-        LParen => return error("expected right brace");
-        RParen => return error("expected right brace");
-        Semicolon => return error("expected right brace");
-        Comma => return error("expected right brace");
-        Plus => return error("expected right brace");
-        Eof => return error("expected right brace");
-    }
-}
-
-fn two_return_block(
-    ast: std::kizu::ast::Ast,
-    text: []const u8,
-    open: std::kizu::lexer::Token,
-    first: ParseNode
-) -> !ParseNode {
-    let second = try std::kizu::parser::parse_return(ast, text, first.next);
-    match second.next.kind {
-        RBrace => return std::kizu::parser::finish_two_statement_block(ast, text, open, first, second);
-        Fn => return error("expected right brace");
-        Return => return error("expected right brace");
-        Ident => return error("expected right brace");
-        Number => return error("expected right brace");
-        LBrace => return error("expected right brace");
-        LParen => return error("expected right brace");
-        RParen => return error("expected right brace");
-        Semicolon => return error("expected right brace");
-        Comma => return error("expected right brace");
-        Plus => return error("expected right brace");
-        Eof => return error("expected right brace");
-    }
-}
-
-fn finish_one_statement_block(
-    ast: std::kizu::ast::Ast,
-    text: []const u8,
-    open: std::kizu::lexer::Token,
-    stmt: ParseNode
-) -> !ParseNode {
-    let child_start = ast.begin_children();
-    try ast.add_child(stmt.node);
-    let range = ast.finish_children(child_start);
-    let node = ast.add_block(std::kizu::ast::span(open.start, stmt.next.end), range);
-    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, stmt.next));
-}
-
-fn finish_two_statement_block(
-    ast: std::kizu::ast::Ast,
-    text: []const u8,
-    open: std::kizu::lexer::Token,
-    first: ParseNode,
-    second: ParseNode
-) -> !ParseNode {
-    let child_start = ast.begin_children();
-    try ast.add_child(first.node);
-    try ast.add_child(second.node);
-    let range = ast.finish_children(child_start);
-    let node = ast.add_block(std::kizu::ast::span(open.start, second.next.end), range);
-    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, second.next));
 }
 
 fn parse_return(

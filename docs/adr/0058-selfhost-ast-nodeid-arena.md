@@ -35,9 +35,8 @@ provenance until the language has a richer owner-parameter relation.
 
 `AstNode` stores a `Span` and an `AstData` union. Recursive relationships use
 `NodeId`, and variable-length relationships use `ChildRange` into the AST-owned
-child list. The initial shape includes ranges for function params, block
-statements, call args, and match arms; field nodes are represented as normal
-nodes so they can be stored in future declaration field ranges.
+child list. The initial shape includes ranges for function params, struct
+fields, block statements, call args, and match arms.
 
 ## Consequences
 
@@ -47,9 +46,9 @@ nodes so they can be stored in future declaration field ranges.
 - Parser APIs return `ParseResult { ast, root }` so a root `NodeId` is paired
   with the AST that owns it.
 - The initial parser path covers function declarations, empty parameter lists,
-  blocks with up to two return statements, return, call, and binary-add
+  blocks with any number of return statements, return, call, and binary-add
   expression nodes without parser builtins.
-- Future parser work can add parsed params, declaration field ranges, richer
+- Future parser work can add parsed params, struct declaration syntax, richer
   expressions, and parsed match-arm ranges without adding parser builtins.
 
 ## Non-goals
