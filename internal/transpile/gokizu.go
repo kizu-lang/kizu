@@ -1385,7 +1385,15 @@ func parserSource(info parserPackage) string {
 // parserHeaderSource renders parser entry points and public scoring functions.
 func parserHeaderSource(info parserPackage) string {
 	var out bytes.Buffer
-	out.WriteString(`import selfhost::lexer;
+	out.WriteString(parserStateSource())
+	out.WriteString(parserMetricEntrySource())
+	out.WriteString(parserPrecedenceSource(info.precedences))
+	return out.String()
+}
+
+// parserStateSource renders parser state and token cursor operations.
+func parserStateSource() string {
+	return `import selfhost::lexer;
 import selfhost::token;
 
 pub struct Parser {
@@ -1415,12 +1423,35 @@ pub fn first_token(self: Parser) -> token::Token {
     return token::New(self.cur.Type, self.cur.Literal, self.cur.Line, self.cur.Column);
 }
 
+pub fn Advance(self: Parser) -> Parser {
+    let source = self.source;
+    let cur_type = self.peek.Type;
+    let cur_literal = self.peek.Literal;
+    let cur_line = self.peek.Line;
+    let cur_column = self.peek.Column;
+    let lex = lexer::FromCursor(source, self.lexer.position, self.lexer.line, self.lexer.column);
+    let scan = lexer::Scan(lex);
+    let next_lexer = lexer::FromCursor(source, scan.next, scan.line, scan.column);
+    return Parser {
+        source: source,
+        lexer: next_lexer,
+        cur: token::New(cur_type, cur_literal, cur_line, cur_column),
+        peek: token::New(scan.token.Type, scan.token.Literal,
+            scan.token.Line, scan.token.Column)
+    };
+}
+
 pub fn first_token_from_source(source: []const u8) -> token::Token {
     let parser = Parser(source);
     return first_token(parser);
 }
 
-pub fn first_token_code(source: []const u8) -> i64 {
+`
+}
+
+// parserMetricEntrySource renders parser scoring helper entry points.
+func parserMetricEntrySource() string {
+	return `pub fn first_token_code(source: []const u8) -> i64 {
     return lexer::FirstTokenCode(source);
 }
 
@@ -1446,9 +1477,7 @@ pub fn parse_score(source: []const u8) -> i64 {
     return first_token_code(source) + declaration_score(source) + brace_score(source);
 }
 
-`)
-	out.WriteString(parserPrecedenceSource(info.precedences))
-	return out.String()
+`
 }
 
 // parserModuleSummarySource renders the parser summary passed to later phases.
