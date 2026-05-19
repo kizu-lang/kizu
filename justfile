@@ -19,6 +19,10 @@ lint:
 check:
     pre-commit run --all-files
 
+# Run Go/Kizu selfhost component oracle parity checks.
+selfhost-oracle:
+    go test ./cmd/kizu -run TestSelfhostOracleRunner -v
+
 # Install local git hooks.
 hooks:
     pre-commit install
