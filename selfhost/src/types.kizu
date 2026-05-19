@@ -1,13 +1,134 @@
 import selfhost::resolver;
 
+pub enum TypeKind {
+    Primitive
+    Function
+    Struct
+    Union
+    Enum
+    ErrorUnion
+    Optional
+    Container
+}
+
 pub struct TypeSummary {
+    pub modules: i64;
     pub symbols: i64;
     pub typed_nodes: i64;
+    pub diagnostics: i64;
 }
 
 pub fn check(resolved: resolver::ResolveSummary) -> TypeSummary {
     return TypeSummary {
+        modules: resolved.modules,
         symbols: resolved.symbols,
-        typed_nodes: resolved.symbols
+        typed_nodes: resolved.symbols,
+        diagnostics: resolved.diagnostics
     };
+}
+
+pub fn declare_type(
+    kinds: &mut std::map::Map<[]const u8, TypeKind>,
+    arities: &mut std::map::Map<[]const u8, i64>,
+    copyable: &mut std::map::Map<[]const u8, bool>,
+    name: []const u8,
+    kind: TypeKind,
+    arity: i64,
+    copy: bool
+) -> !void {
+    if kinds.contains(name) {
+        return error("duplicate type");
+    }
+    try kinds.insert(name, kind);
+    try arities.insert(name, arity);
+    try copyable.insert(name, copy);
+    return;
+}
+
+pub fn lookup_kind(
+    kinds: &std::map::Map<[]const u8, TypeKind>,
+    name: []const u8
+) -> !TypeKind {
+    return kinds.get(name);
+}
+
+pub fn arity_of(
+    arities: &std::map::Map<[]const u8, i64>,
+    name: []const u8
+) -> !i64 {
+    return arities.get(name);
+}
+
+pub fn is_copyable(
+    copyable: &std::map::Map<[]const u8, bool>,
+    name: []const u8
+) -> !bool {
+    return copyable.get(name);
+}
+
+pub fn summarize(
+    kinds: &std::map::Map<[]const u8, TypeKind>,
+    diagnostics: i64
+) -> TypeSummary {
+    return TypeSummary {
+        modules: 1,
+        symbols: kinds.len(),
+        typed_nodes: kinds.len(),
+        diagnostics: diagnostics
+    };
+}
+
+pub fn unknown_type(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "unknown type");
+}
+
+pub fn wrong_arity(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "wrong type arity");
+}
+
+pub fn type_mismatch(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "type mismatch");
+}
+
+pub fn unsupported_feature(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "unsupported type feature");
+}
+
+fn make_diagnostic(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    message: []const u8
+) -> std::kizu::diagnostic::Diagnostic {
+    let primary = make_span(path, byte_start, byte_end);
+    return std::kizu::diagnostic::Diagnostic(allocator, primary, message);
+}
+
+fn make_span(
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::FileSpan {
+    return std::kizu::diagnostic::file_span(0, path, byte_start, byte_end, 1, byte_start + 1);
 }

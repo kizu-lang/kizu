@@ -13,6 +13,7 @@ The package currently defines these source-owned modules:
 - `selfhost::resolver`
 - `selfhost::resolver_oracle`
 - `selfhost::types`
+- `selfhost::types_oracle`
 - `selfhost::ownership`
 - `selfhost::ir`
 - `selfhost::backend`
@@ -34,6 +35,10 @@ The resolver boundary uses `std::map::Map<[]const u8, V>` for symbol and
 visibility tables. Resolver diagnostics use `std::kizu::diagnostic` and the
 oracle covers missing symbols, duplicate symbols, private access, and import
 cycles.
+
+The type checker boundary uses explicit type-kind, arity, and copyability maps.
+The oracle covers primitive, function, struct, union, enum, error-union,
+optional, and std-container seed shapes plus stable diagnostic spans.
 
 Check the package with:
 
