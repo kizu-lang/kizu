@@ -18,6 +18,7 @@ pub fn parse_first_node(
         Enum => return std::kizu::parser::parse_decl_result(allocator, source);
         Union => return std::kizu::parser::parse_decl_result(allocator, source);
         Ident => return std::kizu::parser::parse_expr_result(allocator, source);
+        Lifetime => return error("unexpected lifetime");
         Number => return std::kizu::parser::parse_expr_result(allocator, source);
         String => return std::kizu::parser::parse_expr_result(allocator, source);
         Eof => return std::kizu::parser::parse_empty_result(allocator, source, token.start);
@@ -150,6 +151,7 @@ fn parse_decl_with_visibility(
         Eof => return error("expected declaration");
         Return => return error("expected declaration");
         Ident => return error("expected declaration");
+        Lifetime => return error("expected declaration");
         Number => return error("expected declaration");
         String => return error("expected declaration");
         LBrace => return error("expected declaration");
@@ -262,6 +264,7 @@ fn parse_fn_decl(
             name,
             require_body
         );
+        Lifetime => return error("expected function name");
         Eof => return error("expected function name");
         Import => return error("expected function name");
         Pub => return error("expected function name");
@@ -441,6 +444,7 @@ fn parse_unsafe_decl(
         And => return error("expected fn or extern after unsafe");
         Or => return error("expected fn or extern after unsafe");
         Ident => return error("expected fn or extern after unsafe");
+        Lifetime => return error("expected fn or extern after unsafe");
         Number => return error("expected fn or extern after unsafe");
         String => return error("expected fn or extern after unsafe");
         LBrace => return error("expected fn or extern after unsafe");
@@ -543,12 +547,18 @@ fn parse_struct_decl(
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, struct_token));
     let name = std::kizu::parser::name_node(ast, name_token);
-    let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, name_token));
+    let type_params = try std::kizu::parser::parse_optional_type_params(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, name_token)
+    );
+    let open = try std::kizu::parser::expect_lbrace(type_params.next);
     let fields = try std::kizu::parser::parse_struct_fields(allocator, ast, text, open);
     let node = ast.add_struct_decl(
         std::kizu::ast::span(struct_token.start, fields.next.start),
         public,
         name,
+        type_params.range,
         fields.range
     );
     return std::kizu::parser::parse_node(node, fields.next);
@@ -684,12 +694,18 @@ fn parse_union_decl(
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, union_token));
     let name = std::kizu::parser::name_node(ast, name_token);
-    let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, name_token));
+    let type_params = try std::kizu::parser::parse_optional_type_params(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, name_token)
+    );
+    let open = try std::kizu::parser::expect_lbrace(type_params.next);
     let variants = try std::kizu::parser::parse_union_variants(allocator, ast, text, open);
     let node = ast.add_union_decl(
         std::kizu::ast::span(union_token.start, variants.next.start),
         public,
         name,
+        type_params.range,
         variants.range
     );
     return std::kizu::parser::parse_node(node, variants.next);
@@ -810,7 +826,7 @@ fn parse_type_params(
     let start = ast.begin_children();
     var token = std::kizu::lexer::next_token(text, open);
     while !std::kizu::parser::is_gt_token(token) {
-        let name = try std::kizu::parser::expect_ident(token);
+        let name = try std::kizu::parser::expect_type_param(token);
         try ast.add_child(std::kizu::parser::name_node(ast, name));
         let next = std::kizu::lexer::next_token(text, name);
         if std::kizu::parser::is_comma_token(next) {
@@ -885,6 +901,7 @@ fn parse_optional_params(
         Fn => return error("expected params or block");
         Return => return error("expected params or block");
         Ident => return error("expected params or block");
+        Lifetime => return error("expected params or block");
         Number => return error("expected params or block");
         String => return error("expected params or block");
         RBrace => return error("expected params or block");
@@ -945,6 +962,7 @@ fn parse_params(
         RParen => return std::kizu::parser::empty_range(ast, std::kizu::lexer::next_token(text, first));
         Ident => return std::kizu::parser::parse_non_empty_params(ast, text, first);
         Comptime => return std::kizu::parser::parse_non_empty_params(ast, text, first);
+        Lifetime => return error("expected right paren");
         Fn => return error("expected right paren");
         Import => return error("expected right paren");
         Pub => return error("expected right paren");
@@ -1041,6 +1059,7 @@ fn parse_param_list(
         Fn => return error("expected comma or right paren");
         Return => return error("expected comma or right paren");
         Ident => return error("expected comma or right paren");
+        Lifetime => return error("expected comma or right paren");
         Number => return error("expected comma or right paren");
         String => return error("expected comma or right paren");
         LBrace => return error("expected comma or right paren");
@@ -1101,6 +1120,7 @@ fn parse_param_after_comma(
         RParen => return token;
         Ident => return std::kizu::parser::parse_param_list(ast, text, token);
         Comptime => return std::kizu::parser::parse_param_list(ast, text, token);
+        Lifetime => return error("expected parameter");
         Fn => return error("expected parameter");
         Import => return error("expected parameter");
         Pub => return error("expected parameter");
@@ -1204,6 +1224,7 @@ fn expect_colon(
         Fn => return error("expected colon");
         Return => return error("expected colon");
         Ident => return error("expected colon");
+        Lifetime => return error("expected colon");
         Number => return error("expected colon");
         String => return error("expected colon");
         LBrace => return error("expected colon");
@@ -1278,6 +1299,7 @@ fn parse_optional_return_type(
         Fn => return error("expected return type or block");
         Return => return error("expected return type or block");
         Ident => return error("expected return type or block");
+        Lifetime => return error("expected return type or block");
         Number => return error("expected return type or block");
         String => return error("expected return type or block");
         RBrace => return error("expected return type or block");
@@ -1352,6 +1374,7 @@ fn parse_type_end(
         Enum => return error("expected type name");
         Union => return error("expected type name");
         Extern => return error("expected type name");
+        Lifetime => return error("expected type name");
         Ident => return std::kizu::parser::parse_named_type_end(text, token);
         Bang => return std::kizu::parser::parse_type_end(
             text,
@@ -1435,6 +1458,7 @@ fn parse_named_type_end(
         Fn => return base;
         Return => return base;
         Ident => return base;
+        Lifetime => return base;
         Number => return base;
         String => return base;
         LBrace => return base;
@@ -1512,6 +1536,7 @@ fn is_double_colon(token: std::kizu::lexer::Token) -> bool {
         Fn => return false;
         Return => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         String => return false;
         LBrace => return false;
@@ -1575,6 +1600,7 @@ fn expect_type_segment(
         Union => return error("expected type segment");
         Extern => return error("expected type segment");
         Ident => return token;
+        Lifetime => return error("expected type segment");
         Fn => return error("expected type segment");
         Return => return error("expected type segment");
         Number => return error("expected type segment");
@@ -1642,6 +1668,7 @@ fn parse_borrow_type_end(
         Enum => return error("expected borrowed type");
         Union => return error("expected borrowed type");
         Extern => return error("expected borrowed type");
+        Lifetime => return std::kizu::parser::parse_lifetime_borrow_type_end(text, next);
         Mut => return std::kizu::parser::parse_type_end(
             text,
             std::kizu::lexer::next_token(text, next)
@@ -1698,7 +1725,79 @@ fn parse_borrow_type_end(
         Dot => return error("expected borrowed type");
         Range => return error("expected borrowed type");
         Pipe => return error("expected borrowed type");
+    }
 }
+
+fn parse_lifetime_borrow_type_end(
+    text: []const u8,
+    lifetime: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    let next = std::kizu::lexer::next_token(text, lifetime);
+    match next.kind {
+        Mut => return std::kizu::parser::parse_type_end(
+            text,
+            std::kizu::lexer::next_token(text, next)
+        );
+        Ident => return std::kizu::parser::parse_type_end(text, next);
+        Bang => return std::kizu::parser::parse_type_end(text, next);
+        Amp => return std::kizu::parser::parse_type_end(text, next);
+        LBracket => return std::kizu::parser::parse_type_end(text, next);
+        Question => return std::kizu::parser::parse_type_end(text, next);
+        Lifetime => return error("expected borrowed type");
+        Import => return error("expected borrowed type");
+        Pub => return error("expected borrowed type");
+        Struct => return error("expected borrowed type");
+        Enum => return error("expected borrowed type");
+        Union => return error("expected borrowed type");
+        Extern => return error("expected borrowed type");
+        Fn => return error("expected borrowed type");
+        Return => return error("expected borrowed type");
+        Number => return error("expected borrowed type");
+        String => return error("expected borrowed type");
+        LBrace => return error("expected borrowed type");
+        RBrace => return error("expected borrowed type");
+        LParen => return error("expected borrowed type");
+        RParen => return error("expected borrowed type");
+        Semicolon => return error("expected borrowed type");
+        Comma => return error("expected borrowed type");
+        Colon => return error("expected borrowed type");
+        Arrow => return error("expected borrowed type");
+        RBracket => return error("expected borrowed type");
+        LT => return error("expected borrowed type");
+        GT => return error("expected borrowed type");
+        DoubleColon => return error("expected borrowed type");
+        Let => return error("expected borrowed type");
+        Var => return error("expected borrowed type");
+        If => return error("expected borrowed type");
+        Else => return error("expected borrowed type");
+        While => return error("expected borrowed type");
+        For => return error("expected borrowed type");
+        Break => return error("expected borrowed type");
+        Continue => return error("expected borrowed type");
+        Match => return error("expected borrowed type");
+        Unsafe => return error("expected borrowed type");
+        Comptime => return error("expected borrowed type");
+        Try => return error("expected borrowed type");
+        True => return error("expected borrowed type");
+        False => return error("expected borrowed type");
+        And => return error("expected borrowed type");
+        Or => return error("expected borrowed type");
+        Assign => return error("expected borrowed type");
+        FatArrow => return error("expected borrowed type");
+        Eq => return error("expected borrowed type");
+        NotEq => return error("expected borrowed type");
+        LTE => return error("expected borrowed type");
+        GTE => return error("expected borrowed type");
+        Plus => return error("expected borrowed type");
+        Minus => return error("expected borrowed type");
+        Asterisk => return error("expected borrowed type");
+        Slash => return error("expected borrowed type");
+        Percent => return error("expected borrowed type");
+        Dot => return error("expected borrowed type");
+        Range => return error("expected borrowed type");
+        Pipe => return error("expected borrowed type");
+        Eof => return error("expected borrowed type");
+    }
 }
 
 fn parse_slice_type_end(
@@ -1720,6 +1819,7 @@ fn parse_slice_type_end(
         Fn => return error("expected right bracket");
         Return => return error("expected right bracket");
         Ident => return error("expected right bracket");
+        Lifetime => return error("expected right bracket");
         Number => return error("expected right bracket");
         String => return error("expected right bracket");
         LBrace => return error("expected right bracket");
@@ -1783,6 +1883,7 @@ fn parse_type_arg_end(
         Enum => return error("expected type argument");
         Union => return error("expected type argument");
         Extern => return error("expected type argument");
+        Lifetime => return std::kizu::parser::parse_lifetime_type_arg_end(text, token);
         Ident => return std::kizu::parser::parse_ident_type_arg_end(text, token);
         Bang => return std::kizu::parser::parse_type_end(text, token);
         Amp => return std::kizu::parser::parse_type_end(text, token);
@@ -1836,7 +1937,76 @@ fn parse_type_arg_end(
         Dot => return error("expected type argument");
         Range => return error("expected type argument");
         Pipe => return error("expected type argument");
+    }
 }
+
+fn parse_lifetime_type_arg_end(
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    let next = std::kizu::lexer::next_token(text, token);
+    match next.kind {
+        Comma => return token;
+        GT => return token;
+        RParen => return token;
+        Ident => return std::kizu::parser::parse_type_arg_end(text, next);
+        Mut => return std::kizu::parser::parse_type_arg_end(text, next);
+        Bang => return std::kizu::parser::parse_type_arg_end(text, next);
+        Amp => return std::kizu::parser::parse_type_arg_end(text, next);
+        LBracket => return std::kizu::parser::parse_type_arg_end(text, next);
+        Question => return std::kizu::parser::parse_type_arg_end(text, next);
+        Lifetime => return error("expected type argument");
+        Import => return error("expected type argument");
+        Pub => return error("expected type argument");
+        Struct => return error("expected type argument");
+        Enum => return error("expected type argument");
+        Union => return error("expected type argument");
+        Extern => return error("expected type argument");
+        Fn => return error("expected type argument");
+        Return => return error("expected type argument");
+        Number => return error("expected type argument");
+        String => return error("expected type argument");
+        LBrace => return error("expected type argument");
+        RBrace => return error("expected type argument");
+        LParen => return error("expected type argument");
+        Semicolon => return error("expected type argument");
+        Colon => return error("expected type argument");
+        Arrow => return error("expected type argument");
+        RBracket => return error("expected type argument");
+        LT => return error("expected type argument");
+        DoubleColon => return error("expected type argument");
+        Let => return error("expected type argument");
+        Var => return error("expected type argument");
+        If => return error("expected type argument");
+        Else => return error("expected type argument");
+        While => return error("expected type argument");
+        For => return error("expected type argument");
+        Break => return error("expected type argument");
+        Continue => return error("expected type argument");
+        Match => return error("expected type argument");
+        Unsafe => return error("expected type argument");
+        Comptime => return error("expected type argument");
+        Try => return error("expected type argument");
+        True => return error("expected type argument");
+        False => return error("expected type argument");
+        And => return error("expected type argument");
+        Or => return error("expected type argument");
+        Assign => return error("expected type argument");
+        FatArrow => return error("expected type argument");
+        Eq => return error("expected type argument");
+        NotEq => return error("expected type argument");
+        LTE => return error("expected type argument");
+        GTE => return error("expected type argument");
+        Plus => return error("expected type argument");
+        Minus => return error("expected type argument");
+        Asterisk => return error("expected type argument");
+        Slash => return error("expected type argument");
+        Percent => return error("expected type argument");
+        Dot => return error("expected type argument");
+        Range => return error("expected type argument");
+        Pipe => return error("expected type argument");
+        Eof => return error("expected type argument");
+    }
 }
 
 fn parse_ident_type_arg_end(
@@ -1873,6 +2043,7 @@ fn parse_generic_type_end(
             Fn => return error("expected comma or greater than");
             Return => return error("expected comma or greater than");
             Ident => return error("expected comma or greater than");
+        Lifetime => return error("expected comma or greater than");
             Number => return error("expected comma or greater than");
             String => return error("expected comma or greater than");
             LBrace => return error("expected comma or greater than");
@@ -1940,6 +2111,7 @@ fn next_generic_type_arg(
         Extern => return error("expected type argument");
         GT => return next;
         Ident => return next;
+        Lifetime => return next;
         Bang => return next;
         Amp => return next;
         LBracket => return next;
@@ -2021,6 +2193,7 @@ fn parse_optional_block(
         Fn => return error("expected block");
         Return => return error("expected block");
         Ident => return error("expected block");
+        Lifetime => return error("expected block");
         Number => return error("expected block");
         String => return error("expected block");
         RBrace => return error("expected block");
@@ -2142,6 +2315,7 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -2206,6 +2380,7 @@ fn is_block_close_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return true;
@@ -2269,6 +2444,7 @@ fn parse_statement(
         Unsafe => return std::kizu::parser::parse_unsafe(allocator, ast, text, token);
         Comptime => return std::kizu::parser::parse_comptime_statement(allocator, ast, text, token);
         Ident => return std::kizu::parser::parse_ident_statement(allocator, ast, text, token);
+        Lifetime => return error("expected statement");
         Number => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         String => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         True => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
@@ -2347,6 +2523,7 @@ fn parse_ident_statement(
         And => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Or => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Ident => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Lifetime => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Number => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         String => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         LBrace => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
@@ -2423,6 +2600,7 @@ fn parse_labeled_statement(
         And => return error("label must attach to loop");
         Or => return error("label must attach to loop");
         Ident => return error("label must attach to loop");
+        Lifetime => return error("label must attach to loop");
         Number => return error("label must attach to loop");
         String => return error("label must attach to loop");
         LBrace => return error("label must attach to loop");
@@ -2493,6 +2671,7 @@ fn parse_comptime_statement(
         And => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Or => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Ident => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Lifetime => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Number => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         String => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         LBrace => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
@@ -2593,6 +2772,7 @@ fn parse_return(
         And => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
         Or => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
         Ident => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
+        Lifetime => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
         Number => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
         String => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
         LBrace => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
@@ -2690,6 +2870,7 @@ fn parse_expr_or_assign_statement(
         And => return error("expected semicolon");
         Or => return error("expected semicolon");
         Ident => return error("expected semicolon");
+        Lifetime => return error("expected semicolon");
         Number => return error("expected semicolon");
         String => return error("expected semicolon");
         LBrace => return error("expected semicolon");
@@ -3094,6 +3275,7 @@ fn parse_primary(
             text,
             std::kizu::parser::parse_ident(ast, text, token)
         );
+        Lifetime => return error("expected expression");
         Number => return std::kizu::parser::parse_postfix_expr(
             allocator,
             ast,
@@ -3309,6 +3491,7 @@ fn prefix_right_start(
         And => return error("expected prefix operator");
         Or => return error("expected prefix operator");
         Ident => return error("expected prefix operator");
+        Lifetime => return error("expected prefix operator");
         Number => return error("expected prefix operator");
         String => return error("expected prefix operator");
         LBrace => return error("expected prefix operator");
@@ -3374,6 +3557,7 @@ fn prefix_borrow_right_start(
         And => return next;
         Or => return next;
         Ident => return next;
+        Lifetime => return next;
         Number => return next;
         String => return next;
         LBrace => return next;
@@ -3443,6 +3627,7 @@ fn prefix_op(
         And => return error("expected prefix operator");
         Or => return error("expected prefix operator");
         Ident => return error("expected prefix operator");
+        Lifetime => return error("expected prefix operator");
         Number => return error("expected prefix operator");
         String => return error("expected prefix operator");
         LBrace => return error("expected prefix operator");
@@ -3509,6 +3694,7 @@ fn borrow_prefix_op(
         And => return std::kizu::ast::prefix_borrow();
         Or => return std::kizu::ast::prefix_borrow();
         Ident => return std::kizu::ast::prefix_borrow();
+        Lifetime => return std::kizu::ast::prefix_borrow();
         Number => return std::kizu::ast::prefix_borrow();
         String => return std::kizu::ast::prefix_borrow();
         LBrace => return std::kizu::ast::prefix_borrow();
@@ -3593,6 +3779,7 @@ fn parse_one_postfix(
         And => return error("expected postfix operator");
         Or => return error("expected postfix operator");
         Ident => return error("expected postfix operator");
+        Lifetime => return error("expected postfix operator");
         Number => return error("expected postfix operator");
         LBrace => return error("expected postfix operator");
         RBrace => return error("expected postfix operator");
@@ -3741,6 +3928,7 @@ fn expect_block_close(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Toke
         And => return error("expected statement");
         Or => return error("expected statement");
         Ident => return error("expected statement");
+        Lifetime => return error("expected statement");
         Number => return error("expected statement");
         LBrace => return error("expected statement");
         LParen => return error("expected statement");
@@ -3803,6 +3991,7 @@ fn is_postfix_start(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -3867,6 +4056,7 @@ fn is_call_close_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -3936,6 +4126,7 @@ fn parse_optional_else(
         And => return std::kizu::parser::empty_parse_node(ast, token);
         Or => return std::kizu::parser::empty_parse_node(ast, token);
         Ident => return std::kizu::parser::empty_parse_node(ast, token);
+        Lifetime => return std::kizu::parser::empty_parse_node(ast, token);
         Number => return std::kizu::parser::empty_parse_node(ast, token);
         LBrace => return std::kizu::parser::empty_parse_node(ast, token);
         RBrace => return std::kizu::parser::empty_parse_node(ast, token);
@@ -4005,6 +4196,7 @@ fn parse_optional_branch_label(
         And => return std::kizu::parser::empty_parse_node(ast, next);
         Or => return std::kizu::parser::empty_parse_node(ast, next);
         Ident => return std::kizu::parser::empty_parse_node(ast, next);
+        Lifetime => return std::kizu::parser::empty_parse_node(ast, next);
         Number => return std::kizu::parser::empty_parse_node(ast, next);
         LBrace => return std::kizu::parser::empty_parse_node(ast, next);
         RBrace => return std::kizu::parser::empty_parse_node(ast, next);
@@ -4073,6 +4265,7 @@ fn parse_optional_match_binding(
         And => return std::kizu::parser::empty_parse_node(ast, token);
         Or => return std::kizu::parser::empty_parse_node(ast, token);
         Ident => return std::kizu::parser::empty_parse_node(ast, token);
+        Lifetime => return std::kizu::parser::empty_parse_node(ast, token);
         Number => return std::kizu::parser::empty_parse_node(ast, token);
         LBrace => return std::kizu::parser::empty_parse_node(ast, token);
         RBrace => return std::kizu::parser::empty_parse_node(ast, token);
@@ -4140,6 +4333,7 @@ fn next_match_arm_token(
         And => return token;
         Or => return token;
         Ident => return token;
+        Lifetime => return token;
         Number => return token;
         LBrace => return token;
         RBrace => return token;
@@ -4204,6 +4398,7 @@ fn binary_precedence(token: std::kizu::lexer::Token) -> i64 {
         And => return 3;
         Or => return 2;
         Ident => return 0 - 1;
+        Lifetime => return 0 - 1;
         Number => return 0 - 1;
         LBrace => return 0 - 1;
         RBrace => return 0 - 1;
@@ -4268,6 +4463,7 @@ fn binary_op(token: std::kizu::lexer::Token) -> !std::kizu::ast::BinaryOp {
         And => return std::kizu::ast::binary_and();
         Or => return std::kizu::ast::binary_or();
         Ident => return error("expected binary operator");
+        Lifetime => return error("expected binary operator");
         Number => return error("expected binary operator");
         LBrace => return error("expected binary operator");
         RBrace => return error("expected binary operator");
@@ -4332,6 +4528,7 @@ fn expect_call_arg_start(token: std::kizu::lexer::Token) -> !std::kizu::lexer::T
         And => return error("expected call arg");
         Or => return error("expected call arg");
         Ident => return token;
+        Lifetime => return error("expected call arg");
         Number => return token;
         LBrace => return error("expected call arg");
         RBrace => return error("expected call arg");
@@ -4399,6 +4596,7 @@ fn next_call_arg_token(
         And => return error("expected comma or right paren");
         Or => return error("expected comma or right paren");
         Ident => return error("expected comma or right paren");
+        Lifetime => return error("expected comma or right paren");
         Number => return error("expected comma or right paren");
         LBrace => return error("expected comma or right paren");
         RBrace => return error("expected comma or right paren");
@@ -4463,6 +4661,7 @@ fn is_pub_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4527,6 +4726,7 @@ fn is_comptime_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4591,6 +4791,7 @@ fn is_decl_item_separator(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4655,6 +4856,7 @@ fn is_lt_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4719,6 +4921,7 @@ fn is_gt_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4783,6 +4986,7 @@ fn is_comma_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4847,6 +5051,7 @@ fn is_arrow_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4911,6 +5116,7 @@ fn is_left_paren_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         LBrace => return false;
         RBrace => return false;
@@ -4975,6 +5181,7 @@ fn expect_string(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         And => return error("expected string");
         Or => return error("expected string");
         Ident => return error("expected string");
+        Lifetime => return error("expected string");
         Number => return error("expected string");
         LBrace => return error("expected string");
         RBrace => return error("expected string");
@@ -5039,6 +5246,7 @@ fn expect_fn(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         And => return error("expected fn");
         Or => return error("expected fn");
         Ident => return error("expected fn");
+        Lifetime => return error("expected fn");
         Number => return error("expected fn");
         LBrace => return error("expected fn");
         RBrace => return error("expected fn");
@@ -5103,6 +5311,7 @@ fn expect_left_paren(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token
         And => return error("expected left paren");
         Or => return error("expected left paren");
         Ident => return error("expected left paren");
+        Lifetime => return error("expected left paren");
         Number => return error("expected left paren");
         LBrace => return error("expected left paren");
         RBrace => return error("expected left paren");
@@ -5167,6 +5376,7 @@ fn expect_gt(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         And => return error("expected greater than");
         Or => return error("expected greater than");
         Ident => return error("expected greater than");
+        Lifetime => return error("expected greater than");
         Number => return error("expected greater than");
         LBrace => return error("expected greater than");
         RBrace => return error("expected greater than");
@@ -5204,6 +5414,71 @@ fn expect_gt(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     }
 }
 
+fn expect_type_param(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
+    match token.kind {
+        Ident => return token;
+        Lifetime => return token;
+        Import => return error("expected type parameter");
+        Pub => return error("expected type parameter");
+        Struct => return error("expected type parameter");
+        Enum => return error("expected type parameter");
+        Union => return error("expected type parameter");
+        Extern => return error("expected type parameter");
+        Fn => return error("expected type parameter");
+        Let => return error("expected type parameter");
+        Var => return error("expected type parameter");
+        Return => return error("expected type parameter");
+        If => return error("expected type parameter");
+        Else => return error("expected type parameter");
+        While => return error("expected type parameter");
+        For => return error("expected type parameter");
+        Break => return error("expected type parameter");
+        Continue => return error("expected type parameter");
+        Match => return error("expected type parameter");
+        Unsafe => return error("expected type parameter");
+        Comptime => return error("expected type parameter");
+        Try => return error("expected type parameter");
+        True => return error("expected type parameter");
+        False => return error("expected type parameter");
+        And => return error("expected type parameter");
+        Or => return error("expected type parameter");
+        Number => return error("expected type parameter");
+        LBrace => return error("expected type parameter");
+        RBrace => return error("expected type parameter");
+        LParen => return error("expected type parameter");
+        RParen => return error("expected type parameter");
+        Semicolon => return error("expected type parameter");
+        Comma => return error("expected type parameter");
+        Colon => return error("expected type parameter");
+        DoubleColon => return error("expected type parameter");
+        Assign => return error("expected type parameter");
+        Arrow => return error("expected type parameter");
+        FatArrow => return error("expected type parameter");
+        Bang => return error("expected type parameter");
+        Eq => return error("expected type parameter");
+        NotEq => return error("expected type parameter");
+        Amp => return error("expected type parameter");
+        LBracket => return error("expected type parameter");
+        RBracket => return error("expected type parameter");
+        LT => return error("expected type parameter");
+        LTE => return error("expected type parameter");
+        GT => return error("expected type parameter");
+        GTE => return error("expected type parameter");
+        Question => return error("expected type parameter");
+        Plus => return error("expected type parameter");
+        Minus => return error("expected type parameter");
+        Asterisk => return error("expected type parameter");
+        Slash => return error("expected type parameter");
+        Percent => return error("expected type parameter");
+        Dot => return error("expected type parameter");
+        Range => return error("expected type parameter");
+        Pipe => return error("expected type parameter");
+        Mut => return error("expected type parameter");
+        String => return error("expected type parameter");
+        Eof => return error("expected type parameter");
+    }
+}
+
 fn expect_ident(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
         Import => return error("expected identifier");
@@ -5230,6 +5505,7 @@ fn expect_ident(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         False => return error("expected identifier");
         And => return error("expected identifier");
         Or => return error("expected identifier");
+        Lifetime => return error("expected identifier");
         Ident => return token;
         Number => return error("expected identifier");
         LBrace => return error("expected identifier");
@@ -5295,6 +5571,7 @@ fn expect_assign(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         And => return error("expected assign");
         Or => return error("expected assign");
         Ident => return error("expected assign");
+        Lifetime => return error("expected assign");
         Number => return error("expected assign");
         LBrace => return error("expected assign");
         RBrace => return error("expected assign");
@@ -5359,6 +5636,7 @@ fn expect_semicolon(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token 
         And => return error("expected semicolon");
         Or => return error("expected semicolon");
         Ident => return error("expected semicolon");
+        Lifetime => return error("expected semicolon");
         Number => return error("expected semicolon");
         LBrace => return error("expected semicolon");
         RBrace => return error("expected semicolon");
@@ -5423,6 +5701,7 @@ fn expect_lbrace(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         And => return error("expected left brace");
         Or => return error("expected left brace");
         Ident => return error("expected left brace");
+        Lifetime => return error("expected left brace");
         Number => return error("expected left brace");
         LBrace => return token;
         RBrace => return error("expected left brace");
@@ -5487,6 +5766,7 @@ fn expect_right_paren(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Toke
         And => return error("expected right paren");
         Or => return error("expected right paren");
         Ident => return error("expected right paren");
+        Lifetime => return error("expected right paren");
         Number => return error("expected right paren");
         LBrace => return error("expected right paren");
         RBrace => return error("expected right paren");
@@ -5551,6 +5831,7 @@ fn expect_range(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         And => return error("expected range");
         Or => return error("expected range");
         Ident => return error("expected range");
+        Lifetime => return error("expected range");
         Number => return error("expected range");
         LBrace => return error("expected range");
         RBrace => return error("expected range");
@@ -5615,6 +5896,7 @@ fn expect_pipe(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         And => return error("expected pipe");
         Or => return error("expected pipe");
         Ident => return error("expected pipe");
+        Lifetime => return error("expected pipe");
         Number => return error("expected pipe");
         LBrace => return error("expected pipe");
         RBrace => return error("expected pipe");
@@ -5679,6 +5961,7 @@ fn expect_fat_arrow(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token 
         And => return error("expected fat arrow");
         Or => return error("expected fat arrow");
         Ident => return error("expected fat arrow");
+        Lifetime => return error("expected fat arrow");
         Number => return error("expected fat arrow");
         LBrace => return error("expected fat arrow");
         RBrace => return error("expected fat arrow");

@@ -76,6 +76,13 @@ func (l *Lexer) NextToken() token.Token {
 		tok.Type = token.String
 		tok.Literal = l.readString()
 		return tok
+	case '\'':
+		if isLetter(l.peekChar()) {
+			tok.Type = token.Lifetime
+			tok.Literal = l.readLifetime()
+			return tok
+		}
+		tok = l.oneCharToken(token.Illegal)
 	case 0:
 		tok.Type = token.EOF
 		tok.Literal = ""
@@ -169,6 +176,16 @@ func (l *Lexer) skipLineComment() {
 // readIdentifier reads an identifier or keyword literal.
 func (l *Lexer) readIdentifier() string {
 	position := l.position
+	for isLetter(l.ch) || isDigit(l.ch) {
+		l.readChar()
+	}
+	return string(l.input[position:l.position])
+}
+
+// readLifetime reads an apostrophe-prefixed lifetime name.
+func (l *Lexer) readLifetime() string {
+	position := l.position
+	l.readChar()
 	for isLetter(l.ch) || isDigit(l.ch) {
 		l.readChar()
 	}

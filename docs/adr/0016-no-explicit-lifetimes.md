@@ -1,6 +1,8 @@
 # ADR-0016: 明示 lifetime annotation は採用しない
 
-Status: 採用
+Status: 置換
+
+Superseded by: [ADR-0059: explicit lifetime syntax for borrowed views](0059-explicit-lifetime-syntax.md)
 
 ## 背景
 

@@ -63,6 +63,7 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         And => return false;
         Or => return false;
         Ident => return false;
+        Lifetime => return false;
         Number => return false;
         String => return false;
         LBrace => return false;
@@ -126,6 +127,7 @@ fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
         And => print("And");
         Or => print("Or");
         Ident => print("Ident");
+        Lifetime => print("Lifetime");
         Number => print("Number");
         String => print("String");
         LBrace => print("LBrace");
@@ -206,6 +208,7 @@ var lexerParityTokenKinds = map[token.Type]string{
 	token.And:         "And",
 	token.Or:          "Or",
 	token.Ident:       "Ident",
+	token.Lifetime:    "Lifetime",
 	token.Int:         "Number",
 	token.String:      "String",
 	token.LBrace:      "LBrace",
@@ -325,7 +328,10 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/fn_empty", source: "fn main() {}"},
 		{name: "seed/fn_return_int", source: "fn main() { return 1; }"},
 		{name: "seed/fn_signature", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
-		{name: "seed/type_tokens", source: "fn f(a: &mut []const std::array::Array<i64>) -> !void {}"},
+		{
+			name:   "seed/type_tokens",
+			source: "fn f<'a>(a: &'a mut []'a const std::array::Array<i64>) -> !void {}",
+		},
 		{name: "seed/string_call", source: `fn main() { print("hello"); }`},
 		{name: "seed/binary_precedence", source: "fn main() { print(1 + 2 * 3); }"},
 		{

@@ -72,7 +72,8 @@ policy.
 - A borrowed parameter cannot be returned as an owned value.
 - A borrowed parameter cannot be stored in a local owned binding.
 - A borrowed parameter cannot be passed to an owning parameter.
-- A borrow cannot be stored in a struct field.
+- A borrow can be stored in a struct or union field only when the type has an
+  explicit lifetime parameter.
 - A non-copy value cannot be moved out through `value.*`.
 - Copy values may be copied through `value.*`.
 - `&T` cannot be used for mutation.

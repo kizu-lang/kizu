@@ -186,8 +186,8 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 	fn.Name = p.cur.Literal
 	if p.peek.Type == token.LT {
 		p.nextToken()
-		fn.TypeParams = p.parseTypeParamList()
-		if len(fn.TypeParams) == 0 || !p.expectTypeClose() {
+		fn.LifetimeParams, fn.TypeParams = p.parseGenericParamList()
+		if len(fn.LifetimeParams) == 0 && len(fn.TypeParams) == 0 || !p.expectTypeClose() {
 			return fn
 		}
 	}
@@ -307,6 +307,13 @@ func (p *Parser) parseStructDecl() ast.Decl {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	if p.peek.Type == token.LT {
+		p.nextToken()
+		decl.LifetimeParams, decl.TypeParams = p.parseGenericParamList()
+		if len(decl.LifetimeParams) == 0 && len(decl.TypeParams) == 0 || !p.expectTypeClose() {
+			return decl
+		}
+	}
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
@@ -351,6 +358,10 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 	if p.cur.Type == token.Amp {
 		field.Borrow = true
 		p.nextToken()
+		if p.cur.Type == token.Lifetime {
+			field.BorrowLifetime = p.cur.Literal
+			p.nextToken()
+		}
 		if p.cur.Type == token.Mut {
 			field.MutBorrow = true
 			p.nextToken()
@@ -402,6 +413,13 @@ func (p *Parser) parseUnionDecl() ast.Decl {
 		return decl
 	}
 	decl.Name = p.cur.Literal
+	if p.peek.Type == token.LT {
+		p.nextToken()
+		decl.LifetimeParams, decl.TypeParams = p.parseGenericParamList()
+		if len(decl.LifetimeParams) == 0 && len(decl.TypeParams) == 0 || !p.expectTypeClose() {
+			return decl
+		}
+	}
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
@@ -472,6 +490,10 @@ func (p *Parser) parseParams() []ast.Param {
 		if p.cur.Type == token.Amp {
 			param.Borrow = true
 			p.nextToken()
+			if p.cur.Type == token.Lifetime {
+				param.BorrowLifetime = p.cur.Literal
+				p.nextToken()
+			}
 			if p.cur.Type == token.Mut {
 				param.MutBorrow = true
 				p.nextToken()
@@ -1077,14 +1099,22 @@ func (p *Parser) parseErrorUnionTypeName() string {
 	return "!" + inner
 }
 
-// parseBorrowTypeName parses &T and &mut T type spellings.
+// parseBorrowTypeName parses &T, &mut T, &'a T, and &'a mut T type spellings.
 func (p *Parser) parseBorrowTypeName() string {
 	p.nextToken()
+	lifetime := ""
+	if p.cur.Type == token.Lifetime {
+		lifetime = p.cur.Literal
+		p.nextToken()
+	}
 	if p.cur.Type == token.Mut {
 		p.nextToken()
 		inner := p.parseTypeName()
 		if inner == "" {
 			return ""
+		}
+		if lifetime != "" {
+			return "&" + lifetime + " mut " + inner
 		}
 		return "&mut " + inner
 	}
@@ -1092,20 +1122,50 @@ func (p *Parser) parseBorrowTypeName() string {
 	if inner == "" {
 		return ""
 	}
+	if lifetime != "" {
+		return "&" + lifetime + " " + inner
+	}
 	return "&" + inner
 }
 
-// parseSliceTypeName parses []T type spellings.
+// parseSliceTypeName parses []T and lifetime-qualified slice type spellings.
 func (p *Parser) parseSliceTypeName() string {
 	if !p.expectPeek(token.RBracket) {
 		return ""
 	}
 	p.nextToken()
+	lifetime := ""
+	if p.cur.Type == token.Lifetime {
+		lifetime = p.cur.Literal
+		p.nextToken()
+	}
+	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
+		return p.parseQualifiedSliceType(lifetime, "const")
+	}
+	if p.cur.Type == token.Mut {
+		return p.parseQualifiedSliceType(lifetime, "mut")
+	}
 	arg := p.parseTypeArg()
-	if arg == "" {
+	if arg == "" || lifetime != "" {
+		if lifetime != "" {
+			p.errorf("expected const or mut after slice lifetime, got %s", p.cur.Type)
+		}
 		return ""
 	}
 	return "[]" + arg
+}
+
+// parseQualifiedSliceType parses []const T, []'a const T, and mutable variants.
+func (p *Parser) parseQualifiedSliceType(lifetime string, qualifier string) string {
+	p.nextToken()
+	inner := p.parseTypeName()
+	if inner == "" {
+		return ""
+	}
+	if lifetime != "" {
+		return "[]" + lifetime + " " + qualifier + " " + inner
+	}
+	return "[]" + qualifier + " " + inner
 }
 
 // parseTypeBaseName parses an identifier or namespace-qualified type base.
@@ -1142,16 +1202,42 @@ func (p *Parser) parseTypeArgList() string {
 	return strings.Join(args, ", ")
 }
 
-// parseTypeParamList parses generic function type parameter names.
-func (p *Parser) parseTypeParamList() []string {
-	params := []string{}
+// parseGenericParamList parses lifetime parameters followed by type parameters.
+func (p *Parser) parseGenericParamList() ([]string, []string) {
+	lifetimes := []string{}
+	types := []string{}
+	seen := map[string]bool{}
+	seenType := false
 	p.nextToken()
 	for {
-		if p.cur.Type != token.Ident {
-			p.errorf("expected type parameter, got %s", p.cur.Type)
-			return nil
+		switch p.cur.Type {
+		case token.Lifetime:
+			if p.cur.Literal == "'_" {
+				p.errorf("anonymous lifetime '_ is not supported")
+				return nil, nil
+			}
+			if seenType {
+				p.errorf("lifetime parameter %s must appear before type parameters", p.cur.Literal)
+				return nil, nil
+			}
+			if seen[p.cur.Literal] {
+				p.errorf("duplicate lifetime parameter %s", p.cur.Literal)
+				return nil, nil
+			}
+			seen[p.cur.Literal] = true
+			lifetimes = append(lifetimes, p.cur.Literal)
+		case token.Ident:
+			seenType = true
+			if seen[p.cur.Literal] {
+				p.errorf("duplicate type parameter %s", p.cur.Literal)
+				return nil, nil
+			}
+			seen[p.cur.Literal] = true
+			types = append(types, p.cur.Literal)
+		default:
+			p.errorf("expected lifetime or type parameter, got %s", p.cur.Type)
+			return nil, nil
 		}
-		params = append(params, p.cur.Literal)
 		if p.peek.Type != token.Comma {
 			break
 		}
@@ -1161,7 +1247,7 @@ func (p *Parser) parseTypeParamList() []string {
 		}
 		p.nextToken()
 	}
-	return params
+	return lifetimes, types
 }
 
 // expectTypeClose consumes or accepts the closing generic angle bracket.
@@ -1177,6 +1263,9 @@ func (p *Parser) expectTypeClose() bool {
 
 // parseTypeArg parses a generic type argument.
 func (p *Parser) parseTypeArg() string {
+	if p.cur.Type == token.Lifetime {
+		return p.cur.Literal
+	}
 	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
 		p.nextToken()
 		inner := p.parseTypeName()

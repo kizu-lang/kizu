@@ -155,7 +155,7 @@ use-after-move を許さない
 double move を許さない
 borrow 中の値の move を許さない
 borrow escape を許さない
-borrow を struct field に保存させない
+明示 lifetime なしの borrow を struct field に保存させない
 borrow を task / comptime / unsafe 境界で延命させない
 arena.get(handle) は local borrow だけを返す
 別 arena の handle 使用を許さない
@@ -179,7 +179,7 @@ Kizu は次を目指します。
 - GCなしのメモリ安全性
 - 単純な所有権
 - move semantics
-- 明示的な lifetime 注釈なし
+- borrowed view 境界では明示 lifetime 注釈を使う
 - borrow はローカル限定
 - 書き方の自由度を増やしすぎない
 - 標準ライブラリを厚めにする
@@ -263,13 +263,13 @@ Kizu の値は、基本的に1つの所有者を持ちます。
 所有されている値を関数に渡すと、その値は move されます。
 move された値を再利用するとコンパイルエラーになります。
 
-Kizu には borrow がありますが、borrow はローカル限定です。
-Rust のような明示 lifetime annotation は採用しません。
+Kizu には borrow があります。ローカルだけで使う borrow は lifetime を省略できます。
+関数や型の境界を越える borrowed view は明示 lifetime annotation を使います。
 
 borrow は次のことができません。
 
-* struct の field に保存できない
-* 関数から返せない
+* lifetime parameter を持たない struct の field に保存できない
+* 明示 lifetime なしに関数から返せない
 * lexical block の外へ escape できない
 
 長生きする関係は、参照ではなく次の型で表します。
@@ -841,8 +841,8 @@ borrow のルール:
 * borrow は一時的
 * local borrow binding は straight-line code では最後に使った場所で終了する
 * borrow argument は呼び出し statement の終了で終了する
-* borrow は struct に保存できない
-* borrow は関数から返せない
+* borrow field は lifetime parameter を持つ struct / union にだけ保存できる
+* borrow return は明示 lifetime annotation を必須にする
 * borrow 中の値は move できない
 * `&T` と `&mut T` は重複できない
 * `&mut T` 同士は同じ値に対して重複できない
@@ -854,6 +854,23 @@ borrow のルール:
 * v0.2 の index / slice expression は read-only checked access から始める
 * indexed borrow syntax はまだ実装しない。将来 `&items[0]` を追加する場合は、
   専用の安全ルールと regression coverage を先に追加する
+
+境界に現れる lifetime syntax:
+
+```kizu
+fn first<'a>(bytes: []'a const u8) -> []'a const u8
+fn show<'a>(bytes: &'a []'a const u8) -> void
+
+struct View<'a> {
+    bytes: []'a const u8;
+}
+```
+
+lifetime parameter は type parameter と同じ `<...>` に書き、lifetime を先に置きます。
+`&'a T` / `&'a mut T` は borrow 自体の lifetime を表します。
+`[]'a const T` / `[]'a mut T` は slice view の backing storage lifetime を表します。
+`'static` は string literal と compile-time immutable data に限定します。
+`'_`、lifetime bounds、`impl` / `satisfy` / `contract` の lifetime parameter は後続です。
 
 明示 dereference は Zig に合わせて postfix の `.*` を使います。
 
@@ -1391,8 +1408,8 @@ std::mem::len(bytes: []const u8) -> i64
 std::mem::byte_at(bytes: []const u8, index: i64) -> !u8
 std::mem::equal_bytes(left: []const u8, right: []const u8) -> bool
 std::mem::starts_with(bytes: []const u8, prefix: []const u8) -> bool
-std::mem::slice(bytes: []const u8, start: i64, end: i64) -> ![]const u8
-std::mem::trim_ascii(bytes: []const u8) -> []const u8
+std::mem::slice<'a>(bytes: []'a const u8, start: i64, end: i64) -> ![]'a const u8
+std::mem::trim_ascii<'a>(bytes: []'a const u8) -> []'a const u8
 ```
 
 `std::mem::Box<T>` は明示 allocator capability で 1 つの owned value を確保する
