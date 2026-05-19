@@ -25,3 +25,9 @@ Check the package with:
 ```sh
 kizu check selfhost
 ```
+
+Run the current Go/Kizu component oracle suite with:
+
+```sh
+just selfhost-oracle
+```

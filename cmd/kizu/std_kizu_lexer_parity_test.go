@@ -325,6 +325,11 @@ func collectLexerParityExamples(t *testing.T) ([]lexerParityCase, lexerParitySta
 
 // lexerParityExampleCase summarizes one example when the std lexer can scan it.
 func lexerParityExampleCase(path string) (lexerParityCase, bool, string) {
+	return lexerParityFileCase(path, parserParityExamplesRoot, "examples")
+}
+
+// lexerParityFileCase summarizes one source file when the std lexer can scan it.
+func lexerParityFileCase(path string, root string, prefix string) (lexerParityCase, bool, string) {
 	sourceBytes, err := os.ReadFile(path)
 	if err != nil {
 		return lexerParityCase{}, false, err.Error()
@@ -338,7 +343,7 @@ func lexerParityExampleCase(path string) (lexerParityCase, bool, string) {
 		return lexerParityCase{}, false, reason
 	}
 	return lexerParityCase{
-		name:   parserParityExampleName(path),
+		name:   parserParityCaseName(root, prefix, path),
 		source: source,
 		want:   want,
 	}, true, ""
