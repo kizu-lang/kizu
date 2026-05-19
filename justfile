@@ -30,6 +30,11 @@ selfhost-switch-gate:
     go test ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|PackageSkeletonChecks)$' -v
     go test ./internal/project ./internal/types ./internal/ownership
 
+# Run the no-Go bootstrap contract preflight before starting stage work.
+selfhost-bootstrap-preflight:
+    just selfhost-switch-gate
+    just cache-smoke
+
 # Install local git hooks.
 hooks:
     pre-commit install

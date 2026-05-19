@@ -3,6 +3,9 @@
 This document defines the review gate for replacing Go-owned compiler paths with
 Kizu-owned components. It does not switch production behavior by itself.
 
+The no-Go stage contract is defined in
+[`docs/selfhost-bootstrap.md`](selfhost-bootstrap.md).
+
 ## Repeatable Gate
 
 Run this before any PR that proposes using a Kizu-owned component in a production
