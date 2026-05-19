@@ -110,13 +110,14 @@ blocker:
 
 最終更新: `feat/selfhost-bootstrap-chain` で selfhost manifest を stage input graph に含め、
 parser/checker/lower summary と parse / token / illegal-token component metrics を Kizu struct
-で渡すようにした working tree 時点。
+で渡し、selfhost lexer に cursor-carrying `TokenScan` を追加した working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
 pipeline ではなく、Go が生成した source-scanning LLVM template に依存している。
-parser metric は parser-local な部分文字列 scan ではなく、selfhost lexer の identifier
-scan helper で keyword token count に寄せているが、まだ AST parser ではない。checker は
+parser metric は parser-local な部分文字列 scan ではなく、token / illegal-token count で
+selfhost lexer の `TokenScan` cursor を使う。declaration keyword count は fixed-point
+template と揃えるため、まだ lexer-local の identifier byte matcher に残している。checker は
 source summary の brace balance と illegal-token count を受け取り、illegal token がある
 stage input を invalid として扱う。stage1 と stage2 以降の metric は `selfhost/kizu.toml` と
 `selfhost/src/*.kizu` の両方を stage input として読む。Go LLVM backend は selfhost summary
@@ -175,9 +176,9 @@ stage3_vs_stage4_bytes=0
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 1152
-; kizu stage source bytes 1138571
-; kizu stage source fn count 67
+; kizu stage source metric 1205
+; kizu stage source bytes 1141523
+; kizu stage source fn count 76
 ```
 
 remaining Go / template dependency:
@@ -191,6 +192,9 @@ remaining Go / template dependency:
   `checker::CheckedModule`, and `lower::Module` summaries. Parser summaries carry first-token,
   declaration, token, illegal-token, byte, function/import/struct/enum, brace, and balance
   metrics, but still not AST, typed IR, or lowered LLVM instructions.
+- `selfhost/src/lexer.kizu` now has `TokenScan`, `Scan`, and `Advance` cursor helpers. Token and
+  illegal-token metrics use the cursor scanner, but declaration keyword metrics still use a
+  byte-level identifier matcher until token-kind keyword counting is stable in native output.
 - Go native backend and hosted runtime still build `target/selfhost/kizu-stage1`.
 - The generated Kizu parser/checker/lower are partial surfaces, not production replacements for
   `internal/parser`, `internal/types`, or backend lowering.

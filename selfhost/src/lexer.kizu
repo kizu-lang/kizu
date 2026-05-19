@@ -24,6 +24,157 @@ pub fn NextToken(self: Lexer) -> token::Token {
     return token_at(self.input, self.position, self.line, self.column);
 }
 
+pub struct TokenScan {
+    pub token: token::Token
+    pub next: i64
+    pub line: i64
+    pub column: i64
+    pub illegal: bool
+}
+
+pub fn Scan(self: Lexer) -> TokenScan {
+    return scan_token(self.input, self.position, self.line, self.column);
+}
+
+pub fn Advance(self: Lexer) -> Lexer {
+    let scan = scan_token(self.input, self.position, self.line, self.column);
+    return Lexer {
+        input: self.input,
+        position: scan.next,
+        readPosition: scan.next,
+        ch: cast<u8>(0),
+        line: scan.line,
+        column: scan.column
+    };
+}
+
+fn scan_token(input: []const u8, position: i64, line: i64, column: i64) -> TokenScan {
+    let length = std::builtin::mem_len(input);
+    var start = position;
+    var token_line = line;
+    var token_column = column;
+    while start < length and is_space(input[start]) {
+        if input[start] == cast<u8>(10) {
+            token_line = token_line + 1;
+            token_column = 0;
+        } else {
+            token_column = token_column + 1;
+        }
+        start = start + 1;
+    }
+    if start >= length {
+        return make_scan(token::EOFToken(), start, token_line, token_column, false);
+    }
+    if input[start] == cast<u8>(34) {
+        return scan_string(input, start, length, token_line, token_column);
+    }
+    if is_letter(input[start]) {
+        return scan_ident(input, start, length, token_line, token_column);
+    }
+    if is_digit(input[start]) {
+        return scan_int(input, start, length, token_line, token_column);
+    }
+    return scan_punctuation(input, start, length, token_line, token_column);
+}
+
+fn scan_string(
+    input: []const u8,
+    start: i64,
+    length: i64,
+    token_line: i64,
+    token_column: i64
+) -> TokenScan {
+    let end = string_end(input, start, length);
+    if end >= length {
+        return make_scan(
+            make_token_at(token::Type::String, input[start + 1..length],
+                token_line, token_column + 1),
+            length,
+            token_line,
+            token_column + length - start,
+            true
+        );
+    }
+    return make_scan(
+        make_token_at(token::Type::String, input[start + 1..end], token_line, token_column + 1),
+        end + 1,
+        token_line,
+        token_column + end - start + 1,
+        false
+    );
+}
+
+fn scan_ident(
+    input: []const u8,
+    start: i64,
+    length: i64,
+    token_line: i64,
+    token_column: i64
+) -> TokenScan {
+    let end = ident_end(input, start, length);
+    let kind = keyword_type(input, start, end);
+    let literal = input[start..end];
+    return make_scan(
+        make_token_at(kind, literal, token_line, token_column + 1),
+        end,
+        token_line,
+        token_column + end - start,
+        false
+    );
+}
+
+fn scan_int(
+    input: []const u8,
+    start: i64,
+    length: i64,
+    token_line: i64,
+    token_column: i64
+) -> TokenScan {
+    let end = digit_end(input, start, length);
+    return make_scan(
+        make_token_at(token::Type::Int, input[start..end], token_line, token_column + 1),
+        end,
+        token_line,
+        token_column + end - start,
+        false
+    );
+}
+
+fn scan_punctuation(
+    input: []const u8,
+    start: i64,
+    length: i64,
+    token_line: i64,
+    token_column: i64
+) -> TokenScan {
+    let next = punctuation_end(input, start, length);
+    let tok = punctuation_token_at(input, start, length, token_line, token_column + 1);
+    let illegal = tok.Type == token::Type::Illegal;
+    return make_scan(
+        tok,
+        next,
+        token_line,
+        token_column + next - start,
+        illegal
+    );
+}
+
+fn make_scan(
+    tok: token::Token,
+    next: i64,
+    line: i64,
+    column: i64,
+    illegal: bool
+) -> TokenScan {
+    return TokenScan {
+        token: tok,
+        next: next,
+        line: line,
+        column: column,
+        illegal: illegal
+    };
+}
+
 pub fn FirstToken(input: []const u8) -> token::Token {
     let length = std::builtin::mem_len(input);
     var start = 0;
@@ -46,8 +197,9 @@ pub fn FirstToken(input: []const u8) -> token::Token {
         while end < length and is_ident_byte(input[end]) {
             end = end + 1;
         }
+        let kind = keyword_type(input, start, end);
         let literal = input[start..end];
-        return make_token(token::LookupIdent(literal), literal);
+        return make_token(kind, literal);
     }
     if is_digit(ch) {
         var end = start;
@@ -90,8 +242,9 @@ fn token_at(input: []const u8, position: i64, line: i64, column: i64) -> token::
         while end < length and is_ident_byte(input[end]) {
             end = end + 1;
         }
+        let kind = keyword_type(input, start, end);
         let literal = input[start..end];
-        return make_token_at(token::LookupIdent(literal), literal, token_line, token_column + 1);
+        return make_token_at(kind, literal, token_line, token_column + 1);
     }
     if is_digit(ch) {
         var end = start;
@@ -148,74 +301,27 @@ pub fn CountEnum(input: []const u8) -> i64 {
 }
 
 pub fn CountTokens(input: []const u8) -> i64 {
-    let length = std::builtin::mem_len(input);
-    var index = 0;
     var count = 0;
-    while index < length {
-        while index < length and is_space(input[index]) {
-            index = index + 1;
-        }
-        if index >= length {
-            return count;
-        }
+    var lex = New(input);
+    var scan = scan_token(lex.input, lex.position, lex.line, lex.column);
+    while scan.token.Type != token::Type::EOF {
         count = count + 1;
-        if input[index] == cast<u8>(34) {
-            let end = string_end(input, index, length);
-            if end >= length {
-                index = length;
-            } else {
-                index = end + 1;
-            }
-        } else {
-            if is_letter(input[index]) {
-                index = ident_end(input, index, length);
-            } else {
-                if is_digit(input[index]) {
-                    index = digit_end(input, index, length);
-                } else {
-                    index = punctuation_end(input, index, length);
-                }
-            }
-        }
+        lex = Advance(lex);
+        scan = scan_token(lex.input, lex.position, lex.line, lex.column);
     }
     return count;
 }
 
 pub fn CountIllegalTokens(input: []const u8) -> i64 {
-    let length = std::builtin::mem_len(input);
-    var index = 0;
     var count = 0;
-    while index < length {
-        while index < length and is_space(input[index]) {
-            index = index + 1;
+    var lex = New(input);
+    var scan = scan_token(lex.input, lex.position, lex.line, lex.column);
+    while scan.token.Type != token::Type::EOF {
+        if scan.illegal {
+            count = count + 1;
         }
-        if index >= length {
-            return count;
-        }
-        if input[index] == cast<u8>(34) {
-            let end = string_end(input, index, length);
-            if end >= length {
-                count = count + 1;
-                index = length;
-            } else {
-                index = end + 1;
-            }
-        } else {
-            if is_letter(input[index]) {
-                index = ident_end(input, index, length);
-            } else {
-                if is_digit(input[index]) {
-                    index = digit_end(input, index, length);
-                } else {
-                    if is_known_punctuation(input, index, length) {
-                        count = count + 0;
-                    } else {
-                        count = count + 1;
-                    }
-                    index = punctuation_end(input, index, length);
-                }
-            }
-        }
+        lex = Advance(lex);
+        scan = scan_token(lex.input, lex.position, lex.line, lex.column);
     }
     return count;
 }
@@ -325,6 +431,22 @@ fn is_known_punctuation(input: []const u8, start: i64, length: i64) -> bool {
         return true;
     }
     return false;
+}
+
+fn keyword_type(input: []const u8, start: i64, end: i64) -> token::Type {
+    if keyword_code(input, start, end, 1) {
+        return token::Type::Function;
+    }
+    if keyword_code(input, start, end, 2) {
+        return token::Type::Import;
+    }
+    if keyword_code(input, start, end, 3) {
+        return token::Type::Struct;
+    }
+    if keyword_code(input, start, end, 4) {
+        return token::Type::Enum;
+    }
+    return token::LookupIdent(input[start..end]);
 }
 
 fn punctuation_token(input: []const u8, start: i64, length: i64) -> token::Token {
