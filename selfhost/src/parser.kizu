@@ -7,16 +7,86 @@ pub union ParseError {
     Message([]const u8)
 }
 
-pub fn parse_source(source: []const u8) -> ParseError!ast::AstSummary {
-    let lexed = lexer::summarize(source);
-    if lexed.tokens < 1 {
-        return ParseError::Message("lexer produced no tokens");
-    }
-    return ast::empty(lexed.tokens);
+pub struct ParseDiagnosticSummary {
+    pub diagnostic: bool;
+    pub start: i64;
+    pub end: i64;
+}
+
+pub fn parse_source(source: []const u8) -> !std::kizu::ast::ParseResult {
+    let allocator = std::mem::page_allocator();
+    return parse_file(allocator, "<memory>", source);
+}
+
+pub fn parse_file(
+    allocator: Allocator,
+    path: []const u8,
+    source: []const u8
+) -> !std::kizu::ast::ParseResult {
+    let file = std::kizu::ast::source_file(path, source);
+    return std::kizu::parser::parse_program(allocator, file);
+}
+
+pub fn parse_tokens(
+    allocator: Allocator,
+    path: []const u8,
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !std::kizu::ast::ParseResult {
+    try require_tokens(path, tokens);
+    let file = std::kizu::ast::source_file(path, source);
+    return std::kizu::parser::parse_program(allocator, file);
+}
+
+pub fn summarize(
+    result: std::kizu::ast::ParseResult,
+    tokens: i64,
+    declarations: i64
+) -> ast::AstSummary {
+    return ast::summarize(result.root, tokens, declarations, 0);
 }
 
 pub fn parse_error(path: []const u8) -> ParseError {
-    let primary = diagnostic::file_span(path, 0, 1);
-    let report = diagnostic::Diagnostic(primary, "parse failed");
+    return diagnostic_error(path, 0, 1, "parse failed");
+}
+
+pub fn diagnostic_error(
+    path: []const u8,
+    start: i64,
+    end: i64,
+    message: []const u8
+) -> ParseError {
+    let primary = diagnostic::file_span(path, start, end);
+    let report = diagnostic::Diagnostic(primary, message);
     return ParseError::Diagnostic(report);
+}
+
+pub fn summarize_error(err: ParseError) -> ParseDiagnosticSummary {
+    match err {
+        Diagnostic(report) => return ParseDiagnosticSummary {
+            diagnostic: true,
+            start: report.primary.start,
+            end: report.primary.end
+        };
+        Message(text) => return ParseDiagnosticSummary {
+            diagnostic: false,
+            start: 0,
+            end: 0
+        };
+    }
+}
+
+fn require_tokens(
+    path: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !void {
+    let token_count = tokens.len();
+    if token_count < 1 {
+        return error("parser requires token array");
+    }
+    let eof = try tokens.get(token_count - 1);
+    if !lexer::is_eof(eof) {
+        return error("parser requires EOF token");
+    }
+    return;
 }
