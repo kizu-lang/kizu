@@ -2771,6 +2771,11 @@ func (c *Checker) checkAstAddExprMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
+	case "add_type_name":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_var":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
@@ -2815,9 +2820,14 @@ func (c *Checker) checkAstAddShapeMethod(
 	env *scope,
 ) (string, bool, error) {
 	switch name {
+	case "add_program":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_param":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	case "add_field":
@@ -2843,7 +2853,7 @@ func (c *Checker) checkAstAddShapeMethod(
 	case "add_fn_decl":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-			"std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	case "add_empty":
@@ -4060,9 +4070,10 @@ func (c *Checker) astChildRangeReceiver(expr ast.Expression, env *scope) *bindin
 // astNodeIDMethod reports methods that return an Ast-owned NodeId.
 func astNodeIDMethod(name string) bool {
 	switch name {
-	case "add_node", "add_int", "add_string", "add_var", "add_binary", "add_call",
-		"add_block", "add_return", "add_expr_stmt", "add_param", "add_field", "add_match",
-		"add_struct_decl", "add_match_arm", "add_fn_decl", "add_empty",
+	case "add_node", "add_int", "add_string", "add_type_name", "add_var", "add_binary",
+		"add_call", "add_block", "add_return", "add_expr_stmt", "add_program",
+		"add_param", "add_field", "add_match", "add_struct_decl", "add_match_arm",
+		"add_fn_decl", "add_empty",
 		"child_at":
 		return true
 	default:
@@ -4250,8 +4261,10 @@ func isAstScalarType(typeName string) bool {
 	case "SourceFile", "std::kizu::ast::SourceFile",
 		"AstNode", "std::kizu::ast::AstNode",
 		"AstData", "std::kizu::ast::AstData",
+		"ProgramNode", "std::kizu::ast::ProgramNode",
 		"IntNode", "std::kizu::ast::IntNode",
 		"StringNode", "std::kizu::ast::StringNode",
+		"TypeNameNode", "std::kizu::ast::TypeNameNode",
 		"VarNode", "std::kizu::ast::VarNode",
 		"BinaryNode", "std::kizu::ast::BinaryNode",
 		"CallNode", "std::kizu::ast::CallNode",

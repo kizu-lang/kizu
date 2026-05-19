@@ -28,7 +28,7 @@ fn run_case(allocator: Allocator, name: []const u8, text: []const u8) -> !void {
     print("@@KIZU_PARSER_PARITY_CASE@@");
     print(name);
     let source = std::kizu::ast::source_file(name, text);
-    let result = try std::kizu::parser::parse_first_node(allocator, source);
+    let result = try std::kizu::parser::parse_program(allocator, source);
     try dump_node(text, result.ast, result.root);
     print("@@KIZU_PARSER_PARITY_END@@");
     return;
@@ -41,10 +41,12 @@ fn dump_node(
 ) -> !void {
     let node = ast.get(id);
     match node.data {
+        Program(program) => try dump_program(source, ast, program);
         FnDecl(fn_decl) => try dump_fn_decl(source, ast, fn_decl);
         Var(var_node) => try dump_leaf("Var", source, &node.span);
         Int(int_node) => try dump_leaf("Int", source, &node.span);
         String(string_node) => try dump_string(source, &node.span);
+        TypeName(type_name) => try dump_leaf("TypeName", source, &node.span);
         Binary(binary) => try dump_binary(source, ast, binary);
         Call(call) => try dump_call(source, ast, call);
         Block(block) => try dump_block(source, ast, block);
@@ -52,13 +54,23 @@ fn dump_node(
         ExprStmt(expr_stmt) => try dump_expr_stmt(source, ast, expr_stmt);
         If(if_node) => print("If");
         Let(let_node) => print("Let");
-        Param(param_node) => print("Param");
+        Param(param_node) => try dump_param(source, ast, param_node);
         Field(field_node) => print("Field");
         StructDecl(struct_decl) => print("StructDecl");
         Match(match_node) => print("Match");
         MatchArm(match_arm) => print("MatchArm");
         Empty => print("Empty");
     }
+    return;
+}
+
+fn dump_program(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    program: std::kizu::ast::ProgramNode
+) -> !void {
+    print("Program");
+    try dump_range(source, ast, program.declarations);
     return;
 }
 
@@ -70,7 +82,19 @@ fn dump_fn_decl(
     print("FnDecl");
     try dump_node(source, ast, fn_decl.name);
     try dump_range(source, ast, fn_decl.params);
+    try dump_node(source, ast, fn_decl.return_type);
     try dump_node(source, ast, fn_decl.body);
+    return;
+}
+
+fn dump_param(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    param: std::kizu::ast::ParamNode
+) -> !void {
+    print("Param");
+    try dump_node(source, ast, param.name);
+    try dump_node(source, ast, param.type_node);
     return;
 }
 
@@ -279,6 +303,8 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 	t.Helper()
 	seeds := []parserParityCase{
 		{name: "seed/fn_empty", source: "fn main() {}"},
+		{name: "seed/two_fns", source: "fn one() {} fn two() {}"},
+		{name: "seed/fn_params_return", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
 		{name: "seed/fn_return_int", source: "fn main() { return 1; }"},
 		{name: "seed/fn_expr_stmt_string", source: `fn main() { print("hello"); }`},
 		{name: "seed/fn_expr_stmt_precedence", source: "fn main() { print(1 + 2 * 3); }"},
@@ -326,7 +352,8 @@ func summarizeGoParserSubset(source string) (string, string, []string) {
 // unsupportedStdParserSource rejects bytes the Kizu std lexer cannot scan yet.
 func unsupportedStdParserSource(source string) string {
 	inString := false
-	for _, r := range source {
+	for index := 0; index < len(source); index++ {
+		r := rune(source[index])
 		if inString {
 			if r == '"' {
 				inString = false
@@ -335,6 +362,10 @@ func unsupportedStdParserSource(source string) string {
 		}
 		if r == '"' {
 			inString = true
+			continue
+		}
+		if r == '-' && index+1 < len(source) && source[index+1] == '>' {
+			index++
 			continue
 		}
 		if isStdParserSpace(r) || isStdParserPunctuation(r) {
@@ -356,23 +387,36 @@ func summarizeProgramSubset(program *kizuast.Program) ([]string, string) {
 	if len(program.Decls) == 0 {
 		return nil, "program is empty"
 	}
-	if len(program.Decls) != 1 {
-		return nil, "program has multiple declarations"
+	lines := []string{"Program", "Range", strconv.Itoa(len(program.Decls))}
+	for _, decl := range program.Decls {
+		fn, ok := decl.(*kizuast.FunctionDecl)
+		if !ok {
+			return nil, "top-level declaration is not function"
+		}
+		next, reason := summarizeFunctionSubset(fn)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
 	}
-	fn, ok := program.Decls[0].(*kizuast.FunctionDecl)
-	if !ok {
-		return nil, "top-level declaration is not function"
-	}
-	return summarizeFunctionSubset(fn)
+	return lines, ""
 }
 
 // summarizeFunctionSubset summarizes a function declaration in the shared subset.
 func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
-	if fn.Public || fn.Unsafe || fn.ExternABI != "" || fn.ReturnType != "" {
-		return nil, "function has unsupported modifiers or return type"
+	if fn.Public || fn.Unsafe || fn.ExternABI != "" {
+		return nil, "function has unsupported modifiers"
 	}
-	if len(fn.TypeParams) > 0 || len(fn.Params) > 0 {
-		return nil, "function has unsupported parameters"
+	if len(fn.TypeParams) > 0 {
+		return nil, "function has unsupported type parameters"
+	}
+	params, reason := summarizeParamsSubset(fn.Params)
+	if reason != "" {
+		return nil, reason
+	}
+	returnType, reason := summarizeReturnTypeSubset(fn.ReturnType)
+	if reason != "" {
+		return nil, reason
 	}
 	if fn.Body == nil {
 		return nil, "function has no body"
@@ -381,8 +425,55 @@ func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	lines := []string{"FnDecl", "Var", fn.Name, "Range", "0"}
+	lines := []string{"FnDecl", "Var", fn.Name}
+	lines = append(lines, params...)
+	lines = append(lines, returnType...)
 	return append(lines, body...), ""
+}
+
+// summarizeParamsSubset summarizes simple named function parameters.
+func summarizeParamsSubset(params []kizuast.Param) ([]string, string) {
+	lines := []string{"Range", strconv.Itoa(len(params))}
+	for _, param := range params {
+		next, reason := summarizeParamSubset(param)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
+	}
+	return lines, ""
+}
+
+// summarizeParamSubset summarizes one simple `name: Type` parameter.
+func summarizeParamSubset(param kizuast.Param) ([]string, string) {
+	if param.Borrow || param.MutBorrow || param.Comptime {
+		return nil, "function has unsupported parameters"
+	}
+	if !isStdParserIdent(param.Name) {
+		return nil, "identifier outside std parser subset"
+	}
+	typeName, reason := summarizeTypeNameSubset(param.TypeName)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{"Param", "Var", param.Name}
+	return append(lines, typeName...), ""
+}
+
+// summarizeReturnTypeSubset summarizes an optional simple function return type.
+func summarizeReturnTypeSubset(typeName string) ([]string, string) {
+	if typeName == "" {
+		return []string{"Empty"}, ""
+	}
+	return summarizeTypeNameSubset(typeName)
+}
+
+// summarizeTypeNameSubset summarizes a plain identifier type name.
+func summarizeTypeNameSubset(typeName string) ([]string, string) {
+	if !isStdParserIdent(typeName) {
+		return nil, "type outside std parser subset"
+	}
+	return []string{"TypeName", typeName}, ""
 }
 
 // summarizeBlockSubset summarizes a block containing only return statements.
@@ -506,7 +597,7 @@ func isStdParserSpace(r rune) bool {
 
 // isStdParserPunctuation reports punctuation understood by std::kizu::lexer.
 func isStdParserPunctuation(r rune) bool {
-	return strings.ContainsRune("{}();,+*", r)
+	return strings.ContainsRune("{}();,:+*", r)
 }
 
 // isStdParserWordRune reports identifier and number bytes understood by the std lexer.
