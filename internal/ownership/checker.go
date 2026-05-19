@@ -2744,61 +2744,115 @@ func (c *Checker) checkAstAddMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
+	if result, ok, err := c.checkAstAddExprMethod(receiver, name, args, env); ok || err != nil {
+		return result, err
+	}
+	if result, ok, err := c.checkAstAddShapeMethod(receiver, name, args, env); ok || err != nil {
+		return result, err
+	}
+	return "", fmt.Errorf("move error: unknown Ast method `%s`", name)
+}
+
+// checkAstAddExprMethod validates expression and statement AST constructors.
+func (c *Checker) checkAstAddExprMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
 	switch name {
 	case "add_int":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_string":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_var":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_binary":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::BinaryOp",
 			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_call":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_block":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_return":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_expr_stmt":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	default:
+		return "", false, nil
+	}
+}
+
+// checkAstAddShapeMethod validates declaration and structural AST constructors.
+func (c *Checker) checkAstAddShapeMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
 	case "add_param":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_field":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_struct_decl":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_match":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_match_arm":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_fn_decl":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
 			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_empty":
-		return c.checkAstMethodArgs(receiver, name, args, env, []string{"i64"}, "std::kizu::ast::NodeId")
+		result, err := c.checkAstMethodArgs(
+			receiver, name, args, env, []string{"i64"}, "std::kizu::ast::NodeId",
+		)
+		return result, true, err
 	default:
-		return "", fmt.Errorf("move error: unknown Ast method `%s`", name)
+		return "", false, nil
 	}
 }
 
@@ -4006,8 +4060,8 @@ func (c *Checker) astChildRangeReceiver(expr ast.Expression, env *scope) *bindin
 // astNodeIDMethod reports methods that return an Ast-owned NodeId.
 func astNodeIDMethod(name string) bool {
 	switch name {
-	case "add_node", "add_int", "add_var", "add_binary", "add_call",
-		"add_block", "add_return", "add_param", "add_field", "add_match",
+	case "add_node", "add_int", "add_string", "add_var", "add_binary", "add_call",
+		"add_block", "add_return", "add_expr_stmt", "add_param", "add_field", "add_match",
 		"add_struct_decl", "add_match_arm", "add_fn_decl", "add_empty",
 		"child_at":
 		return true
@@ -4197,6 +4251,7 @@ func isAstScalarType(typeName string) bool {
 		"AstNode", "std::kizu::ast::AstNode",
 		"AstData", "std::kizu::ast::AstData",
 		"IntNode", "std::kizu::ast::IntNode",
+		"StringNode", "std::kizu::ast::StringNode",
 		"VarNode", "std::kizu::ast::VarNode",
 		"BinaryNode", "std::kizu::ast::BinaryNode",
 		"CallNode", "std::kizu::ast::CallNode",
@@ -4204,6 +4259,7 @@ func isAstScalarType(typeName string) bool {
 		"IfNode", "std::kizu::ast::IfNode",
 		"LetNode", "std::kizu::ast::LetNode",
 		"ReturnNode", "std::kizu::ast::ReturnNode",
+		"ExprStmtNode", "std::kizu::ast::ExprStmtNode",
 		"ParamNode", "std::kizu::ast::ParamNode",
 		"FieldNode", "std::kizu::ast::FieldNode",
 		"StructDeclNode", "std::kizu::ast::StructDeclNode",
