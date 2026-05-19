@@ -44,10 +44,12 @@ fn dump_node(
         FnDecl(fn_decl) => try dump_fn_decl(source, ast, fn_decl);
         Var(var_node) => try dump_leaf("Var", source, &node.span);
         Int(int_node) => try dump_leaf("Int", source, &node.span);
+        String(string_node) => try dump_string(source, &node.span);
         Binary(binary) => try dump_binary(source, ast, binary);
         Call(call) => try dump_call(source, ast, call);
         Block(block) => try dump_block(source, ast, block);
         Return(return_node) => try dump_return(source, ast, return_node);
+        ExprStmt(expr_stmt) => try dump_expr_stmt(source, ast, expr_stmt);
         If(if_node) => print("If");
         Let(let_node) => print("Let");
         Param(param_node) => print("Param");
@@ -100,6 +102,7 @@ fn dump_binary(
     print("Binary");
     match binary.op {
         Add => print("Add");
+        Mul => print("Mul");
     }
     try dump_node(source, ast, binary.left);
     try dump_node(source, ast, binary.right);
@@ -133,6 +136,16 @@ fn dump_range(
     return;
 }
 
+fn dump_expr_stmt(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    expr_stmt: std::kizu::ast::ExprStmtNode
+) -> !void {
+    print("ExprStmt");
+    try dump_node(source, ast, expr_stmt.expr);
+    return;
+}
+
 fn dump_leaf(
     kind: []const u8,
     source: []const u8,
@@ -140,6 +153,16 @@ fn dump_leaf(
 ) -> !void {
     print(kind);
     let text = try std::mem::slice(source, span.start, span.end);
+    print(text);
+    return;
+}
+
+fn dump_string(
+    source: []const u8,
+    span: &std::kizu::ast::Span
+) -> !void {
+    print("String");
+    let text = try std::mem::slice(source, span.start + 1, span.end - 1);
     print(text);
     return;
 }
@@ -257,6 +280,10 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 	seeds := []parserParityCase{
 		{name: "seed/fn_empty", source: "fn main() {}"},
 		{name: "seed/fn_return_int", source: "fn main() { return 1; }"},
+		{name: "seed/fn_expr_stmt_string", source: `fn main() { print("hello"); }`},
+		{name: "seed/fn_expr_stmt_precedence", source: "fn main() { print(1 + 2 * 3); }"},
+		{name: "seed/fn_expr_stmt_mul_then_add", source: "fn main() { print(1 * 2 + 3); }"},
+		{name: "seed/fn_expr_stmt_left_assoc_add", source: "fn main() { print(1 + 2 + 3); }"},
 		{
 			name:   "seed/fn_return_call_binary",
 			source: "fn main() { return add(1 + x); return y; }",
@@ -298,7 +325,18 @@ func summarizeGoParserSubset(source string) (string, string, []string) {
 
 // unsupportedStdParserSource rejects bytes the Kizu std lexer cannot scan yet.
 func unsupportedStdParserSource(source string) string {
+	inString := false
 	for _, r := range source {
+		if inString {
+			if r == '"' {
+				inString = false
+			}
+			continue
+		}
+		if r == '"' {
+			inString = true
+			continue
+		}
 		if isStdParserSpace(r) || isStdParserPunctuation(r) {
 			continue
 		}
@@ -306,6 +344,9 @@ func unsupportedStdParserSource(source string) string {
 			continue
 		}
 		return "source contains tokens outside std parser subset"
+	}
+	if inString {
+		return "unterminated string literal"
 	}
 	return ""
 }
@@ -359,18 +400,25 @@ func summarizeBlockSubset(block *kizuast.BlockStmt) ([]string, string) {
 
 // summarizeStatementSubset summarizes statements supported by std::kizu::parser.
 func summarizeStatementSubset(stmt kizuast.Statement) ([]string, string) {
-	ret, ok := stmt.(*kizuast.ReturnStmt)
-	if !ok {
-		return nil, "statement is not return"
+	switch node := stmt.(type) {
+	case *kizuast.ReturnStmt:
+		if node.Value == nil {
+			return nil, "return without value"
+		}
+		value, reason := summarizeExprSubset(node.Value)
+		if reason != "" {
+			return nil, reason
+		}
+		return append([]string{"Return"}, value...), ""
+	case *kizuast.ExprStmt:
+		value, reason := summarizeExprSubset(node.Expr)
+		if reason != "" {
+			return nil, reason
+		}
+		return append([]string{"ExprStmt"}, value...), ""
+	default:
+		return nil, "statement outside std parser subset"
 	}
-	if ret.Value == nil {
-		return nil, "return without value"
-	}
-	value, reason := summarizeExprSubset(ret.Value)
-	if reason != "" {
-		return nil, reason
-	}
-	return append([]string{"Return"}, value...), ""
 }
 
 // summarizeExprSubset summarizes expressions supported by std::kizu::parser.
@@ -381,22 +429,35 @@ func summarizeExprSubset(expr kizuast.Expression) ([]string, string) {
 	return summarizePrimarySubset(expr)
 }
 
-// summarizeBinarySubset summarizes the one-level plus expression supported today.
+// summarizeBinarySubset summarizes supported binary expressions.
 func summarizeBinarySubset(expr *kizuast.BinaryExpr) ([]string, string) {
-	if expr.Operator != "+" {
+	op, ok := parserParityBinaryOp(expr.Operator)
+	if !ok {
 		return nil, "binary operator outside std parser subset"
 	}
-	left, reason := summarizePrimarySubset(expr.Left)
+	left, reason := summarizeExprSubset(expr.Left)
 	if reason != "" {
 		return nil, reason
 	}
-	right, reason := summarizePrimarySubset(expr.Right)
+	right, reason := summarizeExprSubset(expr.Right)
 	if reason != "" {
 		return nil, reason
 	}
-	lines := []string{"Binary", "Add"}
+	lines := []string{"Binary", op}
 	lines = append(lines, left...)
 	return append(lines, right...), ""
+}
+
+// parserParityBinaryOp maps shared binary operators to summary labels.
+func parserParityBinaryOp(op string) (string, bool) {
+	switch op {
+	case "+":
+		return "Add", true
+	case "*":
+		return "Mul", true
+	default:
+		return "", false
+	}
 }
 
 // summarizePrimarySubset summarizes identifiers, integers, and calls.
@@ -412,6 +473,8 @@ func summarizePrimarySubset(expr kizuast.Expression) ([]string, string) {
 			return nil, "integer outside std parser subset"
 		}
 		return []string{"Int", node.Value}, ""
+	case *kizuast.StringExpr:
+		return []string{"String", node.Value}, ""
 	case *kizuast.CallExpr:
 		return summarizeCallSubset(node)
 	default:
@@ -438,12 +501,12 @@ func summarizeCallSubset(expr *kizuast.CallExpr) ([]string, string) {
 
 // isStdParserSpace reports whitespace understood by std::kizu::lexer.
 func isStdParserSpace(r rune) bool {
-	return r == ' ' || r == '\n'
+	return r == ' ' || r == '\n' || r == '\t' || r == '\r'
 }
 
 // isStdParserPunctuation reports punctuation understood by std::kizu::lexer.
 func isStdParserPunctuation(r rune) bool {
-	return strings.ContainsRune("{}();,+", r)
+	return strings.ContainsRune("{}();,+*", r)
 }
 
 // isStdParserWordRune reports identifier and number bytes understood by the std lexer.
@@ -521,19 +584,56 @@ func buildStdKizuParserParityHarness(cases []parserParityCase) (string, error) {
 	out.WriteString(stdKizuParserParityHarness)
 	out.WriteString("\nfn main() -> !void {\n")
 	out.WriteString("    let allocator = std::mem::page_allocator();\n")
-	for _, testCase := range cases {
+	for index, testCase := range cases {
 		name, err := kizuRawStringLiteral(testCase.name)
 		if err != nil {
 			return "", fmt.Errorf("%s name: %w", testCase.name, err)
 		}
-		source, err := kizuRawStringLiteral(testCase.source)
+		source, cleanup, err := writeKizuSourceLiteral(&out, index, testCase.source)
 		if err != nil {
 			return "", fmt.Errorf("%s source: %w", testCase.name, err)
 		}
 		fmt.Fprintf(&out, "    try run_case(allocator, %s, %s);\n", name, source)
+		if cleanup != "" {
+			out.WriteString(cleanup)
+		}
 	}
 	out.WriteString("    return;\n}\n")
 	return out.String(), nil
+}
+
+// writeKizuSourceLiteral writes source construction and returns its expression.
+func writeKizuSourceLiteral(out *strings.Builder, index int, value string) (string, string, error) {
+	if !strings.Contains(value, "\"") {
+		lit, err := kizuRawStringLiteral(value)
+		return lit, "", err
+	}
+	name := fmt.Sprintf("source_%d", index)
+	bytesName := fmt.Sprintf("%s_bytes", name)
+	fmt.Fprintf(out, "    var %s = std::string::String(allocator);\n", name)
+	if err := writeKizuStringChunks(out, name, value); err != nil {
+		return "", "", err
+	}
+	fmt.Fprintf(out, "    let %s = %s.as_bytes();\n", bytesName, name)
+	return bytesName, fmt.Sprintf("    %s.deinit();\n", name), nil
+}
+
+// writeKizuStringChunks appends raw chunks and quote bytes to a String value.
+func writeKizuStringChunks(out *strings.Builder, name string, value string) error {
+	parts := strings.Split(value, "\"")
+	for index, part := range parts {
+		if part != "" {
+			lit, err := kizuRawStringLiteral(part)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "    try %s.append_bytes(%s);\n", name, lit)
+		}
+		if index < len(parts)-1 {
+			fmt.Fprintf(out, "    try %s.append_byte(cast<u8>(34));\n", name)
+		}
+	}
+	return nil
 }
 
 // kizuRawStringLiteral returns a literal for Kizu's current no-escape strings.
