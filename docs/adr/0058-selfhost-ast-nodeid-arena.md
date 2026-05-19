@@ -39,8 +39,10 @@ child list.
 - Copying `NodeId` copies an opaque id, not an AST node or raw pointer.
 - Parser APIs return `ParseResult { ast, root }` so a root `NodeId` is paired
   with the AST that owns it.
-- Future parser work can add block, return, call, binary expression, params,
-  fields, statements, args, and match-arm ranges without adding parser builtins.
+- The initial parser path covers function declarations, a single-statement
+  block, return, call, and binary-add expression nodes without parser builtins.
+- Future parser work can add params, fields, multiple statements, richer
+  expressions, and match-arm ranges without adding parser builtins.
 
 ## Non-goals
 

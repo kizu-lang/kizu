@@ -2683,6 +2683,18 @@ func (c *Checker) checkAstMethod(name string, args []ast.Expression, env *scope)
 		}, "!std::kizu::ast::NodeId")
 	case "deinit":
 		return c.checkAstMethodArgs(name, args, env, nil, "void")
+	default:
+		return c.checkAstAddMethod(name, args, env)
+	}
+}
+
+// checkAstAddMethod validates selfhost AST node-construction helper methods.
+func (c *Checker) checkAstAddMethod(
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
 	case "add_int":
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
@@ -2704,9 +2716,13 @@ func (c *Checker) checkAstMethod(name string, args []ast.Expression, env *scope)
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
-	case "add_fn_decl":
+	case "add_return":
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+	case "add_fn_decl":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 	case "add_empty":
 		return c.checkAstMethodArgs(name, args, env, []string{"i64"}, "std::kizu::ast::NodeId")
@@ -3916,6 +3932,9 @@ func (c *Checker) isCopyType(typeName string) bool {
 	if isAstNodeIDType(typeName) || isAstScalarType(typeName) {
 		return true
 	}
+	if typeName == "ParseNode" || typeName == "std::kizu::parser::ParseNode" {
+		return true
+	}
 	if isRawPointerType(typeName) {
 		return true
 	}
@@ -3956,6 +3975,7 @@ func isAstScalarType(typeName string) bool {
 		"BlockNode", "std::kizu::ast::BlockNode",
 		"IfNode", "std::kizu::ast::IfNode",
 		"LetNode", "std::kizu::ast::LetNode",
+		"ReturnNode", "std::kizu::ast::ReturnNode",
 		"FnDeclNode", "std::kizu::ast::FnDeclNode",
 		"Span", "std::kizu::ast::Span",
 		"TokenId", "std::kizu::ast::TokenId",

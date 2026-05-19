@@ -4815,6 +4815,9 @@ func (c *Checker) isCopyType(typ Type) bool {
 	if isAstNodeIDType(typ) || isAstScalarType(typ) {
 		return true
 	}
+	if typ == "ParseNode" || typ == "std::kizu::parser::ParseNode" {
+		return true
+	}
 	if c.enums[string(typ)] != nil {
 		return true
 	}
@@ -4840,6 +4843,7 @@ func isAstScalarType(typ Type) bool {
 		"BlockNode", "std::kizu::ast::BlockNode",
 		"IfNode", "std::kizu::ast::IfNode",
 		"LetNode", "std::kizu::ast::LetNode",
+		"ReturnNode", "std::kizu::ast::ReturnNode",
 		"FnDeclNode", "std::kizu::ast::FnDeclNode",
 		"Span", "std::kizu::ast::Span",
 		"TokenId", "std::kizu::ast::TokenId",
