@@ -305,6 +305,15 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 		{name: "seed/fn_empty", source: "fn main() {}"},
 		{name: "seed/two_fns", source: "fn one() {} fn two() {}"},
 		{name: "seed/fn_params_return", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
+		{name: "seed/fn_error_union_return", source: "fn main() -> !void {}"},
+		{name: "seed/fn_slice_param", source: "fn write(bytes: []const u8) {}"},
+		{name: "seed/fn_borrow_param", source: "fn read(value: &i64) {}"},
+		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &mut i64) {}"},
+		{name: "seed/fn_namespace_type", source: "fn use(allocator: std::mem::Allocator) {}"},
+		{
+			name:   "seed/fn_generic_type",
+			source: "fn collect(items: std::array::Array<[]const u8>) {}",
+		},
 		{name: "seed/fn_return_int", source: "fn main() { return 1; }"},
 		{name: "seed/fn_expr_stmt_string", source: `fn main() { print("hello"); }`},
 		{name: "seed/fn_expr_stmt_precedence", source: "fn main() { print(1 + 2 * 3); }"},
@@ -362,10 +371,6 @@ func unsupportedStdParserSource(source string) string {
 		}
 		if r == '"' {
 			inString = true
-			continue
-		}
-		if r == '-' && index+1 < len(source) && source[index+1] == '>' {
-			index++
 			continue
 		}
 		if isStdParserSpace(r) || isStdParserPunctuation(r) {
@@ -446,13 +451,13 @@ func summarizeParamsSubset(params []kizuast.Param) ([]string, string) {
 
 // summarizeParamSubset summarizes one simple `name: Type` parameter.
 func summarizeParamSubset(param kizuast.Param) ([]string, string) {
-	if param.Borrow || param.MutBorrow || param.Comptime {
+	if param.Comptime {
 		return nil, "function has unsupported parameters"
 	}
 	if !isStdParserIdent(param.Name) {
 		return nil, "identifier outside std parser subset"
 	}
-	typeName, reason := summarizeTypeNameSubset(param.TypeName)
+	typeName, reason := summarizeTypeNameSubset(parserParityParamTypeName(param))
 	if reason != "" {
 		return nil, reason
 	}
@@ -470,10 +475,22 @@ func summarizeReturnTypeSubset(typeName string) ([]string, string) {
 
 // summarizeTypeNameSubset summarizes a plain identifier type name.
 func summarizeTypeNameSubset(typeName string) ([]string, string) {
-	if !isStdParserIdent(typeName) {
+	if typeName == "" || strings.Contains(typeName, "\n") {
 		return nil, "type outside std parser subset"
 	}
 	return []string{"TypeName", typeName}, ""
+}
+
+// parserParityParamTypeName returns the Go parser spelling used for param types.
+func parserParityParamTypeName(param kizuast.Param) string {
+	switch {
+	case param.MutBorrow:
+		return "&mut " + param.TypeName
+	case param.Borrow:
+		return "&" + param.TypeName
+	default:
+		return param.TypeName
+	}
 }
 
 // summarizeBlockSubset summarizes a block containing only return statements.
@@ -597,7 +614,7 @@ func isStdParserSpace(r rune) bool {
 
 // isStdParserPunctuation reports punctuation understood by std::kizu::lexer.
 func isStdParserPunctuation(r rune) bool {
-	return strings.ContainsRune("{}();,:+*", r)
+	return strings.ContainsRune("{}();,:!&[]<>?+*-", r)
 }
 
 // isStdParserWordRune reports identifier and number bytes understood by the std lexer.
