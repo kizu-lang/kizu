@@ -1148,31 +1148,33 @@ func lexerIllegalTokenCounterSource() string {
 // lexerKeywordCounterSource returns the shared keyword-count scanner.
 func lexerKeywordCounterSource() string {
 	return `fn count_keyword(input: []const u8, want: i64) -> i64 {
-    let length = std::builtin::mem_len(input);
-    var index = 0;
     var count = 0;
-    while index < length {
-        while index < length and is_space(input[index]) {
-            index = index + 1;
+    var lex = New(input);
+    var scan = scan_token(lex.input, lex.position, lex.line, lex.column);
+    while scan.token.Type != token::Type::EOF {
+        if token_is_keyword(scan.token.Type, want) {
+            count = count + 1;
         }
-        if index >= length {
-            return count;
-        }
-        if is_letter(input[index]) {
-            let end = ident_end(input, index, length);
-            if keyword_code(input, index, end, want) {
-                count = count + 1;
-            }
-            index = end;
-        } else {
-            if is_digit(input[index]) {
-                index = digit_end(input, index, length);
-            } else {
-                index = punctuation_end(input, index, length);
-            }
-        }
+        lex = Advance(lex);
+        scan = scan_token(lex.input, lex.position, lex.line, lex.column);
     }
     return count;
+}
+
+fn token_is_keyword(kind: token::Type, want: i64) -> bool {
+    if want == 1 and kind == token::Type::Function {
+        return true;
+    }
+    if want == 2 and kind == token::Type::Import {
+        return true;
+    }
+    if want == 3 and kind == token::Type::Struct {
+        return true;
+    }
+    if want == 4 and kind == token::Type::Enum {
+        return true;
+    }
+    return false;
 }
 
 `
@@ -2171,6 +2173,7 @@ func writeStage2SourceReadLoop(out *strings.Builder, idx int) {
 	fmt.Fprintf(out, "br i1 %%eof%d, label %%read%d.done, label %%read%d.byte ", idx, idx, idx)
 	fmt.Fprintf(out, "read%d.byte: %%next%d = add i32 %%count%d, 1 ", idx, idx, idx)
 	writeStage2FirstTokenCode(out, idx)
+	writeStage2StringState(out, idx)
 	writeStage2WordCounters(out, idx)
 	writeStage2BraceCounters(out, idx)
 	writeStage2PrevUpdates(out, idx)
@@ -2192,6 +2195,8 @@ func writeStage2ReadPhis(out *strings.Builder, idx int, prev string) {
 			name, idx, prev, name, idx, idx)
 	}
 	fmt.Fprintf(out, "%%seen%d = phi i1 [0, %%%s], [%%seennext%d, %%read%d.byte] ",
+		idx, prev, idx, idx)
+	fmt.Fprintf(out, "%%string%d = phi i1 [0, %%%s], [%%stringnext%d, %%read%d.byte] ",
 		idx, prev, idx, idx)
 }
 
@@ -2238,6 +2243,14 @@ func writeStage2FirstTokenSelect(out *strings.Builder, idx int) {
 		idx, idx, idx, idx)
 }
 
+// writeStage2StringState tracks whether the source scan is inside a string.
+func writeStage2StringState(out *strings.Builder, idx int) {
+	fmt.Fprintf(out, "%%quote%d = icmp eq i32 %%ch%d, 34 ", idx, idx)
+	fmt.Fprintf(out, "%%notstring%d = xor i1 %%string%d, true ", idx, idx)
+	fmt.Fprintf(out, "%%stringnext%d = select i1 %%quote%d, i1 %%notstring%d, i1 %%string%d ",
+		idx, idx, idx, idx)
+}
+
 // writeStage2WordCounters emits declaration keyword counters.
 func writeStage2WordCounters(out *strings.Builder, idx int) {
 	writeStage2FnCounter(out, idx)
@@ -2280,7 +2293,10 @@ func writeStage2CharMatch(out *strings.Builder, idx int, name string, chars []in
 			name, idx, pos, prev, name, idx, pos)
 		prev = fmt.Sprintf("%%%s%d_m%d", name, idx, pos)
 	}
-	fmt.Fprintf(out, "%%%s%d_match = and i1 %s, %%%s%d_start ", name, idx, prev, name, idx)
+	fmt.Fprintf(out, "%%%s%d_token = and i1 %s, %%%s%d_start ", name, idx, prev, name, idx)
+	fmt.Fprintf(out, "%%%s%d_notstring = xor i1 %%string%d, true ", name, idx, idx)
+	fmt.Fprintf(out, "%%%s%d_match = and i1 %%%s%d_token, %%%s%d_notstring ",
+		name, idx, name, idx, name, idx)
 	fmt.Fprintf(out, "%%%smatch%d = zext i1 %%%s%d_match to i32 ", name, idx, name, idx)
 	fmt.Fprintf(out, "%%%snext%d = add i32 %%%s%d, %%%smatch%d ", name, idx, name, idx, name, idx)
 }

@@ -289,6 +289,10 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 			typ: "[]const u8", operand: name, length: len(unquoted),
 		}
 	default:
+		if _, ok := e.module.Enums[instr.Result.Type]; ok {
+			e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
+			return nil
+		}
 		e.values[instr.Result.Name] = zeroValue(instr.Result.Type)
 	}
 	return nil
@@ -776,6 +780,9 @@ func (e *emitter) value(value ir.Value) valueInfo {
 func (e *emitter) llvmType(typ string) string {
 	if strings.HasPrefix(typ, "std::") {
 		return llvmType(typ)
+	}
+	if _, ok := e.module.Enums[typ]; ok {
+		return "i64"
 	}
 	st, ok := e.module.Structs[typ]
 	if !ok {

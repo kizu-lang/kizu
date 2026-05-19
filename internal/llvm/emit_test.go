@@ -130,6 +130,32 @@ fn main() {
 	}
 }
 
+// TestEmitEnumTagsAsScalars checks tag enums lower to comparable native values.
+func TestEmitEnumTagsAsScalars(t *testing.T) {
+	module := lowerSource(t, `enum Color { Red Green }
+fn is_red(color: Color) -> bool {
+    return color == Color::Red;
+}
+fn main() {
+    print(is_red(Color::Red));
+    print(is_red(Color::Green));
+}`)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"define i1 @is_red(i64 %color)",
+		"%kizu.2 = icmp eq i64 %color, 0",
+		"call i1 @is_red(i64 0)",
+		"call i1 @is_red(i64 1)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nmissing: %s", got, want)
+		}
+	}
+}
+
 // lowerSource parses, checks, and lowers a source snippet.
 func lowerSource(t *testing.T, source string) *ir.Module {
 	t.Helper()

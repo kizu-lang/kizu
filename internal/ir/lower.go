@@ -18,7 +18,7 @@ type lowerer struct {
 	program    *ast.Program
 	module     *Module
 	signatures map[string]Signature
-	enums      map[string]map[string]bool
+	enums      map[string]map[string]int
 	current    *Function
 	block      *Block
 	env        map[string]Value
@@ -37,9 +37,9 @@ type loopContext struct {
 func newLowerer(program *ast.Program) *lowerer {
 	return &lowerer{
 		program:    program,
-		module:     &Module{Structs: map[string]Struct{}},
+		module:     &Module{Structs: map[string]Struct{}, Enums: map[string]Enum{}},
 		signatures: map[string]Signature{},
-		enums:      map[string]map[string]bool{},
+		enums:      map[string]map[string]int{},
 	}
 }
 
@@ -70,6 +70,7 @@ func (l *lowerer) collectDecls() {
 		case *ast.StructDecl:
 			l.module.Structs[d.Name] = lowerStruct(d)
 		case *ast.EnumDecl:
+			l.module.Enums[d.Name] = lowerEnum(d)
 			l.enums[d.Name] = enumTags(d)
 		case *ast.FunctionDecl:
 			l.signatures[d.Name] = lowerSignature(d)
@@ -77,13 +78,18 @@ func (l *lowerer) collectDecls() {
 	}
 }
 
-// enumTags converts one enum declaration to a membership set.
-func enumTags(decl *ast.EnumDecl) map[string]bool {
-	tags := map[string]bool{}
-	for _, tag := range decl.Tags {
-		tags[tag] = true
+// enumTags converts one enum declaration to tag ordinals.
+func enumTags(decl *ast.EnumDecl) map[string]int {
+	tags := map[string]int{}
+	for idx, tag := range decl.Tags {
+		tags[tag] = idx
 	}
 	return tags
+}
+
+// lowerEnum converts an AST enum declaration to IR metadata.
+func lowerEnum(decl *ast.EnumDecl) Enum {
+	return Enum{Name: decl.Name, Tags: append([]string(nil), decl.Tags...)}
 }
 
 // lowerStruct converts an AST struct declaration to IR metadata.
@@ -522,10 +528,14 @@ func (l *lowerer) lowerEnumLiteral(expr *ast.FieldExpr) (Value, bool) {
 		return Value{}, false
 	}
 	tags, ok := l.enums[ident.Name]
-	if !ok || !tags[expr.Name] {
+	if !ok {
 		return Value{}, false
 	}
-	return l.emitConst(ident.Name, expr.Name), true
+	ordinal, ok := tags[expr.Name]
+	if !ok {
+		return Value{}, false
+	}
+	return l.emitConst(ident.Name, fmt.Sprint(ordinal)), true
 }
 
 // qualifiedName renders a namespace chain as an internal function key.

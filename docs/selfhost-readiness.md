@@ -110,18 +110,18 @@ blocker:
 
 最終更新: `feat/selfhost-bootstrap-chain` で selfhost manifest を stage input graph に含め、
 parser/checker/lower summary と parse / token / illegal-token component metrics を Kizu struct
-で渡し、selfhost lexer に cursor-carrying `TokenScan` を追加した working tree 時点。
+で渡し、selfhost lexer に cursor-carrying `TokenScan` を追加し、tag enum を native scalar
+として emit できるようにした working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
 pipeline ではなく、Go が生成した source-scanning LLVM template に依存している。
-parser metric は parser-local な部分文字列 scan ではなく、token / illegal-token count で
-selfhost lexer の `TokenScan` cursor を使う。declaration keyword count は fixed-point
-template と揃えるため、まだ lexer-local の identifier byte matcher に残している。checker は
-source summary の brace balance と illegal-token count を受け取り、illegal token がある
-stage input を invalid として扱う。stage1 と stage2 以降の metric は `selfhost/kizu.toml` と
+parser metric は parser-local な部分文字列 scan ではなく、declaration keyword、token、
+illegal-token count で selfhost lexer の `TokenScan` cursor を使う。checker は source
+summary の brace balance と illegal-token count を受け取り、illegal token がある stage
+input を invalid として扱う。stage1 と stage2 以降の metric は `selfhost/kizu.toml` と
 `selfhost/src/*.kizu` の両方を stage input として読む。Go LLVM backend は selfhost summary
-struct の cross-function return / call / field read を first-class aggregate として emit
+struct の cross-function return / call / field read と tag enum scalar compare を emit
 できる。
 
 実行した command:
@@ -167,18 +167,18 @@ artifact comparison:
 stage2_vs_stage3_bytes=0
 stage3_vs_stage4_bytes=0
 
-1099696 target/selfhost/stage2.ll
-1099696 target/selfhost/stage3.ll
-1099696 target/selfhost/stage4.ll
-3299088 total
+1148263 target/selfhost/stage2.ll
+1148263 target/selfhost/stage3.ll
+1148263 target/selfhost/stage4.ll
+3444789 total
 ```
 
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 1205
-; kizu stage source bytes 1141523
-; kizu stage source fn count 76
+; kizu stage source metric 1191
+; kizu stage source bytes 1190143
+; kizu stage source fn count 75
 ```
 
 remaining Go / template dependency:
@@ -192,9 +192,8 @@ remaining Go / template dependency:
   `checker::CheckedModule`, and `lower::Module` summaries. Parser summaries carry first-token,
   declaration, token, illegal-token, byte, function/import/struct/enum, brace, and balance
   metrics, but still not AST, typed IR, or lowered LLVM instructions.
-- `selfhost/src/lexer.kizu` now has `TokenScan`, `Scan`, and `Advance` cursor helpers. Token and
-  illegal-token metrics use the cursor scanner, but declaration keyword metrics still use a
-  byte-level identifier matcher until token-kind keyword counting is stable in native output.
+- `selfhost/src/lexer.kizu` now has `TokenScan`, `Scan`, and `Advance` cursor helpers. Token,
+  declaration keyword, and illegal-token metrics use the cursor scanner.
 - Go native backend and hosted runtime still build `target/selfhost/kizu-stage1`.
 - The generated Kizu parser/checker/lower are partial surfaces, not production replacements for
   `internal/parser`, `internal/types`, or backend lowering.

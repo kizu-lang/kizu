@@ -5,6 +5,7 @@ import "fmt"
 // Module is a lowered Kizu source file.
 type Module struct {
 	Structs   map[string]Struct
+	Enums     map[string]Enum
 	Functions []*Function
 }
 
@@ -18,6 +19,12 @@ type Struct struct {
 type Field struct {
 	Name string
 	Type string
+}
+
+// Enum is the IR view of a declared tag enum.
+type Enum struct {
+	Name string
+	Tags []string
 }
 
 // Function is a typed SSA function.
