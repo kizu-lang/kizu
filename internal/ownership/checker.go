@@ -2943,6 +2943,11 @@ func (c *Checker) checkAstAddExprMethod(
 			"std::kizu::ast::NodeId", "bool",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
+	case "add_deref_expr":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_call":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
@@ -4374,7 +4379,7 @@ func (c *Checker) astChildRangeReceiver(expr ast.Expression, env *scope) *bindin
 func astNodeIDMethod(name string) bool {
 	switch name {
 	case "add_node", "add_int", "add_string", "add_type_name", "add_var", "add_bool",
-		"add_prefix", "add_binary", "add_field_expr", "add_call", "add_try_expr",
+		"add_prefix", "add_binary", "add_field_expr", "add_deref_expr", "add_call", "add_try_expr",
 		"add_comptime_expr", "add_block", "add_if", "add_let", "add_assign",
 		"add_return", "add_expr_stmt", "add_while", "add_for", "add_break",
 		"add_continue", "add_program", "add_param", "add_import_decl", "add_field",
@@ -4744,6 +4749,7 @@ func isAstScalarType(typeName string) bool {
 		"PrefixNode", "std::kizu::ast::PrefixNode",
 		"BinaryNode", "std::kizu::ast::BinaryNode",
 		"FieldExprNode", "std::kizu::ast::FieldExprNode",
+		"DerefExprNode", "std::kizu::ast::DerefExprNode",
 		"CallNode", "std::kizu::ast::CallNode",
 		"TypeApplyExprNode", "std::kizu::ast::TypeApplyExprNode",
 		"CastExprNode", "std::kizu::ast::CastExprNode",
