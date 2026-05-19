@@ -239,6 +239,49 @@ fn main() {}`
 	}
 }
 
+// TestCheckAcceptsLifetimeViewDeclarations checks explicit lifetime view syntax.
+func TestCheckAcceptsLifetimeViewDeclarations(t *testing.T) {
+	source := `struct Row<'a, T> {
+    data: []'a const T
+}
+union TokenText<'source> {
+    Identifier(&'source []'source const u8)
+}
+fn first<'a>(bytes: []'a const u8) -> []'a const u8 {
+    return bytes;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsLifetimeDeclarationErrors keeps lifetime signatures explicit.
+func TestCheckRejectsLifetimeDeclarationErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "borrow return needs explicit lifetime",
+			source: `fn bad(bytes: []const u8) -> &u8 { return bytes[0]; }`,
+			want:   "borrow return requires explicit lifetime",
+		},
+		{
+			name:   "borrow field needs lifetime parameter",
+			source: `struct View { bytes: &[]const u8 } fn main() {}`,
+			want:   "borrow field `View.bytes` requires struct lifetime parameter",
+		},
+		{
+			name:   "unused lifetime",
+			source: `fn unused<'a>() -> void { return; }`,
+			want:   "lifetime 'a on `unused` is unused",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckAcceptsPublicAPIWithPublicTypes checks public boundary declarations.
 func TestCheckAcceptsPublicAPIWithPublicTypes(t *testing.T) {
 	source := `pub enum TokenKind {

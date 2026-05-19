@@ -109,18 +109,19 @@ var integerTypes = map[Type]bool{
 
 // Checker validates type rules for a parsed program.
 type Checker struct {
-	functions     map[string]*functionType
-	structs       map[string]*ast.StructDecl
-	enums         map[string]*enumType
-	unions        map[string]*unionType
-	contracts     map[string]*contractType
-	impls         map[string]map[string]*functionType
-	satisfactions map[string]map[string]bool
-	declaredTypes map[string]bool
-	currentReturn Type
-	currentStd    bool
-	typeParams    map[string]bool
-	loopLabels    []string
+	functions      map[string]*functionType
+	structs        map[string]*ast.StructDecl
+	enums          map[string]*enumType
+	unions         map[string]*unionType
+	contracts      map[string]*contractType
+	impls          map[string]map[string]*functionType
+	satisfactions  map[string]map[string]bool
+	declaredTypes  map[string]bool
+	currentReturn  Type
+	currentStd     bool
+	typeParams     map[string]bool
+	lifetimeParams map[string]bool
+	loopLabels     []string
 }
 
 type enumType struct {
@@ -130,9 +131,11 @@ type enumType struct {
 }
 
 type unionType struct {
-	name     string
-	variants map[string]string
-	public   bool
+	name           string
+	lifetimeParams []string
+	typeParams     []string
+	variants       map[string]string
+	public         bool
 }
 
 type functionType struct {
@@ -142,6 +145,7 @@ type functionType struct {
 	mutBorrowParams []bool
 	comptimeParams  []bool
 	typeParams      []string
+	lifetimeParams  []string
 	returnType      Type
 	decl            *ast.FunctionDecl
 	unsafe          bool
@@ -498,7 +502,18 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	if _, exists := c.enums[decl.Name]; exists {
 		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
-	union := &unionType{name: decl.Name, variants: map[string]string{}, public: decl.Public}
+	previousTypeParams := c.typeParams
+	previousLifetimeParams := c.lifetimeParams
+	c.typeParams = typeParamSet(decl.TypeParams)
+	c.lifetimeParams = lifetimeParamSet(decl.LifetimeParams)
+	defer func() {
+		c.typeParams = previousTypeParams
+		c.lifetimeParams = previousLifetimeParams
+	}()
+	union := &unionType{
+		name: decl.Name, lifetimeParams: decl.LifetimeParams, typeParams: decl.TypeParams,
+		variants: map[string]string{}, public: decl.Public,
+	}
 	for _, variant := range decl.Variants {
 		if _, exists := union.variants[variant.Name]; exists {
 			return fmt.Errorf("type error: duplicate union variant `%s::%s`",
@@ -508,8 +523,19 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 			if _, err := c.parseType(variant.Payload); err != nil {
 				return err
 			}
+			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, variant.Payload,
+				decl.LifetimeParams); err != nil {
+				return err
+			}
 		}
 		union.variants[variant.Name] = variant.Payload
+	}
+	if err := checkUnusedLifetimes(
+		decl.Name,
+		decl.LifetimeParams,
+		unionVariantTypes(decl),
+	); err != nil {
+		return err
 	}
 	c.unions[decl.Name] = union
 	return nil
@@ -527,9 +553,20 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	c.structs[decl.Name] = decl
+	previousTypeParams := c.typeParams
+	previousLifetimeParams := c.lifetimeParams
+	c.typeParams = typeParamSet(decl.TypeParams)
+	c.lifetimeParams = lifetimeParamSet(decl.LifetimeParams)
+	defer func() {
+		c.typeParams = previousTypeParams
+		c.lifetimeParams = previousLifetimeParams
+	}()
 	for _, field := range decl.Fields {
 		typ, err := c.parseType(field.TypeName)
 		if err != nil {
+			return err
+		}
+		if err := checkStructFieldBorrowPolicy(decl, field); err != nil {
 			return err
 		}
 		if typ == typeFunction {
@@ -537,7 +574,22 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 				decl.Name, field.Name)
 		}
 	}
+	if err := checkUnusedLifetimes(
+		decl.Name,
+		decl.LifetimeParams,
+		structFieldTypes(decl),
+	); err != nil {
+		return err
+	}
 	return nil
+}
+
+// functionParamInfo keeps parsed parameter types aligned with function metadata.
+type functionParamInfo struct {
+	params          []Type
+	borrowParams    []bool
+	mutBorrowParams []bool
+	comptimeParams  []bool
 }
 
 // newFunctionType converts a parsed function declaration into its static type.
@@ -546,31 +598,17 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		return nil, fmt.Errorf("type error: generic function `%s` is reserved for std", fn.Name)
 	}
 	previousTypeParams := c.typeParams
+	previousLifetimeParams := c.lifetimeParams
 	c.typeParams = typeParamSet(fn.TypeParams)
-	defer func() { c.typeParams = previousTypeParams }()
+	c.lifetimeParams = lifetimeParamSet(fn.LifetimeParams)
+	defer func() {
+		c.typeParams = previousTypeParams
+		c.lifetimeParams = previousLifetimeParams
+	}()
 
-	params := make([]Type, 0, len(fn.Params))
-	borrowParams := make([]bool, 0, len(fn.Params))
-	mutBorrowParams := make([]bool, 0, len(fn.Params))
-	comptimeParams := make([]bool, 0, len(fn.Params))
-	for _, param := range fn.Params {
-		paramType, err := c.parseType(param.TypeName)
-		if err != nil {
-			return nil, err
-		}
-		if paramType == typeVoid {
-			return nil, fmt.Errorf("type error: parameter `%s` cannot have type void", param.Name)
-		}
-		if err := checkFunctionParamPolicy(fn, param, paramType); err != nil {
-			return nil, err
-		}
-		if _, ok := dynContract(paramType); ok && !param.Borrow {
-			return nil, fmt.Errorf("type error: Dyn parameter `%s` must be borrowed", param.Name)
-		}
-		params = append(params, paramType)
-		borrowParams = append(borrowParams, param.Borrow)
-		mutBorrowParams = append(mutBorrowParams, param.MutBorrow)
-		comptimeParams = append(comptimeParams, param.Comptime)
+	paramInfo, err := c.collectFunctionParams(fn)
+	if err != nil {
+		return nil, err
 	}
 	ret := typeVoid
 	if fn.ReturnType != "" {
@@ -583,12 +621,67 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	if ret == typeFunction {
 		return nil, fmt.Errorf("type error: function `%s` cannot return Function", fn.Name)
 	}
+	if err := checkReturnLifetimePolicy(fn); err != nil {
+		return nil, err
+	}
+	if err := checkUnusedLifetimes(
+		fn.Name,
+		fn.LifetimeParams,
+		functionSignatureTypes(fn),
+	); err != nil {
+		return nil, err
+	}
 	return &functionType{
-		name: fn.Name, params: params, borrowParams: borrowParams,
-		mutBorrowParams: mutBorrowParams, comptimeParams: comptimeParams,
-		typeParams: fn.TypeParams,
+		name: fn.Name, params: paramInfo.params, borrowParams: paramInfo.borrowParams,
+		mutBorrowParams: paramInfo.mutBorrowParams, comptimeParams: paramInfo.comptimeParams,
+		typeParams: fn.TypeParams, lifetimeParams: fn.LifetimeParams,
 		returnType: ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
+}
+
+// collectFunctionParams validates function parameters and records call-time metadata.
+func (c *Checker) collectFunctionParams(fn *ast.FunctionDecl) (functionParamInfo, error) {
+	info := functionParamInfo{
+		params:          make([]Type, 0, len(fn.Params)),
+		borrowParams:    make([]bool, 0, len(fn.Params)),
+		mutBorrowParams: make([]bool, 0, len(fn.Params)),
+		comptimeParams:  make([]bool, 0, len(fn.Params)),
+	}
+	for _, param := range fn.Params {
+		paramType, err := c.parseType(param.TypeName)
+		if err != nil {
+			return functionParamInfo{}, err
+		}
+		if err := c.checkFunctionParam(fn, param, paramType); err != nil {
+			return functionParamInfo{}, err
+		}
+		info.params = append(info.params, paramType)
+		info.borrowParams = append(info.borrowParams, param.Borrow)
+		info.mutBorrowParams = append(info.mutBorrowParams, param.MutBorrow)
+		info.comptimeParams = append(info.comptimeParams, param.Comptime)
+	}
+	return info, nil
+}
+
+// checkFunctionParam validates one function parameter type and lifetime boundary.
+func (c *Checker) checkFunctionParam(
+	fn *ast.FunctionDecl,
+	param ast.Param,
+	paramType Type,
+) error {
+	if paramType == typeVoid {
+		return fmt.Errorf("type error: parameter `%s` cannot have type void", param.Name)
+	}
+	if err := checkFunctionParamPolicy(fn, param, paramType); err != nil {
+		return err
+	}
+	if param.BorrowLifetime != "" && !c.isKnownLifetime(param.BorrowLifetime) {
+		return fmt.Errorf("type error: unknown lifetime %s", param.BorrowLifetime)
+	}
+	if _, ok := dynContract(paramType); ok && !param.Borrow {
+		return fmt.Errorf("type error: Dyn parameter `%s` must be borrowed", param.Name)
+	}
+	return nil
 }
 
 // checkFunctionParamPolicy keeps Function as a std-only compile-time token.
@@ -608,6 +701,137 @@ func checkFunctionParamPolicy(fn *ast.FunctionDecl, param ast.Param, typ Type) e
 	return nil
 }
 
+// checkReturnLifetimePolicy requires explicit lifetimes on borrowed return types.
+func checkReturnLifetimePolicy(fn *ast.FunctionDecl) error {
+	if fn.ReturnType == "" {
+		return nil
+	}
+	if strings.HasPrefix(fn.ReturnType, "&") && !strings.HasPrefix(fn.ReturnType, "&'") {
+		return fmt.Errorf("type error: function `%s` borrow return requires explicit lifetime",
+			fn.Name)
+	}
+	return nil
+}
+
+// checkStructFieldBorrowPolicy validates borrow fields on lifetime-bearing structs.
+func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
+	if !field.Borrow {
+		return nil
+	}
+	if len(decl.LifetimeParams) == 0 {
+		return fmt.Errorf("type error: borrow field `%s.%s` requires struct lifetime parameter",
+			decl.Name, field.Name)
+	}
+	if field.BorrowLifetime == "" {
+		return fmt.Errorf("type error: borrow field `%s.%s` requires explicit lifetime",
+			decl.Name, field.Name)
+	}
+	if !containsString(decl.LifetimeParams, field.BorrowLifetime) &&
+		field.BorrowLifetime != "'static" {
+		return fmt.Errorf("type error: unknown lifetime %s", field.BorrowLifetime)
+	}
+	return nil
+}
+
+// checkBorrowFieldPolicy validates borrowed payloads in lifetime-bearing unions.
+func checkBorrowFieldPolicy(
+	typeName string,
+	fieldName string,
+	payload string,
+	lifetimes []string,
+) error {
+	if !strings.HasPrefix(payload, "&") {
+		return nil
+	}
+	if len(lifetimes) == 0 {
+		return fmt.Errorf("type error: borrow payload `%s.%s` requires union lifetime parameter",
+			typeName, fieldName)
+	}
+	if !strings.HasPrefix(payload, "&'") {
+		return fmt.Errorf("type error: borrow payload `%s.%s` requires explicit lifetime",
+			typeName, fieldName)
+	}
+	return nil
+}
+
+// checkUnusedLifetimes rejects lifetime parameters that do not appear in a signature.
+func checkUnusedLifetimes(name string, lifetimes []string, types []string) error {
+	for _, lifetime := range lifetimes {
+		used := false
+		for _, typ := range types {
+			if strings.Contains(typ, lifetime) {
+				used = true
+				break
+			}
+		}
+		if !used {
+			return fmt.Errorf("type error: lifetime %s on `%s` is unused", lifetime, name)
+		}
+	}
+	return nil
+}
+
+// functionSignatureTypes returns all type spellings in a function signature.
+func functionSignatureTypes(fn *ast.FunctionDecl) []string {
+	types := make([]string, 0, len(fn.Params)+1)
+	for _, param := range fn.Params {
+		types = append(types, borrowWrappedType(param.Borrow, param.BorrowLifetime,
+			param.MutBorrow, param.TypeName))
+	}
+	if fn.ReturnType != "" {
+		types = append(types, fn.ReturnType)
+	}
+	return types
+}
+
+// structFieldTypes returns all type spellings in a struct declaration.
+func structFieldTypes(decl *ast.StructDecl) []string {
+	types := make([]string, 0, len(decl.Fields))
+	for _, field := range decl.Fields {
+		types = append(types, borrowWrappedType(field.Borrow, field.BorrowLifetime,
+			field.MutBorrow, field.TypeName))
+	}
+	return types
+}
+
+// unionVariantTypes returns all payload type spellings in a union declaration.
+func unionVariantTypes(decl *ast.UnionDecl) []string {
+	types := make([]string, 0, len(decl.Variants))
+	for _, variant := range decl.Variants {
+		if variant.Payload != "" {
+			types = append(types, variant.Payload)
+		}
+	}
+	return types
+}
+
+// borrowWrappedType returns the full spelling for a borrow-bearing field or parameter.
+func borrowWrappedType(borrow bool, lifetime string, mutable bool, typ string) string {
+	if !borrow {
+		return typ
+	}
+	if lifetime == "" {
+		if mutable {
+			return "&mut " + typ
+		}
+		return "&" + typ
+	}
+	if mutable {
+		return "&" + lifetime + " mut " + typ
+	}
+	return "&" + lifetime + " " + typ
+}
+
+// containsString reports whether values contains target.
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 // typeParamSet returns a lookup for function-level type parameters.
 func typeParamSet(params []string) map[string]bool {
 	if len(params) == 0 {
@@ -618,6 +842,105 @@ func typeParamSet(params []string) map[string]bool {
 		out[param] = true
 	}
 	return out
+}
+
+// lifetimeParamSet returns a lookup for function or type-level lifetime parameters.
+func lifetimeParamSet(params []string) map[string]bool {
+	out := map[string]bool{"'static": true}
+	for _, param := range params {
+		out[param] = true
+	}
+	return out
+}
+
+// isKnownLifetime reports whether name is in scope as a lifetime parameter.
+func (c *Checker) isKnownLifetime(name string) bool {
+	return name == "'static" || c.lifetimeParams[name]
+}
+
+// isLifetimeName reports whether name is an apostrophe-prefixed lifetime.
+func isLifetimeName(name string) bool {
+	if len(name) < 2 || name[0] != '\'' {
+		return false
+	}
+	if name == "'_" {
+		return false
+	}
+	for idx, ch := range name[1:] {
+		if !(ch == '_' || 'a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z' ||
+			idx > 0 && '0' <= ch && ch <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// splitLifetimePrefix extracts the leading lifetime from a borrow or slice spelling.
+func splitLifetimePrefix(text string) (string, string, bool) {
+	if !strings.HasPrefix(text, "'") {
+		return "", text, false
+	}
+	end := strings.IndexByte(text, ' ')
+	if end < 0 {
+		return "", "", false
+	}
+	lifetime := text[:end]
+	if !isLifetimeName(lifetime) {
+		return "", "", false
+	}
+	return lifetime, strings.TrimSpace(text[end+1:]), true
+}
+
+// sameType reports type equality after erasing lifetime annotations.
+func sameType(left Type, right Type) bool {
+	if left == right {
+		return true
+	}
+	return eraseLifetimes(string(left)) == eraseLifetimes(string(right))
+}
+
+// eraseLifetimes removes explicit lifetime annotations from type spellings.
+func eraseLifetimes(name string) string {
+	var out strings.Builder
+	for idx := 0; idx < len(name); {
+		if strings.HasPrefix(name[idx:], "&'") {
+			out.WriteByte('&')
+			idx = skipLifetimeName(name, idx+1)
+			idx = skipOneSpace(name, idx)
+			continue
+		}
+		if strings.HasPrefix(name[idx:], "[]'") {
+			out.WriteString("[]")
+			idx = skipLifetimeName(name, idx+2)
+			idx = skipOneSpace(name, idx)
+			continue
+		}
+		out.WriteByte(name[idx])
+		idx++
+	}
+	return out.String()
+}
+
+// skipLifetimeName skips a lifetime name starting at an apostrophe.
+func skipLifetimeName(name string, start int) int {
+	idx := start + 1
+	for idx < len(name) {
+		ch := name[idx]
+		if ch != '_' && (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
+			(ch < '0' || ch > '9') {
+			break
+		}
+		idx++
+	}
+	return idx
+}
+
+// skipOneSpace skips a single separator after a lifetime name.
+func skipOneSpace(name string, idx int) int {
+	if idx < len(name) && name[idx] == ' ' {
+		return idx + 1
+	}
+	return idx
 }
 
 // substituteTypeParams instantiates the simple generic wrapper type spellings.
@@ -688,6 +1011,16 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 // parseBorrowType validates local borrow type spellings used by std wrappers.
 func (c *Checker) parseBorrowType(name string) (Type, error) {
 	inner := strings.TrimPrefix(name, "&")
+	if strings.HasPrefix(inner, "'") {
+		lifetime, rest, ok := splitLifetimePrefix(inner)
+		if !ok {
+			return "", fmt.Errorf("type error: invalid borrow lifetime in `%s`", name)
+		}
+		if !c.isKnownLifetime(lifetime) {
+			return "", fmt.Errorf("type error: unknown lifetime %s", lifetime)
+		}
+		inner = rest
+	}
 	inner = strings.TrimPrefix(inner, "mut ")
 	if inner == "" {
 		return "", fmt.Errorf("type error: & must wrap a type")
@@ -698,10 +1031,29 @@ func (c *Checker) parseBorrowType(name string) (Type, error) {
 	return Type(name), nil
 }
 
-// parseSliceType validates v0.1 byte slice spellings.
+// parseSliceType validates lifetime-qualified and elided slice spellings.
 func (c *Checker) parseSliceType(name string) (Type, error) {
-	if name != string(typeByteString) {
-		return "", fmt.Errorf("type error: unknown slice type `%s`", name)
+	rest := strings.TrimPrefix(name, "[]")
+	if strings.HasPrefix(rest, "'") {
+		lifetime, tail, ok := splitLifetimePrefix(rest)
+		if !ok {
+			return "", fmt.Errorf("type error: invalid slice lifetime in `%s`", name)
+		}
+		if !c.isKnownLifetime(lifetime) {
+			return "", fmt.Errorf("type error: unknown lifetime %s", lifetime)
+		}
+		rest = tail
+	}
+	if strings.HasPrefix(rest, "const ") {
+		rest = strings.TrimPrefix(rest, "const ")
+	} else if strings.HasPrefix(rest, "mut ") {
+		rest = strings.TrimPrefix(rest, "mut ")
+	}
+	if rest == "" {
+		return "", fmt.Errorf("type error: [] must wrap a type")
+	}
+	if _, err := c.parseType(rest); err != nil {
+		return "", err
 	}
 	return Type(name), nil
 }
@@ -746,6 +1098,14 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 		return c.parseDynType(name, base, args)
 	}
 
+	if c.structs[base] != nil {
+		return c.parseUserGenericType(name, base, args, c.structs[base].LifetimeParams,
+			c.structs[base].TypeParams)
+	}
+	if union := c.unions[base]; union != nil {
+		return c.parseUserGenericType(name, base, args, union.lifetimeParams, union.typeParams)
+	}
+
 	if !isKnownSingleArgGeneric(base) {
 		return "", fmt.Errorf("type error: unknown generic type `%s`", base)
 	}
@@ -755,6 +1115,35 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 	}
 	if _, err := c.parseType(arg); err != nil {
 		return "", err
+	}
+	return Type(name), nil
+}
+
+// parseUserGenericType validates lifetime and type arguments for user declarations.
+func (c *Checker) parseUserGenericType(
+	name string,
+	base string,
+	args []string,
+	lifetimes []string,
+	types []string,
+) (Type, error) {
+	want := len(lifetimes) + len(types)
+	if len(args) != want {
+		return "", fmt.Errorf("type error: `%s` expects %d generic arguments", base, want)
+	}
+	for idx := range lifetimes {
+		if !isLifetimeName(args[idx]) {
+			return "", fmt.Errorf("type error: `%s` argument %d must be a lifetime",
+				base, idx+1)
+		}
+		if !c.isKnownLifetime(args[idx]) {
+			return "", fmt.Errorf("type error: unknown lifetime %s", args[idx])
+		}
+	}
+	for _, arg := range args[len(lifetimes):] {
+		if _, err := c.parseType(arg); err != nil {
+			return "", err
+		}
 	}
 	return Type(name), nil
 }
@@ -776,7 +1165,7 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if len(args) != 2 {
 		return "", fmt.Errorf("type error: std::map::Map expects 2 type arguments")
 	}
-	if args[0] != string(typeByteString) && !c.typeParams[args[0]] {
+	if !sameType(Type(args[0]), typeByteString) && !c.typeParams[args[0]] {
 		return "", fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
 	}
 	if _, err := c.parseType(args[1]); err != nil {
@@ -913,15 +1302,18 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	previousReturn := c.currentReturn
 	previousStd := c.currentStd
 	previousTypeParams := c.typeParams
+	previousLifetimeParams := c.lifetimeParams
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
 	c.currentStd = fn.decl.Std
 	c.typeParams = typeParamSet(fn.typeParams)
+	c.lifetimeParams = lifetimeParamSet(fn.lifetimeParams)
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
 		c.currentStd = previousStd
 		c.typeParams = previousTypeParams
+		c.lifetimeParams = previousLifetimeParams
 		c.loopLabels = previousLoops
 	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
@@ -1159,7 +1551,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope, unsafe bool)
 	if err != nil {
 		return false, err
 	}
-	if got != want {
+	if !sameType(got, want) {
 		return false, fmt.Errorf("type error: cannot assign %s to `%s` of type %s",
 			got, stmt.Target.String(), want)
 	}
@@ -1238,15 +1630,15 @@ func (c *Checker) checkReturnStmt(
 	if err != nil {
 		return false, err
 	}
-	if elem, ok := errorUnionElement(want); ok && got == Type(elem) {
+	if elem, ok := errorUnionElement(want); ok && sameType(got, Type(elem)) {
 		return true, nil
 	}
 	if errorType, elem, ok := errorUnionParts(want); ok {
-		if got == Type(elem) || got == Type(errorType) {
+		if sameType(got, Type(elem)) || sameType(got, Type(errorType)) {
 			return true, nil
 		}
 	}
-	if got != want {
+	if !sameType(got, want) {
 		return false, fmt.Errorf("type error: return expects %s, got %s", want, got)
 	}
 	return true, nil
@@ -1669,7 +2061,7 @@ func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe bool) (
 	if err != nil {
 		return "", err
 	}
-	if target != typeByteString {
+	if !sameType(target, typeByteString) {
 		return "", fmt.Errorf("type error: index/slice target expects []const u8, got %s", target)
 	}
 	if !expr.Slice {
@@ -1688,7 +2080,7 @@ func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe bool) (
 			return "", err
 		}
 	}
-	return typeByteString, nil
+	return target, nil
 }
 
 // checkIndexBound validates one i64 index or slice bound.
@@ -2095,7 +2487,7 @@ func (c *Checker) checkCoreArg(
 	if err != nil {
 		return err
 	}
-	if got != Type(want) {
+	if !sameType(got, Type(want)) {
 		return fmt.Errorf("type error: `%s` arg %d expects %s, got %s",
 			name, index+1, want, got)
 	}
@@ -2199,7 +2591,7 @@ func (c *Checker) checkFsReadFile(
 	if err != nil {
 		return "", true, err
 	}
-	if path != typeByteString {
+	if !sameType(path, typeByteString) {
 		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects []const u8 path, got %s",
 			path)
 	}
@@ -2223,7 +2615,7 @@ func (c *Checker) checkFsWriteFile(
 		if err != nil {
 			return "", true, err
 		}
-		if got != typeByteString {
+		if !sameType(got, typeByteString) {
 			return "", true, fmt.Errorf(
 				"type error: `std::fs::write_file` expects []const u8 %s, got %s", label, got)
 		}
@@ -2280,7 +2672,7 @@ func (c *Checker) checkFsPathArgs(
 	if err != nil {
 		return "", "", err
 	}
-	if path != typeByteString {
+	if !sameType(path, typeByteString) {
 		return "", "", fmt.Errorf("type error: `%s` expects []const u8 path, got %s", name, path)
 	}
 	return "Io", path, nil
@@ -2598,7 +2990,7 @@ func (c *Checker) checkBoxConstructor(
 	if err != nil {
 		return "", true, err
 	}
-	if got != elem {
+	if !sameType(got, elem) {
 		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects %s value, got %s",
 			elem, elem, got)
 	}
@@ -2859,14 +3251,14 @@ func (c *Checker) checkMapPrimitiveMethod(
 		}
 		if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
 			return "", err
-		} else if got != Type(keyType) {
+		} else if !sameType(got, Type(keyType)) {
 			return "", fmt.Errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
 		got, err := c.checkExpr(args[1], env, unsafe)
 		if err != nil {
 			return "", err
 		}
-		if got != valueType {
+		if !sameType(got, valueType) {
 			return "", fmt.Errorf("type error: `Map.insert` expects %s value, got %s",
 				valueType, got)
 		}
@@ -2901,7 +3293,7 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	if err != nil {
 		return err
 	}
-	if got != Type(keyType) {
+	if !sameType(got, Type(keyType)) {
 		return fmt.Errorf("type error: `Map.%s` expects %s key, got %s", name, keyType, got)
 	}
 	return nil
@@ -3029,7 +3421,7 @@ func (c *Checker) checkGenericUserArg(
 	if err != nil {
 		return err
 	}
-	if got != want {
+	if !sameType(got, want) {
 		if name == "std.sync.Mutex" {
 			return fmt.Errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
 				want, want, got)
@@ -3080,7 +3472,7 @@ func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe bool) (T
 	if err != nil {
 		return "", err
 	}
-	if got != typeByteString {
+	if !sameType(got, typeByteString) {
 		return "", fmt.Errorf("type error: `error` expects []const u8, got %s", got)
 	}
 	errorType, _, ok := errorUnionParts(c.currentReturn)
@@ -3150,7 +3542,7 @@ func (c *Checker) checkUserCallArg(
 		}
 		return nil
 	}
-	if got != fn.params[idx] {
+	if !sameType(got, fn.params[idx]) {
 		return userCallArgError(name, fn, idx, got)
 	}
 	return nil
@@ -3278,7 +3670,7 @@ func (c *Checker) checkUnionConstructorCall(
 	if err != nil {
 		return "", true, err
 	}
-	if got != Type(payload) {
+	if !sameType(got, Type(payload)) {
 		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects %s, got %s",
 			unionType.name, field.Name, payload, got)
 	}
@@ -3316,7 +3708,7 @@ func (c *Checker) checkStructLiteralExpr(
 		if !ok {
 			return "", fmt.Errorf("type error: missing field `%s.%s`", expr.TypeName, field.Name)
 		}
-		if got != Type(field.TypeName) {
+		if !sameType(got, Type(field.TypeName)) {
 			return "", fmt.Errorf("type error: field `%s.%s` expects %s, got %s",
 				expr.TypeName, field.Name, field.TypeName, got)
 		}
@@ -3668,7 +4060,7 @@ func (c *Checker) checkStringBytesArg(
 	if err != nil {
 		return err
 	}
-	if got != typeByteString {
+	if !sameType(got, typeByteString) {
 		return fmt.Errorf("type error: `String.%s` expects []const u8, got %s", name, got)
 	}
 	return nil
@@ -3882,7 +4274,7 @@ func (c *Checker) checkArrayAppendArg(
 	if err != nil {
 		return "", err
 	}
-	if got != elem {
+	if !sameType(got, elem) {
 		return "", fmt.Errorf("type error: `Array.append` expects %s, got %s", elem, got)
 	}
 	return "!void", nil
@@ -3959,7 +4351,7 @@ func (c *Checker) checkArraySet(
 	if err != nil {
 		return "", err
 	}
-	if got != elem {
+	if !sameType(got, elem) {
 		return "", fmt.Errorf("type error: `Array.set` expects %s value, got %s", elem, got)
 	}
 	return "!void", nil
@@ -4034,14 +4426,14 @@ func (c *Checker) checkMapInsert(
 	}
 	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
 		return "", err
-	} else if got != typeByteString {
+	} else if !sameType(got, typeByteString) {
 		return "", fmt.Errorf("type error: `Map.insert` expects []const u8 key, got %s", got)
 	}
 	got, err := c.checkExpr(args[1], env, unsafe)
 	if err != nil {
 		return "", err
 	}
-	if got != valueType {
+	if !sameType(got, valueType) {
 		return "", fmt.Errorf("type error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "!void", nil
@@ -4061,7 +4453,7 @@ func (c *Checker) checkMapKeyArg(
 	if err != nil {
 		return err
 	}
-	if got != typeByteString {
+	if !sameType(got, typeByteString) {
 		return fmt.Errorf("type error: `Map.%s` expects []const u8 key, got %s", name, got)
 	}
 	return nil
@@ -4096,7 +4488,7 @@ func (c *Checker) checkMapTypeArgContract(args []Type) error {
 	if len(args) != 2 {
 		return fmt.Errorf("type error: std::map::Map expects 2 type arguments")
 	}
-	if args[0] != typeByteString {
+	if !sameType(args[0], typeByteString) {
 		return fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
 	}
 	if !c.isCopyType(args[1]) {
@@ -4183,7 +4575,7 @@ func (c *Checker) checkSpawnArgs(
 		if err != nil {
 			return err
 		}
-		if got != fn.params[paramIdx] {
+		if !sameType(got, fn.params[paramIdx]) {
 			return fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, name, fn.params[paramIdx], got)
 		}
@@ -4247,7 +4639,7 @@ func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope, unsafe bo
 		if err != nil {
 			return "", err
 		}
-		if got != fn.params[idx] {
+		if !sameType(got, fn.params[idx]) {
 			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, target.Name, fn.params[idx], got)
 		}
@@ -4275,7 +4667,7 @@ func (c *Checker) checkChannelMethod(
 		if err != nil {
 			return "", err
 		}
-		if got != elem {
+		if !sameType(got, elem) {
 			return "", fmt.Errorf("type error: `channel.send` expects %s, got %s", elem, got)
 		}
 		return typeVoid, nil
@@ -4362,7 +4754,7 @@ func (c *Checker) checkAtomicMethod(
 		if err != nil {
 			return "", err
 		}
-		if got != elem {
+		if !sameType(got, elem) {
 			return "", fmt.Errorf("type error: `atomic.store` expects %s, got %s", elem, got)
 		}
 		return typeVoid, nil
@@ -4551,7 +4943,7 @@ func (c *Checker) checkThreadScopedTyped(
 	if err != nil {
 		return "", true, err
 	}
-	if got != argType {
+	if !sameType(got, argType) {
 		return "", true, fmt.Errorf("type error: arg 1 of `std::thread::scoped` expects %s, got %s",
 			argType, got)
 	}
@@ -4575,7 +4967,7 @@ func (c *Checker) checkAtomic(
 	if err != nil {
 		return "", true, err
 	}
-	if got != elem {
+	if !sameType(got, elem) {
 		return "", true, fmt.Errorf("type error: `std::atomic::Atomic<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
@@ -4601,7 +4993,7 @@ func (c *Checker) checkMutex(
 	if err != nil {
 		return "", true, err
 	}
-	if got != elem {
+	if !sameType(got, elem) {
 		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
@@ -4657,7 +5049,7 @@ func (c *Checker) checkMethodArgs(
 		if err != nil {
 			return "", err
 		}
-		if got != want {
+		if !sameType(got, want) {
 			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, method.name, want, got)
 		}
@@ -4722,7 +5114,7 @@ func (c *Checker) checkArenaAdd(
 	if err != nil {
 		return "", err
 	}
-	if got != Type(arg) {
+	if !sameType(got, Type(arg)) {
 		return "", fmt.Errorf("type error: `arena.add` expects %s, got %s", arg, got)
 	}
 	return Type(fmt.Sprintf("handle<%s>", arg)), nil
@@ -4743,7 +5135,7 @@ func (c *Checker) checkArenaGet(
 		return "", err
 	}
 	want := Type(fmt.Sprintf("handle<%s>", arg))
-	if got != want {
+	if !sameType(got, want) {
 		return "", fmt.Errorf("type error: `arena.get` expects %s, got %s", want, got)
 	}
 	return Type(arg), nil
@@ -4788,7 +5180,7 @@ func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	if err != nil {
 		return "", err
 	}
-	if valueType != Type(elem) {
+	if !sameType(valueType, Type(elem)) {
 		return "", fmt.Errorf("type error: `ptr_write` expects %s, got %s", elem, valueType)
 	}
 	return typeVoid, nil
@@ -4816,6 +5208,9 @@ func (c *Checker) isCopyType(typ Type) bool {
 		return true
 	}
 	if typ == "ParseNode" || typ == "std::kizu::parser::ParseNode" {
+		return true
+	}
+	if eraseLifetimes(string(typ)) == string(typeByteString) {
 		return true
 	}
 	if c.enums[string(typ)] != nil {

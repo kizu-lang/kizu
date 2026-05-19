@@ -776,7 +776,7 @@ func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if target != "[]const u8" {
+	if !sameOwnershipType(target, "[]const u8") {
 		return "", fmt.Errorf("move error: index/slice target expects []const u8, got %s", target)
 	}
 	if !expr.Slice {
@@ -795,7 +795,7 @@ func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error)
 			return "", err
 		}
 	}
-	return "[]const u8", nil
+	return target, nil
 }
 
 // readLiteralType returns the ownership type of scalar literals.
@@ -1433,7 +1433,7 @@ func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bo
 	if err != nil {
 		return "", true, err
 	}
-	if path != "[]const u8" {
+	if !sameOwnershipType(path, "[]const u8") {
 		return "", true, fmt.Errorf("move error: `std::fs::read_file` expects []const u8 path, got %s",
 			path)
 	}
@@ -1453,7 +1453,7 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 		if err != nil {
 			return "", true, err
 		}
-		if got != "[]const u8" {
+		if !sameOwnershipType(got, "[]const u8") {
 			return "", true, fmt.Errorf(
 				"move error: `std::fs::write_file` expects []const u8 %s, got %s", label, got)
 		}
@@ -1478,7 +1478,7 @@ func (c *Checker) checkFsPathOnly(
 	if err != nil {
 		return "", true, err
 	}
-	if path != "[]const u8" {
+	if !sameOwnershipType(path, "[]const u8") {
 		return "", true, fmt.Errorf("move error: `%s` expects []const u8 path, got %s", name, path)
 	}
 	return result, true, nil
@@ -2959,12 +2959,20 @@ func (c *Checker) checkAstAddDeclMethod(
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "bool",
 			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+			"std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
-	case "add_enum_decl", "add_union_decl":
+	case "add_enum_decl":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "bool",
 			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_union_decl":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool",
+			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+			"std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	case "add_union_variant":
@@ -3199,7 +3207,7 @@ func (c *Checker) checkStringBytesArg(
 	if err != nil {
 		return "", err
 	}
-	if got != "[]const u8" {
+	if !sameOwnershipType(got, "[]const u8") {
 		return "", fmt.Errorf("string error: `String.%s` expects []const u8, got %s", name, got)
 	}
 	return "!void", nil
@@ -3711,14 +3719,14 @@ func (c *Checker) checkMapInsert(
 	}
 	if got, err := c.readExpr(args[0], env); err != nil {
 		return "", err
-	} else if got != "[]const u8" {
+	} else if !sameOwnershipType(got, "[]const u8") {
 		return "", fmt.Errorf("map error: `Map.insert` expects []const u8 key, got %s", got)
 	}
 	got, err := c.readExpr(args[1], env)
 	if err != nil {
 		return "", err
 	}
-	if got != valueType {
+	if !sameOwnershipType(got, valueType) {
 		return "", fmt.Errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "!void", nil
@@ -3733,7 +3741,7 @@ func (c *Checker) checkMapKeyArg(name string, args []ast.Expression, env *scope)
 	if err != nil {
 		return err
 	}
-	if got != "[]const u8" {
+	if !sameOwnershipType(got, "[]const u8") {
 		return fmt.Errorf("map error: `Map.%s` expects []const u8 key, got %s", name, got)
 	}
 	return nil
@@ -4334,6 +4342,9 @@ func (c *Checker) isCopyType(typeName string) bool {
 	if isAstNodeIDType(typeName) || isAstScalarType(typeName) {
 		return true
 	}
+	if eraseOwnershipLifetimes(typeName) == "[]const u8" {
+		return true
+	}
 	if typeName == "ParseNode" || typeName == "std::kizu::parser::ParseNode" {
 		return true
 	}
@@ -4351,6 +4362,58 @@ func (c *Checker) isCopyType(typeName string) bool {
 	default:
 		return false
 	}
+}
+
+// sameOwnershipType compares type spellings after erasing lifetime annotations.
+func sameOwnershipType(left string, right string) bool {
+	if left == right {
+		return true
+	}
+	return eraseOwnershipLifetimes(left) == eraseOwnershipLifetimes(right)
+}
+
+// eraseOwnershipLifetimes removes explicit lifetimes from ownership type strings.
+func eraseOwnershipLifetimes(name string) string {
+	var out strings.Builder
+	for idx := 0; idx < len(name); {
+		if strings.HasPrefix(name[idx:], "&'") {
+			out.WriteByte('&')
+			idx = skipOwnershipLifetimeName(name, idx+1)
+			idx = skipOwnershipLifetimeSpace(name, idx)
+			continue
+		}
+		if strings.HasPrefix(name[idx:], "[]'") {
+			out.WriteString("[]")
+			idx = skipOwnershipLifetimeName(name, idx+2)
+			idx = skipOwnershipLifetimeSpace(name, idx)
+			continue
+		}
+		out.WriteByte(name[idx])
+		idx++
+	}
+	return out.String()
+}
+
+// skipOwnershipLifetimeName skips a lifetime name starting at apostrophe.
+func skipOwnershipLifetimeName(name string, start int) int {
+	idx := start + 1
+	for idx < len(name) {
+		ch := name[idx]
+		if ch != '_' && (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
+			(ch < '0' || ch > '9') {
+			break
+		}
+		idx++
+	}
+	return idx
+}
+
+// skipOwnershipLifetimeSpace skips one separator after a lifetime.
+func skipOwnershipLifetimeSpace(name string, idx int) int {
+	if idx < len(name) && name[idx] == ' ' {
+		return idx + 1
+	}
+	return idx
 }
 
 // isAtomicSupportedType reports whether Atomic<T> is available in v0.1.
@@ -4769,7 +4832,7 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	if !ok || len(args) != 2 {
 		return nil, fmt.Errorf("map error: std::map::Map expects 2 type arguments")
 	}
-	if args[0] != "[]const u8" {
+	if !sameOwnershipType(args[0], "[]const u8") {
 		return nil, fmt.Errorf("map error: std::map::Map key type must be []const u8 in v0.2")
 	}
 	if isGenericParamName(args[1]) {

@@ -153,6 +153,7 @@ fn dump_struct_decl(
     print("StructDecl");
     dump_visibility(struct_decl.public);
     try dump_node(source, ast, struct_decl.name);
+    try dump_range(source, ast, struct_decl.type_params);
     try dump_range(source, ast, struct_decl.fields);
     return;
 }
@@ -177,6 +178,7 @@ fn dump_union_decl(
     print("UnionDecl");
     dump_visibility(union_decl.public);
     try dump_node(source, ast, union_decl.name);
+    try dump_range(source, ast, union_decl.type_params);
     try dump_range(source, ast, union_decl.variants);
     return;
 }
@@ -643,6 +645,14 @@ func parserParityFunctionSeedCases() []parserParityCase {
 		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &mut i64) {}"},
 		{name: "seed/fn_comptime_param", source: "fn scoped(comptime worker: Function) {}"},
 		{name: "seed/fn_type_params", source: "pub fn identity<T>(value: T) -> T { return value; }"},
+		{
+			name:   "seed/fn_lifetime_params",
+			source: "fn first<'a>(bytes: []'a const u8) -> []'a const u8 { return bytes; }",
+		},
+		{
+			name:   "seed/fn_lifetime_borrow_param",
+			source: "fn show<'a>(bytes: &'a []'a const u8) {}",
+		},
 		{name: "seed/fn_namespace_type", source: "fn use(allocator: std::mem::Allocator) {}"},
 		{
 			name:   "seed/fn_generic_type",
@@ -701,6 +711,10 @@ func parserParityDeclarationSeedCases() []parserParityCase {
 		{
 			name:   "seed/pub_struct_decl",
 			source: "pub struct User { pub name: []const u8; age: i64; }",
+		},
+		{
+			name:   "seed/lifetime_struct_decl",
+			source: "struct Row<'a, T> { data: []'a const T; }",
 		},
 		{name: "seed/enum_decl", source: "enum Color { Red; Blue; }"},
 		{name: "seed/union_decl", source: "union Shape { Point; Circle(i64); }"},
@@ -804,7 +818,7 @@ func summarizeImportDeclSubset(decl *kizuast.ImportDecl) ([]string, string) {
 
 // summarizeFunctionSubset summarizes a function declaration in the shared subset.
 func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
-	typeParams, reason := summarizeTypeParamsSubset(fn.TypeParams)
+	typeParams, reason := summarizeGenericParamsSubset(fn.LifetimeParams, fn.TypeParams)
 	if reason != "" {
 		return nil, reason
 	}
@@ -844,9 +858,15 @@ func summarizeFunctionBodySubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	return summarizeBlockSubset(fn.Body)
 }
 
-// summarizeTypeParamsSubset summarizes generic function parameter names.
-func summarizeTypeParamsSubset(params []string) ([]string, string) {
-	lines := []string{"Range", strconv.Itoa(len(params))}
+// summarizeGenericParamsSubset summarizes lifetime and type parameter names.
+func summarizeGenericParamsSubset(lifetimes []string, params []string) ([]string, string) {
+	lines := []string{"Range", strconv.Itoa(len(lifetimes) + len(params))}
+	for _, name := range lifetimes {
+		if !isStdParserLifetime(name) {
+			return nil, "lifetime outside std parser subset"
+		}
+		lines = append(lines, "Var", name)
+	}
 	for _, name := range params {
 		if !isStdParserIdent(name) {
 			return nil, "identifier outside std parser subset"
@@ -915,7 +935,12 @@ func summarizeStructDeclSubset(decl *kizuast.StructDecl) ([]string, string) {
 	if !isStdParserIdent(decl.Name) {
 		return nil, "identifier outside std parser subset"
 	}
+	typeParams, reason := summarizeGenericParamsSubset(decl.LifetimeParams, decl.TypeParams)
+	if reason != "" {
+		return nil, reason
+	}
 	lines := []string{"StructDecl", parserParityVisibility(decl.Public), "Var", decl.Name}
+	lines = append(lines, typeParams...)
 	lines = append(lines, "Range", strconv.Itoa(len(decl.Fields)))
 	for _, field := range decl.Fields {
 		next, reason := summarizeFieldSubset(field)
@@ -944,8 +969,14 @@ func summarizeFieldSubset(field kizuast.Field) ([]string, string) {
 func parserParityFieldTypeName(field kizuast.Field) string {
 	switch {
 	case field.MutBorrow:
+		if field.BorrowLifetime != "" {
+			return "&" + field.BorrowLifetime + " mut " + field.TypeName
+		}
 		return "&mut " + field.TypeName
 	case field.Borrow:
+		if field.BorrowLifetime != "" {
+			return "&" + field.BorrowLifetime + " " + field.TypeName
+		}
 		return "&" + field.TypeName
 	default:
 		return field.TypeName
@@ -973,7 +1004,12 @@ func summarizeUnionDeclSubset(decl *kizuast.UnionDecl) ([]string, string) {
 	if !isStdParserIdent(decl.Name) {
 		return nil, "identifier outside std parser subset"
 	}
+	typeParams, reason := summarizeGenericParamsSubset(decl.LifetimeParams, decl.TypeParams)
+	if reason != "" {
+		return nil, reason
+	}
 	lines := []string{"UnionDecl", parserParityVisibility(decl.Public), "Var", decl.Name}
+	lines = append(lines, typeParams...)
 	lines = append(lines, "Range", strconv.Itoa(len(decl.Variants)))
 	for _, variant := range decl.Variants {
 		next, reason := summarizeUnionVariantSubset(variant)
@@ -1021,8 +1057,14 @@ func summarizeTypeNameSubset(typeName string) ([]string, string) {
 func parserParityParamTypeName(param kizuast.Param) string {
 	switch {
 	case param.MutBorrow:
+		if param.BorrowLifetime != "" {
+			return "&" + param.BorrowLifetime + " mut " + param.TypeName
+		}
 		return "&mut " + param.TypeName
 	case param.Borrow:
+		if param.BorrowLifetime != "" {
+			return "&" + param.BorrowLifetime + " " + param.TypeName
+		}
 		return "&" + param.TypeName
 	default:
 		return param.TypeName
@@ -1429,7 +1471,7 @@ func isStdParserSpace(r rune) bool {
 
 // isStdParserPunctuation reports punctuation understood by std::kizu::lexer.
 func isStdParserPunctuation(r rune) bool {
-	return strings.ContainsRune("{}();,:!&[]<>?+*-=/>%.|", r)
+	return strings.ContainsRune("{}();,:!&[]<>?+*-=/>%.|'", r)
 }
 
 // isStdParserWordRune reports identifier and number bytes understood by the std lexer.
@@ -1449,6 +1491,11 @@ func isStdParserIdent(name string) bool {
 		}
 	}
 	return name != "fn" && name != "return"
+}
+
+// isStdParserLifetime reports whether name is a plain lifetime token.
+func isStdParserLifetime(name string) bool {
+	return strings.HasPrefix(name, "'") && isStdParserIdent(strings.TrimPrefix(name, "'"))
 }
 
 // isStdParserIdentStart reports whether r can start a std lexer identifier.

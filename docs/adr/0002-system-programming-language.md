@@ -19,7 +19,7 @@ Kizu はシステムプログラミング言語を目指す。
 - comptime
 - 読みやすい処理系
 - macro や build script に依存しない設計
-- 明示 lifetime annotation に依存しない設計
+- borrowed view 境界でだけ明示 lifetime annotation を使う設計
 
 ## 影響
 

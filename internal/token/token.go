@@ -10,6 +10,8 @@ const (
 	Ident  Type = "IDENT"
 	Int    Type = "INT"
 	String Type = "STRING"
+	// Lifetime names a compile-time lifetime parameter such as 'a.
+	Lifetime Type = "LIFETIME"
 
 	Assign   Type = "="
 	Plus     Type = "+"

@@ -23,8 +23,8 @@ std::mem::len(bytes: []const u8) -> i64
 std::mem::byte_at(bytes: []const u8, index: i64) -> !u8
 std::mem::equal_bytes(left: []const u8, right: []const u8) -> bool
 std::mem::starts_with(bytes: []const u8, prefix: []const u8) -> bool
-std::mem::slice(bytes: []const u8, start: i64, end: i64) -> ![]const u8
-std::mem::trim_ascii(bytes: []const u8) -> []const u8
+std::mem::slice<'a>(bytes: []'a const u8, start: i64, end: i64) -> ![]'a const u8
+std::mem::trim_ascii<'a>(bytes: []'a const u8) -> []'a const u8
 ```
 
 `byte_at` and `slice` return `!T` because an invalid index or range is a

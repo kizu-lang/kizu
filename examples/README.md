@@ -88,6 +88,7 @@ go test ./...
 | deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
 | safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
+| explicit lifetime view | `lifetime_view.kizu` | returns a borrowed slice view with `[]'a const u8` |
 
 ## Package-Shaped Examples
 
@@ -116,7 +117,8 @@ single source file. Run them with `kizu check <package-root>`.
 | field borrow blocks owner move | `negative/field_borrow_owner_move.kizu` | `cannot be moved while borrowed` |
 | v0.1 rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
-| borrow fields are forbidden | `negative/borrow_field.kizu` | `cannot store borrow` |
+| borrow fields need explicit lifetimes | `negative/borrow_field.kizu` | `requires struct lifetime parameter` |
+| borrow returns need explicit lifetimes | `negative/lifetime_return_missing.kizu` | `borrow return requires explicit lifetime` |
 | borrowed parameters cannot be stored in owned locals | `negative/borrow_local_alias.kizu` | `borrowed value` |
 | borrowed parameters cannot be passed as owned values | `negative/borrow_to_owner.kizu` | `borrowed value` |
 | non-copy values cannot move out of borrow deref | `negative/borrow_deref_move.kizu` | `cannot be moved out of borrow` |

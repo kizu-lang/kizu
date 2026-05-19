@@ -489,12 +489,18 @@ func TestParseTry(t *testing.T) {
 	}
 }
 
-// TestParseRejectsExplicitLifetime checks that lifetime syntax is not accepted.
-func TestParseRejectsExplicitLifetime(t *testing.T) {
-	input := `fn show(s: &'a []const u8) {}`
+// TestParseExplicitLifetime checks lifetime-qualified borrow and slice syntax.
+func TestParseExplicitLifetime(t *testing.T) {
+	input := `fn show<'a>(s: &'a []'a const u8) -> []'a const u8 {
+    return s.*;
+}`
 	p := New(lexer.New(input))
-	_ = p.ParseProgram()
-	if len(p.Errors()) == 0 {
-		t.Fatalf("expected parser error")
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn show<'a>(s: &'a []'a const u8) -> []'a const u8 { return s.*; }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
