@@ -1388,6 +1388,8 @@ func parserHeaderSource(info parserPackage) string {
 	out.WriteString(parserStateSource())
 	out.WriteString(parserMetricEntrySource())
 	out.WriteString(parserTokenSummarySource())
+	out.WriteString(parserAstTypesSource())
+	out.WriteString(parserAstModuleSource())
 	out.WriteString(parserPrecedenceSource(info.precedences))
 	return out.String()
 }
@@ -1546,6 +1548,115 @@ func parserTokenSummarySource() string {
 `
 }
 
+// parserAstTypesSource renders minimal selfhost AST node surfaces.
+func parserAstTypesSource() string {
+	return `pub enum AstKind {
+    Missing
+    Module
+    Function
+    ParamList
+    Param
+    Block
+}
+
+pub struct AstNode {
+    pub kind: AstKind,
+    pub token_type: token::Type,
+    pub line: i64,
+    pub column: i64,
+    pub first_child: i64,
+    pub next_sibling: i64
+}
+
+pub struct ModuleAst {
+    pub root: AstNode,
+    pub node_count: i64,
+    pub functions: i64,
+    pub params: i64,
+    pub blocks: i64,
+    pub valid: bool
+}
+
+fn AstNode(
+    kind: AstKind,
+    tok: token::Token,
+    first_child: i64,
+    next_sibling: i64
+) -> AstNode {
+    return AstNode {
+        kind: kind,
+        token_type: tok.Type,
+        line: tok.Line,
+        column: tok.Column,
+        first_child: first_child,
+        next_sibling: next_sibling
+    };
+}
+
+`
+}
+
+// parserAstModuleSource renders the module-level AST parser entry.
+func parserAstModuleSource() string {
+	return `pub fn parse_ast(source: []const u8) -> ModuleAst {
+    var parser = Parser(source);
+    var node_count = 1;
+    var functions = 0;
+    var params = 0;
+    var blocks = 0;
+    var depth = 0;
+    var in_params = false;
+    var function_header = false;
+    var valid = true;
+    while parser.cur.Type != token::Type::EOF {
+        if depth == 0 and parser.cur.Type == token::Type::Function {
+            node_count = node_count + 2;
+            functions = functions + 1;
+            function_header = true;
+        }
+        if function_header and parser.cur.Type == token::Type::LParen {
+            in_params = true;
+        }
+        if in_params and parser.cur.Type == token::Type::Ident and
+            parser.peek.Type == token::Type::Colon {
+            params = params + 1;
+            node_count = node_count + 1;
+        }
+        if in_params and parser.cur.Type == token::Type::RParen {
+            in_params = false;
+        }
+        if parser.cur.Type == token::Type::LBrace {
+            depth = depth + 1;
+            blocks = blocks + 1;
+            node_count = node_count + 1;
+            function_header = false;
+        }
+        if parser.cur.Type == token::Type::RBrace {
+            depth = depth - 1;
+            if depth < 0 {
+                valid = false;
+            }
+        }
+        if parser.cur.Type == token::Type::Illegal {
+            valid = false;
+        }
+        parser = Advance(parser);
+    }
+    valid = valid and depth == 0 and in_params == false;
+    let root_child = 0;
+    return ModuleAst {
+        root: AstNode(AstKind::Module, first_token_from_source(source), root_child, -1),
+        node_count: node_count,
+        functions: functions,
+        params: params,
+        blocks: blocks,
+        valid: valid
+    };
+}
+
+`
+}
+
 // parserModuleSummarySource renders the parser summary passed to later phases.
 func parserModuleSummarySource() string {
 	return `pub struct Module {
@@ -1559,6 +1670,10 @@ func parserModuleSummarySource() string {
     pub imports: i64,
     pub structs: i64,
     pub enums: i64,
+    pub ast_nodes: i64,
+    pub ast_params: i64,
+    pub ast_blocks: i64,
+    pub ast_valid: bool,
     pub braces: i64,
     pub balance: i64,
     pub balanced: bool
@@ -1567,6 +1682,7 @@ func parserModuleSummarySource() string {
 pub fn parse_module(source: []const u8) -> Module {
     let first = first_token_code(source);
     let summary = token_summary(source);
+    let ast = parse_ast(source);
     let functions = summary.functions;
     let imports = summary.imports;
     let structs = summary.structs;
@@ -1591,6 +1707,10 @@ pub fn parse_module(source: []const u8) -> Module {
         imports: imports,
         structs: structs,
         enums: enums,
+        ast_nodes: ast.node_count,
+        ast_params: ast.params,
+        ast_blocks: ast.blocks,
+        ast_valid: ast.valid,
         braces: braces,
         balance: balance,
         balanced: balance == 0
@@ -1671,6 +1791,10 @@ pub struct SourceMetrics {
     pub bytes: i64,
     pub functions: i64,
     pub declarations: i64,
+    pub ast_nodes: i64,
+    pub ast_params: i64,
+    pub ast_blocks: i64,
+    pub ast_valid: bool,
     pub tokens: i64,
     pub illegal_tokens: i64,
     pub braces: i64,
@@ -1750,6 +1874,22 @@ func compilerTreeMetricsSource() string {
             lexer_parse.declarations + parser_parse.declarations + resolver_parse.declarations +
             checker_parse.declarations + lower_parse.declarations + emit_parse.declarations +
             compiler_parse.declarations + main_parse.declarations,
+        ast_nodes: manifest_parse.ast_nodes + token_parse.ast_nodes + lexer_parse.ast_nodes +
+            parser_parse.ast_nodes + resolver_parse.ast_nodes + checker_parse.ast_nodes +
+            lower_parse.ast_nodes + emit_parse.ast_nodes + compiler_parse.ast_nodes +
+            main_parse.ast_nodes,
+        ast_params: manifest_parse.ast_params + token_parse.ast_params + lexer_parse.ast_params +
+            parser_parse.ast_params + resolver_parse.ast_params + checker_parse.ast_params +
+            lower_parse.ast_params + emit_parse.ast_params + compiler_parse.ast_params +
+            main_parse.ast_params,
+        ast_blocks: manifest_parse.ast_blocks + token_parse.ast_blocks + lexer_parse.ast_blocks +
+            parser_parse.ast_blocks + resolver_parse.ast_blocks + checker_parse.ast_blocks +
+            lower_parse.ast_blocks + emit_parse.ast_blocks + compiler_parse.ast_blocks +
+            main_parse.ast_blocks,
+        ast_valid: manifest_parse.ast_valid and token_parse.ast_valid and lexer_parse.ast_valid and
+            parser_parse.ast_valid and resolver_parse.ast_valid and checker_parse.ast_valid and
+            lower_parse.ast_valid and emit_parse.ast_valid and compiler_parse.ast_valid and
+            main_parse.ast_valid,
         tokens: manifest_parse.tokens + token_parse.tokens + lexer_parse.tokens +
             parser_parse.tokens + resolver_parse.tokens + checker_parse.tokens +
             lower_parse.tokens + emit_parse.tokens + compiler_parse.tokens + main_parse.tokens,
@@ -1773,7 +1913,8 @@ func compilerTreeMetricsSource() string {
         metrics.tokens,
         metrics.illegal_tokens,
         metrics.braces,
-        metrics.balanced
+        metrics.balanced,
+        metrics.ast_valid
     );
     let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, metrics.bytes, metrics.functions);
@@ -1789,7 +1930,7 @@ func compilerTreeMetricsSource() string {
 func compilerEmitStage2Source() string {
 	return `pub fn emit_stage2() -> !void {
     let allocator = std::mem::page_allocator();
-    let checked = checker::check_entry(1, 0, 0, 0, 0, 0, false);
+    let checked = checker::check_entry(1, 0, 0, 0, 0, 0, false, false);
     let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, 0, 0);
     let artifact_bytes = artifact.as_bytes();
@@ -1848,10 +1989,11 @@ pub fn check_entry(
     tokens: i64,
     illegal_tokens: i64,
     braces: i64,
-    balanced: bool
+    balanced: bool,
+    ast_valid: bool
 ) -> CheckedModule {
     return CheckedModule {
-        valid: parsed >= 100 and balanced and illegal_tokens == 0,
+        valid: parsed >= 100 and balanced and ast_valid and illegal_tokens == 0,
         score: parsed,
         functions: functions,
         declarations: declarations,

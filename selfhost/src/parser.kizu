@@ -137,6 +137,105 @@ pub fn token_summary(source: []const u8) -> TokenSummary {
     };
 }
 
+pub enum AstKind {
+    Missing
+    Module
+    Function
+    ParamList
+    Param
+    Block
+}
+
+pub struct AstNode {
+    pub kind: AstKind,
+    pub token_type: token::Type,
+    pub line: i64,
+    pub column: i64,
+    pub first_child: i64,
+    pub next_sibling: i64
+}
+
+pub struct ModuleAst {
+    pub root: AstNode,
+    pub node_count: i64,
+    pub functions: i64,
+    pub params: i64,
+    pub blocks: i64,
+    pub valid: bool
+}
+
+fn AstNode(
+    kind: AstKind,
+    tok: token::Token,
+    first_child: i64,
+    next_sibling: i64
+) -> AstNode {
+    return AstNode {
+        kind: kind,
+        token_type: tok.Type,
+        line: tok.Line,
+        column: tok.Column,
+        first_child: first_child,
+        next_sibling: next_sibling
+    };
+}
+
+pub fn parse_ast(source: []const u8) -> ModuleAst {
+    var parser = Parser(source);
+    var node_count = 1;
+    var functions = 0;
+    var params = 0;
+    var blocks = 0;
+    var depth = 0;
+    var in_params = false;
+    var function_header = false;
+    var valid = true;
+    while parser.cur.Type != token::Type::EOF {
+        if depth == 0 and parser.cur.Type == token::Type::Function {
+            node_count = node_count + 2;
+            functions = functions + 1;
+            function_header = true;
+        }
+        if function_header and parser.cur.Type == token::Type::LParen {
+            in_params = true;
+        }
+        if in_params and parser.cur.Type == token::Type::Ident and
+            parser.peek.Type == token::Type::Colon {
+            params = params + 1;
+            node_count = node_count + 1;
+        }
+        if in_params and parser.cur.Type == token::Type::RParen {
+            in_params = false;
+        }
+        if parser.cur.Type == token::Type::LBrace {
+            depth = depth + 1;
+            blocks = blocks + 1;
+            node_count = node_count + 1;
+            function_header = false;
+        }
+        if parser.cur.Type == token::Type::RBrace {
+            depth = depth - 1;
+            if depth < 0 {
+                valid = false;
+            }
+        }
+        if parser.cur.Type == token::Type::Illegal {
+            valid = false;
+        }
+        parser = Advance(parser);
+    }
+    valid = valid and depth == 0 and in_params == false;
+    let root_child = 0;
+    return ModuleAst {
+        root: AstNode(AstKind::Module, first_token_from_source(source), root_child, -1),
+        node_count: node_count,
+        functions: functions,
+        params: params,
+        blocks: blocks,
+        valid: valid
+    };
+}
+
 pub fn precedence(kind: token::Type) -> i64 {
     if kind == token::Type::And {
         return 3;
@@ -203,6 +302,10 @@ pub struct Module {
     pub imports: i64,
     pub structs: i64,
     pub enums: i64,
+    pub ast_nodes: i64,
+    pub ast_params: i64,
+    pub ast_blocks: i64,
+    pub ast_valid: bool,
     pub braces: i64,
     pub balance: i64,
     pub balanced: bool
@@ -211,6 +314,7 @@ pub struct Module {
 pub fn parse_module(source: []const u8) -> Module {
     let first = first_token_code(source);
     let summary = token_summary(source);
+    let ast = parse_ast(source);
     let functions = summary.functions;
     let imports = summary.imports;
     let structs = summary.structs;
@@ -235,6 +339,10 @@ pub fn parse_module(source: []const u8) -> Module {
         imports: imports,
         structs: structs,
         enums: enums,
+        ast_nodes: ast.node_count,
+        ast_params: ast.params,
+        ast_blocks: ast.blocks,
+        ast_valid: ast.valid,
         braces: braces,
         balance: balance,
         balanced: balance == 0
