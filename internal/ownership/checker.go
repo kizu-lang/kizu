@@ -2747,13 +2747,16 @@ func (c *Checker) checkAstAddMethod(
 	if result, ok, err := c.checkAstAddExprMethod(receiver, name, args, env); ok || err != nil {
 		return result, err
 	}
+	if result, ok, err := c.checkAstAddStmtMethod(receiver, name, args, env); ok || err != nil {
+		return result, err
+	}
 	if result, ok, err := c.checkAstAddShapeMethod(receiver, name, args, env); ok || err != nil {
 		return result, err
 	}
 	return "", fmt.Errorf("move error: unknown Ast method `%s`", name)
 }
 
-// checkAstAddExprMethod validates expression and statement AST constructors.
+// checkAstAddExprMethod validates expression AST constructors.
 func (c *Checker) checkAstAddExprMethod(
 	receiver *binding,
 	name string,
@@ -2781,10 +2784,27 @@ func (c *Checker) checkAstAddExprMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
+	case "add_bool":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_prefix":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::PrefixOp",
+			"std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_binary":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::BinaryOp",
 			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_field_expr":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "bool",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	case "add_call":
@@ -2792,9 +2812,44 @@ func (c *Checker) checkAstAddExprMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
+	case "add_try_expr", "add_comptime_expr":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	default:
+		return "", false, nil
+	}
+}
+
+// checkAstAddStmtMethod validates statement and block AST constructors.
+func (c *Checker) checkAstAddStmtMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
 	case "add_block":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_if":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_let":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_assign":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	case "add_return":
@@ -2805,6 +2860,35 @@ func (c *Checker) checkAstAddExprMethod(
 	case "add_expr_stmt":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_while":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_for":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_break", "add_continue":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_unsafe":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_comptime_if":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	default:
@@ -2847,7 +2931,8 @@ func (c *Checker) checkAstAddShapeMethod(
 		return result, true, err
 	case "add_match_arm":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	case "add_fn_decl":
@@ -4070,9 +4155,12 @@ func (c *Checker) astChildRangeReceiver(expr ast.Expression, env *scope) *bindin
 // astNodeIDMethod reports methods that return an Ast-owned NodeId.
 func astNodeIDMethod(name string) bool {
 	switch name {
-	case "add_node", "add_int", "add_string", "add_type_name", "add_var", "add_binary",
-		"add_call", "add_block", "add_return", "add_expr_stmt", "add_program",
-		"add_param", "add_field", "add_match", "add_struct_decl", "add_match_arm",
+	case "add_node", "add_int", "add_string", "add_type_name", "add_var", "add_bool",
+		"add_prefix", "add_binary", "add_field_expr", "add_call", "add_try_expr",
+		"add_comptime_expr", "add_block", "add_if", "add_let", "add_assign",
+		"add_return", "add_expr_stmt", "add_while", "add_for", "add_break",
+		"add_continue", "add_program", "add_param", "add_field", "add_match",
+		"add_struct_decl", "add_match_arm", "add_unsafe", "add_comptime_if",
 		"add_fn_decl", "add_empty",
 		"child_at":
 		return true
@@ -4266,22 +4354,36 @@ func isAstScalarType(typeName string) bool {
 		"StringNode", "std::kizu::ast::StringNode",
 		"TypeNameNode", "std::kizu::ast::TypeNameNode",
 		"VarNode", "std::kizu::ast::VarNode",
+		"BoolNode", "std::kizu::ast::BoolNode",
+		"PrefixNode", "std::kizu::ast::PrefixNode",
 		"BinaryNode", "std::kizu::ast::BinaryNode",
+		"FieldExprNode", "std::kizu::ast::FieldExprNode",
 		"CallNode", "std::kizu::ast::CallNode",
+		"TryExprNode", "std::kizu::ast::TryExprNode",
+		"ComptimeExprNode", "std::kizu::ast::ComptimeExprNode",
 		"BlockNode", "std::kizu::ast::BlockNode",
 		"IfNode", "std::kizu::ast::IfNode",
 		"LetNode", "std::kizu::ast::LetNode",
+		"AssignNode", "std::kizu::ast::AssignNode",
 		"ReturnNode", "std::kizu::ast::ReturnNode",
 		"ExprStmtNode", "std::kizu::ast::ExprStmtNode",
+		"WhileNode", "std::kizu::ast::WhileNode",
+		"ForNode", "std::kizu::ast::ForNode",
+		"BreakNode", "std::kizu::ast::BreakNode",
+		"ContinueNode", "std::kizu::ast::ContinueNode",
 		"ParamNode", "std::kizu::ast::ParamNode",
 		"FieldNode", "std::kizu::ast::FieldNode",
 		"StructDeclNode", "std::kizu::ast::StructDeclNode",
 		"MatchNode", "std::kizu::ast::MatchNode",
 		"MatchArmNode", "std::kizu::ast::MatchArmNode",
+		"UnsafeNode", "std::kizu::ast::UnsafeNode",
+		"ComptimeIfNode", "std::kizu::ast::ComptimeIfNode",
 		"FnDeclNode", "std::kizu::ast::FnDeclNode",
 		"Span", "std::kizu::ast::Span",
 		"TokenId", "std::kizu::ast::TokenId",
 		"SymbolId", "std::kizu::ast::SymbolId",
+		"PrefixOp", "std::kizu::ast::PrefixOp",
+		"BinaryOp", "std::kizu::ast::BinaryOp",
 		"ChildRange", "std::kizu::ast::ChildRange",
 		"std::kizu::lexer::Token":
 		return true

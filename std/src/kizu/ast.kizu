@@ -18,7 +18,25 @@ pub struct SymbolId {
 
 pub enum BinaryOp {
     Add
+    Sub
     Mul
+    Div
+    Mod
+    Eq
+    NotEq
+    LT
+    LTE
+    GT
+    GTE
+    And
+    Or
+}
+
+pub enum PrefixOp {
+    Not
+    Neg
+    Borrow
+    MutBorrow
 }
 
 pub struct ChildRange {
@@ -47,18 +65,30 @@ pub union AstData {
     String(StringNode)
     TypeName(TypeNameNode)
     Var(VarNode)
+    Bool(BoolNode)
+    Prefix(PrefixNode)
     Binary(BinaryNode)
+    FieldExpr(FieldExprNode)
     Call(CallNode)
+    TryExpr(TryExprNode)
+    ComptimeExpr(ComptimeExprNode)
     Block(BlockNode)
     If(IfNode)
     Let(LetNode)
+    Assign(AssignNode)
     Return(ReturnNode)
     ExprStmt(ExprStmtNode)
+    While(WhileNode)
+    For(ForNode)
+    Break(BreakNode)
+    Continue(ContinueNode)
     Param(ParamNode)
     Field(FieldNode)
     StructDecl(StructDeclNode)
     Match(MatchNode)
     MatchArm(MatchArmNode)
+    Unsafe(UnsafeNode)
+    ComptimeIf(ComptimeIfNode)
     FnDecl(FnDeclNode)
     Empty
 }
@@ -83,15 +113,38 @@ pub struct VarNode {
     pub name: SymbolId;
 }
 
+pub struct BoolNode {
+    pub value: bool;
+}
+
+pub struct PrefixNode {
+    pub op: PrefixOp;
+    pub right: NodeId;
+}
+
 pub struct BinaryNode {
     pub op: BinaryOp;
     pub left: NodeId;
     pub right: NodeId;
 }
 
+pub struct FieldExprNode {
+    pub receiver: NodeId;
+    pub name: NodeId;
+    pub namespace: bool;
+}
+
 pub struct CallNode {
     pub callee: NodeId;
     pub args: ChildRange;
+}
+
+pub struct TryExprNode {
+    pub value: NodeId;
+}
+
+pub struct ComptimeExprNode {
+    pub value: NodeId;
 }
 
 pub struct BlockNode {
@@ -105,7 +158,13 @@ pub struct IfNode {
 }
 
 pub struct LetNode {
-    pub name: SymbolId;
+    pub mutable: bool;
+    pub name: NodeId;
+    pub value: NodeId;
+}
+
+pub struct AssignNode {
+    pub target: NodeId;
     pub value: NodeId;
 }
 
@@ -115,6 +174,28 @@ pub struct ReturnNode {
 
 pub struct ExprStmtNode {
     pub expr: NodeId;
+}
+
+pub struct WhileNode {
+    pub label: NodeId;
+    pub condition: NodeId;
+    pub body: NodeId;
+}
+
+pub struct ForNode {
+    pub label: NodeId;
+    pub name: NodeId;
+    pub start: NodeId;
+    pub end: NodeId;
+    pub body: NodeId;
+}
+
+pub struct BreakNode {
+    pub label: NodeId;
+}
+
+pub struct ContinueNode {
+    pub label: NodeId;
 }
 
 pub struct ParamNode {
@@ -138,8 +219,19 @@ pub struct MatchNode {
 }
 
 pub struct MatchArmNode {
-    pub pattern: SymbolId;
+    pub pattern: NodeId;
+    pub binding: NodeId;
     pub body: NodeId;
+}
+
+pub struct UnsafeNode {
+    pub body: NodeId;
+}
+
+pub struct ComptimeIfNode {
+    pub condition: NodeId;
+    pub then_block: NodeId;
+    pub else_block: NodeId;
 }
 
 pub struct FnDeclNode {
@@ -199,8 +291,68 @@ pub fn binary_add() -> BinaryOp {
     return BinaryOp::Add;
 }
 
+pub fn binary_sub() -> BinaryOp {
+    return BinaryOp::Sub;
+}
+
 pub fn binary_mul() -> BinaryOp {
     return BinaryOp::Mul;
+}
+
+pub fn binary_div() -> BinaryOp {
+    return BinaryOp::Div;
+}
+
+pub fn binary_mod() -> BinaryOp {
+    return BinaryOp::Mod;
+}
+
+pub fn binary_eq() -> BinaryOp {
+    return BinaryOp::Eq;
+}
+
+pub fn binary_not_eq() -> BinaryOp {
+    return BinaryOp::NotEq;
+}
+
+pub fn binary_lt() -> BinaryOp {
+    return BinaryOp::LT;
+}
+
+pub fn binary_lte() -> BinaryOp {
+    return BinaryOp::LTE;
+}
+
+pub fn binary_gt() -> BinaryOp {
+    return BinaryOp::GT;
+}
+
+pub fn binary_gte() -> BinaryOp {
+    return BinaryOp::GTE;
+}
+
+pub fn binary_and() -> BinaryOp {
+    return BinaryOp::And;
+}
+
+pub fn binary_or() -> BinaryOp {
+    return BinaryOp::Or;
+}
+
+pub fn prefix_not() -> PrefixOp {
+    return PrefixOp::Not;
+}
+
+pub fn prefix_neg() -> PrefixOp {
+    return PrefixOp::Neg;
+}
+
+pub fn prefix_borrow() -> PrefixOp {
+    return PrefixOp::Borrow;
+}
+
+pub fn prefix_mut_borrow() -> PrefixOp {
+    return PrefixOp::MutBorrow;
 }
 
 impl Ast {
@@ -279,6 +431,24 @@ impl Ast {
         }));
     }
 
+    fn add_bool(self: Ast, span_value: Span, value: bool) -> NodeId {
+        return self.add_node(span_value, AstData::Bool(BoolNode {
+            value: value
+        }));
+    }
+
+    fn add_prefix(
+        self: Ast,
+        span_value: Span,
+        op: PrefixOp,
+        right: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::Prefix(PrefixNode {
+            op: op,
+            right: right
+        }));
+    }
+
     fn add_binary(
         self: Ast,
         span_value: Span,
@@ -290,6 +460,20 @@ impl Ast {
             op: op,
             left: left,
             right: right
+        }));
+    }
+
+    fn add_field_expr(
+        self: Ast,
+        span_value: Span,
+        receiver: NodeId,
+        name: NodeId,
+        namespace: bool
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::FieldExpr(FieldExprNode {
+            receiver: receiver,
+            name: name,
+            namespace: namespace
         }));
     }
 
@@ -305,9 +489,56 @@ impl Ast {
         }));
     }
 
+    fn add_try_expr(self: Ast, span_value: Span, value: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::TryExpr(TryExprNode {
+            value: value
+        }));
+    }
+
+    fn add_comptime_expr(self: Ast, span_value: Span, value: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::ComptimeExpr(ComptimeExprNode {
+            value: value
+        }));
+    }
+
     fn add_block(self: Ast, span_value: Span, statements: ChildRange) -> NodeId {
         return self.add_node(span_value, AstData::Block(BlockNode {
             statements: statements
+        }));
+    }
+
+    fn add_if(
+        self: Ast,
+        span_value: Span,
+        condition: NodeId,
+        then_block: NodeId,
+        else_block: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::If(IfNode {
+            condition: condition,
+            then_block: then_block,
+            else_block: else_block
+        }));
+    }
+
+    fn add_let(
+        self: Ast,
+        span_value: Span,
+        mutable: bool,
+        name: NodeId,
+        value: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::Let(LetNode {
+            mutable: mutable,
+            name: name,
+            value: value
+        }));
+    }
+
+    fn add_assign(self: Ast, span_value: Span, target: NodeId, value: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::Assign(AssignNode {
+            target: target,
+            value: value
         }));
     }
 
@@ -320,6 +551,50 @@ impl Ast {
     fn add_expr_stmt(self: Ast, span_value: Span, expr: NodeId) -> NodeId {
         return self.add_node(span_value, AstData::ExprStmt(ExprStmtNode {
             expr: expr
+        }));
+    }
+
+    fn add_while(
+        self: Ast,
+        span_value: Span,
+        label: NodeId,
+        condition: NodeId,
+        body: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::While(WhileNode {
+            label: label,
+            condition: condition,
+            body: body
+        }));
+    }
+
+    fn add_for(
+        self: Ast,
+        span_value: Span,
+        label: NodeId,
+        name: NodeId,
+        start: NodeId,
+        end: NodeId,
+        body: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::For(ForNode {
+            label: label,
+            name: name,
+            start: start,
+            end: end,
+            body: body
+        }));
+    }
+
+    fn add_break(self: Ast, span_value: Span, label: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::Break(BreakNode {
+            label: label
+        }));
+    }
+
+    fn add_continue(self: Ast, span_value: Span, label: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::Continue(ContinueNode {
+            label: label
         }));
     }
 
@@ -356,10 +631,37 @@ impl Ast {
         }));
     }
 
-    fn add_match_arm(self: Ast, span_value: Span, pattern: SymbolId, body: NodeId) -> NodeId {
+    fn add_match_arm(
+        self: Ast,
+        span_value: Span,
+        pattern: NodeId,
+        binding: NodeId,
+        body: NodeId
+    ) -> NodeId {
         return self.add_node(span_value, AstData::MatchArm(MatchArmNode {
             pattern: pattern,
+            binding: binding,
             body: body
+        }));
+    }
+
+    fn add_unsafe(self: Ast, span_value: Span, body: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::Unsafe(UnsafeNode {
+            body: body
+        }));
+    }
+
+    fn add_comptime_if(
+        self: Ast,
+        span_value: Span,
+        condition: NodeId,
+        then_block: NodeId,
+        else_block: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::ComptimeIf(ComptimeIfNode {
+            condition: condition,
+            then_block: then_block,
+            else_block: else_block
         }));
     }
 
