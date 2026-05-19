@@ -62,6 +62,11 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 
 // Run registers top-level declarations and calls main.
 func (i *Interpreter) Run(program *ast.Program) error {
+	return i.RunEntry(program, "main")
+}
+
+// RunEntry registers top-level declarations and calls entry.
+func (i *Interpreter) RunEntry(program *ast.Program, entry string) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.EnumDecl:
@@ -79,7 +84,7 @@ func (i *Interpreter) Run(program *ast.Program) error {
 			continue
 		}
 	}
-	value, err := i.callFunction("main", nil)
+	value, err := i.callFunction(entry, nil)
 	if err != nil {
 		return err
 	}

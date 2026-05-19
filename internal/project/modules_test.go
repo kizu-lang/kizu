@@ -3,6 +3,7 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -31,6 +32,9 @@ func TestModuleConformanceFixture(t *testing.T) {
 	}
 	for _, module := range graph.Modules {
 		parseConformanceModule(t, module)
+	}
+	if err := CheckGraph(graph); err != nil {
+		t.Fatalf("check graph failed: %v", err)
 	}
 }
 
@@ -88,6 +92,79 @@ func TestResolveModulesRejectsDuplicateModulePaths(t *testing.T) {
 	}
 }
 
+// TestCheckGraphRejectsMissingImport checks imported modules must exist.
+func TestCheckGraphRejectsMissingImport(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::missing;
+
+fn main(value: missing::Token) -> void {
+    return;
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "missing import `app::missing`") {
+		t.Fatalf("got error %v, want missing import", err)
+	}
+}
+
+// TestCheckGraphRejectsDuplicateImportAlias checks ambiguous last segments.
+func TestCheckGraphRejectsDuplicateImportAlias(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+import app::parser::lexer;
+
+fn main(value: lexer::Token) -> void {
+    return;
+}
+`,
+		"src/lexer.kizu":        "pub struct Token { pub value: i64; }",
+		"src/parser/lexer.kizu": "pub struct Token { pub value: i64; }",
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "duplicate import alias `lexer`") {
+		t.Fatalf("got error %v, want duplicate import alias", err)
+	}
+}
+
+// TestCheckGraphRejectsImportShadowing checks local names cannot hide imports.
+func TestCheckGraphRejectsImportShadowing(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+
+struct lexer {
+    pub value: i64;
+}
+
+fn main() -> void {
+    return;
+}
+`,
+		"src/lexer.kizu": "pub struct Token { pub value: i64; }",
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "declaration `lexer` shadows import") {
+		t.Fatalf("got error %v, want import shadowing", err)
+	}
+}
+
+// TestCheckGraphRejectsPrivateImportedType checks module visibility boundaries.
+func TestCheckGraphRejectsPrivateImportedType(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::lexer;
+
+fn main(value: lexer::Token) -> void {
+    return;
+}
+`,
+		"src/lexer.kizu": "struct Token { pub value: i64; }",
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "type `lexer::Token` is private") {
+		t.Fatalf("got error %v, want private imported type", err)
+	}
+}
+
 // writeFile creates an empty source file under root.
 func writeFile(t *testing.T, root string, rel string) {
 	t.Helper()
@@ -98,6 +175,55 @@ func writeFile(t *testing.T, root string, rel string) {
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// moduleFixture writes a minimal package manifest and source files.
+func moduleFixture(t *testing.T, sources map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	manifest := `[package]
+name = "app"
+version = "0.2.0"
+
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+`
+	writeFileContent(t, root, "kizu.toml", manifest)
+	for path, source := range sources {
+		writeFileContent(t, root, path, source)
+	}
+	return root
+}
+
+// writeFileContent creates one source file with contents under root.
+func writeFileContent(t *testing.T, root string, rel string, source string) {
+	t.Helper()
+	path := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkTempModuleGraph parses the temp manifest, resolves modules, and checks it.
+func checkTempModuleGraph(t *testing.T, root string) error {
+	t.Helper()
+	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ParseManifest(string(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolveModules(root, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CheckGraph(graph)
 }
 
 // modulePaths returns only module path strings.

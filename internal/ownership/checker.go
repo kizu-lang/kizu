@@ -772,6 +772,9 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 		return c.moveStructLiteralExpr(st, env)
 	}
 	if field, ok := expr.(*ast.FieldExpr); ok {
+		if field.Namespace {
+			return c.readFieldExpr(field, env)
+		}
 		return c.moveFieldExpr(field, env)
 	}
 	if stmt, ok := expr.(*ast.IfStmt); ok {
