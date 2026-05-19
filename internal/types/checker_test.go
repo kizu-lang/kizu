@@ -910,6 +910,26 @@ func TestCheckAcceptsErrorFromStringView(t *testing.T) {
 	}
 }
 
+// TestCheckAcceptsTypedErrorCast checks explicit untyped-to-typed error mapping.
+func TestCheckAcceptsTypedErrorCast(t *testing.T) {
+	source := `union CompileError {
+    Message([]const u8);
+}
+fn lower(ok: bool) -> !i64 {
+    if ok {
+        return 1;
+    }
+    return error("bad");
+}
+fn parse(ok: bool) -> CompileError!i64 {
+    let value = try cast<CompileError!i64>(lower(ok));
+    return value;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsTryErrors checks readable error propagation errors.
 func TestCheckRejectsTryErrors(t *testing.T) {
 	cases := []struct {
@@ -940,6 +960,19 @@ fn main() {
     return error(1);
 }`,
 			want: "`error` expects []const u8",
+		},
+		{
+			name: "typed cast requires message variant",
+			source: `union CompileError {
+    Diagnostic(i64);
+}
+fn lower() -> !i64 {
+    return error("bad");
+}
+fn parse() -> CompileError!i64 {
+    return try cast<CompileError!i64>(lower());
+}`,
+			want: "typed error cast requires CompileError::Message([]const u8)",
 		},
 	}
 	runErrorCases(t, cases)

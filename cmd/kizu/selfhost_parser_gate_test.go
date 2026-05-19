@@ -13,6 +13,8 @@ parser-declarations
 2
 parser-diagnostics
 0
+parser-typed-diagnostics
+1
 `
 
 // TestSelfhostParserGate executes the Kizu-owned parser oracle entry.

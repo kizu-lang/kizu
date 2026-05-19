@@ -1037,6 +1037,9 @@ fn main() -> ConfigError!void {
 * `ErrorType!T` は typed error union を表す
 * `ErrorType!T` では `ErrorType` または `T` を返せる
 * `try` は同じ `ErrorType` の error union だけを伝播できる
+* `cast<ErrorType!T>(expr)` は `expr: !T` を明示的に typed error union へ変換できる
+* typed error cast は `ErrorType::Message([]const u8)` variant がある場合だけ有効で、
+  untyped error message をその variant に包む
 * `!T` 関数では `T` を返すと成功値として扱う
 * `error(message)` は `!T` を返す関数内でだけ使える
 * `error(message)` は typed error union では使えない

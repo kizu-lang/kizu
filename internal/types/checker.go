@@ -2672,6 +2672,9 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe bool) (Ty
 	if err != nil {
 		return "", err
 	}
+	if ok, err := c.checkErrorUnionCast(source, target); ok || err != nil {
+		return target, err
+	}
 	if numericTypes[source] && numericTypes[target] {
 		return target, nil
 	}
@@ -2682,6 +2685,34 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe bool) (Ty
 		return target, nil
 	}
 	return "", fmt.Errorf("type error: cannot cast %s to %s", source, target)
+}
+
+// checkErrorUnionCast validates explicit untyped-to-typed error adaptation.
+func (c *Checker) checkErrorUnionCast(source Type, target Type) (bool, error) {
+	targetError, targetSuccess, targetOK := errorUnionParts(target)
+	if !targetOK || targetError == "" {
+		return false, nil
+	}
+	sourceError, sourceSuccess, sourceOK := errorUnionParts(source)
+	if !sourceOK || sourceError != "" || !sameType(Type(sourceSuccess), Type(targetSuccess)) {
+		return false, nil
+	}
+	if !c.unionHasMessageVariant(targetError) {
+		return true, fmt.Errorf(
+			"type error: typed error cast requires %s::Message([]const u8)",
+			targetError,
+		)
+	}
+	return true, nil
+}
+
+// unionHasMessageVariant reports whether a union can hold an untyped error message.
+func (c *Checker) unionHasMessageVariant(name string) bool {
+	union := c.unions[name]
+	if union == nil {
+		return false
+	}
+	return sameType(Type(union.variants["Message"]), typeByteString)
 }
 
 // checkTryExpr validates error-union propagation and returns the success type.
