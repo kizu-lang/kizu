@@ -4482,6 +4482,9 @@ func (c *Checker) isCopyType(typeName string) bool {
 	if isAstNodeIDType(typeName) || isAstScalarType(typeName) {
 		return true
 	}
+	if isDiagnosticScalarType(typeName) {
+		return true
+	}
 	if eraseOwnershipLifetimes(typeName) == "[]const u8" {
 		return true
 	}
@@ -4498,6 +4501,16 @@ func (c *Checker) isCopyType(typeName string) bool {
 	case "bool", "void", "Io", "Allocator", "std::fs::Metadata",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64", "[]const u8":
+		return true
+	default:
+		return false
+	}
+}
+
+// isDiagnosticScalarType reports copyable compiler diagnostic metadata.
+func isDiagnosticScalarType(typeName string) bool {
+	switch typeName {
+	case "std::kizu::diagnostic::FileSpan", "std::kizu::diagnostic::RelatedSpan":
 		return true
 	default:
 		return false

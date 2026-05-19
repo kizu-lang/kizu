@@ -4157,6 +4157,9 @@ func (c *Checker) checkStructLiteralExpr(
 		if !ok {
 			return "", fmt.Errorf("type error: missing field `%s.%s`", expr.TypeName, field.Name)
 		}
+		if err := c.checkPrivateFieldAccess(expr.TypeName, field); err != nil {
+			return "", err
+		}
 		want := fieldDeclaredType(field)
 		if !sameType(got, want) &&
 			!c.returnValueMatchesBorrowParam(exprs[field.Name], env, want, got) {
@@ -4203,13 +4206,52 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 	}
 	for _, field := range decl.Fields {
 		if field.Name == expr.Name {
-			if !field.Public && isStdType(receiver) && !c.currentStd {
-				return "", fmt.Errorf("type error: field `%s.%s` is private", receiver, expr.Name)
+			if err := c.checkPrivateFieldAccess(string(receiver), field); err != nil {
+				return "", err
 			}
 			return Type(field.TypeName), nil
 		}
 	}
 	return "", fmt.Errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+}
+
+// checkPrivateFieldAccess enforces std and user module field visibility.
+func (c *Checker) checkPrivateFieldAccess(typeName string, field ast.Field) error {
+	if field.Public {
+		return nil
+	}
+	if isStdType(Type(typeName)) {
+		if c.currentStd {
+			return nil
+		}
+		return fmt.Errorf("type error: field `%s.%s` is private", typeName, field.Name)
+	}
+	if c.sameUserModule(typeName) {
+		return nil
+	}
+	return fmt.Errorf("type error: field `%s.%s` is private", typeName, field.Name)
+}
+
+// sameUserModule reports whether the current function belongs to typeName's module.
+func (c *Checker) sameUserModule(typeName string) bool {
+	typeModule, ok := userModulePath(typeName)
+	if !ok {
+		return true
+	}
+	if c.currentFunction == nil {
+		return false
+	}
+	fnModule, ok := userModulePath(c.currentFunction.name)
+	return ok && fnModule == typeModule
+}
+
+// userModulePath returns the module prefix for package-qualified user names.
+func userModulePath(name string) (string, bool) {
+	index := strings.LastIndex(name, "::")
+	if index < 0 {
+		return "", false
+	}
+	return name[:index], true
 }
 
 // checkFsMetadataField returns builtin metadata field types.
@@ -5664,6 +5706,9 @@ func (c *Checker) isCopyType(typ Type) bool {
 	if isAstNodeIDType(typ) || isAstScalarType(typ) {
 		return true
 	}
+	if isDiagnosticScalarType(typ) {
+		return true
+	}
 	if typ == "ParseNode" || typ == "std::kizu::parser::ParseNode" {
 		return true
 	}
@@ -5728,6 +5773,16 @@ func isAstScalarType(typ Type) bool {
 		"BinaryOp", "std::kizu::ast::BinaryOp",
 		"ChildRange", "std::kizu::ast::ChildRange",
 		"std::kizu::lexer::Token":
+		return true
+	default:
+		return false
+	}
+}
+
+// isDiagnosticScalarType reports copyable compiler diagnostic metadata.
+func isDiagnosticScalarType(typ Type) bool {
+	switch typ {
+	case "std::kizu::diagnostic::FileSpan", "std::kizu::diagnostic::RelatedSpan":
 		return true
 	default:
 		return false

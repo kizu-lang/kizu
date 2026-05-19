@@ -190,7 +190,7 @@ func (i *Interpreter) callFunctionExpr(
 	}
 	result, returned, err := i.evalBlock(fn.Body, env)
 	if err != nil || returned {
-		return result, err
+		return wrapTypedErrorReturn(fn.ReturnType, result), err
 	}
 	return voidValue(), nil
 }

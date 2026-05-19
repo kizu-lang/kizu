@@ -26,7 +26,7 @@ func TestModuleConformanceFixture(t *testing.T) {
 		t.Fatalf("resolve failed: %v", err)
 	}
 	got := modulePaths(graph.Modules)
-	want := []string{"app", "app::lexer", "app::parser::ast"}
+	want := []string{"app", "app::lexer", "app::parser::ast", "app::token"}
 	if !sameStrings(got, want) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
@@ -162,6 +162,139 @@ fn main(value: lexer::Token) -> void {
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "type `lexer::Token` is private") {
 		t.Fatalf("got error %v, want private imported type", err)
+	}
+}
+
+// TestCheckGraphAllowsCrossModuleTokenReferences covers self-host token shapes.
+func TestCheckGraphAllowsCrossModuleTokenReferences(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::token;
+
+struct Parser {
+    pub current: token::Token;
+}
+
+fn accept(value: token::Token) -> token::Token {
+    return value;
+}
+
+fn main() -> void {
+    let current = token::make(1);
+    let parser = Parser { current: current };
+    let next = accept(parser.current);
+    print(next.kind);
+    return;
+}
+`,
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64;
+}
+
+pub fn make(kind: i64) -> Token {
+    return Token { kind: kind };
+}
+`,
+	})
+	if err := checkTempModuleGraph(t, root); err != nil {
+		t.Fatalf("check graph failed: %v", err)
+	}
+}
+
+// TestCheckGraphRejectsPrivateImportedFunction checks top-level visibility.
+func TestCheckGraphRejectsPrivateImportedFunction(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::token;
+
+fn main() -> void {
+    let current = token::make(1);
+    print(current.kind);
+    return;
+}
+`,
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64;
+}
+
+fn make(kind: i64) -> Token {
+    return Token { kind: kind };
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "function `token::make` is private") {
+		t.Fatalf("got error %v, want private imported function", err)
+	}
+}
+
+// TestCheckGraphRejectsUnknownImportedFunction checks missing imported members.
+func TestCheckGraphRejectsUnknownImportedFunction(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::token;
+
+fn main() -> void {
+    let current = token::missing(1);
+    print(current.kind);
+    return;
+}
+`,
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64;
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "unknown function `token::missing`") {
+		t.Fatalf("got error %v, want unknown imported function", err)
+	}
+}
+
+// TestCheckGraphRejectsPrivateImportedFieldConstruction checks struct literals.
+func TestCheckGraphRejectsPrivateImportedFieldConstruction(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::token;
+
+fn main() -> void {
+    let current = token::Token { kind: 1, secret: 2 };
+    print(current.kind);
+    return;
+}
+`,
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64;
+    secret: i64;
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "field `app::token::Token.secret` is private") {
+		t.Fatalf("got error %v, want private imported field construction", err)
+	}
+}
+
+// TestCheckGraphRejectsPrivateImportedFieldAccess checks external field reads.
+func TestCheckGraphRejectsPrivateImportedFieldAccess(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": `import app::token;
+
+fn main() -> void {
+    let current = token::make();
+    print(current.secret);
+    return;
+}
+`,
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64;
+    secret: i64;
+}
+
+pub fn make() -> Token {
+    return Token { kind: 1, secret: 2 };
+}
+`,
+	})
+	err := checkTempModuleGraph(t, root)
+	if err == nil || !strings.Contains(err.Error(), "field `app::token::Token.secret` is private") {
+		t.Fatalf("got error %v, want private imported field access", err)
 	}
 }
 

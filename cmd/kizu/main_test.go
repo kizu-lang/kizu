@@ -110,6 +110,34 @@ func TestTestPackageCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestRunCompilerPhasesPackageSmoke checks self-host phase-shaped APIs.
+func TestRunCompilerPhasesPackageSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/compiler_phases")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if string(out) != "7\n" {
+		t.Fatalf("got %q, want compiler phase output", out)
+	}
+}
+
+// TestRunCompilerPhasesStopsAfterParseError checks try prevents later phases.
+func TestRunCompilerPhasesStopsAfterParseError(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/compiler_phases_fail")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected command to fail\n%s", out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "app::parser::CompileError::Message") {
+		t.Fatalf("got %q, want typed parser error", out)
+	}
+	if strings.Contains(text, "lowered") {
+		t.Fatalf("got %q, want lowering output to be skipped", out)
+	}
+}
+
 // TestResolveStdModulesIncludesTransitiveStdSourceDeps checks std source dependencies.
 func TestResolveStdModulesIncludesTransitiveStdSourceDeps(t *testing.T) {
 	got, err := resolveStdModules(`fn main() {
