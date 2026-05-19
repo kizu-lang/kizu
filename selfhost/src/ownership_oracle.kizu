@@ -1,0 +1,111 @@
+import selfhost::ownership;
+
+pub fn gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var states = std::map::Map<[]const u8, ownership::OwnershipState>(allocator);
+    var kinds = std::map::Map<[]const u8, ownership::ResourceKind>(allocator);
+
+    try ownership::declare_resource(states, kinds, "value", ownership::ResourceKind::Value);
+    try ownership::declare_resource(states, kinds, "tokens", ownership::ResourceKind::Array);
+    try ownership::declare_resource(states, kinds, "symbols", ownership::ResourceKind::Map);
+    try ownership::declare_resource(states, kinds, "buffer", ownership::ResourceKind::String);
+    try ownership::declare_resource(states, kinds, "arena", ownership::ResourceKind::Arena);
+    try ownership::declare_resource(states, kinds, "node", ownership::ResourceKind::Handle);
+    try ownership::declare_resource(
+        states,
+        kinds,
+        "slice",
+        ownership::ResourceKind::BorrowedView
+    );
+
+    try ownership::shared_borrow(states, "tokens");
+    try ownership::release_borrow(states, "tokens");
+    try ownership::mut_borrow(states, "symbols");
+    try ownership::release_borrow(states, "symbols");
+    try ownership::move_value(states, "node");
+    try ownership::deinit_resource(states, "buffer");
+
+    try expect_resources(states, kinds);
+    try expect_diagnostics(allocator);
+
+    let summary = ownership::summarize(states, 2, 4);
+    try std::testing::expect_equal_i64(7, summary.resources);
+    try std::testing::expect_equal_i64(7, summary.checked_nodes);
+    try std::testing::expect_equal_i64(2, summary.borrows);
+    try std::testing::expect_equal_i64(4, summary.errors);
+
+    states.deinit();
+    kinds.deinit();
+
+    print("ownership-resources");
+    print(summary.resources);
+    print("ownership-borrows");
+    print(summary.borrows);
+    print("ownership-errors");
+    print(summary.errors);
+    return;
+}
+
+fn expect_resources(
+    states: &std::map::Map<[]const u8, ownership::OwnershipState>,
+    kinds: &std::map::Map<[]const u8, ownership::ResourceKind>
+) -> !void {
+    let tokens = try ownership::kind_of(kinds, "tokens");
+    try std::testing::expect_equal_bool(true, tokens == ownership::ResourceKind::Array);
+    let symbols = try ownership::kind_of(kinds, "symbols");
+    try std::testing::expect_equal_bool(true, symbols == ownership::ResourceKind::Map);
+    let buffer = try ownership::kind_of(kinds, "buffer");
+    try std::testing::expect_equal_bool(true, buffer == ownership::ResourceKind::String);
+    let arena = try ownership::kind_of(kinds, "arena");
+    try std::testing::expect_equal_bool(true, arena == ownership::ResourceKind::Arena);
+    let node_kind = try ownership::kind_of(kinds, "node");
+    try std::testing::expect_equal_bool(true, node_kind == ownership::ResourceKind::Handle);
+    let slice = try ownership::kind_of(kinds, "slice");
+    try std::testing::expect_equal_bool(true, slice == ownership::ResourceKind::BorrowedView);
+
+    let tokens_state = try ownership::state_of(states, "tokens");
+    try std::testing::expect_equal_bool(true, tokens_state == ownership::OwnershipState::Available);
+    let symbols_state = try ownership::state_of(states, "symbols");
+    try std::testing::expect_equal_bool(true, symbols_state == ownership::OwnershipState::Available);
+    let node = try ownership::state_of(states, "node");
+    try std::testing::expect_equal_bool(true, node == ownership::OwnershipState::Moved);
+    let buffer_state = try ownership::state_of(states, "buffer");
+    try std::testing::expect_equal_bool(
+        true,
+        buffer_state == ownership::OwnershipState::Deinitialized
+    );
+    return;
+}
+
+fn expect_diagnostics(allocator: Allocator) -> !void {
+    var moved = ownership::use_after_move(allocator, "selfhost/src/ownership.kizu", 5, 9);
+    try expect_diagnostic(moved, "use after move", 5, 9);
+
+    var alias = ownership::mutable_alias(allocator, "selfhost/src/ownership.kizu", 11, 18);
+    try expect_diagnostic(alias, "mutable alias", 11, 18);
+
+    var dangling = ownership::dangling_borrow(allocator, "selfhost/src/ownership.kizu", 20, 29);
+    try expect_diagnostic(dangling, "dangling borrow", 20, 29);
+
+    var deinit = ownership::deinit_while_borrowed(
+        allocator,
+        "selfhost/src/ownership.kizu",
+        31,
+        43
+    );
+    try expect_diagnostic(deinit, "deinit while borrowed", 31, 43);
+    return;
+}
+
+fn expect_diagnostic(
+    diagnostic: std::kizu::diagnostic::Diagnostic,
+    message: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> !void {
+    try std::testing::expect_equal_bytes(message, diagnostic.message);
+    try std::testing::expect_equal_i64(byte_start, diagnostic.primary.byte_start);
+    try std::testing::expect_equal_i64(byte_end, diagnostic.primary.byte_end);
+    diagnostic.deinit();
+    return;
+}

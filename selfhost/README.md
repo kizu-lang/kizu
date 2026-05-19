@@ -15,6 +15,7 @@ The package currently defines these source-owned modules:
 - `selfhost::types`
 - `selfhost::types_oracle`
 - `selfhost::ownership`
+- `selfhost::ownership_oracle`
 - `selfhost::ir`
 - `selfhost::backend`
 
@@ -39,6 +40,10 @@ cycles.
 The type checker boundary uses explicit type-kind, arity, and copyability maps.
 The oracle covers primitive, function, struct, union, enum, error-union,
 optional, and std-container seed shapes plus stable diagnostic spans.
+
+The ownership boundary uses explicit resource-kind and ownership-state maps. The
+oracle covers value, array, map, string, arena, handle, and borrowed-view seed
+shapes plus stable memory-safety diagnostic spans.
 
 Check the package with:
 
