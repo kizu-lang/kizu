@@ -1,28 +1,331 @@
+pub struct SourceFile {
+    pub path: []const u8;
+    pub text: []const u8;
+}
+
 pub struct Span {
     pub start: i64;
     pub end: i64;
 }
 
-pub union Node {
-    FnDecl(Span)
-    Ident(Span)
+pub struct TokenId {
+    pub raw: i64;
+}
+
+pub struct SymbolId {
+    pub raw: i64;
+}
+
+pub enum BinaryOp {
+    Add
+}
+
+pub struct ChildRange {
+    pub start: i64;
+    pub len: i64;
+}
+
+pub struct NodeId {
+    raw: handle<std::kizu::ast::AstNode>;
+}
+
+pub struct Ast {
+    nodes: arena<std::kizu::ast::AstNode>;
+    children: std::array::Array<std::kizu::ast::NodeId>;
+    source: SourceFile;
+}
+
+pub struct AstNode {
+    pub span: Span;
+    pub data: AstData;
+}
+
+pub union AstData {
+    Int(IntNode)
+    Var(VarNode)
+    Binary(BinaryNode)
+    Call(CallNode)
+    Block(BlockNode)
+    If(IfNode)
+    Let(LetNode)
+    Return(ReturnNode)
+    Param(ParamNode)
+    Field(FieldNode)
+    StructDecl(StructDeclNode)
+    Match(MatchNode)
+    MatchArm(MatchArmNode)
+    FnDecl(FnDeclNode)
     Empty
 }
 
-pub fn fn_decl(name_start: i64, name_end: i64) -> Node {
-    return Node::FnDecl(Span {
-        start: name_start,
-        end: name_end
-    });
+pub struct IntNode {
+    pub token: TokenId;
 }
 
-pub fn ident(start: i64, end: i64) -> Node {
-    return Node::Ident(Span {
+pub struct VarNode {
+    pub name: SymbolId;
+}
+
+pub struct BinaryNode {
+    pub op: BinaryOp;
+    pub left: NodeId;
+    pub right: NodeId;
+}
+
+pub struct CallNode {
+    pub callee: NodeId;
+    pub args: ChildRange;
+}
+
+pub struct BlockNode {
+    pub statements: ChildRange;
+}
+
+pub struct IfNode {
+    pub condition: NodeId;
+    pub then_block: NodeId;
+    pub else_block: NodeId;
+}
+
+pub struct LetNode {
+    pub name: SymbolId;
+    pub value: NodeId;
+}
+
+pub struct ReturnNode {
+    pub value: NodeId;
+}
+
+pub struct ParamNode {
+    pub name: SymbolId;
+}
+
+pub struct FieldNode {
+    pub name: SymbolId;
+    pub value: NodeId;
+}
+
+pub struct StructDeclNode {
+    pub name: SymbolId;
+    pub fields: ChildRange;
+}
+
+pub struct MatchNode {
+    pub value: NodeId;
+    pub arms: ChildRange;
+}
+
+pub struct MatchArmNode {
+    pub pattern: SymbolId;
+    pub body: NodeId;
+}
+
+pub struct FnDeclNode {
+    pub name: NodeId;
+    pub params: ChildRange;
+    pub body: NodeId;
+}
+
+pub struct ParseResult {
+    pub ast: Ast;
+    pub root: NodeId;
+}
+
+pub fn Ast(allocator: Allocator, source: SourceFile) -> Ast {
+    return Ast {
+        nodes: arena<AstNode>(),
+        children: std::array::Array<NodeId>(allocator),
+        source: source
+    };
+}
+
+pub fn source_file(path: []const u8, text: []const u8) -> SourceFile {
+    return SourceFile {
+        path: path,
+        text: text
+    };
+}
+
+pub fn parse_result(ast: Ast, root: NodeId) -> ParseResult {
+    return ParseResult {
+        ast: ast,
+        root: root
+    };
+}
+
+pub fn token_id(raw: i64) -> TokenId {
+    return TokenId {
+        raw: raw
+    };
+}
+
+pub fn symbol_id(raw: i64) -> SymbolId {
+    return SymbolId {
+        raw: raw
+    };
+}
+
+pub fn span(start: i64, end: i64) -> Span {
+    return Span {
         start: start,
         end: end
-    });
+    };
 }
 
-pub fn empty() -> Node {
-    return Node::Empty;
+pub fn binary_add() -> BinaryOp {
+    return BinaryOp::Add;
+}
+
+impl Ast {
+    fn add_node(self: Ast, span_value: Span, data: AstData) -> NodeId {
+        let raw = self.nodes.add(AstNode {
+            span: span_value,
+            data: data
+        });
+        return NodeId {
+            raw: raw
+        };
+    }
+
+    fn get(self: Ast, id: NodeId) -> AstNode {
+        return self.nodes.get(id.raw);
+    }
+
+    fn len(self: Ast) -> i64 {
+        return self.children.len();
+    }
+
+    fn begin_children(self: Ast) -> i64 {
+        return self.children.len();
+    }
+
+    fn add_child(self: Ast, child: NodeId) -> !void {
+        try self.children.append(child);
+        return;
+    }
+
+    fn finish_children(self: Ast, start: i64) -> ChildRange {
+        return ChildRange {
+            start: start,
+            len: self.children.len() - start
+        };
+    }
+
+    fn child_at(self: Ast, range: ChildRange, index: i64) -> !NodeId {
+        if index < 0 or index >= range.len {
+            return error("child index out of bounds");
+        }
+        return self.children.get(range.start + index);
+    }
+
+    fn deinit(self: Ast) -> void {
+        self.children.deinit();
+    }
+
+    fn add_int(self: Ast, span_value: Span, token: TokenId) -> NodeId {
+        return self.add_node(span_value, AstData::Int(IntNode {
+            token: token
+        }));
+    }
+
+    fn add_var(self: Ast, span_value: Span, name: SymbolId) -> NodeId {
+        return self.add_node(span_value, AstData::Var(VarNode {
+            name: name
+        }));
+    }
+
+    fn add_binary(
+        self: Ast,
+        span_value: Span,
+        op: BinaryOp,
+        left: NodeId,
+        right: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::Binary(BinaryNode {
+            op: op,
+            left: left,
+            right: right
+        }));
+    }
+
+    fn add_call(
+        self: Ast,
+        span_value: Span,
+        callee: NodeId,
+        args: ChildRange
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::Call(CallNode {
+            callee: callee,
+            args: args
+        }));
+    }
+
+    fn add_block(self: Ast, span_value: Span, statements: ChildRange) -> NodeId {
+        return self.add_node(span_value, AstData::Block(BlockNode {
+            statements: statements
+        }));
+    }
+
+    fn add_return(self: Ast, span_value: Span, value: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::Return(ReturnNode {
+            value: value
+        }));
+    }
+
+    fn add_param(self: Ast, span_value: Span, name: SymbolId) -> NodeId {
+        return self.add_node(span_value, AstData::Param(ParamNode {
+            name: name
+        }));
+    }
+
+    fn add_field(self: Ast, span_value: Span, name: SymbolId, value: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::Field(FieldNode {
+            name: name,
+            value: value
+        }));
+    }
+
+    fn add_struct_decl(
+        self: Ast,
+        span_value: Span,
+        name: SymbolId,
+        fields: ChildRange
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::StructDecl(StructDeclNode {
+            name: name,
+            fields: fields
+        }));
+    }
+
+    fn add_match(self: Ast, span_value: Span, value: NodeId, arms: ChildRange) -> NodeId {
+        return self.add_node(span_value, AstData::Match(MatchNode {
+            value: value,
+            arms: arms
+        }));
+    }
+
+    fn add_match_arm(self: Ast, span_value: Span, pattern: SymbolId, body: NodeId) -> NodeId {
+        return self.add_node(span_value, AstData::MatchArm(MatchArmNode {
+            pattern: pattern,
+            body: body
+        }));
+    }
+
+    fn add_fn_decl(
+        self: Ast,
+        span_value: Span,
+        name: NodeId,
+        params: ChildRange,
+        body: NodeId
+    ) -> NodeId {
+        return self.add_node(span_value, AstData::FnDecl(FnDeclNode {
+            name: name,
+            params: params,
+            body: body
+        }));
+    }
+
+    fn add_empty(self: Ast, at: i64) -> NodeId {
+        return self.add_node(std::kizu::ast::span(at, at), AstData::Empty);
+    }
 }

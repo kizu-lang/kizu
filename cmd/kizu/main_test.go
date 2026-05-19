@@ -143,13 +143,15 @@ func TestResolveStdModulesOrdersTestingDeps(t *testing.T) {
 // TestResolveStdModulesOrdersNestedKizuDeps checks nested std modules and deps.
 func TestResolveStdModulesOrdersNestedKizuDeps(t *testing.T) {
 	got, err := resolveStdModules(`fn main() -> !void {
-    let node = try std::kizu::parser::parse_first_node("fn main");
+    let allocator = std::mem::page_allocator();
+    let source = std::kizu::ast::source_file("main.kizu", "fn main");
+    let node = try std::kizu::parser::parse_first_node(allocator, source);
     return;
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kizu::ast", "mem", "kizu::lexer", "kizu::parser"}
+	want := []string{"mem", "array", "kizu::ast", "kizu::lexer", "kizu::parser"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v, want %v", got, want)
 	}

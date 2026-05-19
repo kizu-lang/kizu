@@ -2326,6 +2326,9 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 		return nil
 	}
 	seen[typ] = true
+	if isAstNodeIDType(typ) {
+		return nil
+	}
 	if isPointerType(typ) {
 		return fmt.Errorf("type error: Array element cannot be raw pointer in v0.2")
 	}
@@ -4809,10 +4812,52 @@ func isPointerType(typ Type) bool {
 
 // isCopyType reports whether values of typ can be duplicated in v0.1 safe code.
 func (c *Checker) isCopyType(typ Type) bool {
+	if isAstNodeIDType(typ) || isAstScalarType(typ) {
+		return true
+	}
+	if typ == "ParseNode" || typ == "std::kizu::parser::ParseNode" {
+		return true
+	}
 	if c.enums[string(typ)] != nil {
 		return true
 	}
 	return copyTypes[typ]
+}
+
+// isAstNodeIDType reports the selfhost AST id wrapper allowed in child lists.
+func isAstNodeIDType(typ Type) bool {
+	return typ == "NodeId" || typ == "std::kizu::ast::NodeId"
+}
+
+// isAstScalarType reports small selfhost AST metadata wrappers with copy fields.
+func isAstScalarType(typ Type) bool {
+	switch typ {
+	case "SourceFile", "std::kizu::ast::SourceFile",
+		"AstNode", "std::kizu::ast::AstNode",
+		"AstData", "std::kizu::ast::AstData",
+		"IntNode", "std::kizu::ast::IntNode",
+		"VarNode", "std::kizu::ast::VarNode",
+		"BinaryNode", "std::kizu::ast::BinaryNode",
+		"CallNode", "std::kizu::ast::CallNode",
+		"BlockNode", "std::kizu::ast::BlockNode",
+		"IfNode", "std::kizu::ast::IfNode",
+		"LetNode", "std::kizu::ast::LetNode",
+		"ReturnNode", "std::kizu::ast::ReturnNode",
+		"ParamNode", "std::kizu::ast::ParamNode",
+		"FieldNode", "std::kizu::ast::FieldNode",
+		"StructDeclNode", "std::kizu::ast::StructDeclNode",
+		"MatchNode", "std::kizu::ast::MatchNode",
+		"MatchArmNode", "std::kizu::ast::MatchArmNode",
+		"FnDeclNode", "std::kizu::ast::FnDeclNode",
+		"Span", "std::kizu::ast::Span",
+		"TokenId", "std::kizu::ast::TokenId",
+		"SymbolId", "std::kizu::ast::SymbolId",
+		"ChildRange", "std::kizu::ast::ChildRange",
+		"std::kizu::lexer::Token":
+		return true
+	default:
+		return false
+	}
 }
 
 // isAtomicSupportedType reports whether Atomic<T> is available in v0.1.
