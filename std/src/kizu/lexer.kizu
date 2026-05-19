@@ -65,17 +65,30 @@ pub struct Token {
     pub kind: std::kizu::lexer::TokenKind;
     pub start: i64;
     pub end: i64;
+    pub line: i64;
+    pub column: i64;
+}
+
+struct Position {
+    line: i64;
+    column: i64;
 }
 
 pub fn first_token(source: []const u8) -> std::kizu::lexer::Token {
-    return std::kizu::lexer::token_at(source, 0);
+    return std::kizu::lexer::token_at(source, 0, std::kizu::lexer::position(1, 1));
 }
 
 pub fn next_token(
     source: []const u8,
     previous: std::kizu::lexer::Token
 ) -> std::kizu::lexer::Token {
-    return std::kizu::lexer::token_at(source, previous.end);
+    let next = std::kizu::lexer::advance_position(
+        source,
+        previous.start,
+        previous.end,
+        std::kizu::lexer::position(previous.line, previous.column)
+    );
+    return std::kizu::lexer::token_at(source, previous.end, next);
 }
 
 pub fn tokenize(
@@ -92,130 +105,144 @@ pub fn tokenize(
     return tokens;
 }
 
-fn token_at(source: []const u8, offset: i64) -> std::kizu::lexer::Token {
+fn token_at(
+    source: []const u8,
+    offset: i64,
+    initial: Position
+) -> std::kizu::lexer::Token {
     let length = std::mem::len(source);
     var start = offset;
+    var current = initial;
     var scanning = true;
     while scanning {
         while start < length and std::kizu::lexer::is_space(source[start]) {
+            current = std::kizu::lexer::advance_byte(source[start], current);
             start = start + 1;
         }
         if start + 1 < length and source[start] == cast<u8>(47) and
             source[start + 1] == cast<u8>(47) {
-            start = std::kizu::lexer::skip_line_comment(source, start + 2);
+            current = std::kizu::lexer::advance_byte(source[start], current);
+            current = std::kizu::lexer::advance_byte(source[start + 1], current);
+            let skipped = std::kizu::lexer::skip_line_comment(source, start + 2, current);
+            start = skipped.start;
+            current = std::kizu::lexer::position(skipped.line, skipped.column);
         } else {
             scanning = false;
         }
     }
     if start >= length {
-        return std::kizu::lexer::token(TokenKind::Eof, start, start);
+        return std::kizu::lexer::token(TokenKind::Eof, start, start, current);
     }
 
     let byte = source[start];
     if byte == cast<u8>(123) {
-        return std::kizu::lexer::token(TokenKind::LBrace, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::LBrace, start, start + 1, current);
     }
     if byte == cast<u8>(125) {
-        return std::kizu::lexer::token(TokenKind::RBrace, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::RBrace, start, start + 1, current);
     }
     if byte == cast<u8>(40) {
-        return std::kizu::lexer::token(TokenKind::LParen, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::LParen, start, start + 1, current);
     }
     if byte == cast<u8>(41) {
-        return std::kizu::lexer::token(TokenKind::RParen, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::RParen, start, start + 1, current);
     }
     if byte == cast<u8>(59) {
-        return std::kizu::lexer::token(TokenKind::Semicolon, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Semicolon, start, start + 1, current);
     }
     if byte == cast<u8>(44) {
-        return std::kizu::lexer::token(TokenKind::Comma, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Comma, start, start + 1, current);
     }
     if byte == cast<u8>(33) {
         if start + 1 < length and source[start + 1] == cast<u8>(61) {
-            return std::kizu::lexer::token(TokenKind::NotEq, start, start + 2);
+            return std::kizu::lexer::token(TokenKind::NotEq, start, start + 2, current);
         }
-        return std::kizu::lexer::token(TokenKind::Bang, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Bang, start, start + 1, current);
     }
     if byte == cast<u8>(38) {
-        return std::kizu::lexer::token(TokenKind::Amp, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Amp, start, start + 1, current);
     }
     if byte == cast<u8>(60) {
         if start + 1 < length and source[start + 1] == cast<u8>(61) {
-            return std::kizu::lexer::token(TokenKind::LTE, start, start + 2);
+            return std::kizu::lexer::token(TokenKind::LTE, start, start + 2, current);
         }
-        return std::kizu::lexer::token(TokenKind::LT, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::LT, start, start + 1, current);
     }
     if byte == cast<u8>(62) {
         if start + 1 < length and source[start + 1] == cast<u8>(61) {
-            return std::kizu::lexer::token(TokenKind::GTE, start, start + 2);
+            return std::kizu::lexer::token(TokenKind::GTE, start, start + 2, current);
         }
-        return std::kizu::lexer::token(TokenKind::GT, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::GT, start, start + 1, current);
     }
     if byte == cast<u8>(63) {
-        return std::kizu::lexer::token(TokenKind::Question, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Question, start, start + 1, current);
     }
     if byte == cast<u8>(91) {
-        return std::kizu::lexer::token(TokenKind::LBracket, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::LBracket, start, start + 1, current);
     }
     if byte == cast<u8>(93) {
-        return std::kizu::lexer::token(TokenKind::RBracket, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::RBracket, start, start + 1, current);
     }
     if byte == cast<u8>(58) {
         if start + 1 < length and source[start + 1] == cast<u8>(58) {
-            return std::kizu::lexer::token(TokenKind::DoubleColon, start, start + 2);
+            return std::kizu::lexer::token(TokenKind::DoubleColon, start, start + 2, current);
         }
-        return std::kizu::lexer::token(TokenKind::Colon, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Colon, start, start + 1, current);
     }
     if byte == cast<u8>(45) and start + 1 < length and source[start + 1] == cast<u8>(62) {
-        return std::kizu::lexer::token(TokenKind::Arrow, start, start + 2);
+        return std::kizu::lexer::token(TokenKind::Arrow, start, start + 2, current);
     }
     if byte == cast<u8>(45) {
-        return std::kizu::lexer::token(TokenKind::Minus, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Minus, start, start + 1, current);
     }
     if byte == cast<u8>(61) {
         if start + 1 < length and source[start + 1] == cast<u8>(61) {
-            return std::kizu::lexer::token(TokenKind::Eq, start, start + 2);
+            return std::kizu::lexer::token(TokenKind::Eq, start, start + 2, current);
         }
         if start + 1 < length and source[start + 1] == cast<u8>(62) {
-            return std::kizu::lexer::token(TokenKind::FatArrow, start, start + 2);
+            return std::kizu::lexer::token(TokenKind::FatArrow, start, start + 2, current);
         }
-        return std::kizu::lexer::token(TokenKind::Assign, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Assign, start, start + 1, current);
     }
     if byte == cast<u8>(43) {
-        return std::kizu::lexer::token(TokenKind::Plus, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Plus, start, start + 1, current);
     }
     if byte == cast<u8>(42) {
-        return std::kizu::lexer::token(TokenKind::Asterisk, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Asterisk, start, start + 1, current);
     }
     if byte == cast<u8>(47) {
-        return std::kizu::lexer::token(TokenKind::Slash, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Slash, start, start + 1, current);
     }
     if byte == cast<u8>(37) {
-        return std::kizu::lexer::token(TokenKind::Percent, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Percent, start, start + 1, current);
     }
     if byte == cast<u8>(46) {
         if start + 1 < length and source[start + 1] == cast<u8>(46) {
-            return std::kizu::lexer::token(TokenKind::Range, start, start + 2);
+            return std::kizu::lexer::token(TokenKind::Range, start, start + 2, current);
         }
-        return std::kizu::lexer::token(TokenKind::Dot, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Dot, start, start + 1, current);
     }
     if byte == cast<u8>(124) {
-        return std::kizu::lexer::token(TokenKind::Pipe, start, start + 1);
+        return std::kizu::lexer::token(TokenKind::Pipe, start, start + 1, current);
     }
     if byte == cast<u8>(34) {
-        return std::kizu::lexer::string_token(source, start);
+        return std::kizu::lexer::string_token(source, start, current);
     }
     if byte == cast<u8>(39) and start + 1 < length and
         std::kizu::lexer::is_alpha(source[start + 1]) {
-        return std::kizu::lexer::lifetime_token(source, start);
+        return std::kizu::lexer::lifetime_token(source, start, current);
     }
     if std::kizu::lexer::is_digit(byte) {
-        return std::kizu::lexer::number_token(source, start);
+        return std::kizu::lexer::number_token(source, start, current);
     }
-    return std::kizu::lexer::word_token(source, start);
+    return std::kizu::lexer::word_token(source, start, current);
 }
 
-fn word_token(source: []const u8, start: i64) -> std::kizu::lexer::Token {
+fn word_token(
+    source: []const u8,
+    start: i64,
+    current: Position
+) -> std::kizu::lexer::Token {
     let length = std::mem::len(source);
     var end = start;
     while end < length and std::kizu::lexer::is_word(source[end]) {
@@ -223,128 +250,178 @@ fn word_token(source: []const u8, start: i64) -> std::kizu::lexer::Token {
     }
     let text = source[start..end];
     if std::mem::equal_bytes(text, "fn") {
-        return std::kizu::lexer::token(TokenKind::Fn, start, end);
+        return std::kizu::lexer::token(TokenKind::Fn, start, end, current);
     }
     if std::mem::equal_bytes(text, "import") {
-        return std::kizu::lexer::token(TokenKind::Import, start, end);
+        return std::kizu::lexer::token(TokenKind::Import, start, end, current);
     }
     if std::mem::equal_bytes(text, "pub") {
-        return std::kizu::lexer::token(TokenKind::Pub, start, end);
+        return std::kizu::lexer::token(TokenKind::Pub, start, end, current);
     }
     if std::mem::equal_bytes(text, "struct") {
-        return std::kizu::lexer::token(TokenKind::Struct, start, end);
+        return std::kizu::lexer::token(TokenKind::Struct, start, end, current);
     }
     if std::mem::equal_bytes(text, "enum") {
-        return std::kizu::lexer::token(TokenKind::Enum, start, end);
+        return std::kizu::lexer::token(TokenKind::Enum, start, end, current);
     }
     if std::mem::equal_bytes(text, "union") {
-        return std::kizu::lexer::token(TokenKind::Union, start, end);
+        return std::kizu::lexer::token(TokenKind::Union, start, end, current);
     }
     if std::mem::equal_bytes(text, "extern") {
-        return std::kizu::lexer::token(TokenKind::Extern, start, end);
+        return std::kizu::lexer::token(TokenKind::Extern, start, end, current);
     }
     if std::mem::equal_bytes(text, "let") {
-        return std::kizu::lexer::token(TokenKind::Let, start, end);
+        return std::kizu::lexer::token(TokenKind::Let, start, end, current);
     }
     if std::mem::equal_bytes(text, "var") {
-        return std::kizu::lexer::token(TokenKind::Var, start, end);
+        return std::kizu::lexer::token(TokenKind::Var, start, end, current);
     }
     if std::mem::equal_bytes(text, "return") {
-        return std::kizu::lexer::token(TokenKind::Return, start, end);
+        return std::kizu::lexer::token(TokenKind::Return, start, end, current);
     }
     if std::mem::equal_bytes(text, "if") {
-        return std::kizu::lexer::token(TokenKind::If, start, end);
+        return std::kizu::lexer::token(TokenKind::If, start, end, current);
     }
     if std::mem::equal_bytes(text, "else") {
-        return std::kizu::lexer::token(TokenKind::Else, start, end);
+        return std::kizu::lexer::token(TokenKind::Else, start, end, current);
     }
     if std::mem::equal_bytes(text, "while") {
-        return std::kizu::lexer::token(TokenKind::While, start, end);
+        return std::kizu::lexer::token(TokenKind::While, start, end, current);
     }
     if std::mem::equal_bytes(text, "for") {
-        return std::kizu::lexer::token(TokenKind::For, start, end);
+        return std::kizu::lexer::token(TokenKind::For, start, end, current);
     }
     if std::mem::equal_bytes(text, "break") {
-        return std::kizu::lexer::token(TokenKind::Break, start, end);
+        return std::kizu::lexer::token(TokenKind::Break, start, end, current);
     }
     if std::mem::equal_bytes(text, "continue") {
-        return std::kizu::lexer::token(TokenKind::Continue, start, end);
+        return std::kizu::lexer::token(TokenKind::Continue, start, end, current);
     }
     if std::mem::equal_bytes(text, "match") {
-        return std::kizu::lexer::token(TokenKind::Match, start, end);
+        return std::kizu::lexer::token(TokenKind::Match, start, end, current);
     }
     if std::mem::equal_bytes(text, "unsafe") {
-        return std::kizu::lexer::token(TokenKind::Unsafe, start, end);
+        return std::kizu::lexer::token(TokenKind::Unsafe, start, end, current);
     }
     if std::mem::equal_bytes(text, "comptime") {
-        return std::kizu::lexer::token(TokenKind::Comptime, start, end);
+        return std::kizu::lexer::token(TokenKind::Comptime, start, end, current);
     }
     if std::mem::equal_bytes(text, "try") {
-        return std::kizu::lexer::token(TokenKind::Try, start, end);
+        return std::kizu::lexer::token(TokenKind::Try, start, end, current);
     }
     if std::mem::equal_bytes(text, "true") {
-        return std::kizu::lexer::token(TokenKind::True, start, end);
+        return std::kizu::lexer::token(TokenKind::True, start, end, current);
     }
     if std::mem::equal_bytes(text, "false") {
-        return std::kizu::lexer::token(TokenKind::False, start, end);
+        return std::kizu::lexer::token(TokenKind::False, start, end, current);
     }
     if std::mem::equal_bytes(text, "and") {
-        return std::kizu::lexer::token(TokenKind::And, start, end);
+        return std::kizu::lexer::token(TokenKind::And, start, end, current);
     }
     if std::mem::equal_bytes(text, "or") {
-        return std::kizu::lexer::token(TokenKind::Or, start, end);
+        return std::kizu::lexer::token(TokenKind::Or, start, end, current);
     }
     if std::mem::equal_bytes(text, "mut") {
-        return std::kizu::lexer::token(TokenKind::Mut, start, end);
+        return std::kizu::lexer::token(TokenKind::Mut, start, end, current);
     }
-    return std::kizu::lexer::token(TokenKind::Ident, start, end);
+    return std::kizu::lexer::token(TokenKind::Ident, start, end, current);
 }
 
-fn skip_line_comment(source: []const u8, start: i64) -> i64 {
+fn skip_line_comment(source: []const u8, start: i64, initial: Position) -> Token {
     let length = std::mem::len(source);
     var end = start;
+    var current = initial;
     while end < length and source[end] != cast<u8>(10) {
+        current = std::kizu::lexer::advance_byte(source[end], current);
         end = end + 1;
     }
-    return end;
+    return std::kizu::lexer::token(TokenKind::Eof, end, end, current);
 }
 
-fn number_token(source: []const u8, start: i64) -> std::kizu::lexer::Token {
+fn number_token(
+    source: []const u8,
+    start: i64,
+    current: Position
+) -> std::kizu::lexer::Token {
     let length = std::mem::len(source);
     var end = start;
     while end < length and std::kizu::lexer::is_digit(source[end]) {
         end = end + 1;
     }
-    return std::kizu::lexer::token(TokenKind::Number, start, end);
+    return std::kizu::lexer::token(TokenKind::Number, start, end, current);
 }
 
-fn lifetime_token(source: []const u8, start: i64) -> std::kizu::lexer::Token {
+fn lifetime_token(
+    source: []const u8,
+    start: i64,
+    current: Position
+) -> std::kizu::lexer::Token {
     let length = std::mem::len(source);
     var end = start + 1;
     while end < length and std::kizu::lexer::is_word(source[end]) {
         end = end + 1;
     }
-    return std::kizu::lexer::token(TokenKind::Lifetime, start, end);
+    return std::kizu::lexer::token(TokenKind::Lifetime, start, end, current);
 }
 
-fn string_token(source: []const u8, start: i64) -> std::kizu::lexer::Token {
+fn string_token(
+    source: []const u8,
+    start: i64,
+    current: Position
+) -> std::kizu::lexer::Token {
     let length = std::mem::len(source);
     var end = start + 1;
     while end < length and source[end] != cast<u8>(34) {
         end = end + 1;
     }
     if end < length {
-        return std::kizu::lexer::token(TokenKind::String, start, end + 1);
+        return std::kizu::lexer::token(TokenKind::String, start, end + 1, current);
     }
-    return std::kizu::lexer::token(TokenKind::String, start, end);
+    return std::kizu::lexer::token(TokenKind::String, start, end, current);
 }
 
-fn token(kind: std::kizu::lexer::TokenKind, start: i64, end: i64) -> std::kizu::lexer::Token {
+fn token(
+    kind: std::kizu::lexer::TokenKind,
+    start: i64,
+    end: i64,
+    current: Position
+) -> std::kizu::lexer::Token {
     return Token {
         kind: kind,
         start: start,
-        end: end
+        end: end,
+        line: current.line,
+        column: current.column
     };
+}
+
+fn position(line: i64, column: i64) -> Position {
+    return Position {
+        line: line,
+        column: column
+    };
+}
+
+fn advance_position(
+    source: []const u8,
+    start: i64,
+    end: i64,
+    initial: Position
+) -> Position {
+    var index = start;
+    var current = initial;
+    while index < end {
+        current = std::kizu::lexer::advance_byte(source[index], current);
+        index = index + 1;
+    }
+    return current;
+}
+
+fn advance_byte(byte: u8, initial: Position) -> Position {
+    if byte == cast<u8>(10) {
+        return std::kizu::lexer::position(initial.line + 1, 1);
+    }
+    return std::kizu::lexer::position(initial.line, initial.column + 1);
 }
 
 fn is_space(byte: u8) -> bool {
