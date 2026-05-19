@@ -23,6 +23,13 @@ check:
 selfhost-oracle:
     go test ./cmd/kizu -run TestSelfhostOracleRunner -v
 
+# Run the selfhost production switch review gate without changing production paths.
+selfhost-switch-gate:
+    go run ./cmd/kizu check selfhost
+    just selfhost-oracle
+    go test ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|PackageSkeletonChecks)$' -v
+    go test ./internal/project ./internal/types ./internal/ownership
+
 # Install local git hooks.
 hooks:
     pre-commit install
