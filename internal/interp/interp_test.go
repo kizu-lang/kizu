@@ -271,6 +271,31 @@ fn main() -> !i64 {
 	}
 }
 
+// TestRunTypedErrorTryPropagatesFunctionExpr checks typed errors from calls.
+func TestRunTypedErrorTryPropagatesFunctionExpr(t *testing.T) {
+	got, err := parseAndRun(`union CompileError {
+    Message([]const u8);
+}
+fn parse(ok: bool) -> CompileError!i64 {
+    if ok {
+        return 1;
+    }
+    return CompileError::Message("bad");
+}
+fn main() -> CompileError!void {
+    let value = try parse(false);
+    print("lowered");
+    print(value);
+    return;
+}`)
+	if err == nil || err.Error() != "runtime error: CompileError::Message" {
+		t.Fatalf("got err %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty output", got)
+	}
+}
+
 // TestRuntimeErrorChecksMutableAssignment checks a short readable runtime error.
 func TestRuntimeErrorChecksMutableAssignment(t *testing.T) {
 	_, err := parseAndRun(`fn main() {

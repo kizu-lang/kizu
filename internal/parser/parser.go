@@ -913,6 +913,11 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 			return left
 		}
 	}
+	if p.peek.Type == token.LBrace {
+		if typeName, ok := structLiteralTypeName(left); ok {
+			return p.parseStructLiteralExpr(typeName)
+		}
+	}
 	return left
 }
 
@@ -1354,6 +1359,37 @@ func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
 		p.nextToken()
 	}
 	return expr
+}
+
+// structLiteralTypeName returns a namespaced type usable before a struct literal.
+func structLiteralTypeName(expr ast.Expression) (string, bool) {
+	parts, ok := namespaceExprParts(expr)
+	if !ok || len(parts) == 0 || !startsUpper(parts[len(parts)-1]) {
+		return "", false
+	}
+	if len(parts) > 1 && startsUpper(parts[len(parts)-2]) {
+		return "", false
+	}
+	return strings.Join(parts, "::"), true
+}
+
+// namespaceExprParts extracts identifier parts from a namespace expression.
+func namespaceExprParts(expr ast.Expression) ([]string, bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return []string{e.Name}, true
+	case *ast.FieldExpr:
+		if !e.Namespace {
+			return nil, false
+		}
+		parts, ok := namespaceExprParts(e.Receiver)
+		if !ok {
+			return nil, false
+		}
+		return append(parts, e.Name), true
+	default:
+		return nil, false
+	}
 }
 
 // parseFieldValue parses one field initializer.

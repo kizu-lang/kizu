@@ -360,6 +360,24 @@ fn main() { let users = arena<User>(); let alice = users.add(User { name: "alice
 	}
 }
 
+// TestParseNamespacedStructLiteral checks imported type construction syntax.
+func TestParseNamespacedStructLiteral(t *testing.T) {
+	input := `import app::token;
+fn main() {
+    let token = token::Token { kind: 1 };
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `import app::token
+fn main() { let token = token::Token { kind: 1 }; }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseMultiArgGenericTypes checks generic type argument lists.
 func TestParseMultiArgGenericTypes(t *testing.T) {
 	input := `fn lookup(table: std::map::Map<[]const u8, i64>) -> i64 {

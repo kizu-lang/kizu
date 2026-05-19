@@ -35,6 +35,22 @@ fn run_lexer_case(name: []const u8, text: []const u8) -> !void {
     }
 }
 
+fn run_tokenize_case(name: []const u8, text: []const u8) -> !void {
+    print("@@KIZU_LEXER_PARITY_CASE@@");
+    print(name);
+    let allocator = std::mem::page_allocator();
+    var tokens = try std::kizu::lexer::tokenize(allocator, text);
+    var index = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        try dump_token(text, token);
+        index = index + 1;
+    }
+    tokens.deinit();
+    print("@@KIZU_LEXER_PARITY_END@@");
+    return;
+}
+
 fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
         Eof => return true;
@@ -263,6 +279,14 @@ func TestStdKizuLexerParityExamples(t *testing.T) {
 	logUnsupportedLexerParityReasons(t, stats.unsupportedReasons, stats.unsupportedSamples)
 }
 
+// TestStdKizuLexerTokenizeParitySeeds checks the Array-backed token path.
+func TestStdKizuLexerTokenizeParitySeeds(t *testing.T) {
+	cases := lexerParitySeedCases(t)
+	got := runStdKizuLexerTokenizeParityHarness(t, cases)
+
+	assertLexerParityCases(t, cases, got)
+}
+
 // collectLexerParityExamples finds examples supported by the current std lexer subset.
 func collectLexerParityExamples(t *testing.T) ([]lexerParityCase, lexerParityStats) {
 	t.Helper()
@@ -398,7 +422,26 @@ func runStdKizuLexerParityHarness(
 	cases []lexerParityCase,
 ) map[string]string {
 	t.Helper()
-	source, err := buildStdKizuLexerParityHarness(cases)
+	return runStdKizuLexerHarness(t, cases, "run_lexer_case")
+}
+
+// runStdKizuLexerTokenizeParityHarness runs the Array-backed std lexer path.
+func runStdKizuLexerTokenizeParityHarness(
+	t *testing.T,
+	cases []lexerParityCase,
+) map[string]string {
+	t.Helper()
+	return runStdKizuLexerHarness(t, cases, "run_tokenize_case")
+}
+
+// runStdKizuLexerHarness runs the Kizu std lexer once for all cases.
+func runStdKizuLexerHarness(
+	t *testing.T,
+	cases []lexerParityCase,
+	runner string,
+) map[string]string {
+	t.Helper()
+	source, err := buildStdKizuLexerParityHarness(cases, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +468,7 @@ func runStdKizuLexerParityHarness(
 }
 
 // buildStdKizuLexerParityHarness creates a Kizu program that lexes all cases.
-func buildStdKizuLexerParityHarness(cases []lexerParityCase) (string, error) {
+func buildStdKizuLexerParityHarness(cases []lexerParityCase, runner string) (string, error) {
 	var out strings.Builder
 	out.WriteString(stdKizuLexerParityHarness)
 	out.WriteString("\nfn main() -> !void {\n")
@@ -439,7 +482,7 @@ func buildStdKizuLexerParityHarness(cases []lexerParityCase) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("%s source: %w", testCase.name, err)
 		}
-		fmt.Fprintf(&out, "    try run_lexer_case(%s, %s);\n", name, source)
+		fmt.Fprintf(&out, "    try %s(%s, %s);\n", runner, name, source)
 		if cleanup != "" {
 			out.WriteString(cleanup)
 		}

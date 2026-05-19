@@ -63,6 +63,11 @@ Multi-file diagnostics use one primary span plus related spans. Import cycles
 and private access errors must show the relevant module graph or definition
 site.
 
+Go/Kizu diagnostic oracle tests compare a stable summary, not terminal
+rendering. The summary is ordered as primary file path, byte start/end, line,
+column, message, then related spans in emission order with the same fields and
+their message. Color, caret art, and help text are renderer concerns.
+
 ### Compiler Outputs
 
 Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).

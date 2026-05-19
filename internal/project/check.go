@@ -17,11 +17,15 @@ func LoadProgram(graph Graph) (*ast.Program, error) {
 		modules:     map[string]*moduleUnit{},
 		modulePaths: map[string]bool{},
 		types:       map[string]typeExport{},
+		functions:   map[string]functionExport{},
 	}
 	if err := checker.load(graph); err != nil {
 		return nil, err
 	}
 	if err := checker.collectTypes(); err != nil {
+		return nil, err
+	}
+	if err := checker.collectFunctions(); err != nil {
 		return nil, err
 	}
 	return checker.program()
@@ -40,6 +44,7 @@ type graphChecker struct {
 	modules     map[string]*moduleUnit
 	modulePaths map[string]bool
 	types       map[string]typeExport
+	functions   map[string]functionExport
 }
 
 type moduleUnit struct {
@@ -49,6 +54,11 @@ type moduleUnit struct {
 }
 
 type typeExport struct {
+	module string
+	public bool
+}
+
+type functionExport struct {
 	module string
 	public bool
 }
@@ -93,6 +103,24 @@ func (c *graphChecker) collectTypes() error {
 				return fmt.Errorf("module error: duplicate type `%s`", qualified)
 			}
 			c.types[qualified] = typeExport{module: module.path, public: public}
+		}
+	}
+	return nil
+}
+
+// collectFunctions indexes user-declared module functions before resolving calls.
+func (c *graphChecker) collectFunctions() error {
+	for _, module := range c.modules {
+		for _, decl := range module.program.Decls {
+			fn, ok := decl.(*ast.FunctionDecl)
+			if !ok {
+				continue
+			}
+			qualified := module.path + "::" + fn.Name
+			if _, exists := c.functions[qualified]; exists {
+				return fmt.Errorf("module error: duplicate function `%s`", qualified)
+			}
+			c.functions[qualified] = functionExport{module: module.path, public: fn.Public}
 		}
 	}
 	return nil
@@ -519,7 +547,11 @@ func (c *graphChecker) qualifyCallee(
 		if _, ok := c.resolveTypeNamespaceReceiver(module, field); ok {
 			return c.qualifyFieldExpr(module, field)
 		}
-		if name, ok := c.resolveNamespacePath(module, field); ok {
+		name, ok, err := c.resolveNamespacePath(module, field)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			return &ast.IdentExpr{Name: name}, nil
 		}
 	}
@@ -616,26 +648,52 @@ func (c *graphChecker) resolveTypeNamespaceReceiver(
 func (c *graphChecker) resolveNamespacePath(
 	module *moduleUnit,
 	expr *ast.FieldExpr,
-) (string, bool) {
+) (string, bool, error) {
 	parts, ok := namespaceParts(expr)
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
 	return c.resolveNamespaceParts(module, parts)
 }
 
-// resolveNamespaceParts resolves local or imported namespace path parts.
-func (c *graphChecker) resolveNamespaceParts(module *moduleUnit, parts []string) (string, bool) {
+// resolveNamespaceParts resolves local or imported function namespace parts.
+func (c *graphChecker) resolveNamespaceParts(
+	module *moduleUnit,
+	parts []string,
+) (string, bool, error) {
 	if len(parts) == 0 {
-		return "", false
+		return "", false, nil
 	}
 	if target, ok := module.imports[parts[0]]; ok {
-		return target + "::" + strings.Join(parts[1:], "::"), true
+		if len(parts) == 1 {
+			return "", false, nil
+		}
+		return c.resolveImportedFunction(module, target, parts)
 	}
-	if _, ok := c.types[module.path+"::"+parts[0]]; ok {
-		return module.path + "::" + strings.Join(parts, "::"), true
+	name := module.path + "::" + strings.Join(parts, "::")
+	if _, ok := c.functions[name]; ok {
+		return name, true, nil
 	}
-	return "", false
+	return "", false, nil
+}
+
+// resolveImportedFunction validates visibility for a call through an import alias.
+func (c *graphChecker) resolveImportedFunction(
+	module *moduleUnit,
+	target string,
+	parts []string,
+) (string, bool, error) {
+	name := target + "::" + strings.Join(parts[1:], "::")
+	exported, ok := c.functions[name]
+	if !ok {
+		sourceName := strings.Join(parts, "::")
+		return "", false, fmt.Errorf("module error: unknown function `%s`", sourceName)
+	}
+	if exported.module != module.path && !exported.public {
+		sourceName := strings.Join(parts, "::")
+		return "", false, fmt.Errorf("module error: function `%s` is private", sourceName)
+	}
+	return name, true, nil
 }
 
 // resolveTypeNamespaceParts resolves namespace parts only when they name a type.
@@ -705,6 +763,9 @@ func (r typeResolver) resolve(name string) (string, error) {
 	case strings.HasPrefix(name, "const "):
 		return r.resolvePrefixed(name, "const ")
 	}
+	if errorType, successType, ok := splitTypedErrorUnion(name); ok {
+		return r.resolveTypedErrorUnion(errorType, successType)
+	}
 	if base, args, ok := splitTypeApply(name); ok {
 		return r.resolveGeneric(base, args)
 	}
@@ -737,6 +798,19 @@ func (r typeResolver) resolveGeneric(base string, args string) (string, error) {
 		}
 	}
 	return resolvedBase + "<" + strings.Join(parts, ", ") + ">", nil
+}
+
+// resolveTypedErrorUnion resolves Error!T names across module boundaries.
+func (r typeResolver) resolveTypedErrorUnion(errorType string, successType string) (string, error) {
+	resolvedError, err := r.resolve(errorType)
+	if err != nil {
+		return "", err
+	}
+	resolvedSuccess, err := r.resolve(successType)
+	if err != nil {
+		return "", err
+	}
+	return resolvedError + "!" + resolvedSuccess, nil
 }
 
 // resolveBase resolves one non-generic type base.
@@ -818,6 +892,24 @@ func splitTypeArgs(args string) ([]string, error) {
 	}
 	parts = append(parts, strings.TrimSpace(args[start:]))
 	return parts, nil
+}
+
+// splitTypedErrorUnion separates Error!T while leaving prefix !T to resolvePrefixed.
+func splitTypedErrorUnion(name string) (string, string, bool) {
+	depth := 0
+	for index, ch := range name {
+		switch ch {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case '!':
+			if depth == 0 && index > 0 && index < len(name)-1 {
+				return name[:index], name[index+1:], true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // sortedModuleUnits returns modules in deterministic path order.

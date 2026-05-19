@@ -756,6 +756,7 @@ var stdSourceModuleOrder = []string{
 	"testing",
 	"kizu::ast",
 	"kizu::lexer",
+	"kizu::diagnostic",
 	"kizu::parser",
 	"fs",
 	"path",
@@ -1018,6 +1019,12 @@ func qualifyStdTypeName(module string, typ string) string {
 		switch typ {
 		case "TokenKind", "Token":
 			return "std::kizu::lexer::" + typ
+		}
+	}
+	if module == "kizu::diagnostic" {
+		switch typ {
+		case "FileSpan", "RelatedSpan", "Diagnostic":
+			return "std::kizu::diagnostic::" + typ
 		}
 	}
 	return typ
