@@ -1403,6 +1403,15 @@ pub struct Parser {
     pub peek: token::Token
 }
 
+pub struct TokenSummary {
+    pub functions: i64,
+    pub imports: i64,
+    pub structs: i64,
+    pub enums: i64,
+    pub tokens: i64,
+    pub illegal_tokens: i64
+}
+
 pub fn Parser(source: []const u8) -> Parser {
     let l0 = lexer::New(source);
     let scan0 = lexer::Scan(l0);
@@ -1456,12 +1465,13 @@ func parserMetricEntrySource() string {
 }
 
 pub fn function_count(source: []const u8) -> i64 {
-    return lexer::CountFunction(source);
+    return token_summary(source).functions;
 }
 
 pub fn declaration_score(source: []const u8) -> i64 {
-    return lexer::CountFunction(source) * 5 + lexer::CountImport(source) * 3 +
-        lexer::CountStruct(source) * 2 + lexer::CountEnum(source) * 2;
+    let summary = token_summary(source);
+    return summary.functions * 5 + summary.imports * 3 +
+        summary.structs * 2 + summary.enums * 2;
 }
 
 pub fn brace_score(source: []const u8) -> i64 {
@@ -1475,6 +1485,43 @@ pub fn brace_score(source: []const u8) -> i64 {
 
 pub fn parse_score(source: []const u8) -> i64 {
     return first_token_code(source) + declaration_score(source) + brace_score(source);
+}
+
+pub fn token_summary(source: []const u8) -> TokenSummary {
+    var parser = Parser(source);
+    var functions = 0;
+    var imports = 0;
+    var structs = 0;
+    var enums = 0;
+    var tokens = 0;
+    var illegal_tokens = 0;
+    while parser.cur.Type != token::Type::EOF {
+        tokens = tokens + 1;
+        if parser.cur.Type == token::Type::Function {
+            functions = functions + 1;
+        }
+        if parser.cur.Type == token::Type::Import {
+            imports = imports + 1;
+        }
+        if parser.cur.Type == token::Type::Struct {
+            structs = structs + 1;
+        }
+        if parser.cur.Type == token::Type::Enum {
+            enums = enums + 1;
+        }
+        if parser.cur.Type == token::Type::Illegal {
+            illegal_tokens = illegal_tokens + 1;
+        }
+        parser = Advance(parser);
+    }
+    return TokenSummary {
+        functions: functions,
+        imports: imports,
+        structs: structs,
+        enums: enums,
+        tokens: tokens,
+        illegal_tokens: illegal_tokens
+    };
 }
 
 `
@@ -1500,12 +1547,13 @@ func parserModuleSummarySource() string {
 
 pub fn parse_module(source: []const u8) -> Module {
     let first = first_token_code(source);
-    let functions = function_count(source);
-    let imports = lexer::CountImport(source);
-    let structs = lexer::CountStruct(source);
-    let enums = lexer::CountEnum(source);
-    let tokens = lexer::CountTokens(source);
-    let illegal_tokens = lexer::CountIllegalTokens(source);
+    let summary = token_summary(source);
+    let functions = summary.functions;
+    let imports = summary.imports;
+    let structs = summary.structs;
+    let enums = summary.enums;
+    let tokens = summary.tokens;
+    let illegal_tokens = summary.illegal_tokens;
     let declarations = functions * 5 + imports * 3 + structs * 2 + enums * 2;
     let balance = brace_balance(source);
     let braces = brace_count(source);

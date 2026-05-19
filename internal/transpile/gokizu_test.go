@@ -42,6 +42,8 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "peek: token::New")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn Advance(self: Parser)")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "cur: token::New(cur_type")
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub struct TokenSummary")
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn token_summary")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn function_count")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn precedence")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "token::Type::DoubleColon")
