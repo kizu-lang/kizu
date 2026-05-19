@@ -1005,7 +1005,7 @@ func qualifyStdTypeName(module string, typ string) string {
 		case "SourceFile", "Span", "TokenId", "SymbolId", "BinaryOp", "PrefixOp", "ChildRange",
 			"NodeId", "Ast", "AstNode", "AstData", "ProgramNode", "IntNode",
 			"StringNode", "TypeNameNode", "VarNode", "BoolNode", "PrefixNode",
-			"BinaryNode", "FieldExprNode", "CallNode", "TypeApplyExprNode",
+			"BinaryNode", "FieldExprNode", "DerefExprNode", "CallNode", "TypeApplyExprNode",
 			"CastExprNode", "IndexExprNode", "StructLiteralExprNode", "StructFieldInitNode",
 			"ArenaNewExprNode", "TryExprNode", "ComptimeExprNode",
 			"BlockNode", "IfNode", "LetNode", "AssignNode", "ReturnNode", "ExprStmtNode",

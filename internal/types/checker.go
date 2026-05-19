@@ -5741,6 +5741,7 @@ func isAstScalarType(typ Type) bool {
 		"PrefixNode", "std::kizu::ast::PrefixNode",
 		"BinaryNode", "std::kizu::ast::BinaryNode",
 		"FieldExprNode", "std::kizu::ast::FieldExprNode",
+		"DerefExprNode", "std::kizu::ast::DerefExprNode",
 		"CallNode", "std::kizu::ast::CallNode",
 		"TypeApplyExprNode", "std::kizu::ast::TypeApplyExprNode",
 		"CastExprNode", "std::kizu::ast::CastExprNode",

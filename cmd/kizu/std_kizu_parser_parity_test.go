@@ -19,6 +19,7 @@ import (
 
 const (
 	parserParityExamplesRoot = "../../examples"
+	parserParitySelfhostRoot = "../../selfhost"
 	parserParityCaseStart    = "@@KIZU_PARSER_PARITY_CASE@@"
 	parserParityCaseEnd      = "@@KIZU_PARSER_PARITY_END@@"
 )
@@ -52,6 +53,7 @@ fn dump_node(
         Prefix(prefix) => try dump_prefix(source, ast, prefix);
         Binary(binary) => try dump_binary(source, ast, binary);
         FieldExpr(field_expr) => try dump_field_expr(source, ast, field_expr);
+        DerefExpr(deref_expr) => try dump_deref_expr(source, ast, deref_expr);
         Call(call) => try dump_call(source, ast, call);
         TypeApplyExpr(type_apply) => try dump_type_apply_expr(source, ast, type_apply);
         CastExpr(cast_expr) => try dump_cast_expr(source, ast, cast_expr);
@@ -399,6 +401,16 @@ fn dump_field_expr(
     return;
 }
 
+fn dump_deref_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    deref_expr: std::kizu::ast::DerefExprNode
+) -> !void {
+    print("DerefExpr");
+    try dump_node(source, ast, deref_expr.receiver);
+    return;
+}
+
 fn dump_call(
     source: []const u8,
     ast: std::kizu::ast::Ast,
@@ -631,6 +643,14 @@ func TestStdKizuParserParityExamples(t *testing.T) {
 	logUnsupportedParserParityReasons(t, stats.unsupportedReasons, stats.unsupportedSamples)
 }
 
+// TestStdKizuParserParitySelfhostPackage gates the agreed selfhost source surface.
+func TestStdKizuParserParitySelfhostPackage(t *testing.T) {
+	cases := collectParserParitySelfhostSources(t)
+	got := runStdKizuParserParityHarness(t, cases)
+	assertParserParityCases(t, cases, got)
+	t.Logf("selfhost sources compared=%d", len(cases))
+}
+
 // collectParserParityExamples finds examples supported by the current std parser subset.
 func collectParserParityExamples(t *testing.T) ([]parserParityCase, parserParityStats) {
 	t.Helper()
@@ -673,8 +693,51 @@ func collectParserParityExamples(t *testing.T) ([]parserParityCase, parserParity
 	return cases, stats
 }
 
+// collectParserParitySelfhostSources finds every selfhost source file and rejects gaps.
+func collectParserParitySelfhostSources(t *testing.T) []parserParityCase {
+	t.Helper()
+	cases := []parserParityCase{}
+	err := filepath.WalkDir(parserParitySelfhostRoot, func(
+		path string,
+		entry fs.DirEntry,
+		err error,
+	) error {
+		if err != nil || entry.IsDir() || filepath.Ext(path) != ".kizu" {
+			return err
+		}
+		next, ok, reason, parseErrs := parserParityFileCase(
+			path,
+			parserParitySelfhostRoot,
+			"selfhost",
+		)
+		switch {
+		case len(parseErrs) > 0:
+			t.Fatalf("%s Go parse errors: %v", next.name, parseErrs)
+		case !ok:
+			t.Fatalf("%s is unsupported: %s", next.name, reason)
+		default:
+			cases = append(cases, next)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
+	return cases
+}
+
 // parserParityExampleCase summarizes one example when both parser subsets can handle it.
 func parserParityExampleCase(path string) (parserParityCase, bool, string, []string) {
+	return parserParityFileCase(path, parserParityExamplesRoot, "examples")
+}
+
+// parserParityFileCase summarizes one source file when both parser subsets can handle it.
+func parserParityFileCase(
+	path string,
+	root string,
+	prefix string,
+) (parserParityCase, bool, string, []string) {
 	sourceBytes, err := os.ReadFile(path)
 	if err != nil {
 		return parserParityCase{}, false, err.Error(), nil
@@ -682,10 +745,10 @@ func parserParityExampleCase(path string) (parserParityCase, bool, string, []str
 	source := string(sourceBytes)
 	want, reason, parseErrs := summarizeGoParserSubset(source)
 	if len(parseErrs) > 0 || reason != "" {
-		return parserParityCase{}, false, reason, parseErrs
+		return parserParityCase{name: parserParityCaseName(root, prefix, path)}, false, reason, parseErrs
 	}
 	return parserParityCase{
-		name:   parserParityExampleName(path),
+		name:   parserParityCaseName(root, prefix, path),
 		source: source,
 		want:   want,
 	}, true, "", nil
@@ -693,11 +756,16 @@ func parserParityExampleCase(path string) (parserParityCase, bool, string, []str
 
 // parserParityExampleName returns a stable corpus name for an example file.
 func parserParityExampleName(path string) string {
-	rel, err := filepath.Rel(parserParityExamplesRoot, path)
+	return parserParityCaseName(parserParityExamplesRoot, "examples", path)
+}
+
+// parserParityCaseName returns a stable corpus name for a file under root.
+func parserParityCaseName(root string, prefix string, path string) string {
+	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return filepath.ToSlash(path)
 	}
-	return "examples/" + filepath.ToSlash(rel)
+	return prefix + "/" + filepath.ToSlash(rel)
 }
 
 // parserParitySeedCases provides stable positive coverage for the current subset.
@@ -799,6 +867,7 @@ func parserParityExpressionSeedCases() []parserParityCase {
 			source: "fn main() { let xs = std::array::Array<i64>(allocator); }",
 		},
 		{name: "seed/fn_cast_expr", source: "fn main() { let byte = cast<u8>(48); }"},
+		{name: "seed/fn_deref_field", source: "fn main(value: &User) { print(value.*.name); }"},
 		{
 			name:   "seed/fn_index_and_slice",
 			source: "fn main() { let item = bytes[0]; let part = bytes[1..3]; }",
@@ -906,6 +975,8 @@ func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
 		return summarizeEnumDeclSubset(node)
 	case *kizuast.UnionDecl:
 		return summarizeUnionDeclSubset(node)
+	case *kizuast.ContractDecl, *kizuast.ImplDecl, *kizuast.SatisfyDecl:
+		return nil, "non-selfhost contract declaration outside std parser subset"
 	default:
 		return nil, "top-level declaration outside std parser subset"
 	}
@@ -1418,10 +1489,12 @@ func summarizeExprSubset(expr kizuast.Expression) ([]string, string) {
 			return nil, reason
 		}
 		return append([]string{"ComptimeExpr"}, value...), ""
+	case *kizuast.DerefExpr:
+		return summarizeDerefExprSubset(node)
 	case *kizuast.IfStmt:
-		return nil, "if expression outside std parser subset"
+		return nil, "non-selfhost if expression outside std parser subset"
 	case *kizuast.MatchStmt:
-		return nil, "match expression outside std parser subset"
+		return nil, "non-selfhost match expression outside std parser subset"
 	default:
 		return summarizePrimarySubset(expr)
 	}
@@ -1561,6 +1634,15 @@ func summarizeFieldExprSubset(expr *kizuast.FieldExpr) ([]string, string) {
 	lines := []string{"FieldExpr", mode}
 	lines = append(lines, receiver...)
 	return append(lines, "Var", expr.Name), ""
+}
+
+// summarizeDerefExprSubset summarizes explicit postfix dereference.
+func summarizeDerefExprSubset(expr *kizuast.DerefExpr) ([]string, string) {
+	receiver, reason := summarizeExprSubset(expr.Receiver)
+	if reason != "" {
+		return nil, reason
+	}
+	return append([]string{"DerefExpr"}, receiver...), ""
 }
 
 // summarizeCallSubset summarizes calls with a supported callee expression.
