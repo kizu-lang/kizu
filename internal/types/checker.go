@@ -4833,7 +4833,6 @@ func isAstNodeIDType(typ Type) bool {
 func isAstScalarType(typ Type) bool {
 	switch typ {
 	case "SourceFile", "std::kizu::ast::SourceFile",
-		"Ast", "std::kizu::ast::Ast",
 		"AstNode", "std::kizu::ast::AstNode",
 		"AstData", "std::kizu::ast::AstData",
 		"IntNode", "std::kizu::ast::IntNode",
@@ -4844,6 +4843,10 @@ func isAstScalarType(typ Type) bool {
 		"IfNode", "std::kizu::ast::IfNode",
 		"LetNode", "std::kizu::ast::LetNode",
 		"ReturnNode", "std::kizu::ast::ReturnNode",
+		"ParamNode", "std::kizu::ast::ParamNode",
+		"FieldNode", "std::kizu::ast::FieldNode",
+		"MatchNode", "std::kizu::ast::MatchNode",
+		"MatchArmNode", "std::kizu::ast::MatchArmNode",
 		"FnDeclNode", "std::kizu::ast::FnDeclNode",
 		"Span", "std::kizu::ast::Span",
 		"TokenId", "std::kizu::ast::TokenId",

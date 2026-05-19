@@ -1101,6 +1101,8 @@ func (c *Checker) checkUserCall(
 			_, err = c.readExpr(arg, env)
 		} else if fn.params[idx].borrow {
 			_, err = c.readExpr(arg, env)
+		} else if isAstType(fn.params[idx].typeName) {
+			_, err = c.readExpr(arg, env)
 		} else {
 			_, err = c.moveExpr(arg, env)
 		}
@@ -2646,7 +2648,7 @@ func (c *Checker) checkNonArenaMethod(
 		return c.checkTaskGroupMethod(name, args, env)
 	}
 	if value.typeName == "std::kizu::ast::Ast" {
-		return c.checkAstMethod(name, args, env)
+		return c.checkAstMethod(value, name, args, env)
 	}
 	if elem, ok := taskElement(value.typeName); ok {
 		return c.checkTaskMethod(value, name, elem, args)
@@ -2659,13 +2661,21 @@ func (c *Checker) checkNonArenaMethod(
 }
 
 // checkAstMethod validates selfhost AST arena helper methods.
-func (c *Checker) checkAstMethod(name string, args []ast.Expression, env *scope) (string, error) {
+func (c *Checker) checkAstMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
 	switch name {
 	case "add_node":
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::AstData",
 		}, "std::kizu::ast::NodeId")
 	case "get":
+		if err := c.checkAstNodeIDProvenance(receiver, args, env); err != nil {
+			return "", err
+		}
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::AstNode")
@@ -2686,6 +2696,25 @@ func (c *Checker) checkAstMethod(name string, args []ast.Expression, env *scope)
 	default:
 		return c.checkAstAddMethod(name, args, env)
 	}
+}
+
+// checkAstNodeIDProvenance rejects known NodeIds from a different Ast.
+func (c *Checker) checkAstNodeIDProvenance(
+	receiver *binding,
+	args []ast.Expression,
+	env *scope,
+) error {
+	if len(args) != 1 || receiver.arenaID == 0 {
+		return nil
+	}
+	idArena := c.astNodeIDProvenance(args[0], env)
+	if idArena == 0 {
+		return nil
+	}
+	if idArena != receiver.arenaID {
+		return fmt.Errorf("ast error: NodeId does not belong to Ast `%s`", receiver.name)
+	}
+	return nil
 }
 
 // checkAstAddMethod validates selfhost AST node-construction helper methods.
@@ -2720,9 +2749,26 @@ func (c *Checker) checkAstAddMethod(
 		return c.checkAstMethodArgs(name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
+	case "add_param":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
+		}, "std::kizu::ast::NodeId")
+	case "add_field":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+	case "add_match":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+	case "add_match_arm":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
 	case "add_fn_decl":
 		return c.checkAstMethodArgs(name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 	case "add_empty":
 		return c.checkAstMethodArgs(name, args, env, []string{"i64"}, "std::kizu::ast::NodeId")
@@ -3792,13 +3838,92 @@ func (c *Checker) newBinding(name string, typeName string) *binding {
 
 // setArenaProvenance records arena and handle origins for local bindings.
 func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *scope) {
+	if isAstType(value.typeName) || isAstParseResultType(value.typeName) {
+		value.arenaID = value.id
+	}
+	if provenance := c.astFieldProvenance(expr, env); provenance != 0 {
+		if isAstType(value.typeName) || isAstParseResultType(value.typeName) {
+			value.arenaID = provenance
+		}
+		if isAstNodeIDType(value.typeName) {
+			value.handleArenaID = provenance
+		}
+	}
 	if _, ok := expr.(*ast.ArenaNewExpr); ok {
 		value.arenaID = value.id
 		return
 	}
-	arena := c.arenaAddReceiver(expr, env)
-	if arena != nil {
+	if arena := c.arenaAddReceiver(expr, env); arena != nil {
 		value.handleArenaID = arena.arenaID
+	}
+	if astReceiver := c.astNodeIDReceiver(expr, env); astReceiver != nil {
+		value.handleArenaID = astReceiver.arenaID
+	}
+}
+
+// astFieldProvenance returns the Ast identity carried by ParseResult fields.
+func (c *Checker) astFieldProvenance(expr ast.Expression, env *scope) int {
+	field, ok := expr.(*ast.FieldExpr)
+	if !ok || (field.Name != "ast" && field.Name != "root") {
+		return 0
+	}
+	receiver, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return 0
+	}
+	value, ok := env.lookup(receiver.Name)
+	if !ok || !isAstParseResultType(value.typeName) {
+		return 0
+	}
+	return value.arenaID
+}
+
+// astNodeIDProvenance returns the known Ast identity for a NodeId expression.
+func (c *Checker) astNodeIDProvenance(expr ast.Expression, env *scope) int {
+	if provenance := c.astFieldProvenance(expr, env); provenance != 0 {
+		return provenance
+	}
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return 0
+	}
+	value, ok := env.lookup(ident.Name)
+	if !ok || !isAstNodeIDType(value.typeName) {
+		return 0
+	}
+	return value.handleArenaID
+}
+
+// astNodeIDReceiver returns the Ast receiver for Ast methods that create NodeIds.
+func (c *Checker) astNodeIDReceiver(expr ast.Expression, env *scope) *binding {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || !astNodeIDMethod(field.Name) {
+		return nil
+	}
+	receiver, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	value, _ := env.lookup(receiver.Name)
+	if value == nil || !isAstType(value.typeName) {
+		return nil
+	}
+	return value
+}
+
+// astNodeIDMethod reports methods that create an Ast-owned NodeId.
+func astNodeIDMethod(name string) bool {
+	switch name {
+	case "add_node", "add_int", "add_var", "add_binary", "add_call",
+		"add_block", "add_return", "add_param", "add_field", "add_match",
+		"add_match_arm", "add_fn_decl", "add_empty":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -3961,11 +4086,20 @@ func isAstNodeIDType(typeName string) bool {
 	return typeName == "NodeId" || typeName == "std::kizu::ast::NodeId"
 }
 
+// isAstType reports the selfhost AST owner type.
+func isAstType(typeName string) bool {
+	return typeName == "Ast" || typeName == "std::kizu::ast::Ast"
+}
+
+// isAstParseResultType reports the parser result that carries an Ast and root id.
+func isAstParseResultType(typeName string) bool {
+	return typeName == "ParseResult" || typeName == "std::kizu::ast::ParseResult"
+}
+
 // isAstScalarType reports small selfhost AST metadata wrappers with copy fields.
 func isAstScalarType(typeName string) bool {
 	switch typeName {
 	case "SourceFile", "std::kizu::ast::SourceFile",
-		"Ast", "std::kizu::ast::Ast",
 		"AstNode", "std::kizu::ast::AstNode",
 		"AstData", "std::kizu::ast::AstData",
 		"IntNode", "std::kizu::ast::IntNode",
@@ -3976,6 +4110,10 @@ func isAstScalarType(typeName string) bool {
 		"IfNode", "std::kizu::ast::IfNode",
 		"LetNode", "std::kizu::ast::LetNode",
 		"ReturnNode", "std::kizu::ast::ReturnNode",
+		"ParamNode", "std::kizu::ast::ParamNode",
+		"FieldNode", "std::kizu::ast::FieldNode",
+		"MatchNode", "std::kizu::ast::MatchNode",
+		"MatchArmNode", "std::kizu::ast::MatchArmNode",
 		"FnDeclNode", "std::kizu::ast::FnDeclNode",
 		"Span", "std::kizu::ast::Span",
 		"TokenId", "std::kizu::ast::TokenId",
