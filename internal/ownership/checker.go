@@ -50,6 +50,7 @@ type binding struct {
 	fieldMutBorrows  map[string]int
 	arenaID          int
 	handleArenaID    int
+	rangeArenaID     int
 	taskDone         bool
 }
 
@@ -595,6 +596,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		target.moved = false
 		target.arenaID = 0
 		target.handleArenaID = 0
+		target.rangeArenaID = 0
 		c.setArenaProvenance(target, stmt.Value, env)
 		return nil
 	}
@@ -2669,36 +2671,35 @@ func (c *Checker) checkAstMethod(
 ) (string, error) {
 	switch name {
 	case "add_node":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::AstData",
 		}, "std::kizu::ast::NodeId")
 	case "get":
-		if err := c.checkAstNodeIDProvenance(receiver, args, env); err != nil {
-			return "", err
-		}
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::AstNode")
 	case "len", "begin_children":
-		return c.checkAstMethodArgs(name, args, env, nil, "i64")
+		return c.checkAstMethodArgs(receiver, name, args, env, nil, "i64")
 	case "add_child":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::NodeId",
 		}, "!void")
 	case "finish_children":
-		return c.checkAstMethodArgs(name, args, env, []string{"i64"}, "std::kizu::ast::ChildRange")
+		return c.checkAstMethodArgs(
+			receiver, name, args, env, []string{"i64"}, "std::kizu::ast::ChildRange",
+		)
 	case "child_at":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::ChildRange", "i64",
 		}, "!std::kizu::ast::NodeId")
 	case "deinit":
-		return c.checkAstMethodArgs(name, args, env, nil, "void")
+		return c.checkAstMethodArgs(receiver, name, args, env, nil, "void")
 	default:
-		return c.checkAstAddMethod(name, args, env)
+		return c.checkAstAddMethod(receiver, name, args, env)
 	}
 }
 
-// checkAstNodeIDProvenance rejects known NodeIds from a different Ast.
+// checkAstNodeIDProvenance rejects known AST-owned values from a different Ast.
 func (c *Checker) checkAstNodeIDProvenance(
 	receiver *binding,
 	args []ast.Expression,
@@ -2717,65 +2718,85 @@ func (c *Checker) checkAstNodeIDProvenance(
 	return nil
 }
 
+// checkAstChildRangeProvenance rejects known ChildRanges from a different Ast.
+func (c *Checker) checkAstChildRangeProvenance(
+	receiver *binding,
+	arg ast.Expression,
+	env *scope,
+) error {
+	if receiver.arenaID == 0 {
+		return nil
+	}
+	rangeArena := c.astChildRangeProvenance(arg, env)
+	if rangeArena == 0 {
+		return nil
+	}
+	if rangeArena != receiver.arenaID {
+		return fmt.Errorf("ast error: ChildRange does not belong to Ast `%s`", receiver.name)
+	}
+	return nil
+}
+
 // checkAstAddMethod validates selfhost AST node-construction helper methods.
 func (c *Checker) checkAstAddMethod(
+	receiver *binding,
 	name string,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
 	switch name {
 	case "add_int":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
 		}, "std::kizu::ast::NodeId")
 	case "add_var":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
 		}, "std::kizu::ast::NodeId")
 	case "add_binary":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::BinaryOp",
 			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 	case "add_call":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 	case "add_block":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 	case "add_return":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 	case "add_param":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
 		}, "std::kizu::ast::NodeId")
 	case "add_field":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 	case "add_struct_decl":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 	case "add_match":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 	case "add_match_arm":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 	case "add_fn_decl":
-		return c.checkAstMethodArgs(name, args, env, []string{
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
 			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 	case "add_empty":
-		return c.checkAstMethodArgs(name, args, env, []string{"i64"}, "std::kizu::ast::NodeId")
+		return c.checkAstMethodArgs(receiver, name, args, env, []string{"i64"}, "std::kizu::ast::NodeId")
 	default:
 		return "", fmt.Errorf("move error: unknown Ast method `%s`", name)
 	}
@@ -2783,6 +2804,7 @@ func (c *Checker) checkAstAddMethod(
 
 // checkAstMethodArgs checks AST helper arguments without moving copy-like ids.
 func (c *Checker) checkAstMethodArgs(
+	receiver *binding,
 	name string,
 	args []ast.Expression,
 	env *scope,
@@ -2793,6 +2815,16 @@ func (c *Checker) checkAstMethodArgs(
 		return "", fmt.Errorf("move error: `Ast.%s` expects %d args, got %d", name, len(want), len(args))
 	}
 	for idx, arg := range args {
+		if isAstNodeIDType(want[idx]) {
+			if err := c.checkAstNodeIDProvenance(receiver, []ast.Expression{arg}, env); err != nil {
+				return "", err
+			}
+		}
+		if isAstChildRangeType(want[idx]) {
+			if err := c.checkAstChildRangeProvenance(receiver, arg, env); err != nil {
+				return "", err
+			}
+		}
 		got, err := c.moveExpr(arg, env)
 		if err != nil {
 			return "", err
@@ -3853,6 +3885,12 @@ func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *s
 			value.handleArenaID = provenance
 		}
 	}
+	if isAstNodeIDType(value.typeName) {
+		value.handleArenaID = c.astNodeIDProvenance(expr, env)
+	}
+	if isAstChildRangeType(value.typeName) {
+		value.rangeArenaID = c.astChildRangeProvenance(expr, env)
+	}
 	if _, ok := expr.(*ast.ArenaNewExpr); ok {
 		value.arenaID = value.id
 		return
@@ -3862,6 +3900,9 @@ func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *s
 	}
 	if astReceiver := c.astNodeIDReceiver(expr, env); astReceiver != nil {
 		value.handleArenaID = astReceiver.arenaID
+	}
+	if astReceiver := c.astChildRangeReceiver(expr, env); astReceiver != nil {
+		value.rangeArenaID = astReceiver.arenaID
 	}
 }
 
@@ -3887,6 +3928,9 @@ func (c *Checker) astNodeIDProvenance(expr ast.Expression, env *scope) int {
 	if provenance := c.astFieldProvenance(expr, env); provenance != 0 {
 		return provenance
 	}
+	if astReceiver := c.astNodeIDReceiver(expr, env); astReceiver != nil {
+		return astReceiver.arenaID
+	}
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
 		return 0
@@ -3898,8 +3942,27 @@ func (c *Checker) astNodeIDProvenance(expr ast.Expression, env *scope) int {
 	return value.handleArenaID
 }
 
-// astNodeIDReceiver returns the Ast receiver for Ast methods that create NodeIds.
+// astChildRangeProvenance returns the known Ast identity for a ChildRange expression.
+func (c *Checker) astChildRangeProvenance(expr ast.Expression, env *scope) int {
+	if astReceiver := c.astChildRangeReceiver(expr, env); astReceiver != nil {
+		return astReceiver.arenaID
+	}
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return 0
+	}
+	value, ok := env.lookup(ident.Name)
+	if !ok || !isAstChildRangeType(value.typeName) {
+		return 0
+	}
+	return value.rangeArenaID
+}
+
+// astNodeIDReceiver returns the Ast receiver for Ast methods that return NodeIds.
 func (c *Checker) astNodeIDReceiver(expr ast.Expression, env *scope) *binding {
+	if tryExpr, ok := expr.(*ast.TryExpr); ok {
+		return c.astNodeIDReceiver(tryExpr.Value, env)
+	}
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return nil
@@ -3919,12 +3982,34 @@ func (c *Checker) astNodeIDReceiver(expr ast.Expression, env *scope) *binding {
 	return value
 }
 
-// astNodeIDMethod reports methods that create an Ast-owned NodeId.
+// astChildRangeReceiver returns the Ast receiver for Ast methods that return ranges.
+func (c *Checker) astChildRangeReceiver(expr ast.Expression, env *scope) *binding {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "finish_children" {
+		return nil
+	}
+	receiver, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	value, _ := env.lookup(receiver.Name)
+	if value == nil || !isAstType(value.typeName) {
+		return nil
+	}
+	return value
+}
+
+// astNodeIDMethod reports methods that return an Ast-owned NodeId.
 func astNodeIDMethod(name string) bool {
 	switch name {
 	case "add_node", "add_int", "add_var", "add_binary", "add_call",
 		"add_block", "add_return", "add_param", "add_field", "add_match",
-		"add_struct_decl", "add_match_arm", "add_fn_decl", "add_empty":
+		"add_struct_decl", "add_match_arm", "add_fn_decl", "add_empty",
+		"child_at":
 		return true
 	default:
 		return false
@@ -4088,6 +4173,11 @@ func isAtomicSupportedType(typeName string) bool {
 // isAstNodeIDType reports the selfhost AST id wrapper allowed in child lists.
 func isAstNodeIDType(typeName string) bool {
 	return typeName == "NodeId" || typeName == "std::kizu::ast::NodeId"
+}
+
+// isAstChildRangeType reports selfhost AST child range values.
+func isAstChildRangeType(typeName string) bool {
+	return typeName == "ChildRange" || typeName == "std::kizu::ast::ChildRange"
 }
 
 // isAstType reports the selfhost AST owner type.
