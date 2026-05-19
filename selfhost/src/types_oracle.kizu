@@ -1,0 +1,153 @@
+import selfhost::types;
+
+pub fn gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    var kinds = std::map::Map<[]const u8, types::TypeKind>(allocator);
+    var arities = std::map::Map<[]const u8, i64>(allocator);
+    var copyable = std::map::Map<[]const u8, bool>(allocator);
+
+    try types::declare_type(kinds, arities, copyable, "void", types::TypeKind::Primitive, 0, true);
+    try types::declare_type(kinds, arities, copyable, "i64", types::TypeKind::Primitive, 0, true);
+    try types::declare_type(
+        kinds,
+        arities,
+        copyable,
+        "selfhost::lexer::summarize",
+        types::TypeKind::Function,
+        1,
+        true
+    );
+    try types::declare_type(
+        kinds,
+        arities,
+        copyable,
+        "selfhost::token::TokenKind",
+        types::TypeKind::Enum,
+        0,
+        true
+    );
+    try types::declare_type(
+        kinds,
+        arities,
+        copyable,
+        "selfhost::token::Token",
+        types::TypeKind::Struct,
+        0,
+        true
+    );
+    try types::declare_type(
+        kinds,
+        arities,
+        copyable,
+        "selfhost::parser::ParseError",
+        types::TypeKind::Union,
+        0,
+        false
+    );
+    try types::declare_type(
+        kinds,
+        arities,
+        copyable,
+        "selfhost::parser::ParseError!i64",
+        types::TypeKind::ErrorUnion,
+        2,
+        false
+    );
+    try types::declare_type(
+        kinds,
+        arities,
+        copyable,
+        "?selfhost::ast::NodeId",
+        types::TypeKind::Optional,
+        1,
+        true
+    );
+    try types::declare_type(
+        kinds,
+        arities,
+        copyable,
+        "std::map::Map<[]const u8, selfhost::types::TypeKind>",
+        types::TypeKind::Container,
+        2,
+        false
+    );
+
+    try expect_types(kinds, arities, copyable);
+    try expect_diagnostics(allocator);
+
+    let summary = types::summarize(kinds, 4);
+    try std::testing::expect_equal_i64(1, summary.modules);
+    try std::testing::expect_equal_i64(9, summary.symbols);
+    try std::testing::expect_equal_i64(9, summary.typed_nodes);
+    try std::testing::expect_equal_i64(4, summary.diagnostics);
+
+    kinds.deinit();
+    arities.deinit();
+    copyable.deinit();
+
+    print("type-symbols");
+    print(summary.symbols);
+    print("type-typed-nodes");
+    print(summary.typed_nodes);
+    print("type-diagnostics");
+    print(summary.diagnostics);
+    return;
+}
+
+fn expect_types(
+    kinds: &std::map::Map<[]const u8, types::TypeKind>,
+    arities: &std::map::Map<[]const u8, i64>,
+    copyable: &std::map::Map<[]const u8, bool>
+) -> !void {
+    let primitive = try types::lookup_kind(kinds, "i64");
+    try std::testing::expect_equal_bool(true, primitive == types::TypeKind::Primitive);
+    let function = try types::lookup_kind(kinds, "selfhost::lexer::summarize");
+    try std::testing::expect_equal_bool(true, function == types::TypeKind::Function);
+    let token = try types::lookup_kind(kinds, "selfhost::token::Token");
+    try std::testing::expect_equal_bool(true, token == types::TypeKind::Struct);
+    let parse_error = try types::lookup_kind(kinds, "selfhost::parser::ParseError");
+    try std::testing::expect_equal_bool(true, parse_error == types::TypeKind::Union);
+    let error_union = try types::lookup_kind(kinds, "selfhost::parser::ParseError!i64");
+    try std::testing::expect_equal_bool(true, error_union == types::TypeKind::ErrorUnion);
+    let container = try types::lookup_kind(kinds, "std::map::Map<[]const u8, selfhost::types::TypeKind>");
+    try std::testing::expect_equal_bool(true, container == types::TypeKind::Container);
+
+    let map_arity = try types::arity_of(
+        arities,
+        "std::map::Map<[]const u8, selfhost::types::TypeKind>"
+    );
+    try std::testing::expect_equal_i64(2, map_arity);
+    let token_copy = try types::is_copyable(copyable, "selfhost::token::Token");
+    try std::testing::expect_equal_bool(true, token_copy);
+    let error_copy = try types::is_copyable(copyable, "selfhost::parser::ParseError");
+    try std::testing::expect_equal_bool(false, error_copy);
+    return;
+}
+
+fn expect_diagnostics(allocator: Allocator) -> !void {
+    var unknown = types::unknown_type(allocator, "selfhost/src/types.kizu", 5, 10);
+    try expect_diagnostic(unknown, "unknown type", 5, 10);
+
+    var arity = types::wrong_arity(allocator, "selfhost/src/types.kizu", 12, 18);
+    try expect_diagnostic(arity, "wrong type arity", 12, 18);
+
+    var mismatch = types::type_mismatch(allocator, "selfhost/src/types.kizu", 20, 29);
+    try expect_diagnostic(mismatch, "type mismatch", 20, 29);
+
+    var unsupported = types::unsupported_feature(allocator, "selfhost/src/types.kizu", 31, 43);
+    try expect_diagnostic(unsupported, "unsupported type feature", 31, 43);
+    return;
+}
+
+fn expect_diagnostic(
+    diagnostic: std::kizu::diagnostic::Diagnostic,
+    message: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> !void {
+    try std::testing::expect_equal_bytes(message, diagnostic.message);
+    try std::testing::expect_equal_i64(byte_start, diagnostic.primary.byte_start);
+    try std::testing::expect_equal_i64(byte_end, diagnostic.primary.byte_end);
+    diagnostic.deinit();
+    return;
+}

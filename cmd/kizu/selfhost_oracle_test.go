@@ -30,6 +30,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostParserSourceOracle(t),
 		runSelfhostParserErrorOracle(t),
 		runSelfhostResolverOracle(t),
+		runSelfhostTypeOracle(t),
 	}
 	failures := 0
 	for _, result := range results {
@@ -185,6 +186,19 @@ func runSelfhostResolverOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "selfhost",
 		scanned:   4,
 		compared:  4,
+		failures:  failures,
+	}
+}
+
+// runSelfhostTypeOracle checks the Kizu-owned type checker component gate.
+func runSelfhostTypeOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostTypeGateFailures(t)
+	return selfhostOracleResult{
+		component: "types",
+		corpus:    "selfhost",
+		scanned:   9,
+		compared:  9,
 		failures:  failures,
 	}
 }
