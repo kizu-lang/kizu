@@ -10,6 +10,7 @@ The package currently defines these source-owned modules:
 - `selfhost::lexer_oracle`
 - `selfhost::ast`
 - `selfhost::parser`
+- `selfhost::parser_oracle`
 - `selfhost::diagnostic`
 - `selfhost::resolver`
 - `selfhost::resolver_oracle`
@@ -30,9 +31,13 @@ duplicating token shapes. The oracle suite compares the direct token stream, the
 Array-backed `tokenize` path, and the selfhost lexer component gate against the
 Go lexer.
 
-The parser and AST boundary is currently `std::kizu::{ast, parser}`. Parser
-success gates compare the Arena + NodeId AST summary for every `selfhost/src`
-source file, and parser error gates keep recoverable `!T` failures readable.
+The parser and AST boundary is currently `std::kizu::{ast, parser}` through
+`selfhost::{ast, parser}`. The selfhost parser consumes Kizu lexer token arrays,
+returns structured Arena + NodeId `ParseResult` values, and exposes typed
+diagnostic summaries for parser-owned errors. Parser success gates compare the
+Arena + NodeId AST summary for every `selfhost/src` source file, and parser
+error gates keep recoverable `!T` failures readable. Mapping lower-level
+untyped parser failures into typed parser diagnostics is tracked by #464.
 
 The resolver boundary uses `std::map::Map<[]const u8, V>` for symbol and
 visibility tables. Resolver diagnostics use `std::kizu::diagnostic` and the
