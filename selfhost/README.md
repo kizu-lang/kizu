@@ -25,6 +25,10 @@ modules should reuse that implementation instead of duplicating token shapes in
 `selfhost::lexer`; the oracle suite compares the direct token stream and the
 Array-backed `tokenize` path against the Go lexer.
 
+The parser and AST boundary is currently `std::kizu::{ast, parser}`. Parser
+success gates compare the Arena + NodeId AST summary for every `selfhost/src`
+source file, and parser error gates keep recoverable `!T` failures readable.
+
 Check the package with:
 
 ```sh

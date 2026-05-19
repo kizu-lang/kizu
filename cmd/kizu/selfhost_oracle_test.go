@@ -28,6 +28,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostLexerTokenizeSourceOracle(t),
 		runSelfhostParserOracle(t),
 		runSelfhostParserSourceOracle(t),
+		runSelfhostParserErrorOracle(t),
 	}
 	failures := 0
 	for _, result := range results {
@@ -154,6 +155,20 @@ func runSelfhostParserSourceOracle(t *testing.T) selfhostOracleResult {
 	return selfhostOracleResult{
 		component: "parser",
 		corpus:    "selfhost",
+		scanned:   len(cases),
+		compared:  len(cases),
+		failures:  failures,
+	}
+}
+
+// runSelfhostParserErrorOracle checks parser errors stay recoverable and readable.
+func runSelfhostParserErrorOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countStdKizuParserErrorSeedFailures(t)
+	cases := stdKizuParserErrorSeedCases()
+	return selfhostOracleResult{
+		component: "parser-errors",
+		corpus:    "negative-seeds",
 		scanned:   len(cases),
 		compared:  len(cases),
 		failures:  failures,
