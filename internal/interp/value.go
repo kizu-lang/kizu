@@ -28,6 +28,7 @@ const (
 	kindMutex
 	kindArray
 	kindMap
+	kindBox
 	kindRef
 	kindFunctionName
 )
@@ -56,6 +57,7 @@ type Value struct {
 	mutex     *Mutex
 	array     *Array
 	mapValue  *Map
+	box       *Box
 	ref       *binding
 }
 
@@ -81,6 +83,12 @@ type Map struct {
 	valueType string
 	entries   map[string]Value
 	deinit    bool
+}
+
+// Box stores one owned heap-like value for explicit indirection.
+type Box struct {
+	value  Value
+	deinit bool
 }
 
 // ErrorUnion owns an error value for !T runtime propagation.
@@ -219,6 +227,8 @@ func (v Value) objectString() string {
 		return v.union.typeName + "::" + v.union.tag
 	case kindMap:
 		return "<map>"
+	case kindBox:
+		return "<box>"
 	default:
 		return v.capabilityString()
 	}
@@ -337,6 +347,14 @@ func mapValue(valueType string) Value {
 			valueType: valueType,
 			entries:   map[string]Value{},
 		},
+	}
+}
+
+// boxValue returns one owned indirection value.
+func boxValue(typeName string, value Value) Value {
+	return Value{
+		kind: kindBox, typeName: fmt.Sprintf("std::mem::Box<%s>", typeName),
+		box: &Box{value: value},
 	}
 }
 

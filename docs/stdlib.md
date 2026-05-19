@@ -96,6 +96,7 @@ Current builtin thinning candidates:
 | `std::builtin::mem_byte_at` | Removed | Implemented in `std/src/mem.kizu` using checked index syntax |
 | `std::builtin::mem_slice` | Removed | Implemented in `std/src/mem.kizu` using checked slice syntax |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
+| `std::builtin::box<T>`, `std::builtin::box_borrow<T>`, `std::builtin::box_borrow_mut<T>`, `std::builtin::box_deinit<T>` | Runtime primitive | Public constructor and methods live in `std/src/mem.kizu`; direct user calls are rejected |
 | `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_arg_count`, `std::builtin::process_arg`, `std::builtin::process_env` | Host primitive | Keep as host process boundary |
@@ -128,7 +129,8 @@ uses a `comptime Function` parameter to forward the worker name through
 `std/src/task.kizu`. `parallel_map` uses an explicit `&mut Partition` parameter
 to mutate partition output without moving the owner. `std::channel::Channel<T>()`,
 `std::atomic::Atomic<T>(value)`, `std::sync::Mutex<T>(value)`,
-`std::array::Array<T>(allocator)`, `std::map::Map<K, V>(allocator)`, and
+`std::mem::Box<T>(allocator, value)`, `std::array::Array<T>(allocator)`,
+`std::map::Map<K, V>(allocator)`, and
 `std::thread::scoped<T>(io, worker, arg)` now use source-level type-argument
 forwarding through Kizu std source.
 
@@ -136,7 +138,7 @@ forwarding through Kizu std source.
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
-| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; only allocator and len use trusted primitives | keep only allocator capability and slice metadata primitives trusted |
+| `std::mem` | `page_allocator`, `Box<T>`, `borrow`, `borrow_mut`, `deinit`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, Box storage, Box local borrow, Box deinit, and len use trusted primitives | keep only allocator capability, Box storage/local-borrow boundary, and slice metadata primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |

@@ -116,6 +116,7 @@ type Checker struct {
 	contracts     map[string]*contractType
 	impls         map[string]map[string]*functionType
 	satisfactions map[string]map[string]bool
+	declaredTypes map[string]bool
 	currentReturn Type
 	currentStd    bool
 	typeParams    map[string]bool
@@ -171,6 +172,7 @@ func New() *Checker {
 		contracts:     map[string]*contractType{},
 		impls:         map[string]map[string]*functionType{},
 		satisfactions: map[string]map[string]bool{},
+		declaredTypes: map[string]bool{},
 	}
 }
 
@@ -210,39 +212,63 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 
 // collectTypesAndMethods registers declarations needed before function signatures.
 func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
+	if err := c.predeclareTypeNames(program); err != nil {
+		return err
+	}
 	for _, decl := range program.Decls {
-		switch d := decl.(type) {
-		case *ast.StructDecl:
-			if err := c.collectStruct(d); err != nil {
-				return err
-			}
-		case *ast.EnumDecl:
-			if err := c.collectEnum(d); err != nil {
-				return err
-			}
-		case *ast.UnionDecl:
-			if err := c.collectUnion(d); err != nil {
-				return err
-			}
-		case *ast.ContractDecl:
-			if err := c.collectContract(d); err != nil {
-				return err
-			}
-		case *ast.ImplDecl:
-			if err := c.collectImpl(d); err != nil {
-				return err
-			}
-		case *ast.SatisfyDecl:
-			continue
-		case *ast.ImportDecl:
-			continue
-		case *ast.FunctionDecl:
-			continue
-		default:
-			return fmt.Errorf("type error: unsupported declaration %T", decl)
+		if err := c.collectTypeOrMethodDecl(decl); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// collectTypeOrMethodDecl registers one type-level declaration.
+func (c *Checker) collectTypeOrMethodDecl(decl ast.Decl) error {
+	switch d := decl.(type) {
+	case *ast.StructDecl:
+		return c.collectStruct(d)
+	case *ast.EnumDecl:
+		return c.collectEnum(d)
+	case *ast.UnionDecl:
+		return c.collectUnion(d)
+	case *ast.ContractDecl:
+		return c.collectContract(d)
+	case *ast.ImplDecl:
+		return c.collectImpl(d)
+	case *ast.SatisfyDecl, *ast.ImportDecl, *ast.FunctionDecl:
+		return nil
+	default:
+		return fmt.Errorf("type error: unsupported declaration %T", decl)
+	}
+}
+
+// predeclareTypeNames lets recursive fields refer to later declarations through Box.
+func (c *Checker) predeclareTypeNames(program *ast.Program) error {
+	for _, decl := range program.Decls {
+		name, ok := declaredTypeName(decl)
+		if !ok {
+			continue
+		}
+		c.declaredTypes[name] = true
+	}
+	return nil
+}
+
+// declaredTypeName returns the user type introduced by a declaration.
+func declaredTypeName(decl ast.Decl) (string, bool) {
+	switch d := decl.(type) {
+	case *ast.StructDecl:
+		return d.Name, true
+	case *ast.EnumDecl:
+		return d.Name, true
+	case *ast.UnionDecl:
+		return d.Name, true
+	case *ast.ContractDecl:
+		return d.Name, true
+	default:
+		return "", false
+	}
 }
 
 // checkPublicAPI rejects private types exposed through public declarations.
@@ -640,6 +666,11 @@ func (c *Checker) parseType(name string) (Type, error) {
 	if base, arg, ok := splitGenericType(name); ok {
 		return c.parseGenericType(name, base, arg)
 	}
+	return c.parseNamedType(name)
+}
+
+// parseNamedType validates primitive, declared, and type-parameter names.
+func (c *Checker) parseNamedType(name string) (Type, error) {
 	typ := Type(name)
 	if typ == typeSelf {
 		return typ, nil
@@ -647,8 +678,8 @@ func (c *Checker) parseType(name string) (Type, error) {
 	if c.typeParams[name] {
 		return typ, nil
 	}
-	if !knownTypes[typ] && c.structs[name] == nil && c.enums[name] == nil &&
-		c.unions[name] == nil {
+	if !knownTypes[typ] && !c.declaredTypes[name] && c.structs[name] == nil &&
+		c.enums[name] == nil && c.unions[name] == nil {
 		return "", fmt.Errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
@@ -694,6 +725,15 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 		return "", fmt.Errorf("type error: invalid generic arguments for `%s`", base)
 	}
 	switch base {
+	case "std::mem::Box":
+		arg, err := singleGenericArg(base, args)
+		if err != nil {
+			return "", err
+		}
+		if _, err := c.parseType(arg); err != nil {
+			return "", err
+		}
+		return Type(name), nil
 	case "std::map::Map":
 		return c.parseMapType(name, args)
 	case "ptr":
@@ -752,7 +792,7 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 func isKnownSingleArgGeneric(base string) bool {
 	switch base {
 	case "arena", "handle", "option", "std::array::Array", "Task",
-		"Channel", "Mutex", "Atomic":
+		"Channel", "Mutex", "Atomic", "std::mem::Box":
 		return true
 	default:
 		return false
@@ -978,6 +1018,13 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool
 		}
 		return false, env.defineParam(stmt.Name, typ, true, mutable)
 	}
+	typ, mutable, ok, err = c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
+	if ok || err != nil {
+		if err != nil {
+			return false, err
+		}
+		return false, env.defineParam(stmt.Name, typ, true, mutable)
+	}
 	if ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe); ok || err != nil {
 		if err != nil {
 			return false, err
@@ -989,6 +1036,52 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool
 		return false, err
 	}
 	return false, env.define(stmt.Name, typ, stmt.Mutable)
+}
+
+// checkBoxBorrowInitializer recognizes box.borrow/borrow_mut local borrow initializers.
+func (c *Checker) checkBoxBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, bool, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return "", false, false, nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || (field.Name != "borrow" && field.Name != "borrow_mut") {
+		return "", false, false, nil
+	}
+	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
+	if err != nil {
+		return "", false, true, err
+	}
+	base, elem, ok := splitGenericType(string(receiver))
+	if !ok || base != "std::mem::Box" {
+		return "", false, true, fmt.Errorf("type error: `Box.%s` expects Box receiver",
+			field.Name)
+	}
+	if len(call.Args) != 0 {
+		return "", false, true, fmt.Errorf("type error: `Box.%s` expects 0 args, got %d",
+			field.Name, len(call.Args))
+	}
+	if field.Name == "borrow_mut" && !boxBorrowMutReceiverIsMutable(field.Receiver, env) {
+		return "", false, true, fmt.Errorf("type error: `Box.borrow_mut` requires mutable Box receiver")
+	}
+	return Type(elem), field.Name == "borrow_mut", true, nil
+}
+
+// boxBorrowMutReceiverIsMutable accepts a mutable local Box or direct field owner.
+func boxBorrowMutReceiverIsMutable(expr ast.Expression, env *scope) bool {
+	switch receiver := expr.(type) {
+	case *ast.IdentExpr:
+		return env.isMutable(receiver.Name)
+	case *ast.FieldExpr:
+		ident, ok := receiver.Receiver.(*ast.IdentExpr)
+		return ok && env.isMutable(ident.Name)
+	default:
+		return false
+	}
 }
 
 // checkStringViewInitializer recognizes string.as_bytes() local byte views.
@@ -2438,6 +2531,9 @@ func (c *Checker) checkBuiltinMethodTypeApply(
 	unsafe bool,
 ) (Type, bool, error) {
 	switch name {
+	case "std.builtin.box", "std.builtin.box_borrow", "std.builtin.box_borrow_mut",
+		"std.builtin.box_deinit":
+		return c.checkBuiltinBoxTypeApply(name, typeArg, args, env, unsafe)
 	case "std.builtin.channel_send", "std.builtin.channel_recv":
 		return c.checkBuiltinChannelMethod(name, typeArg, args, env, unsafe)
 	case "std.builtin.atomic_load", "std.builtin.atomic_store":
@@ -2447,6 +2543,89 @@ func (c *Checker) checkBuiltinMethodTypeApply(
 	default:
 		return c.checkBuiltinArrayMethodTypeApply(name, typeArg, args, env, unsafe)
 	}
+}
+
+// checkBuiltinBoxTypeApply validates std-only Box runtime primitives.
+func (c *Checker) checkBuiltinBoxTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	elem, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	switch name {
+	case "std.builtin.box":
+		return c.checkBoxConstructor(elem, args, env, unsafe)
+	case "std.builtin.box_borrow":
+		return c.checkBuiltinBoxMethod(name, elem, "borrow", args, env, unsafe)
+	case "std.builtin.box_borrow_mut":
+		return c.checkBuiltinBoxMethod(name, elem, "borrow_mut", args, env, unsafe)
+	default:
+		return c.checkBuiltinBoxMethod(name, elem, "deinit", args, env, unsafe)
+	}
+}
+
+// checkBoxConstructor validates std::mem::Box<T>(allocator, value).
+func (c *Checker) checkBoxConstructor(
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if !c.currentStd {
+		return "", true, fmt.Errorf("type error: `std.builtin.box` is reserved; use std::mem::Box")
+	}
+	if len(args) != 2 {
+		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects allocator and value",
+			elem)
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != "Allocator" {
+		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects Allocator, got %s",
+			elem, got)
+	}
+	got, err = c.checkExpr(args[1], env, unsafe)
+	if err != nil {
+		return "", true, err
+	}
+	if got != elem {
+		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects %s value, got %s",
+			elem, elem, got)
+	}
+	return Type(fmt.Sprintf("!std::mem::Box<%s>", elem)), true, nil
+}
+
+// checkBuiltinBoxMethod validates Box primitives that back source wrappers.
+func (c *Checker) checkBuiltinBoxMethod(
+	name string,
+	elem Type,
+	method string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
+	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (Type, error) {
+		if len(rest) != 0 {
+			return "", fmt.Errorf("type error: `Box.%s` expects 0 args, got %d",
+				method, len(rest))
+		}
+		switch method {
+		case "borrow":
+			return Type("&" + string(elem)), nil
+		case "borrow_mut":
+			return Type("&mut " + string(elem)), nil
+		default:
+			return typeVoid, nil
+		}
+	}, args, env, unsafe)
 }
 
 // checkBuiltinArrayMethodTypeApply validates std-only Array method primitives.
@@ -3328,11 +3507,48 @@ func (c *Checker) checkKnownReceiverMethod(
 		typ, err := c.checkMapReceiverMethod(field, arg, args, env, unsafe)
 		return typ, true, err
 	}
+	if ok && base == "std::mem::Box" {
+		typ, err := c.checkBoxReceiverMethod(field, Type(arg), args, env, unsafe)
+		return typ, true, err
+	}
 	if receiver == "std::string::String" {
 		typ, err := c.checkStringReceiverMethod(field, args, env, unsafe)
 		return typ, true, err
 	}
 	return "", false, nil
+}
+
+// checkBoxReceiverMethod validates receiver-sensitive Box<T> methods.
+func (c *Checker) checkBoxReceiverMethod(
+	field *ast.FieldExpr,
+	elem Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	switch field.Name {
+	case "borrow":
+		return "", fmt.Errorf(
+			"type error: `Box.borrow` must be bound with `let name = box.borrow()`")
+	case "borrow_mut":
+		return "", fmt.Errorf(
+			"type error: `Box.borrow_mut` must be bound with `let name = box.borrow_mut()`")
+	case "deinit":
+		if _, ok := field.Receiver.(*ast.IdentExpr); !ok {
+			return "", fmt.Errorf("type error: `Box.deinit` requires local Box receiver")
+		}
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Box.deinit` expects 0 args, got %d", len(args))
+		}
+		return typeVoid, nil
+	default:
+		receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
+		method := c.implMethod(string(receiver), field.Name)
+		if method != nil {
+			return c.checkMethodArgs(method, receiver, args, env, unsafe)
+		}
+		return "", fmt.Errorf("type error: Box has no method `%s`", field.Name)
+	}
 }
 
 // checkArenaOrImplMethod validates arena methods or user-defined impl methods.
