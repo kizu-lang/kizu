@@ -53,6 +53,20 @@ fn dump_node(
         Binary(binary) => try dump_binary(source, ast, binary);
         FieldExpr(field_expr) => try dump_field_expr(source, ast, field_expr);
         Call(call) => try dump_call(source, ast, call);
+        TypeApplyExpr(type_apply) => try dump_type_apply_expr(source, ast, type_apply);
+        CastExpr(cast_expr) => try dump_cast_expr(source, ast, cast_expr);
+        IndexExpr(index_expr) => try dump_index_expr(source, ast, index_expr);
+        StructLiteralExpr(struct_literal) => try dump_struct_literal_expr(
+            source,
+            ast,
+            struct_literal
+        );
+        StructFieldInit(struct_field_init) => try dump_struct_field_init(
+            source,
+            ast,
+            struct_field_init
+        );
+        ArenaNewExpr(arena_new) => try dump_arena_new_expr(source, ast, arena_new);
         TryExpr(try_expr) => try dump_try_expr(source, ast, try_expr);
         ComptimeExpr(comptime_expr) => try dump_comptime_expr(source, ast, comptime_expr);
         Block(block) => try dump_block(source, ast, block);
@@ -396,6 +410,77 @@ fn dump_call(
     return;
 }
 
+fn dump_type_apply_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    type_apply: std::kizu::ast::TypeApplyExprNode
+) -> !void {
+    print("TypeApplyExpr");
+    try dump_node(source, ast, type_apply.callee);
+    try dump_range(source, ast, type_apply.type_args);
+    return;
+}
+
+fn dump_cast_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    cast_expr: std::kizu::ast::CastExprNode
+) -> !void {
+    print("CastExpr");
+    try dump_node(source, ast, cast_expr.type_node);
+    try dump_node(source, ast, cast_expr.value);
+    return;
+}
+
+fn dump_index_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    index_expr: std::kizu::ast::IndexExprNode
+) -> !void {
+    print("IndexExpr");
+    if index_expr.slice {
+        print("Slice");
+    } else {
+        print("Index");
+    }
+    try dump_node(source, ast, index_expr.target);
+    try dump_node(source, ast, index_expr.start);
+    try dump_node(source, ast, index_expr.end);
+    return;
+}
+
+fn dump_struct_literal_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    struct_literal: std::kizu::ast::StructLiteralExprNode
+) -> !void {
+    print("StructLiteralExpr");
+    try dump_node(source, ast, struct_literal.type_name);
+    try dump_range(source, ast, struct_literal.fields);
+    return;
+}
+
+fn dump_struct_field_init(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    struct_field_init: std::kizu::ast::StructFieldInitNode
+) -> !void {
+    print("StructFieldInit");
+    try dump_node(source, ast, struct_field_init.name);
+    try dump_node(source, ast, struct_field_init.value);
+    return;
+}
+
+fn dump_arena_new_expr(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    arena_new: std::kizu::ast::ArenaNewExprNode
+) -> !void {
+    print("ArenaNewExpr");
+    try dump_node(source, ast, arena_new.type_node);
+    return;
+}
+
 fn dump_try_expr(
     source: []const u8,
     ast: std::kizu::ast::Ast,
@@ -618,7 +703,9 @@ func parserParityExampleName(path string) string {
 // parserParitySeedCases provides stable positive coverage for the current subset.
 func parserParitySeedCases(t *testing.T) []parserParityCase {
 	t.Helper()
-	seeds := append(parserParityFunctionSeedCases(), parserParityDeclarationSeedCases()...)
+	seeds := parserParityFunctionSeedCases()
+	seeds = append(seeds, parserParityExpressionSeedCases()...)
+	seeds = append(seeds, parserParityDeclarationSeedCases()...)
 	for index := range seeds {
 		want, reason, parseErrs := summarizeGoParserSubset(seeds[index].source)
 		if len(parseErrs) > 0 {
@@ -701,6 +788,26 @@ func parserParityFunctionSeedCases() []parserParityCase {
 			source: "fn main() { unsafe { print(1); } comptime if 1 + 1 == 2 { " +
 				"print(comptime 8); } else { print(0); } }",
 		},
+	}
+}
+
+// parserParityExpressionSeedCases covers expression forms needed by selfhost source.
+func parserParityExpressionSeedCases() []parserParityCase {
+	return []parserParityCase{
+		{
+			name:   "seed/fn_type_apply_call",
+			source: "fn main() { let xs = std::array::Array<i64>(allocator); }",
+		},
+		{name: "seed/fn_cast_expr", source: "fn main() { let byte = cast<u8>(48); }"},
+		{
+			name:   "seed/fn_index_and_slice",
+			source: "fn main() { let item = bytes[0]; let part = bytes[1..3]; }",
+		},
+		{
+			name:   "seed/fn_struct_literal",
+			source: `fn main() { let user = User { name: "a", age: 1 }; }`,
+		},
+		{name: "seed/fn_arena_new_expr", source: "fn main() { let nodes = arena<Node>(); }"},
 	}
 }
 
@@ -1426,6 +1533,16 @@ func summarizePrimarySubset(expr kizuast.Expression) ([]string, string) {
 		return summarizeFieldExprSubset(node)
 	case *kizuast.CallExpr:
 		return summarizeCallSubset(node)
+	case *kizuast.TypeApplyExpr:
+		return summarizeTypeApplyExprSubset(node)
+	case *kizuast.CastExpr:
+		return summarizeCastExprSubset(node)
+	case *kizuast.IndexExpr:
+		return summarizeIndexExprSubset(node)
+	case *kizuast.StructLiteralExpr:
+		return summarizeStructLiteralExprSubset(node)
+	case *kizuast.ArenaNewExpr:
+		return summarizeArenaNewExprSubset(node)
 	default:
 		return nil, "expression outside std parser subset"
 	}
@@ -1462,6 +1579,173 @@ func summarizeCallSubset(expr *kizuast.CallExpr) ([]string, string) {
 		lines = append(lines, next...)
 	}
 	return lines, ""
+}
+
+// summarizeTypeApplyExprSubset summarizes namespace generic constructor selection.
+func summarizeTypeApplyExprSubset(expr *kizuast.TypeApplyExpr) ([]string, string) {
+	callee, reason := summarizeExprSubset(expr.Callee)
+	if reason != "" {
+		return nil, reason
+	}
+	args, reason := summarizeTypeArgListSubset(expr.TypeArg)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"TypeApplyExpr"}, callee...)
+	return append(lines, args...), ""
+}
+
+// summarizeTypeArgListSubset summarizes comma-separated generic arguments.
+func summarizeTypeArgListSubset(typeArgs string) ([]string, string) {
+	args := splitTopLevelTypeArgs(typeArgs)
+	if len(args) == 0 {
+		return nil, "type outside std parser subset"
+	}
+	lines := []string{"Range", strconv.Itoa(len(args))}
+	for _, arg := range args {
+		next, reason := summarizeTypeNameSubset(arg)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
+	}
+	return lines, ""
+}
+
+// splitTopLevelTypeArgs splits a parser type argument list at outer commas.
+func splitTopLevelTypeArgs(typeArgs string) []string {
+	args := []string{}
+	depth := 0
+	start := 0
+	for index, r := range typeArgs {
+		switch r {
+		case '<':
+			depth++
+		case '>':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(typeArgs[start:index]))
+				start = index + 1
+			}
+		}
+	}
+	last := strings.TrimSpace(typeArgs[start:])
+	if last != "" {
+		args = append(args, last)
+	}
+	return args
+}
+
+// summarizeCastExprSubset summarizes cast<T>(value).
+func summarizeCastExprSubset(expr *kizuast.CastExpr) ([]string, string) {
+	target, reason := summarizeTypeNameSubset(expr.TargetType)
+	if reason != "" {
+		return nil, reason
+	}
+	value, reason := summarizeExprSubset(expr.Value)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"CastExpr"}, target...)
+	return append(lines, value...), ""
+}
+
+// summarizeIndexExprSubset summarizes index and one-dimensional slice expressions.
+func summarizeIndexExprSubset(expr *kizuast.IndexExpr) ([]string, string) {
+	target, reason := summarizeExprSubset(expr.Target)
+	if reason != "" {
+		return nil, reason
+	}
+	mode := "Index"
+	startExpr := expr.Index
+	var endExpr kizuast.Expression
+	if expr.Slice {
+		mode = "Slice"
+		startExpr = expr.Start
+		endExpr = expr.End
+	}
+	start, reason := summarizeOptionalExprSubset(startExpr)
+	if reason != "" {
+		return nil, reason
+	}
+	end, reason := summarizeOptionalExprSubset(endExpr)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{"IndexExpr", mode}
+	lines = append(lines, target...)
+	lines = append(lines, start...)
+	return append(lines, end...), ""
+}
+
+// summarizeOptionalExprSubset summarizes an expression or the AST Empty sentinel.
+func summarizeOptionalExprSubset(expr kizuast.Expression) ([]string, string) {
+	if expr == nil {
+		return []string{"Empty"}, ""
+	}
+	return summarizeExprSubset(expr)
+}
+
+// summarizeStructLiteralExprSubset summarizes Type { field: value }.
+func summarizeStructLiteralExprSubset(expr *kizuast.StructLiteralExpr) ([]string, string) {
+	typeName, reason := summarizeTypeExprNameSubset(expr.TypeName)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"StructLiteralExpr"}, typeName...)
+	lines = append(lines, "Range", strconv.Itoa(len(expr.Fields)))
+	for _, field := range expr.Fields {
+		next, reason := summarizeStructFieldInitSubset(field)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
+	}
+	return lines, ""
+}
+
+// summarizeTypeExprNameSubset renders a namespace type name as expression nodes.
+func summarizeTypeExprNameSubset(typeName string) ([]string, string) {
+	parts := strings.Split(typeName, "::")
+	if len(parts) == 0 || !isStdParserIdent(parts[0]) {
+		return nil, "identifier outside std parser subset"
+	}
+	lines := []string{"Var", parts[0]}
+	for _, part := range parts[1:] {
+		if !isStdParserIdent(part) {
+			return nil, "identifier outside std parser subset"
+		}
+		next := []string{"FieldExpr", "Namespace"}
+		next = append(next, lines...)
+		next = append(next, "Var", part)
+		lines = next
+	}
+	return lines, ""
+}
+
+// summarizeStructFieldInitSubset summarizes one struct field initializer.
+func summarizeStructFieldInitSubset(field kizuast.FieldValue) ([]string, string) {
+	if !isStdParserIdent(field.Name) {
+		return nil, "identifier outside std parser subset"
+	}
+	value, reason := summarizeExprSubset(field.Value)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{"StructFieldInit", "Var", field.Name}
+	return append(lines, value...), ""
+}
+
+// summarizeArenaNewExprSubset summarizes arena<T>() construction.
+func summarizeArenaNewExprSubset(expr *kizuast.ArenaNewExpr) ([]string, string) {
+	typeName, reason := summarizeTypeNameSubset(expr.TypeName)
+	if reason != "" {
+		return nil, reason
+	}
+	return append([]string{"ArenaNewExpr"}, typeName...), ""
 }
 
 // isStdParserSpace reports whitespace understood by std::kizu::lexer.

@@ -3269,12 +3269,7 @@ fn parse_primary(
         Enum => return error("expected expression");
         Union => return error("expected expression");
         Extern => return error("expected expression");
-        Ident => return std::kizu::parser::parse_postfix_expr(
-            allocator,
-            ast,
-            text,
-            std::kizu::parser::parse_ident(ast, text, token)
-        );
+        Ident => return std::kizu::parser::parse_ident_primary(allocator, ast, text, token);
         Lifetime => return error("expected expression");
         Number => return std::kizu::parser::parse_postfix_expr(
             allocator,
@@ -3385,6 +3380,100 @@ fn parse_ident(
         std::kizu::ast::symbol_id(token.start)
     );
     return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, token));
+}
+
+fn parse_ident_primary(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let next = std::kizu::lexer::next_token(text, token);
+    let cast_name = try std::kizu::parser::is_token_text(text, token, "cast");
+    if cast_name {
+        if std::kizu::parser::is_lt_token(next) {
+            return std::kizu::parser::parse_cast_expr(allocator, ast, text, token);
+        }
+    }
+    let arena_name = try std::kizu::parser::is_token_text(text, token, "arena");
+    if arena_name {
+        if std::kizu::parser::is_lt_token(next) {
+            return std::kizu::parser::parse_arena_new_expr(allocator, ast, text, token);
+        }
+    }
+    return std::kizu::parser::parse_postfix_expr(
+        allocator,
+        ast,
+        text,
+        std::kizu::parser::parse_ident(ast, text, token)
+    );
+}
+
+fn parse_cast_expr(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let open = std::kizu::lexer::next_token(text, token);
+    let type_node = try std::kizu::parser::parse_type_name(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, open)
+    );
+    let close_type = try std::kizu::parser::expect_gt(type_node.next);
+    let open_args = try std::kizu::parser::expect_left_paren(
+        std::kizu::lexer::next_token(text, close_type)
+    );
+    let value = try std::kizu::parser::parse_expr(
+        allocator,
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, open_args)
+    );
+    let close_args = try std::kizu::parser::expect_right_paren(value.next);
+    let node = ast.add_cast_expr(
+        std::kizu::ast::span(token.start, close_args.end),
+        type_node.node,
+        value.node
+    );
+    return std::kizu::parser::parse_postfix_expr(
+        allocator,
+        ast,
+        text,
+        std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, close_args))
+    );
+}
+
+fn parse_arena_new_expr(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let open_type = std::kizu::lexer::next_token(text, token);
+    let type_node = try std::kizu::parser::parse_type_name(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, open_type)
+    );
+    let close_type = try std::kizu::parser::expect_gt(type_node.next);
+    let open_args = try std::kizu::parser::expect_left_paren(
+        std::kizu::lexer::next_token(text, close_type)
+    );
+    let close_args = try std::kizu::parser::expect_right_paren(
+        std::kizu::lexer::next_token(text, open_args)
+    );
+    let node = ast.add_arena_new_expr(
+        std::kizu::ast::span(token.start, close_args.end),
+        type_node.node
+    );
+    return std::kizu::parser::parse_postfix_expr(
+        allocator,
+        ast,
+        text,
+        std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, close_args))
+    );
 }
 
 fn parse_grouped_expr(
@@ -3738,8 +3827,20 @@ fn parse_postfix_expr(
     first: ParseNode
 ) -> !ParseNode {
     var left = first;
-    while std::kizu::parser::is_postfix_start(left.next) {
-        left = try std::kizu::parser::parse_one_postfix(allocator, ast, text, left);
+    while true {
+        if std::kizu::parser::is_type_apply_start(ast, text, left) {
+            left = try std::kizu::parser::parse_type_apply_expr(allocator, ast, text, left);
+        } else {
+            if std::kizu::parser::is_postfix_start(left.next) {
+                left = try std::kizu::parser::parse_one_postfix(allocator, ast, text, left);
+            } else {
+                if std::kizu::parser::is_struct_literal_start(ast, text, left) {
+                    left = try std::kizu::parser::parse_struct_literal_expr(allocator, ast, text, left);
+                } else {
+                    return left;
+                }
+            }
+        }
     }
     return left;
 }
@@ -3760,6 +3861,7 @@ fn parse_one_postfix(
         LParen => return std::kizu::parser::parse_call(allocator, ast, text, left.node, left.next);
         DoubleColon => return std::kizu::parser::parse_field_expr(ast, text, left, true);
         Dot => return std::kizu::parser::parse_field_expr(ast, text, left, false);
+        LBracket => return std::kizu::parser::parse_index_expr(allocator, ast, text, left);
             Fn => return error("expected postfix operator");
         Let => return error("expected postfix operator");
         Var => return error("expected postfix operator");
@@ -3794,7 +3896,6 @@ fn parse_one_postfix(
         Eq => return error("expected postfix operator");
         NotEq => return error("expected postfix operator");
         Amp => return error("expected postfix operator");
-        LBracket => return error("expected postfix operator");
         RBracket => return error("expected postfix operator");
         LT => return error("expected postfix operator");
         LTE => return error("expected postfix operator");
@@ -3812,6 +3913,238 @@ fn parse_one_postfix(
         String => return error("expected postfix operator");
         Eof => return error("expected postfix operator");
 }
+}
+
+fn parse_type_apply_expr(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode
+) -> !ParseNode {
+    var type_args = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    let result = std::kizu::parser::parse_type_apply_expr_with_args(
+        type_args,
+        ast,
+        text,
+        left
+    );
+    type_args.deinit();
+    return try result;
+}
+
+fn parse_type_apply_expr_with_args(
+    type_args: &mut std::array::Array<std::kizu::ast::NodeId>,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode
+) -> !ParseNode {
+    var current = std::kizu::lexer::next_token(text, left.next);
+    while true {
+        let arg = try std::kizu::parser::parse_type_name(ast, text, current);
+        try type_args.append(arg.node);
+        if std::kizu::parser::is_single_token_byte(text, arg.next, cast<u8>(62)) {
+            let start = ast.begin_children();
+            var index = 0;
+            while index < type_args.len() {
+                try ast.add_child(try type_args.get(index));
+                index = index + 1;
+            }
+            let range = ast.finish_children(start);
+            let callee_node = ast.get(left.node);
+            let node = ast.add_type_apply_expr(
+                std::kizu::ast::span(callee_node.span.start, arg.next.end),
+                left.node,
+                range
+            );
+            return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, arg.next));
+        }
+        if !std::kizu::parser::is_single_token_byte(text, arg.next, cast<u8>(44)) {
+            return error("expected comma or greater than");
+        }
+        current = std::kizu::lexer::next_token(text, arg.next);
+    }
+    return error("expected greater than");
+}
+
+fn parse_index_expr(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode
+) -> !ParseNode {
+    let first = std::kizu::lexer::next_token(text, left.next);
+    if std::kizu::parser::is_double_token_byte(text, first, cast<u8>(46), cast<u8>(46)) {
+        return std::kizu::parser::parse_open_start_slice(allocator, ast, text, left, first);
+    }
+    let start = try std::kizu::parser::parse_expr(allocator, ast, text, first);
+    if std::kizu::parser::is_double_token_byte(text, start.next, cast<u8>(46), cast<u8>(46)) {
+        return std::kizu::parser::parse_closed_start_slice(
+            allocator,
+            ast,
+            text,
+            left,
+            start,
+            start.next
+        );
+    }
+    let close = try std::kizu::parser::expect_right_bracket_token(text, start.next);
+    let empty = ast.add_empty(close.start);
+    let target_node = ast.get(left.node);
+    let node = ast.add_index_expr(
+        std::kizu::ast::span(target_node.span.start, close.end),
+        left.node,
+        start.node,
+        empty,
+        false
+    );
+    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, close));
+}
+
+fn parse_open_start_slice(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode,
+    range_token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let end_start = std::kizu::lexer::next_token(text, range_token);
+    if std::kizu::parser::is_single_token_byte(text, end_start, cast<u8>(93)) {
+        return error("slice expression requires at least one bound");
+    }
+    let end = try std::kizu::parser::parse_expr(allocator, ast, text, end_start);
+    let close = try std::kizu::parser::expect_right_bracket_token(text, end.next);
+    let start = ast.add_empty(range_token.start);
+    return std::kizu::parser::finish_slice_expr(ast, text, left, start, end.node, close);
+}
+
+fn parse_closed_start_slice(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode,
+    start: ParseNode,
+    range_token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let end_start = std::kizu::lexer::next_token(text, range_token);
+    if std::kizu::parser::is_single_token_byte(text, end_start, cast<u8>(93)) {
+        let end = ast.add_empty(end_start.start);
+        return std::kizu::parser::finish_slice_expr(ast, text, left, start.node, end, end_start);
+    }
+    let end = try std::kizu::parser::parse_expr(allocator, ast, text, end_start);
+    let close = try std::kizu::parser::expect_right_bracket_token(text, end.next);
+    return std::kizu::parser::finish_slice_expr(ast, text, left, start.node, end.node, close);
+}
+
+fn finish_slice_expr(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    close: std::kizu::lexer::Token
+) -> ParseNode {
+    let target_node = ast.get(left.node);
+    let node = ast.add_index_expr(
+        std::kizu::ast::span(target_node.span.start, close.end),
+        left.node,
+        start,
+        end,
+        true
+    );
+    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, close));
+}
+
+fn parse_struct_literal_expr(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode
+) -> !ParseNode {
+    var fields = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    let result = std::kizu::parser::parse_struct_literal_expr_with_fields(
+        fields,
+        allocator,
+        ast,
+        text,
+        left
+    );
+    fields.deinit();
+    return try result;
+}
+
+fn parse_struct_literal_expr_with_fields(
+    fields: &mut std::array::Array<std::kizu::ast::NodeId>,
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode
+) -> !ParseNode {
+    var current = std::kizu::lexer::next_token(text, left.next);
+    while !std::kizu::parser::is_single_token_byte(text, current, cast<u8>(125)) {
+        let field = try std::kizu::parser::parse_struct_field_init(
+            allocator,
+            ast,
+            text,
+            current
+        );
+        try fields.append(field.node);
+        current = try std::kizu::parser::next_struct_literal_field_token(text, field.next);
+    }
+    let start = ast.begin_children();
+    var index = 0;
+    while index < fields.len() {
+        try ast.add_child(try fields.get(index));
+        index = index + 1;
+    }
+    let range = ast.finish_children(start);
+    let type_node = ast.get(left.node);
+    let node = ast.add_struct_literal_expr(
+        std::kizu::ast::span(type_node.span.start, current.end),
+        left.node,
+        range
+    );
+    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, current));
+}
+
+fn parse_struct_field_init(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let name_token = try std::kizu::parser::expect_ident(token);
+    let value_start = try std::kizu::parser::expect_colon(
+        text,
+        std::kizu::lexer::next_token(text, name_token)
+    );
+    let value = try std::kizu::parser::parse_expr(allocator, ast, text, value_start);
+    let name = ast.add_var(
+        std::kizu::ast::span(name_token.start, name_token.end),
+        std::kizu::ast::symbol_id(name_token.start)
+    );
+    let value_node = ast.get(value.node);
+    let node = ast.add_struct_field_init(
+        std::kizu::ast::span(name_token.start, value_node.span.end),
+        name,
+        value.node
+    );
+    return std::kizu::parser::parse_node(node, value.next);
+}
+
+fn next_struct_literal_field_token(
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    if std::kizu::parser::is_single_token_byte(text, token, cast<u8>(125)) {
+        return token;
+    }
+    if std::kizu::parser::is_single_token_byte(text, token, cast<u8>(44)) {
+        return std::kizu::lexer::next_token(text, token);
+    }
+    if std::kizu::parser::is_single_token_byte(text, token, cast<u8>(59)) {
+        return std::kizu::lexer::next_token(text, token);
+    }
+    return error("expected comma, semicolon, or right brace");
 }
 
 fn parse_field_expr(
@@ -3897,6 +4230,155 @@ fn empty_range(ast: std::kizu::ast::Ast, next: std::kizu::lexer::Token) -> Parse
         range: ast.finish_children(start),
         next: next
     };
+}
+
+fn is_single_token_byte(
+    text: []const u8,
+    token: std::kizu::lexer::Token,
+    byte: u8
+) -> bool {
+    if token.end != token.start + 1 {
+        return false;
+    }
+    return text[token.start] == byte;
+}
+
+fn is_double_token_byte(
+    text: []const u8,
+    token: std::kizu::lexer::Token,
+    first: u8,
+    second: u8
+) -> bool {
+    if token.end != token.start + 2 {
+        return false;
+    }
+    if text[token.start] != first {
+        return false;
+    }
+    return text[token.start + 1] == second;
+}
+
+fn expect_right_bracket_token(
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    if std::kizu::parser::is_single_token_byte(text, token, cast<u8>(93)) {
+        return token;
+    }
+    return error("expected right bracket");
+}
+
+fn is_type_apply_start(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode
+) -> bool {
+    if !std::kizu::parser::is_lt_token(left.next) {
+        return false;
+    }
+    let node = ast.get(left.node);
+    return std::kizu::parser::is_namespace_path_span(text, &node.span);
+}
+
+fn is_struct_literal_start(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    left: ParseNode
+) -> bool {
+    if !std::kizu::parser::is_single_token_byte(text, left.next, cast<u8>(123)) {
+        return false;
+    }
+    let node = ast.get(left.node);
+    return std::kizu::parser::is_struct_literal_type_span(text, &node.span);
+}
+
+fn is_namespace_path_span(source: []const u8, span: &std::kizu::ast::Span) -> bool {
+    var index = span.start;
+    var need_segment = true;
+    var saw_namespace = false;
+    while index < span.end {
+        let byte = source[index];
+        if std::kizu::parser::is_name_byte(byte) {
+            need_segment = false;
+            index = index + 1;
+        } else {
+            if !std::kizu::parser::is_double_colon_at(source, span.end, index) {
+                return false;
+            }
+            if need_segment {
+                return false;
+            }
+            saw_namespace = true;
+            need_segment = true;
+            index = index + 2;
+        }
+    }
+    if need_segment {
+        return false;
+    }
+    return saw_namespace;
+}
+
+fn is_struct_literal_type_span(source: []const u8, span: &std::kizu::ast::Span) -> bool {
+    var index = span.start;
+    var segment_start = span.start;
+    var previous_segment_start = span.start;
+    var segment_count = 0;
+    var need_segment = true;
+    while index < span.end {
+        let byte = source[index];
+        if std::kizu::parser::is_name_byte(byte) {
+            if need_segment {
+                previous_segment_start = segment_start;
+                segment_start = index;
+                segment_count = segment_count + 1;
+                need_segment = false;
+            }
+            index = index + 1;
+        } else {
+            if !std::kizu::parser::is_double_colon_at(source, span.end, index) {
+                return false;
+            }
+            if need_segment {
+                return false;
+            }
+            need_segment = true;
+            index = index + 2;
+        }
+    }
+    if need_segment {
+        return false;
+    }
+    if !std::kizu::parser::is_upper_byte(source[segment_start]) {
+        return false;
+    }
+    if segment_count > 1 {
+        if std::kizu::parser::is_upper_byte(source[previous_segment_start]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn is_double_colon_at(source: []const u8, end: i64, index: i64) -> bool {
+    if index + 1 >= end {
+        return false;
+    }
+    if source[index] != cast<u8>(58) {
+        return false;
+    }
+    return source[index + 1] == cast<u8>(58);
+}
+
+fn is_name_byte(byte: u8) -> bool {
+    return std::kizu::parser::is_upper_byte(byte) or
+        (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+        (byte >= cast<u8>(48) and byte <= cast<u8>(57)) or
+        byte == cast<u8>(95);
+}
+
+fn is_upper_byte(byte: u8) -> bool {
+    return byte >= cast<u8>(65) and byte <= cast<u8>(90);
 }
 
 fn expect_block_close(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
@@ -4008,7 +4490,7 @@ fn is_postfix_start(token: std::kizu::lexer::Token) -> bool {
         Eq => return false;
         NotEq => return false;
         Amp => return false;
-        LBracket => return false;
+        LBracket => return true;
         RBracket => return false;
         LT => return false;
         LTE => return false;

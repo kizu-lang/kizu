@@ -2954,6 +2954,46 @@ func (c *Checker) checkAstAddExprMethod(
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	default:
+		return c.checkAstAddExtendedExprMethod(receiver, name, args, env)
+	}
+}
+
+// checkAstAddExtendedExprMethod validates expression constructors added for parser parity.
+func (c *Checker) checkAstAddExtendedExprMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "add_type_apply_expr":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_cast_expr", "add_struct_field_init":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_index_expr":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId", "bool",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_struct_literal_expr":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_arena_new_expr":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	default:
 		return "", false, nil
 	}
 }
@@ -4705,6 +4745,12 @@ func isAstScalarType(typeName string) bool {
 		"BinaryNode", "std::kizu::ast::BinaryNode",
 		"FieldExprNode", "std::kizu::ast::FieldExprNode",
 		"CallNode", "std::kizu::ast::CallNode",
+		"TypeApplyExprNode", "std::kizu::ast::TypeApplyExprNode",
+		"CastExprNode", "std::kizu::ast::CastExprNode",
+		"IndexExprNode", "std::kizu::ast::IndexExprNode",
+		"StructLiteralExprNode", "std::kizu::ast::StructLiteralExprNode",
+		"StructFieldInitNode", "std::kizu::ast::StructFieldInitNode",
+		"ArenaNewExprNode", "std::kizu::ast::ArenaNewExprNode",
 		"TryExprNode", "std::kizu::ast::TryExprNode",
 		"ComptimeExprNode", "std::kizu::ast::ComptimeExprNode",
 		"BlockNode", "std::kizu::ast::BlockNode",
