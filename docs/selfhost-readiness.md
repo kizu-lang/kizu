@@ -111,8 +111,8 @@ blocker:
 最終更新: `feat/selfhost-bootstrap-chain` で selfhost manifest を stage input graph に含め、
 parser/checker/lower summary と parse / token / illegal-token / brace component metrics を Kizu
 struct で渡し、selfhost lexer に cursor-carrying `TokenScan` を追加し、parser が lexer / cur /
-peek state を保持して `Advance` でき、parser-local token summary を作り、tag enum を native
-scalar として emit できるようにした working tree 時点。
+peek state を保持して `Advance` でき、parser-local token summary と top-level declaration
+summary を作り、tag enum を native scalar として emit できるようにした working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
@@ -120,8 +120,9 @@ pipeline ではなく、Go が生成した source-scanning LLVM template に依�
 parser metric は parser-local な部分文字列 scan ではなく、declaration keyword、token、
 illegal-token、brace count / balance で selfhost lexer の `TokenScan` cursor を使う。parser
 value は Go parser と同じく lexer state と current/peek token を持ち、`Advance` で token
-stream を進め、`token_summary` で parser-local に source token summary を作るが、まだ AST は
-構築しない。checker は source summary の brace balance と illegal-token count を受け取り、
+stream を進め、`token_summary` で parser-local に source token summary と brace-depth-based
+top-level declaration counts を作るが、まだ AST は構築しない。checker は source summary の
+brace balance と illegal-token count を受け取り、
 illegal token がある stage input を invalid として扱う。stage1 と stage2 以降の metric は
 `selfhost/kizu.toml` と `selfhost/src/*.kizu` の両方を stage input として読む。Go LLVM backend
 は selfhost summary struct の cross-function return / call / field read と tag enum scalar
@@ -179,8 +180,8 @@ stage3_vs_stage4_bytes=0
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 1232
-; kizu stage source bytes 1207993
+; kizu stage source metric 1240
+; kizu stage source bytes 1211553
 ; kizu stage source fn count 78
 ```
 
@@ -193,11 +194,12 @@ remaining Go / template dependency:
   execute the Kizu parser, resolver, checker, lowering, and LLVM emitter as a compiler pipeline.
 - `selfhost/src/compiler.kizu` uses `SourceMetrics`, `parser::Module`,
   `checker::CheckedModule`, and `lower::Module` summaries. Parser summaries carry first-token,
-  declaration, token, illegal-token, byte, function/import/struct/enum, brace, and balance
-  metrics, but still not AST, typed IR, or lowered LLVM instructions.
+  declaration, token, illegal-token, byte, function/import/struct/enum, top-level
+  function/import/struct/enum, brace, and balance metrics, but still not AST, typed IR, or
+  lowered LLVM instructions.
 - `selfhost/src/parser.kizu` has a parser value with lexer state plus current and peek tokens,
-  can advance that state, and builds parser-local token summaries. It is still a summary parser,
-  not a real AST parser.
+  can advance that state, and builds parser-local token summaries plus top-level declaration
+  counters. It is still a summary parser, not a real AST parser.
 - `selfhost/src/lexer.kizu` now has `TokenScan`, `Scan`, and `Advance` cursor helpers. Token,
   declaration keyword, and illegal-token metrics use the cursor scanner.
 - Go native backend and hosted runtime still build `target/selfhost/kizu-stage1`.
