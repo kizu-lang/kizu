@@ -81,6 +81,64 @@ fn main() {
 	}
 }
 
+// TestCheckAllowsLifetimeBorrowReturns keeps returned borrows tied to local owners.
+func TestCheckAllowsLifetimeBorrowReturns(t *testing.T) {
+	source := `fn shared<'a>(value: &'a i64) -> &'a i64 {
+    return value;
+}
+fn mutable<'a>(value: &'a mut i64) -> &'a mut i64 {
+    return value;
+}
+fn main() {
+    var value = 1;
+    let read = shared(value);
+    print(read.*);
+    let write = mutable(value);
+    write.* = 2;
+    print(value);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsLifetimeBorrowReturnConflicts checks parent restrictions stay local.
+func TestCheckRejectsLifetimeBorrowReturnConflicts(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "assign while shared return live",
+			source: `fn shared<'a>(value: &'a i64) -> &'a i64 {
+    return value;
+}
+fn main() {
+    var value = 1;
+    let read = shared(value);
+    value = 2;
+    print(read.*);
+}`,
+			want: "cannot be assigned while borrowed",
+		},
+		{
+			name: "read while mutable return live",
+			source: `fn mutable<'a>(value: &'a mut i64) -> &'a mut i64 {
+    return value;
+}
+fn main() {
+    var value = 1;
+    let write = mutable(value);
+    print(value);
+    write.* = 2;
+}`,
+			want: "cannot be read while mutably borrowed",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckMutableBorrowArgumentDoesNotMove checks &mut preserves ownership.
 func TestCheckMutableBorrowArgumentDoesNotMove(t *testing.T) {
 	source := `struct User { name: []const u8 }

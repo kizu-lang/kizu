@@ -24,6 +24,9 @@ func (c *Checker) checkComptimeExpr(
 	if err != nil {
 		return "", err
 	}
+	if hasExplicitNonStaticLifetime(typ) {
+		return "", fmt.Errorf("type error: lifetime view cannot cross comptime boundary")
+	}
 	value, err := evalComptime(expr.Expr)
 	if err != nil {
 		return "", err

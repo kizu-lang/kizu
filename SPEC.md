@@ -1401,8 +1401,8 @@ allocation-free な read-only byte helper から始めます。
 ```text
 std::mem::page_allocator() -> Allocator
 std::mem::Box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
-box.borrow() -> &T
-box.borrow_mut() -> &mut T
+box.borrow<'a>() -> &'a T
+box.borrow_mut<'a>() -> &'a mut T
 box.deinit() -> void
 std::mem::len(bytes: []const u8) -> i64
 std::mem::byte_at(bytes: []const u8, index: i64) -> !u8
@@ -1416,8 +1416,9 @@ std::mem::trim_ascii<'a>(bytes: []'a const u8) -> []'a const u8
 non-copy / move-only な indirection です。`Box<T>` は struct / union payload に保存できます。
 `Box<T>` を含む struct / union は non-copy です。
 `borrow` / `borrow_mut` は local borrow source であり、戻り値は local binding に束縛する
-必要があります。borrow は関数から返せず、field に保存できません。borrow が生きている間は
-対象 `Box<T>` の move / deinit を禁止します。`deinit` は owned local `Box<T>` receiver 限定です。
+必要があります。borrow return や borrow field は explicit lifetime に source が結び付く場合だけ
+許可します。borrow が生きている間は対象 `Box<T>` の move / deinit を禁止します。
+`deinit` は owned local `Box<T>` receiver 限定です。
 safe API は raw pointer を公開しません。
 
 `std::mem` の safe API は raw pointer を返しません。
@@ -1437,8 +1438,8 @@ array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
 array.get(index: i64) -> !T
-array.at(index: i64) -> !&T
-array.at_mut(index: i64) -> !&mut T
+array.at<'a>(index: i64) -> !&'a T
+array.at_mut<'a>(index: i64) -> !&'a mut T
 array.set(index: i64, value: T) -> !void
 array.deinit() -> void
 ```
@@ -1634,9 +1635,9 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 * `std::path::join(allocator, left, right)` は `!std::string::String` を返す
 * `std::path::clean(allocator, path)` は `!std::string::String` を返す
-* `std::path::basename(path)` は `[]const u8` を返す
-* `std::path::dirname(path)` は `[]const u8` を返す
-* `std::path::extension(path)` は `[]const u8` を返す
+* `std::path::basename<'a>(path: []'a const u8)` は `[]'a const u8` を返す
+* `std::path::dirname<'a>(path: []'a const u8)` は `[]'a const u8` を返す
+* `std::path::extension<'a>(path: []'a const u8)` は `[]'a const u8` を返す
 * path helper は pure helper であり、filesystem を読まない
 * `join` と `clean` は owned buffer を構築するため、allocator を明示し、allocation
   failure を `!T` error として返す
