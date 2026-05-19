@@ -31,7 +31,7 @@ just perf-cache-isolated
 
 | Component | Kizu-owned source | Production owner | Current status | Switch criteria |
 | --- | --- | --- | --- | --- |
-| token / lexer | `std::kizu::lexer`, `selfhost::token`, `selfhost::lexer` | Go lexer | oracle-only | Token kind, literal, byte span, line, and column parity remains green for examples and `selfhost/src`. |
+| token / lexer | `std::kizu::lexer`, `selfhost::token`, `selfhost::{lexer, lexer_oracle}` | Go lexer | Kizu source component gate | Token kind, literal, byte span, line, and column parity remains green for examples and `selfhost/src`; the selfhost lexer returns a token array. |
 | AST / parser | `std::kizu::{ast, parser}`, `selfhost::{ast, parser}` | Go parser / AST | oracle-only | Arena + NodeId parser parity and parser-error seeds remain green for examples and `selfhost/src`. |
 | diagnostics / resolver | `selfhost::{diagnostic, resolver, resolver_oracle}` | Go project resolver | oracle-only | Symbol/visibility map gate and missing symbol, duplicate symbol, private access, import cycle diagnostics remain green. |
 | type checker | `selfhost::{types, types_oracle}` | Go type checker | oracle-only | Type-kind, arity, copyability, and stable diagnostic span gate remains green. |

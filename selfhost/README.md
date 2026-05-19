@@ -7,6 +7,7 @@ The package currently defines these source-owned modules:
 
 - `selfhost::token`
 - `selfhost::lexer`
+- `selfhost::lexer_oracle`
 - `selfhost::ast`
 - `selfhost::parser`
 - `selfhost::diagnostic`
@@ -24,9 +25,10 @@ work should land in this package or in `std::kizu` when it is reusable stdlib
 compiler infrastructure.
 
 The token and lexer boundary is currently `std::kizu::lexer`. Selfhost compiler
-modules should reuse that implementation instead of duplicating token shapes in
-`selfhost::lexer`; the oracle suite compares the direct token stream and the
-Array-backed `tokenize` path against the Go lexer.
+modules reuse that implementation through `selfhost::lexer` instead of
+duplicating token shapes. The oracle suite compares the direct token stream, the
+Array-backed `tokenize` path, and the selfhost lexer component gate against the
+Go lexer.
 
 The parser and AST boundary is currently `std::kizu::{ast, parser}`. Parser
 success gates compare the Arena + NodeId AST summary for every `selfhost/src`

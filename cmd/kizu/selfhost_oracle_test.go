@@ -26,6 +26,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostLexerTokenizeOracle(t),
 		runSelfhostLexerSourceOracle(t),
 		runSelfhostLexerTokenizeSourceOracle(t),
+		runSelfhostLexerProductionOracle(t),
 		runSelfhostParserOracle(t),
 		runSelfhostParserSourceOracle(t),
 		runSelfhostParserErrorOracle(t),
@@ -118,6 +119,19 @@ func runSelfhostLexerTokenizeSourceOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "selfhost",
 		scanned:   len(cases),
 		compared:  len(cases),
+		failures:  failures,
+	}
+}
+
+// runSelfhostLexerProductionOracle checks the selfhost lexer component gate.
+func runSelfhostLexerProductionOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostLexerGateFailures(t)
+	return selfhostOracleResult{
+		component: "lexer-production",
+		corpus:    "selfhost",
+		scanned:   1,
+		compared:  1,
 		failures:  failures,
 	}
 }
