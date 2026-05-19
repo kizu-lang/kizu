@@ -76,3 +76,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0055: std::fmt diagnostic formatting](0055-std-fmt-diagnostic-formatting.md)
 - [ADR-0056: allocator-backed byte storage boundary](0056-allocator-backed-byte-storage.md)
 - [ADR-0057: Kizu String over Array storage](0057-kizu-string-array-storage.md)
+- [ADR-0058: selfhost AST NodeId arena](0058-selfhost-ast-nodeid-arena.md)

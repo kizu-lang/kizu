@@ -851,9 +851,13 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 	if deref, ok := expr.(*ast.DerefExpr); ok {
 		return c.moveDerefExpr(deref, env)
 	}
-	if c.isArenaGetExpr(expr) {
-		if _, err := c.readExpr(expr, env); err != nil {
+	if c.isArenaGetExpr(expr, env) {
+		typeName, err := c.readExpr(expr, env)
+		if err != nil {
 			return "", err
+		}
+		if c.isCopyType(typeName) {
+			return typeName, nil
 		}
 		return "", fmt.Errorf("arena error: arena.get returns a local borrow and cannot be moved")
 	}
@@ -1538,6 +1542,9 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 		return nil
 	}
 	seen[typeName] = true
+	if isAstNodeIDType(typeName) {
+		return nil
+	}
 	if isRawPointerType(typeName) {
 		return fmt.Errorf("array error: Array element cannot be raw pointer in v0.2")
 	}
@@ -2405,7 +2412,7 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 			name,
 		)
 	}
-	if c.containsArenaGet(expr.Receiver) {
+	if c.containsArenaGet(expr.Receiver, env) {
 		return "", fmt.Errorf(
 			"arena error: arena.get returns a local borrow and its fields cannot be moved",
 		)
@@ -2638,6 +2645,9 @@ func (c *Checker) checkNonArenaMethod(
 	if value.typeName == "TaskGroup" {
 		return c.checkTaskGroupMethod(name, args, env)
 	}
+	if value.typeName == "std::kizu::ast::Ast" {
+		return c.checkAstMethod(name, args, env)
+	}
 	if elem, ok := taskElement(value.typeName); ok {
 		return c.checkTaskMethod(value, name, elem, args)
 	}
@@ -2646,6 +2656,87 @@ func (c *Checker) checkNonArenaMethod(
 		return typ, err
 	}
 	return c.checkPlainMethodArgs(args, env)
+}
+
+// checkAstMethod validates selfhost AST arena helper methods.
+func (c *Checker) checkAstMethod(name string, args []ast.Expression, env *scope) (string, error) {
+	switch name {
+	case "add_node":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::AstData",
+		}, "std::kizu::ast::NodeId")
+	case "get":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::NodeId",
+		}, "std::kizu::ast::AstNode")
+	case "len", "begin_children":
+		return c.checkAstMethodArgs(name, args, env, nil, "i64")
+	case "add_child":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::NodeId",
+		}, "!void")
+	case "finish_children":
+		return c.checkAstMethodArgs(name, args, env, []string{"i64"}, "std::kizu::ast::ChildRange")
+	case "child_at":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::ChildRange", "i64",
+		}, "!std::kizu::ast::NodeId")
+	case "deinit":
+		return c.checkAstMethodArgs(name, args, env, nil, "void")
+	case "add_int":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::TokenId",
+		}, "std::kizu::ast::NodeId")
+	case "add_var":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
+		}, "std::kizu::ast::NodeId")
+	case "add_binary":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::BinaryOp",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+	case "add_call":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+	case "add_block":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+	case "add_fn_decl":
+		return c.checkAstMethodArgs(name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+	case "add_empty":
+		return c.checkAstMethodArgs(name, args, env, []string{"i64"}, "std::kizu::ast::NodeId")
+	default:
+		return "", fmt.Errorf("move error: unknown Ast method `%s`", name)
+	}
+}
+
+// checkAstMethodArgs checks AST helper arguments without moving copy-like ids.
+func (c *Checker) checkAstMethodArgs(
+	name string,
+	args []ast.Expression,
+	env *scope,
+	want []string,
+	result string,
+) (string, error) {
+	if len(args) != len(want) {
+		return "", fmt.Errorf("move error: `Ast.%s` expects %d args, got %d", name, len(want), len(args))
+	}
+	for idx, arg := range args {
+		got, err := c.moveExpr(arg, env)
+		if err != nil {
+			return "", err
+		}
+		if got != want[idx] {
+			return "", fmt.Errorf("move error: `Ast.%s` arg %d expects %s, got %s",
+				name, idx+1, want[idx], got)
+		}
+	}
+	return result, nil
 }
 
 // checkBoxReceiverExpr validates methods on local Box values and direct Box fields.
@@ -3714,39 +3805,47 @@ func (c *Checker) arenaAddReceiver(expr ast.Expression, env *scope) *binding {
 }
 
 // isArenaGetExpr reports whether expr is an arena.get call.
-func (c *Checker) isArenaGetExpr(expr ast.Expression) bool {
+func (c *Checker) isArenaGetExpr(expr ast.Expression, env *scope) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
-	return ok && field.Name == "get"
+	if !ok || field.Name != "get" {
+		return false
+	}
+	receiver, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return false
+	}
+	base, _, ok := splitGenericType(receiver)
+	return ok && base == "arena"
 }
 
 // containsArenaGet reports whether an expression reads through arena.get.
-func (c *Checker) containsArenaGet(expr ast.Expression) bool {
+func (c *Checker) containsArenaGet(expr ast.Expression, env *scope) bool {
 	switch e := expr.(type) {
 	case *ast.CallExpr:
-		if c.isArenaGetExpr(e) {
+		if c.isArenaGetExpr(e, env) {
 			return true
 		}
 		for _, arg := range e.Args {
-			if c.containsArenaGet(arg) {
+			if c.containsArenaGet(arg, env) {
 				return true
 			}
 		}
 	case *ast.FieldExpr:
-		return c.containsArenaGet(e.Receiver)
+		return c.containsArenaGet(e.Receiver, env)
 	case *ast.PrefixExpr:
-		return c.containsArenaGet(e.Right)
+		return c.containsArenaGet(e.Right, env)
 	case *ast.BinaryExpr:
-		return c.containsArenaGet(e.Left) || c.containsArenaGet(e.Right)
+		return c.containsArenaGet(e.Left, env) || c.containsArenaGet(e.Right, env)
 	case *ast.CastExpr:
-		return c.containsArenaGet(e.Value)
+		return c.containsArenaGet(e.Value, env)
 	case *ast.TryExpr:
-		return c.containsArenaGet(e.Value)
+		return c.containsArenaGet(e.Value, env)
 	case *ast.ComptimeExpr:
-		return c.containsArenaGet(e.Expr)
+		return c.containsArenaGet(e.Expr, env)
 	}
 	return false
 }
@@ -3814,6 +3913,9 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 
 // isCopyType reports whether values of typeName can be reused after move contexts.
 func (c *Checker) isCopyType(typeName string) bool {
+	if isAstNodeIDType(typeName) || isAstScalarType(typeName) {
+		return true
+	}
 	if isRawPointerType(typeName) {
 		return true
 	}
@@ -3833,6 +3935,37 @@ func (c *Checker) isCopyType(typeName string) bool {
 // isAtomicSupportedType reports whether Atomic<T> is available in v0.1.
 func isAtomicSupportedType(typeName string) bool {
 	return typeName == "bool" || typeName == "i64"
+}
+
+// isAstNodeIDType reports the selfhost AST id wrapper allowed in child lists.
+func isAstNodeIDType(typeName string) bool {
+	return typeName == "NodeId" || typeName == "std::kizu::ast::NodeId"
+}
+
+// isAstScalarType reports small selfhost AST metadata wrappers with copy fields.
+func isAstScalarType(typeName string) bool {
+	switch typeName {
+	case "SourceFile", "std::kizu::ast::SourceFile",
+		"Ast", "std::kizu::ast::Ast",
+		"AstNode", "std::kizu::ast::AstNode",
+		"AstData", "std::kizu::ast::AstData",
+		"IntNode", "std::kizu::ast::IntNode",
+		"VarNode", "std::kizu::ast::VarNode",
+		"BinaryNode", "std::kizu::ast::BinaryNode",
+		"CallNode", "std::kizu::ast::CallNode",
+		"BlockNode", "std::kizu::ast::BlockNode",
+		"IfNode", "std::kizu::ast::IfNode",
+		"LetNode", "std::kizu::ast::LetNode",
+		"FnDeclNode", "std::kizu::ast::FnDeclNode",
+		"Span", "std::kizu::ast::Span",
+		"TokenId", "std::kizu::ast::TokenId",
+		"SymbolId", "std::kizu::ast::SymbolId",
+		"ChildRange", "std::kizu::ast::ChildRange",
+		"std::kizu::lexer::Token":
+		return true
+	default:
+		return false
+	}
 }
 
 // isRawPointerType reports whether typeName is a raw pointer spelling.

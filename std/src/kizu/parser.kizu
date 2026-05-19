@@ -1,23 +1,70 @@
-pub fn parse_first_node(source: []const u8) -> !std::kizu::ast::Node {
-    let token = std::kizu::lexer::first_token(source);
+pub fn parse_first_node(
+    allocator: Allocator,
+    source: std::kizu::ast::SourceFile,
+) -> !std::kizu::ast::ParseResult {
+    let token = std::kizu::lexer::first_token(source.text);
     match token.kind {
-        Fn => return std::kizu::parser::parse_fn_decl(source);
-        Ident => return std::kizu::parser::parse_first_ident(source);
-        Eof => return std::kizu::ast::empty();
+        Fn => return std::kizu::parser::parse_fn_decl_result(allocator, source);
+        Ident => return std::kizu::parser::parse_ident_result(allocator, source);
+        Eof => return std::kizu::parser::parse_empty_result(allocator, source, token.start);
     }
 }
 
-fn parse_fn_decl(source: []const u8) -> !std::kizu::ast::Node {
-    let fn_token = std::kizu::lexer::first_token(source);
-    let name = std::kizu::lexer::next_token(source, fn_token);
+fn parse_fn_decl_result(
+    allocator: Allocator,
+    source: std::kizu::ast::SourceFile
+) -> !std::kizu::ast::ParseResult {
+    let text = source.text;
+    var ast = std::kizu::ast::Ast(allocator, source);
+    let fn_token = std::kizu::lexer::first_token(text);
+    let name = std::kizu::lexer::next_token(text, fn_token);
     match name.kind {
         Fn => return error("expected function name");
-        Ident => return std::kizu::ast::fn_decl(name.start, name.end);
+        Ident => return std::kizu::parser::finish_fn_decl(ast, fn_token, name);
         Eof => return error("expected function name");
     }
 }
 
-fn parse_first_ident(source: []const u8) -> std::kizu::ast::Node {
+fn parse_ident_result(
+    allocator: Allocator,
+    source: std::kizu::ast::SourceFile
+) -> std::kizu::ast::ParseResult {
+    let text = source.text;
+    var ast = std::kizu::ast::Ast(allocator, source);
+    let root = std::kizu::parser::parse_first_ident(ast, text);
+    return std::kizu::ast::parse_result(ast, root);
+}
+
+fn parse_empty_result(
+    allocator: Allocator,
+    source: std::kizu::ast::SourceFile,
+    at: i64
+) -> std::kizu::ast::ParseResult {
+    var ast = std::kizu::ast::Ast(allocator, source);
+    let root = ast.add_empty(at);
+    return std::kizu::ast::parse_result(ast, root);
+}
+
+fn finish_fn_decl(
+    ast: std::kizu::ast::Ast,
+    fn_token: std::kizu::lexer::Token,
+    name: std::kizu::lexer::Token
+) -> std::kizu::ast::ParseResult {
+    let name_node = ast.add_var(
+        std::kizu::ast::span(name.start, name.end),
+        std::kizu::ast::symbol_id(name.start)
+    );
+    let root = ast.add_fn_decl(std::kizu::ast::span(fn_token.start, name.end), name_node);
+    return std::kizu::ast::parse_result(ast, root);
+}
+
+fn parse_first_ident(
+    ast: std::kizu::ast::Ast,
+    source: []const u8
+) -> std::kizu::ast::NodeId {
     let token = std::kizu::lexer::first_token(source);
-    return std::kizu::ast::ident(token.start, token.end);
+    return ast.add_var(
+        std::kizu::ast::span(token.start, token.end),
+        std::kizu::ast::symbol_id(token.start)
+    );
 }

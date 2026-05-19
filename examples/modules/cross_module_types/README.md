@@ -39,15 +39,17 @@ pub fn accept_token(token: &std::kizu::lexer::Token) -> void {
 }
 
 pub fn expect_fn_decl(
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
     source: []const u8,
-    node: &std::kizu::ast::Node,
     name: []const u8,
     start: i64,
-    end: i64,
+    end: i64
 ) -> !void {
-    match node {
-        FnDecl(span) => try expect_span(source, span, name, start, end);
-        Ident(span) => return std::testing::fail("expected fn decl");
+    let node = ast.get(root);
+    match node.data {
+        FnDecl(fn_decl) => try expect_var_node(ast.get(fn_decl.name), source, name, start, end);
+        Var(var_node) => return std::testing::fail("expected fn decl");
         Empty => return std::testing::fail("expected fn decl");
     }
     return;
@@ -60,18 +62,23 @@ pub fn expect_fn_decl(
 import app::checks;
 
 pub fn main() -> !void {
-    let source = "fn main";
-    let token = std::kizu::lexer::first_token(source);
+    let allocator = std::mem::page_allocator();
+    let source_text = "fn main";
+    let token = std::kizu::lexer::first_token(source_text);
     checks::accept_token(&token);
     try std::testing::expect_equal_i64(0, token.start);
     try std::testing::expect_equal_i64(2, token.end);
 
-    let node = try std::kizu::parser::parse_first_node(source);
-    try checks::expect_fn_decl(source, &node, "main", 3, 7);
+    let source = std::kizu::ast::source_file("main.kizu", source_text);
+    let result = try std::kizu::parser::parse_first_node(allocator, source);
+    let root = result.root;
+    try checks::expect_fn_decl(result.ast, root, source_text, "main", 3, 7);
 
     let ident_source = "token";
-    let ident = try std::kizu::parser::parse_first_node(ident_source);
-    try checks::expect_ident(ident_source, &ident, "token", 0, 5);
+    let ident_file = std::kizu::ast::source_file("ident.kizu", ident_source);
+    let ident = try std::kizu::parser::parse_first_node(allocator, ident_file);
+    let ident_root = ident.root;
+    try checks::expect_ident(ident.ast, ident_root, ident_source, "token", 0, 5);
 
     let indented = std::kizu::lexer::first_token("   lexer");
     try std::testing::expect_equal_i64(3, indented.start);

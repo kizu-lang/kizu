@@ -916,6 +916,9 @@ func renameStdStmtExprs(module string, stmt ast.Statement) {
 
 // renameStdExpr qualifies module-local struct literal type names recursively.
 func renameStdExpr(module string, expr ast.Expression) {
+	if renameStdTypeExpr(module, expr) {
+		return
+	}
 	switch e := expr.(type) {
 	case *ast.StructLiteralExpr:
 		e.TypeName = qualifyStdTypeName(module, e.TypeName)
@@ -934,11 +937,6 @@ func renameStdExpr(module string, expr ast.Expression) {
 		for _, arg := range e.Args {
 			renameStdExpr(module, arg)
 		}
-	case *ast.TypeApplyExpr:
-		renameStdExpr(module, e.Callee)
-	case *ast.CastExpr:
-		e.TargetType = qualifyStdTypeName(module, e.TargetType)
-		renameStdExpr(module, e.Value)
 	case *ast.TryExpr:
 		renameStdExpr(module, e.Value)
 	case *ast.IndexExpr:
@@ -957,6 +955,23 @@ func renameStdExpr(module string, expr ast.Expression) {
 	}
 }
 
+// renameStdTypeExpr qualifies type-bearing expression nodes.
+func renameStdTypeExpr(module string, expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.TypeApplyExpr:
+		renameStdExpr(module, e.Callee)
+		e.TypeArg = qualifyStdTypeName(module, e.TypeArg)
+	case *ast.CastExpr:
+		e.TargetType = qualifyStdTypeName(module, e.TargetType)
+		renameStdExpr(module, e.Value)
+	case *ast.ArenaNewExpr:
+		e.TypeName = qualifyStdTypeName(module, e.TypeName)
+	default:
+		return false
+	}
+	return true
+}
+
 // renameStdNamespaceReceiver qualifies module-local namespace type receivers.
 func renameStdNamespaceReceiver(module string, expr *ast.FieldExpr) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
@@ -968,12 +983,27 @@ func renameStdNamespaceReceiver(module string, expr *ast.FieldExpr) {
 
 // qualifyStdTypeName maps local std wrapper type names to public std names.
 func qualifyStdTypeName(module string, typ string) string {
+	if strings.HasPrefix(typ, "!") {
+		return "!" + qualifyStdTypeName(module, strings.TrimPrefix(typ, "!"))
+	}
+	if base, argsText, ok := splitStdGenericType(typ); ok {
+		args, argsOK := splitStdGenericArgs(argsText)
+		if !argsOK {
+			return typ
+		}
+		for idx := range args {
+			args[idx] = qualifyStdTypeName(module, args[idx])
+		}
+		return base + "<" + strings.Join(args, ", ") + ">"
+	}
 	if module == "string" && typ == "String" {
 		return "std::string::String"
 	}
 	if module == "kizu::ast" {
 		switch typ {
-		case "Span", "Node":
+		case "SourceFile", "Span", "TokenId", "SymbolId", "BinaryOp", "ChildRange",
+			"NodeId", "Ast", "AstNode", "AstData", "IntNode", "VarNode", "BinaryNode",
+			"CallNode", "BlockNode", "IfNode", "LetNode", "FnDeclNode", "ParseResult":
 			return "std::kizu::ast::" + typ
 		}
 	}
@@ -984,6 +1014,43 @@ func qualifyStdTypeName(module string, typ string) string {
 		}
 	}
 	return typ
+}
+
+// splitStdGenericType extracts base and raw arguments from a simple type string.
+func splitStdGenericType(name string) (string, string, bool) {
+	start := strings.Index(name, "<")
+	if start < 0 || !strings.HasSuffix(name, ">") {
+		return "", "", false
+	}
+	return name[:start], name[start+1 : len(name)-1], true
+}
+
+// splitStdGenericArgs splits top-level generic arguments for std type rewriting.
+func splitStdGenericArgs(arg string) ([]string, bool) {
+	parts := []string{}
+	depth := 0
+	start := 0
+	for idx, r := range arg {
+		switch r {
+		case '<':
+			depth++
+		case '>':
+			depth--
+			if depth < 0 {
+				return nil, false
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(arg[start:idx]))
+				start = idx + 1
+			}
+		}
+	}
+	if depth != 0 {
+		return nil, false
+	}
+	parts = append(parts, strings.TrimSpace(arg[start:]))
+	return parts, true
 }
 
 // findRepoFile searches upward for a repository-relative file.
