@@ -9,7 +9,14 @@ pub fn parse_first_node(
 ) -> !std::kizu::ast::ParseResult {
     let token = std::kizu::lexer::first_token(source.text);
     match token.kind {
-        Fn => return std::kizu::parser::parse_fn_decl_result(allocator, source);
+        Import => return std::kizu::parser::parse_decl_result(allocator, source);
+        Pub => return std::kizu::parser::parse_decl_result(allocator, source);
+        Fn => return std::kizu::parser::parse_decl_result(allocator, source);
+        Unsafe => return std::kizu::parser::parse_decl_result(allocator, source);
+        Extern => return std::kizu::parser::parse_decl_result(allocator, source);
+        Struct => return std::kizu::parser::parse_decl_result(allocator, source);
+        Enum => return std::kizu::parser::parse_decl_result(allocator, source);
+        Union => return std::kizu::parser::parse_decl_result(allocator, source);
         Ident => return std::kizu::parser::parse_expr_result(allocator, source);
         Number => return std::kizu::parser::parse_expr_result(allocator, source);
         String => return std::kizu::parser::parse_expr_result(allocator, source);
@@ -43,7 +50,6 @@ pub fn parse_first_node(
         Break => return error("unexpected break");
         Continue => return error("unexpected continue");
         Match => return error("unexpected match");
-        Unsafe => return error("unexpected unsafe");
         Comptime => return error("unexpected comptime");
         Try => return std::kizu::parser::parse_expr_result(allocator, source);
         True => return std::kizu::parser::parse_expr_result(allocator, source);
@@ -113,8 +119,34 @@ fn parse_top_level_decl(
     text: []const u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
+    return std::kizu::parser::parse_decl_with_visibility(allocator, ast, text, token, false);
+}
+
+fn parse_decl_with_visibility(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token,
+    public: bool
+) -> !ParseNode {
     match token.kind {
-        Fn => return std::kizu::parser::parse_fn_decl(allocator, ast, text, token);
+        Import => return std::kizu::parser::parse_import_decl(ast, text, token);
+        Pub => return std::kizu::parser::parse_public_decl(allocator, ast, text, token);
+        Fn => return std::kizu::parser::parse_fn_decl(
+            allocator,
+            ast,
+            text,
+            token,
+            public,
+            false,
+            ast.add_empty(token.start),
+            true
+        );
+        Unsafe => return std::kizu::parser::parse_unsafe_decl(allocator, ast, text, token, public);
+        Extern => return std::kizu::parser::parse_extern_decl(allocator, ast, text, token, public, false);
+        Struct => return std::kizu::parser::parse_struct_decl(allocator, ast, text, token, public);
+        Enum => return std::kizu::parser::parse_enum_decl(allocator, ast, text, token, public);
+        Union => return std::kizu::parser::parse_union_decl(allocator, ast, text, token, public);
         Eof => return error("expected declaration");
         Return => return error("expected declaration");
         Ident => return error("expected declaration");
@@ -139,7 +171,7 @@ fn parse_top_level_decl(
         DoubleColon => return error("expected declaration");
         Plus => return error("expected declaration");
         Asterisk => return error("expected declaration");
-            Let => return error("expected declaration");
+        Let => return error("expected declaration");
         Var => return error("expected declaration");
         If => return error("expected declaration");
         Else => return error("expected declaration");
@@ -148,7 +180,6 @@ fn parse_top_level_decl(
         Break => return error("expected declaration");
         Continue => return error("expected declaration");
         Match => return error("expected declaration");
-        Unsafe => return error("expected declaration");
         Comptime => return error("expected declaration");
         Try => return error("expected declaration");
         True => return error("expected declaration");
@@ -170,28 +201,74 @@ fn parse_top_level_decl(
 }
 }
 
-fn parse_fn_decl_result(
+fn parse_public_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    pub_token: std::kizu::lexer::Token
+) -> !ParseNode {
+    return std::kizu::parser::parse_decl_with_visibility(
+        allocator,
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, pub_token),
+        true
+    );
+}
+
+fn parse_decl_result(
     allocator: Allocator,
     source: std::kizu::ast::SourceFile
 ) -> !std::kizu::ast::ParseResult {
     let text = source.text;
     var ast = std::kizu::ast::Ast(allocator, source);
-    let fn_token = std::kizu::lexer::first_token(text);
-    let root = try std::kizu::parser::parse_fn_decl(allocator, ast, text, fn_token);
+    let root = try std::kizu::parser::parse_top_level_decl(
+        allocator,
+        ast,
+        text,
+        std::kizu::lexer::first_token(text)
+    );
     return std::kizu::ast::parse_result(ast, root.node);
+}
+
+fn parse_fn_decl_result(
+    allocator: Allocator,
+    source: std::kizu::ast::SourceFile
+) -> !std::kizu::ast::ParseResult {
+    return std::kizu::parser::parse_decl_result(allocator, source);
 }
 
 fn parse_fn_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []const u8,
-    fn_token: std::kizu::lexer::Token
+    fn_token: std::kizu::lexer::Token,
+    public: bool,
+    unsafe_decl: bool,
+    extern_abi: std::kizu::ast::NodeId,
+    require_body: bool
 ) -> !ParseNode {
     let name = std::kizu::lexer::next_token(text, fn_token);
     match name.kind {
         Fn => return error("expected function name");
-        Ident => return std::kizu::parser::parse_fn_body_node(allocator, ast, text, fn_token, name);
+        Ident => return std::kizu::parser::parse_fn_body_node(
+            allocator,
+            ast,
+            text,
+            fn_token,
+            public,
+            unsafe_decl,
+            extern_abi,
+            name,
+            require_body
+        );
         Eof => return error("expected function name");
+        Import => return error("expected function name");
+        Pub => return error("expected function name");
+        Struct => return error("expected function name");
+        Enum => return error("expected function name");
+        Union => return error("expected function name");
+        Extern => return error("expected function name");
         Return => return error("expected function name");
         Number => return error("expected function name");
         String => return error("expected function name");
@@ -275,24 +352,519 @@ fn parse_fn_body_node(
     ast: std::kizu::ast::Ast,
     text: []const u8,
     fn_token: std::kizu::lexer::Token,
-    name: std::kizu::lexer::Token
+    public: bool,
+    unsafe_decl: bool,
+    extern_abi: std::kizu::ast::NodeId,
+    name: std::kizu::lexer::Token,
+    require_body: bool
 ) -> !ParseNode {
     let name_node = ast.add_var(
         std::kizu::ast::span(name.start, name.end),
         std::kizu::ast::symbol_id(name.start)
     );
-    let params = try std::kizu::parser::parse_optional_params(ast, text, std::kizu::lexer::next_token(text, name));
-    let return_type = try std::kizu::parser::parse_optional_return_type(ast, text, params.next);
-    let body = try std::kizu::parser::parse_optional_block(allocator, ast, text, return_type.next);
+    let type_params = try std::kizu::parser::parse_optional_type_params(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, name)
+    );
+    let params = try std::kizu::parser::parse_required_params(ast, text, type_params.next);
+    let return_type = try std::kizu::parser::parse_signature_return_type(ast, text, params.next);
+    let body = try std::kizu::parser::parse_signature_body(
+        allocator,
+        ast,
+        text,
+        return_type.next,
+        require_body
+    );
     let body_node = ast.get(body.node);
     let root = ast.add_fn_decl(
         std::kizu::ast::span(fn_token.start, body_node.span.end),
+        public,
+        unsafe_decl,
+        extern_abi,
         name_node,
+        type_params.range,
         params.range,
         return_type.node,
         body.node
     );
     return std::kizu::parser::parse_node(root, body.next);
+}
+
+fn parse_unsafe_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    unsafe_token: std::kizu::lexer::Token,
+    public: bool
+) -> !ParseNode {
+    let next = std::kizu::lexer::next_token(text, unsafe_token);
+    match next.kind {
+        Fn => return std::kizu::parser::parse_fn_decl(
+            allocator,
+            ast,
+            text,
+            next,
+            public,
+            true,
+            ast.add_empty(unsafe_token.start),
+            true
+        );
+        Extern => return std::kizu::parser::parse_extern_decl(
+            allocator,
+            ast,
+            text,
+            next,
+            public,
+            true
+        );
+        Import => return error("expected fn or extern after unsafe");
+        Pub => return error("expected fn or extern after unsafe");
+        Struct => return error("expected fn or extern after unsafe");
+        Enum => return error("expected fn or extern after unsafe");
+        Union => return error("expected fn or extern after unsafe");
+        Let => return error("expected fn or extern after unsafe");
+        Var => return error("expected fn or extern after unsafe");
+        Return => return error("expected fn or extern after unsafe");
+        If => return error("expected fn or extern after unsafe");
+        Else => return error("expected fn or extern after unsafe");
+        While => return error("expected fn or extern after unsafe");
+        For => return error("expected fn or extern after unsafe");
+        Break => return error("expected fn or extern after unsafe");
+        Continue => return error("expected fn or extern after unsafe");
+        Match => return error("expected fn or extern after unsafe");
+        Unsafe => return error("expected fn or extern after unsafe");
+        Comptime => return error("expected fn or extern after unsafe");
+        Try => return error("expected fn or extern after unsafe");
+        True => return error("expected fn or extern after unsafe");
+        False => return error("expected fn or extern after unsafe");
+        And => return error("expected fn or extern after unsafe");
+        Or => return error("expected fn or extern after unsafe");
+        Ident => return error("expected fn or extern after unsafe");
+        Number => return error("expected fn or extern after unsafe");
+        String => return error("expected fn or extern after unsafe");
+        LBrace => return error("expected fn or extern after unsafe");
+        RBrace => return error("expected fn or extern after unsafe");
+        LParen => return error("expected fn or extern after unsafe");
+        RParen => return error("expected fn or extern after unsafe");
+        Semicolon => return error("expected fn or extern after unsafe");
+        Comma => return error("expected fn or extern after unsafe");
+        Colon => return error("expected fn or extern after unsafe");
+        DoubleColon => return error("expected fn or extern after unsafe");
+        Assign => return error("expected fn or extern after unsafe");
+        Arrow => return error("expected fn or extern after unsafe");
+        FatArrow => return error("expected fn or extern after unsafe");
+        Bang => return error("expected fn or extern after unsafe");
+        Eq => return error("expected fn or extern after unsafe");
+        NotEq => return error("expected fn or extern after unsafe");
+        Amp => return error("expected fn or extern after unsafe");
+        LBracket => return error("expected fn or extern after unsafe");
+        RBracket => return error("expected fn or extern after unsafe");
+        LT => return error("expected fn or extern after unsafe");
+        LTE => return error("expected fn or extern after unsafe");
+        GT => return error("expected fn or extern after unsafe");
+        GTE => return error("expected fn or extern after unsafe");
+        Question => return error("expected fn or extern after unsafe");
+        Plus => return error("expected fn or extern after unsafe");
+        Minus => return error("expected fn or extern after unsafe");
+        Asterisk => return error("expected fn or extern after unsafe");
+        Slash => return error("expected fn or extern after unsafe");
+        Percent => return error("expected fn or extern after unsafe");
+        Dot => return error("expected fn or extern after unsafe");
+        Range => return error("expected fn or extern after unsafe");
+        Pipe => return error("expected fn or extern after unsafe");
+        Mut => return error("expected fn or extern after unsafe");
+        Eof => return error("expected fn or extern after unsafe");
+    }
+}
+
+fn parse_extern_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    extern_token: std::kizu::lexer::Token,
+    public: bool,
+    unsafe_decl: bool
+) -> !ParseNode {
+    let abi_token = try std::kizu::parser::expect_string(
+        std::kizu::lexer::next_token(text, extern_token)
+    );
+    let abi = ast.add_string(
+        std::kizu::ast::span(abi_token.start, abi_token.end),
+        std::kizu::ast::token_id(abi_token.start)
+    );
+    let fn_token = try std::kizu::parser::expect_fn(std::kizu::lexer::next_token(text, abi_token));
+    return std::kizu::parser::parse_fn_decl(
+        allocator,
+        ast,
+        text,
+        fn_token,
+        public,
+        unsafe_decl,
+        abi,
+        false
+    );
+}
+
+fn parse_import_decl(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    import_token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let start = ast.begin_children();
+    let first = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, import_token));
+    try std::kizu::parser::add_name_child(ast, first);
+    let end = try std::kizu::parser::parse_import_segments(ast, text, std::kizu::lexer::next_token(text, first));
+    let range = ast.finish_children(start);
+    let node = ast.add_import_decl(std::kizu::ast::span(import_token.start, end.end), range);
+    return std::kizu::parser::parse_node(node, std::kizu::lexer::next_token(text, end));
+}
+
+fn parse_import_segments(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    first: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    var token = first;
+    while std::kizu::parser::is_double_colon(token) {
+        let segment = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, token));
+        try std::kizu::parser::add_name_child(ast, segment);
+        token = std::kizu::lexer::next_token(text, segment);
+    }
+    return std::kizu::parser::expect_semicolon(token);
+}
+
+fn parse_struct_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    struct_token: std::kizu::lexer::Token,
+    public: bool
+) -> !ParseNode {
+    let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, struct_token));
+    let name = std::kizu::parser::name_node(ast, name_token);
+    let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, name_token));
+    let fields = try std::kizu::parser::parse_struct_fields(allocator, ast, text, open);
+    let node = ast.add_struct_decl(
+        std::kizu::ast::span(struct_token.start, fields.next.start),
+        public,
+        name,
+        fields.range
+    );
+    return std::kizu::parser::parse_node(node, fields.next);
+}
+
+fn parse_struct_fields(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !ParseRange {
+    var fields = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    let result = std::kizu::parser::parse_struct_fields_with_array(fields, ast, text, open);
+    fields.deinit();
+    return result;
+}
+
+fn parse_struct_fields_with_array(
+    fields: &mut std::array::Array<std::kizu::ast::NodeId>,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !ParseRange {
+    var token = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_block_close_token(token) {
+        let field = try std::kizu::parser::parse_struct_field(ast, text, token);
+        try fields.append(field.node);
+        token = std::kizu::parser::next_decl_item_token(text, field.next);
+    }
+    let close = try std::kizu::parser::expect_block_close(token);
+    let start = ast.begin_children();
+    var index = 0;
+    while index < fields.len() {
+        try ast.add_child(try fields.get(index));
+        index = index + 1;
+    }
+    return ParseRange {
+        range: ast.finish_children(start),
+        next: std::kizu::lexer::next_token(text, close)
+    };
+}
+
+fn parse_struct_field(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    var public = false;
+    var name_token = token;
+    if std::kizu::parser::is_pub_token(token) {
+        public = true;
+        name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, token));
+    }
+    name_token = try std::kizu::parser::expect_ident(name_token);
+    let colon = try std::kizu::parser::expect_colon(
+        text,
+        std::kizu::lexer::next_token(text, name_token)
+    );
+    let type_name = try std::kizu::parser::parse_type_name(ast, text, colon);
+    let type_node = ast.get(type_name.node);
+    let node = ast.add_field(
+        std::kizu::ast::span(token.start, type_node.span.end),
+        public,
+        std::kizu::parser::name_node(ast, name_token),
+        type_name.node
+    );
+    return std::kizu::parser::parse_node(node, type_name.next);
+}
+
+fn parse_enum_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    enum_token: std::kizu::lexer::Token,
+    public: bool
+) -> !ParseNode {
+    let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, enum_token));
+    let name = std::kizu::parser::name_node(ast, name_token);
+    let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, name_token));
+    let tags = try std::kizu::parser::parse_enum_tags(allocator, ast, text, open);
+    let node = ast.add_enum_decl(
+        std::kizu::ast::span(enum_token.start, tags.next.start),
+        public,
+        name,
+        tags.range
+    );
+    return std::kizu::parser::parse_node(node, tags.next);
+}
+
+fn parse_enum_tags(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !ParseRange {
+    var tags = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    let result = std::kizu::parser::parse_enum_tags_with_array(tags, ast, text, open);
+    tags.deinit();
+    return result;
+}
+
+fn parse_enum_tags_with_array(
+    tags: &mut std::array::Array<std::kizu::ast::NodeId>,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !ParseRange {
+    var token = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_block_close_token(token) {
+        let tag = try std::kizu::parser::expect_ident(token);
+        try tags.append(std::kizu::parser::name_node(ast, tag));
+        token = std::kizu::parser::next_decl_item_token(text, std::kizu::lexer::next_token(text, tag));
+    }
+    let close = try std::kizu::parser::expect_block_close(token);
+    let start = ast.begin_children();
+    var index = 0;
+    while index < tags.len() {
+        try ast.add_child(try tags.get(index));
+        index = index + 1;
+    }
+    return ParseRange {
+        range: ast.finish_children(start),
+        next: std::kizu::lexer::next_token(text, close)
+    };
+}
+
+fn parse_union_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    union_token: std::kizu::lexer::Token,
+    public: bool
+) -> !ParseNode {
+    let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, union_token));
+    let name = std::kizu::parser::name_node(ast, name_token);
+    let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, name_token));
+    let variants = try std::kizu::parser::parse_union_variants(allocator, ast, text, open);
+    let node = ast.add_union_decl(
+        std::kizu::ast::span(union_token.start, variants.next.start),
+        public,
+        name,
+        variants.range
+    );
+    return std::kizu::parser::parse_node(node, variants.next);
+}
+
+fn parse_union_variants(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !ParseRange {
+    var variants = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    let result = std::kizu::parser::parse_union_variants_with_array(variants, ast, text, open);
+    variants.deinit();
+    return result;
+}
+
+fn parse_union_variants_with_array(
+    variants: &mut std::array::Array<std::kizu::ast::NodeId>,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !ParseRange {
+    var token = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_block_close_token(token) {
+        let variant = try std::kizu::parser::parse_union_variant(ast, text, token);
+        try variants.append(variant.node);
+        token = std::kizu::parser::next_decl_item_token(text, variant.next);
+    }
+    let close = try std::kizu::parser::expect_block_close(token);
+    let start = ast.begin_children();
+    var index = 0;
+    while index < variants.len() {
+        try ast.add_child(try variants.get(index));
+        index = index + 1;
+    }
+    return ParseRange {
+        range: ast.finish_children(start),
+        next: std::kizu::lexer::next_token(text, close)
+    };
+}
+
+fn parse_union_variant(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let name_token = try std::kizu::parser::expect_ident(token);
+    let payload = try std::kizu::parser::parse_optional_variant_payload(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, name_token)
+    );
+    let payload_node = ast.get(payload.node);
+    let node = ast.add_union_variant(
+        std::kizu::ast::span(name_token.start, payload_node.span.end),
+        std::kizu::parser::name_node(ast, name_token),
+        payload.node
+    );
+    return std::kizu::parser::parse_node(node, payload.next);
+}
+
+fn parse_optional_variant_payload(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    if !std::kizu::parser::is_left_paren_token(token) {
+        return std::kizu::parser::empty_parse_node(ast, token);
+    }
+    let payload = try std::kizu::parser::parse_type_name(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, token)
+    );
+    let close = try std::kizu::parser::expect_right_paren(payload.next);
+    return std::kizu::parser::parse_node(payload.node, std::kizu::lexer::next_token(text, close));
+}
+
+fn add_name_child(ast: std::kizu::ast::Ast, token: std::kizu::lexer::Token) -> !void {
+    try ast.add_child(std::kizu::parser::name_node(ast, token));
+    return;
+}
+
+fn name_node(ast: std::kizu::ast::Ast, token: std::kizu::lexer::Token) -> std::kizu::ast::NodeId {
+    return ast.add_var(
+        std::kizu::ast::span(token.start, token.end),
+        std::kizu::ast::symbol_id(token.start)
+    );
+}
+
+fn next_decl_item_token(
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> std::kizu::lexer::Token {
+    if std::kizu::parser::is_decl_item_separator(token) {
+        return std::kizu::lexer::next_token(text, token);
+    }
+    return token;
+}
+
+fn parse_optional_type_params(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseRange {
+    if std::kizu::parser::is_lt_token(token) {
+        return std::kizu::parser::parse_type_params(ast, text, token);
+    }
+    return std::kizu::parser::empty_range(ast, token);
+}
+
+fn parse_type_params(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !ParseRange {
+    let start = ast.begin_children();
+    var token = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_gt_token(token) {
+        let name = try std::kizu::parser::expect_ident(token);
+        try ast.add_child(std::kizu::parser::name_node(ast, name));
+        let next = std::kizu::lexer::next_token(text, name);
+        if std::kizu::parser::is_comma_token(next) {
+            token = std::kizu::lexer::next_token(text, next);
+        } else {
+            let close = try std::kizu::parser::expect_gt(next);
+            return ParseRange {
+                range: ast.finish_children(start),
+                next: std::kizu::lexer::next_token(text, close)
+            };
+        }
+    }
+    return ParseRange {
+        range: ast.finish_children(start),
+        next: std::kizu::lexer::next_token(text, token)
+    };
+}
+
+fn parse_required_params(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseRange {
+    let open = try std::kizu::parser::expect_left_paren(token);
+    return std::kizu::parser::parse_params(ast, text, open);
+}
+
+fn parse_signature_return_type(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    if std::kizu::parser::is_arrow_token(token) {
+        return std::kizu::parser::parse_type_name(
+            ast,
+            text,
+            std::kizu::lexer::next_token(text, token)
+        );
+    }
+    return std::kizu::parser::empty_parse_node(ast, token);
+}
+
+fn parse_signature_body(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token,
+    require_body: bool
+) -> !ParseNode {
+    if require_body {
+        let open = try std::kizu::parser::expect_lbrace(token);
+        return std::kizu::parser::parse_block(allocator, ast, text, open);
+    }
+    return std::kizu::parser::empty_parse_node(ast, token);
 }
 
 fn parse_optional_params(
@@ -301,6 +873,12 @@ fn parse_optional_params(
     token: std::kizu::lexer::Token
 ) -> !ParseRange {
     match token.kind {
+        Import => return error("expected params or block");
+        Pub => return error("expected params or block");
+        Struct => return error("expected params or block");
+        Enum => return error("expected params or block");
+        Union => return error("expected params or block");
+        Extern => return error("expected params or block");
         LParen => return std::kizu::parser::parse_params(ast, text, token);
         LBrace => return std::kizu::parser::empty_range(ast, token);
         Eof => return std::kizu::parser::empty_range(ast, token);
@@ -366,7 +944,14 @@ fn parse_params(
     match first.kind {
         RParen => return std::kizu::parser::empty_range(ast, std::kizu::lexer::next_token(text, first));
         Ident => return std::kizu::parser::parse_non_empty_params(ast, text, first);
+        Comptime => return std::kizu::parser::parse_non_empty_params(ast, text, first);
         Fn => return error("expected right paren");
+        Import => return error("expected right paren");
+        Pub => return error("expected right paren");
+        Struct => return error("expected right paren");
+        Enum => return error("expected right paren");
+        Union => return error("expected right paren");
+        Extern => return error("expected right paren");
         Return => return error("expected right paren");
         Number => return error("expected right paren");
         String => return error("expected right paren");
@@ -389,7 +974,7 @@ fn parse_params(
         Plus => return error("expected right paren");
         Asterisk => return error("expected right paren");
         Eof => return error("expected right paren");
-            Let => return error("expected right paren");
+        Let => return error("expected right paren");
         Var => return error("expected right paren");
         If => return error("expected right paren");
         Else => return error("expected right paren");
@@ -399,7 +984,6 @@ fn parse_params(
         Continue => return error("expected right paren");
         Match => return error("expected right paren");
         Unsafe => return error("expected right paren");
-        Comptime => return error("expected right paren");
         Try => return error("expected right paren");
         True => return error("expected right paren");
         False => return error("expected right paren");
@@ -442,6 +1026,12 @@ fn parse_param_list(
     let param = try std::kizu::parser::parse_param(ast, text, token);
     try ast.add_child(param.node);
     match param.next.kind {
+        Import => return error("expected comma or right paren");
+        Pub => return error("expected comma or right paren");
+        Struct => return error("expected comma or right paren");
+        Enum => return error("expected comma or right paren");
+        Union => return error("expected comma or right paren");
+        Extern => return error("expected comma or right paren");
         Comma => return std::kizu::parser::parse_param_after_comma(
             ast,
             text,
@@ -510,7 +1100,14 @@ fn parse_param_after_comma(
     match token.kind {
         RParen => return token;
         Ident => return std::kizu::parser::parse_param_list(ast, text, token);
+        Comptime => return std::kizu::parser::parse_param_list(ast, text, token);
         Fn => return error("expected parameter");
+        Import => return error("expected parameter");
+        Pub => return error("expected parameter");
+        Struct => return error("expected parameter");
+        Enum => return error("expected parameter");
+        Union => return error("expected parameter");
+        Extern => return error("expected parameter");
         Return => return error("expected parameter");
         Number => return error("expected parameter");
         String => return error("expected parameter");
@@ -533,7 +1130,7 @@ fn parse_param_after_comma(
         Plus => return error("expected parameter");
         Asterisk => return error("expected parameter");
         Eof => return error("expected right paren");
-            Let => return error("expected parameter");
+        Let => return error("expected parameter");
         Var => return error("expected parameter");
         If => return error("expected parameter");
         Else => return error("expected parameter");
@@ -543,7 +1140,6 @@ fn parse_param_after_comma(
         Continue => return error("expected parameter");
         Match => return error("expected parameter");
         Unsafe => return error("expected parameter");
-        Comptime => return error("expected parameter");
         Try => return error("expected parameter");
         True => return error("expected parameter");
         False => return error("expected parameter");
@@ -567,8 +1163,15 @@ fn parse_param_after_comma(
 fn parse_param(
     ast: std::kizu::ast::Ast,
     text: []const u8,
-    name: std::kizu::lexer::Token
+    token: std::kizu::lexer::Token
 ) -> !ParseNode {
+    var is_comptime = false;
+    var name = token;
+    if std::kizu::parser::is_comptime_token(token) {
+        is_comptime = true;
+        name = std::kizu::lexer::next_token(text, token);
+    }
+    name = try std::kizu::parser::expect_ident(name);
     let colon = std::kizu::lexer::next_token(text, name);
     let type_token = try std::kizu::parser::expect_colon(text, colon);
     let type_name = try std::kizu::parser::parse_type_name(ast, text, type_token);
@@ -578,7 +1181,8 @@ fn parse_param(
         std::kizu::ast::symbol_id(name.start)
     );
     let node = ast.add_param(
-        std::kizu::ast::span(name.start, type_node.span.end),
+        std::kizu::ast::span(token.start, type_node.span.end),
+        is_comptime,
         name_node,
         type_name.node
     );
@@ -590,6 +1194,12 @@ fn expect_colon(
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected colon");
+        Pub => return error("expected colon");
+        Struct => return error("expected colon");
+        Enum => return error("expected colon");
+        Union => return error("expected colon");
+        Extern => return error("expected colon");
         Colon => return std::kizu::lexer::next_token(text, token);
         Fn => return error("expected colon");
         Return => return error("expected colon");
@@ -652,6 +1262,12 @@ fn parse_optional_return_type(
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
+        Import => return error("expected return type or block");
+        Pub => return error("expected return type or block");
+        Struct => return error("expected return type or block");
+        Enum => return error("expected return type or block");
+        Union => return error("expected return type or block");
+        Extern => return error("expected return type or block");
         Arrow => return std::kizu::parser::parse_type_name(
             ast,
             text,
@@ -730,6 +1346,12 @@ fn parse_type_end(
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected type name");
+        Pub => return error("expected type name");
+        Struct => return error("expected type name");
+        Enum => return error("expected type name");
+        Union => return error("expected type name");
+        Extern => return error("expected type name");
         Ident => return std::kizu::parser::parse_named_type_end(text, token);
         Bang => return std::kizu::parser::parse_type_end(
             text,
@@ -799,6 +1421,12 @@ fn parse_named_type_end(
     let base = try std::kizu::parser::parse_type_base_end(text, token);
     let next = std::kizu::lexer::next_token(text, base);
     match next.kind {
+        Import => return base;
+        Pub => return base;
+        Struct => return base;
+        Enum => return base;
+        Union => return base;
+        Extern => return base;
         Bang => return std::kizu::parser::parse_type_end(
             text,
             std::kizu::lexer::next_token(text, next)
@@ -874,6 +1502,12 @@ fn parse_type_base_end(
 
 fn is_double_colon(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
         DoubleColon => return true;
         Fn => return false;
         Return => return false;
@@ -934,6 +1568,12 @@ fn expect_type_segment(
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected type segment");
+        Pub => return error("expected type segment");
+        Struct => return error("expected type segment");
+        Enum => return error("expected type segment");
+        Union => return error("expected type segment");
+        Extern => return error("expected type segment");
         Ident => return token;
         Fn => return error("expected type segment");
         Return => return error("expected type segment");
@@ -996,6 +1636,12 @@ fn parse_borrow_type_end(
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, token);
     match next.kind {
+        Import => return error("expected borrowed type");
+        Pub => return error("expected borrowed type");
+        Struct => return error("expected borrowed type");
+        Enum => return error("expected borrowed type");
+        Union => return error("expected borrowed type");
+        Extern => return error("expected borrowed type");
         Mut => return std::kizu::parser::parse_type_end(
             text,
             std::kizu::lexer::next_token(text, next)
@@ -1061,6 +1707,12 @@ fn parse_slice_type_end(
 ) -> !std::kizu::lexer::Token {
     let close = std::kizu::lexer::next_token(text, open);
     match close.kind {
+        Import => return error("expected right bracket");
+        Pub => return error("expected right bracket");
+        Struct => return error("expected right bracket");
+        Enum => return error("expected right bracket");
+        Union => return error("expected right bracket");
+        Extern => return error("expected right bracket");
         RBracket => return std::kizu::parser::parse_type_arg_end(
             text,
             std::kizu::lexer::next_token(text, close)
@@ -1125,6 +1777,12 @@ fn parse_type_arg_end(
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected type argument");
+        Pub => return error("expected type argument");
+        Struct => return error("expected type argument");
+        Enum => return error("expected type argument");
+        Union => return error("expected type argument");
+        Extern => return error("expected type argument");
         Ident => return std::kizu::parser::parse_ident_type_arg_end(text, token);
         Bang => return std::kizu::parser::parse_type_end(text, token);
         Amp => return std::kizu::parser::parse_type_end(text, token);
@@ -1204,6 +1862,12 @@ fn parse_generic_type_end(
         let arg_end = try std::kizu::parser::parse_type_arg_end(text, current);
         let next = std::kizu::lexer::next_token(text, arg_end);
         match next.kind {
+            Import => return error("expected comma or greater than");
+            Pub => return error("expected comma or greater than");
+            Struct => return error("expected comma or greater than");
+            Enum => return error("expected comma or greater than");
+            Union => return error("expected comma or greater than");
+            Extern => return error("expected comma or greater than");
             GT => return next;
             Comma => current = try std::kizu::parser::next_generic_type_arg(text, next);
             Fn => return error("expected comma or greater than");
@@ -1268,6 +1932,12 @@ fn next_generic_type_arg(
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, comma);
     match next.kind {
+        Import => return error("expected type argument");
+        Pub => return error("expected type argument");
+        Struct => return error("expected type argument");
+        Enum => return error("expected type argument");
+        Union => return error("expected type argument");
+        Extern => return error("expected type argument");
         GT => return next;
         Ident => return next;
         Bang => return next;
@@ -1340,6 +2010,12 @@ fn parse_optional_block(
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
+        Import => return error("expected block");
+        Pub => return error("expected block");
+        Struct => return error("expected block");
+        Enum => return error("expected block");
+        Union => return error("expected block");
+        Extern => return error("expected block");
         LBrace => return std::kizu::parser::parse_block(allocator, ast, text, token);
         Eof => return std::kizu::parser::empty_parse_node(ast, token);
         Fn => return error("expected block");
@@ -1441,6 +2117,12 @@ fn parse_block_with_statements(
 
 fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
         Fn => return false;
         Let => return false;
         Var => return false;
@@ -1499,6 +2181,12 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
 
 fn is_block_close_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
         Fn => return false;
         Let => return false;
         Var => return false;
@@ -1563,6 +2251,12 @@ fn parse_statement(
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
+        Import => return error("expected statement");
+        Pub => return error("expected statement");
+        Struct => return error("expected statement");
+        Enum => return error("expected statement");
+        Union => return error("expected statement");
+        Extern => return error("expected statement");
         Let => return std::kizu::parser::parse_let(allocator, ast, text, token, false);
         Var => return std::kizu::parser::parse_let(allocator, ast, text, token, true);
         Return => return std::kizu::parser::parse_return(allocator, ast, text, token);
@@ -1627,6 +2321,12 @@ fn parse_ident_statement(
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
     match next.kind {
+        Import => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Pub => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Struct => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Enum => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Union => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Extern => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Colon => return std::kizu::parser::parse_labeled_statement(allocator, ast, text, token);
         Fn => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Let => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
@@ -1698,6 +2398,12 @@ fn parse_labeled_statement(
         std::kizu::lexer::next_token(text, label_token)
     );
     match loop_token.kind {
+        Import => return error("label must attach to loop");
+        Pub => return error("label must attach to loop");
+        Struct => return error("label must attach to loop");
+        Enum => return error("label must attach to loop");
+        Union => return error("label must attach to loop");
+        Extern => return error("label must attach to loop");
         While => return std::kizu::parser::parse_while(allocator, ast, text, loop_token, label);
         For => return std::kizu::parser::parse_for(allocator, ast, text, loop_token, label);
         Fn => return error("label must attach to loop");
@@ -1762,6 +2468,12 @@ fn parse_comptime_statement(
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
     match next.kind {
+        Import => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Pub => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Struct => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Enum => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Union => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
+        Extern => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         If => return std::kizu::parser::parse_comptime_if(allocator, ast, text, token);
         Fn => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
         Let => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);
@@ -1855,6 +2567,12 @@ fn parse_return(
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
     match next.kind {
+        Import => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
+        Pub => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
+        Struct => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
+        Enum => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
+        Union => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
+        Extern => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
         Semicolon => return std::kizu::parser::finish_empty_return(ast, text, token, next);
         Fn => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
         Let => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);
@@ -1945,6 +2663,12 @@ fn parse_expr_or_assign_statement(
 ) -> !ParseNode {
     let expr = try std::kizu::parser::parse_expr(allocator, ast, text, token);
     match expr.next.kind {
+        Import => return error("expected semicolon");
+        Pub => return error("expected semicolon");
+        Struct => return error("expected semicolon");
+        Enum => return error("expected semicolon");
+        Union => return error("expected semicolon");
+        Extern => return error("expected semicolon");
         Assign => return std::kizu::parser::parse_assign(allocator, ast, text, expr);
         Semicolon => return std::kizu::parser::finish_expr_statement(ast, text, expr, expr.next);
         Fn => return error("expected semicolon");
@@ -2358,6 +3082,12 @@ fn parse_primary(
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
+        Import => return error("expected expression");
+        Pub => return error("expected expression");
+        Struct => return error("expected expression");
+        Enum => return error("expected expression");
+        Union => return error("expected expression");
+        Extern => return error("expected expression");
         Ident => return std::kizu::parser::parse_postfix_expr(
             allocator,
             ast,
@@ -2551,6 +3281,12 @@ fn prefix_right_start(
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, token);
     match token.kind {
+        Import => return error("expected prefix operator");
+        Pub => return error("expected prefix operator");
+        Struct => return error("expected prefix operator");
+        Enum => return error("expected prefix operator");
+        Union => return error("expected prefix operator");
+        Extern => return error("expected prefix operator");
         Amp => return std::kizu::parser::prefix_borrow_right_start(text, next);
         Bang => return next;
         Minus => return next;
@@ -2612,6 +3348,12 @@ fn prefix_borrow_right_start(
     next: std::kizu::lexer::Token
 ) -> std::kizu::lexer::Token {
     match next.kind {
+        Import => return next;
+        Pub => return next;
+        Struct => return next;
+        Enum => return next;
+        Union => return next;
+        Extern => return next;
         Mut => return std::kizu::lexer::next_token(text, next);
         Fn => return next;
         Let => return next;
@@ -2673,6 +3415,12 @@ fn prefix_op(
     token: std::kizu::lexer::Token
 ) -> !std::kizu::ast::PrefixOp {
     match token.kind {
+        Import => return error("expected prefix operator");
+        Pub => return error("expected prefix operator");
+        Struct => return error("expected prefix operator");
+        Enum => return error("expected prefix operator");
+        Union => return error("expected prefix operator");
+        Extern => return error("expected prefix operator");
         Bang => return std::kizu::ast::prefix_not();
         Minus => return std::kizu::ast::prefix_neg();
         Amp => return std::kizu::parser::borrow_prefix_op(text, token);
@@ -2735,6 +3483,12 @@ fn borrow_prefix_op(
 ) -> std::kizu::ast::PrefixOp {
     let next = std::kizu::lexer::next_token(text, token);
     match next.kind {
+        Import => return std::kizu::ast::prefix_borrow();
+        Pub => return std::kizu::ast::prefix_borrow();
+        Struct => return std::kizu::ast::prefix_borrow();
+        Enum => return std::kizu::ast::prefix_borrow();
+        Union => return std::kizu::ast::prefix_borrow();
+        Extern => return std::kizu::ast::prefix_borrow();
         Mut => return std::kizu::ast::prefix_mut_borrow();
         Fn => return std::kizu::ast::prefix_borrow();
         Let => return std::kizu::ast::prefix_borrow();
@@ -2811,6 +3565,12 @@ fn parse_one_postfix(
     left: ParseNode
 ) -> !ParseNode {
     match left.next.kind {
+            Import => return error("expected postfix operator");
+            Pub => return error("expected postfix operator");
+            Struct => return error("expected postfix operator");
+            Enum => return error("expected postfix operator");
+            Union => return error("expected postfix operator");
+            Extern => return error("expected postfix operator");
         LParen => return std::kizu::parser::parse_call(allocator, ast, text, left.node, left.next);
         DoubleColon => return std::kizu::parser::parse_field_expr(ast, text, left, true);
         Dot => return std::kizu::parser::parse_field_expr(ast, text, left, false);
@@ -2954,6 +3714,12 @@ fn empty_range(ast: std::kizu::ast::Ast, next: std::kizu::lexer::Token) -> Parse
 
 fn expect_block_close(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected statement");
+        Pub => return error("expected statement");
+        Struct => return error("expected statement");
+        Enum => return error("expected statement");
+        Union => return error("expected statement");
+        Extern => return error("expected statement");
         RBrace => return token;
         Eof => return error("expected right brace");
         Fn => return error("expected statement");
@@ -3012,6 +3778,12 @@ fn expect_block_close(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Toke
 
 fn is_postfix_start(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
         Fn => return false;
         Let => return false;
         Var => return false;
@@ -3070,6 +3842,12 @@ fn is_postfix_start(token: std::kizu::lexer::Token) -> bool {
 
 fn is_call_close_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
         Fn => return false;
         Let => return false;
         Var => return false;
@@ -3133,6 +3911,12 @@ fn parse_optional_else(
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
+        Import => return std::kizu::parser::empty_parse_node(ast, token);
+        Pub => return std::kizu::parser::empty_parse_node(ast, token);
+        Struct => return std::kizu::parser::empty_parse_node(ast, token);
+        Enum => return std::kizu::parser::empty_parse_node(ast, token);
+        Union => return std::kizu::parser::empty_parse_node(ast, token);
+        Extern => return std::kizu::parser::empty_parse_node(ast, token);
         Fn => return std::kizu::parser::empty_parse_node(ast, token);
         Let => return std::kizu::parser::empty_parse_node(ast, token);
         Var => return std::kizu::parser::empty_parse_node(ast, token);
@@ -3196,6 +3980,12 @@ fn parse_optional_branch_label(
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
     match next.kind {
+        Import => return std::kizu::parser::empty_parse_node(ast, next);
+        Pub => return std::kizu::parser::empty_parse_node(ast, next);
+        Struct => return std::kizu::parser::empty_parse_node(ast, next);
+        Enum => return std::kizu::parser::empty_parse_node(ast, next);
+        Union => return std::kizu::parser::empty_parse_node(ast, next);
+        Extern => return std::kizu::parser::empty_parse_node(ast, next);
         Fn => return std::kizu::parser::empty_parse_node(ast, next);
         Let => return std::kizu::parser::empty_parse_node(ast, next);
         Var => return std::kizu::parser::empty_parse_node(ast, next);
@@ -3258,6 +4048,12 @@ fn parse_optional_match_binding(
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
+        Import => return std::kizu::parser::empty_parse_node(ast, token);
+        Pub => return std::kizu::parser::empty_parse_node(ast, token);
+        Struct => return std::kizu::parser::empty_parse_node(ast, token);
+        Enum => return std::kizu::parser::empty_parse_node(ast, token);
+        Union => return std::kizu::parser::empty_parse_node(ast, token);
+        Extern => return std::kizu::parser::empty_parse_node(ast, token);
         Fn => return std::kizu::parser::empty_parse_node(ast, token);
         Let => return std::kizu::parser::empty_parse_node(ast, token);
         Var => return std::kizu::parser::empty_parse_node(ast, token);
@@ -3319,6 +4115,12 @@ fn next_match_arm_token(
     token: std::kizu::lexer::Token
 ) -> std::kizu::lexer::Token {
     match token.kind {
+        Import => return token;
+        Pub => return token;
+        Struct => return token;
+        Enum => return token;
+        Union => return token;
+        Extern => return token;
         Fn => return token;
         Let => return token;
         Var => return token;
@@ -3377,6 +4179,12 @@ fn next_match_arm_token(
 
 fn binary_precedence(token: std::kizu::lexer::Token) -> i64 {
     match token.kind {
+        Import => return 0 - 1;
+        Pub => return 0 - 1;
+        Struct => return 0 - 1;
+        Enum => return 0 - 1;
+        Union => return 0 - 1;
+        Extern => return 0 - 1;
         Fn => return 0 - 1;
         Let => return 0 - 1;
         Var => return 0 - 1;
@@ -3435,6 +4243,12 @@ fn binary_precedence(token: std::kizu::lexer::Token) -> i64 {
 
 fn binary_op(token: std::kizu::lexer::Token) -> !std::kizu::ast::BinaryOp {
     match token.kind {
+        Import => return error("expected binary operator");
+        Pub => return error("expected binary operator");
+        Struct => return error("expected binary operator");
+        Enum => return error("expected binary operator");
+        Union => return error("expected binary operator");
+        Extern => return error("expected binary operator");
         Fn => return error("expected binary operator");
         Let => return error("expected binary operator");
         Var => return error("expected binary operator");
@@ -3493,6 +4307,12 @@ fn binary_op(token: std::kizu::lexer::Token) -> !std::kizu::ast::BinaryOp {
 
 fn expect_call_arg_start(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected call arg");
+        Pub => return error("expected call arg");
+        Struct => return error("expected call arg");
+        Enum => return error("expected call arg");
+        Union => return error("expected call arg");
+        Extern => return error("expected call arg");
         Fn => return error("expected call arg");
         Let => return error("expected call arg");
         Var => return error("expected call arg");
@@ -3554,6 +4374,12 @@ fn next_call_arg_token(
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected comma or right paren");
+        Pub => return error("expected comma or right paren");
+        Struct => return error("expected comma or right paren");
+        Enum => return error("expected comma or right paren");
+        Union => return error("expected comma or right paren");
+        Extern => return error("expected comma or right paren");
         Fn => return error("expected comma or right paren");
         Let => return error("expected comma or right paren");
         Var => return error("expected comma or right paren");
@@ -3610,8 +4436,782 @@ fn next_call_arg_token(
     }
 }
 
+fn is_pub_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return true;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return false;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return false;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        LTE => return false;
+        GT => return false;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn is_comptime_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return true;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return false;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return false;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        LTE => return false;
+        GT => return false;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn is_decl_item_separator(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return true;
+        Comma => return true;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return false;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        LTE => return false;
+        GT => return false;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn is_lt_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return false;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return false;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return true;
+        LTE => return false;
+        GT => return false;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn is_gt_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return false;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return false;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        LTE => return false;
+        GT => return true;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn is_comma_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return true;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return false;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        LTE => return false;
+        GT => return false;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn is_arrow_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return false;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return false;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return true;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        LTE => return false;
+        GT => return false;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn is_left_paren_token(token: std::kizu::lexer::Token) -> bool {
+    match token.kind {
+        Fn => return false;
+        Import => return false;
+        Pub => return false;
+        Struct => return false;
+        Enum => return false;
+        Union => return false;
+        Extern => return false;
+        Let => return false;
+        Var => return false;
+        Return => return false;
+        If => return false;
+        Else => return false;
+        While => return false;
+        For => return false;
+        Break => return false;
+        Continue => return false;
+        Match => return false;
+        Unsafe => return false;
+        Comptime => return false;
+        Try => return false;
+        True => return false;
+        False => return false;
+        And => return false;
+        Or => return false;
+        Ident => return false;
+        Number => return false;
+        LBrace => return false;
+        RBrace => return false;
+        LParen => return true;
+        RParen => return false;
+        Semicolon => return false;
+        Comma => return false;
+        Colon => return false;
+        DoubleColon => return false;
+        Assign => return false;
+        Arrow => return false;
+        FatArrow => return false;
+        Bang => return false;
+        Eq => return false;
+        NotEq => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        LTE => return false;
+        GT => return false;
+        GTE => return false;
+        Question => return false;
+        Plus => return false;
+        Minus => return false;
+        Asterisk => return false;
+        Slash => return false;
+        Percent => return false;
+        Dot => return false;
+        Range => return false;
+        Pipe => return false;
+        Mut => return false;
+        String => return false;
+        Eof => return false;
+    }
+}
+
+fn expect_string(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
+    match token.kind {
+        Fn => return error("expected string");
+        Import => return error("expected string");
+        Pub => return error("expected string");
+        Struct => return error("expected string");
+        Enum => return error("expected string");
+        Union => return error("expected string");
+        Extern => return error("expected string");
+        Let => return error("expected string");
+        Var => return error("expected string");
+        Return => return error("expected string");
+        If => return error("expected string");
+        Else => return error("expected string");
+        While => return error("expected string");
+        For => return error("expected string");
+        Break => return error("expected string");
+        Continue => return error("expected string");
+        Match => return error("expected string");
+        Unsafe => return error("expected string");
+        Comptime => return error("expected string");
+        Try => return error("expected string");
+        True => return error("expected string");
+        False => return error("expected string");
+        And => return error("expected string");
+        Or => return error("expected string");
+        Ident => return error("expected string");
+        Number => return error("expected string");
+        LBrace => return error("expected string");
+        RBrace => return error("expected string");
+        LParen => return error("expected string");
+        RParen => return error("expected string");
+        Semicolon => return error("expected string");
+        Comma => return error("expected string");
+        Colon => return error("expected string");
+        DoubleColon => return error("expected string");
+        Assign => return error("expected string");
+        Arrow => return error("expected string");
+        FatArrow => return error("expected string");
+        Bang => return error("expected string");
+        Eq => return error("expected string");
+        NotEq => return error("expected string");
+        Amp => return error("expected string");
+        LBracket => return error("expected string");
+        RBracket => return error("expected string");
+        LT => return error("expected string");
+        LTE => return error("expected string");
+        GT => return error("expected string");
+        GTE => return error("expected string");
+        Question => return error("expected string");
+        Plus => return error("expected string");
+        Minus => return error("expected string");
+        Asterisk => return error("expected string");
+        Slash => return error("expected string");
+        Percent => return error("expected string");
+        Dot => return error("expected string");
+        Range => return error("expected string");
+        Pipe => return error("expected string");
+        Mut => return error("expected string");
+        String => return token;
+        Eof => return error("expected string");
+    }
+}
+
+fn expect_fn(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
+    match token.kind {
+        Fn => return token;
+        Import => return error("expected fn");
+        Pub => return error("expected fn");
+        Struct => return error("expected fn");
+        Enum => return error("expected fn");
+        Union => return error("expected fn");
+        Extern => return error("expected fn");
+        Let => return error("expected fn");
+        Var => return error("expected fn");
+        Return => return error("expected fn");
+        If => return error("expected fn");
+        Else => return error("expected fn");
+        While => return error("expected fn");
+        For => return error("expected fn");
+        Break => return error("expected fn");
+        Continue => return error("expected fn");
+        Match => return error("expected fn");
+        Unsafe => return error("expected fn");
+        Comptime => return error("expected fn");
+        Try => return error("expected fn");
+        True => return error("expected fn");
+        False => return error("expected fn");
+        And => return error("expected fn");
+        Or => return error("expected fn");
+        Ident => return error("expected fn");
+        Number => return error("expected fn");
+        LBrace => return error("expected fn");
+        RBrace => return error("expected fn");
+        LParen => return error("expected fn");
+        RParen => return error("expected fn");
+        Semicolon => return error("expected fn");
+        Comma => return error("expected fn");
+        Colon => return error("expected fn");
+        DoubleColon => return error("expected fn");
+        Assign => return error("expected fn");
+        Arrow => return error("expected fn");
+        FatArrow => return error("expected fn");
+        Bang => return error("expected fn");
+        Eq => return error("expected fn");
+        NotEq => return error("expected fn");
+        Amp => return error("expected fn");
+        LBracket => return error("expected fn");
+        RBracket => return error("expected fn");
+        LT => return error("expected fn");
+        LTE => return error("expected fn");
+        GT => return error("expected fn");
+        GTE => return error("expected fn");
+        Question => return error("expected fn");
+        Plus => return error("expected fn");
+        Minus => return error("expected fn");
+        Asterisk => return error("expected fn");
+        Slash => return error("expected fn");
+        Percent => return error("expected fn");
+        Dot => return error("expected fn");
+        Range => return error("expected fn");
+        Pipe => return error("expected fn");
+        Mut => return error("expected fn");
+        String => return error("expected fn");
+        Eof => return error("expected fn");
+    }
+}
+
+fn expect_left_paren(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
+    match token.kind {
+        Fn => return error("expected left paren");
+        Import => return error("expected left paren");
+        Pub => return error("expected left paren");
+        Struct => return error("expected left paren");
+        Enum => return error("expected left paren");
+        Union => return error("expected left paren");
+        Extern => return error("expected left paren");
+        Let => return error("expected left paren");
+        Var => return error("expected left paren");
+        Return => return error("expected left paren");
+        If => return error("expected left paren");
+        Else => return error("expected left paren");
+        While => return error("expected left paren");
+        For => return error("expected left paren");
+        Break => return error("expected left paren");
+        Continue => return error("expected left paren");
+        Match => return error("expected left paren");
+        Unsafe => return error("expected left paren");
+        Comptime => return error("expected left paren");
+        Try => return error("expected left paren");
+        True => return error("expected left paren");
+        False => return error("expected left paren");
+        And => return error("expected left paren");
+        Or => return error("expected left paren");
+        Ident => return error("expected left paren");
+        Number => return error("expected left paren");
+        LBrace => return error("expected left paren");
+        RBrace => return error("expected left paren");
+        LParen => return token;
+        RParen => return error("expected left paren");
+        Semicolon => return error("expected left paren");
+        Comma => return error("expected left paren");
+        Colon => return error("expected left paren");
+        DoubleColon => return error("expected left paren");
+        Assign => return error("expected left paren");
+        Arrow => return error("expected left paren");
+        FatArrow => return error("expected left paren");
+        Bang => return error("expected left paren");
+        Eq => return error("expected left paren");
+        NotEq => return error("expected left paren");
+        Amp => return error("expected left paren");
+        LBracket => return error("expected left paren");
+        RBracket => return error("expected left paren");
+        LT => return error("expected left paren");
+        LTE => return error("expected left paren");
+        GT => return error("expected left paren");
+        GTE => return error("expected left paren");
+        Question => return error("expected left paren");
+        Plus => return error("expected left paren");
+        Minus => return error("expected left paren");
+        Asterisk => return error("expected left paren");
+        Slash => return error("expected left paren");
+        Percent => return error("expected left paren");
+        Dot => return error("expected left paren");
+        Range => return error("expected left paren");
+        Pipe => return error("expected left paren");
+        Mut => return error("expected left paren");
+        String => return error("expected left paren");
+        Eof => return error("expected left paren");
+    }
+}
+
+fn expect_gt(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
+    match token.kind {
+        Fn => return error("expected greater than");
+        Import => return error("expected greater than");
+        Pub => return error("expected greater than");
+        Struct => return error("expected greater than");
+        Enum => return error("expected greater than");
+        Union => return error("expected greater than");
+        Extern => return error("expected greater than");
+        Let => return error("expected greater than");
+        Var => return error("expected greater than");
+        Return => return error("expected greater than");
+        If => return error("expected greater than");
+        Else => return error("expected greater than");
+        While => return error("expected greater than");
+        For => return error("expected greater than");
+        Break => return error("expected greater than");
+        Continue => return error("expected greater than");
+        Match => return error("expected greater than");
+        Unsafe => return error("expected greater than");
+        Comptime => return error("expected greater than");
+        Try => return error("expected greater than");
+        True => return error("expected greater than");
+        False => return error("expected greater than");
+        And => return error("expected greater than");
+        Or => return error("expected greater than");
+        Ident => return error("expected greater than");
+        Number => return error("expected greater than");
+        LBrace => return error("expected greater than");
+        RBrace => return error("expected greater than");
+        LParen => return error("expected greater than");
+        RParen => return error("expected greater than");
+        Semicolon => return error("expected greater than");
+        Comma => return error("expected greater than");
+        Colon => return error("expected greater than");
+        DoubleColon => return error("expected greater than");
+        Assign => return error("expected greater than");
+        Arrow => return error("expected greater than");
+        FatArrow => return error("expected greater than");
+        Bang => return error("expected greater than");
+        Eq => return error("expected greater than");
+        NotEq => return error("expected greater than");
+        Amp => return error("expected greater than");
+        LBracket => return error("expected greater than");
+        RBracket => return error("expected greater than");
+        LT => return error("expected greater than");
+        LTE => return error("expected greater than");
+        GT => return token;
+        GTE => return error("expected greater than");
+        Question => return error("expected greater than");
+        Plus => return error("expected greater than");
+        Minus => return error("expected greater than");
+        Asterisk => return error("expected greater than");
+        Slash => return error("expected greater than");
+        Percent => return error("expected greater than");
+        Dot => return error("expected greater than");
+        Range => return error("expected greater than");
+        Pipe => return error("expected greater than");
+        Mut => return error("expected greater than");
+        String => return error("expected greater than");
+        Eof => return error("expected greater than");
+    }
+}
+
 fn expect_ident(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected identifier");
+        Pub => return error("expected identifier");
+        Struct => return error("expected identifier");
+        Enum => return error("expected identifier");
+        Union => return error("expected identifier");
+        Extern => return error("expected identifier");
         Fn => return error("expected identifier");
         Let => return error("expected identifier");
         Var => return error("expected identifier");
@@ -3670,6 +5270,12 @@ fn expect_ident(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
 
 fn expect_assign(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected assign");
+        Pub => return error("expected assign");
+        Struct => return error("expected assign");
+        Enum => return error("expected assign");
+        Union => return error("expected assign");
+        Extern => return error("expected assign");
         Fn => return error("expected assign");
         Let => return error("expected assign");
         Var => return error("expected assign");
@@ -3728,6 +5334,12 @@ fn expect_assign(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
 
 fn expect_semicolon(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected semicolon");
+        Pub => return error("expected semicolon");
+        Struct => return error("expected semicolon");
+        Enum => return error("expected semicolon");
+        Union => return error("expected semicolon");
+        Extern => return error("expected semicolon");
         Fn => return error("expected semicolon");
         Let => return error("expected semicolon");
         Var => return error("expected semicolon");
@@ -3786,6 +5398,12 @@ fn expect_semicolon(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token 
 
 fn expect_lbrace(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected left brace");
+        Pub => return error("expected left brace");
+        Struct => return error("expected left brace");
+        Enum => return error("expected left brace");
+        Union => return error("expected left brace");
+        Extern => return error("expected left brace");
         Fn => return error("expected left brace");
         Let => return error("expected left brace");
         Var => return error("expected left brace");
@@ -3844,6 +5462,12 @@ fn expect_lbrace(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
 
 fn expect_right_paren(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected right paren");
+        Pub => return error("expected right paren");
+        Struct => return error("expected right paren");
+        Enum => return error("expected right paren");
+        Union => return error("expected right paren");
+        Extern => return error("expected right paren");
         Fn => return error("expected right paren");
         Let => return error("expected right paren");
         Var => return error("expected right paren");
@@ -3902,6 +5526,12 @@ fn expect_right_paren(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Toke
 
 fn expect_range(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected range");
+        Pub => return error("expected range");
+        Struct => return error("expected range");
+        Enum => return error("expected range");
+        Union => return error("expected range");
+        Extern => return error("expected range");
         Fn => return error("expected range");
         Let => return error("expected range");
         Var => return error("expected range");
@@ -3960,6 +5590,12 @@ fn expect_range(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
 
 fn expect_pipe(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected pipe");
+        Pub => return error("expected pipe");
+        Struct => return error("expected pipe");
+        Enum => return error("expected pipe");
+        Union => return error("expected pipe");
+        Extern => return error("expected pipe");
         Fn => return error("expected pipe");
         Let => return error("expected pipe");
         Var => return error("expected pipe");
@@ -4018,6 +5654,12 @@ fn expect_pipe(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
 
 fn expect_fat_arrow(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
+        Import => return error("expected fat arrow");
+        Pub => return error("expected fat arrow");
+        Struct => return error("expected fat arrow");
+        Enum => return error("expected fat arrow");
+        Union => return error("expected fat arrow");
+        Extern => return error("expected fat arrow");
         Fn => return error("expected fat arrow");
         Let => return error("expected fat arrow");
         Var => return error("expected fat arrow");

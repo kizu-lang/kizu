@@ -42,6 +42,7 @@ fn dump_node(
     let node = ast.get(id);
     match node.data {
         Program(program) => try dump_program(source, ast, program);
+        ImportDecl(import_decl) => try dump_import_decl(source, ast, import_decl);
         FnDecl(fn_decl) => try dump_fn_decl(source, ast, fn_decl);
         Var(var_node) => try dump_leaf("Var", source, &node.span);
         Int(int_node) => try dump_leaf("Int", source, &node.span);
@@ -65,8 +66,11 @@ fn dump_node(
         Break(break_node) => try dump_break(source, ast, break_node);
         Continue(continue_node) => try dump_continue(source, ast, continue_node);
         Param(param_node) => try dump_param(source, ast, param_node);
-        Field(field_node) => print("Field");
-        StructDecl(struct_decl) => print("StructDecl");
+        Field(field_node) => try dump_field(source, ast, field_node);
+        StructDecl(struct_decl) => try dump_struct_decl(source, ast, struct_decl);
+        EnumDecl(enum_decl) => try dump_enum_decl(source, ast, enum_decl);
+        UnionDecl(union_decl) => try dump_union_decl(source, ast, union_decl);
+        UnionVariant(union_variant) => try dump_union_variant(source, ast, union_variant);
         Match(match_node) => try dump_match(source, ast, match_node);
         MatchArm(match_arm) => try dump_match_arm(source, ast, match_arm);
         Unsafe(unsafe_node) => try dump_unsafe(source, ast, unsafe_node);
@@ -92,7 +96,11 @@ fn dump_fn_decl(
     fn_decl: std::kizu::ast::FnDeclNode
 ) -> !void {
     print("FnDecl");
+    dump_visibility(fn_decl.public);
+    dump_safety(fn_decl.unsafe_decl);
+    try dump_node(source, ast, fn_decl.extern_abi);
     try dump_node(source, ast, fn_decl.name);
+    try dump_range(source, ast, fn_decl.type_params);
     try dump_range(source, ast, fn_decl.params);
     try dump_node(source, ast, fn_decl.return_type);
     try dump_node(source, ast, fn_decl.body);
@@ -105,8 +113,100 @@ fn dump_param(
     param: std::kizu::ast::ParamNode
 ) -> !void {
     print("Param");
+    if param.comptime_param {
+        print("Comptime");
+    } else {
+        print("Runtime");
+    }
     try dump_node(source, ast, param.name);
     try dump_node(source, ast, param.type_node);
+    return;
+}
+
+fn dump_import_decl(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    import_decl: std::kizu::ast::ImportDeclNode
+) -> !void {
+    print("ImportDecl");
+    try dump_range(source, ast, import_decl.path);
+    return;
+}
+
+fn dump_field(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    field: std::kizu::ast::FieldNode
+) -> !void {
+    print("Field");
+    dump_visibility(field.public);
+    try dump_node(source, ast, field.name);
+    try dump_node(source, ast, field.type_node);
+    return;
+}
+
+fn dump_struct_decl(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    struct_decl: std::kizu::ast::StructDeclNode
+) -> !void {
+    print("StructDecl");
+    dump_visibility(struct_decl.public);
+    try dump_node(source, ast, struct_decl.name);
+    try dump_range(source, ast, struct_decl.fields);
+    return;
+}
+
+fn dump_enum_decl(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    enum_decl: std::kizu::ast::EnumDeclNode
+) -> !void {
+    print("EnumDecl");
+    dump_visibility(enum_decl.public);
+    try dump_node(source, ast, enum_decl.name);
+    try dump_range(source, ast, enum_decl.tags);
+    return;
+}
+
+fn dump_union_decl(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    union_decl: std::kizu::ast::UnionDeclNode
+) -> !void {
+    print("UnionDecl");
+    dump_visibility(union_decl.public);
+    try dump_node(source, ast, union_decl.name);
+    try dump_range(source, ast, union_decl.variants);
+    return;
+}
+
+fn dump_union_variant(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    union_variant: std::kizu::ast::UnionVariantNode
+) -> !void {
+    print("UnionVariant");
+    try dump_node(source, ast, union_variant.name);
+    try dump_node(source, ast, union_variant.payload);
+    return;
+}
+
+fn dump_visibility(public: bool) -> void {
+    if public {
+        print("Public");
+    } else {
+        print("Private");
+    }
+    return;
+}
+
+fn dump_safety(unsafe_decl: bool) -> void {
+    if unsafe_decl {
+        print("Unsafe");
+    } else {
+        print("Safe");
+    }
     return;
 }
 
@@ -516,7 +616,23 @@ func parserParityExampleName(path string) string {
 // parserParitySeedCases provides stable positive coverage for the current subset.
 func parserParitySeedCases(t *testing.T) []parserParityCase {
 	t.Helper()
-	seeds := []parserParityCase{
+	seeds := append(parserParityFunctionSeedCases(), parserParityDeclarationSeedCases()...)
+	for index := range seeds {
+		want, reason, parseErrs := summarizeGoParserSubset(seeds[index].source)
+		if len(parseErrs) > 0 {
+			t.Fatalf("%s Go parse errors: %v", seeds[index].name, parseErrs)
+		}
+		if reason != "" {
+			t.Fatalf("%s is unsupported: %s", seeds[index].name, reason)
+		}
+		seeds[index].want = want
+	}
+	return seeds
+}
+
+// parserParityFunctionSeedCases covers function and statement parser parity.
+func parserParityFunctionSeedCases() []parserParityCase {
+	return []parserParityCase{
 		{name: "seed/fn_empty", source: "fn main() {}"},
 		{name: "seed/two_fns", source: "fn one() {} fn two() {}"},
 		{name: "seed/fn_params_return", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
@@ -525,6 +641,8 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 		{name: "seed/fn_slice_param", source: "fn write(bytes: []const u8) {}"},
 		{name: "seed/fn_borrow_param", source: "fn read(value: &i64) {}"},
 		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &mut i64) {}"},
+		{name: "seed/fn_comptime_param", source: "fn scoped(comptime worker: Function) {}"},
+		{name: "seed/fn_type_params", source: "pub fn identity<T>(value: T) -> T { return value; }"},
 		{name: "seed/fn_namespace_type", source: "fn use(allocator: std::mem::Allocator) {}"},
 		{
 			name:   "seed/fn_generic_type",
@@ -574,15 +692,20 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 				"print(comptime 8); } else { print(0); } }",
 		},
 	}
-	for index := range seeds {
-		want, reason, parseErrs := summarizeGoParserSubset(seeds[index].source)
-		if len(parseErrs) > 0 {
-			t.Fatalf("%s Go parse errors: %v", seeds[index].name, parseErrs)
-		}
-		if reason != "" {
-			t.Fatalf("%s is unsupported: %s", seeds[index].name, reason)
-		}
-		seeds[index].want = want
+}
+
+// parserParityDeclarationSeedCases covers top-level declaration parser parity.
+func parserParityDeclarationSeedCases() []parserParityCase {
+	seeds := []parserParityCase{
+		{name: "seed/import_decl", source: "import app::lexer;"},
+		{
+			name:   "seed/pub_struct_decl",
+			source: "pub struct User { pub name: []const u8; age: i64; }",
+		},
+		{name: "seed/enum_decl", source: "enum Color { Red; Blue; }"},
+		{name: "seed/union_decl", source: "union Shape { Point; Circle(i64); }"},
+		{name: "seed/extern_fn", source: `extern "c" fn puts(s: ptr<const u8>) -> i32`},
+		{name: "seed/unsafe_fn", source: "unsafe fn poke() {}"},
 	}
 	return seeds
 }
@@ -640,11 +763,7 @@ func summarizeProgramSubset(program *kizuast.Program) ([]string, string) {
 	}
 	lines := []string{"Program", "Range", strconv.Itoa(len(program.Decls))}
 	for _, decl := range program.Decls {
-		fn, ok := decl.(*kizuast.FunctionDecl)
-		if !ok {
-			return nil, "top-level declaration is not function"
-		}
-		next, reason := summarizeFunctionSubset(fn)
+		next, reason := summarizeDeclSubset(decl)
 		if reason != "" {
 			return nil, reason
 		}
@@ -653,13 +772,41 @@ func summarizeProgramSubset(program *kizuast.Program) ([]string, string) {
 	return lines, ""
 }
 
+// summarizeDeclSubset summarizes one top-level declaration in the shared subset.
+func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
+	switch node := decl.(type) {
+	case *kizuast.ImportDecl:
+		return summarizeImportDeclSubset(node)
+	case *kizuast.FunctionDecl:
+		return summarizeFunctionSubset(node)
+	case *kizuast.StructDecl:
+		return summarizeStructDeclSubset(node)
+	case *kizuast.EnumDecl:
+		return summarizeEnumDeclSubset(node)
+	case *kizuast.UnionDecl:
+		return summarizeUnionDeclSubset(node)
+	default:
+		return nil, "top-level declaration outside std parser subset"
+	}
+}
+
+// summarizeImportDeclSubset summarizes one explicit import declaration.
+func summarizeImportDeclSubset(decl *kizuast.ImportDecl) ([]string, string) {
+	lines := []string{"ImportDecl", "Range", strconv.Itoa(len(decl.Path))}
+	for _, segment := range decl.Path {
+		if !isStdParserIdent(segment) {
+			return nil, "identifier outside std parser subset"
+		}
+		lines = append(lines, "Var", segment)
+	}
+	return lines, ""
+}
+
 // summarizeFunctionSubset summarizes a function declaration in the shared subset.
 func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
-	if fn.Public || fn.Unsafe || fn.ExternABI != "" {
-		return nil, "function has unsupported modifiers"
-	}
-	if len(fn.TypeParams) > 0 {
-		return nil, "function has unsupported type parameters"
+	typeParams, reason := summarizeTypeParamsSubset(fn.TypeParams)
+	if reason != "" {
+		return nil, reason
 	}
 	params, reason := summarizeParamsSubset(fn.Params)
 	if reason != "" {
@@ -669,17 +816,68 @@ func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	if fn.Body == nil {
-		return nil, "function has no body"
-	}
-	body, reason := summarizeBlockSubset(fn.Body)
+	body, reason := summarizeFunctionBodySubset(fn)
 	if reason != "" {
 		return nil, reason
 	}
-	lines := []string{"FnDecl", "Var", fn.Name}
+	lines := []string{
+		"FnDecl",
+		parserParityVisibility(fn.Public),
+		parserParitySafety(fn.Unsafe),
+	}
+	lines = append(lines, summarizeExternABISubset(fn.ExternABI)...)
+	lines = append(lines, "Var", fn.Name)
+	lines = append(lines, typeParams...)
 	lines = append(lines, params...)
 	lines = append(lines, returnType...)
 	return append(lines, body...), ""
+}
+
+// summarizeFunctionBodySubset summarizes a required body or extern empty body.
+func summarizeFunctionBodySubset(fn *kizuast.FunctionDecl) ([]string, string) {
+	if fn.Body == nil && fn.ExternABI == "" {
+		return nil, "function has no body"
+	}
+	if fn.Body == nil {
+		return []string{"Empty"}, ""
+	}
+	return summarizeBlockSubset(fn.Body)
+}
+
+// summarizeTypeParamsSubset summarizes generic function parameter names.
+func summarizeTypeParamsSubset(params []string) ([]string, string) {
+	lines := []string{"Range", strconv.Itoa(len(params))}
+	for _, name := range params {
+		if !isStdParserIdent(name) {
+			return nil, "identifier outside std parser subset"
+		}
+		lines = append(lines, "Var", name)
+	}
+	return lines, ""
+}
+
+// summarizeExternABISubset summarizes an optional extern ABI string.
+func summarizeExternABISubset(abi string) []string {
+	if abi == "" {
+		return []string{"Empty"}
+	}
+	return []string{"String", abi}
+}
+
+// parserParityVisibility maps declaration visibility to summary labels.
+func parserParityVisibility(public bool) string {
+	if public {
+		return "Public"
+	}
+	return "Private"
+}
+
+// parserParitySafety maps unsafe declaration metadata to summary labels.
+func parserParitySafety(unsafe bool) string {
+	if unsafe {
+		return "Unsafe"
+	}
+	return "Safe"
 }
 
 // summarizeParamsSubset summarizes simple named function parameters.
@@ -697,9 +895,6 @@ func summarizeParamsSubset(params []kizuast.Param) ([]string, string) {
 
 // summarizeParamSubset summarizes one simple `name: Type` parameter.
 func summarizeParamSubset(param kizuast.Param) ([]string, string) {
-	if param.Comptime {
-		return nil, "function has unsupported parameters"
-	}
 	if !isStdParserIdent(param.Name) {
 		return nil, "identifier outside std parser subset"
 	}
@@ -707,8 +902,103 @@ func summarizeParamSubset(param kizuast.Param) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	lines := []string{"Param", "Var", param.Name}
+	mode := "Runtime"
+	if param.Comptime {
+		mode = "Comptime"
+	}
+	lines := []string{"Param", mode, "Var", param.Name}
 	return append(lines, typeName...), ""
+}
+
+// summarizeStructDeclSubset summarizes a top-level struct declaration.
+func summarizeStructDeclSubset(decl *kizuast.StructDecl) ([]string, string) {
+	if !isStdParserIdent(decl.Name) {
+		return nil, "identifier outside std parser subset"
+	}
+	lines := []string{"StructDecl", parserParityVisibility(decl.Public), "Var", decl.Name}
+	lines = append(lines, "Range", strconv.Itoa(len(decl.Fields)))
+	for _, field := range decl.Fields {
+		next, reason := summarizeFieldSubset(field)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
+	}
+	return lines, ""
+}
+
+// summarizeFieldSubset summarizes one named struct field.
+func summarizeFieldSubset(field kizuast.Field) ([]string, string) {
+	if !isStdParserIdent(field.Name) {
+		return nil, "identifier outside std parser subset"
+	}
+	typeName, reason := summarizeTypeNameSubset(parserParityFieldTypeName(field))
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{"Field", parserParityVisibility(field.Public), "Var", field.Name}
+	return append(lines, typeName...), ""
+}
+
+// parserParityFieldTypeName returns the Go parser spelling used for field types.
+func parserParityFieldTypeName(field kizuast.Field) string {
+	switch {
+	case field.MutBorrow:
+		return "&mut " + field.TypeName
+	case field.Borrow:
+		return "&" + field.TypeName
+	default:
+		return field.TypeName
+	}
+}
+
+// summarizeEnumDeclSubset summarizes a top-level tag enum declaration.
+func summarizeEnumDeclSubset(decl *kizuast.EnumDecl) ([]string, string) {
+	if !isStdParserIdent(decl.Name) {
+		return nil, "identifier outside std parser subset"
+	}
+	lines := []string{"EnumDecl", parserParityVisibility(decl.Public), "Var", decl.Name}
+	lines = append(lines, "Range", strconv.Itoa(len(decl.Tags)))
+	for _, tag := range decl.Tags {
+		if !isStdParserIdent(tag) {
+			return nil, "identifier outside std parser subset"
+		}
+		lines = append(lines, "Var", tag)
+	}
+	return lines, ""
+}
+
+// summarizeUnionDeclSubset summarizes a top-level tagged union declaration.
+func summarizeUnionDeclSubset(decl *kizuast.UnionDecl) ([]string, string) {
+	if !isStdParserIdent(decl.Name) {
+		return nil, "identifier outside std parser subset"
+	}
+	lines := []string{"UnionDecl", parserParityVisibility(decl.Public), "Var", decl.Name}
+	lines = append(lines, "Range", strconv.Itoa(len(decl.Variants)))
+	for _, variant := range decl.Variants {
+		next, reason := summarizeUnionVariantSubset(variant)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
+	}
+	return lines, ""
+}
+
+// summarizeUnionVariantSubset summarizes one tagged union variant.
+func summarizeUnionVariantSubset(variant kizuast.UnionVariant) ([]string, string) {
+	if !isStdParserIdent(variant.Name) {
+		return nil, "identifier outside std parser subset"
+	}
+	lines := []string{"UnionVariant", "Var", variant.Name}
+	if variant.Payload == "" {
+		return append(lines, "Empty"), ""
+	}
+	payload, reason := summarizeTypeNameSubset(variant.Payload)
+	if reason != "" {
+		return nil, reason
+	}
+	return append(lines, payload...), ""
 }
 
 // summarizeReturnTypeSubset summarizes an optional simple function return type.

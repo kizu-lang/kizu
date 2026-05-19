@@ -2909,21 +2909,6 @@ func (c *Checker) checkAstAddShapeMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
-	case "add_param":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_field":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_struct_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::SymbolId", "std::kizu::ast::ChildRange",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
 	case "add_match":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
@@ -2935,16 +2920,65 @@ func (c *Checker) checkAstAddShapeMethod(
 			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
-	case "add_fn_decl":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
-			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
 	case "add_empty":
 		result, err := c.checkAstMethodArgs(
 			receiver, name, args, env, []string{"i64"}, "std::kizu::ast::NodeId",
 		)
+		return result, true, err
+	default:
+		return c.checkAstAddDeclMethod(receiver, name, args, env)
+	}
+}
+
+// checkAstAddDeclMethod validates declaration-oriented AST constructors.
+func (c *Checker) checkAstAddDeclMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "add_param":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_import_decl":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_field":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_struct_decl":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool",
+			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_enum_decl", "add_union_decl":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool",
+			"std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_union_variant":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	case "add_fn_decl":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "bool", "bool",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+			"std::kizu::ast::ChildRange", "std::kizu::ast::ChildRange",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	default:
 		return "", false, nil
@@ -4159,8 +4193,9 @@ func astNodeIDMethod(name string) bool {
 		"add_prefix", "add_binary", "add_field_expr", "add_call", "add_try_expr",
 		"add_comptime_expr", "add_block", "add_if", "add_let", "add_assign",
 		"add_return", "add_expr_stmt", "add_while", "add_for", "add_break",
-		"add_continue", "add_program", "add_param", "add_field", "add_match",
-		"add_struct_decl", "add_match_arm", "add_unsafe", "add_comptime_if",
+		"add_continue", "add_program", "add_param", "add_import_decl", "add_field",
+		"add_struct_decl", "add_enum_decl", "add_union_decl", "add_union_variant", "add_match",
+		"add_match_arm", "add_unsafe", "add_comptime_if",
 		"add_fn_decl", "add_empty",
 		"child_at":
 		return true
@@ -4372,8 +4407,12 @@ func isAstScalarType(typeName string) bool {
 		"BreakNode", "std::kizu::ast::BreakNode",
 		"ContinueNode", "std::kizu::ast::ContinueNode",
 		"ParamNode", "std::kizu::ast::ParamNode",
+		"ImportDeclNode", "std::kizu::ast::ImportDeclNode",
 		"FieldNode", "std::kizu::ast::FieldNode",
 		"StructDeclNode", "std::kizu::ast::StructDeclNode",
+		"EnumDeclNode", "std::kizu::ast::EnumDeclNode",
+		"UnionDeclNode", "std::kizu::ast::UnionDeclNode",
+		"UnionVariantNode", "std::kizu::ast::UnionVariantNode",
 		"MatchNode", "std::kizu::ast::MatchNode",
 		"MatchArmNode", "std::kizu::ast::MatchArmNode",
 		"UnsafeNode", "std::kizu::ast::UnsafeNode",
