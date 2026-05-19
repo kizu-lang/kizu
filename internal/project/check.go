@@ -481,6 +481,8 @@ func (c *graphChecker) qualifyExpr(
 		value, err := c.qualifyExpr(module, e.Value)
 		cp.Value = value
 		return &cp, err
+	case *ast.TypeApplyExpr:
+		return c.qualifyTypeApplyExpr(module, e)
 	case *ast.ArenaNewExpr:
 		cp := *e
 		typ, err := c.resolveType(module, e.TypeName)
@@ -532,6 +534,31 @@ func (c *graphChecker) qualifyCallExpr(
 			return nil, err
 		}
 	}
+	return &cp, nil
+}
+
+// qualifyTypeApplyExpr rewrites explicit type arguments in constructor calls.
+func (c *graphChecker) qualifyTypeApplyExpr(
+	module *moduleUnit,
+	expr *ast.TypeApplyExpr,
+) (*ast.TypeApplyExpr, error) {
+	cp := *expr
+	callee, err := c.qualifyExpr(module, expr.Callee)
+	if err != nil {
+		return nil, err
+	}
+	cp.Callee = callee
+	args, err := splitTypeArgs(expr.TypeArg)
+	if err != nil {
+		return nil, err
+	}
+	for idx, arg := range args {
+		args[idx], err = c.resolveType(module, arg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	cp.TypeArg = strings.Join(args, ", ")
 	return &cp, nil
 }
 

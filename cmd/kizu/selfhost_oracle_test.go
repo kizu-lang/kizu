@@ -29,6 +29,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostParserOracle(t),
 		runSelfhostParserSourceOracle(t),
 		runSelfhostParserErrorOracle(t),
+		runSelfhostResolverOracle(t),
 	}
 	failures := 0
 	for _, result := range results {
@@ -171,6 +172,19 @@ func runSelfhostParserErrorOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "negative-seeds",
 		scanned:   len(cases),
 		compared:  len(cases),
+		failures:  failures,
+	}
+}
+
+// runSelfhostResolverOracle checks the Kizu-owned resolver component gate.
+func runSelfhostResolverOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostResolverGateFailures(t)
+	return selfhostOracleResult{
+		component: "resolver",
+		corpus:    "selfhost",
+		scanned:   4,
+		compared:  4,
 		failures:  failures,
 	}
 }
