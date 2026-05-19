@@ -275,7 +275,7 @@ borrow は次のことができません。
 長生きする関係は、参照ではなく次の型で表します。
 
 ```text
-box<T>
+std::mem::Box<T>
 shared<T>
 arena<T>
 handle<T>
@@ -690,7 +690,7 @@ v0.1 では `arena<T>` / `handle<T>` だけを実装対象にします。
 将来追加する ownership/container 型:
 
 ```text
-box<T>
+std::mem::Box<T>
 shared<T>
 slice<T>
 ```
@@ -810,12 +810,12 @@ copy できない型:
 ```text
 array
 map
-box
+std::mem::Box<T>
 arena-owned value
 non-copy field を含む struct
 ```
 
-`array`、`map`、`box` は v0.1 では実装しません。
+`array`、`map`、`std::mem::Box<T>` は v0.1 では実装しません。
 将来追加する場合も、copy できない所有値として扱います。
 
 ## 9. borrow
@@ -1382,6 +1382,11 @@ v0.2 の `std::mem` は、self-host compiler の lexer が必要とする
 allocation-free な read-only byte helper から始めます。
 
 ```text
+std::mem::page_allocator() -> Allocator
+std::mem::Box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
+box.borrow() -> &T
+box.borrow_mut() -> &mut T
+box.deinit() -> void
 std::mem::len(bytes: []const u8) -> i64
 std::mem::byte_at(bytes: []const u8, index: i64) -> !u8
 std::mem::equal_bytes(left: []const u8, right: []const u8) -> bool
@@ -1389,6 +1394,14 @@ std::mem::starts_with(bytes: []const u8, prefix: []const u8) -> bool
 std::mem::slice(bytes: []const u8, start: i64, end: i64) -> ![]const u8
 std::mem::trim_ascii(bytes: []const u8) -> []const u8
 ```
+
+`std::mem::Box<T>` は明示 allocator capability で 1 つの owned value を確保する
+non-copy / move-only な indirection です。`Box<T>` は struct / union payload に保存できます。
+`Box<T>` を含む struct / union は non-copy です。
+`borrow` / `borrow_mut` は local borrow source であり、戻り値は local binding に束縛する
+必要があります。borrow は関数から返せず、field に保存できません。borrow が生きている間は
+対象 `Box<T>` の move / deinit を禁止します。`deinit` は owned local `Box<T>` receiver 限定です。
+safe API は raw pointer を公開しません。
 
 `std::mem` の safe API は raw pointer を返しません。
 `std::mem::slice` と `std::mem::byte_at` は境界外アクセスを `!T` として返します。

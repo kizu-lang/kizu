@@ -89,6 +89,15 @@ go test ./...
 | safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
 | low-level concurrency boundary | `thread_boundary.kizu` | uses scoped thread, seq_cst atomic, and mutex prototypes |
 
+## Package-Shaped Examples
+
+These examples document behavior that needs a package/module root rather than a
+single source file. Run them with `kizu check <package-root>`.
+
+| Feature | Example | Backing fixture |
+| --- | --- | --- |
+| imported module type references | `modules/cross_module_types/` | `tests/conformance/modules/basic` |
+
 ## Negative Examples
 
 | Safety rule | Example | Expected diagnostic substring |

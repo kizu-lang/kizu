@@ -9,6 +9,7 @@ type binding struct {
 	fieldName   string
 	arrayParent *Array
 	arrayIndex  int
+	boxParent   *Box
 }
 
 // Env stores lexical bindings for a function call or block execution.

@@ -16,6 +16,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/native"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/types"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
@@ -103,6 +104,9 @@ func parseFile(path string) error {
 
 // runFile parses a source file and executes it with the interpreter.
 func runFile(path string, args []string) error {
+	if isPackageRoot(path) {
+		return runPackage(path, args)
+	}
 	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return err
@@ -119,8 +123,24 @@ func runFile(path string, args []string) error {
 	return interp.NewWithProcessArgs(os.Stdout, args).Run(program)
 }
 
+// runPackage resolves a package root and executes the root module main.
+func runPackage(path string, args []string) error {
+	graph, program, err := loadPackageProgram(path)
+	if err != nil {
+		return err
+	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	entry := graph.Root + "::main"
+	return interp.NewWithProcessArgs(os.Stdout, args).RunEntry(program, entry)
+}
+
 // checkFile parses a source file and runs static checks.
 func checkFile(path string) error {
+	if isPackageRoot(path) {
+		return checkPackage(path)
+	}
 	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return err
@@ -138,8 +158,98 @@ func checkFile(path string) error {
 	return nil
 }
 
+// checkPackage resolves a package root and runs package-level static checks.
+func checkPackage(path string) error {
+	_, program, err := loadPackageProgram(path)
+	if err != nil {
+		return err
+	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	_, _ = fmt.Println("check: ok")
+	return nil
+}
+
+// isPackageRoot reports whether path names a directory or kizu.toml manifest.
+func isPackageRoot(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir() || filepath.Base(path) == "kizu.toml"
+}
+
+// loadPackageGraph parses kizu.toml and resolves the package module graph.
+func loadPackageGraph(path string) (project.Graph, error) {
+	root := path
+	manifestPath := filepath.Join(path, "kizu.toml")
+	if filepath.Base(path) == "kizu.toml" {
+		root = filepath.Dir(path)
+		manifestPath = path
+	}
+	source, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return project.Graph{}, err
+	}
+	manifest, err := project.ParseManifest(string(source))
+	if err != nil {
+		return project.Graph{}, err
+	}
+	return project.ResolveModules(root, manifest)
+}
+
+// loadPackageProgram resolves a package root and loads its merged program.
+func loadPackageProgram(path string) (project.Graph, *ast.Program, error) {
+	graph, err := loadPackageGraph(path)
+	if err != nil {
+		return project.Graph{}, nil, err
+	}
+	program, err := project.LoadProgram(graph)
+	if err != nil {
+		return project.Graph{}, nil, err
+	}
+	stdDecls, err := packageStdDecls(graph)
+	if err != nil {
+		return project.Graph{}, nil, err
+	}
+	program.Decls = append(stdDecls, program.Decls...)
+	return graph, program, nil
+}
+
+// packageStdDecls loads std wrapper declarations referenced by package modules.
+func packageStdDecls(graph project.Graph) ([]ast.Decl, error) {
+	var source strings.Builder
+	for _, module := range graph.Modules {
+		data, err := os.ReadFile(module.File)
+		if err != nil {
+			return nil, err
+		}
+		source.Write(data)
+		source.WriteByte('\n')
+	}
+	modules, err := resolveStdModules(source.String())
+	if err != nil {
+		return nil, err
+	}
+	if len(modules) == 0 {
+		return nil, nil
+	}
+	decls, errs, err := parseStdDecls(modules)
+	if err != nil {
+		return nil, err
+	}
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("parse std failed: %s", errs[0])
+	}
+	return decls, nil
+}
+
 // testFile runs a single Kizu test source and reports a minimal test result.
 func testFile(path string, args []string) error {
+	if isPackageRoot(path) {
+		return testPackage(path, args)
+	}
 	program, errs, err := parsePathWithStd(path)
 	if err != nil {
 		return err
@@ -154,6 +264,23 @@ func testFile(path string, args []string) error {
 		return err
 	}
 	if err := interp.NewWithProcessArgs(os.Stdout, args).Run(program); err != nil {
+		return err
+	}
+	_, _ = fmt.Println("test: ok")
+	return nil
+}
+
+// testPackage resolves a package root and runs its root module as a test.
+func testPackage(path string, args []string) error {
+	graph, program, err := loadPackageProgram(path)
+	if err != nil {
+		return err
+	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	entry := graph.Root + "::main"
+	if err := interp.NewWithProcessArgs(os.Stdout, args).RunEntry(program, entry); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")
@@ -599,7 +726,7 @@ func (r *stdModuleResolver) visit(module string) error {
 
 // readStdModuleSource reads one std source module by its short module name.
 func readStdModuleSource(module string) (string, error) {
-	path, err := findRepoFile("std/src/" + module + ".kizu")
+	path, err := findRepoFile(stdModuleFile(module))
 	if err != nil {
 		return "", err
 	}
@@ -627,6 +754,9 @@ var stdSourceModuleOrder = []string{
 	"string",
 	"fmt",
 	"testing",
+	"kizu::ast",
+	"kizu::lexer",
+	"kizu::parser",
 	"fs",
 	"path",
 	"io",
@@ -654,7 +784,7 @@ func parseStdDecls(modules []string) ([]ast.Decl, []string, error) {
 
 // parseStdModuleDecls loads one std wrapper module from Kizu source.
 func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
-	path, err := findRepoFile("std/src/" + module + ".kizu")
+	path, err := findRepoFile(stdModuleFile(module))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -667,6 +797,10 @@ func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
 		switch d := decl.(type) {
 		case *ast.StructDecl:
 			renameStdStruct(module, d)
+		case *ast.EnumDecl:
+			renameStdEnum(module, d)
+		case *ast.UnionDecl:
+			renameStdUnion(module, d)
 		case *ast.FunctionDecl:
 			renameStdFunction(module, d)
 			d.Std = true
@@ -680,6 +814,11 @@ func parseStdModuleDecls(module string) ([]ast.Decl, []string, error) {
 	return decls, nil, nil
 }
 
+// stdModuleFile maps a std namespace module name to its source file path.
+func stdModuleFile(module string) string {
+	return "std/src/" + strings.ReplaceAll(module, "::", "/") + ".kizu"
+}
+
 // renameStdStruct rewrites a std wrapper struct into its qualified form.
 func renameStdStruct(module string, decl *ast.StructDecl) {
 	decl.Name = qualifyStdTypeName(module, decl.Name)
@@ -688,9 +827,22 @@ func renameStdStruct(module string, decl *ast.StructDecl) {
 	}
 }
 
+// renameStdEnum rewrites a std wrapper enum into its qualified form.
+func renameStdEnum(module string, decl *ast.EnumDecl) {
+	decl.Name = qualifyStdTypeName(module, decl.Name)
+}
+
+// renameStdUnion rewrites a std wrapper union into its qualified form.
+func renameStdUnion(module string, decl *ast.UnionDecl) {
+	decl.Name = qualifyStdTypeName(module, decl.Name)
+	for idx := range decl.Variants {
+		decl.Variants[idx].Payload = qualifyStdTypeName(module, decl.Variants[idx].Payload)
+	}
+}
+
 // renameStdFunction rewrites a std wrapper function into its qualified form.
 func renameStdFunction(module string, fn *ast.FunctionDecl) {
-	fn.Name = "std." + module + "." + fn.Name
+	fn.Name = "std." + strings.ReplaceAll(module, "::", ".") + "." + fn.Name
 	fn.Public = false
 	renameStdFunctionTypes(module, fn)
 	renameStdBlockExprs(module, fn.Body)
@@ -795,16 +947,41 @@ func renameStdExpr(module string, expr ast.Expression) {
 		renameStdExpr(module, e.Start)
 		renameStdExpr(module, e.End)
 	case *ast.FieldExpr:
+		if e.Namespace {
+			renameStdNamespaceReceiver(module, e)
+			return
+		}
 		renameStdExpr(module, e.Receiver)
 	case *ast.DerefExpr:
 		renameStdExpr(module, e.Receiver)
 	}
 }
 
+// renameStdNamespaceReceiver qualifies module-local namespace type receivers.
+func renameStdNamespaceReceiver(module string, expr *ast.FieldExpr) {
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
+		ident.Name = qualifyStdTypeName(module, ident.Name)
+		return
+	}
+	renameStdExpr(module, expr.Receiver)
+}
+
 // qualifyStdTypeName maps local std wrapper type names to public std names.
 func qualifyStdTypeName(module string, typ string) string {
 	if module == "string" && typ == "String" {
 		return "std::string::String"
+	}
+	if module == "kizu::ast" {
+		switch typ {
+		case "Span", "Node":
+			return "std::kizu::ast::" + typ
+		}
+	}
+	if module == "kizu::lexer" {
+		switch typ {
+		case "TokenKind", "Token":
+			return "std::kizu::lexer::" + typ
+		}
 	}
 	return typ
 }

@@ -62,6 +62,11 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 
 // Run registers top-level declarations and calls main.
 func (i *Interpreter) Run(program *ast.Program) error {
+	return i.RunEntry(program, "main")
+}
+
+// RunEntry registers top-level declarations and calls entry.
+func (i *Interpreter) RunEntry(program *ast.Program, entry string) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.EnumDecl:
@@ -79,7 +84,7 @@ func (i *Interpreter) Run(program *ast.Program) error {
 			continue
 		}
 	}
-	value, err := i.callFunction("main", nil)
+	value, err := i.callFunction(entry, nil)
 	if err != nil {
 		return err
 	}
@@ -391,6 +396,11 @@ func assignRef(target Value, value Value) error {
 		target.ref.value = value
 		return nil
 	}
+	if target.ref.boxParent != nil {
+		target.ref.boxParent.value = value
+		target.ref.value = value
+		return nil
+	}
 	target.ref.value = value
 	return nil
 }
@@ -504,9 +514,7 @@ func (i *Interpreter) evalMatchStmt(stmt *ast.MatchStmt, env *Env) (Value, bool,
 	if err != nil {
 		return voidValue(), false, err
 	}
-	if value.kind == kindRef {
-		value = value.ref.value
-	}
+	value = unwrapRefValue(value)
 	if value.kind != kindEnum && value.kind != kindUnion {
 		return voidValue(), false, fmt.Errorf("runtime error: match expects enum or union")
 	}
@@ -1567,6 +1575,12 @@ func (i *Interpreter) evalBuiltinTypeApply(
 	case "std.builtin.mutex_get":
 		value, err := i.evalMutexPrimitive(args, env)
 		return value, true, err
+	case "std.builtin.box":
+		value, err := i.evalBox(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
+	case "std.builtin.box_borrow", "std.builtin.box_borrow_mut", "std.builtin.box_deinit":
+		value, err := i.evalBoxPrimitive(name, args, env)
+		return value, true, err
 	case "std.builtin.array":
 		value, err := i.evalArrayConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
@@ -1626,6 +1640,20 @@ func (i *Interpreter) evalMutexPrimitive(args []ast.Expression, env *Env) (Value
 		return voidValue(), err
 	}
 	return i.evalMutexRuntimeMethod(receiver, "get", rest, env)
+}
+
+// evalBoxPrimitive executes reserved Box method primitives.
+func (i *Interpreter) evalBoxPrimitive(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	receiver, rest, err := i.evalPrimitiveReceiver(name, args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return i.evalBoxRuntimeMethod(receiver, strings.TrimPrefix(name, "std.builtin.box_"),
+		rest)
 }
 
 // evalArrayPrimitive executes reserved Array method primitives.
@@ -1933,10 +1961,59 @@ func (i *Interpreter) evalNonArenaMethod(
 		return i.evalArrayMethod(receiver, name, args, env)
 	case kindMap:
 		return i.evalMapMethod(receiver, name, args, env)
+	case kindBox:
+		return i.evalBoxMethod(receiver, name, args, env)
 	case kindStruct:
 		return i.evalImplMethod(receiver, name, args, env)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: method `%s` expects arena", name)
+	}
+}
+
+// evalBoxMethod dispatches public Box methods through Kizu std wrappers.
+func (i *Interpreter) evalBoxMethod(
+	box Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	typeArgs := []string{box.typeName}
+	if _, elem, ok := splitGenericType(box.typeName); ok {
+		typeArgs[0] = elem
+	}
+	if value, ok, err := i.evalStdMethodWrapper(
+		"std.mem."+name, typeArgs, box, args, env,
+	); ok || err != nil {
+		return value, err
+	}
+	return i.evalBoxRuntimeMethod(box, name, args)
+}
+
+// evalBoxRuntimeMethod executes Box<T> primitive operations.
+func (i *Interpreter) evalBoxRuntimeMethod(
+	box Value,
+	name string,
+	args []ast.Expression,
+) (Value, error) {
+	if box.kind != kindBox {
+		return voidValue(), fmt.Errorf("runtime error: Box method expects Box receiver")
+	}
+	if box.box.deinit {
+		return voidValue(), fmt.Errorf("runtime error: Box was deinitialized")
+	}
+	if len(args) != 0 {
+		return voidValue(), fmt.Errorf("runtime error: Box.%s expects 0 args", name)
+	}
+	switch name {
+	case "borrow", "borrow_mut":
+		return refValue(&binding{
+			value: box.box.value, mutable: name == "borrow_mut", boxParent: box.box,
+		}), nil
+	case "deinit":
+		box.box.deinit = true
+		return voidValue(), nil
+	default:
+		return voidValue(), fmt.Errorf("runtime error: Box has no method `%s`", name)
 	}
 }
 
@@ -2233,14 +2310,43 @@ func runtimeValueMatchesType(value Value, typeName string) bool {
 	case "[]const u8":
 		return value.kind == kindString
 	default:
+		if base, elem, ok := splitGenericType(typeName); ok && base == "std::mem::Box" {
+			return value.kind == kindBox && value.typeName == fmt.Sprintf("std::mem::Box<%s>", elem)
+		}
 		if value.kind == kindEnum {
 			return value.enum.typeName == typeName
+		}
+		if value.kind == kindUnion {
+			return value.union.typeName == typeName
 		}
 		if value.kind == kindStruct {
 			return value.typeName == typeName
 		}
 		return false
 	}
+}
+
+// evalBox constructs an owned Box<T> value.
+func (i *Interpreter) evalBox(typeArg string, args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 2 {
+		return voidValue(), fmt.Errorf("runtime error: std::mem::Box<%s> expects allocator and value",
+			typeArg)
+	}
+	allocator, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if allocator.kind != kindAllocator {
+		return voidValue(), fmt.Errorf("runtime error: std::mem::Box expects Allocator")
+	}
+	value, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if !runtimeValueMatchesType(value, typeArg) {
+		return errorUnionValue("Box value type mismatch"), nil
+	}
+	return boxValue(typeArg, value), nil
 }
 
 // evalMutex constructs a synchronous protected value.
@@ -2804,6 +2910,24 @@ func (i *Interpreter) evalArrayIndex(name string, args []ast.Expression, env *En
 		return 0, fmt.Errorf("runtime error: %s expects i64 index", name)
 	}
 	return int(index.i), nil
+}
+
+// splitGenericType extracts base and raw arguments from base<args>.
+func splitGenericType(name string) (string, string, bool) {
+	for idx, ch := range name {
+		if ch != '<' {
+			continue
+		}
+		if len(name) < idx+3 || name[len(name)-1] != '>' {
+			return "", "", false
+		}
+		arg := name[idx+1 : len(name)-1]
+		if arg == "" {
+			return "", "", false
+		}
+		return name[:idx], arg, true
+	}
+	return "", "", false
 }
 
 // splitGenericArgs extracts top-level comma-separated generic arguments.

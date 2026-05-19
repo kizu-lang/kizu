@@ -74,6 +74,42 @@ func TestFmtCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestCheckPackageCommandSmoke checks package roots can be statically checked.
+func TestCheckPackageCommandSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "check", "../../examples/modules/cross_module_types")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if string(out) != "check: ok\n" {
+		t.Fatalf("got %q, want check ok", out)
+	}
+}
+
+// TestRunPackageCommandSmoke checks package roots can execute root module main.
+func TestRunPackageCommandSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "run", "../../examples/modules/cross_module_types")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if string(out) != "0\n2\nfn\nmain\ntoken\n3\n8\n3\n3\n" {
+		t.Fatalf("got %q, want package run output", out)
+	}
+}
+
+// TestTestPackageCommandSmoke checks package roots can run assertion tests.
+func TestTestPackageCommandSmoke(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "test", "../../examples/modules/cross_module_types")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	if string(out) != "0\n2\nfn\nmain\ntoken\n3\n8\n3\n3\ntest: ok\n" {
+		t.Fatalf("got %q, want package test output", out)
+	}
+}
+
 // TestResolveStdModulesIncludesTransitiveStdSourceDeps checks std source dependencies.
 func TestResolveStdModulesIncludesTransitiveStdSourceDeps(t *testing.T) {
 	got, err := resolveStdModules(`fn main() {
@@ -99,6 +135,21 @@ func TestResolveStdModulesOrdersTestingDeps(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"mem", "array", "string", "fmt", "testing"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestResolveStdModulesOrdersNestedKizuDeps checks nested std modules and deps.
+func TestResolveStdModulesOrdersNestedKizuDeps(t *testing.T) {
+	got, err := resolveStdModules(`fn main() -> !void {
+    let node = try std::kizu::parser::parse_first_node("fn main");
+    return;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kizu::ast", "mem", "kizu::lexer", "kizu::parser"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v, want %v", got, want)
 	}

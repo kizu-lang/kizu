@@ -255,6 +255,13 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope) error {
 	if target, elem, mutable, ok := c.arrayBorrowInitializer(stmt.Value, env); ok {
 		return c.checkArrayBorrowLetStmt(stmt, target, elem, mutable, env)
 	}
+	target, field, elem, mutable, ok, err := c.boxBorrowInitializer(stmt.Value, env)
+	if ok || err != nil {
+		if err != nil {
+			return err
+		}
+		return c.checkBoxBorrowLetStmt(stmt, target, field, elem, mutable, env)
+	}
 	if target, ok := c.stringViewInitializer(stmt.Value, env); ok {
 		return c.checkStringViewLetStmt(stmt, target, env)
 	}
@@ -407,6 +414,88 @@ func (c *Checker) arrayBorrowInitializer(
 		return nil, "", false, false
 	}
 	return array, elem, field.Name == "at_mut", true
+}
+
+// checkBoxBorrowLetStmt binds a Box payload borrow and activates the Box owner.
+func (c *Checker) checkBoxBorrowLetStmt(
+	stmt *ast.LetStmt,
+	target *binding,
+	field string,
+	elem string,
+	mutable bool,
+	env *scope,
+) error {
+	if mutable && !boxBorrowTargetIsMutable(target, field) {
+		return fmt.Errorf("box error: `Box.borrow_mut` requires mutable Box receiver")
+	}
+	if err := c.checkBoxBorrowInitializerShape(stmt.Value); err != nil {
+		return err
+	}
+	if err := checkBorrowConflictForField(target, field, mutable); err != nil {
+		return err
+	}
+	c.activateBorrow(target, field, mutable)
+	value := c.newBinding(stmt.Name, elem)
+	value.borrowedParam = true
+	value.localBorrow = true
+	value.borrowTarget = target
+	value.borrowField = field
+	value.mutBorrow = mutable
+	env.define(value)
+	return nil
+}
+
+// boxBorrowTargetIsMutable reports whether the target can produce a mutable Box view.
+func boxBorrowTargetIsMutable(target *binding, field string) bool {
+	if field != "" {
+		return target.mutable
+	}
+	return target.mutable
+}
+
+// checkBoxBorrowInitializerShape validates Box.borrow/borrow_mut local borrow syntax.
+func (c *Checker) checkBoxBorrowInitializerShape(expr ast.Expression) error {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return fmt.Errorf("box error: Box borrow initializer must call Box.borrow")
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || (field.Name != "borrow" && field.Name != "borrow_mut") {
+		return fmt.Errorf("box error: Box borrow initializer must call Box.borrow")
+	}
+	if len(call.Args) != 0 {
+		return fmt.Errorf("box error: `Box.%s` expects 0 args, got %d", field.Name, len(call.Args))
+	}
+	return nil
+}
+
+// boxBorrowInitializer recognizes box.borrow/borrow_mut local borrow initializers.
+func (c *Checker) boxBorrowInitializer(
+	expr ast.Expression,
+	env *scope,
+) (*binding, string, string, bool, bool, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, "", "", false, false, nil
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || (field.Name != "borrow" && field.Name != "borrow_mut") {
+		return nil, "", "", false, false, nil
+	}
+	target, borrowedField, err := c.borrowTarget(field.Receiver, env)
+	if err != nil {
+		return nil, "", "", false, true, err
+	}
+	typeName, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return nil, "", "", false, true, err
+	}
+	base, elem, ok := splitGenericType(typeName)
+	if !ok || base != "std::mem::Box" {
+		return nil, "", "", false, true, fmt.Errorf("box error: `Box.%s` expects Box receiver",
+			field.Name)
+	}
+	return target, borrowedField, elem, field.Name == "borrow_mut", true, nil
 }
 
 // checkBorrowLetStmt binds a local borrow and activates its owner until last use.
@@ -772,6 +861,9 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 		return c.moveStructLiteralExpr(st, env)
 	}
 	if field, ok := expr.(*ast.FieldExpr); ok {
+		if field.Namespace {
+			return c.readFieldExpr(field, env)
+		}
 		return c.moveFieldExpr(field, env)
 	}
 	if stmt, ok := expr.(*ast.IfStmt); ok {
@@ -1573,6 +1665,12 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	if typ, ok, err := c.checkBuiltinBoxTypeApply(name, typeArg, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	if typ, ok, err := c.checkBuiltinArrayTypeApply(name, typeArg, args, env); ok || err != nil {
+		return typ, ok, err
+	}
 	switch name {
 	case "std.builtin.channel":
 		if !c.currentStd {
@@ -1595,18 +1693,31 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 		}
 		typ, _, err := c.checkMutex(typeArg, args, env)
 		return typ, true, err
-	case "std.builtin.array":
-		if !c.currentStd {
-			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::array", name)
-		}
-		typ, err := c.checkArrayConstructor(typeArg, args, env)
-		return typ, true, err
 	case "std.builtin.channel_send", "std.builtin.channel_recv":
 		return c.checkBuiltinChannelMethod(name, typeArg, args, env)
 	case "std.builtin.atomic_load", "std.builtin.atomic_store":
 		return c.checkBuiltinAtomicMethod(name, typeArg, args, env)
 	case "std.builtin.mutex_get":
 		return c.checkBuiltinMutexMethod(name, typeArg, args, env)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkBuiltinArrayTypeApply validates std-only generic Array primitives.
+func (c *Checker) checkBuiltinArrayTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.builtin.array":
+		if !c.currentStd {
+			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::array", name)
+		}
+		typ, err := c.checkArrayConstructor(typeArg, args, env)
+		return typ, true, err
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
 		"std.builtin.array_get", "std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
@@ -1614,6 +1725,83 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkBuiltinBoxTypeApply validates std-only generic Box primitives.
+func (c *Checker) checkBuiltinBoxTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "std.builtin.box":
+		if !c.currentStd {
+			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::mem", name)
+		}
+		typ, err := c.checkBoxConstructor(typeArg, args, env)
+		return typ, true, err
+	case "std.builtin.box_borrow", "std.builtin.box_borrow_mut", "std.builtin.box_deinit":
+		return c.checkBuiltinBoxMethod(name, typeArg, args, env)
+	default:
+		return "", false, nil
+	}
+}
+
+// checkBoxConstructor validates std::mem::Box<T>(allocator, value) ownership.
+func (c *Checker) checkBoxConstructor(
+	elem string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 2 {
+		return "", fmt.Errorf("box error: `std::mem::Box<%s>` expects allocator and value", elem)
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", fmt.Errorf("box error: `std::mem::Box<%s>` expects Allocator, got %s", elem, got)
+	}
+	got, err = c.moveExpr(args[1], env)
+	if err != nil {
+		return "", err
+	}
+	if got != elem {
+		return "", fmt.Errorf("box error: `std::mem::Box<%s>` expects %s value, got %s",
+			elem, elem, got)
+	}
+	return fmt.Sprintf("!std::mem::Box<%s>", elem), nil
+}
+
+// checkBuiltinBoxMethod validates std-only Box method primitives.
+func (c *Checker) checkBuiltinBoxMethod(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	method := strings.TrimPrefix(name, "std.builtin.box_")
+	if method == "borrow_mut" {
+		method = "borrow_mut"
+	}
+	receiver := fmt.Sprintf("std::mem::Box<%s>", typeArg)
+	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (string, error) {
+		if len(rest) != 0 {
+			return "", fmt.Errorf("box error: `Box.%s` expects 0 args, got %d", method, len(rest))
+		}
+		switch method {
+		case "borrow":
+			return "&" + typeArg, nil
+		case "borrow_mut":
+			return "&mut " + typeArg, nil
+		case "deinit":
+			return "void", nil
+		default:
+			return "", fmt.Errorf("box error: Box has no method `%s`", method)
+		}
+	}, args, env)
 }
 
 // checkBuiltinChannelMethod validates std-only channel method primitives.
@@ -1959,21 +2147,52 @@ func (c *Checker) checkGenericUserArg(
 			return err
 		}
 	}
-	if name == "std.thread.scoped" && idx == 2 {
-		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
-			return err
-		}
-		got, err := c.moveExpr(arg, env)
+	if handled, err := c.checkGenericUserMoveArg(name, idx, want, arg, env); handled || err != nil {
 		if err != nil {
 			return err
-		}
-		if got != want {
-			return fmt.Errorf("move error: arg %d of `%s` expects %s, got %s",
-				idx+1, name, want, got)
 		}
 		return nil
 	}
 	got, err := c.readExpr(arg, env)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("move error: arg %d of `%s` expects %s, got %s",
+			idx+1, name, want, got)
+	}
+	return nil
+}
+
+// checkGenericUserMoveArg handles generic wrappers whose argument transfers ownership.
+func (c *Checker) checkGenericUserMoveArg(
+	name string,
+	idx int,
+	want string,
+	arg ast.Expression,
+	env *scope,
+) (bool, error) {
+	if name == "std.thread.scoped" && idx == 2 {
+		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
+			return true, err
+		}
+		return true, c.checkMovedGenericArg(name, idx, want, arg, env)
+	}
+	if name == "std.mem.Box" && idx == 1 {
+		return true, c.checkMovedGenericArg(name, idx, want, arg, env)
+	}
+	return false, nil
+}
+
+// checkMovedGenericArg validates one moved argument against an instantiated type.
+func (c *Checker) checkMovedGenericArg(
+	name string,
+	idx int,
+	want string,
+	arg ast.Expression,
+	env *scope,
+) error {
+	got, err := c.moveExpr(arg, env)
 	if err != nil {
 		return err
 	}
@@ -2326,6 +2545,18 @@ func (c *Checker) checkMethodCallExpr(
 	if typ, ok, err := c.checkStdFieldStorageMethod(field, args, env); ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkBoxReceiverExpr(field, args, env); ok || err != nil {
+		return typ, err
+	}
+	return c.checkLocalReceiverMethod(field, args, env)
+}
+
+// checkLocalReceiverMethod validates methods whose receiver must be a local binding.
+func (c *Checker) checkLocalReceiverMethod(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
 	receiver, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
 		return "", fmt.Errorf("arena error: arena method receiver must be a local binding")
@@ -2398,6 +2629,9 @@ func (c *Checker) checkNonArenaMethod(
 		}
 		return c.checkStringMethod(value, name, args, env)
 	}
+	if base, _, ok := splitGenericType(value.typeName); ok && base == "std::mem::Box" {
+		return c.checkBoxMethod(value, name, args)
+	}
 	if err := checkMapReceiverBorrow(value, name); err != nil {
 		return "", err
 	}
@@ -2412,6 +2646,67 @@ func (c *Checker) checkNonArenaMethod(
 		return typ, err
 	}
 	return c.checkPlainMethodArgs(args, env)
+}
+
+// checkBoxReceiverExpr validates methods on local Box values and direct Box fields.
+func (c *Checker) checkBoxReceiverExpr(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	typeName, err := c.readExpr(field.Receiver, env)
+	if err != nil {
+		return "", false, nil
+	}
+	base, _, ok := splitGenericType(typeName)
+	if !ok || base != "std::mem::Box" {
+		return "", false, nil
+	}
+	target, borrowedField, err := c.borrowTarget(field.Receiver, env)
+	if err != nil {
+		return "", true, err
+	}
+	if field.Name == "deinit" && borrowedField != "" {
+		return "", true, fmt.Errorf("box error: `Box.deinit` requires local Box receiver")
+	}
+	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args)
+	return typ, true, err
+}
+
+// checkBoxMethodForTarget validates Box methods with a tracked borrow root.
+func (c *Checker) checkBoxMethodForTarget(
+	target *binding,
+	field string,
+	name string,
+	args []ast.Expression,
+) (string, error) {
+	switch name {
+	case "borrow", "borrow_mut":
+		return "", fmt.Errorf("box error: `Box.%s` must be bound with `let name = box.%s()`",
+			name, name)
+	case "deinit":
+		if target.hasAnyBorrow() {
+			return "", fmt.Errorf("box error: `Box.deinit` cannot run while box is borrowed")
+		}
+		if len(args) != 0 {
+			return "", fmt.Errorf("box error: `Box.deinit` expects 0 args, got %d", len(args))
+		}
+		if field == "" {
+			target.moved = true
+		}
+		return "void", nil
+	default:
+		return "", fmt.Errorf("box error: Box has no method `%s`", name)
+	}
+}
+
+// checkBoxMethod validates methods on a local Box binding.
+func (c *Checker) checkBoxMethod(
+	box *binding,
+	name string,
+	args []ast.Expression,
+) (string, error) {
+	return c.checkBoxMethodForTarget(box, "", name, args)
 }
 
 // checkStringReceiverBorrow rejects String methods whose receiver cannot be tracked safely.

@@ -190,6 +190,9 @@ func manifestPaths(manifests []conformanceManifest) []string {
 	paths := []string{}
 	for _, manifest := range manifests {
 		for _, tt := range manifest.Cases {
+			if isPackageExamplePath(tt.Path) {
+				continue
+			}
 			paths = append(paths, tt.Path)
 		}
 	}
@@ -209,11 +212,21 @@ func examplePaths(t *testing.T) []string {
 		t.Fatal(err)
 	}
 	paths = append(paths, top...)
-	for idx, path := range paths {
-		paths[idx] = strings.TrimPrefix(filepath.ToSlash(path), "../../")
+	filtered := paths[:0]
+	for _, path := range paths {
+		rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
+		if isPackageExamplePath(rel) {
+			continue
+		}
+		filtered = append(filtered, rel)
 	}
-	sort.Strings(paths)
-	return paths
+	sort.Strings(filtered)
+	return filtered
+}
+
+// isPackageExamplePath reports package roots that are manifest cases, not files.
+func isPackageExamplePath(path string) bool {
+	return strings.HasPrefix(path, "examples/modules/")
 }
 
 // diffStrings returns entries in left that do not appear in right.

@@ -96,6 +96,7 @@ Current builtin thinning candidates:
 | `std::builtin::mem_byte_at` | Removed | Implemented in `std/src/mem.kizu` using checked index syntax |
 | `std::builtin::mem_slice` | Removed | Implemented in `std/src/mem.kizu` using checked slice syntax |
 | `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
+| `std::builtin::box<T>`, `std::builtin::box_borrow<T>`, `std::builtin::box_borrow_mut<T>`, `std::builtin::box_deinit<T>` | Runtime primitive | Public constructor and methods live in `std/src/mem.kizu`; direct user calls are rejected |
 | `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |
 | `std::builtin::process_arg_count`, `std::builtin::process_arg`, `std::builtin::process_env` | Host primitive | Keep as host process boundary |
@@ -128,7 +129,8 @@ uses a `comptime Function` parameter to forward the worker name through
 `std/src/task.kizu`. `parallel_map` uses an explicit `&mut Partition` parameter
 to mutate partition output without moving the owner. `std::channel::Channel<T>()`,
 `std::atomic::Atomic<T>(value)`, `std::sync::Mutex<T>(value)`,
-`std::array::Array<T>(allocator)`, `std::map::Map<K, V>(allocator)`, and
+`std::mem::Box<T>(allocator, value)`, `std::array::Array<T>(allocator)`,
+`std::map::Map<K, V>(allocator)`, and
 `std::thread::scoped<T>(io, worker, arg)` now use source-level type-argument
 forwarding through Kizu std source.
 
@@ -136,12 +138,13 @@ forwarding through Kizu std source.
 
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
-| `std::mem` | `page_allocator`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; only allocator and len use trusted primitives | keep only allocator capability and slice metadata primitives trusted |
+| `std::mem` | `page_allocator`, `Box<T>`, `borrow`, `borrow_mut`, `deinit`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, Box storage, Box local borrow, Box deinit, and len use trusted primitives | keep only allocator capability, Box storage/local-borrow boundary, and slice metadata primitives trusted |
 | `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::map_*`; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough |
 | `std::testing` | `expect`, equality helpers, `fail` | Kizu source over `std::fmt` and `String` | keep Go limited to the runner and error-union reporting boundary |
+| `std::kizu::{ast,lexer,parser}` | `Span`, `Node`, `TokenKind`, `Token`, `first_token`, `next_token`, `parse_first_node` | Kizu source under `std/src/kizu/`; Go only loads nested std modules and runs normal type/ownership/interpreter checks | grow into the self-host compiler frontend without adding parser builtins |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `create_dir`, `remove_dir`, `remove_file`, `Metadata` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |
 | `std::io` | `blocking`, `threaded`, `failing`, `write_stdout`, `write_stderr`, `read_stdin` | Kizu wrappers in `std/src/io.kizu` over `std::builtin::io_*` primitives | migrated wrapper module; keep host I/O and explicit capability construction trusted |
@@ -176,14 +179,18 @@ std/
     thread.kizu
     sync.kizu
     atomic.kizu
+    kizu/
+      ast.kizu
+      lexer.kizu
+      parser.kizu
 ```
 
 The compiler still reserves the root namespace `std`. User packages cannot be
 named `std`.
 
-Do not create a Kizu compiler tree until the Go implementation is ready to be
-ported. The compiler migration should happen later as a deliberate 1:1 port from
-the Go packages, not as a long-lived parallel scaffold.
+Do not create a separate Kizu compiler tree until the Go implementation is ready
+to be ported. `std::kizu::*` is the narrow exception for reusable frontend
+library components that examples and conformance can execute today.
 
 ## Acceptance Rules For New Std APIs
 
