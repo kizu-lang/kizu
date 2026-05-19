@@ -1409,10 +1409,6 @@ pub struct TokenSummary {
     pub imports: i64,
     pub structs: i64,
     pub enums: i64,
-    pub top_functions: i64,
-    pub top_imports: i64,
-    pub top_structs: i64,
-    pub top_enums: i64,
     pub tokens: i64,
     pub illegal_tokens: i64,
     pub braces: i64,
@@ -1504,28 +1500,12 @@ func parserTokenSummarySource() string {
     var imports = 0;
     var structs = 0;
     var enums = 0;
-    var top_functions = 0;
-    var top_imports = 0;
-    var top_structs = 0;
-    var top_enums = 0;
     var tokens = 0;
     var illegal_tokens = 0;
     var braces = 0;
     var balance = 0;
     while parser.cur.Type != token::Type::EOF {
         tokens = tokens + 1;
-        if balance == 0 and parser.cur.Type == token::Type::Function {
-            top_functions = top_functions + 1;
-        }
-        if balance == 0 and parser.cur.Type == token::Type::Import {
-            top_imports = top_imports + 1;
-        }
-        if balance == 0 and parser.cur.Type == token::Type::Struct {
-            top_structs = top_structs + 1;
-        }
-        if balance == 0 and parser.cur.Type == token::Type::Enum {
-            top_enums = top_enums + 1;
-        }
         if parser.cur.Type == token::Type::Function {
             functions = functions + 1;
         }
@@ -1556,10 +1536,6 @@ func parserTokenSummarySource() string {
         imports: imports,
         structs: structs,
         enums: enums,
-        top_functions: top_functions,
-        top_imports: top_imports,
-        top_structs: top_structs,
-        top_enums: top_enums,
         tokens: tokens,
         illegal_tokens: illegal_tokens,
         braces: braces,
@@ -1583,10 +1559,6 @@ func parserModuleSummarySource() string {
     pub imports: i64,
     pub structs: i64,
     pub enums: i64,
-    pub top_functions: i64,
-    pub top_imports: i64,
-    pub top_structs: i64,
-    pub top_enums: i64,
     pub braces: i64,
     pub balance: i64,
     pub balanced: bool
@@ -1599,10 +1571,6 @@ pub fn parse_module(source: []const u8) -> Module {
     let imports = summary.imports;
     let structs = summary.structs;
     let enums = summary.enums;
-    let top_functions = summary.top_functions;
-    let top_imports = summary.top_imports;
-    let top_structs = summary.top_structs;
-    let top_enums = summary.top_enums;
     let tokens = summary.tokens;
     let illegal_tokens = summary.illegal_tokens;
     let declarations = functions * 5 + imports * 3 + structs * 2 + enums * 2;
@@ -1623,10 +1591,6 @@ pub fn parse_module(source: []const u8) -> Module {
         imports: imports,
         structs: structs,
         enums: enums,
-        top_functions: top_functions,
-        top_imports: top_imports,
-        top_structs: top_structs,
-        top_enums: top_enums,
         braces: braces,
         balance: balance,
         balanced: balance == 0
@@ -1707,10 +1671,6 @@ pub struct SourceMetrics {
     pub bytes: i64,
     pub functions: i64,
     pub declarations: i64,
-    pub top_functions: i64,
-    pub top_imports: i64,
-    pub top_structs: i64,
-    pub top_enums: i64,
     pub tokens: i64,
     pub illegal_tokens: i64,
     pub braces: i64,
@@ -1790,22 +1750,6 @@ func compilerTreeMetricsSource() string {
             lexer_parse.declarations + parser_parse.declarations + resolver_parse.declarations +
             checker_parse.declarations + lower_parse.declarations + emit_parse.declarations +
             compiler_parse.declarations + main_parse.declarations,
-        top_functions: manifest_parse.top_functions + token_parse.top_functions +
-            lexer_parse.top_functions + parser_parse.top_functions + resolver_parse.top_functions +
-            checker_parse.top_functions + lower_parse.top_functions + emit_parse.top_functions +
-            compiler_parse.top_functions + main_parse.top_functions,
-        top_imports: manifest_parse.top_imports + token_parse.top_imports +
-            lexer_parse.top_imports + parser_parse.top_imports + resolver_parse.top_imports +
-            checker_parse.top_imports + lower_parse.top_imports + emit_parse.top_imports +
-            compiler_parse.top_imports + main_parse.top_imports,
-        top_structs: manifest_parse.top_structs + token_parse.top_structs +
-            lexer_parse.top_structs + parser_parse.top_structs + resolver_parse.top_structs +
-            checker_parse.top_structs + lower_parse.top_structs + emit_parse.top_structs +
-            compiler_parse.top_structs + main_parse.top_structs,
-        top_enums: manifest_parse.top_enums + token_parse.top_enums +
-            lexer_parse.top_enums + parser_parse.top_enums + resolver_parse.top_enums +
-            checker_parse.top_enums + lower_parse.top_enums + emit_parse.top_enums +
-            compiler_parse.top_enums + main_parse.top_enums,
         tokens: manifest_parse.tokens + token_parse.tokens + lexer_parse.tokens +
             parser_parse.tokens + resolver_parse.tokens + checker_parse.tokens +
             lower_parse.tokens + emit_parse.tokens + compiler_parse.tokens + main_parse.tokens,
@@ -1826,10 +1770,6 @@ func compilerTreeMetricsSource() string {
         metrics.parsed,
         metrics.functions,
         metrics.declarations,
-        metrics.top_functions,
-        metrics.top_imports,
-        metrics.top_structs,
-        metrics.top_enums,
         metrics.tokens,
         metrics.illegal_tokens,
         metrics.braces,
@@ -1849,7 +1789,7 @@ func compilerTreeMetricsSource() string {
 func compilerEmitStage2Source() string {
 	return `pub fn emit_stage2() -> !void {
     let allocator = std::mem::page_allocator();
-    let checked = checker::check_entry(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false);
+    let checked = checker::check_entry(1, 0, 0, 0, 0, 0, false);
     let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, 0, 0);
     let artifact_bytes = artifact.as_bytes();
@@ -1895,10 +1835,6 @@ func checkerSource(info typesPackage) string {
     pub score: i64,
     pub functions: i64,
     pub declarations: i64,
-    pub top_functions: i64,
-    pub top_imports: i64,
-    pub top_structs: i64,
-    pub top_enums: i64,
     pub tokens: i64,
     pub illegal_tokens: i64,
     pub braces: i64,
@@ -1909,10 +1845,6 @@ pub fn check_entry(
     parsed: i64,
     functions: i64,
     declarations: i64,
-    top_functions: i64,
-    top_imports: i64,
-    top_structs: i64,
-    top_enums: i64,
     tokens: i64,
     illegal_tokens: i64,
     braces: i64,
@@ -1923,10 +1855,6 @@ pub fn check_entry(
         score: parsed,
         functions: functions,
         declarations: declarations,
-        top_functions: top_functions,
-        top_imports: top_imports,
-        top_structs: top_structs,
-        top_enums: top_enums,
         tokens: tokens,
         illegal_tokens: illegal_tokens,
         braces: braces,
@@ -1962,10 +1890,6 @@ pub struct Module {
     pub score: i64,
     pub functions: i64,
     pub declarations: i64,
-    pub top_functions: i64,
-    pub top_imports: i64,
-    pub top_structs: i64,
-    pub top_enums: i64,
     pub tokens: i64,
     pub illegal_tokens: i64,
     pub braces: i64
@@ -1977,10 +1901,6 @@ pub fn lower_entry(checked: checker::CheckedModule) -> Module {
             score: checked.score,
             functions: checked.functions,
             declarations: checked.declarations,
-            top_functions: checked.top_functions,
-            top_imports: checked.top_imports,
-            top_structs: checked.top_structs,
-            top_enums: checked.top_enums,
             tokens: checked.tokens,
             illegal_tokens: checked.illegal_tokens,
             braces: checked.braces
@@ -1990,10 +1910,6 @@ pub fn lower_entry(checked: checker::CheckedModule) -> Module {
         score: 0,
         functions: checked.functions,
         declarations: checked.declarations,
-        top_functions: checked.top_functions,
-        top_imports: checked.top_imports,
-        top_structs: checked.top_structs,
-        top_enums: checked.top_enums,
         tokens: checked.tokens,
         illegal_tokens: checked.illegal_tokens,
         braces: checked.braces
