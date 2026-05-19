@@ -109,23 +109,25 @@ blocker:
 ## Current Bootstrap Evidence
 
 最終更新: `feat/selfhost-bootstrap-chain` で selfhost manifest を stage input graph に含め、
-parser/checker/lower summary と parse / token component metrics を Kizu struct で渡すように
-した working tree 時点。
+parser/checker/lower summary と parse / token / illegal-token component metrics を Kizu struct
+で渡すようにした working tree 時点。
 
 この記録は現状監査用であり、self-host 完了宣言ではない。現時点の stage chain は
 次段 artifact を生成するが、stage2 はまだ Kizu の parse / resolve / check / lower / emit
 pipeline ではなく、Go が生成した source-scanning LLVM template に依存している。
 parser metric は parser-local な部分文字列 scan ではなく、selfhost lexer の identifier
-scan helper で keyword token count に寄せているが、まだ AST parser ではない。stage1 と
-stage2 以降の metric は `selfhost/kizu.toml` と `selfhost/src/*.kizu` の両方を stage input
-として読む。Go LLVM backend は selfhost summary struct の cross-function return / call /
-field read を first-class aggregate として emit できる。
+scan helper で keyword token count に寄せているが、まだ AST parser ではない。checker は
+source summary の brace balance と illegal-token count を受け取り、illegal token がある
+stage input を invalid として扱う。stage1 と stage2 以降の metric は `selfhost/kizu.toml` と
+`selfhost/src/*.kizu` の両方を stage input として読む。Go LLVM backend は selfhost summary
+struct の cross-function return / call / field read を first-class aggregate として emit
+できる。
 
 実行した command:
 
 ```sh
 go run ./cmd/kizu check selfhost
-go test ./internal/llvm ./internal/transpile -count=1
+go test ./internal/transpile -count=1
 go test ./cmd/kizu -run TestSelfhostStage1ReadsSourceTree -count=1
 go test ./...
 pre-commit run --all-files
@@ -173,9 +175,9 @@ stage3_vs_stage4_bytes=0
 stage2 source metric header:
 
 ```text
-; kizu stage source metric 1093
-; kizu stage source bytes 1135347
-; kizu stage source fn count 64
+; kizu stage source metric 1152
+; kizu stage source bytes 1138571
+; kizu stage source fn count 67
 ```
 
 remaining Go / template dependency:
@@ -187,8 +189,8 @@ remaining Go / template dependency:
   execute the Kizu parser, resolver, checker, lowering, and LLVM emitter as a compiler pipeline.
 - `selfhost/src/compiler.kizu` uses `SourceMetrics`, `parser::Module`,
   `checker::CheckedModule`, and `lower::Module` summaries. Parser summaries carry first-token,
-  declaration, token, byte, function/import/struct/enum, brace, and balance metrics, but still
-  not AST, typed IR, or lowered LLVM instructions.
+  declaration, token, illegal-token, byte, function/import/struct/enum, brace, and balance
+  metrics, but still not AST, typed IR, or lowered LLVM instructions.
 - Go native backend and hosted runtime still build `target/selfhost/kizu-stage1`.
 - The generated Kizu parser/checker/lower are partial surfaces, not production replacements for
   `internal/parser`, `internal/types`, or backend lowering.

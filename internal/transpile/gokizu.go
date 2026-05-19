@@ -881,7 +881,8 @@ func firstTokenCodeSource() string {
 
 // lexerTokenCounterSource returns a lexer-backed token counter for parser metrics.
 func lexerTokenCounterSource() string {
-	return lexerTokenCounterEntrySource() + lexerTokenCounterKeywordSource() +
+	return lexerTokenCounterEntrySource() + lexerIllegalTokenCounterSource() +
+		lexerKeywordCounterSource() + lexerTokenCounterKeywordSource() +
 		lexerTokenCounterAdvanceSource()
 }
 
@@ -915,20 +916,78 @@ pub fn CountTokens(input: []const u8) -> i64 {
             return count;
         }
         count = count + 1;
-        if is_letter(input[index]) {
-            index = ident_end(input, index, length);
-        } else {
-            if is_digit(input[index]) {
-                index = digit_end(input, index, length);
+        if input[index] == cast<u8>(34) {
+            let end = string_end(input, index, length);
+            if end >= length {
+                index = length;
             } else {
-                index = punctuation_end(input, index, length);
+                index = end + 1;
+            }
+        } else {
+            if is_letter(input[index]) {
+                index = ident_end(input, index, length);
+            } else {
+                if is_digit(input[index]) {
+                    index = digit_end(input, index, length);
+                } else {
+                    index = punctuation_end(input, index, length);
+                }
             }
         }
     }
     return count;
 }
 
-fn count_keyword(input: []const u8, want: i64) -> i64 {
+`
+}
+
+// lexerIllegalTokenCounterSource returns the illegal-token metric entry point.
+func lexerIllegalTokenCounterSource() string {
+	return `pub fn CountIllegalTokens(input: []const u8) -> i64 {
+    let length = std::builtin::mem_len(input);
+    var index = 0;
+    var count = 0;
+    while index < length {
+        while index < length and is_space(input[index]) {
+            index = index + 1;
+        }
+        if index >= length {
+            return count;
+        }
+        if input[index] == cast<u8>(34) {
+            let end = string_end(input, index, length);
+            if end >= length {
+                count = count + 1;
+                index = length;
+            } else {
+                index = end + 1;
+            }
+        } else {
+            if is_letter(input[index]) {
+                index = ident_end(input, index, length);
+            } else {
+                if is_digit(input[index]) {
+                    index = digit_end(input, index, length);
+                } else {
+                    if is_known_punctuation(input, index, length) {
+                        count = count + 0;
+                    } else {
+                        count = count + 1;
+                    }
+                    index = punctuation_end(input, index, length);
+                }
+            }
+        }
+    }
+    return count;
+}
+
+`
+}
+
+// lexerKeywordCounterSource returns the shared keyword-count scanner.
+func lexerKeywordCounterSource() string {
+	return `fn count_keyword(input: []const u8, want: i64) -> i64 {
     let length = std::builtin::mem_len(input);
     var index = 0;
     var count = 0;
@@ -1004,6 +1063,14 @@ fn digit_end(input: []const u8, start: i64, length: i64) -> i64 {
     return end;
 }
 
+fn string_end(input: []const u8, start: i64, length: i64) -> i64 {
+    var end = start + 1;
+    while end < length and input[end] != cast<u8>(34) {
+        end = end + 1;
+    }
+    return end;
+}
+
 fn punctuation_end(input: []const u8, start: i64, length: i64) -> i64 {
     if start + 1 < length {
         let ch = input[start];
@@ -1020,6 +1087,21 @@ fn punctuation_end(input: []const u8, start: i64, length: i64) -> i64 {
         }
     }
     return start + 1;
+}
+
+fn is_known_punctuation(input: []const u8, start: i64, length: i64) -> bool {
+    let ch = input[start];
+    if ch == cast<u8>(33) or ch == cast<u8>(37) or ch == cast<u8>(38) or
+        ch == cast<u8>(40) or ch == cast<u8>(41) or ch == cast<u8>(42) or
+        ch == cast<u8>(43) or ch == cast<u8>(44) or ch == cast<u8>(45) or
+        ch == cast<u8>(46) or ch == cast<u8>(47) or ch == cast<u8>(58) or
+        ch == cast<u8>(59) or ch == cast<u8>(60) or ch == cast<u8>(61) or
+        ch == cast<u8>(62) or ch == cast<u8>(63) or ch == cast<u8>(91) or
+        ch == cast<u8>(93) or ch == cast<u8>(123) or ch == cast<u8>(124) or
+        ch == cast<u8>(125) or ch == cast<u8>(34) {
+        return true;
+    }
+    return false;
 }
 
 `
@@ -1197,6 +1279,7 @@ func parserModuleSummarySource() string {
     pub first_token: i64,
     pub declarations: i64,
     pub tokens: i64,
+    pub illegal_tokens: i64,
     pub bytes: i64,
     pub functions: i64,
     pub imports: i64,
@@ -1214,6 +1297,7 @@ pub fn parse_module(source: []const u8) -> Module {
     let structs = lexer::CountStruct(source);
     let enums = lexer::CountEnum(source);
     let tokens = lexer::CountTokens(source);
+    let illegal_tokens = lexer::CountIllegalTokens(source);
     let declarations = functions * 5 + imports * 3 + structs * 2 + enums * 2;
     let balance = brace_balance(source);
     let braces = brace_count(source);
@@ -1226,6 +1310,7 @@ pub fn parse_module(source: []const u8) -> Module {
         first_token: first,
         declarations: declarations,
         tokens: tokens,
+        illegal_tokens: illegal_tokens,
         bytes: std::mem::len(source),
         functions: functions,
         imports: imports,
@@ -1312,6 +1397,7 @@ pub struct SourceMetrics {
     pub functions: i64,
     pub declarations: i64,
     pub tokens: i64,
+    pub illegal_tokens: i64,
     pub braces: i64,
     pub balanced: bool
 }
@@ -1340,6 +1426,11 @@ pub fn first_token(source: []const u8) -> token::Token {
 
 // compilerTreeSource renders the package compile pipeline used by stage1.
 func compilerTreeSource() string {
+	return compilerTreeInputSource() + compilerTreeMetricsSource()
+}
+
+// compilerTreeInputSource renders source loading and parser summary inputs.
+func compilerTreeInputSource() string {
 	return `pub fn compile_tree(io: Io, output: []const u8) -> !void {
     let allocator = std::mem::page_allocator();
     let manifest = try std::fs::read_file(io, "selfhost/kizu.toml");
@@ -1364,7 +1455,12 @@ func compilerTreeSource() string {
     let emit_parse = parse_module(emit_source);
     let compiler_parse = parse_module(compiler_source);
     let main_parse = parse_module(main_source);
-    let metrics = SourceMetrics {
+`
+}
+
+// compilerTreeMetricsSource renders summary aggregation and artifact writing.
+func compilerTreeMetricsSource() string {
+	return `    let metrics = SourceMetrics {
         parsed: manifest_parse.score + token_parse.score + lexer_parse.score +
             parser_parse.score + resolver_parse.score + checker_parse.score + lower_parse.score +
             emit_parse.score + compiler_parse.score + main_parse.score,
@@ -1382,6 +1478,11 @@ func compilerTreeSource() string {
         tokens: manifest_parse.tokens + token_parse.tokens + lexer_parse.tokens +
             parser_parse.tokens + resolver_parse.tokens + checker_parse.tokens +
             lower_parse.tokens + emit_parse.tokens + compiler_parse.tokens + main_parse.tokens,
+        illegal_tokens: manifest_parse.illegal_tokens + token_parse.illegal_tokens +
+            lexer_parse.illegal_tokens + parser_parse.illegal_tokens +
+            resolver_parse.illegal_tokens + checker_parse.illegal_tokens +
+            lower_parse.illegal_tokens + emit_parse.illegal_tokens +
+            compiler_parse.illegal_tokens + main_parse.illegal_tokens,
         braces: manifest_parse.braces + token_parse.braces + lexer_parse.braces +
             parser_parse.braces + resolver_parse.braces + checker_parse.braces +
             lower_parse.braces + emit_parse.braces + compiler_parse.braces + main_parse.braces,
@@ -1395,6 +1496,7 @@ func compilerTreeSource() string {
         metrics.functions,
         metrics.declarations,
         metrics.tokens,
+        metrics.illegal_tokens,
         metrics.braces,
         metrics.balanced
     );
@@ -1412,7 +1514,7 @@ func compilerTreeSource() string {
 func compilerEmitStage2Source() string {
 	return `pub fn emit_stage2() -> !void {
     let allocator = std::mem::page_allocator();
-    let checked = checker::check_entry(1, 0, 0, 0, 0, false);
+    let checked = checker::check_entry(1, 0, 0, 0, 0, 0, false);
     let module = lower::lower_entry(checked);
     let artifact = try emit::llvm(allocator, module, 0, 0);
     let artifact_bytes = artifact.as_bytes();
@@ -1459,6 +1561,7 @@ func checkerSource(info typesPackage) string {
     pub functions: i64,
     pub declarations: i64,
     pub tokens: i64,
+    pub illegal_tokens: i64,
     pub braces: i64,
     pub balanced: bool
 }
@@ -1468,15 +1571,17 @@ pub fn check_entry(
     functions: i64,
     declarations: i64,
     tokens: i64,
+    illegal_tokens: i64,
     braces: i64,
     balanced: bool
 ) -> CheckedModule {
     return CheckedModule {
-        valid: parsed >= 100 and balanced,
+        valid: parsed >= 100 and balanced and illegal_tokens == 0,
         score: parsed,
         functions: functions,
         declarations: declarations,
         tokens: tokens,
+        illegal_tokens: illegal_tokens,
         braces: braces,
         balanced: balanced
     };
@@ -1511,6 +1616,7 @@ pub struct Module {
     pub functions: i64,
     pub declarations: i64,
     pub tokens: i64,
+    pub illegal_tokens: i64,
     pub braces: i64
 }
 
@@ -1521,6 +1627,7 @@ pub fn lower_entry(checked: checker::CheckedModule) -> Module {
             functions: checked.functions,
             declarations: checked.declarations,
             tokens: checked.tokens,
+            illegal_tokens: checked.illegal_tokens,
             braces: checked.braces
         };
     }
@@ -1529,6 +1636,7 @@ pub fn lower_entry(checked: checker::CheckedModule) -> Module {
         functions: checked.functions,
         declarations: checked.declarations,
         tokens: checked.tokens,
+        illegal_tokens: checked.illegal_tokens,
         braces: checked.braces
     };
 }

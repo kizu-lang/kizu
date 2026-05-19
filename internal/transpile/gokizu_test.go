@@ -31,6 +31,7 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "token::Type::String")
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "input[start + 1..end]")
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "pub fn CountTokens")
+	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "pub fn CountIllegalTokens")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn first_token_code")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn function_count")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn precedence")
@@ -89,6 +90,7 @@ func assertGeneratedCheckerSource(t *testing.T, outDir string) {
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "valid: parsed >= 100 and balanced")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "declarations: declarations")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "tokens: tokens")
+	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "illegal_tokens == 0")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn known_type")
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", `if name == "i64"`)
 	assertGeneratedSourceContains(t, outDir, "src/checker.kizu", "pub fn numeric_type")
@@ -102,14 +104,18 @@ func assertGeneratedCompilerSource(t *testing.T, outDir string) {
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "first_token: first")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "declarations: declarations")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "tokens: tokens")
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "illegal_tokens: illegal_tokens")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "pub struct SourceMetrics")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.parsed")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.declarations")
 	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.tokens")
+	assertGeneratedSourceContains(t, outDir, "src/compiler.kizu", "metrics.illegal_tokens")
 	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "pub struct Module")
 	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "score: checked.score")
 	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "braces: checked.braces")
 	assertGeneratedSourceContains(t, outDir, "src/lower.kizu", "tokens: checked.tokens")
+	assertGeneratedSourceContains(t, outDir, "src/lower.kizu",
+		"illegal_tokens: checked.illegal_tokens")
 }
 
 // assertGeneratedEmitSource checks generated LLVM emitter bootstrap logic.
