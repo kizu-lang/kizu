@@ -50,9 +50,18 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         Semicolon => return false;
         Comma => return false;
         Colon => return false;
+        DoubleColon => return false;
         Arrow => return false;
+        Bang => return false;
+        Amp => return false;
+        LBracket => return false;
+        RBracket => return false;
+        LT => return false;
+        GT => return false;
+        Question => return false;
         Plus => return false;
         Asterisk => return false;
+        Mut => return false;
     }
 }
 
@@ -70,9 +79,18 @@ fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
         Semicolon => print("Semicolon");
         Comma => print("Comma");
         Colon => print("Colon");
+        DoubleColon => print("DoubleColon");
         Arrow => print("Arrow");
+        Bang => print("Bang");
+        Amp => print("Amp");
+        LBracket => print("LBracket");
+        RBracket => print("RBracket");
+        LT => print("LT");
+        GT => print("GT");
+        Question => print("Question");
         Plus => print("Plus");
         Asterisk => print("Asterisk");
+        Mut => print("Mut");
         Eof => print("Eof");
     }
     let text = try std::mem::slice(source, token.start, token.end);
@@ -95,22 +113,31 @@ type lexerParityStats struct {
 }
 
 var lexerParityTokenKinds = map[token.Type]string{
-	token.Function:  "Fn",
-	token.Return:    "Return",
-	token.Ident:     "Ident",
-	token.Int:       "Number",
-	token.String:    "String",
-	token.LBrace:    "LBrace",
-	token.RBrace:    "RBrace",
-	token.LParen:    "LParen",
-	token.RParen:    "RParen",
-	token.Semicolon: "Semicolon",
-	token.Comma:     "Comma",
-	token.Colon:     "Colon",
-	token.Arrow:     "Arrow",
-	token.Plus:      "Plus",
-	token.Asterisk:  "Asterisk",
-	token.EOF:       "Eof",
+	token.Function:    "Fn",
+	token.Return:      "Return",
+	token.Ident:       "Ident",
+	token.Int:         "Number",
+	token.String:      "String",
+	token.LBrace:      "LBrace",
+	token.RBrace:      "RBrace",
+	token.LParen:      "LParen",
+	token.RParen:      "RParen",
+	token.Semicolon:   "Semicolon",
+	token.Comma:       "Comma",
+	token.Colon:       "Colon",
+	token.DoubleColon: "DoubleColon",
+	token.Arrow:       "Arrow",
+	token.Bang:        "Bang",
+	token.Amp:         "Amp",
+	token.LBracket:    "LBracket",
+	token.RBracket:    "RBracket",
+	token.LT:          "LT",
+	token.GT:          "GT",
+	token.Question:    "Question",
+	token.Plus:        "Plus",
+	token.Asterisk:    "Asterisk",
+	token.Mut:         "Mut",
+	token.EOF:         "Eof",
 }
 
 // TestStdKizuLexerParityExamples checks examples against the std Kizu lexer subset.
@@ -196,6 +223,7 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/fn_empty", source: "fn main() {}"},
 		{name: "seed/fn_return_int", source: "fn main() { return 1; }"},
 		{name: "seed/fn_signature", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
+		{name: "seed/type_tokens", source: "fn f(a: &mut []const std::array::Array<i64>) -> !void {}"},
 		{name: "seed/string_call", source: `fn main() { print("hello"); }`},
 		{name: "seed/binary_precedence", source: "fn main() { print(1 + 2 * 3); }"},
 	}
