@@ -1387,6 +1387,7 @@ func parserHeaderSource(info parserPackage) string {
 	var out bytes.Buffer
 	out.WriteString(parserStateSource())
 	out.WriteString(parserMetricEntrySource())
+	out.WriteString(parserTokenSummarySource())
 	out.WriteString(parserPrecedenceSource(info.precedences))
 	return out.String()
 }
@@ -1409,7 +1410,9 @@ pub struct TokenSummary {
     pub structs: i64,
     pub enums: i64,
     pub tokens: i64,
-    pub illegal_tokens: i64
+    pub illegal_tokens: i64,
+    pub braces: i64,
+    pub balance: i64
 }
 
 pub fn Parser(source: []const u8) -> Parser {
@@ -1475,10 +1478,9 @@ pub fn declaration_score(source: []const u8) -> i64 {
 }
 
 pub fn brace_score(source: []const u8) -> i64 {
-    let balance = brace_balance(source);
-    let braces = brace_count(source);
-    if balance == 0 {
-        return braces;
+    let summary = token_summary(source);
+    if summary.balance == 0 {
+        return summary.braces;
     }
     return 0;
 }
@@ -1487,7 +1489,12 @@ pub fn parse_score(source: []const u8) -> i64 {
     return first_token_code(source) + declaration_score(source) + brace_score(source);
 }
 
-pub fn token_summary(source: []const u8) -> TokenSummary {
+`
+}
+
+// parserTokenSummarySource renders the parser-local source token summary loop.
+func parserTokenSummarySource() string {
+	return `pub fn token_summary(source: []const u8) -> TokenSummary {
     var parser = Parser(source);
     var functions = 0;
     var imports = 0;
@@ -1495,6 +1502,8 @@ pub fn token_summary(source: []const u8) -> TokenSummary {
     var enums = 0;
     var tokens = 0;
     var illegal_tokens = 0;
+    var braces = 0;
+    var balance = 0;
     while parser.cur.Type != token::Type::EOF {
         tokens = tokens + 1;
         if parser.cur.Type == token::Type::Function {
@@ -1512,6 +1521,14 @@ pub fn token_summary(source: []const u8) -> TokenSummary {
         if parser.cur.Type == token::Type::Illegal {
             illegal_tokens = illegal_tokens + 1;
         }
+        if parser.cur.Type == token::Type::LBrace {
+            braces = braces + 1;
+            balance = balance + 1;
+        }
+        if parser.cur.Type == token::Type::RBrace {
+            braces = braces + 1;
+            balance = balance - 1;
+        }
         parser = Advance(parser);
     }
     return TokenSummary {
@@ -1520,7 +1537,9 @@ pub fn token_summary(source: []const u8) -> TokenSummary {
         structs: structs,
         enums: enums,
         tokens: tokens,
-        illegal_tokens: illegal_tokens
+        illegal_tokens: illegal_tokens,
+        braces: braces,
+        balance: balance
     };
 }
 
@@ -1555,8 +1574,8 @@ pub fn parse_module(source: []const u8) -> Module {
     let tokens = summary.tokens;
     let illegal_tokens = summary.illegal_tokens;
     let declarations = functions * 5 + imports * 3 + structs * 2 + enums * 2;
-    let balance = brace_balance(source);
-    let braces = brace_count(source);
+    let balance = summary.balance;
+    let braces = summary.braces;
     var brace_metric = 0;
     if balance == 0 {
         brace_metric = braces;
@@ -2417,11 +2436,15 @@ func writeStage2NonIdent(out *strings.Builder, name string, value string) {
 func writeStage2BraceCounters(out *strings.Builder, idx int) {
 	fmt.Fprintf(out, "%%isopen%d = icmp eq i32 %%ch%d, 123 ", idx, idx)
 	fmt.Fprintf(out, "%%isclose%d = icmp eq i32 %%ch%d, 125 ", idx, idx)
-	fmt.Fprintf(out, "%%isbrace%d = or i1 %%isopen%d, %%isclose%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%rawbrace%d = or i1 %%isopen%d, %%isclose%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%bracenotstring%d = xor i1 %%string%d, true ", idx, idx)
+	fmt.Fprintf(out, "%%isbrace%d = and i1 %%rawbrace%d, %%bracenotstring%d ", idx, idx, idx)
 	fmt.Fprintf(out, "%%braceinc%d = zext i1 %%isbrace%d to i32 ", idx, idx)
 	fmt.Fprintf(out, "%%bracenext%d = add i32 %%brace%d, %%braceinc%d ", idx, idx, idx)
-	fmt.Fprintf(out, "%%balanceopen%d = zext i1 %%isopen%d to i32 ", idx, idx)
-	fmt.Fprintf(out, "%%balanceclose%d = zext i1 %%isclose%d to i32 ", idx, idx)
+	fmt.Fprintf(out, "%%open%d = and i1 %%isopen%d, %%bracenotstring%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%close%d = and i1 %%isclose%d, %%bracenotstring%d ", idx, idx, idx)
+	fmt.Fprintf(out, "%%balanceopen%d = zext i1 %%open%d to i32 ", idx, idx)
+	fmt.Fprintf(out, "%%balanceclose%d = zext i1 %%close%d to i32 ", idx, idx)
 	fmt.Fprintf(out, "%%balancedelta%d = sub i32 %%balanceopen%d, %%balanceclose%d ", idx, idx, idx)
 	fmt.Fprintf(out, "%%balancenext%d = add i32 %%balance%d, %%balancedelta%d ", idx, idx, idx)
 }

@@ -36,6 +36,17 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "lex = Advance(lex)")
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "pub fn CountTokens")
 	assertGeneratedSourceContains(t, outDir, "src/lexer.kizu", "pub fn CountIllegalTokens")
+	assertGeneratedParserSource(t, outDir)
+	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "pub fn token_path")
+	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "selfhost/src/compiler.kizu")
+	assertGeneratedCheckerSource(t, outDir)
+	assertGeneratedCompilerSource(t, outDir)
+	assertGeneratedEmitSource(t, outDir)
+}
+
+// assertGeneratedParserSource checks generated parser bootstrap logic.
+func assertGeneratedParserSource(t *testing.T, outDir string) {
+	t.Helper()
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn first_token_code")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub lexer: lexer::Lexer")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "cur: token::New")
@@ -44,6 +55,8 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "cur: token::New(cur_type")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub struct TokenSummary")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn token_summary")
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "braces: braces")
+	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "balance: balance")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn function_count")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn precedence")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "token::Type::DoubleColon")
@@ -51,11 +64,6 @@ func TestGenerateCompilerDoesNotEmitGoDriver(t *testing.T) {
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn declaration_score")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn brace_score")
 	assertGeneratedSourceContains(t, outDir, "src/parser.kizu", "pub fn parse_score")
-	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "pub fn token_path")
-	assertGeneratedSourceContains(t, outDir, "src/resolver.kizu", "selfhost/src/compiler.kizu")
-	assertGeneratedCheckerSource(t, outDir)
-	assertGeneratedCompilerSource(t, outDir)
-	assertGeneratedEmitSource(t, outDir)
 }
 
 // TestCheckedInSelfhostDoesNotEmitGoDriver checks the committed bootstrap seed
