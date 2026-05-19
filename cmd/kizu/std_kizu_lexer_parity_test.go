@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -181,6 +182,10 @@ fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
     }
     let text = try std::mem::slice(source, token.start, token.end);
     print(text);
+    print(token.start);
+    print(token.end);
+    print(token.line);
+    print(token.column);
     return;
 }
 `
@@ -285,6 +290,24 @@ func TestStdKizuLexerTokenizeParitySeeds(t *testing.T) {
 	got := runStdKizuLexerTokenizeParityHarness(t, cases)
 
 	assertLexerParityCases(t, cases, got)
+}
+
+// TestStdKizuLexerParitySelfhostPackage gates the selfhost source lexer surface.
+func TestStdKizuLexerParitySelfhostPackage(t *testing.T) {
+	cases := collectLexerParitySelfhostSources(t)
+	got := runStdKizuLexerParityHarness(t, cases)
+
+	assertLexerParityCases(t, cases, got)
+	t.Logf("selfhost sources compared=%d unsupported=0", len(cases))
+}
+
+// TestStdKizuLexerTokenizeParitySelfhostPackage gates Array-backed tokenization.
+func TestStdKizuLexerTokenizeParitySelfhostPackage(t *testing.T) {
+	cases := collectLexerParitySelfhostSources(t)
+	got := runStdKizuLexerTokenizeParityHarness(t, cases)
+
+	assertLexerParityCases(t, cases, got)
+	t.Logf("selfhost sources compared=%d unsupported=0", len(cases))
 }
 
 // collectLexerParityExamples finds examples supported by the current std lexer subset.
@@ -393,13 +416,25 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 func summarizeGoLexerSubset(source string) (string, string) {
 	l := lexer.New(source)
 	lines := []string{}
+	offset := 0
 	for {
 		tok := l.NextToken()
 		kind, ok := lexerParityTokenKind(tok.Type)
 		if !ok {
 			return "", "token outside std lexer subset: " + string(tok.Type)
 		}
-		lines = append(lines, kind, lexerParityTokenLiteral(tok))
+		literal := lexerParityTokenLiteral(tok)
+		start, end := lexerParityTokenByteSpan(source, offset, literal, tok.Type)
+		offset = end
+		lines = append(
+			lines,
+			kind,
+			literal,
+			strconv.Itoa(start),
+			strconv.Itoa(end),
+			strconv.Itoa(tok.Line),
+			strconv.Itoa(tok.Column),
+		)
 		if tok.Type == token.EOF {
 			break
 		}
@@ -419,6 +454,50 @@ func lexerParityTokenLiteral(tok token.Token) string {
 		return `"` + tok.Literal + `"`
 	}
 	return tok.Literal
+}
+
+// lexerParityTokenByteSpan derives byte offsets for the Go lexer token stream.
+func lexerParityTokenByteSpan(
+	source string,
+	offset int,
+	literal string,
+	tok token.Type,
+) (int, int) {
+	start := lexerParitySkipTrivia(source, offset)
+	if tok == token.EOF {
+		return len(source), len(source)
+	}
+	if strings.HasPrefix(source[start:], literal) {
+		return start, start + len(literal)
+	}
+	index := strings.Index(source[start:], literal)
+	if index < 0 {
+		return start, start
+	}
+	start += index
+	return start, start + len(literal)
+}
+
+// lexerParitySkipTrivia skips spaces and line comments like the Go lexer.
+func lexerParitySkipTrivia(source string, offset int) int {
+	for offset < len(source) {
+		switch source[offset] {
+		case ' ', '\t', '\n', '\r':
+			offset++
+		case '/':
+			if offset+1 < len(source) && source[offset+1] == '/' {
+				offset += 2
+				for offset < len(source) && source[offset] != '\n' {
+					offset++
+				}
+				continue
+			}
+			return offset
+		default:
+			return offset
+		}
+	}
+	return offset
 }
 
 // runStdKizuLexerParityHarness runs the Kizu std lexer once for all cases.

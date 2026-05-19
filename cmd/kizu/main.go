@@ -1019,7 +1019,7 @@ func qualifyStdTypeName(module string, typ string) string {
 	}
 	if module == "kizu::lexer" {
 		switch typ {
-		case "TokenKind", "Token":
+		case "TokenKind", "Token", "Position":
 			return "std::kizu::lexer::" + typ
 		}
 	}

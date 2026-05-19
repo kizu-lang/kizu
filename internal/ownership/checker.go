@@ -4787,6 +4787,7 @@ func isAstScalarType(typeName string) bool {
 		"PrefixOp", "std::kizu::ast::PrefixOp",
 		"BinaryOp", "std::kizu::ast::BinaryOp",
 		"ChildRange", "std::kizu::ast::ChildRange",
+		"Position", "std::kizu::lexer::Position",
 		"std::kizu::lexer::Token":
 		return true
 	default:

@@ -20,6 +20,11 @@ Generated `target/selfhost*` artifacts are not source of truth. New selfhost
 work should land in this package or in `std::kizu` when it is reusable stdlib
 compiler infrastructure.
 
+The token and lexer boundary is currently `std::kizu::lexer`. Selfhost compiler
+modules should reuse that implementation instead of duplicating token shapes in
+`selfhost::lexer`; the oracle suite compares the direct token stream and the
+Array-backed `tokenize` path against the Go lexer.
+
 Check the package with:
 
 ```sh

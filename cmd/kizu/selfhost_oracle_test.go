@@ -25,6 +25,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostLexerOracle(t),
 		runSelfhostLexerTokenizeOracle(t),
 		runSelfhostLexerSourceOracle(t),
+		runSelfhostLexerTokenizeSourceOracle(t),
 		runSelfhostParserOracle(t),
 		runSelfhostParserSourceOracle(t),
 	}
@@ -92,6 +93,24 @@ func runSelfhostLexerSourceOracle(t *testing.T) selfhostOracleResult {
 	}
 	return selfhostOracleResult{
 		component: "lexer",
+		corpus:    "selfhost",
+		scanned:   len(cases),
+		compared:  len(cases),
+		failures:  failures,
+	}
+}
+
+// runSelfhostLexerTokenizeSourceOracle compares selfhost sources through token arrays.
+func runSelfhostLexerTokenizeSourceOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	cases := collectLexerParitySelfhostSources(t)
+	got := runStdKizuLexerTokenizeParityHarness(t, cases)
+	failures := countLexerParityFailures(cases, got)
+	if failures > 0 {
+		assertLexerParityCases(t, cases, got)
+	}
+	return selfhostOracleResult{
+		component: "lexer-tokenize",
 		corpus:    "selfhost",
 		scanned:   len(cases),
 		compared:  len(cases),
