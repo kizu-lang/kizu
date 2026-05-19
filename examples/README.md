@@ -81,8 +81,10 @@ go test ./...
 | owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
 | diagnostic formatting | `std_fmt.kizu` | appends deterministic i64, bool, and byte literal output |
 | diagnostic byte escaping | `std_fmt_escapes.kizu` | escapes newline, tab, and backslash bytes |
+| source artifact builder | `std_source_builder_artifact.kizu` | builds emitted text with `String` and `std::fmt` |
 | owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]const u8, i64>` |
 | symbol table map shape | `std_map_symbol_table.kizu` | maps byte keys to copy enum values |
+| resolver scope map shape | `std_map_resolver_scope.kizu` | uses `Map<[]const u8, V>` for selfhost-style symbol lookup |
 | owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&mut Map` |
 | minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions through `kizu test` |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
