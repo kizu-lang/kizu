@@ -130,7 +130,7 @@ func TestRunCompilerPhasesStopsAfterParseError(t *testing.T) {
 		t.Fatalf("expected command to fail\n%s", out)
 	}
 	text := string(out)
-	if !strings.Contains(text, "app::parser::CompileError::Message") {
+	if !strings.Contains(text, "app::parser::CompileError::Diagnostic") {
 		t.Fatalf("got %q, want typed parser error", out)
 	}
 	if strings.Contains(text, "lowered") {
