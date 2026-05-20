@@ -8,11 +8,11 @@ import (
 )
 
 const selfhostOwnershipOracleOutput = `ownership-production-resources
-1369
+2019
 ownership-production-checked-nodes
-39053
+54511
 ownership-production-borrows
-265
+431
 ownership-resources
 7
 ownership-borrows
