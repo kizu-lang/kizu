@@ -117,6 +117,16 @@ Source: [ADR-0052](adr/0052-zig-style-native-build-policy.md).
   are build inputs and cache-key inputs
 - unsupported lowered features must fail before invoking clang
 
+### Selfhost Runtime ABI
+
+Source: [`docs/selfhost-runtime-abi.md`](selfhost-runtime-abi.md).
+
+The first selfhost compiler artifact uses ABI version `selfhost-abi-v0`. The
+contract maps the #453 IR manifest shapes to LLVM value layouts, direct and
+std-primitive call conventions, recoverable error representation, cleanup hooks,
+and explicit runtime symbols. Any backend/runtime issue that needs a new
+reachable ABI shape must update that document or link a blocker under #495.
+
 ### Bootstrap
 
 Source: [ADR-0051](adr/0051-compiler-outputs-cache-bootstrap.md).

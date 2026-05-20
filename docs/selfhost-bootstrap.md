@@ -114,6 +114,11 @@ These are runtime boundaries, not Go fallbacks. Public Kizu APIs must keep the
 capability visible in signatures or constructors where the language model
 requires it.
 
+The minimum runtime ABI for the first selfhost artifact is
+[`docs/selfhost-runtime-abi.md`](selfhost-runtime-abi.md). Backend, runtime, and
+host-primitive roadmap issues must update that document when they add a new
+reachable ABI shape.
+
 ## CI Contract
 
 Until #459 exists, CI should run:
