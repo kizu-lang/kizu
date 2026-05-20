@@ -2,7 +2,7 @@
 
 ## Status
 
-採用。
+Superseded by [ADR-0060: borrowed-return provenance without named lifetimes](0060-borrowed-return-provenance.md).
 
 ## Context
 

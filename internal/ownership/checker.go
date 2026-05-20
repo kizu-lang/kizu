@@ -21,10 +21,11 @@ type Checker struct {
 }
 
 type functionInfo struct {
-	name       string
-	params     []paramInfo
-	returnType string
-	decl       *ast.FunctionDecl
+	name         string
+	params       []paramInfo
+	returnType   string
+	returnBorrow string
+	decl         *ast.FunctionDecl
 }
 
 type paramInfo struct {
@@ -157,7 +158,8 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 			})
 		}
 		c.functions[fn.Name] = &functionInfo{
-			name: fn.Name, params: params, returnType: fn.ReturnType, decl: fn,
+			name: fn.Name, params: params, returnType: fn.ReturnType,
+			returnBorrow: fn.ReturnBorrow, decl: fn,
 		}
 	}
 	return nil
@@ -255,13 +257,16 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 	return err
 }
 
-// borrowedReturnAllowed permits returning an explicit-lifetime borrow parameter.
+// borrowedReturnAllowed permits returning the declared borrowed source parameter.
 func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
 	if c.currentFunction == nil {
 		return false
 	}
-	lifetime, mutable, inner, ok := explicitOwnershipBorrowType(returnTypeName(c.currentFunction))
-	if !ok || lifetime == "" {
+	if c.currentFunction.returnBorrow != name {
+		return false
+	}
+	_, mutable, inner, ok := explicitOwnershipBorrowType(returnTypeName(c.currentFunction))
+	if !ok {
 		return false
 	}
 	if mutable && !value.mutBorrow {
@@ -270,14 +275,11 @@ func (c *Checker) borrowedReturnAllowed(name string, value *binding) bool {
 	if !sameOwnershipType(value.typeName, inner) {
 		return false
 	}
-	for _, param := range c.currentFunction.decl.Params {
-		if param.Name != name || !param.Borrow || param.BorrowLifetime != lifetime {
+	for idx, param := range c.currentFunction.decl.Params {
+		if param.Name != name || !c.currentFunction.params[idx].borrow {
 			continue
 		}
-		if mutable && !param.MutBorrow {
-			return false
-		}
-		return true
+		return !mutable || c.currentFunction.params[idx].mutBorrow
 	}
 	return false
 }
@@ -341,7 +343,7 @@ func (c *Checker) checkReturnedBorrowLetStmt(
 	return nil
 }
 
-// returnedBorrowInitializer recognizes calls returning an explicit-lifetime borrow.
+// returnedBorrowInitializer recognizes calls returning a declared borrowed view.
 func (c *Checker) returnedBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
@@ -354,14 +356,14 @@ func (c *Checker) returnedBorrowInitializer(
 	if fn == nil {
 		return nil, "", "", false, false, nil
 	}
-	lifetime, mutable, elem, ok := explicitOwnershipBorrowType(returnTypeName(fn))
+	_, mutable, elem, ok := explicitOwnershipBorrowType(returnTypeName(fn))
 	if !ok {
 		return nil, "", "", false, false, nil
 	}
-	idx := borrowReturnParamIndex(fn, lifetime, mutable)
+	idx := borrowReturnParamIndex(fn, mutable)
 	if idx < 0 || idx >= len(call.Args) {
 		return nil, "", "", false, true,
-			fmt.Errorf("borrow error: `%s` return lifetime has no source parameter", name)
+			fmt.Errorf("borrow error: `%s` borrowed return has no source parameter", name)
 	}
 	target, field, err := c.borrowTarget(call.Args[idx], env)
 	if err != nil {
@@ -389,13 +391,13 @@ func (c *Checker) calledFunction(callee ast.Expression) (string, *functionInfo) 
 	}
 }
 
-// borrowReturnParamIndex finds the parameter that owns a returned borrow lifetime.
-func borrowReturnParamIndex(fn *functionInfo, lifetime string, mutable bool) int {
+// borrowReturnParamIndex finds the parameter that owns a returned borrow.
+func borrowReturnParamIndex(fn *functionInfo, mutable bool) int {
 	for idx, param := range fn.decl.Params {
-		if !param.Borrow || param.BorrowLifetime != lifetime {
+		if param.Name != fn.returnBorrow || !fn.params[idx].borrow {
 			continue
 		}
-		if mutable && !param.MutBorrow {
+		if mutable && !fn.params[idx].mutBorrow {
 			continue
 		}
 		return idx
@@ -3201,6 +3203,7 @@ func (c *Checker) checkAstAddDeclMethod(
 			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 			"std::kizu::ast::ChildRange", "std::kizu::ast::ChildRange",
 			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	default:
@@ -4628,15 +4631,12 @@ func fieldOwnershipType(field ast.Field) string {
 	return "&" + field.BorrowLifetime + " " + field.TypeName
 }
 
-// explicitOwnershipBorrowType extracts &'a T and &'a mut T spellings.
+// explicitOwnershipBorrowType extracts &T and &mut T spellings.
 func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
-	if !strings.HasPrefix(typeName, "&'") {
+	if !strings.HasPrefix(typeName, "&") {
 		return "", false, "", false
 	}
-	lifetime, rest, ok := splitOwnershipLifetimePrefix(strings.TrimPrefix(typeName, "&"))
-	if !ok {
-		return "", false, "", false
-	}
+	rest := strings.TrimPrefix(typeName, "&")
 	mutable := false
 	if strings.HasPrefix(rest, "mut ") {
 		mutable = true
@@ -4645,23 +4645,7 @@ func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
 	if rest == "" {
 		return "", false, "", false
 	}
-	return lifetime, mutable, rest, true
-}
-
-// splitOwnershipLifetimePrefix extracts the leading lifetime from a type fragment.
-func splitOwnershipLifetimePrefix(text string) (string, string, bool) {
-	if !strings.HasPrefix(text, "'") {
-		return "", text, false
-	}
-	end := strings.IndexByte(text, ' ')
-	if end < 0 {
-		return "", "", false
-	}
-	lifetime := text[:end]
-	if !isOwnershipLifetimeName(lifetime) {
-		return "", "", false
-	}
-	return lifetime, strings.TrimSpace(text[end+1:]), true
+	return "", mutable, rest, true
 }
 
 // hasOwnershipExplicitNonStaticLifetime reports whether typeName carries a scoped lifetime.

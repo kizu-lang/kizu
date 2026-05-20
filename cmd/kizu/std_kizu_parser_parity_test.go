@@ -119,6 +119,7 @@ fn dump_fn_decl(
     try dump_range(source, ast, fn_decl.type_params);
     try dump_range(source, ast, fn_decl.params);
     try dump_node(source, ast, fn_decl.return_type);
+    try dump_node(source, ast, fn_decl.return_borrow);
     try dump_node(source, ast, fn_decl.body);
     return;
 }
@@ -789,6 +790,12 @@ func parserParitySeedCases(t *testing.T) []parserParityCase {
 
 // parserParityFunctionSeedCases covers function and statement parser parity.
 func parserParityFunctionSeedCases() []parserParityCase {
+	seeds := parserParityFunctionSignatureSeedCases()
+	return append(seeds, parserParityFunctionBodySeedCases()...)
+}
+
+// parserParityFunctionSignatureSeedCases covers function signature parser parity.
+func parserParityFunctionSignatureSeedCases() []parserParityCase {
 	return []parserParityCase{
 		{name: "seed/fn_empty", source: "fn main() {}"},
 		{name: "seed/two_fns", source: "fn one() {} fn two() {}"},
@@ -801,18 +808,28 @@ func parserParityFunctionSeedCases() []parserParityCase {
 		{name: "seed/fn_comptime_param", source: "fn scoped(comptime worker: Function) {}"},
 		{name: "seed/fn_type_params", source: "pub fn identity<T>(value: T) -> T { return value; }"},
 		{
-			name:   "seed/fn_lifetime_params",
-			source: "fn first<'a>(bytes: []'a const u8) -> []'a const u8 { return bytes; }",
+			name:   "seed/fn_slice_return",
+			source: "fn first(bytes: []const u8) -> []const u8 { return bytes; }",
 		},
 		{
-			name:   "seed/fn_lifetime_borrow_param",
-			source: "fn show<'a>(bytes: &'a []'a const u8) {}",
+			name:   "seed/fn_borrow_return_provenance",
+			source: "fn first(bytes: []const u8) -> []const u8 borrows bytes { return bytes; }",
+		},
+		{
+			name:   "seed/fn_slice_borrow_param",
+			source: "fn show(bytes: &[]const u8) {}",
 		},
 		{name: "seed/fn_namespace_type", source: "fn use(allocator: std::mem::Allocator) {}"},
 		{
 			name:   "seed/fn_generic_type",
 			source: "fn collect(items: std::array::Array<[]const u8>) {}",
 		},
+	}
+}
+
+// parserParityFunctionBodySeedCases covers function body parser parity.
+func parserParityFunctionBodySeedCases() []parserParityCase {
+	return []parserParityCase{
 		{name: "seed/fn_return_int", source: "fn main() { return 1; }"},
 		{name: "seed/fn_expr_stmt_string", source: `fn main() { print("hello"); }`},
 		{name: "seed/fn_expr_stmt_precedence", source: "fn main() { print(1 + 2 * 3); }"},
@@ -889,8 +906,8 @@ func parserParityDeclarationSeedCases() []parserParityCase {
 			source: "pub struct User { pub name: []const u8; age: i64; }",
 		},
 		{
-			name:   "seed/lifetime_struct_decl",
-			source: "struct Row<'a, T> { data: []'a const T; }",
+			name:   "seed/generic_struct_decl",
+			source: "struct Row<T> { data: []const T; }",
 		},
 		{name: "seed/enum_decl", source: "enum Color { Red; Blue; }"},
 		{name: "seed/union_decl", source: "union Shape { Point; Circle(i64); }"},
@@ -1008,6 +1025,10 @@ func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
+	returnBorrow, reason := summarizeReturnBorrowSubset(fn.ReturnBorrow)
+	if reason != "" {
+		return nil, reason
+	}
 	body, reason := summarizeFunctionBodySubset(fn)
 	if reason != "" {
 		return nil, reason
@@ -1022,7 +1043,19 @@ func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	lines = append(lines, typeParams...)
 	lines = append(lines, params...)
 	lines = append(lines, returnType...)
+	lines = append(lines, returnBorrow...)
 	return append(lines, body...), ""
+}
+
+// summarizeReturnBorrowSubset summarizes an optional borrowed-return source.
+func summarizeReturnBorrowSubset(source string) ([]string, string) {
+	if source == "" {
+		return []string{"Empty"}, ""
+	}
+	if !isStdParserIdent(source) {
+		return nil, "identifier outside std parser subset"
+	}
+	return []string{"Var", source}, ""
 }
 
 // summarizeFunctionBodySubset summarizes a required body or extern empty body.

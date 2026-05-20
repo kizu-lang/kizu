@@ -372,11 +372,17 @@ fn parse_fn_body_node(
     );
     let params = try std::kizu::parser::parse_required_params(ast, text, type_params.next);
     let return_type = try std::kizu::parser::parse_signature_return_type(ast, text, params.next);
+    let return_borrow = try std::kizu::parser::parse_signature_return_borrow(
+        ast,
+        text,
+        return_type.next,
+        std::kizu::parser::is_arrow_token(params.next)
+    );
     let body = try std::kizu::parser::parse_signature_body(
         allocator,
         ast,
         text,
-        return_type.next,
+        return_borrow.next,
         require_body
     );
     let body_node = ast.get(body.node);
@@ -389,6 +395,7 @@ fn parse_fn_body_node(
         type_params.range,
         params.range,
         return_type.node,
+        return_borrow.node,
         body.node
     );
     return std::kizu::parser::parse_node(root, body.next);
@@ -864,6 +871,28 @@ fn parse_signature_return_type(
             ast,
             text,
             std::kizu::lexer::next_token(text, token)
+        );
+    }
+    return std::kizu::parser::empty_parse_node(ast, token);
+}
+
+fn parse_signature_return_borrow(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token,
+    has_return_type: bool
+) -> !ParseNode {
+    if !has_return_type {
+        return std::kizu::parser::empty_parse_node(ast, token);
+    }
+    let borrows = try std::kizu::parser::is_token_text(text, token, "borrows");
+    if borrows {
+        let source = try std::kizu::parser::expect_ident(
+            std::kizu::lexer::next_token(text, token)
+        );
+        return std::kizu::parser::parse_node(
+            std::kizu::parser::name_node(ast, source),
+            std::kizu::lexer::next_token(text, source)
         );
     }
     return std::kizu::parser::empty_parse_node(ast, token);
@@ -1668,7 +1697,7 @@ fn parse_borrow_type_end(
         Enum => return error("expected borrowed type");
         Union => return error("expected borrowed type");
         Extern => return error("expected borrowed type");
-        Lifetime => return std::kizu::parser::parse_lifetime_borrow_type_end(text, next);
+        Lifetime => return error("explicit lifetime syntax is not supported");
         Mut => return std::kizu::parser::parse_type_end(
             text,
             std::kizu::lexer::next_token(text, next)
@@ -1883,7 +1912,7 @@ fn parse_type_arg_end(
         Enum => return error("expected type argument");
         Union => return error("expected type argument");
         Extern => return error("expected type argument");
-        Lifetime => return std::kizu::parser::parse_lifetime_type_arg_end(text, token);
+        Lifetime => return error("explicit lifetime syntax is not supported");
         Ident => return std::kizu::parser::parse_ident_type_arg_end(text, token);
         Bang => return std::kizu::parser::parse_type_end(text, token);
         Amp => return std::kizu::parser::parse_type_end(text, token);
@@ -5925,7 +5954,7 @@ fn expect_gt(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
 fn expect_type_param(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
         Ident => return token;
-        Lifetime => return token;
+        Lifetime => return error("explicit lifetime syntax is not supported");
         Import => return error("expected type parameter");
         Pub => return error("expected type parameter");
         Struct => return error("expected type parameter");

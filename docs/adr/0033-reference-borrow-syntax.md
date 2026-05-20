@@ -17,7 +17,7 @@ Kizu v0.1 の borrow syntax は次にする。
 ```kizu
 fn show(value: &T) -> void
 fn update(value: &mut T) -> void
-fn view<'a>(value: &'a T) -> &'a T
+fn view(value: &T) -> &T borrows value
 ```
 
 意味:
@@ -33,13 +33,12 @@ fn view<'a>(value: &'a T) -> &'a T
 
 ## 制約
 
-ADR-0059 により、関数や型の境界を越える borrowed view では明示 lifetime
-annotation を採用する。
+ADR-0060 により、関数境界を越える borrowed return では `borrows <source>` を採用する。
 
-`&T` / `&mut T` は引き続き lifetime を省略した local borrow として扱える。
-borrow を struct field に保存したり関数から返したりする場合は、`&'a T` /
-`&'a mut T` のように明示 lifetime が必要になる。task / comptime / unsafe 境界で
-safe borrow を lifetime extension させることはできない。
+`&T` / `&mut T` は local borrow として扱う。borrow を struct field に保存する
+モデルは v0.2 では採用しない。関数から返す場合は `-> &T borrows value` のように
+戻り値の source を明示する。task / comptime / unsafe 境界で safe borrow を延命
+させることはできない。
 
 ## 影響
 

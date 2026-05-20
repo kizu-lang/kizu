@@ -10,7 +10,7 @@ const (
 	Ident  Type = "IDENT"
 	Int    Type = "INT"
 	String Type = "STRING"
-	// Lifetime names a compile-time lifetime parameter such as 'a.
+	// Lifetime names deprecated apostrophe-prefixed syntax such as 'a.
 	Lifetime Type = "LIFETIME"
 
 	Assign   Type = "="

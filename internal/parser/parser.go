@@ -205,6 +205,13 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 		if fn.ReturnType == "" {
 			return fn
 		}
+		if p.peek.Type == token.Ident && p.peek.Literal == "borrows" {
+			p.nextToken()
+			if !p.expectPeek(token.Ident) {
+				return fn
+			}
+			fn.ReturnBorrow = p.cur.Literal
+		}
 	}
 	if !requireBody {
 		return fn
@@ -1104,13 +1111,12 @@ func (p *Parser) parseErrorUnionTypeName() string {
 	return "!" + inner
 }
 
-// parseBorrowTypeName parses &T, &mut T, &'a T, and &'a mut T type spellings.
+// parseBorrowTypeName parses &T and &mut T type spellings.
 func (p *Parser) parseBorrowTypeName() string {
 	p.nextToken()
-	lifetime := ""
 	if p.cur.Type == token.Lifetime {
-		lifetime = p.cur.Literal
-		p.nextToken()
+		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
+		return ""
 	}
 	if p.cur.Type == token.Mut {
 		p.nextToken()
@@ -1118,57 +1124,44 @@ func (p *Parser) parseBorrowTypeName() string {
 		if inner == "" {
 			return ""
 		}
-		if lifetime != "" {
-			return "&" + lifetime + " mut " + inner
-		}
 		return "&mut " + inner
 	}
 	inner := p.parseTypeName()
 	if inner == "" {
 		return ""
 	}
-	if lifetime != "" {
-		return "&" + lifetime + " " + inner
-	}
 	return "&" + inner
 }
 
-// parseSliceTypeName parses []T and lifetime-qualified slice type spellings.
+// parseSliceTypeName parses []T and qualified slice type spellings.
 func (p *Parser) parseSliceTypeName() string {
 	if !p.expectPeek(token.RBracket) {
 		return ""
 	}
 	p.nextToken()
-	lifetime := ""
 	if p.cur.Type == token.Lifetime {
-		lifetime = p.cur.Literal
-		p.nextToken()
+		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
+		return ""
 	}
 	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
-		return p.parseQualifiedSliceType(lifetime, "const")
+		return p.parseQualifiedSliceType("const")
 	}
 	if p.cur.Type == token.Mut {
-		return p.parseQualifiedSliceType(lifetime, "mut")
+		return p.parseQualifiedSliceType("mut")
 	}
 	arg := p.parseTypeArg()
-	if arg == "" || lifetime != "" {
-		if lifetime != "" {
-			p.errorf("expected const or mut after slice lifetime, got %s", p.cur.Type)
-		}
+	if arg == "" {
 		return ""
 	}
 	return "[]" + arg
 }
 
-// parseQualifiedSliceType parses []const T, []'a const T, and mutable variants.
-func (p *Parser) parseQualifiedSliceType(lifetime string, qualifier string) string {
+// parseQualifiedSliceType parses []const T and mutable variants.
+func (p *Parser) parseQualifiedSliceType(qualifier string) string {
 	p.nextToken()
 	inner := p.parseTypeName()
 	if inner == "" {
 		return ""
-	}
-	if lifetime != "" {
-		return "[]" + lifetime + " " + qualifier + " " + inner
 	}
 	return "[]" + qualifier + " " + inner
 }
@@ -1207,32 +1200,18 @@ func (p *Parser) parseTypeArgList() string {
 	return strings.Join(args, ", ")
 }
 
-// parseGenericParamList parses lifetime parameters followed by type parameters.
+// parseGenericParamList parses type parameters and rejects named lifetimes.
 func (p *Parser) parseGenericParamList() ([]string, []string) {
 	lifetimes := []string{}
 	types := []string{}
 	seen := map[string]bool{}
-	seenType := false
 	p.nextToken()
 	for {
 		switch p.cur.Type {
 		case token.Lifetime:
-			if p.cur.Literal == "'_" {
-				p.errorf("anonymous lifetime '_ is not supported")
-				return nil, nil
-			}
-			if seenType {
-				p.errorf("lifetime parameter %s must appear before type parameters", p.cur.Literal)
-				return nil, nil
-			}
-			if seen[p.cur.Literal] {
-				p.errorf("duplicate lifetime parameter %s", p.cur.Literal)
-				return nil, nil
-			}
-			seen[p.cur.Literal] = true
-			lifetimes = append(lifetimes, p.cur.Literal)
+			p.errorf("explicit lifetime parameters are not supported; use `borrows` return provenance")
+			return nil, nil
 		case token.Ident:
-			seenType = true
 			if seen[p.cur.Literal] {
 				p.errorf("duplicate type parameter %s", p.cur.Literal)
 				return nil, nil
@@ -1269,7 +1248,8 @@ func (p *Parser) expectTypeClose() bool {
 // parseTypeArg parses a generic type argument.
 func (p *Parser) parseTypeArg() string {
 	if p.cur.Type == token.Lifetime {
-		return p.cur.Literal
+		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
+		return ""
 	}
 	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
 		p.nextToken()

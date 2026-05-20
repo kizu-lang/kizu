@@ -70,9 +70,8 @@ go test ./...
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
-| explicit lifetime slice view | `lifetime_view.kizu` | returns a `[]'a const u8` view tied to its source |
-| explicit lifetime borrow return | `lifetime_borrow_return.kizu` | returns shared and mutable borrows tied to local owners |
-| lifetime borrow fields | `lifetime_borrow_fields.kizu` | check-only struct and union borrow field declarations |
+| borrowed-return provenance slice view | `borrow_return_provenance.kizu` | returns a `[]const u8` view tied to its source |
+| borrowed-return provenance | `borrow_provenance_return.kizu` | returns shared and mutable borrows tied to local owners |
 | checked index / slice syntax | `slice_syntax.kizu` | asserts trapping `[]const u8` indexing and slicing through `bytes[...]` |
 | boolean logic | `logical.kizu` | asserts `and` / `or` precedence and short-circuit shape |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
@@ -125,8 +124,8 @@ single source file. Run them with `kizu check <package-root>`.
 | field borrow blocks owner move | `negative/field_borrow_owner_move.kizu` | `cannot be moved while borrowed` |
 | v0.1 rejects nested field borrow | `negative/nested_field_borrow.kizu` | `one direct field` |
 | borrowed values cannot escape | `negative/borrow_escape.kizu` | `borrowed value` |
-| borrow fields need explicit lifetimes | `negative/borrow_field.kizu` | `requires struct lifetime parameter` |
-| borrow returns need explicit lifetimes | `negative/lifetime_return_missing.kizu` | `borrow return requires explicit lifetime` |
+| borrow fields cannot be stored | `negative/borrow_field.kizu` | `cannot store borrow` |
+| borrow returns need provenance | `negative/borrow_return_missing_source.kizu` | `borrows <source>` |
 | borrowed parameters cannot be stored in owned locals | `negative/borrow_local_alias.kizu` | `borrowed value` |
 | borrowed parameters cannot be passed as owned values | `negative/borrow_to_owner.kizu` | `borrowed value` |
 | non-copy values cannot move out of borrow deref | `negative/borrow_deref_move.kizu` | `cannot be moved out of borrow` |
@@ -253,12 +252,9 @@ single source file. Run them with `kizu check <package-root>`.
 | string byte views block deinit | `negative/std_string_deinit_while_viewed.kizu` | `cannot run while string is borrowed` |
 | string byte views cannot escape through return | `negative/std_string_as_bytes_return_escape.kizu` | `String.as_bytes` must be bound |
 | string byte views cannot be used directly | `negative/std_string_as_bytes_direct_use.kizu` | `String.as_bytes` must be bound |
-| lifetime return must name its source | `negative/lifetime_return_unbound_source.kizu` | `return lifetime` |
-| lifetime return cannot use local string view | `negative/lifetime_return_dangling_string_view.kizu` | `return lifetime` |
-| lifetime borrow fields need type lifetimes | `negative/lifetime_borrow_field_missing_param.kizu` | `requires struct lifetime parameter` |
-| lifetime views cannot cross channels | `negative/lifetime_channel_escape.kizu` | `lifetime view cannot cross concurrency boundary` |
-| lifetime views cannot cross comptime | `negative/lifetime_comptime_escape.kizu` | `lifetime view cannot cross comptime boundary` |
-| mutable lifetime view blocks parent read | `negative/lifetime_mut_return_alias.kizu` | `cannot be read while mutably borrowed` |
+| borrowed return must match its source | `negative/borrow_return_source_mismatch.kizu` | `not tied to that source` |
+| borrowed return cannot use local string view | `negative/borrow_return_dangling_string_view.kizu` | `borrowed value` |
+| mutable borrowed return blocks parent read | `negative/borrow_return_mut_alias.kizu` | `cannot be read while mutably borrowed` |
 | shared string borrows cannot deinit | `negative/std_string_deinit_through_shared_borrow.kizu` | `requires owned String receiver` |
 | mutable string borrows cannot deinit | `negative/std_string_deinit_through_mut_borrow.kizu` | `requires owned String receiver` |
 | shared string borrows cannot append | `negative/std_string_append_through_shared_borrow.kizu` | `requires mutable String receiver` |

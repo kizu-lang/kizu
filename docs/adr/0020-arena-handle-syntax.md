@@ -4,7 +4,7 @@ Status: 採用
 
 ## 背景
 
-Kizu は borrowed view 境界で明示 lifetime annotation を採用する。
+Kizu は borrowed return の由来を `borrows <source>` で明示する。
 一方で、AST や graph の長寿命 identity は borrow ではなく、
 `arena<T>` と `handle<T>` で表す。
 
@@ -63,5 +63,5 @@ local arena から作られた handle を関数から返すことは、arena よ
 - Phase 6 は full generics なしで arena / handle を実装できる
 - `arena<T>` / `handle<T>` は後の generic 実装候補にできるが、v0 では専用扱いを正とする
 - raw pointer は Phase 12 の unsafe 境界で扱い、`handle<T>` とは別物として扱う
-- ADR-0059 の「view は lifetime、graph identity は arena / handle」と整合する
+- ADR-0060 の「view return は provenance、graph identity は arena / handle」と整合する
 - ADR-0017 の safe Kizu メモリ安全性保証を支える
