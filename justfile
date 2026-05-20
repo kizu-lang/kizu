@@ -25,7 +25,7 @@ selfhost-oracle:
 
 # Run direct heavyweight selfhost gates for focused debugging.
 selfhost-integration-gates:
-    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate)$' -v
+    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate|PipelineGate)$' -v
 
 # Run the selfhost production switch review gate without changing production paths.
 selfhost-switch-gate:
