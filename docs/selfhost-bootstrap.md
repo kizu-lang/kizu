@@ -32,6 +32,46 @@ It must be visibly separate from the production binary.
 
 ## Bootstrap Commands
 
+The minimum selfhost compiler CLI introduced by #458 has two supported commands:
+
+```sh
+selfhost check selfhost
+selfhost stage selfhost
+```
+
+`check selfhost` loads `selfhost/` and reachable `std/` wrappers, then runs the
+Kizu-owned source, resolver, type, and ownership phases. On success it writes:
+
+```text
+check: ok
+```
+
+and returns exit code `0`. Unsupported commands or targets write a diagnostic to
+stderr and return exit code `64`.
+
+`stage selfhost` emits the deterministic stage artifacts under `target/selfhost`:
+
+```text
+target/selfhost/selfhost.ir
+target/selfhost/selfhost.ir.manifest
+target/selfhost/selfhost.ll
+target/selfhost/selfhost.ll.meta
+target/selfhost/selfhost.storage.ll
+target/selfhost/selfhost.storage.ll.meta
+target/selfhost/selfhost.host.ll
+target/selfhost/selfhost.host.ll.meta
+```
+
+On success it writes `stage: ok`, each emitted backend/runtime artifact path,
+and returns exit code `0`. These are the stage input/output paths that #459 must
+use unless a later issue updates this contract.
+
+Validate this CLI contract with:
+
+```sh
+just selfhost-cli-gate
+```
+
 The final bootstrap runner introduced by #459 must provide this shape:
 
 ```sh

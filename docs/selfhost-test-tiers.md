@@ -51,6 +51,12 @@ Measured locally on 2026-05-21 after #506:
 | --- | ---: |
 | `just selfhost-oracle` | 77.8s |
 
+Measured locally on 2026-05-21 during #458 CLI work:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-oracle` | 80.4s |
+
 ## Direct Heavyweight Gates
 
 Direct heavyweight gates are for debugging one selfhost stage without running
@@ -58,11 +64,21 @@ the whole aggregate oracle:
 
 ```sh
 just selfhost-integration-gates
+just selfhost-cli-gate
 ```
 
 This tier runs with `KIZU_RUN_SELFHOST_GATES=1`. It should not be chained after
 `just selfhost-oracle` in routine preflight. Use it when a specific resolver,
-type, ownership, IR, backend, or one-pass pipeline gate needs focused output.
+type, ownership, IR, backend, one-pass pipeline, or CLI contract gate needs
+focused output.
+
+`just selfhost-integration-gates` intentionally excludes the CLI contract gate.
+The CLI gate stages backend artifacts and overlaps with the backend/pipeline
+checks, so it has its own explicit recipe:
+
+```sh
+just selfhost-cli-gate
+```
 
 Measured locally during #456/#503:
 
@@ -75,6 +91,13 @@ Measured locally on 2026-05-21 after #506:
 | Command | Elapsed |
 | --- | ---: |
 | `KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostPipelineGate -count=1 -timeout=10m -v` | 56.4s |
+
+Measured locally on 2026-05-21 during #458 CLI work:
+
+| Command | Elapsed |
+| --- | ---: |
+| initial `TestSelfhostCLIGate` with separate `check selfhost` and `stage selfhost` runs | 114.7s |
+| one-pass `just selfhost-cli-gate` contract gate | 57.5s |
 
 ## Bootstrap Preflight
 
@@ -112,7 +135,15 @@ During #456/#503 this per-gate cost was multiplied across resolver, type,
 ownership, IR, and backend production gates, so the aggregate oracle took about
 295s. After #506 the aggregate oracle still pays for one full interpreted
 selfhost production pipeline, but no longer repeats it per stage; the measured
-aggregate cost is 77.8s.
+aggregate cost is about 78-80s.
+
+During #458, profiling `TestSelfhostCLIGate` showed the same pattern. The slow
+path was not stdout/stderr, filesystem writes, or clang. The initial test ran
+`check selfhost` and `stage selfhost` as two separate interpreted selfhost
+passes, then repeated detailed backend artifact validation. CPU samples were
+again dominated by interpreter evaluation and allocation/GC work. The gate now
+uses one Kizu-owned CLI contract entry and leaves detailed backend artifact and
+host-link validation to `TestSelfhostBackendArtifactGate`.
 
 ## Current Decision
 
@@ -130,8 +161,9 @@ The accepted policy for now is:
 
 - daily gate: fast default `go test ./...`;
 - aggregate oracle: explicit bootstrap/preflight command;
-- direct heavyweight gates: explicit debugging command;
+- direct heavyweight gates: explicit debugging commands;
 - aggregate production checks: one pass through `selfhost::pipeline_oracle`;
+- CLI contract checks: one pass through `selfhost::cli_contract_gate`;
 - no routine recipe runs both aggregate oracle and direct heavyweight gates.
 
 Future optimization can revisit interpreter value representation, checked-package

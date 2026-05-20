@@ -27,6 +27,10 @@ selfhost-oracle:
 selfhost-integration-gates:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate|PipelineGate)$' -v
 
+# Run the minimum selfhost CLI contract gate.
+selfhost-cli-gate:
+    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostCLIGate$' -count=1 -v
+
 # Run the selfhost production switch review gate without changing production paths.
 selfhost-switch-gate:
     go run ./cmd/kizu check selfhost
