@@ -7,8 +7,12 @@ pub struct BackendSummary {
 pub struct LlvmArtifact {
     pub ll_path: []const u8;
     pub metadata_path: []const u8;
+    pub storage_path: []const u8;
+    pub storage_metadata_path: []const u8;
     pub bytes: i64;
     pub metadata_bytes: i64;
+    pub storage_bytes: i64;
+    pub storage_metadata_bytes: i64;
 }
 
 pub fn summarize(program_ir: ir::IrSummary) -> BackendSummary {
@@ -59,11 +63,38 @@ pub fn emit_llvm_artifact(
     );
     metadata.deinit();
 
+    let storage = try load_runtime_storage_module(io);
+    let storage_len = try write_backend_bytes(
+        io,
+        "target/selfhost/selfhost.storage.ll",
+        storage,
+        std::mem::len(storage)
+    );
+
+    var storage_metadata = try render_runtime_storage_metadata(
+        allocator,
+        io,
+        ir_path,
+        manifest_path
+    );
+    let storage_metadata_view = storage_metadata.as_bytes();
+    let storage_metadata_len = try write_backend_bytes(
+        io,
+        "target/selfhost/selfhost.storage.ll.meta",
+        storage_metadata_view,
+        storage_metadata.len()
+    );
+    storage_metadata.deinit();
+
     return LlvmArtifact {
         ll_path: "target/selfhost/selfhost.ll",
         metadata_path: "target/selfhost/selfhost.ll.meta",
+        storage_path: "target/selfhost/selfhost.storage.ll",
+        storage_metadata_path: "target/selfhost/selfhost.storage.ll.meta",
         bytes: module_len,
-        metadata_bytes: metadata_len
+        metadata_bytes: metadata_len,
+        storage_bytes: storage_len,
+        storage_metadata_bytes: storage_metadata_len
     };
 }
 
@@ -144,6 +175,7 @@ fn render_llvm_module(
         "declare %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8)");
     try append_line(out, "declare void @kizu_rt_owned_deinit(%kizu.owned)");
     try append_line(out, "declare void @kizu_rt_trap(%kizu.slice.u8) noreturn");
+    try append_line(out, "declare i64 @kizu_selfhost__runtime_storage_smoke()");
     try append_line(out, "");
     try append_line(out, "define i64 @kizu_selfhost__smoke() {");
     try append_line(out, "entry:");
@@ -163,6 +195,9 @@ fn render_llvm_metadata(
     try append_key_value(out, "ir ", ir_path);
     try append_key_value(out, "manifest ", manifest_path);
     try append_line(out, "output target/selfhost/selfhost.ll");
+    try append_line(out, "runtime-storage target/selfhost/selfhost.storage.ll");
+    try append_line(out, "storage-backend selfhost-runtime-ll");
+    try append_line(out, "go-stdprim-storage none");
     try append_line(out, "validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate");
     try append_line(out, "external @kizu_rt_io_blocking");
     try append_line(out, "external @kizu_rt_fs_read_file");
@@ -171,6 +206,43 @@ fn render_llvm_metadata(
     try append_line(out, "external @kizu_rt_trap");
     try append_line(out, "unsupported-policy blocker");
     return out;
+}
+
+fn load_runtime_storage_module(io: Io) -> ![]const u8 {
+    let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.storage.ll");
+    try validate_runtime_storage_template(bytes);
+    return bytes;
+}
+
+fn validate_runtime_storage_template(bytes: []const u8) -> !void {
+    if !std::mem::starts_with(bytes, "; kizu selfhost runtime storage ll v0") {
+        return error("invalid runtime storage artifact");
+    }
+    return;
+}
+
+fn render_runtime_storage_metadata(
+    allocator: Allocator,
+    io: Io,
+    ir_path: []const u8,
+    manifest_path: []const u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "kizu-runtime-storage-v0");
+    try append_line(out, "abi selfhost-abi-v0");
+    try append_key_value(out, "ir ", ir_path);
+    try append_key_value(out, "manifest ", manifest_path);
+    let tail = try load_runtime_storage_metadata_tail(io);
+    try out.append_bytes(tail);
+    return out;
+}
+
+fn load_runtime_storage_metadata_tail(io: Io) -> ![]const u8 {
+    let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.storage.ll.meta.tail");
+    if !std::mem::starts_with(bytes, "linked-llvm target/selfhost/selfhost.ll") {
+        return error("invalid runtime storage metadata template");
+    }
+    return bytes;
 }
 
 fn append_key_value(

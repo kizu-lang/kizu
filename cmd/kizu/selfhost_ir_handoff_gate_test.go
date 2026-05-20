@@ -10,6 +10,7 @@ import (
 
 // TestSelfhostIRHandoffGate executes the selfhost ownership-to-IR handoff smoke.
 func TestSelfhostIRHandoffGate(t *testing.T) {
+	requireSelfhostGate(t)
 	if failures := countSelfhostIRHandoffGateFailures(t); failures > 0 {
 		t.Fatalf("selfhost IR handoff gate failures=%d", failures)
 	}

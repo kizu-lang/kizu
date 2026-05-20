@@ -10,6 +10,7 @@ import (
 
 // TestSelfhostTypeGate executes the Kizu-owned type checker oracle entry.
 func TestSelfhostTypeGate(t *testing.T) {
+	requireSelfhostGate(t)
 	if failures := countSelfhostTypeGateFailures(t); failures > 0 {
 		t.Fatalf("selfhost type gate failures=%d", failures)
 	}

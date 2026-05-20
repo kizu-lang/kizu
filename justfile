@@ -21,13 +21,17 @@ check:
 
 # Run Go/Kizu selfhost component oracle parity checks.
 selfhost-oracle:
-    go test ./cmd/kizu -run TestSelfhostOracleRunner -v
+    KIZU_RUN_SELFHOST_ORACLE=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -v
+
+# Run heavyweight selfhost integration gates as an explicit check.
+selfhost-integration-gates:
+    KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate)$' -v
 
 # Run the selfhost production switch review gate without changing production paths.
 selfhost-switch-gate:
     go run ./cmd/kizu check selfhost
     just selfhost-oracle
-    go test ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|PackageSkeletonChecks)$' -v
+    go test ./cmd/kizu -run 'TestSelfhostPackageSkeletonChecks$' -v
     go test ./internal/project ./internal/types ./internal/ownership
 
 # Run the no-Go bootstrap contract preflight before starting stage work.

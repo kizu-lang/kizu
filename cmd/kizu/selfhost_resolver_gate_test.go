@@ -10,6 +10,7 @@ import (
 
 // TestSelfhostResolverGate executes the Kizu-owned resolver oracle entry.
 func TestSelfhostResolverGate(t *testing.T) {
+	requireSelfhostGate(t)
 	if failures := countSelfhostResolverGateFailures(t); failures > 0 {
 		t.Fatalf("selfhost resolver gate failures=%d", failures)
 	}
