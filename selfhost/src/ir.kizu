@@ -1,11 +1,40 @@
 import selfhost::ownership;
+import selfhost::resolver;
+import selfhost::source;
+import selfhost::types;
 
 pub struct IrSummary {
     pub blocks: i64;
+    pub entry_points: i64;
 }
 
-pub fn lower(owned: ownership::OwnershipSummary) -> IrSummary {
+pub fn lower(checked: ownership::CheckedPackage) -> IrSummary {
     return IrSummary {
-        blocks: owned.checked_nodes
+        blocks: checked.checked_nodes,
+        entry_points: 1
     };
+}
+
+pub fn handoff_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    var files = try source::load_selfhost_sources(allocator, io, "selfhost");
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let checked = try ownership::check_package(allocator, files, typed);
+    try std::testing::expect_equal_i64(0, checked.diagnostics);
+    try std::testing::expect(checked.resources > 0);
+    let lowered = lower(checked);
+    try std::testing::expect(lowered.blocks > 0);
+    try std::testing::expect_equal_i64(1, lowered.entry_points);
+
+    print("ir-handoff-blocks");
+    print(lowered.blocks);
+    print("ir-handoff-entry-points");
+    print(lowered.entry_points);
+    print("ir-handoff-diagnostics");
+    print(0);
+
+    files.deinit();
+    return;
 }

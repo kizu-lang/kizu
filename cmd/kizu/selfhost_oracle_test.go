@@ -35,6 +35,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostResolverOracle(t),
 		runSelfhostTypeOracle(t),
 		runSelfhostOwnershipOracle(t),
+		runSelfhostIRHandoffOracle(t),
 	}
 	failures := 0
 	for _, result := range results {
@@ -255,6 +256,19 @@ func runSelfhostOwnershipOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "selfhost",
 		scanned:   7,
 		compared:  7,
+		failures:  failures,
+	}
+}
+
+// runSelfhostIRHandoffOracle checks the checked ownership package reaches IR lowering.
+func runSelfhostIRHandoffOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostIRHandoffGateFailures(t)
+	return selfhostOracleResult{
+		component: "ir-handoff",
+		corpus:    "selfhost",
+		scanned:   1,
+		compared:  1,
 		failures:  failures,
 	}
 }
