@@ -61,8 +61,13 @@ static uint8_t kizu_page_allocator_token;
 static uint8_t kizu_io_token;
 
 void kizu_host_init(int argc, char **argv) {
-    kizu_argc = argc;
-    kizu_argv = argv;
+    if (argc > 0 && argv != NULL) {
+        kizu_argc = argc - 1;
+        kizu_argv = argv + 1;
+        return;
+    }
+    kizu_argc = 0;
+    kizu_argv = NULL;
 }
 
 static kizu_slice_u8 borrowed_slice(const char *text) {

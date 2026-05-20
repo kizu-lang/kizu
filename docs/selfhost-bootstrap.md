@@ -70,7 +70,14 @@ Validate this CLI contract with:
 
 ```sh
 just selfhost-cli-gate
+KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostBackendArtifactGate
 ```
+
+`just selfhost-cli-gate` validates the Kizu source CLI through the stage0
+interpreter. `TestSelfhostBackendArtifactGate` also links the generated
+`selfhost.ll` artifact with the hosted runtime and runs the artifact CLI entry
+for `check selfhost`, `stage selfhost`, and unsupported command diagnostics.
+The latter is the no-Go smoke for the #458 artifact CLI path.
 
 The final bootstrap runner introduced by #459 must provide this shape:
 

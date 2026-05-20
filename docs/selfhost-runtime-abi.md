@@ -54,6 +54,7 @@ Kizu module and function symbols lower to deterministic LLVM symbol names:
 | Kizu shape | LLVM symbol |
 | --- | --- |
 | package entry `selfhost::smoke` | `@kizu_selfhost__smoke` |
+| hosted compiler CLI entry `selfhost::cli_main` | `@kizu_selfhost__cli_main` |
 | module function `selfhost::m::f` | `@kizu_selfhost_m__f` |
 | allocator capability | `@kizu_rt_mem_page_allocator` |
 | std primitive `std::fs::exists` | `@kizu_rt_fs_exists` |
@@ -276,6 +277,24 @@ publish boundary without adding a public `std::fs::rename` wrapper yet;
 additional filesystem calls require a concrete selfhost call site and a linked
 roadmap issue.
 
+For #458, `selfhost.ll` also exposes `@kizu_selfhost__cli_main` as the minimum
+hosted compiler CLI entry. A host launcher initializes process arguments with
+`kizu_host_init(argc, argv)`; the hosted runtime presents Kizu process args
+without the executable name, matching `std::process::arg(0)` in the interpreter.
+The hosted smoke links `selfhost.ll`, `selfhost.host.ll`, and
+`selfhost/runtime/selfhost.hosted.c`, then runs:
+
+```sh
+selfhost check selfhost
+selfhost stage selfhost
+```
+
+The check path reads `selfhost/kizu.toml`, reads `selfhost/src`, writes
+`check: ok` to stdout, and returns exit code `0` through the runtime process
+boundary. Unsupported commands write a deterministic stderr diagnostic and
+return exit code `64`. This is a runnable no-Go artifact smoke; broader stage
+comparison remains #459.
+
 ## Textual LLVM Validation
 
 Until CI requires an LLVM verifier binary, #454 uses this repository command as
@@ -296,6 +315,7 @@ The gate checks that `target/selfhost/selfhost.ll`:
   `@kizu_rt_fs_read_file`, `@kizu_rt_fs_write_file`,
   `@kizu_rt_fs_read_dir`, stdout/stderr, process, exit,
   `@kizu_rt_owned_deinit`, and `@kizu_rt_trap`
+- defines the hosted compiler CLI entry `@kizu_selfhost__cli_main`
 - defines the stable bootstrap entry symbol `@kizu_selfhost__smoke`
 
 The same gate checks that `target/selfhost/selfhost.ll.meta` records
@@ -322,6 +342,11 @@ from the repository root. The smoke reads `selfhost/kizu.toml`, reads
 `selfhost/src`, writes `target/selfhost/host-smoke.status`, writes stdout
 and stderr, reads process args/env, and returns an exit code through the hosted
 runtime boundary.
+
+For #458 the gate also links the generated compiler artifact itself with the
+host capability runtime and runs `@kizu_selfhost__cli_main` for the supported CLI
+contract. That validation proves the `check selfhost` user-visible path is
+reachable from the Kizu-built LLVM artifact without Go `cmd/kizu` dispatch.
 
 ## Unsupported Shapes Tracked By #495
 
