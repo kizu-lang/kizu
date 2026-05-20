@@ -392,6 +392,8 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 		value, err := c.qualifyExpr(module, s.Value)
 		cp.Value = value
 		return &cp, err
+	case *ast.AssignStmt:
+		return c.qualifyAssignStmt(module, s)
 	case *ast.ReturnStmt:
 		cp := *s
 		value, err := c.qualifyExpr(module, s.Value)
@@ -403,18 +405,7 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 		cp.Expr = expr
 		return &cp, err
 	case *ast.IfStmt:
-		cp := *s
-		condition, err := c.qualifyExpr(module, s.Condition)
-		if err != nil {
-			return nil, err
-		}
-		cp.Condition = condition
-		cp.Consequence, err = c.qualifyBlock(module, s.Consequence)
-		if err != nil {
-			return nil, err
-		}
-		cp.Alternative, err = c.qualifyBlock(module, s.Alternative)
-		return &cp, err
+		return c.qualifyIfStmt(module, s)
 	case *ast.WhileStmt:
 		cp := *s
 		condition, err := c.qualifyExpr(module, s.Condition)
@@ -424,11 +415,86 @@ func (c *graphChecker) qualifyStmt(module *moduleUnit, stmt ast.Statement) (ast.
 		cp.Condition = condition
 		cp.Body, err = c.qualifyBlock(module, s.Body)
 		return &cp, err
+	case *ast.ForStmt:
+		return c.qualifyForStmt(module, s)
 	case *ast.MatchStmt:
 		return c.qualifyMatchStmt(module, s)
+	case *ast.UnsafeStmt:
+		cp := *s
+		body, err := c.qualifyBlock(module, s.Body)
+		cp.Body = body
+		return &cp, err
+	case *ast.ComptimeIfStmt:
+		return c.qualifyComptimeIfStmt(module, s)
 	default:
 		return stmt, nil
 	}
+}
+
+// qualifyAssignStmt rewrites both sides of an assignment statement.
+func (c *graphChecker) qualifyAssignStmt(
+	module *moduleUnit,
+	stmt *ast.AssignStmt,
+) (*ast.AssignStmt, error) {
+	cp := *stmt
+	var err error
+	cp.Target, err = c.qualifyExpr(module, stmt.Target)
+	if err != nil {
+		return nil, err
+	}
+	cp.Value, err = c.qualifyExpr(module, stmt.Value)
+	return &cp, err
+}
+
+// qualifyIfStmt rewrites all expressions reachable from an if node.
+func (c *graphChecker) qualifyIfStmt(module *moduleUnit, stmt *ast.IfStmt) (*ast.IfStmt, error) {
+	cp := *stmt
+	condition, err := c.qualifyExpr(module, stmt.Condition)
+	if err != nil {
+		return nil, err
+	}
+	cp.Condition = condition
+	cp.Consequence, err = c.qualifyBlock(module, stmt.Consequence)
+	if err != nil {
+		return nil, err
+	}
+	cp.Alternative, err = c.qualifyBlock(module, stmt.Alternative)
+	return &cp, err
+}
+
+// qualifyForStmt rewrites range bounds and loop body expressions.
+func (c *graphChecker) qualifyForStmt(module *moduleUnit, stmt *ast.ForStmt) (*ast.ForStmt, error) {
+	cp := *stmt
+	var err error
+	cp.Start, err = c.qualifyExpr(module, stmt.Start)
+	if err != nil {
+		return nil, err
+	}
+	cp.End, err = c.qualifyExpr(module, stmt.End)
+	if err != nil {
+		return nil, err
+	}
+	cp.Body, err = c.qualifyBlock(module, stmt.Body)
+	return &cp, err
+}
+
+// qualifyComptimeIfStmt rewrites both branches of a compile-time conditional.
+func (c *graphChecker) qualifyComptimeIfStmt(
+	module *moduleUnit,
+	stmt *ast.ComptimeIfStmt,
+) (*ast.ComptimeIfStmt, error) {
+	cp := *stmt
+	condition, err := c.qualifyExpr(module, stmt.Condition)
+	if err != nil {
+		return nil, err
+	}
+	cp.Condition = condition
+	cp.Consequence, err = c.qualifyBlock(module, stmt.Consequence)
+	if err != nil {
+		return nil, err
+	}
+	cp.Alternative, err = c.qualifyBlock(module, stmt.Alternative)
+	return &cp, err
 }
 
 // qualifyMatchStmt rewrites the matched value and all arm bodies.
@@ -458,29 +524,18 @@ func (c *graphChecker) qualifyExpr(
 	expr ast.Expression,
 ) (ast.Expression, error) {
 	switch e := expr.(type) {
+	case *ast.ComptimeExpr:
+		return c.qualifyComptimeExpr(module, e)
 	case *ast.PrefixExpr:
-		cp := *e
-		right, err := c.qualifyExpr(module, e.Right)
-		cp.Right = right
-		return &cp, err
+		return c.qualifyPrefixExpr(module, e)
 	case *ast.BinaryExpr:
 		return c.qualifyBinaryExpr(module, e)
 	case *ast.CallExpr:
 		return c.qualifyCallExpr(module, e)
 	case *ast.CastExpr:
-		cp := *e
-		typ, err := c.resolveType(module, e.TargetType)
-		if err != nil {
-			return nil, err
-		}
-		cp.TargetType = typ
-		cp.Value, err = c.qualifyExpr(module, e.Value)
-		return &cp, err
+		return c.qualifyCastExpr(module, e)
 	case *ast.TryExpr:
-		cp := *e
-		value, err := c.qualifyExpr(module, e.Value)
-		cp.Value = value
-		return &cp, err
+		return c.qualifyTryExpr(module, e)
 	case *ast.TypeApplyExpr:
 		return c.qualifyTypeApplyExpr(module, e)
 	case *ast.ArenaNewExpr:
@@ -494,11 +549,37 @@ func (c *graphChecker) qualifyExpr(
 		return c.qualifyFieldExpr(module, e)
 	case *ast.IndexExpr:
 		return c.qualifyIndexExpr(module, e)
+	case *ast.DerefExpr:
+		return c.qualifyDerefExpr(module, e)
+	case *ast.IfStmt:
+		return c.qualifyIfStmt(module, e)
 	case *ast.MatchStmt:
 		return c.qualifyMatchStmt(module, e)
 	default:
 		return expr, nil
 	}
+}
+
+// qualifyComptimeExpr rewrites the expression evaluated at compile time.
+func (c *graphChecker) qualifyComptimeExpr(
+	module *moduleUnit,
+	expr *ast.ComptimeExpr,
+) (*ast.ComptimeExpr, error) {
+	cp := *expr
+	value, err := c.qualifyExpr(module, expr.Expr)
+	cp.Expr = value
+	return &cp, err
+}
+
+// qualifyPrefixExpr rewrites the operand of a unary expression.
+func (c *graphChecker) qualifyPrefixExpr(
+	module *moduleUnit,
+	expr *ast.PrefixExpr,
+) (*ast.PrefixExpr, error) {
+	cp := *expr
+	right, err := c.qualifyExpr(module, expr.Right)
+	cp.Right = right
+	return &cp, err
 }
 
 // qualifyBinaryExpr rewrites both sides of a binary expression.
@@ -513,6 +594,32 @@ func (c *graphChecker) qualifyBinaryExpr(
 		return nil, err
 	}
 	cp.Right, err = c.qualifyExpr(module, expr.Right)
+	return &cp, err
+}
+
+// qualifyCastExpr rewrites the target type and value of a cast expression.
+func (c *graphChecker) qualifyCastExpr(
+	module *moduleUnit,
+	expr *ast.CastExpr,
+) (*ast.CastExpr, error) {
+	cp := *expr
+	typ, err := c.resolveType(module, expr.TargetType)
+	if err != nil {
+		return nil, err
+	}
+	cp.TargetType = typ
+	cp.Value, err = c.qualifyExpr(module, expr.Value)
+	return &cp, err
+}
+
+// qualifyTryExpr rewrites the fallible expression wrapped by try.
+func (c *graphChecker) qualifyTryExpr(
+	module *moduleUnit,
+	expr *ast.TryExpr,
+) (*ast.TryExpr, error) {
+	cp := *expr
+	value, err := c.qualifyExpr(module, expr.Value)
+	cp.Value = value
 	return &cp, err
 }
 
@@ -634,6 +741,17 @@ func (c *graphChecker) qualifyIndexExpr(
 		return nil, err
 	}
 	cp.End, err = c.qualifyExpr(module, expr.End)
+	return &cp, err
+}
+
+// qualifyDerefExpr rewrites the receiver before explicit pointer dereference.
+func (c *graphChecker) qualifyDerefExpr(
+	module *moduleUnit,
+	expr *ast.DerefExpr,
+) (*ast.DerefExpr, error) {
+	cp := *expr
+	receiver, err := c.qualifyExpr(module, expr.Receiver)
+	cp.Receiver = receiver
 	return &cp, err
 }
 
