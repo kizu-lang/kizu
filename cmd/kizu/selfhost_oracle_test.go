@@ -36,6 +36,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostTypeOracle(t),
 		runSelfhostOwnershipOracle(t),
 		runSelfhostIRHandoffOracle(t),
+		runSelfhostIRArtifactOracle(t),
 	}
 	failures := 0
 	for _, result := range results {
@@ -266,6 +267,19 @@ func runSelfhostIRHandoffOracle(t *testing.T) selfhostOracleResult {
 	failures := countSelfhostIRHandoffGateFailures(t)
 	return selfhostOracleResult{
 		component: "ir-handoff",
+		corpus:    "selfhost",
+		scanned:   1,
+		compared:  1,
+		failures:  failures,
+	}
+}
+
+// runSelfhostIRArtifactOracle checks Kizu-owned IR artifact emission and backend read.
+func runSelfhostIRArtifactOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostIRArtifactGateFailures(t)
+	return selfhostOracleResult{
+		component: "ir-artifact",
 		corpus:    "selfhost",
 		scanned:   1,
 		compared:  1,

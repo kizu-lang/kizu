@@ -8,10 +8,59 @@ pub struct IrSummary {
     pub entry_points: i64;
 }
 
-pub fn lower(checked: ownership::CheckedPackage) -> IrSummary {
+pub struct IrArtifact {
+    pub ir_path: []const u8;
+    pub manifest_path: []const u8;
+    pub bytes: i64;
+    pub manifest_bytes: i64;
+}
+
+pub fn lower(checked: &ownership::CheckedPackage) -> IrSummary {
     return IrSummary {
         blocks: checked.checked_nodes,
         entry_points: 1
+    };
+}
+
+pub fn emit_selfhost_artifacts(
+    allocator: Allocator,
+    io: Io,
+    root: []const u8
+) -> !IrArtifact {
+    var files = try source::load_selfhost_sources(allocator, io, root);
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let checked = try ownership::check_package(allocator, files, typed);
+    try std::testing::expect_equal_i64(0, checked.diagnostics);
+    let lowered = lower(checked);
+
+    try ensure_selfhost_target(io);
+    var text = try render_ir_artifact(allocator, lowered, checked);
+    let text_view = text.as_bytes();
+    let byte_len = try write_artifact_bytes(
+        io,
+        "target/selfhost/selfhost.ir",
+        text_view,
+        text.len()
+    );
+    text.deinit();
+
+    var manifest = try render_shape_manifest(allocator);
+    let manifest_view = manifest.as_bytes();
+    let manifest_len = try write_artifact_bytes(
+        io,
+        "target/selfhost/selfhost.ir.manifest",
+        manifest_view,
+        manifest.len()
+    );
+    manifest.deinit();
+
+    files.deinit();
+    return IrArtifact {
+        ir_path: "target/selfhost/selfhost.ir",
+        manifest_path: "target/selfhost/selfhost.ir.manifest",
+        bytes: byte_len,
+        manifest_bytes: manifest_len
     };
 }
 
@@ -36,5 +85,86 @@ pub fn handoff_gate() -> !void {
     print(0);
 
     files.deinit();
+    return;
+}
+
+fn ensure_selfhost_target(io: Io) -> !void {
+    if !(try std::fs::exists(io, "target")) {
+        try std::fs::create_dir(io, "target");
+    }
+    if !(try std::fs::exists(io, "target/selfhost")) {
+        try std::fs::create_dir(io, "target/selfhost");
+    }
+    return;
+}
+
+fn write_artifact_bytes(
+    io: Io,
+    path: &[]const u8,
+    bytes: &[]const u8,
+    byte_len: i64
+) -> !i64 {
+    try std::fs::write_file(io, path, bytes);
+    return byte_len;
+}
+
+fn render_ir_artifact(
+    allocator: Allocator,
+    lowered: IrSummary,
+    checked: &ownership::CheckedPackage
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "kizu-ir-v0");
+    try append_line(out, "package selfhost");
+    try out.append_bytes("module ");
+    try out.append_bytes(checked.module.module);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry ");
+    try out.append_bytes(checked.entry_function.module);
+    try out.append_bytes("::");
+    try out.append_bytes(checked.entry_function.name);
+    try out.append_byte(cast<u8>(10));
+    if lowered.blocks > 0 {
+        try append_line(out, "blocks present");
+    }
+    if lowered.entry_points == 1 {
+        try append_line(out, "entry-points 1");
+    }
+    if checked.resources > 0 {
+        try append_line(out, "resources present");
+    }
+    if checked.borrows > 0 {
+        try append_line(out, "borrows present");
+    }
+    if checked.diagnostics == 0 {
+        try append_line(out, "diagnostics 0");
+    }
+    return out;
+}
+
+fn render_shape_manifest(allocator: Allocator) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "kizu-ir-shape-v0");
+    try append_line(out, "node-kind function");
+    try append_line(out, "node-kind block");
+    try append_line(out, "node-kind diagnostic");
+    try append_line(out, "value-type i64");
+    try append_line(out, "value-type bool");
+    try append_line(out, "value-type []const u8");
+    try append_line(out, "storage local");
+    try append_line(out, "storage owned-container");
+    try append_line(out, "storage borrowed-view");
+    try append_line(out, "call direct");
+    try append_line(out, "call std-primitive");
+    try append_line(out, "cleanup deinit");
+    try append_line(out, "external std::fs::read_file");
+    try append_line(out, "external std::fs::write_file");
+    try append_line(out, "external std::io::blocking");
+    return out;
+}
+
+fn append_line(out: &mut std::string::String, text: []const u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
     return;
 }
