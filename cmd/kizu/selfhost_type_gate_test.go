@@ -12,15 +12,15 @@ const selfhostTypeOracleOutput = `type-modules
 type-production-symbols
 98
 type-production-functions
-435
+464
 type-production-typed-nodes
-17292
+24531
 type-symbols
 9
 type-typed-nodes
 9
 type-diagnostics
-4
+8
 `
 
 // TestSelfhostTypeGate executes the Kizu-owned type checker oracle entry.
