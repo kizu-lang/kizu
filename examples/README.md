@@ -66,6 +66,7 @@ go test ./...
 | pure path helpers | `std_path.kizu` | joins and cleans paths with explicit allocator-backed output |
 | path edge cases | `std_path_edges.kizu` | covers root, empty path, repeated slash, parent segment, and extension behavior |
 | explicit-Io fs helpers | `std_fs_path.kizu` | checks existence, metadata, create_dir, and remove_dir |
+| explicit-Io directory read | `std_fs_read_dir.kizu` | lists deterministic directory entries |
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |

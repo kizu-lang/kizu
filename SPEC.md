@@ -1625,10 +1625,12 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
 * `std::fs::exists(io, path)` は `!bool` を返す
 * `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
+* `std::fs::read_dir(io, path)` は `!std::array::Array<std::fs::DirEntry>` を返す
 * `std::fs::create_dir(io, path)` は `!void` を返す
 * `std::fs::remove_dir(io, path)` は `!void` を返す
 * `std::fs::remove_file(io, path)` は `!void` を返す
 * `std::fs::Metadata` は v0.2 では `size: i64` と `is_dir: bool` だけを持つ
+* `std::fs::DirEntry` は v0.2 では `name: []const u8`、`path: []const u8`、`is_dir: bool` だけを持つ
 * `path` と `bytes` は caller 側の `[]const u8` を保持しない read-only borrow
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない

@@ -1,0 +1,102 @@
+import selfhost::source;
+
+pub fn gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+
+    var files = try source::load_selfhost_sources(allocator, io, "selfhost");
+    let manifest_sources = try source::count_kind(files, source::SourceKind::User);
+    let selfhost_sources = try source::count_kind(files, source::SourceKind::Selfhost);
+    let std_sources = try source::count_kind(files, source::SourceKind::Std);
+    let summary = source::summarize(
+        files.len(),
+        manifest_sources,
+        selfhost_sources,
+        std_sources,
+        0,
+        0
+    );
+    try std::testing::expect_equal_i64(32, summary.sources);
+    try std::testing::expect_equal_i64(1, summary.manifest_sources);
+    try std::testing::expect_equal_i64(18, summary.selfhost_sources);
+    try std::testing::expect_equal_i64(13, summary.std_sources);
+    try expect_source_files(files);
+
+    try expect_diagnostics(allocator);
+
+    print("source-files");
+    print(summary.sources);
+    print("source-selfhost");
+    print(summary.selfhost_sources);
+    print("source-std");
+    print(summary.std_sources);
+    print("source-diagnostics");
+    print(4);
+    print("source-related");
+    print(2);
+    files.deinit();
+    return;
+}
+
+fn expect_source_files(files: &std::array::Array<source::SourceFile>) -> !void {
+    let manifest = try files.at(0);
+    try std::testing::expect_equal_i64(0, manifest.id);
+    try std::testing::expect_equal_bytes("manifest", manifest.module);
+    try std::testing::expect_equal_bytes("selfhost/kizu.toml", manifest.path);
+
+    let first_source = try files.at(1);
+    try std::testing::expect_equal_i64(1, first_source.id);
+    try std::testing::expect_equal_bytes("ast", first_source.module);
+    try std::testing::expect_equal_bytes("selfhost/src/ast.kizu", first_source.path);
+
+    let first_std = try files.at(19);
+    try std::testing::expect_equal_bytes("mem", first_std.module);
+    try std::testing::expect_equal_bytes("std/src/mem.kizu", first_std.path);
+    return;
+}
+
+fn expect_diagnostics(allocator: Allocator) -> !void {
+    var missing = source::missing_file(allocator, "missing.kizu");
+    try expect_diagnostic(missing, "missing file", 0, 0, 0);
+
+    var invalid = source::invalid_manifest(allocator, "kizu.toml", 10, 18);
+    try expect_diagnostic(invalid, "invalid manifest", 10, 18, 0);
+
+    var duplicate = try source::duplicate_module(
+        allocator,
+        "src/main.kizu",
+        3,
+        7,
+        "src/lib.kizu",
+        1,
+        5
+    );
+    try expect_diagnostic(duplicate, "duplicate module", 3, 7, 1);
+
+    var cycle = try source::import_cycle(
+        allocator,
+        "src/a.kizu",
+        9,
+        15,
+        "src/b.kizu",
+        2,
+        8
+    );
+    try expect_diagnostic(cycle, "import cycle", 9, 15, 1);
+    return;
+}
+
+fn expect_diagnostic(
+    diagnostic: std::kizu::diagnostic::Diagnostic,
+    message: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    related: i64
+) -> !void {
+    try std::testing::expect_equal_bytes(message, diagnostic.message);
+    try std::testing::expect_equal_i64(byte_start, diagnostic.primary.byte_start);
+    try std::testing::expect_equal_i64(byte_end, diagnostic.primary.byte_end);
+    try std::testing::expect_equal_i64(related, diagnostic.related_len());
+    diagnostic.deinit();
+    return;
+}

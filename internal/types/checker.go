@@ -41,6 +41,7 @@ var knownTypes = map[Type]bool{
 	"Io":                  true,
 	"Allocator":           true,
 	"std::fs::Metadata":   true,
+	"std::fs::DirEntry":   true,
 	"std::string::String": true,
 	"TaskGroup":           true,
 	"Queue":               true,
@@ -82,6 +83,7 @@ var copyTypes = map[Type]bool{
 	"Io":                true,
 	"Allocator":         true,
 	"std::fs::Metadata": true,
+	"std::fs::DirEntry": true,
 }
 
 var signedNumericTypes = map[Type]bool{
@@ -3003,6 +3005,8 @@ func (c *Checker) checkFsBuiltin(
 		return c.checkFsExists(args, env, unsafe)
 	case "std.builtin.fs_metadata":
 		return c.checkFsMetadata(args, env, unsafe)
+	case "std.builtin.fs_read_dir":
+		return c.checkFsReadDir(args, env, unsafe)
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
 		return c.checkFsPathOnly(name, args, env, unsafe, "!void")
 	default:
@@ -3105,6 +3109,16 @@ func (c *Checker) checkFsMetadata(
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::metadata", args, env, unsafe)
 	return "!std::fs::Metadata", true, err
+}
+
+// checkFsReadDir validates std::fs::read_dir.
+func (c *Checker) checkFsReadDir(
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	_, _, err := c.checkFsPathArgs("std::fs::read_dir", args, env, unsafe)
+	return "!std::array::Array<std::fs::DirEntry>", true, err
 }
 
 // checkFsPathOnly validates an Io plus path API and returns result.
@@ -4231,6 +4245,9 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (
 	if receiver == "std::fs::Metadata" {
 		return checkFsMetadataField(expr.Name)
 	}
+	if receiver == "std::fs::DirEntry" {
+		return checkFsDirEntryField(expr.Name)
+	}
 	decl := c.structs[string(receiver)]
 	if decl == nil {
 		return "", fmt.Errorf("type error: `%s` has no fields", receiver)
@@ -4294,6 +4311,18 @@ func checkFsMetadataField(name string) (Type, error) {
 		return typeBool, nil
 	default:
 		return "", fmt.Errorf("type error: unknown field `std::fs::Metadata.%s`", name)
+	}
+}
+
+// checkFsDirEntryField returns builtin directory entry field types.
+func checkFsDirEntryField(name string) (Type, error) {
+	switch name {
+	case "name", "path":
+		return typeByteString, nil
+	case "is_dir":
+		return typeBool, nil
+	default:
+		return "", fmt.Errorf("type error: unknown field `std::fs::DirEntry.%s`", name)
 	}
 }
 

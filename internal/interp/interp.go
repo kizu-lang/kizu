@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1138,6 +1139,9 @@ func (i *Interpreter) evalFsBuiltin(
 	case "std.builtin.fs_metadata":
 		value, err := i.evalFsMetadata(args, env)
 		return value, true, err
+	case "std.builtin.fs_read_dir":
+		value, err := i.evalFsReadDir(args, env)
+		return value, true, err
 	case "std.builtin.fs_create_dir":
 		value, err := i.evalFsCreateDir(args, env)
 		return value, true, err
@@ -1306,6 +1310,30 @@ func (i *Interpreter) evalFsMetadata(args []ast.Expression, env *Env) (Value, er
 		"size":   intValue(info.Size()),
 		"is_dir": boolValue(info.IsDir()),
 	}), nil
+}
+
+// evalFsReadDir returns deterministic directory entries for a filesystem path.
+func (i *Interpreter) evalFsReadDir(args []ast.Expression, env *Env) (Value, error) {
+	ioValue, target, err := i.evalFsIoPath(args, env, "std::fs::read_dir")
+	if err != nil {
+		return voidValue(), err
+	}
+	if failure, ok := failingIoError(ioValue); ok {
+		return failure, nil
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return errorUnionValue(err.Error()), nil
+	}
+	out := arrayValue("std::fs::DirEntry")
+	for _, entry := range entries {
+		out.array.values = append(out.array.values, structValue("std::fs::DirEntry", map[string]Value{
+			"name":   stringValue(entry.Name()),
+			"path":   stringValue(filepath.Join(target, entry.Name())),
+			"is_dir": boolValue(entry.IsDir()),
+		}))
+	}
+	return out, nil
 }
 
 // evalFsCreateDir creates a directory and reports I/O failures as !void errors.
