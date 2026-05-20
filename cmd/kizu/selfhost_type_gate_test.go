@@ -10,9 +10,11 @@ import (
 const selfhostTypeOracleOutput = `type-modules
 31
 type-production-symbols
-97
+98
+type-production-functions
+435
 type-production-typed-nodes
-14128
+17292
 type-symbols
 9
 type-typed-nodes
