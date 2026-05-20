@@ -55,7 +55,7 @@ Measured locally on 2026-05-21 during #458 CLI work:
 
 | Command | Elapsed |
 | --- | ---: |
-| `just selfhost-oracle` | 83.5s |
+| `just selfhost-oracle` | 84.0s |
 
 ## Direct Heavyweight Gates
 
@@ -106,12 +106,26 @@ Bootstrap-oriented work uses:
 
 ```sh
 just selfhost-bootstrap-preflight
+just selfhost-bootstrap
 ```
 
-This runs the aggregate selfhost oracle once through `just selfhost-switch-gate`
-and then runs cache smoke coverage. It intentionally does not run
+The preflight runs the aggregate selfhost oracle once through
+`just selfhost-switch-gate` and then runs cache smoke coverage. It intentionally
+does not run
 `just selfhost-integration-gates` after the aggregate oracle, to avoid duplicate
 selfhost package loading, checking, and interpreted `RunEntry` execution.
+
+`just selfhost-bootstrap` is the #459 stage0-stage1-stage2 comparison runner. It
+uses the explicit stage0 bootstrap/oracle gate to build the supported selfhost
+artifact set, then links and runs stage1 and stage2 in hosted no-Go mode. It
+compares stdout/stderr/exit codes and deterministic SHA-256 artifact
+fingerprints, and writes `target/selfhost/reports/bootstrap.txt`.
+
+Measured locally on 2026-05-21 during #459 bootstrap runner work:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-bootstrap` | 61.4s |
 
 ## Cost Model
 

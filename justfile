@@ -43,6 +43,10 @@ selfhost-bootstrap-preflight:
     just selfhost-switch-gate
     just cache-smoke
 
+# Run the stage0-stage1-stage2 selfhost bootstrap comparison.
+selfhost-bootstrap:
+    KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
+
 # Install local git hooks.
 hooks:
     pre-commit install
