@@ -40,6 +40,9 @@ diagnostic summaries for parser-owned errors. Lower-level untyped lexer, parser,
 and container failures are explicitly adapted through typed error casts. Parser
 success gates compare the Arena + NodeId AST summary for every `selfhost/src`
 source file, and parser error gates keep recoverable `!T` failures readable.
+`std::kizu::ast::ParseResult` exposes helper methods for root/node/child access
+so later compiler phases can traverse parsed ASTs without moving the owned
+arena out of the parse result.
 
 The source manager boundary uses explicit `std::fs`, `std::path`, and `std::io`
 capabilities to load `kizu.toml`, `selfhost/src`, and the std sources required by
