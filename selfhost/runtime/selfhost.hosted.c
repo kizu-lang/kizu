@@ -1,0 +1,387 @@
+#include <dirent.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+typedef struct {
+    const uint8_t *ptr;
+    int64_t len;
+} kizu_slice_u8;
+
+typedef struct {
+    void *ptr;
+} kizu_owned;
+
+typedef struct {
+    int64_t size;
+    int is_dir;
+} kizu_fs_metadata;
+
+typedef struct {
+    uint8_t ok;
+    uint8_t value;
+    kizu_slice_u8 message;
+} kizu_error_bool;
+
+typedef struct {
+    uint8_t ok;
+    int64_t value;
+    kizu_slice_u8 message;
+} kizu_error_i64;
+
+typedef struct {
+    uint8_t ok;
+    kizu_owned value;
+    kizu_slice_u8 message;
+} kizu_error_owned;
+
+typedef struct {
+    uint8_t ok;
+    kizu_fs_metadata value;
+    kizu_slice_u8 message;
+} kizu_error_metadata;
+
+typedef struct {
+    uint8_t ok;
+    kizu_slice_u8 value;
+    kizu_slice_u8 message;
+} kizu_error_slice_u8;
+
+typedef struct {
+    uint8_t ok;
+    kizu_slice_u8 message;
+} kizu_error_void;
+
+static int kizu_argc;
+static char **kizu_argv;
+static uint8_t kizu_page_allocator_token;
+static uint8_t kizu_io_token;
+
+void kizu_host_init(int argc, char **argv) {
+    kizu_argc = argc;
+    kizu_argv = argv;
+}
+
+static kizu_slice_u8 borrowed_slice(const char *text) {
+    kizu_slice_u8 out;
+    out.ptr = (const uint8_t *)text;
+    out.len = (int64_t)strlen(text);
+    return out;
+}
+
+static kizu_slice_u8 copied_slice(const uint8_t *bytes, size_t len) {
+    uint8_t *copy = malloc(len == 0 ? 1 : len);
+    if (copy == NULL) {
+        return borrowed_slice("");
+    }
+    if (len > 0) {
+        memcpy(copy, bytes, len);
+    }
+    kizu_slice_u8 out;
+    out.ptr = copy;
+    out.len = (int64_t)len;
+    return out;
+}
+
+static char *slice_c_string(kizu_slice_u8 slice) {
+    size_t len = slice.len < 0 ? 0 : (size_t)slice.len;
+    char *out = malloc(len + 1);
+    if (out == NULL) {
+        return NULL;
+    }
+    if (len > 0) {
+        memcpy(out, slice.ptr, len);
+    }
+    out[len] = '\0';
+    return out;
+}
+
+static kizu_error_void ok_void(void) {
+    kizu_error_void out;
+    out.ok = 1;
+    out.message = borrowed_slice("");
+    return out;
+}
+
+static kizu_error_void error_void(const char *message) {
+    kizu_error_void out;
+    out.ok = 0;
+    out.message = borrowed_slice(message);
+    return out;
+}
+
+static kizu_error_slice_u8 error_slice(const char *message) {
+    kizu_error_slice_u8 out;
+    out.ok = 0;
+    out.value = borrowed_slice("");
+    out.message = borrowed_slice(message);
+    return out;
+}
+
+void *kizu_host_page_allocator(void) {
+    return &kizu_page_allocator_token;
+}
+
+void *kizu_host_io_blocking(void) {
+    return &kizu_io_token;
+}
+
+void *kizu_host_alloc(void *allocator, int64_t bytes) {
+    (void)allocator;
+    size_t size = bytes <= 0 ? 1 : (size_t)bytes;
+    return calloc(1, size);
+}
+
+void kizu_host_free(void *allocator, void *value) {
+    (void)allocator;
+    free(value);
+}
+
+void kizu_host_fs_exists(kizu_error_bool *out, void *io, kizu_slice_u8 path) {
+    (void)io;
+    char *name = slice_c_string(path);
+    out->ok = 1;
+    out->value = 0;
+    out->message = borrowed_slice("");
+    if (name == NULL) {
+        out->ok = 0;
+        out->message = borrowed_slice("allocation failed");
+        return;
+    }
+    struct stat info;
+    out->value = stat(name, &info) == 0;
+    free(name);
+    return;
+}
+
+void kizu_host_fs_metadata(kizu_error_metadata *out, void *io, kizu_slice_u8 path) {
+    (void)io;
+    char *name = slice_c_string(path);
+    out->ok = 0;
+    out->value.size = 0;
+    out->value.is_dir = 0;
+    out->message = borrowed_slice("stat failed");
+    if (name == NULL) {
+        out->message = borrowed_slice("allocation failed");
+        return;
+    }
+    struct stat info;
+    if (stat(name, &info) == 0) {
+        out->ok = 1;
+        out->value.size = (int64_t)info.st_size;
+        out->value.is_dir = S_ISDIR(info.st_mode);
+        out->message = borrowed_slice("");
+    }
+    free(name);
+    return;
+}
+
+void kizu_host_fs_read_dir(kizu_error_owned *out, void *io, kizu_slice_u8 path) {
+    (void)io;
+    char *name = slice_c_string(path);
+    out->ok = 0;
+    out->value.ptr = NULL;
+    out->message = borrowed_slice("read_dir failed");
+    if (name == NULL) {
+        out->message = borrowed_slice("allocation failed");
+        return;
+    }
+    DIR *dir = opendir(name);
+    if (dir == NULL) {
+        free(name);
+        return;
+    }
+    int64_t *count = calloc(1, sizeof(int64_t));
+    if (count == NULL) {
+        closedir(dir);
+        free(name);
+        out->message = borrowed_slice("allocation failed");
+        return;
+    }
+    while (readdir(dir) != NULL) {
+        *count = *count + 1;
+    }
+    closedir(dir);
+    free(name);
+    out->ok = 1;
+    out->value.ptr = count;
+    out->message = borrowed_slice("");
+    return;
+}
+
+void kizu_host_fs_read_file(kizu_error_slice_u8 *out, void *io, kizu_slice_u8 path) {
+    (void)io;
+    char *name = slice_c_string(path);
+    if (name == NULL) {
+        *out = error_slice("allocation failed");
+        return;
+    }
+    FILE *file = fopen(name, "rb");
+    free(name);
+    if (file == NULL) {
+        *out = error_slice("open failed");
+        return;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        *out = error_slice("seek failed");
+        return;
+    }
+    long size = ftell(file);
+    if (size < 0 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        *out = error_slice("tell failed");
+        return;
+    }
+    uint8_t *buffer = malloc((size_t)size == 0 ? 1 : (size_t)size);
+    if (buffer == NULL) {
+        fclose(file);
+        *out = error_slice("allocation failed");
+        return;
+    }
+    size_t read = fread(buffer, 1, (size_t)size, file);
+    fclose(file);
+    if (read != (size_t)size) {
+        free(buffer);
+        *out = error_slice("read failed");
+        return;
+    }
+    out->ok = 1;
+    out->value.ptr = buffer;
+    out->value.len = (int64_t)read;
+    out->message = borrowed_slice("");
+    return;
+}
+
+void kizu_host_fs_write_file(
+    kizu_error_void *out,
+    void *io,
+    kizu_slice_u8 path,
+    kizu_slice_u8 bytes
+) {
+    (void)io;
+    char *name = slice_c_string(path);
+    if (name == NULL) {
+        *out = error_void("allocation failed");
+        return;
+    }
+    FILE *file = fopen(name, "wb");
+    free(name);
+    if (file == NULL) {
+        *out = error_void("open failed");
+        return;
+    }
+    size_t len = bytes.len < 0 ? 0 : (size_t)bytes.len;
+    size_t written = fwrite(bytes.ptr, 1, len, file);
+    fclose(file);
+    if (written != len) {
+        *out = error_void("write failed");
+        return;
+    }
+    *out = ok_void();
+    return;
+}
+
+void kizu_host_fs_create_dir(kizu_error_void *out, void *io, kizu_slice_u8 path) {
+    (void)io;
+    char *name = slice_c_string(path);
+    if (name == NULL) {
+        *out = error_void("allocation failed");
+        return;
+    }
+    int status = mkdir(name, 0755);
+    int saved_errno = errno;
+    free(name);
+    if (status == 0 || saved_errno == EEXIST) {
+        *out = ok_void();
+        return;
+    }
+    *out = error_void("mkdir failed");
+    return;
+}
+
+void kizu_host_fs_rename(
+    kizu_error_void *out,
+    void *io,
+    kizu_slice_u8 from,
+    kizu_slice_u8 to
+) {
+    (void)io;
+    char *from_name = slice_c_string(from);
+    char *to_name = slice_c_string(to);
+    if (from_name == NULL || to_name == NULL) {
+        free(from_name);
+        free(to_name);
+        *out = error_void("allocation failed");
+        return;
+    }
+    int status = rename(from_name, to_name);
+    free(from_name);
+    free(to_name);
+    *out = status == 0 ? ok_void() : error_void("rename failed");
+    return;
+}
+
+void kizu_host_io_write_stdout(kizu_error_void *out, void *io, kizu_slice_u8 bytes) {
+    (void)io;
+    size_t len = bytes.len < 0 ? 0 : (size_t)bytes.len;
+    *out = fwrite(bytes.ptr, 1, len, stdout) == len ? ok_void() : error_void("stdout failed");
+    return;
+}
+
+void kizu_host_io_write_stderr(kizu_error_void *out, void *io, kizu_slice_u8 bytes) {
+    (void)io;
+    size_t len = bytes.len < 0 ? 0 : (size_t)bytes.len;
+    *out = fwrite(bytes.ptr, 1, len, stderr) == len ? ok_void() : error_void("stderr failed");
+    return;
+}
+
+int64_t kizu_host_process_arg_count(void) {
+    return (int64_t)kizu_argc;
+}
+
+void kizu_host_process_arg(kizu_error_slice_u8 *out, int64_t index) {
+    if (index < 0 || index >= kizu_argc || kizu_argv == NULL) {
+        *out = error_slice("process arg index out of bounds");
+        return;
+    }
+    out->ok = 1;
+    out->value = borrowed_slice(kizu_argv[index]);
+    out->message = borrowed_slice("");
+    return;
+}
+
+void kizu_host_process_env(kizu_error_slice_u8 *out, kizu_slice_u8 name) {
+    char *key = slice_c_string(name);
+    if (key == NULL) {
+        *out = error_slice("allocation failed");
+        return;
+    }
+    char *value = getenv(key);
+    free(key);
+    if (value == NULL) {
+        *out = error_slice("environment variable not found");
+        return;
+    }
+    out->ok = 1;
+    out->value = borrowed_slice(value);
+    out->message = borrowed_slice("");
+    return;
+}
+
+int64_t kizu_host_process_exit_code(int64_t code) {
+    return code;
+}
+
+void kizu_host_process_exit(int64_t code) {
+    exit((int)code);
+}
+
+void kizu_host_trap(kizu_slice_u8 message) {
+    size_t len = message.len < 0 ? 0 : (size_t)message.len;
+    fwrite(message.ptr, 1, len, stderr);
+    exit(1);
+}

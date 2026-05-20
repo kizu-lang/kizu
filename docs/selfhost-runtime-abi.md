@@ -262,10 +262,12 @@ target/selfhost/selfhost.host.ll.meta
 ```
 
 The host artifact defines the `@kizu_rt_*` symbols consumed by the selfhost
-compiler artifact and delegates to lower-level `@kizu_host_*` imports. Those
-imports are the only allowed OS boundary for the first bootstrap path. Metadata
-must include `go-stdprim-host none`, `interpreter-host none`, and explicit
-allocator, filesystem, process, stdout, stderr, and exit boundaries.
+compiler artifact and delegates to lower-level `@kizu_host_*` imports. The
+hosted implementation for those imports lives in
+`selfhost/runtime/selfhost.hosted.c`. Those imports are the only allowed OS
+boundary for the first bootstrap path. Metadata must include `go-stdprim-host
+none`, `interpreter-host none`, and explicit allocator, filesystem, process,
+stdout, stderr, and exit boundaries.
 
 The current bootstrap comparison is artifact-only before external linking, so
 process spawn/wait is deferred to #459 unless that issue chooses a hosted linker
@@ -314,7 +316,12 @@ For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
 `target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper
 symbols, the `@kizu_selfhost__host_capability_smoke` entry, explicit host
 boundary metadata, and the absence of Go interpreter/stdprim fallback markers
-for host access.
+for host access. The gate also links `selfhost.host.ll` with
+`selfhost/runtime/selfhost.hosted.c` and a tiny C harness, then runs the smoke
+from the repository root. The smoke reads `selfhost/kizu.toml`, reads
+`selfhost/src`, writes `target/selfhost/host-smoke.status`, writes stdout
+and stderr, reads process args/env, and returns an exit code through the hosted
+runtime boundary.
 
 ## Unsupported Shapes Tracked By #495
 
