@@ -37,6 +37,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostOwnershipOracle(t),
 		runSelfhostIRHandoffOracle(t),
 		runSelfhostIRArtifactOracle(t),
+		runSelfhostBackendArtifactOracle(t),
 	}
 	failures := 0
 	for _, result := range results {
@@ -280,6 +281,19 @@ func runSelfhostIRArtifactOracle(t *testing.T) selfhostOracleResult {
 	failures := countSelfhostIRArtifactGateFailures(t)
 	return selfhostOracleResult{
 		component: "ir-artifact",
+		corpus:    "selfhost",
+		scanned:   1,
+		compared:  1,
+		failures:  failures,
+	}
+}
+
+// runSelfhostBackendArtifactOracle checks Kizu-owned LLVM artifact emission.
+func runSelfhostBackendArtifactOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostBackendArtifactGateFailures(t)
+	return selfhostOracleResult{
+		component: "backend-artifact",
 		corpus:    "selfhost",
 		scanned:   1,
 		compared:  1,

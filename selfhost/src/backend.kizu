@@ -4,6 +4,13 @@ pub struct BackendSummary {
     pub artifacts: i64;
 }
 
+pub struct LlvmArtifact {
+    pub ll_path: []const u8;
+    pub metadata_path: []const u8;
+    pub bytes: i64;
+    pub metadata_bytes: i64;
+}
+
 pub fn summarize(program_ir: ir::IrSummary) -> BackendSummary {
     return BackendSummary {
         artifacts: program_ir.blocks
@@ -18,4 +25,200 @@ pub fn consume_ir_artifact(io: Io, path: &[]const u8) -> !BackendSummary {
     return BackendSummary {
         artifacts: std::mem::len(bytes)
     };
+}
+
+pub fn emit_llvm_artifact(
+    allocator: Allocator,
+    io: Io,
+    ir_path: []const u8,
+    manifest_path: []const u8
+) -> !LlvmArtifact {
+    let ir_bytes = try std::fs::read_file(io, ir_path);
+    try validate_ir_artifact(ir_bytes);
+
+    let manifest_bytes = try std::fs::read_file(io, manifest_path);
+    try validate_shape_manifest(manifest_bytes);
+
+    var module = try render_llvm_module(allocator, ir_path);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        "target/selfhost/selfhost.ll",
+        module_view,
+        module.len()
+    );
+    module.deinit();
+
+    var metadata = try render_llvm_metadata(allocator, ir_path, manifest_path);
+    let metadata_view = metadata.as_bytes();
+    let metadata_len = try write_backend_bytes(
+        io,
+        "target/selfhost/selfhost.ll.meta",
+        metadata_view,
+        metadata.len()
+    );
+    metadata.deinit();
+
+    return LlvmArtifact {
+        ll_path: "target/selfhost/selfhost.ll",
+        metadata_path: "target/selfhost/selfhost.ll.meta",
+        bytes: module_len,
+        metadata_bytes: metadata_len
+    };
+}
+
+fn validate_ir_artifact(bytes: []const u8) -> !void {
+    if !std::mem::starts_with(bytes, "kizu-ir-v0") {
+        return error("invalid IR artifact");
+    }
+    if !bytes_contains(bytes, "package selfhost") {
+        return error("unsupported IR artifact package");
+    }
+    return;
+}
+
+fn validate_shape_manifest(bytes: []const u8) -> !void {
+    if !std::mem::starts_with(bytes, "kizu-ir-shape-v0") {
+        return error("invalid IR shape manifest");
+    }
+    try require_shape(bytes, "node-kind function");
+    try require_shape(bytes, "node-kind block");
+    try require_shape(bytes, "node-kind diagnostic");
+    try require_shape(bytes, "value-type i64");
+    try require_shape(bytes, "value-type bool");
+    try require_shape(bytes, "value-type []const u8");
+    try require_shape(bytes, "storage local");
+    try require_shape(bytes, "storage owned-container");
+    try require_shape(bytes, "storage borrowed-view");
+    try require_shape(bytes, "call direct");
+    try require_shape(bytes, "call std-primitive");
+    try require_shape(bytes, "cleanup deinit");
+    try require_shape(bytes, "external std::fs::read_file");
+    try require_shape(bytes, "external std::fs::write_file");
+    try require_shape(bytes, "external std::io::blocking");
+    // New manifest lines are backend blockers until the ABI contract is extended.
+    if std::mem::len(bytes) != 316 {
+        return error("unsupported IR shape manifest");
+    }
+    return;
+}
+
+fn require_shape(bytes: []const u8, shape: []const u8) -> !void {
+    if !bytes_contains(bytes, shape) {
+        return error("unsupported IR shape manifest");
+    }
+    return;
+}
+
+fn write_backend_bytes(
+    io: Io,
+    path: &[]const u8,
+    bytes: &[]const u8,
+    byte_len: i64
+) -> !i64 {
+    try std::fs::write_file(io, path, bytes);
+    return byte_len;
+}
+
+fn render_llvm_module(
+    allocator: Allocator,
+    ir_path: []const u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "; kizu selfhost bootstrap ll v0");
+    try out.append_bytes("source_filename = ");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(ir_path);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "");
+    try append_line(out, "%kizu.slice.u8 = type { ptr, i64 }");
+    try append_line(out, "%kizu.owned = type { ptr }");
+    try append_line(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
+    try append_line(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
+    try append_line(out, "");
+    try append_line(out, "declare %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out,
+        "declare %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8)");
+    try append_line(out, "declare void @kizu_rt_owned_deinit(%kizu.owned)");
+    try append_line(out, "declare void @kizu_rt_trap(%kizu.slice.u8) noreturn");
+    try append_line(out, "");
+    try append_line(out, "define i64 @kizu_selfhost__smoke() {");
+    try append_line(out, "entry:");
+    try append_line(out, "  ret i64 0");
+    try append_line(out, "}");
+    return out;
+}
+
+fn render_llvm_metadata(
+    allocator: Allocator,
+    ir_path: []const u8,
+    manifest_path: []const u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "kizu-llvm-artifact-v0");
+    try append_line(out, "abi selfhost-abi-v0");
+    try append_key_value(out, "ir ", ir_path);
+    try append_key_value(out, "manifest ", manifest_path);
+    try append_line(out, "output target/selfhost/selfhost.ll");
+    try append_line(out, "validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate");
+    try append_line(out, "external @kizu_rt_io_blocking");
+    try append_line(out, "external @kizu_rt_fs_read_file");
+    try append_line(out, "external @kizu_rt_fs_write_file");
+    try append_line(out, "external @kizu_rt_owned_deinit");
+    try append_line(out, "external @kizu_rt_trap");
+    try append_line(out, "unsupported-policy blocker");
+    return out;
+}
+
+fn append_key_value(
+    out: &mut std::string::String,
+    key: []const u8,
+    value: []const u8
+) -> !void {
+    try out.append_bytes(key);
+    try out.append_bytes(value);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_line(out: &mut std::string::String, text: []const u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn bytes_contains(bytes: []const u8, needle: []const u8) -> bool {
+    let byte_len = std::mem::len(bytes);
+    let needle_len = std::mem::len(needle);
+    if needle_len == 0 {
+        return true;
+    }
+    if needle_len > byte_len {
+        return false;
+    }
+
+    var index = 0;
+    let last_start = byte_len - needle_len;
+    while index <= last_start {
+        if bytes_match_at(bytes, needle, index) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn bytes_match_at(bytes: []const u8, needle: []const u8, start: i64) -> bool {
+    var index = 0;
+    let needle_len = std::mem::len(needle);
+    while index < needle_len {
+        if bytes[start + index] != needle[index] {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
 }

@@ -158,6 +158,32 @@ implementation. A value that needs cleanup but lacks a listed hook is unsupporte
 The first argument is the explicit `Io` capability. The runtime must not use a
 hidden global default capability.
 
+## Textual LLVM Validation
+
+Until CI requires an LLVM verifier binary, #454 uses this repository command as
+the documented textual-IR validation gate:
+
+```sh
+go test ./cmd/kizu -run TestSelfhostBackendArtifactGate
+```
+
+The gate checks that `target/selfhost/selfhost.ll`:
+
+- starts with the `; kizu selfhost bootstrap ll v0` marker
+- records `target/selfhost/selfhost.ir` as `source_filename`
+- defines `%kizu.slice.u8`, `%kizu.owned`, `%kizu.error.slice.u8`, and
+  `%kizu.error.void`
+- declares all unresolved runtime symbols used by the bootstrap artifact:
+  `@kizu_rt_io_blocking`, `@kizu_rt_fs_read_file`,
+  `@kizu_rt_fs_write_file`, `@kizu_rt_owned_deinit`, and `@kizu_rt_trap`
+- defines the stable bootstrap entry symbol `@kizu_selfhost__smoke`
+
+The same gate checks that `target/selfhost/selfhost.ll.meta` records
+`selfhost-abi-v0`, the source IR path, the shape manifest path, the output path,
+the validation command, each unresolved external, and the blocker policy for
+unsupported shapes. This metadata is a stable input for the #459 stage
+comparison.
+
 ## Unsupported Shapes Tracked By #495
 
 The following are intentionally outside `selfhost-abi-v0`:
