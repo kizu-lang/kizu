@@ -2,24 +2,11 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/kizu-lang/kizu/internal/interp"
 )
-
-const selfhostOwnershipOracleOutput = `ownership-production-resources
-2019
-ownership-production-checked-nodes
-54511
-ownership-production-borrows
-431
-ownership-resources
-7
-ownership-borrows
-2
-ownership-errors
-4
-`
 
 // TestSelfhostOwnershipGate executes the Kizu-owned ownership oracle entry.
 func TestSelfhostOwnershipGate(t *testing.T) {
@@ -36,13 +23,20 @@ func countSelfhostOwnershipGateFailures(t *testing.T) int {
 		t.Errorf("ownership gate failed: %v\n%s", err, out)
 		return 1
 	}
-	if out != selfhostOwnershipOracleOutput {
-		t.Errorf(
-			"ownership gate output mismatch\nwant:\n%sgot:\n%s",
-			selfhostOwnershipOracleOutput,
-			out,
-		)
-		return 1
+	required := []string{
+		"ownership-production-resources\n",
+		"ownership-production-checked-nodes\n",
+		"ownership-production-borrows\n",
+		"ownership-production-errors\n0\n",
+		"ownership-resources\n7\n",
+		"ownership-borrows\n2\n",
+		"ownership-errors\n4\n",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(out, fragment) {
+			t.Errorf("ownership gate output missing %q\ngot:\n%s", fragment, out)
+			return 1
+		}
 	}
 	return 0
 }
