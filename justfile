@@ -47,6 +47,15 @@ selfhost-bootstrap-preflight:
 selfhost-bootstrap:
     KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
 
+# Run the supported corpus through the hosted selfhost artifact.
+selfhost-corpus-gate:
+    KIZU_RUN_SELFHOST_CORPUS=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostSupportedCorpusGate$' -count=1 -v
+
+# Build the hosted artifact once, then run the supported corpus.
+selfhost-corpus-gate-from-scratch:
+    just selfhost-bootstrap
+    just selfhost-corpus-gate
+
 # Install local git hooks.
 hooks:
     pre-commit install

@@ -302,6 +302,19 @@ through the explicit filesystem runtime boundary. This is the supported
 bootstrap subset until later issues replace the artifact materialization path
 with a broader selfhost backend.
 
+For #460, the hosted CLI also accepts the manifest-selected corpus checks:
+
+```sh
+selfhost check examples/hello.kizu
+selfhost check examples/negative/moved_value.kizu
+```
+
+These targets exist only for the supported corpus manifest in
+`selfhost/tests/supported-corpus.tsv`. They verify user-visible stdout, stderr,
+and exit-code behavior through the hosted artifact. Broad CLI parity, broad
+example/conformance coverage, and unsupported ABI shapes remain blocked by #497
+and #495.
+
 ## Textual LLVM Validation
 
 Until CI requires an LLVM verifier binary, #454 uses this repository command as

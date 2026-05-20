@@ -127,6 +127,38 @@ Measured locally on 2026-05-21 during #459 bootstrap runner work:
 | --- | ---: |
 | `just selfhost-bootstrap` | 61.4s |
 
+## Supported Corpus Gate
+
+The #460 supported corpus gate uses the hosted stage2 artifact produced by the
+bootstrap runner:
+
+```sh
+just selfhost-bootstrap
+just selfhost-corpus-gate
+```
+
+`just selfhost-corpus-gate` intentionally does not call
+`runSelfhostBootstrap` internally. It requires
+`target/selfhost/stage2/selfhost` plus a passing
+`target/selfhost/reports/bootstrap.txt` report, then runs only the active
+manifest rows from `selfhost/tests/supported-corpus.tsv`.
+
+Measured locally on 2026-05-21 during #460:
+
+| Command | Elapsed |
+| --- | ---: |
+| initial `TestSelfhostSupportedCorpusGate` with embedded bootstrap | 60.6s |
+| corpus execution inside that report | 9ms |
+| `just selfhost-corpus-gate` after bootstrap separation | 0.36s |
+| `just selfhost-corpus-gate-from-scratch` | 61.2s |
+
+The 60s path was not caused by corpus size. It came from rebuilding and running
+the stage0-stage1-stage2 bootstrap inside the corpus test. Profiling that path
+showed the same interpreter-heavy bootstrap cost as the direct backend artifact
+gate: CPU samples were dominated by interpreter evaluation, allocation/copying,
+and GC, with allocation profile top entries in `internal/interp.(*Env).Define`,
+`evalStructLiteralExpr`, `NewEnv`, and `qualifiedName`.
+
 ## Cost Model
 
 The heavyweight gates are slow because each direct gate performs this full

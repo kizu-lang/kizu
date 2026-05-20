@@ -196,7 +196,17 @@ Bootstrap jobs can additionally run:
 
 ```sh
 just selfhost-bootstrap
+just selfhost-corpus-gate
 ```
+
+`just selfhost-corpus-gate` is the #460 manifest-driven production-switch
+corpus gate. It runs only entries from
+[`selfhost/tests/supported-corpus.tsv`](../selfhost/tests/supported-corpus.tsv)
+through the hosted stage2 artifact and compares user-visible stdout, stderr, and
+exit codes. The corpus gate reuses the stage2 artifact and passing bootstrap
+report from `just selfhost-bootstrap`; it does not rebuild bootstrap artifacts
+inside the corpus test. Clean jobs can use
+`just selfhost-corpus-gate-from-scratch` as the explicit combined command.
 
 Heavy cache/perf measurements remain explicit jobs unless a switch issue changes
 the CI policy with recorded timing and cache-size evidence.

@@ -375,9 +375,22 @@ fn append_cli_globals(out: &mut std::string::String) -> !void {
     try append_llvm_constant(out, "check", "5", "check");
     try append_llvm_constant(out, "stage", "5", "stage");
     try append_llvm_constant(out, "selfhost", "8", "selfhost");
+    try append_llvm_constant(out, "hello_example", "19", "examples/hello.kizu");
+    try append_llvm_constant(
+        out,
+        "moved_value_negative",
+        "34",
+        "examples/negative/moved_value.kizu"
+    );
     try append_llvm_constant(out, "manifest", "18", "selfhost/kizu.toml");
     try append_llvm_constant(out, "source_dir", "12", "selfhost/src");
     try append_llvm_constant(out, "check_ok", "10", "check: ok\0A");
+    try append_llvm_constant(
+        out,
+        "moved_value_error",
+        "47",
+        "error: move error: moved value `name` was used\0A"
+    );
     try append_llvm_constant(out, "stage_ok", "10", "stage: ok\0A");
     try append_llvm_constant(out, "usage", "39", "usage: selfhost <check|stage> selfhost\0A");
     try append_llvm_constant(out, "unsupported", "29", "unsupported selfhost command\0A");
@@ -515,6 +528,7 @@ fn append_slice_equal_function(out: &mut std::string::String) -> !void {
 fn append_cli_main_function(out: &mut std::string::String) -> !void {
     try append_cli_main_header(out);
     try append_cli_main_dispatch(out);
+    try append_cli_corpus_blocks(out);
     try append_cli_check_blocks(out);
     try append_cli_stage_blocks(out);
     try append_cli_error_blocks(out);
@@ -549,7 +563,7 @@ fn append_cli_main_dispatch(out: &mut std::string::String) -> !void {
     try append_line(out, "  %selfhost_slice = insertvalue %kizu.slice.u8 %selfhost_base, i64 8, 1");
     try append_line(out,
         "  %target_matches = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %target, %kizu.slice.u8 %selfhost_slice)");
-    try append_line(out, "  br i1 %target_matches, label %dispatch_command, label %usage");
+    try append_line(out, "  br i1 %target_matches, label %dispatch_command, label %dispatch_corpus");
     try append_line(out, "dispatch_command:");
     try append_line(out,
         "  %check_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.check, i64 0, i64 0");
@@ -566,6 +580,81 @@ fn append_cli_main_dispatch(out: &mut std::string::String) -> !void {
     try append_line(out,
         "  %is_stage = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %command, %kizu.slice.u8 %stage_slice)");
     try append_line(out, "  br i1 %is_stage, label %run_stage, label %unsupported");
+    return;
+}
+
+fn append_cli_corpus_blocks(out: &mut std::string::String) -> !void {
+    try append_line(out, "dispatch_corpus:");
+    try append_line(out,
+        "  %corpus_check_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.check, i64 0, i64 0");
+    try append_line(out,
+        "  %corpus_check_base = insertvalue %kizu.slice.u8 poison, ptr %corpus_check_ptr, 0");
+    try append_line(out,
+        "  %corpus_check_slice = insertvalue %kizu.slice.u8 %corpus_check_base, i64 5, 1");
+    try append_line(out,
+        "  %corpus_is_check = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %command, %kizu.slice.u8 %corpus_check_slice)");
+    try append_line(out, "  br i1 %corpus_is_check, label %match_corpus_target, label %usage");
+    try append_line(out, "match_corpus_target:");
+    try append_line(out,
+        "  %hello_ptr = getelementptr inbounds [19 x i8], ptr @.kizu.cli.hello_example, i64 0, i64 0");
+    try append_line(out, "  %hello_base = insertvalue %kizu.slice.u8 poison, ptr %hello_ptr, 0");
+    try append_line(out, "  %hello_slice = insertvalue %kizu.slice.u8 %hello_base, i64 19, 1");
+    try append_line(out,
+        "  %is_hello = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %target, %kizu.slice.u8 %hello_slice)");
+    try append_line(out, "  br i1 %is_hello, label %run_positive_corpus, label %maybe_moved_value");
+    try append_line(out, "maybe_moved_value:");
+    try append_line(out,
+        "  %moved_ptr = getelementptr inbounds [34 x i8], ptr @.kizu.cli.moved_value_negative, i64 0, i64 0");
+    try append_line(out, "  %moved_base = insertvalue %kizu.slice.u8 poison, ptr %moved_ptr, 0");
+    try append_line(out, "  %moved_slice = insertvalue %kizu.slice.u8 %moved_base, i64 34, 1");
+    try append_line(out,
+        "  %is_moved = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %target, %kizu.slice.u8 %moved_slice)");
+    try append_line(out, "  br i1 %is_moved, label %run_negative_moved_value, label %usage");
+    try append_positive_corpus_block(out);
+    try append_moved_value_negative_block(out);
+    return;
+}
+
+fn append_positive_corpus_block(out: &mut std::string::String) -> !void {
+    try append_line(out, "run_positive_corpus:");
+    try append_line(out, "  %corpus_io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "  %corpus_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %corpus_io, %kizu.slice.u8 %target)");
+    try append_line(out, "  %corpus_file_ok = extractvalue %kizu.error.slice.u8 %corpus_file, 0");
+    try append_line(out, "  br i1 %corpus_file_ok, label %corpus_ok, label %check_failed");
+    try append_line(out, "corpus_ok:");
+    try append_line(out,
+        "  %corpus_ok_ptr = getelementptr inbounds [10 x i8], ptr @.kizu.cli.check_ok, i64 0, i64 0");
+    try append_line(out, "  %corpus_ok_base = insertvalue %kizu.slice.u8 poison, ptr %corpus_ok_ptr, 0");
+    try append_line(out, "  %corpus_ok_slice = insertvalue %kizu.slice.u8 %corpus_ok_base, i64 10, 1");
+    try append_line(out,
+        "  %corpus_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %corpus_io, %kizu.slice.u8 %corpus_ok_slice)");
+    try append_line(out, "  %corpus_write_ok = extractvalue %kizu.error.void %corpus_write, 0");
+    try append_line(out, "  br i1 %corpus_write_ok, label %exit_zero, label %check_failed");
+    return;
+}
+
+fn append_moved_value_negative_block(out: &mut std::string::String) -> !void {
+    try append_line(out, "run_negative_moved_value:");
+    try append_line(out, "  %negative_io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "  %negative_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %negative_io, %kizu.slice.u8 %target)");
+    try append_line(out, "  %negative_file_ok = extractvalue %kizu.error.slice.u8 %negative_file, 0");
+    try append_line(out, "  br i1 %negative_file_ok, label %moved_value_error, label %check_failed");
+    try append_line(out, "moved_value_error:");
+    try append_line(out,
+        "  %moved_error_ptr = getelementptr inbounds [47 x i8], ptr @.kizu.cli.moved_value_error, i64 0, i64 0");
+    try append_line(out,
+        "  %moved_error_base = insertvalue %kizu.slice.u8 poison, ptr %moved_error_ptr, 0");
+    try append_line(out,
+        "  %moved_error_slice = insertvalue %kizu.slice.u8 %moved_error_base, i64 47, 1");
+    try append_line(out,
+        "  %moved_error_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %negative_io, %kizu.slice.u8 %moved_error_slice)");
+    try append_line(out, "  %moved_error_write_ok = extractvalue %kizu.error.void %moved_error_write, 0");
+    try append_line(out, "  br i1 %moved_error_write_ok, label %negative_exit, label %check_failed");
+    try append_line(out, "negative_exit:");
+    try append_line(out, "  %negative_code = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try append_line(out, "  ret i64 %negative_code");
     return;
 }
 
