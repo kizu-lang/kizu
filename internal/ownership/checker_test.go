@@ -81,12 +81,12 @@ fn main() {
 	}
 }
 
-// TestCheckAllowsLifetimeBorrowReturns keeps returned borrows tied to local owners.
-func TestCheckAllowsLifetimeBorrowReturns(t *testing.T) {
-	source := `fn shared<'a>(value: &'a i64) -> &'a i64 {
+// TestCheckAllowsBorrowProvenanceReturns keeps returned borrows tied to local owners.
+func TestCheckAllowsBorrowProvenanceReturns(t *testing.T) {
+	source := `fn shared(value: &i64) -> &i64 borrows value {
     return value;
 }
-fn mutable<'a>(value: &'a mut i64) -> &'a mut i64 {
+fn mutable(value: &mut i64) -> &mut i64 borrows value {
     return value;
 }
 fn main() {
@@ -102,8 +102,8 @@ fn main() {
 	}
 }
 
-// TestCheckRejectsLifetimeBorrowReturnConflicts checks parent restrictions stay local.
-func TestCheckRejectsLifetimeBorrowReturnConflicts(t *testing.T) {
+// TestCheckRejectsBorrowProvenanceReturnConflicts checks parent restrictions stay local.
+func TestCheckRejectsBorrowProvenanceReturnConflicts(t *testing.T) {
 	cases := []struct {
 		name   string
 		source string
@@ -111,7 +111,7 @@ func TestCheckRejectsLifetimeBorrowReturnConflicts(t *testing.T) {
 	}{
 		{
 			name: "assign while shared return live",
-			source: `fn shared<'a>(value: &'a i64) -> &'a i64 {
+			source: `fn shared(value: &i64) -> &i64 borrows value {
     return value;
 }
 fn main() {
@@ -124,7 +124,7 @@ fn main() {
 		},
 		{
 			name: "read while mutable return live",
-			source: `fn mutable<'a>(value: &'a mut i64) -> &'a mut i64 {
+			source: `fn mutable(value: &mut i64) -> &mut i64 borrows value {
     return value;
 }
 fn main() {

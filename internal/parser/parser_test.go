@@ -507,17 +507,17 @@ func TestParseTry(t *testing.T) {
 	}
 }
 
-// TestParseExplicitLifetime checks lifetime-qualified borrow and slice syntax.
-func TestParseExplicitLifetime(t *testing.T) {
-	input := `fn show<'a>(s: &'a []'a const u8) -> []'a const u8 {
-    return s.*;
+// TestParseBorrowReturnProvenance checks borrowed-return provenance syntax.
+func TestParseBorrowReturnProvenance(t *testing.T) {
+	input := `fn show(s: []const u8) -> []const u8 borrows s {
+    return s[0..1];
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn show<'a>(s: &'a []'a const u8) -> []'a const u8 { return s.*; }`
+	want := `fn show(s: []const u8) -> []const u8 borrows s { return s[0..1]; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

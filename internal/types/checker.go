@@ -149,6 +149,7 @@ type functionType struct {
 	comptimeParams  []bool
 	typeParams      []string
 	lifetimeParams  []string
+	returnBorrow    string
 	returnType      Type
 	decl            *ast.FunctionDecl
 	unsafe          bool
@@ -162,11 +163,12 @@ type contractType struct {
 }
 
 type scope struct {
-	parent    *scope
-	values    map[string]Type
-	mutable   map[string]bool
-	borrowed  map[string]bool
-	mutBorrow map[string]bool
+	parent       *scope
+	values       map[string]Type
+	mutable      map[string]bool
+	borrowed     map[string]bool
+	mutBorrow    map[string]bool
+	borrowSource map[string]string
 }
 
 // New creates an empty type checker.
@@ -600,6 +602,10 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	if len(fn.TypeParams) > 0 && !fn.Std {
 		return nil, fmt.Errorf("type error: generic function `%s` is reserved for std", fn.Name)
 	}
+	if len(fn.LifetimeParams) > 0 {
+		return nil, fmt.Errorf(
+			"type error: explicit lifetime parameters are not supported; use `borrows`")
+	}
 	previousTypeParams := c.typeParams
 	previousLifetimeParams := c.lifetimeParams
 	c.typeParams = typeParamSet(fn.TypeParams)
@@ -624,7 +630,7 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	if ret == typeFunction {
 		return nil, fmt.Errorf("type error: function `%s` cannot return Function", fn.Name)
 	}
-	if err := checkReturnLifetimePolicy(fn); err != nil {
+	if err := checkReturnBorrowPolicy(fn); err != nil {
 		return nil, err
 	}
 	if err := checkUnusedLifetimes(
@@ -638,7 +644,8 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		name: fn.Name, params: paramInfo.params, borrowParams: paramInfo.borrowParams,
 		mutBorrowParams: paramInfo.mutBorrowParams, comptimeParams: paramInfo.comptimeParams,
 		typeParams: fn.TypeParams, lifetimeParams: fn.LifetimeParams,
-		returnType: ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
+		returnBorrow: fn.ReturnBorrow,
+		returnType:   ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
 }
 
@@ -678,9 +685,6 @@ func (c *Checker) checkFunctionParam(
 	if err := checkFunctionParamPolicy(fn, param, paramType); err != nil {
 		return err
 	}
-	if param.BorrowLifetime != "" && !c.isKnownLifetime(param.BorrowLifetime) {
-		return fmt.Errorf("type error: unknown lifetime %s", param.BorrowLifetime)
-	}
 	if _, ok := dynContract(paramType); ok && !param.Borrow {
 		return fmt.Errorf("type error: Dyn parameter `%s` must be borrowed", param.Name)
 	}
@@ -704,36 +708,42 @@ func checkFunctionParamPolicy(fn *ast.FunctionDecl, param ast.Param, typ Type) e
 	return nil
 }
 
-// checkReturnLifetimePolicy requires explicit lifetimes on borrowed return types.
-func checkReturnLifetimePolicy(fn *ast.FunctionDecl) error {
+// checkReturnBorrowPolicy validates source provenance for borrowed returns.
+func checkReturnBorrowPolicy(fn *ast.FunctionDecl) error {
 	if fn.ReturnType == "" {
+		if fn.ReturnBorrow != "" {
+			return fmt.Errorf("type error: function `%s` `borrows` requires return type", fn.Name)
+		}
 		return nil
 	}
-	if strings.HasPrefix(fn.ReturnType, "&") && !strings.HasPrefix(fn.ReturnType, "&'") {
-		return fmt.Errorf("type error: function `%s` borrow return requires explicit lifetime",
+	if fn.ReturnBorrow == "" {
+		if isBorrowReturnType(Type(fn.ReturnType)) {
+			return fmt.Errorf(
+				"type error: function `%s` borrow return requires `borrows <source>`",
+				fn.Name)
+		}
+		return nil
+	}
+	if !isBorrowedViewReturnType(Type(fn.ReturnType)) {
+		return fmt.Errorf("type error: function `%s` `borrows` requires borrowed view return",
 			fn.Name)
 	}
-	return nil
+	for _, param := range fn.Params {
+		if param.Name == fn.ReturnBorrow {
+			return nil
+		}
+	}
+	return fmt.Errorf("type error: function `%s` borrows unknown source `%s`",
+		fn.Name, fn.ReturnBorrow)
 }
 
-// checkStructFieldBorrowPolicy validates borrow fields on lifetime-bearing structs.
+// checkStructFieldBorrowPolicy rejects borrow fields until a non-lifetime model exists.
 func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
 	if !field.Borrow {
 		return nil
 	}
-	if len(decl.LifetimeParams) == 0 {
-		return fmt.Errorf("type error: borrow field `%s.%s` requires struct lifetime parameter",
-			decl.Name, field.Name)
-	}
-	if field.BorrowLifetime == "" {
-		return fmt.Errorf("type error: borrow field `%s.%s` requires explicit lifetime",
-			decl.Name, field.Name)
-	}
-	if !containsString(decl.LifetimeParams, field.BorrowLifetime) &&
-		field.BorrowLifetime != "'static" {
-		return fmt.Errorf("type error: unknown lifetime %s", field.BorrowLifetime)
-	}
-	return nil
+	return fmt.Errorf("type error: borrow field `%s.%s` cannot store borrow",
+		decl.Name, field.Name)
 }
 
 // checkBorrowFieldPolicy validates borrowed payloads in lifetime-bearing unions.
@@ -741,20 +751,37 @@ func checkBorrowFieldPolicy(
 	typeName string,
 	fieldName string,
 	payload string,
-	lifetimes []string,
+	_ []string,
 ) error {
 	if !strings.HasPrefix(payload, "&") {
 		return nil
 	}
-	if len(lifetimes) == 0 {
-		return fmt.Errorf("type error: borrow payload `%s.%s` requires union lifetime parameter",
-			typeName, fieldName)
+	return fmt.Errorf("type error: borrow payload `%s.%s` cannot store borrow",
+		typeName, fieldName)
+}
+
+// isBorrowReturnType reports whether typ is an explicit local borrow return.
+func isBorrowReturnType(typ Type) bool {
+	success := unwrapReturnSuccessType(typ)
+	return strings.HasPrefix(string(success), "&")
+}
+
+// isBorrowedViewReturnType reports whether typ returns a non-owned view.
+func isBorrowedViewReturnType(typ Type) bool {
+	success := unwrapReturnSuccessType(typ)
+	text := string(success)
+	return strings.HasPrefix(text, "&") || strings.HasPrefix(text, "[]")
+}
+
+// unwrapReturnSuccessType extracts the success payload of !T-like return types.
+func unwrapReturnSuccessType(typ Type) Type {
+	if elem, ok := errorUnionElement(typ); ok {
+		return Type(elem)
 	}
-	if !strings.HasPrefix(payload, "&'") {
-		return fmt.Errorf("type error: borrow payload `%s.%s` requires explicit lifetime",
-			typeName, fieldName)
+	if _, elem, ok := errorUnionParts(typ); ok {
+		return Type(elem)
 	}
-	return nil
+	return typ
 }
 
 // checkUnusedLifetimes rejects lifetime parameters that do not appear in a signature.
@@ -825,16 +852,6 @@ func borrowWrappedType(borrow bool, lifetime string, mutable bool, typ string) s
 	return "&" + lifetime + " " + typ
 }
 
-// containsString reports whether values contains target.
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
 // typeParamSet returns a lookup for function-level type parameters.
 func typeParamSet(params []string) map[string]bool {
 	if len(params) == 0 {
@@ -876,22 +893,6 @@ func isLifetimeName(name string) bool {
 		}
 	}
 	return true
-}
-
-// splitLifetimePrefix extracts the leading lifetime from a borrow or slice spelling.
-func splitLifetimePrefix(text string) (string, string, bool) {
-	if !strings.HasPrefix(text, "'") {
-		return "", text, false
-	}
-	end := strings.IndexByte(text, ' ')
-	if end < 0 {
-		return "", "", false
-	}
-	lifetime := text[:end]
-	if !isLifetimeName(lifetime) {
-		return "", "", false
-	}
-	return lifetime, strings.TrimSpace(text[end+1:]), true
 }
 
 // sameType reports type equality after erasing lifetime annotations.
@@ -1015,14 +1016,8 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 func (c *Checker) parseBorrowType(name string) (Type, error) {
 	inner := strings.TrimPrefix(name, "&")
 	if strings.HasPrefix(inner, "'") {
-		lifetime, rest, ok := splitLifetimePrefix(inner)
-		if !ok {
-			return "", fmt.Errorf("type error: invalid borrow lifetime in `%s`", name)
-		}
-		if !c.isKnownLifetime(lifetime) {
-			return "", fmt.Errorf("type error: unknown lifetime %s", lifetime)
-		}
-		inner = rest
+		return "", fmt.Errorf(
+			"type error: explicit lifetime syntax is not supported; use `borrows`")
 	}
 	inner = strings.TrimPrefix(inner, "mut ")
 	if inner == "" {
@@ -1038,14 +1033,8 @@ func (c *Checker) parseBorrowType(name string) (Type, error) {
 func (c *Checker) parseSliceType(name string) (Type, error) {
 	rest := strings.TrimPrefix(name, "[]")
 	if strings.HasPrefix(rest, "'") {
-		lifetime, tail, ok := splitLifetimePrefix(rest)
-		if !ok {
-			return "", fmt.Errorf("type error: invalid slice lifetime in `%s`", name)
-		}
-		if !c.isKnownLifetime(lifetime) {
-			return "", fmt.Errorf("type error: unknown lifetime %s", lifetime)
-		}
-		rest = tail
+		return "", fmt.Errorf(
+			"type error: explicit lifetime syntax is not supported; use `borrows`")
 	}
 	if strings.HasPrefix(rest, "const ") {
 		rest = strings.TrimPrefix(rest, "const ")
@@ -1402,41 +1391,61 @@ func (c *Checker) checkStmt(
 
 // checkLetStmt validates a let or var declaration.
 func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool, error) {
-	if borrow, ok := borrowPrefix(stmt.Value); ok {
-		typ, mutable, err := c.checkBorrowPrefix(borrow, env, unsafe)
-		if err != nil {
-			return false, err
-		}
-		return false, env.defineParam(stmt.Name, typ, true, mutable)
+	handled, err := c.defineSpecialLetInitializer(stmt, env, unsafe)
+	if handled || err != nil {
+		return false, err
 	}
-	typ, mutable, ok, err := c.checkArrayBorrowInitializer(stmt.Value, env, unsafe)
-	if ok || err != nil {
-		if err != nil {
-			return false, err
-		}
-		return false, env.defineParam(stmt.Name, typ, true, mutable)
-	}
-	typ, mutable, ok, err = c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
-	if ok || err != nil {
-		if err != nil {
-			return false, err
-		}
-		return false, env.defineParam(stmt.Name, typ, true, mutable)
-	}
-	if ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe); ok || err != nil {
-		if err != nil {
-			return false, err
-		}
-		return false, env.defineParam(stmt.Name, typeByteString, true, false)
-	}
-	typ, err = c.checkExpr(stmt.Value, env, unsafe)
+	typ, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
 	}
 	if _, mutable, inner, ok := explicitBorrowType(typ); ok {
-		return false, env.defineParam(stmt.Name, inner, true, mutable)
+		source := c.singleBorrowSource(stmt.Value, env, unsafe)
+		return false, env.defineParamWithSource(stmt.Name, inner, true, mutable, source)
+	}
+	if isBorrowedViewReturnType(typ) {
+		source := c.singleBorrowSource(stmt.Value, env, unsafe)
+		if source != "" {
+			return false, env.defineWithSource(stmt.Name, typ, stmt.Mutable, source)
+		}
 	}
 	return false, env.define(stmt.Name, typ, stmt.Mutable)
+}
+
+// defineSpecialLetInitializer records local borrow/view initializers with source data.
+func (c *Checker) defineSpecialLetInitializer(
+	stmt *ast.LetStmt,
+	env *scope,
+	unsafe bool,
+) (bool, error) {
+	if borrow, ok := borrowPrefix(stmt.Value); ok {
+		typ, mutable, err := c.checkBorrowPrefix(borrow, env, unsafe)
+		if err != nil {
+			return true, err
+		}
+		return true, env.defineParam(stmt.Name, typ, true, mutable)
+	}
+	typ, mutable, ok, err := c.checkArrayBorrowInitializer(stmt.Value, env, unsafe)
+	if ok || err != nil {
+		if err != nil {
+			return true, err
+		}
+		return true, env.defineParam(stmt.Name, typ, true, mutable)
+	}
+	typ, mutable, ok, err = c.checkBoxBorrowInitializer(stmt.Value, env, unsafe)
+	if ok || err != nil {
+		if err != nil {
+			return true, err
+		}
+		return true, env.defineParam(stmt.Name, typ, true, mutable)
+	}
+	if source, ok, err := c.checkStringViewInitializer(stmt.Value, env, unsafe); ok || err != nil {
+		if err != nil {
+			return true, err
+		}
+		return true, env.defineParamWithSource(stmt.Name, typeByteString, true, false, source)
+	}
+	return false, nil
 }
 
 // checkBoxBorrowInitializer recognizes box.borrow/borrow_mut local borrow initializers.
@@ -1490,27 +1499,28 @@ func (c *Checker) checkStringViewInitializer(
 	expr ast.Expression,
 	env *scope,
 	unsafe bool,
-) (bool, error) {
+) (string, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return false, nil
+		return "", false, nil
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || field.Name != "as_bytes" {
-		return false, nil
+		return "", false, nil
 	}
 	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
 	if err != nil {
-		return true, err
+		return "", true, err
 	}
 	if receiver != "std::string::String" {
-		return true, fmt.Errorf("type error: `String.as_bytes` expects String receiver")
+		return "", true, fmt.Errorf("type error: `String.as_bytes` expects String receiver")
 	}
 	if len(call.Args) != 0 {
-		return true, fmt.Errorf("type error: `String.as_bytes` expects 0 args, got %d",
+		return "", true, fmt.Errorf("type error: `String.as_bytes` expects 0 args, got %d",
 			len(call.Args))
 	}
-	return true, nil
+	source := c.singleBorrowSource(field.Receiver, env, unsafe)
+	return source, true, nil
 }
 
 // checkArrayBorrowInitializer recognizes try array.at/at_mut(index) local borrows.
@@ -1654,7 +1664,7 @@ func (c *Checker) checkReturnValue(
 		return ok, err
 	}
 	if c.returnValueMatchesBorrowParam(expr, env, want, got) {
-		if err := c.checkReturnLifetimeSources(expr, env, want, unsafe); err != nil {
+		if err := c.checkReturnBorrowSources(expr, env, want, unsafe); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -1662,7 +1672,7 @@ func (c *Checker) checkReturnValue(
 	if !sameType(got, want) {
 		return false, fmt.Errorf("type error: return expects %s, got %s", want, got)
 	}
-	if err := c.checkReturnLifetimeSources(expr, env, want, unsafe); err != nil {
+	if err := c.checkReturnBorrowSources(expr, env, want, unsafe); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1677,7 +1687,7 @@ func (c *Checker) checkErrorUnionReturn(
 	unsafe bool,
 ) (bool, error) {
 	if elem, ok := errorUnionElement(want); ok && sameType(got, Type(elem)) {
-		if err := c.checkReturnLifetimeSources(expr, env, Type(elem), unsafe); err != nil {
+		if err := c.checkReturnBorrowSources(expr, env, Type(elem), unsafe); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -1685,7 +1695,7 @@ func (c *Checker) checkErrorUnionReturn(
 	if errorType, elem, ok := errorUnionParts(want); ok {
 		if sameType(got, Type(elem)) || sameType(got, Type(errorType)) {
 			if sameType(got, Type(elem)) {
-				if err := c.checkReturnLifetimeSources(expr, env, Type(elem), unsafe); err != nil {
+				if err := c.checkReturnBorrowSources(expr, env, Type(elem), unsafe); err != nil {
 					return false, err
 				}
 			}
@@ -1709,7 +1719,7 @@ func acceptsBareReturn(want Type) bool {
 	return false
 }
 
-// returnValueMatchesBorrowParam permits returning a borrow parameter as &'a T.
+// returnValueMatchesBorrowParam permits returning a named borrow source as &T.
 func (c *Checker) returnValueMatchesBorrowParam(
 	expr ast.Expression,
 	env *scope,
@@ -1720,8 +1730,8 @@ func (c *Checker) returnValueMatchesBorrowParam(
 	if !ok || !env.isBorrowed(ident.Name) {
 		return false
 	}
-	lifetime, mutable, inner, ok := explicitBorrowType(want)
-	if !ok || lifetime == "" {
+	_, mutable, inner, ok := explicitBorrowType(want)
+	if !ok {
 		return false
 	}
 	if mutable && !env.isMutBorrowed(ident.Name) {
@@ -1730,137 +1740,170 @@ func (c *Checker) returnValueMatchesBorrowParam(
 	if !sameType(got, inner) {
 		return false
 	}
-	return c.borrowParamCarriesLifetime(ident.Name, lifetime, mutable)
+	return c.currentFunction != nil && c.currentFunction.returnBorrow == ident.Name
 }
 
-// checkReturnLifetimeSources rejects returning views not tied to the result lifetime.
-func (c *Checker) checkReturnLifetimeSources(
+// checkReturnBorrowSources rejects returned views not tied to the declared source.
+func (c *Checker) checkReturnBorrowSources(
 	expr ast.Expression,
 	env *scope,
-	want Type,
+	_ Type,
 	unsafe bool,
 ) error {
-	required := explicitNonStaticLifetimes(want)
-	if len(required) == 0 {
+	if c.currentFunction == nil || c.currentFunction.returnBorrow == "" {
 		return nil
 	}
 	if isErrorConstruction(expr) {
 		return nil
 	}
-	if c.trustedStdLifetimeReturn(expr) {
+	if c.trustedStdBorrowReturn(expr) {
 		return nil
 	}
-	sources, err := c.exprLifetimeSources(expr, env, unsafe)
+	sources, err := c.exprBorrowSources(expr, env, unsafe)
 	if err != nil {
 		return err
 	}
-	if sources["'static"] {
+	if sources["$static"] {
 		return nil
 	}
-	for lifetime := range required {
-		if !sources[lifetime] {
-			return fmt.Errorf("type error: return lifetime %s is not tied to returned value",
-				lifetime)
-		}
+	source := c.currentFunction.returnBorrow
+	if sources[source] {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("type error: return borrows `%s` but returned value is not tied to that source",
+		source)
 }
 
-// exprLifetimeSources reports explicit lifetimes that can flow out of expr.
-func (c *Checker) exprLifetimeSources(
+// exprBorrowSources reports parameter names that can back a returned view.
+func (c *Checker) exprBorrowSources(
 	expr ast.Expression,
 	env *scope,
 	unsafe bool,
 ) (map[string]bool, error) {
 	switch e := expr.(type) {
 	case *ast.StringExpr:
-		return map[string]bool{"'static": true}, nil
+		return map[string]bool{"$static": true}, nil
 	case *ast.IdentExpr:
-		return c.identLifetimeSources(e.Name, env), nil
+		return c.identBorrowSources(e.Name, env), nil
 	case *ast.IndexExpr:
 		if !e.Slice {
 			return map[string]bool{}, nil
 		}
-		return c.exprLifetimeSources(e.Target, env, unsafe)
+		return c.exprBorrowSources(e.Target, env, unsafe)
 	case *ast.TryExpr:
-		return c.exprLifetimeSources(e.Value, env, unsafe)
+		return c.exprBorrowSources(e.Value, env, unsafe)
 	case *ast.CallExpr:
-		return c.callLifetimeSources(e, env, unsafe)
+		return c.callBorrowSources(e, env, unsafe)
 	case *ast.FieldExpr:
-		return c.fieldLifetimeSources(e, env, unsafe)
+		return c.fieldBorrowSources(e, env, unsafe)
 	case *ast.StructLiteralExpr:
-		return c.structLiteralLifetimeSources(e, env, unsafe)
+		return c.structLiteralBorrowSources(e, env, unsafe)
 	default:
 		return map[string]bool{}, nil
 	}
 }
 
-// identLifetimeSources derives a local value's lifetime provenance from its type.
-func (c *Checker) identLifetimeSources(name string, env *scope) map[string]bool {
-	sources := map[string]bool{}
-	if typ, ok := env.lookup(name); ok {
-		addLifetimes(sources, explicitLifetimes(typ))
+// identBorrowSources derives a local value's borrow provenance from its binding.
+func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
+	sources := map[string]bool{name: true}
+	if source, ok := env.lookupBorrowSource(name); ok {
+		sources[source] = true
 	}
-	if env.isBorrowed(name) {
-		if lifetime, ok := c.borrowParamLifetime(name); ok {
-			sources[lifetime] = true
-		}
+	if typ, ok := env.lookup(name); ok && isBorrowedViewReturnType(typ) {
+		sources[name] = true
 	}
 	return sources
 }
 
-// callLifetimeSources maps returned lifetime parameters back to call arguments.
-func (c *Checker) callLifetimeSources(
+// callBorrowSources maps returned borrow provenance back to call arguments.
+func (c *Checker) callBorrowSources(
 	expr *ast.CallExpr,
 	env *scope,
 	unsafe bool,
 ) (map[string]bool, error) {
+	if sources, ok, err := c.methodBorrowSources(expr, env, unsafe); ok || err != nil {
+		return sources, err
+	}
 	fn := c.calledFunction(expr.Callee)
 	if fn == nil {
 		return map[string]bool{}, nil
 	}
-	returnLifetimes := explicitNonStaticLifetimes(fn.returnType)
-	if elem, ok := errorUnionElement(fn.returnType); ok {
-		addLifetimes(returnLifetimes, explicitNonStaticLifetimes(Type(elem)))
-	}
-	if _, elem, ok := errorUnionParts(fn.returnType); ok {
-		addLifetimes(returnLifetimes, explicitNonStaticLifetimes(Type(elem)))
-	}
-	if len(returnLifetimes) == 0 {
+	if fn.returnBorrow == "" {
 		return map[string]bool{}, nil
 	}
-	sources := map[string]bool{}
-	for idx, arg := range expr.Args {
-		if idx >= len(fn.decl.Params) {
-			break
-		}
-		if !paramFeedsReturnLifetime(fn.decl.Params[idx], returnLifetimes) {
-			continue
-		}
-		argSources, err := c.exprLifetimeSources(arg, env, unsafe)
-		if err != nil {
-			return nil, err
-		}
-		addLifetimes(sources, argSources)
+	idx := borrowReturnParamIndex(fn)
+	if idx < 0 || idx >= len(expr.Args) {
+		return map[string]bool{}, fmt.Errorf("type error: `%s` borrows unknown source `%s`",
+			fn.name, fn.returnBorrow)
 	}
-	return sources, nil
+	return c.exprBorrowSources(expr.Args[idx], env, unsafe)
 }
 
-// fieldLifetimeSources reports lifetimes carried by the declared field type.
-func (c *Checker) fieldLifetimeSources(
+// borrowReturnParamIndex finds the parameter named by a return-borrow annotation.
+func borrowReturnParamIndex(fn *functionType) int {
+	if fn == nil || fn.decl == nil || fn.returnBorrow == "" {
+		return -1
+	}
+	for idx, param := range fn.decl.Params {
+		if param.Name == fn.returnBorrow {
+			return idx
+		}
+	}
+	return -1
+}
+
+// methodBorrowSources handles built-in method-style view returns.
+func (c *Checker) methodBorrowSources(
+	expr *ast.CallExpr,
+	env *scope,
+	unsafe bool,
+) (map[string]bool, bool, error) {
+	field, ok := expr.Callee.(*ast.FieldExpr)
+	if !ok || field.Namespace {
+		return nil, false, nil
+	}
+	switch field.Name {
+	case "as_bytes", "borrow", "borrow_mut", "at", "at_mut":
+		sources, err := c.exprBorrowSources(field.Receiver, env, unsafe)
+		return sources, true, err
+	default:
+		return nil, false, nil
+	}
+}
+
+// singleBorrowSource extracts a deterministic source name when one source is known.
+func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe bool) string {
+	sources, err := c.exprBorrowSources(expr, env, unsafe)
+	if err != nil {
+		return ""
+	}
+	source := ""
+	for candidate := range sources {
+		if candidate == "$static" {
+			continue
+		}
+		if source != "" {
+			return ""
+		}
+		source = candidate
+	}
+	return source
+}
+
+// fieldBorrowSources preserves the receiver provenance through direct fields.
+func (c *Checker) fieldBorrowSources(
 	expr *ast.FieldExpr,
 	env *scope,
 	unsafe bool,
 ) (map[string]bool, error) {
-	typ, err := c.checkFieldExpr(expr, env, unsafe)
-	if err != nil {
-		return nil, err
+	if expr.Namespace {
+		return map[string]bool{}, nil
 	}
-	return explicitLifetimes(typ), nil
+	return c.exprBorrowSources(expr.Receiver, env, unsafe)
 }
 
-// structLiteralLifetimeSources validates lifetime fields and returns field sources.
-func (c *Checker) structLiteralLifetimeSources(
+// structLiteralBorrowSources returns borrow sources from stored field values.
+func (c *Checker) structLiteralBorrowSources(
 	expr *ast.StructLiteralExpr,
 	env *scope,
 	unsafe bool,
@@ -1880,16 +1923,12 @@ func (c *Checker) structLiteralLifetimeSources(
 			continue
 		}
 		want := fieldDeclaredType(field)
-		if err := c.checkExprSuppliesLifetimes(
-			value, env, want, unsafe, fmt.Sprintf("field `%s.%s`", decl.Name, field.Name),
-		); err != nil {
-			return nil, err
-		}
-		valueSources, err := c.exprLifetimeSources(value, env, unsafe)
+		_ = want
+		valueSources, err := c.exprBorrowSources(value, env, unsafe)
 		if err != nil {
 			return nil, err
 		}
-		addLifetimes(out, valueSources)
+		addBorrowSources(out, valueSources)
 	}
 	return out, nil
 }
@@ -1902,23 +1941,8 @@ func (c *Checker) checkExprSuppliesLifetimes(
 	unsafe bool,
 	context string,
 ) error {
-	required := explicitNonStaticLifetimes(want)
-	if len(required) == 0 {
-		return nil
-	}
-	sources, err := c.exprLifetimeSources(expr, env, unsafe)
-	if err != nil {
-		return err
-	}
-	if sources["'static"] {
-		return nil
-	}
-	for lifetime := range required {
-		if !sources[lifetime] {
-			return fmt.Errorf("type error: %s lifetime %s is not tied to initializer",
-				context, lifetime)
-		}
-	}
+	_, _, _, _ = expr, env, want, unsafe
+	_ = context
 	return nil
 }
 
@@ -1938,8 +1962,8 @@ func (c *Checker) calledFunction(callee ast.Expression) *functionType {
 	}
 }
 
-// trustedStdLifetimeReturn accepts std wrappers around provenance-aware primitives.
-func (c *Checker) trustedStdLifetimeReturn(expr ast.Expression) bool {
+// trustedStdBorrowReturn accepts std wrappers around provenance-aware primitives.
+func (c *Checker) trustedStdBorrowReturn(expr ast.Expression) bool {
 	if !c.currentStd {
 		return false
 	}
@@ -1985,59 +2009,13 @@ func isErrorConstruction(expr ast.Expression) bool {
 	return ok && ident.Name == "error"
 }
 
-// paramFeedsReturnLifetime reports whether a parameter can provide result lifetimes.
-func paramFeedsReturnLifetime(param ast.Param, lifetimes map[string]bool) bool {
-	if param.BorrowLifetime != "" && lifetimes[param.BorrowLifetime] {
-		return true
-	}
-	for lifetime := range explicitNonStaticLifetimes(Type(param.TypeName)) {
-		if lifetimes[lifetime] {
-			return true
-		}
-	}
-	return false
-}
-
-// borrowParamCarriesLifetime checks a named borrow parameter against a result lifetime.
-func (c *Checker) borrowParamCarriesLifetime(name string, lifetime string, mutable bool) bool {
-	if c.currentFunction == nil {
-		return false
-	}
-	for _, param := range c.currentFunction.decl.Params {
-		if param.Name != name || !param.Borrow || param.BorrowLifetime != lifetime {
-			continue
-		}
-		if mutable && !param.MutBorrow {
-			return false
-		}
-		return true
-	}
-	return false
-}
-
-// borrowParamLifetime returns the explicit lifetime on a function borrow parameter.
-func (c *Checker) borrowParamLifetime(name string) (string, bool) {
-	if c.currentFunction == nil {
-		return "", false
-	}
-	for _, param := range c.currentFunction.decl.Params {
-		if param.Name == name && param.Borrow && param.BorrowLifetime != "" {
-			return param.BorrowLifetime, true
-		}
-	}
-	return "", false
-}
-
-// explicitBorrowType extracts &'a T and &'a mut T spellings.
+// explicitBorrowType extracts &T and &mut T spellings.
 func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 	text := string(typ)
-	if !strings.HasPrefix(text, "&'") {
+	if !strings.HasPrefix(text, "&") {
 		return "", false, "", false
 	}
-	lifetime, rest, ok := splitLifetimePrefix(strings.TrimPrefix(text, "&"))
-	if !ok {
-		return "", false, "", false
-	}
+	rest := strings.TrimPrefix(text, "&")
 	mutable := false
 	if strings.HasPrefix(rest, "mut ") {
 		mutable = true
@@ -2046,7 +2024,7 @@ func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 	if rest == "" {
 		return "", false, "", false
 	}
-	return lifetime, mutable, Type(rest), true
+	return "", mutable, Type(rest), true
 }
 
 // fieldDeclaredType returns the full field type, including borrow prefixes.
@@ -2086,10 +2064,10 @@ func explicitLifetimes(typ Type) map[string]bool {
 	return out
 }
 
-// addLifetimes unions src into dst.
-func addLifetimes(dst map[string]bool, src map[string]bool) {
-	for lifetime := range src {
-		dst[lifetime] = true
+// addBorrowSources unions src into dst.
+func addBorrowSources(dst map[string]bool, src map[string]bool) {
+	for source := range src {
+		dst[source] = true
 	}
 }
 
@@ -6196,6 +6174,7 @@ func newScope(parent *scope) *scope {
 	return &scope{
 		parent: parent, values: map[string]Type{}, mutable: map[string]bool{},
 		borrowed: map[string]bool{}, mutBorrow: map[string]bool{},
+		borrowSource: map[string]string{},
 	}
 }
 
@@ -6214,13 +6193,42 @@ func (s *scope) define(name string, typ Type, mutable bool) error {
 	return nil
 }
 
+// defineWithSource binds a non-borrow local while preserving view provenance.
+func (s *scope) defineWithSource(name string, typ Type, mutable bool, source string) error {
+	if err := s.define(name, typ, mutable); err != nil {
+		return err
+	}
+	if source != "" {
+		s.borrowSource[name] = source
+	}
+	return nil
+}
+
 // defineParam binds a function parameter and records borrow capabilities.
 func (s *scope) defineParam(name string, typ Type, borrowed bool, mutBorrow bool) error {
+	source := ""
+	if borrowed || isBorrowedViewReturnType(typ) {
+		source = name
+	}
+	return s.defineParamWithSource(name, typ, borrowed, mutBorrow, source)
+}
+
+// defineParamWithSource binds a borrowed local and records its source owner.
+func (s *scope) defineParamWithSource(
+	name string,
+	typ Type,
+	borrowed bool,
+	mutBorrow bool,
+	source string,
+) error {
 	if err := s.define(name, typ, false); err != nil {
 		return err
 	}
 	s.borrowed[name] = borrowed
 	s.mutBorrow[name] = mutBorrow
+	if source != "" {
+		s.borrowSource[name] = source
+	}
 	return nil
 }
 
@@ -6262,6 +6270,17 @@ func (s *scope) isMutBorrowed(name string) bool {
 		}
 	}
 	return false
+}
+
+// lookupBorrowSource resolves the provenance source for a borrowed local.
+func (s *scope) lookupBorrowSource(name string) (string, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		if _, ok := cur.values[name]; ok {
+			source := cur.borrowSource[name]
+			return source, source != ""
+		}
+	}
+	return "", false
 }
 
 // splitGenericType extracts base and raw arguments from base<args>.

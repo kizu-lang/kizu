@@ -20,8 +20,8 @@ Kizu v0.1 は、safe Kizu に対して次を release blocker として扱う。
 - double move を許さない
 - borrow 中の値の move を許さない
 - borrow escape を許さない
-- 明示 lifetime なしの borrow を struct field に保存させない
-- borrow を task / comptime / unsafe 境界で lifetime extension させない
+- borrow を struct field に保存させない
+- borrow を task / comptime / unsafe 境界で延命させない
 - `arena<T>.get(handle<T>)` は local borrow だけを返す
 - handle は対応する arena 以外に使えない
 - handle は raw pointer として扱えない

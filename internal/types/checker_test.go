@@ -239,16 +239,10 @@ fn main() {}`
 	}
 }
 
-// TestCheckAcceptsLifetimeViewDeclarations checks explicit lifetime view syntax.
-func TestCheckAcceptsLifetimeViewDeclarations(t *testing.T) {
-	source := `struct Row<'a, T> {
-    data: []'a const T
-}
-union TokenText<'source> {
-    Identifier(&'source []'source const u8)
-}
-fn first<'a>(bytes: []'a const u8) -> []'a const u8 {
-    return bytes;
+// TestCheckAcceptsBorrowReturnProvenance checks borrowed slice return syntax.
+func TestCheckAcceptsBorrowReturnProvenance(t *testing.T) {
+	source := `fn first(bytes: []const u8) -> []const u8 borrows bytes {
+    return bytes[0..1];
 }
 fn main() {}`
 	if err := checkSource(source); err != nil {
@@ -256,12 +250,12 @@ fn main() {}`
 	}
 }
 
-// TestCheckAcceptsLifetimeBorrowReturns checks explicit shared and mutable borrow returns.
-func TestCheckAcceptsLifetimeBorrowReturns(t *testing.T) {
-	source := `fn shared<'a>(value: &'a i64) -> &'a i64 {
+// TestCheckAcceptsBorrowProvenanceReturns checks shared and mutable borrow returns.
+func TestCheckAcceptsBorrowProvenanceReturns(t *testing.T) {
+	source := `fn shared(value: &i64) -> &i64 borrows value {
     return value;
 }
-fn mutable<'a>(value: &'a mut i64) -> &'a mut i64 {
+fn mutable(value: &mut i64) -> &mut i64 borrows value {
     return value;
 }
 fn main() {}`
@@ -270,61 +264,50 @@ fn main() {}`
 	}
 }
 
-// TestCheckRejectsLifetimeDeclarationErrors keeps lifetime signatures explicit.
-func TestCheckRejectsLifetimeDeclarationErrors(t *testing.T) {
+// TestCheckRejectsBorrowProvenanceDeclarationErrors keeps borrowed returns explicit.
+func TestCheckRejectsBorrowProvenanceDeclarationErrors(t *testing.T) {
 	cases := []struct {
 		name   string
 		source string
 		want   string
 	}{
 		{
-			name:   "borrow return needs explicit lifetime",
-			source: `fn bad(bytes: []const u8) -> &u8 { return bytes[0]; }`,
-			want:   "borrow return requires explicit lifetime",
+			name:   "borrow return needs source",
+			source: `fn bad(value: &i64) -> &i64 { return value; }`,
+			want:   "borrow return requires `borrows <source>`",
 		},
 		{
-			name:   "borrow field needs lifetime parameter",
+			name:   "borrow field rejected",
 			source: `struct View { bytes: &[]const u8 } fn main() {}`,
-			want:   "borrow field `View.bytes` requires struct lifetime parameter",
+			want:   "borrow field `View.bytes` cannot store borrow",
 		},
 		{
-			name:   "unused lifetime",
+			name:   "explicit lifetime parameter rejected",
 			source: `fn unused<'a>() -> void { return; }`,
-			want:   "lifetime 'a on `unused` is unused",
+			want:   "explicit lifetime parameters are not supported",
 		},
 	}
 	runErrorCases(t, cases)
 }
 
-// TestCheckRejectsLifetimeEscapeErrors rejects untied lifetime provenance.
-func TestCheckRejectsLifetimeEscapeErrors(t *testing.T) {
+// TestCheckRejectsBorrowProvenanceEscapeErrors rejects untied return provenance.
+func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
 	cases := []struct {
 		name   string
 		source string
 		want   string
 	}{
 		{
-			name: "return source lacks lifetime",
-			source: `fn bad<'a>(left: []'a const u8, right: []const u8) -> []'a const u8 {
+			name: "return source mismatch",
+			source: `fn bad(left: []const u8, right: []const u8) -> []const u8 borrows left {
     return right;
 }`,
-			want: "return lifetime 'a is not tied to returned value",
+			want: "return borrows `left` but returned value is not tied to that source",
 		},
 		{
-			name: "field source lacks lifetime",
-			source: `struct View<'a> { bytes: []'a const u8 }
-fn bad(bytes: []const u8) {
-    let view = View { bytes: bytes };
-    print(view.bytes);
-}`,
-			want: "field `View.bytes` lifetime 'a is not tied to initializer",
-		},
-		{
-			name: "channel boundary",
-			source: `fn bad<'a>(channel: Channel<[]'a const u8>, bytes: []'a const u8) {
-    channel.send(bytes);
-}`,
-			want: "lifetime view cannot cross concurrency boundary",
+			name:   "explicit lifetime type rejected",
+			source: `fn bad(bytes: []'a const u8) -> void { return; }`,
+			want:   "explicit lifetime syntax is not supported",
 		},
 	}
 	runErrorCases(t, cases)

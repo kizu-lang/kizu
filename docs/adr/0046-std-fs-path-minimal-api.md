@@ -16,9 +16,9 @@ standard-library APIs.
 std::path::join(allocator: Allocator, left: []const u8, right: []const u8)
   -> !std::string::String
 std::path::clean(allocator: Allocator, path: []const u8) -> !std::string::String
-std::path::basename<'a>(path: []'a const u8) -> []'a const u8
-std::path::dirname<'a>(path: []'a const u8) -> []'a const u8
-std::path::extension<'a>(path: []'a const u8) -> []'a const u8
+std::path::basename(path: []const u8) -> []const u8 borrows path
+std::path::dirname(path: []const u8) -> []const u8 borrows path
+std::path::extension(path: []const u8) -> []const u8 borrows path
 ```
 
 `join` and `clean` construct owned bytes, so allocation is explicit through the

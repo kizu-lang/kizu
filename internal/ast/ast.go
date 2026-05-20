@@ -66,6 +66,7 @@ type FunctionDecl struct {
 	TypeParams     []string
 	Params         []Param
 	ReturnType     string
+	ReturnBorrow   string
 	Body           *BlockStmt
 	Unsafe         bool
 	ExternABI      string
@@ -85,6 +86,9 @@ func (d *FunctionDecl) String() string {
 	ret := ""
 	if d.ReturnType != "" {
 		ret = " -> " + d.ReturnType
+		if d.ReturnBorrow != "" {
+			ret += " borrows " + d.ReturnBorrow
+		}
 	}
 	typeParams := typeParamText(d.LifetimeParams, d.TypeParams)
 	if typeParams != "" {
