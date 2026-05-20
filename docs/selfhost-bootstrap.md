@@ -126,7 +126,9 @@ just selfhost-bootstrap-preflight
 ```
 
 The preflight runs the existing selfhost switch gate and an isolated cache smoke
-test. It does not build stage1 or stage2.
+test. After #461, the switch gate includes the explicit bootstrap runner, so the
+preflight builds stage1/stage2 and then runs production and corpus checks through
+the hosted artifact.
 
 ## Artifact Contract
 
@@ -184,19 +186,33 @@ reachable ABI shape.
 
 ## CI Contract
 
-Until the production switch issues opt into the full bootstrap runner, CI should
-run:
+After #461, CI for the first runnable selfhost path should run:
 
 ```sh
-just selfhost-bootstrap-preflight
+just selfhost-production-from-scratch
 go test ./...
 ```
 
-Bootstrap jobs can additionally run:
+`just selfhost-production-from-scratch` builds the stage2 hosted artifact
+through the explicit stage0 bootstrap/oracle boundary, then runs the #458
+production command path and the supported corpus through that artifact.
+
+Local jobs that already have a passing stage2 artifact can run the fast gates:
 
 ```sh
-just selfhost-bootstrap
+just selfhost-production-gate
 just selfhost-corpus-gate
+```
+
+`just selfhost-production-gate` is the #461 production-boundary gate. It runs
+`target/selfhost/stage2/selfhost check selfhost`, `stage selfhost`, and the
+unsupported-command diagnostic path directly through the hosted stage2 artifact.
+The test harness does not call Go lexer, parser, resolver, type checker,
+ownership checker, interpreter, stdprim, IR, backend, cache, or `cmd/kizu`
+dispatch for that production path. The durable report is:
+
+```text
+target/selfhost/reports/production-boundary.txt
 ```
 
 `just selfhost-corpus-gate` is the #460 manifest-driven production-switch
@@ -216,7 +232,9 @@ the CI policy with recorded timing and cache-size evidence.
 - Any stage comparison mismatch blocks the production switch.
 - Any oracle mismatch blocks the production switch.
 - Any hidden fallback to Go blocks the production switch.
-- Rollback is a revert of the explicit component switch or stage-runner change.
+- Rollback is a revert of the explicit production-boundary or stage-runner
+  change; do not add automatic fallback from the hosted artifact to Go compiler
+  phases.
 - A newly discovered blocker gets a new GitHub issue linked from #445 before the
   dependent roadmap issue is closed.
 
