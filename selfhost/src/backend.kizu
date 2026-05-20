@@ -9,10 +9,14 @@ pub struct LlvmArtifact {
     pub metadata_path: []const u8;
     pub storage_path: []const u8;
     pub storage_metadata_path: []const u8;
+    pub host_path: []const u8;
+    pub host_metadata_path: []const u8;
     pub bytes: i64;
     pub metadata_bytes: i64;
     pub storage_bytes: i64;
     pub storage_metadata_bytes: i64;
+    pub host_bytes: i64;
+    pub host_metadata_bytes: i64;
 }
 
 pub fn summarize(program_ir: ir::IrSummary) -> BackendSummary {
@@ -86,15 +90,42 @@ pub fn emit_llvm_artifact(
     );
     storage_metadata.deinit();
 
+    let host = try load_host_capability_module(io);
+    let host_len = try write_backend_bytes(
+        io,
+        "target/selfhost/selfhost.host.ll",
+        host,
+        std::mem::len(host)
+    );
+
+    var host_metadata = try render_host_capability_metadata(
+        allocator,
+        io,
+        ir_path,
+        manifest_path
+    );
+    let host_metadata_view = host_metadata.as_bytes();
+    let host_metadata_len = try write_backend_bytes(
+        io,
+        "target/selfhost/selfhost.host.ll.meta",
+        host_metadata_view,
+        host_metadata.len()
+    );
+    host_metadata.deinit();
+
     return LlvmArtifact {
         ll_path: "target/selfhost/selfhost.ll",
         metadata_path: "target/selfhost/selfhost.ll.meta",
         storage_path: "target/selfhost/selfhost.storage.ll",
         storage_metadata_path: "target/selfhost/selfhost.storage.ll.meta",
+        host_path: "target/selfhost/selfhost.host.ll",
+        host_metadata_path: "target/selfhost/selfhost.host.ll.meta",
         bytes: module_len,
         metadata_bytes: metadata_len,
         storage_bytes: storage_len,
-        storage_metadata_bytes: storage_metadata_len
+        storage_metadata_bytes: storage_metadata_len,
+        host_bytes: host_len,
+        host_metadata_bytes: host_metadata_len
     };
 }
 
@@ -112,6 +143,7 @@ fn validate_shape_manifest(bytes: []const u8) -> !void {
     if !std::mem::starts_with(bytes, "kizu-ir-shape-v0") {
         return error("invalid IR shape manifest");
     }
+    try require_shape(bytes, "manifest-version selfhost-abi-v0");
     try require_shape(bytes, "node-kind function");
     try require_shape(bytes, "node-kind block");
     try require_shape(bytes, "node-kind diagnostic");
@@ -124,13 +156,22 @@ fn validate_shape_manifest(bytes: []const u8) -> !void {
     try require_shape(bytes, "call direct");
     try require_shape(bytes, "call std-primitive");
     try require_shape(bytes, "cleanup deinit");
+    try require_shape(bytes, "host-capabilities selfhost-host-v0");
+    try require_shape(bytes, "external std::mem::page_allocator");
+    try require_shape(bytes, "external std::fs::exists");
+    try require_shape(bytes, "external std::fs::metadata");
+    try require_shape(bytes, "external std::fs::read_dir");
     try require_shape(bytes, "external std::fs::read_file");
     try require_shape(bytes, "external std::fs::write_file");
+    try require_shape(bytes, "external std::fs::create_dir");
     try require_shape(bytes, "external std::io::blocking");
-    // New manifest lines are backend blockers until the ABI contract is extended.
-    if std::mem::len(bytes) != 316 {
-        return error("unsupported IR shape manifest");
-    }
+    try require_shape(bytes, "external std::io::write_stdout");
+    try require_shape(bytes, "external std::io::write_stderr");
+    try require_shape(bytes, "external std::process::arg_count");
+    try require_shape(bytes, "external std::process::arg");
+    try require_shape(bytes, "external std::process::env");
+    try require_shape(bytes, "external std::process::exit_code");
+    try require_shape(bytes, "manifest-complete selfhost-abi-v0");
     return;
 }
 
@@ -165,17 +206,44 @@ fn render_llvm_module(
     try append_line(out, "");
     try append_line(out, "%kizu.slice.u8 = type { ptr, i64 }");
     try append_line(out, "%kizu.owned = type { ptr }");
+    try append_line(out, "%kizu.fs.metadata = type { i64, i1 }");
+    try append_line(out, "%kizu.error.bool = type { i1, i1, %kizu.slice.u8 }");
+    try append_line(out, "%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }");
+    try append_line(out, "%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }");
+    try append_line(out,
+        "%kizu.error.metadata = type { i1, %kizu.fs.metadata, %kizu.slice.u8 }");
     try append_line(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
     try append_line(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
     try append_line(out, "");
+    try append_line(out, "declare %kizu.owned @kizu_rt_mem_page_allocator()");
     try append_line(out, "declare %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "declare %kizu.error.bool @kizu_rt_fs_exists(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out,
+        "declare %kizu.error.metadata @kizu_rt_fs_metadata(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out,
+        "declare %kizu.error.owned @kizu_rt_fs_read_dir(%kizu.owned, %kizu.slice.u8)");
     try append_line(out,
         "declare %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned, %kizu.slice.u8)");
     try append_line(out,
         "declare %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8)");
+    try append_line(out,
+        "declare %kizu.error.void @kizu_rt_fs_create_dir(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out,
+        "declare %kizu.error.void @kizu_rt_fs_rename(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8)");
+    try append_line(out,
+        "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out,
+        "declare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out, "declare i64 @kizu_rt_process_arg_count()");
+    try append_line(out, "declare %kizu.error.slice.u8 @kizu_rt_process_arg(i64)");
+    try append_line(out, "declare %kizu.error.slice.u8 @kizu_rt_process_env(%kizu.slice.u8)");
+    try append_line(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try append_line(out, "declare void @kizu_rt_process_exit(i64) noreturn");
     try append_line(out, "declare void @kizu_rt_owned_deinit(%kizu.owned)");
     try append_line(out, "declare void @kizu_rt_trap(%kizu.slice.u8) noreturn");
     try append_line(out, "declare i64 @kizu_selfhost__runtime_storage_smoke()");
+    try append_line(out, "declare i64 @kizu_selfhost__host_capability_smoke()");
     try append_line(out, "");
     try append_line(out, "define i64 @kizu_selfhost__smoke() {");
     try append_line(out, "entry:");
@@ -196,12 +264,30 @@ fn render_llvm_metadata(
     try append_key_value(out, "manifest ", manifest_path);
     try append_line(out, "output target/selfhost/selfhost.ll");
     try append_line(out, "runtime-storage target/selfhost/selfhost.storage.ll");
+    try append_line(out, "host-runtime target/selfhost/selfhost.host.ll");
+    try append_line(out, "host-runtime-metadata target/selfhost/selfhost.host.ll.meta");
     try append_line(out, "storage-backend selfhost-runtime-ll");
+    try append_line(out, "host-capabilities selfhost-host-v0");
     try append_line(out, "go-stdprim-storage none");
+    try append_line(out, "go-stdprim-host none");
+    try append_line(out, "linker-process deferred issue-459");
     try append_line(out, "validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate");
+    try append_line(out, "external @kizu_rt_mem_page_allocator");
     try append_line(out, "external @kizu_rt_io_blocking");
+    try append_line(out, "external @kizu_rt_fs_exists");
+    try append_line(out, "external @kizu_rt_fs_metadata");
+    try append_line(out, "external @kizu_rt_fs_read_dir");
     try append_line(out, "external @kizu_rt_fs_read_file");
     try append_line(out, "external @kizu_rt_fs_write_file");
+    try append_line(out, "external @kizu_rt_fs_create_dir");
+    try append_line(out, "external @kizu_rt_fs_rename");
+    try append_line(out, "external @kizu_rt_io_write_stdout");
+    try append_line(out, "external @kizu_rt_io_write_stderr");
+    try append_line(out, "external @kizu_rt_process_arg_count");
+    try append_line(out, "external @kizu_rt_process_arg");
+    try append_line(out, "external @kizu_rt_process_env");
+    try append_line(out, "external @kizu_rt_process_exit_code");
+    try append_line(out, "external @kizu_rt_process_exit");
     try append_line(out, "external @kizu_rt_owned_deinit");
     try append_line(out, "external @kizu_rt_trap");
     try append_line(out, "unsupported-policy blocker");
@@ -241,6 +327,38 @@ fn load_runtime_storage_metadata_tail(io: Io) -> ![]const u8 {
     let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.storage.ll.meta.tail");
     if !std::mem::starts_with(bytes, "linked-llvm target/selfhost/selfhost.ll") {
         return error("invalid runtime storage metadata template");
+    }
+    return bytes;
+}
+
+fn load_host_capability_module(io: Io) -> ![]const u8 {
+    let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.host.ll");
+    if !std::mem::starts_with(bytes, "; kizu selfhost host capabilities ll v0") {
+        return error("invalid host capability artifact");
+    }
+    return bytes;
+}
+
+fn render_host_capability_metadata(
+    allocator: Allocator,
+    io: Io,
+    ir_path: []const u8,
+    manifest_path: []const u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "kizu-host-capabilities-v0");
+    try append_line(out, "abi selfhost-abi-v0");
+    try append_key_value(out, "ir ", ir_path);
+    try append_key_value(out, "manifest ", manifest_path);
+    let tail = try load_host_capability_metadata_tail(io);
+    try out.append_bytes(tail);
+    return out;
+}
+
+fn load_host_capability_metadata_tail(io: Io) -> ![]const u8 {
+    let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.host.ll.meta.tail");
+    if !std::mem::starts_with(bytes, "linked-llvm target/selfhost/selfhost.ll") {
+        return error("invalid host capability metadata template");
     }
     return bytes;
 }
