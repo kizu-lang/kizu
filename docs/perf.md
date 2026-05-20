@@ -60,6 +60,10 @@ pre-commit run --all-files
 
 `examples/user_registry.kizu` は v0.1 の complex app baseline として扱う。
 
+Selfhost compiler checks are split into daily and heavyweight tiers in
+[`docs/selfhost-test-tiers.md`](selfhost-test-tiers.md). The daily gate must not
+hide multi-minute interpreted selfhost oracle work inside default `go test`.
+
 v0.1 の完了条件に Rust 同等以上の runtime performance guarantee は含めない。
 この段階では、継続的に同じ対象を測り、悪化を見つけられることを優先する。
 
