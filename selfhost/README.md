@@ -47,10 +47,11 @@ the selfhost frontend. The source table preserves source ids, source kind, modul
 name, file path, and loaded text. Source diagnostics use stable source ids,
 paths, byte spans, line/column data, and related spans.
 
-The resolver boundary uses `std::map::Map<[]const u8, V>` for symbol and
-visibility tables. Resolver diagnostics use `std::kizu::diagnostic` and the
-oracle covers missing symbols, duplicate symbols, private access, and import
-cycles.
+The resolver boundary consumes the source table, registers selfhost/std modules,
+and scans top-level declarations into qualified symbol and visibility maps using
+`std::map::Map<[]const u8, V>`. Resolver diagnostics use
+`std::kizu::diagnostic` and the oracle covers missing symbols, duplicate
+symbols, private access, and import cycles.
 
 The type checker boundary uses explicit type-kind, arity, and copyability maps.
 The oracle covers primitive, function, struct, union, enum, error-union,
