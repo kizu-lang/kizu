@@ -5,6 +5,8 @@ Kizu-owned components. It does not switch production behavior by itself.
 
 The no-Go stage contract is defined in
 [`docs/selfhost-bootstrap.md`](selfhost-bootstrap.md).
+Selfhost test tiering and timing policy are defined in
+[`docs/selfhost-test-tiers.md`](selfhost-test-tiers.md).
 
 ## Repeatable Gate
 
@@ -15,9 +17,11 @@ CLI path:
 just selfhost-switch-gate
 ```
 
-The command checks the source-owned `selfhost` package, runs the Go/Kizu oracle
-suite, runs the component gate entries directly, and keeps the Go project, type,
-and ownership packages green.
+The command checks the source-owned `selfhost` package, runs the aggregate
+Go/Kizu oracle suite once, and keeps the Go project, type, and ownership
+packages green. It intentionally does not run the direct heavyweight gate recipe
+after the aggregate oracle, because the aggregate oracle already executes those
+stage gate functions.
 
 For cache or artifact-affecting switch PRs, also run one of:
 

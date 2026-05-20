@@ -23,7 +23,7 @@ check:
 selfhost-oracle:
     KIZU_RUN_SELFHOST_ORACLE=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -v
 
-# Run heavyweight selfhost integration gates as an explicit check.
+# Run direct heavyweight selfhost gates for focused debugging.
 selfhost-integration-gates:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate)$' -v
 
