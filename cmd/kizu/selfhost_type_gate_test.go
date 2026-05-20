@@ -12,9 +12,9 @@ const selfhostTypeOracleOutput = `type-modules
 type-production-symbols
 98
 type-production-functions
-500
+508
 type-production-typed-nodes
-28964
+29778
 type-symbols
 9
 type-typed-nodes

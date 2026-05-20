@@ -7,7 +7,13 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-const selfhostOwnershipOracleOutput = `ownership-resources
+const selfhostOwnershipOracleOutput = `ownership-production-resources
+1369
+ownership-production-checked-nodes
+39053
+ownership-production-borrows
+265
+ownership-resources
 7
 ownership-borrows
 2
@@ -44,7 +50,13 @@ func countSelfhostOwnershipGateFailures(t *testing.T) int {
 // runSelfhostOwnershipGate loads the selfhost package and runs its ownership oracle.
 func runSelfhostOwnershipGate(t *testing.T) (string, error) {
 	t.Helper()
-	_, program, err := loadPackageProgram("../../selfhost")
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	defer restore()
+
+	_, program, err := loadPackageProgram("selfhost")
 	if err != nil {
 		return "", err
 	}
