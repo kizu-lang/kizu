@@ -4133,6 +4133,13 @@ func (c *Checker) activateBorrowArgs(
 			return nil, err
 		}
 		if value != nil {
+			if fn.params[idx].mutBorrow && value.borrowedParam && !value.mutBorrow {
+				releaseBorrows(borrowed)
+				return nil, fmt.Errorf(
+					"borrow error: shared borrow `%s` cannot be forwarded as mutable",
+					value.name,
+				)
+			}
 			if err := checkBorrowConflict(value, fn.params[idx].mutBorrow); err != nil {
 				releaseBorrows(borrowed)
 				return nil, err

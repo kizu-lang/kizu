@@ -5616,23 +5616,27 @@ func (c *Checker) checkMethodArgs(
 	return method.returnType, nil
 }
 
-// requireMutableBorrowArg restricts &mut arguments to mutable local bindings.
+// requireMutableBorrowArg restricts &mut arguments to mutable locals or reborrowed &mut params.
 func requireMutableBorrowArg(expr ast.Expression, env *scope) error {
 	ident, ok := expr.(*ast.IdentExpr)
-	if !ok {
-		field, fieldOK := expr.(*ast.FieldExpr)
-		if !fieldOK {
-			return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+	if ok {
+		if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
+			return nil
 		}
-		ident, ok = field.Receiver.(*ast.IdentExpr)
-		if !ok {
-			return fmt.Errorf("type error: &mut argument must be a mutable local binding")
-		}
-	}
-	if !env.isMutable(ident.Name) {
 		return fmt.Errorf("type error: &mut argument `%s` must be mutable", ident.Name)
 	}
-	return nil
+	field, fieldOK := expr.(*ast.FieldExpr)
+	if !fieldOK {
+		return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+	}
+	ident, ok = field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+	}
+	if env.isMutable(ident.Name) {
+		return nil
+	}
+	return fmt.Errorf("type error: &mut argument `%s` must be mutable", ident.Name)
 }
 
 // borrowPrefix reports whether an expression is &T or &mut T syntax.

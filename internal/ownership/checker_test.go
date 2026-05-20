@@ -153,6 +153,42 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsMutableBorrowForwarding checks &mut params can be reborrowed for calls.
+func TestCheckAcceptsMutableBorrowForwarding(t *testing.T) {
+	source := `struct User { name: []const u8 }
+fn rename(user: &mut User) { user.*.name = "bob"; }
+fn outer(user: &mut User) {
+    rename(user);
+    user.*.name = "carol";
+}
+fn main() {
+    var user = User { name: "alice" };
+    outer(user);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsMutableBorrowForwardingAlias checks reborrows stay exclusive.
+func TestCheckRejectsMutableBorrowForwardingAlias(t *testing.T) {
+	source := `struct User { name: []const u8 }
+fn use(left: &User, right: &mut User) {
+    print(left.name);
+    print(right.name);
+}
+fn outer(user: &mut User) {
+    use(user, user);
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "cannot be mutably borrowed while borrowed") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckAcceptsErrorFromStringView checks error copies local view bytes.
 func TestCheckAcceptsErrorFromStringView(t *testing.T) {
 	source := `fn fail(text: std::string::String) -> !void {

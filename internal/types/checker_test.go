@@ -527,6 +527,39 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsMutableBorrowForwarding checks call-scoped &mut reborrows.
+func TestCheckAcceptsMutableBorrowForwarding(t *testing.T) {
+	source := `struct User { name: []const u8 }
+fn rename(user: &mut User) -> void { user.*.name = "bob" ;}
+fn outer(user: &mut User) -> void {
+    rename(user);
+    user.*.name = "carol";
+}
+fn main() -> void {
+    var user = User { name: "alice" };
+    outer(user);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsSharedBorrowForwarding rejects shared-to-mutable reborrows.
+func TestCheckRejectsSharedBorrowForwarding(t *testing.T) {
+	source := `struct User { name: []const u8 }
+fn rename(user: &mut User) -> void { user.*.name = "bob" ;}
+fn outer(user: &User) -> void {
+    rename(user);
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "&mut argument `user` must be mutable") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckFieldAndDerefAssignment validates mutable assignment targets.
 func TestCheckFieldAndDerefAssignment(t *testing.T) {
 	source := `struct User { name: []const u8 }
