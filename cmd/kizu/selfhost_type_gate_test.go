@@ -7,7 +7,13 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-const selfhostTypeOracleOutput = `type-symbols
+const selfhostTypeOracleOutput = `type-modules
+31
+type-production-symbols
+97
+type-production-typed-nodes
+2185
+type-symbols
 9
 type-typed-nodes
 9
@@ -40,7 +46,13 @@ func countSelfhostTypeGateFailures(t *testing.T) int {
 // runSelfhostTypeGate loads the selfhost package and runs its type checker oracle.
 func runSelfhostTypeGate(t *testing.T) (string, error) {
 	t.Helper()
-	_, program, err := loadPackageProgram("../../selfhost")
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	defer restore()
+
+	_, program, err := loadPackageProgram("selfhost")
 	if err != nil {
 		return "", err
 	}
