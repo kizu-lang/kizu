@@ -79,19 +79,24 @@ interpreter. `TestSelfhostBackendArtifactGate` also links the generated
 for `check selfhost`, `stage selfhost`, and unsupported command diagnostics.
 The latter is the no-Go smoke for the #458 artifact CLI path.
 
-The final bootstrap runner introduced by #459 must provide this shape:
+The bootstrap runner introduced by #459 provides this shape:
 
 ```sh
 just selfhost-bootstrap
 ```
 
-It expands to the following logical steps:
+The runner performs these logical steps internally:
 
-```sh
-just selfhost-bootstrap-stage1
-just selfhost-bootstrap-stage2
-just selfhost-bootstrap-compare
-```
+1. stage0 uses the explicit Go bootstrap/oracle gate to emit the supported
+   selfhost LLVM artifact set.
+2. stage1 links the emitted Kizu-built artifact and runs `check selfhost` plus
+   `stage selfhost`.
+3. stage1 materializes the supported stage2 artifact set through the hosted
+   `stage selfhost` command.
+4. stage2 links from the stage2 artifact set and runs the same supported CLI
+   commands.
+5. the runner compares user-visible stdout/stderr/exit codes and deterministic
+   SHA-256 fingerprints for the supported artifact set.
 
 The concrete stage commands must use these artifact locations unless a later
 issue updates this contract:
@@ -102,6 +107,17 @@ target/selfhost/stage1/
 target/selfhost/stage2/
 target/selfhost/reports/
 ```
+
+The durable report is:
+
+```text
+target/selfhost/reports/bootstrap.txt
+```
+
+It records the stage0 compiler mode, stage1/stage2 executables, command output
+fingerprints, artifact fingerprints, cache directory and size, elapsed time, and
+comparison status. Stage1 and stage2 are required to run in `hosted-artifact
+no-go` mode; stage0 is the only explicit Go bootstrap/oracle boundary.
 
 During the current transition, run this preflight before starting stage work:
 
@@ -168,14 +184,15 @@ reachable ABI shape.
 
 ## CI Contract
 
-Until #459 exists, CI should run:
+Until the production switch issues opt into the full bootstrap runner, CI should
+run:
 
 ```sh
 just selfhost-bootstrap-preflight
 go test ./...
 ```
 
-After #459, CI should add:
+Bootstrap jobs can additionally run:
 
 ```sh
 just selfhost-bootstrap

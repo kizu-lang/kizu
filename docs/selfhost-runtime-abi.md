@@ -295,6 +295,13 @@ boundary. Unsupported commands write a deterministic stderr diagnostic and
 return exit code `64`. This is a runnable no-Go artifact smoke; broader stage
 comparison remains #459.
 
+For #459, the hosted `stage selfhost` path also materializes the supported
+stage2 artifact set by reading the current `target/selfhost/selfhost.*` LLVM
+artifacts and writing the corresponding files under `target/selfhost/stage2/`
+through the explicit filesystem runtime boundary. This is the supported
+bootstrap subset until later issues replace the artifact materialization path
+with a broader selfhost backend.
+
 ## Textual LLVM Validation
 
 Until CI requires an LLVM verifier binary, #454 uses this repository command as
