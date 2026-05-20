@@ -109,9 +109,9 @@ just selfhost-bootstrap-preflight
 just selfhost-bootstrap
 ```
 
-The preflight runs the aggregate selfhost oracle once through
-`just selfhost-switch-gate` and then runs cache smoke coverage. It intentionally
-does not run
+The preflight runs `just selfhost-switch-gate` and then runs cache smoke
+coverage. After #461, the switch gate includes production-from-scratch and the
+aggregate selfhost oracle once. It intentionally does not run
 `just selfhost-integration-gates` after the aggregate oracle, to avoid duplicate
 selfhost package loading, checking, and interpreted `RunEntry` execution.
 
@@ -126,6 +126,35 @@ Measured locally on 2026-05-21 during #459 bootstrap runner work:
 | Command | Elapsed |
 | --- | ---: |
 | `just selfhost-bootstrap` | 61.4s |
+
+## Production Boundary Gate
+
+The #461 production boundary gate runs only the hosted stage2 artifact for the
+#458 command surface:
+
+```sh
+just selfhost-production-gate
+```
+
+It requires the same `target/selfhost/stage2/selfhost` executable and passing
+bootstrap report as the corpus gate. It does not rebuild artifacts. From a clean
+workspace, run:
+
+```sh
+just selfhost-production-from-scratch
+```
+
+That command runs `just selfhost-bootstrap`, `just selfhost-production-gate`,
+and `just selfhost-corpus-gate` in sequence. Go is present only as the explicit
+stage0 bootstrap/oracle harness in the first step and as the test runner for the
+gate; the production commands are direct executions of the hosted artifact.
+
+Measured locally on 2026-05-21 during #461:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-production-gate` | 0.31s |
+| `just selfhost-production-from-scratch` | 61.0s |
 
 ## Supported Corpus Gate
 

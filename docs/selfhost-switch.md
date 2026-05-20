@@ -17,11 +17,12 @@ CLI path:
 just selfhost-switch-gate
 ```
 
-The command checks the source-owned `selfhost` package, runs the aggregate
-Go/Kizu oracle suite once, and keeps the Go project, type, and ownership
-packages green. It intentionally does not run the direct heavyweight gate recipe
-after the aggregate oracle, because the aggregate oracle already executes those
-stage gate functions.
+The command builds the hosted stage2 artifact through the explicit bootstrap
+boundary, runs the #458 production commands through that artifact, runs the
+supported corpus, runs the aggregate Go/Kizu oracle suite once, and keeps the Go
+project, type, and ownership packages green. It intentionally does not run the
+direct heavyweight gate recipe after the aggregate oracle, because the aggregate
+oracle already executes those stage gate functions.
 
 For cache or artifact-affecting switch PRs, also run one of:
 
@@ -44,18 +45,44 @@ just perf-cache-isolated
 | interpreter | none | Go interpreter | Go-owned | No switch planned before Kizu compiler frontend can emit a stable execution IR. |
 | IR / backend | `selfhost::{ir, backend}` skeleton | Go IR / backend | Go-owned | Requires a separate backend fingerprint and artifact/cache issue before any production switch. |
 | build cache / artifacts | none | Go cache / target paths | Go-owned | Requires explicit cache-key, prune, status, no-op rebuild, and artifact-size evidence. |
+| #458 selfhost CLI path | `selfhost::{ir, backend}` plus hosted runtime ABI | `target/selfhost/stage2/selfhost` | switched for `check selfhost` and `stage selfhost` | `just selfhost-production-from-scratch` passes; Go remains only in explicit stage0 bootstrap/oracle jobs; general CLI parity remains blocked by #497. |
 
 ## Failure Policy
 
 - Any oracle mismatch blocks the switch PR.
-- The production path stays Go-owned until the switch PR changes an explicit
-  component selection point.
+- The general `kizu` CLI stays Go-owned until a later switch issue changes an
+  explicit component selection point. The #458 selfhost command path is the
+  hosted stage2 artifact, not `go run ./cmd/kizu check selfhost`.
 - There is no implicit fallback from Kizu-owned logic to Go-owned logic inside a
   switched path. Rollback is a normal revert of the explicit switch commit.
 - Backend, cache, and artifact changes require their own switch decision and
   measurement evidence; frontend oracle success is not enough to change them.
 - Unsupported language features must stay visible in oracle output or in linked
   GitHub issues. Do not hide them behind runtime fallback.
+
+## Release Boundary For #461
+
+The releaseable artifact for the first runnable selfhost path is the stage2
+hosted compiler produced by:
+
+```sh
+just selfhost-production-from-scratch
+```
+
+For this release boundary, only the #458 command surface is production-owned by
+the artifact:
+
+```sh
+target/selfhost/stage2/selfhost check selfhost
+target/selfhost/stage2/selfhost stage selfhost
+```
+
+The artifact may also run the manifest-selected #460 supported corpus. It must
+not be described as a general replacement for the `kizu` CLI until #497 closes.
+
+Rollback is a revert of the #461 production-boundary change or a release note
+that points operators back to explicit bootstrap/oracle commands. Rollback must
+not silently dispatch failed artifact commands to Go compiler phases.
 
 ## Local Evidence For #435
 
@@ -83,3 +110,13 @@ added:
 
 No production CLI path, backend target, cache key, or artifact location is
 changed by #451.
+
+## Local Evidence For #461
+
+Recorded on 2026-05-21 after the production boundary gate was added:
+
+| Command | Result | Notes |
+| --- | --- | --- |
+| `just selfhost-switch-gate` | passed, `real 143.71s` | Ran production-from-scratch, aggregate oracle, package skeleton check, and project/type/ownership Go package tests. |
+| `just selfhost-production-from-scratch` | passed, `real 61.03s` | Built stage2 through explicit bootstrap, then ran production and corpus gates through the hosted artifact. |
+| `just selfhost-production-gate` | passed, `real 0.31s` | Ran `check selfhost`, `stage selfhost`, and unsupported command diagnostics through `target/selfhost/stage2/selfhost`; report wrote `go.production none`. |

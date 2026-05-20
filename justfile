@@ -31,9 +31,9 @@ selfhost-integration-gates:
 selfhost-cli-gate:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostCLIGate$' -count=1 -v
 
-# Run the selfhost production switch review gate without changing production paths.
+# Run the selfhost production switch review gate.
 selfhost-switch-gate:
-    go run ./cmd/kizu check selfhost
+    just selfhost-production-from-scratch
     just selfhost-oracle
     go test ./cmd/kizu -run 'TestSelfhostPackageSkeletonChecks$' -v
     go test ./internal/project ./internal/types ./internal/ownership
@@ -46,6 +46,16 @@ selfhost-bootstrap-preflight:
 # Run the stage0-stage1-stage2 selfhost bootstrap comparison.
 selfhost-bootstrap:
     KIZU_RUN_SELFHOST_BOOTSTRAP=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostBootstrapRunner$' -count=1 -v
+
+# Run #458 commands through the hosted stage2 production artifact.
+selfhost-production-gate:
+    KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1 -v
+
+# Build the hosted artifact once, then run production and corpus gates.
+selfhost-production-from-scratch:
+    just selfhost-bootstrap
+    just selfhost-production-gate
+    just selfhost-corpus-gate
 
 # Run the supported corpus through the hosted selfhost artifact.
 selfhost-corpus-gate:
