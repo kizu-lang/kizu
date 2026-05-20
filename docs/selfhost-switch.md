@@ -73,7 +73,7 @@ added:
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `go test ./cmd/kizu -run 'TestSelfhostResolverGate\|TestSelfhostTypeGate' -v` | passed, `ok ... 32.526s` | Resolver production symbols = 513; type production symbols = 97; type production typed nodes = 2185. |
+| `go test ./cmd/kizu -run 'TestSelfhostResolverGate\|TestSelfhostTypeGate' -v` | passed, `ok ... 32.526s` | Resolver production symbols = 513; type production symbols = 97; type production typed nodes = 2198 after ParseResult helpers. |
 | `just selfhost-oracle` | passed, `ok ... 43.498s` | Oracle output reported lexer/parser/source/resolver/type/ownership failures = 0. |
 | `go test ./...` | passed, `cmd/kizu 96.172s` | Full suite remains green; the selfhost type gate is currently interpreter-heavy. |
 

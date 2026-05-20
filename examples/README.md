@@ -77,6 +77,7 @@ go test ./...
 | boolean logic | `logical.kizu` | asserts `and` / `or` precedence and short-circuit shape |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
+| parse result AST access | `std_kizu_ast_parse_result_access.kizu` | reads parser root metadata through `ParseResult` helper methods |
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
 | owned string storage boundary | `std_string_storage_boundary.kizu` | asserts reserve, append, truncate, clear, view, and deinit rules |
