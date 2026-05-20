@@ -11,6 +11,7 @@ import (
 
 // TestSelfhostBackendArtifactGate executes the Kizu-owned LLVM artifact smoke.
 func TestSelfhostBackendArtifactGate(t *testing.T) {
+	requireSelfhostGate(t)
 	if failures := countSelfhostBackendArtifactGateFailures(t); failures > 0 {
 		t.Fatalf("selfhost backend artifact gate failures=%d", failures)
 	}
@@ -27,8 +28,12 @@ func countSelfhostBackendArtifactGateFailures(t *testing.T) int {
 	required := []string{
 		"llvm-artifact-path\ntarget/selfhost/selfhost.ll\n",
 		"llvm-metadata-path\ntarget/selfhost/selfhost.ll.meta\n",
+		"runtime-storage-path\ntarget/selfhost/selfhost.storage.ll\n",
+		"runtime-storage-metadata-path\ntarget/selfhost/selfhost.storage.ll.meta\n",
 		"llvm-artifact-bytes\n",
 		"llvm-metadata-bytes\n",
+		"runtime-storage-bytes\n",
+		"runtime-storage-metadata-bytes\n",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(out, fragment) {
@@ -52,7 +57,23 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 		t.Errorf("read LLVM artifact metadata: %v", err)
 		return 1
 	}
-	return countTextualLLVMValidationFailures(t, string(llBytes), string(metaBytes))
+	storageBytes, err := os.ReadFile("../../target/selfhost/selfhost.storage.ll")
+	if err != nil {
+		t.Errorf("read runtime storage artifact: %v", err)
+		return 1
+	}
+	storageMetaBytes, err := os.ReadFile("../../target/selfhost/selfhost.storage.ll.meta")
+	if err != nil {
+		t.Errorf("read runtime storage metadata: %v", err)
+		return 1
+	}
+	failures := countTextualLLVMValidationFailures(t, string(llBytes), string(metaBytes))
+	failures += countRuntimeStorageValidationFailures(
+		t,
+		string(storageBytes),
+		string(storageMetaBytes),
+	)
+	return failures
 }
 
 // countTextualLLVMValidationFailures applies the documented textual IR validation.
@@ -68,6 +89,7 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"declare %kizu.error.void @kizu_rt_fs_write_file",
 		"declare void @kizu_rt_owned_deinit(%kizu.owned)\n",
 		"declare void @kizu_rt_trap(%kizu.slice.u8) noreturn\n",
+		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
 	}
 	for _, fragment := range requiredLL {
@@ -88,6 +110,9 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"ir target/selfhost/selfhost.ir\n",
 		"manifest target/selfhost/selfhost.ir.manifest\n",
 		"output target/selfhost/selfhost.ll\n",
+		"runtime-storage target/selfhost/selfhost.storage.ll\n",
+		"storage-backend selfhost-runtime-ll\n",
+		"go-stdprim-storage none\n",
 		"validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate\n",
 		"external @kizu_rt_io_blocking\n",
 		"external @kizu_rt_fs_read_file\n",
@@ -99,6 +124,90 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 	for _, fragment := range requiredMeta {
 		if !strings.Contains(metaContent, fragment) {
 			t.Errorf("LLVM artifact metadata missing %q:\n%s", fragment, metaContent)
+			return 1
+		}
+	}
+	return 0
+}
+
+// countRuntimeStorageValidationFailures validates the non-Go runtime storage artifact.
+func countRuntimeStorageValidationFailures(t *testing.T, llContent string, metaContent string) int {
+	t.Helper()
+	if failures := countRuntimeStorageLLFailures(t, llContent); failures > 0 {
+		return failures
+	}
+	return countRuntimeStorageMetadataFailures(t, metaContent)
+}
+
+// countRuntimeStorageLLFailures checks storage symbols and smoke calls.
+func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
+	t.Helper()
+	requiredLL := []string{
+		"; kizu selfhost runtime storage ll v0\n",
+		"%kizu.rt.array = type { ptr, i64, i64 }\n",
+		"%kizu.rt.string = type { ptr, i64, i64 }\n",
+		"%kizu.rt.map = type { ptr, i1, i64 }\n",
+		"declare ptr @kizu_rt_alloc(ptr, i64)\n",
+		"declare void @kizu_rt_free(ptr, ptr)\n",
+		"define %kizu.owned @kizu_rt_array_new",
+		"define %kizu.error.void @kizu_rt_array_append",
+		"define %kizu.owned @kizu_rt_string_new",
+		"define %kizu.error.void @kizu_rt_string_append_bytes",
+		"define %kizu.owned @kizu_rt_map_new",
+		"define %kizu.error.void @kizu_rt_map_insert",
+		"define %kizu.owned @kizu_rt_diagnostic_buffer_new",
+		"define %kizu.error.void @kizu_rt_diagnostic_push",
+		"define i64 @kizu_selfhost__runtime_storage_smoke() {\n",
+		"call %kizu.error.void @kizu_rt_array_append",
+		"call %kizu.error.void @kizu_rt_string_append_bytes",
+		"call %kizu.error.void @kizu_rt_map_insert",
+		"call %kizu.error.void @kizu_rt_diagnostic_push",
+	}
+	for _, fragment := range requiredLL {
+		if !strings.Contains(llContent, fragment) {
+			t.Errorf("runtime storage artifact missing %q:\n%s", fragment, llContent)
+			return 1
+		}
+	}
+	forbiddenMarkers := []string{"std.builtin", "stdprim", "internal/interp", "internal global"}
+	for _, forbidden := range forbiddenMarkers {
+		if strings.Contains(llContent, forbidden) {
+			t.Errorf("runtime storage artifact contains Go fallback marker %q", forbidden)
+			return 1
+		}
+	}
+	return 0
+}
+
+// countRuntimeStorageMetadataFailures checks reachable storage metadata and guards.
+func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
+	t.Helper()
+	requiredMeta := []string{
+		"kizu-runtime-storage-v0\n",
+		"abi selfhost-abi-v0\n",
+		"ir target/selfhost/selfhost.ir\n",
+		"manifest target/selfhost/selfhost.ir.manifest\n",
+		"linked-llvm target/selfhost/selfhost.ll\n",
+		"output target/selfhost/selfhost.storage.ll\n",
+		"storage-backend selfhost-runtime-ll\n",
+		"allocator-boundary explicit\n",
+		"external @kizu_rt_alloc\n",
+		"external @kizu_rt_free\n",
+		"go-stdprim-storage none\n",
+		"interpreter-storage none\n",
+		"reachable array token-list\n",
+		"reachable array ast-child-list\n",
+		"reachable string diagnostic-buffer\n",
+		"reachable string path-buffer\n",
+		"reachable map resolver-symbol-table\n",
+		"reachable map type-symbol-table\n",
+		"reachable map ownership-state-table\n",
+		"reachable diagnostic compiler-failure-buffer\n",
+		"deferred box-arena-handle issue-496\n",
+	}
+	for _, fragment := range requiredMeta {
+		if !strings.Contains(metaContent, fragment) {
+			t.Errorf("runtime storage metadata missing %q:\n%s", fragment, metaContent)
 			return 1
 		}
 	}

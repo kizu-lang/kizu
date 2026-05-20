@@ -147,6 +147,60 @@ The #453 manifest contains only `deinit` cleanup. Cleanup calls are explicit:
 #454 may declare these symbols without defining them. #456 owns the storage
 implementation. A value that needs cleanup but lacks a listed hook is unsupported.
 
+## Reachable Runtime Storage
+
+#456 keeps public `std::array::Array`, `std::string::String`, and
+`std::map::Map` APIs in Kizu source. The bootstrap storage implementation is an
+opaque runtime template at `selfhost/runtime/selfhost.storage.ll`, with static
+metadata contract lines in `selfhost/runtime/selfhost.storage.ll.meta.tail`.
+The Kizu backend copies them to artifacts linked next to
+`target/selfhost/selfhost.ll`:
+
+```text
+target/selfhost/selfhost.storage.ll
+target/selfhost/selfhost.storage.ll.meta
+```
+
+The public ABI still exposes owned containers only as `%kizu.owned`. Runtime
+storage internals are not available to safe Kizu code. The minimum reachable
+selfhost storage symbols are:
+
+| Shape | Runtime symbol | Purpose |
+| --- | --- | --- |
+| Array construction | `@kizu_rt_array_new` | token lists and AST child lists |
+| Array append | `@kizu_rt_array_append` | copies one lowered element into storage |
+| Array length | `@kizu_rt_array_len` | returns the checked element count |
+| Array borrowed view | `@kizu_rt_array_at` | returns a local read-only element view |
+| Array cleanup | `@kizu_rt_array_deinit` | releases owned array storage |
+| String construction | `@kizu_rt_string_new` | diagnostic and path buffers |
+| String append bytes | `@kizu_rt_string_append_bytes` | copies borrowed bytes |
+| String append byte | `@kizu_rt_string_append_byte` | appends one byte |
+| String length | `@kizu_rt_string_len` | returns byte length |
+| String borrowed view | `@kizu_rt_string_as_bytes` | returns a local read-only byte view |
+| String cleanup | `@kizu_rt_string_deinit` | releases owned string storage |
+| Map construction | `@kizu_rt_map_new` | resolver, type, and ownership tables |
+| Map insert | `@kizu_rt_map_insert` | copies `[]const u8` key and copy value |
+| Map contains | `@kizu_rt_map_contains` | checks key presence |
+| Map `i64` get | `@kizu_rt_map_get_i64` | returns copy payloads used by symbol tables |
+| Map cleanup | `@kizu_rt_map_deinit` | releases owned map storage |
+| Diagnostic buffer construction | `@kizu_rt_diagnostic_buffer_new` | compiler failure storage |
+| Diagnostic push | `@kizu_rt_diagnostic_push` | copies diagnostic message text |
+| Diagnostic cleanup | `@kizu_rt_diagnostic_buffer_deinit` | releases diagnostic storage |
+
+Construction takes an explicit allocator capability represented as `%kizu.owned`
+and allocates through runtime-internal `@kizu_rt_alloc(ptr, i64)`. Cleanup calls
+`@kizu_rt_free(ptr, ptr)` using the allocator pointer stored inside the opaque
+runtime object. #457 owns binding allocator capability creation to host
+facilities; #456 keeps the storage calls capability-shaped and non-Go.
+
+Append operations return `!void` using `%kizu.error.void`. The runtime artifact
+metadata must include `allocator-boundary explicit`, `go-stdprim-storage none`,
+and `interpreter-storage none`; Go-backed interpreter storage is allowed only
+for stage0/oracle execution, not for this artifact path.
+
+Box, Arena, and Handle storage are deferred to #496 unless a later selfhost IR
+artifact lists a concrete reachable call site.
+
 ## External Primitives
 
 | Kizu primitive | Runtime symbol | Signature |
@@ -184,6 +238,14 @@ the validation command, each unresolved external, and the blocker policy for
 unsupported shapes. This metadata is a stable input for the #459 stage
 comparison.
 
+For #456 the Kizu backend performs cheap header validation before copying the
+runtime storage template. The same Go gate checks
+`target/selfhost/selfhost.storage.ll` and `target/selfhost/selfhost.storage.ll.meta`.
+The storage validation requires the reachable Array, String, Map, and diagnostic
+runtime symbols, the `@kizu_selfhost__runtime_storage_smoke` entry, explicit
+allocator-boundary metadata, and the absence of Go interpreter/stdprim fallback
+markers in the storage LLVM artifact.
+
 ## Unsupported Shapes Tracked By #495
 
 The following are intentionally outside `selfhost-abi-v0`:
@@ -191,7 +253,7 @@ The following are intentionally outside `selfhost-abi-v0`:
 - raw pointers and nullable pointers
 - floats and integer widths other than `i64` and `u8`
 - mutable slices
-- full array, string, and map storage layout
+- public array, string, and map storage layout beyond opaque runtime handles
 - tagged-union payload ABI beyond blocker-specific additions
 - task, thread, channel, mutex, and atomic runtime ABI
 - C ABI interop and native object/linker metadata beyond textual LLVM emission

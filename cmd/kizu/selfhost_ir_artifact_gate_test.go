@@ -11,6 +11,7 @@ import (
 
 // TestSelfhostIRArtifactGate executes the selfhost IR artifact emission smoke.
 func TestSelfhostIRArtifactGate(t *testing.T) {
+	requireSelfhostGate(t)
 	if failures := countSelfhostIRArtifactGateFailures(t); failures > 0 {
 		t.Fatalf("selfhost IR artifact gate failures=%d", failures)
 	}

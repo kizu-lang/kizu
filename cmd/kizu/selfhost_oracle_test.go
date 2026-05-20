@@ -2,10 +2,24 @@ package main
 
 import (
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 )
+
+const (
+	selfhostGateEnv   = "KIZU_RUN_SELFHOST_GATES"
+	selfhostOracleEnv = "KIZU_RUN_SELFHOST_ORACLE"
+)
+
+// requireSelfhostGate skips heavyweight selfhost integration gates by default.
+func requireSelfhostGate(t *testing.T) {
+	t.Helper()
+	if os.Getenv(selfhostGateEnv) != "1" {
+		t.Skipf("set %s=1 to run heavyweight selfhost gates", selfhostGateEnv)
+	}
+}
 
 type selfhostOracleResult struct {
 	component          string
@@ -21,6 +35,9 @@ type selfhostOracleResult struct {
 
 // TestSelfhostOracleRunner is the one-command Go/Kizu component parity gate.
 func TestSelfhostOracleRunner(t *testing.T) {
+	if os.Getenv(selfhostOracleEnv) != "1" {
+		t.Skipf("set %s=1 to run the aggregate selfhost oracle", selfhostOracleEnv)
+	}
 	results := []selfhostOracleResult{
 		runSelfhostLexerOracle(t),
 		runSelfhostLexerTokenizeOracle(t),

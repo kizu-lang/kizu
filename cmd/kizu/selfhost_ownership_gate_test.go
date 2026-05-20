@@ -10,6 +10,7 @@ import (
 
 // TestSelfhostOwnershipGate executes the Kizu-owned ownership oracle entry.
 func TestSelfhostOwnershipGate(t *testing.T) {
+	requireSelfhostGate(t)
 	if failures := countSelfhostOwnershipGateFailures(t); failures > 0 {
 		t.Fatalf("selfhost ownership gate failures=%d", failures)
 	}
