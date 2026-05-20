@@ -11,6 +11,8 @@ The package currently defines these source-owned modules:
 - `selfhost::ast`
 - `selfhost::parser`
 - `selfhost::parser_oracle`
+- `selfhost::source`
+- `selfhost::source_oracle`
 - `selfhost::diagnostic`
 - `selfhost::resolver`
 - `selfhost::resolver_oracle`
@@ -38,6 +40,12 @@ diagnostic summaries for parser-owned errors. Lower-level untyped lexer, parser,
 and container failures are explicitly adapted through typed error casts. Parser
 success gates compare the Arena + NodeId AST summary for every `selfhost/src`
 source file, and parser error gates keep recoverable `!T` failures readable.
+
+The source manager boundary uses explicit `std::fs`, `std::path`, and `std::io`
+capabilities to load `kizu.toml`, `selfhost/src`, and the std sources required by
+the selfhost frontend. The source table preserves source ids, source kind, module
+name, file path, and loaded text. Source diagnostics use stable source ids,
+paths, byte spans, line/column data, and related spans.
 
 The resolver boundary uses `std::map::Map<[]const u8, V>` for symbol and
 visibility tables. Resolver diagnostics use `std::kizu::diagnostic` and the

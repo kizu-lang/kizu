@@ -1476,6 +1476,9 @@ func (c *Checker) checkFsBuiltin(
 		return c.checkFsPathOnly("std::fs::exists", args, env, "!bool")
 	case "std.builtin.fs_metadata":
 		return c.checkFsPathOnly("std::fs::metadata", args, env, "!std::fs::Metadata")
+	case "std.builtin.fs_read_dir":
+		return c.checkFsPathOnly("std::fs::read_dir", args, env,
+			"!std::array::Array<std::fs::DirEntry>")
 	case "std.builtin.fs_create_dir", "std.builtin.fs_remove_dir", "std.builtin.fs_remove_file":
 		return c.checkFsPathOnly(strings.ReplaceAll(name, ".", "::"), args, env, "!void")
 	default:
@@ -2498,15 +2501,46 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 			return typ, nil
 		}
 	}
-	if receiverType == "std::fs::Metadata" {
-		switch expr.Name {
-		case "size":
-			return "i64", nil
-		case "is_dir":
-			return "bool", nil
-		}
+	if typ, ok := readFsFieldType(receiverType, expr.Name); ok {
+		return typ, nil
 	}
 	return receiverType, nil
+}
+
+// readFsFieldType returns ownership types for builtin filesystem structs.
+func readFsFieldType(receiverType string, field string) (string, bool) {
+	switch receiverType {
+	case "std::fs::Metadata":
+		return readFsMetadataFieldType(field)
+	case "std::fs::DirEntry":
+		return readFsDirEntryFieldType(field)
+	default:
+		return "", false
+	}
+}
+
+// readFsMetadataFieldType returns ownership types for std::fs::Metadata fields.
+func readFsMetadataFieldType(field string) (string, bool) {
+	switch field {
+	case "size":
+		return "i64", true
+	case "is_dir":
+		return "bool", true
+	default:
+		return "", false
+	}
+}
+
+// readFsDirEntryFieldType returns ownership types for std::fs::DirEntry fields.
+func readFsDirEntryFieldType(field string) (string, bool) {
+	switch field {
+	case "name", "path":
+		return "[]const u8", true
+	case "is_dir":
+		return "bool", true
+	default:
+		return "", false
+	}
 }
 
 // readNamespaceExpr reads enum or payload-free union namespace lookup.
@@ -4543,7 +4577,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 		return true
 	}
 	switch typeName {
-	case "bool", "void", "Io", "Allocator", "std::fs::Metadata",
+	case "bool", "void", "Io", "Allocator", "std::fs::Metadata", "std::fs::DirEntry",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 		"usize", "isize", "f32", "f64", "[]const u8":
 		return true

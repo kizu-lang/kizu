@@ -1,0 +1,272 @@
+pub enum SourceKind {
+    User
+    Std
+    Selfhost
+}
+
+pub struct SourceFile {
+    pub id: i64;
+    pub kind: SourceKind;
+    pub module: []const u8;
+    pub path: []const u8;
+    pub text: []const u8;
+}
+
+pub struct PackageSummary {
+    pub sources: i64;
+    pub manifest_sources: i64;
+    pub selfhost_sources: i64;
+    pub std_sources: i64;
+    pub diagnostics: i64;
+    pub related: i64;
+}
+
+pub fn load_selfhost_package(
+    allocator: Allocator,
+    io: Io,
+    root: []const u8
+) -> !PackageSummary {
+    var files = try load_selfhost_sources(allocator, io, root);
+    let manifest_sources = try count_kind(files, SourceKind::User);
+    let selfhost_sources = try count_kind(files, SourceKind::Selfhost);
+    let std_sources = try count_kind(files, SourceKind::Std);
+    let summary = summarize(
+        files.len(),
+        manifest_sources,
+        selfhost_sources,
+        std_sources,
+        0,
+        0
+    );
+    files.deinit();
+    return summary;
+}
+
+pub fn load_selfhost_sources(
+    allocator: Allocator,
+    io: Io,
+    root: []const u8
+) -> !std::array::Array<SourceFile> {
+    if !std::mem::equal_bytes(root, "selfhost") {
+        return error("source manager currently loads the selfhost root");
+    }
+
+    var files = std::array::Array<SourceFile>(allocator);
+
+    var manifest_path = try std::path::join(allocator, root, "kizu.toml");
+    let manifest_bytes = manifest_path.as_bytes();
+    let manifest_text = try std::fs::read_file(io, manifest_bytes);
+    if !valid_manifest(manifest_text) {
+        return error("invalid manifest");
+    }
+    try files.append(source_file(0, SourceKind::User, "manifest", "selfhost/kizu.toml", manifest_text));
+    manifest_path.deinit();
+    var next_id = 1;
+
+    var source_dir = try std::path::join(allocator, root, "src");
+    let source_dir_path = source_dir.as_bytes();
+    var entries = try std::fs::read_dir(io, source_dir_path);
+    source_dir.deinit();
+    var index = 0;
+    while index < entries.len() {
+        let entry = try entries.get(index);
+        if !entry.is_dir and std::mem::equal_bytes(std::path::extension(entry.name), ".kizu") {
+            let text = try std::fs::read_file(io, entry.path);
+            let module = module_name(entry.name);
+            if std::mem::len(module) < 1 {
+                return error("invalid module");
+            }
+            try files.append(source_file(next_id, SourceKind::Selfhost, module, entry.path, text));
+            next_id = next_id + 1;
+        }
+        index = index + 1;
+    }
+    entries.deinit();
+
+    try append_std_source(files, io, next_id, "mem", "std/src/mem.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "array", "std/src/array.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "string", "std/src/string.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "map", "std/src/map.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "testing", "std/src/testing.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "fs", "std/src/fs.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "path", "std/src/path.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "io", "std/src/io.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "process", "std/src/process.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "kizu::ast", "std/src/kizu/ast.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "kizu::lexer", "std/src/kizu/lexer.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "kizu::parser", "std/src/kizu/parser.kizu");
+    next_id = next_id + 1;
+    try append_std_source(files, io, next_id, "kizu::diagnostic", "std/src/kizu/diagnostic.kizu");
+    return files;
+}
+
+pub fn summarize(
+    sources: i64,
+    manifest_sources: i64,
+    selfhost_sources: i64,
+    std_sources: i64,
+    diagnostics: i64,
+    related: i64
+) -> PackageSummary {
+    return PackageSummary {
+        sources: sources,
+        manifest_sources: manifest_sources,
+        selfhost_sources: selfhost_sources,
+        std_sources: std_sources,
+        diagnostics: diagnostics,
+        related: related
+    };
+}
+
+pub fn count_kind(
+    files: &std::array::Array<SourceFile>,
+    kind: SourceKind
+) -> !i64 {
+    var index = 0;
+    var count = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if file.kind == kind {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+pub fn span(
+    source_id: i64,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    line: i64,
+    column: i64
+) -> std::kizu::diagnostic::FileSpan {
+    return std::kizu::diagnostic::file_span(
+        source_id,
+        path,
+        byte_start,
+        byte_end,
+        line,
+        column
+    );
+}
+
+pub fn missing_file(
+    allocator: Allocator,
+    path: []const u8
+) -> std::kizu::diagnostic::Diagnostic {
+    let primary = span(0, path, 0, 0, 1, 1);
+    return std::kizu::diagnostic::Diagnostic(allocator, primary, "missing file");
+}
+
+pub fn invalid_manifest(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    let primary = span(0, path, byte_start, byte_end, 1, byte_start + 1);
+    return std::kizu::diagnostic::Diagnostic(allocator, primary, "invalid manifest");
+}
+
+pub fn duplicate_module(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    previous_path: []const u8,
+    previous_start: i64,
+    previous_end: i64
+) -> !std::kizu::diagnostic::Diagnostic {
+    var report = std::kizu::diagnostic::Diagnostic(
+        allocator,
+        span(0, path, byte_start, byte_end, 1, byte_start + 1),
+        "duplicate module"
+    );
+    try report.add_related(
+        span(1, previous_path, previous_start, previous_end, 1, previous_start + 1),
+        "previous module"
+    );
+    return report;
+}
+
+pub fn import_cycle(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64,
+    edge_path: []const u8,
+    edge_start: i64,
+    edge_end: i64
+) -> !std::kizu::diagnostic::Diagnostic {
+    var report = std::kizu::diagnostic::Diagnostic(
+        allocator,
+        span(0, path, byte_start, byte_end, 1, byte_start + 1),
+        "import cycle"
+    );
+    try report.add_related(
+        span(1, edge_path, edge_start, edge_end, 1, edge_start + 1),
+        "cycle edge"
+    );
+    return report;
+}
+
+fn load_std_source(
+    io: Io,
+    path: []const u8
+) -> !void {
+    try std::fs::read_file(io, path);
+    return;
+}
+
+fn append_std_source(
+    files: &mut std::array::Array<SourceFile>,
+    io: Io,
+    id: i64,
+    module: []const u8,
+    path: []const u8
+) -> !void {
+    let text = try std::fs::read_file(io, path);
+    try files.append(source_file(id, SourceKind::Std, module, path, text));
+    return;
+}
+
+fn source_file(
+    id: i64,
+    kind: SourceKind,
+    module: []const u8,
+    path: []const u8,
+    text: []const u8
+) -> SourceFile {
+    return SourceFile {
+        id: id,
+        kind: kind,
+        module: module,
+        path: path,
+        text: text
+    };
+}
+
+fn valid_manifest(text: []const u8) -> bool {
+    return std::mem::starts_with(text, "[package]");
+}
+
+fn module_name(file_name: []const u8) -> []const u8 {
+    let length = std::mem::len(file_name);
+    if length > 5 and std::mem::equal_bytes(file_name[length - 5..length], ".kizu") {
+        return file_name[0..length - 5];
+    }
+    return file_name;
+}

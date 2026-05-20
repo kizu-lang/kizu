@@ -31,6 +31,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostParserSourceOracle(t),
 		runSelfhostParserProductionOracle(t),
 		runSelfhostParserErrorOracle(t),
+		runSelfhostSourceOracle(t),
 		runSelfhostResolverOracle(t),
 		runSelfhostTypeOracle(t),
 		runSelfhostOwnershipOracle(t),
@@ -202,6 +203,19 @@ func runSelfhostParserErrorOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "negative-seeds",
 		scanned:   len(cases),
 		compared:  len(cases),
+		failures:  failures,
+	}
+}
+
+// runSelfhostSourceOracle checks the Kizu-owned source manager component gate.
+func runSelfhostSourceOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostSourceGateFailures(t)
+	return selfhostOracleResult{
+		component: "source",
+		corpus:    "selfhost",
+		scanned:   4,
+		compared:  4,
 		failures:  failures,
 	}
 }

@@ -1000,6 +1000,9 @@ func qualifyStdTypeName(module string, typ string) string {
 	if module == "string" && typ == "String" {
 		return "std::string::String"
 	}
+	if module == "fs" && typ == "DirEntry" {
+		return "std::fs::DirEntry"
+	}
 	if module == "kizu::ast" {
 		switch typ {
 		case "SourceFile", "Span", "TokenId", "SymbolId", "BinaryOp", "PrefixOp", "ChildRange",

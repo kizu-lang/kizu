@@ -32,6 +32,7 @@ std::fs::read_file(io: Io, path: &[]const u8) -> ![]const u8
 std::fs::write_file(io: Io, path: &[]const u8, bytes: &[]const u8) -> !void
 std::fs::exists(io: Io, path: &[]const u8) -> !bool
 std::fs::metadata(io: Io, path: &[]const u8) -> !std::fs::Metadata
+std::fs::read_dir(io: Io, path: &[]const u8) -> !std::array::Array<std::fs::DirEntry>
 std::fs::create_dir(io: Io, path: &[]const u8) -> !void
 std::fs::remove_dir(io: Io, path: &[]const u8) -> !void
 std::fs::remove_file(io: Io, path: &[]const u8) -> !void
@@ -45,6 +46,14 @@ without transferring ownership.
 
 ```text
 size: i64
+is_dir: bool
+```
+
+`std::fs::DirEntry` is also narrow in v0.2:
+
+```text
+name: []const u8
+path: []const u8
 is_dir: bool
 ```
 
