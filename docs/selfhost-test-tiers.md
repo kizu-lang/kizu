@@ -55,7 +55,7 @@ Measured locally on 2026-05-21 during #458 CLI work:
 
 | Command | Elapsed |
 | --- | ---: |
-| `just selfhost-oracle` | 80.4s |
+| `just selfhost-oracle` | 83.5s |
 
 ## Direct Heavyweight Gates
 
@@ -97,7 +97,8 @@ Measured locally on 2026-05-21 during #458 CLI work:
 | Command | Elapsed |
 | --- | ---: |
 | initial `TestSelfhostCLIGate` with separate `check selfhost` and `stage selfhost` runs | 114.7s |
-| one-pass `just selfhost-cli-gate` contract gate | 57.5s |
+| one-pass `just selfhost-cli-gate` contract gate | 59.6s |
+| `KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -timeout=10m -v` with hosted artifact CLI smoke | 60.3s |
 
 ## Bootstrap Preflight
 
@@ -135,7 +136,7 @@ During #456/#503 this per-gate cost was multiplied across resolver, type,
 ownership, IR, and backend production gates, so the aggregate oracle took about
 295s. After #506 the aggregate oracle still pays for one full interpreted
 selfhost production pipeline, but no longer repeats it per stage; the measured
-aggregate cost is about 78-80s.
+aggregate cost is about 78-84s.
 
 During #458, profiling `TestSelfhostCLIGate` showed the same pattern. The slow
 path was not stdout/stderr, filesystem writes, or clang. The initial test ran

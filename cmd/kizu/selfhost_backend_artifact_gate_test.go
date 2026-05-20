@@ -94,6 +94,9 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 		string(hostBytes),
 		string(hostMetaBytes),
 	)
+	if failures == 0 {
+		failures += countHostedCompilerCLISmokeFailures(t)
+	}
 	return failures
 }
 
@@ -127,6 +130,8 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"declare void @kizu_rt_trap(%kizu.slice.u8) noreturn\n",
 		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
 		"declare i64 @kizu_selfhost__host_capability_smoke()\n",
+		"define i1 @kizu_selfhost__slice_equal",
+		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
 	}
 	for _, fragment := range requiredLL {
@@ -155,6 +160,10 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"go-stdprim-storage none\n",
 		"go-stdprim-host none\n",
 		"linker-process deferred issue-459\n",
+		"entry @kizu_selfhost__cli_main\n",
+		"cli-command check selfhost\n",
+		"cli-command stage selfhost\n",
+		"cli-hosted-smoke no-go\n",
 		"validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate\n",
 		"external @kizu_rt_mem_page_allocator\n",
 		"external @kizu_rt_io_blocking\n",
@@ -465,6 +474,132 @@ func countHostCapabilitySmokeRunFailures(t *testing.T, exePath string) int {
 	return 0
 }
 
+// countHostedCompilerCLISmokeFailures links and runs the generated CLI artifact.
+func countHostedCompilerCLISmokeFailures(t *testing.T) int {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Errorf("hosted compiler CLI smoke requires clang: %v", err)
+		return 1
+	}
+	tempDir := t.TempDir()
+	harnessPath := filepath.Join(tempDir, "hosted_cli_main.c")
+	exePath := filepath.Join(tempDir, "selfhost-cli")
+	if err := os.WriteFile(harnessPath, []byte(hostedCompilerCLIHarnessSource), 0o644); err != nil {
+		t.Errorf("write hosted compiler CLI harness: %v", err)
+		return 1
+	}
+	compile := exec.Command(
+		clang,
+		"-Wno-override-module",
+		"target/selfhost/selfhost.ll",
+		"target/selfhost/selfhost.host.ll",
+		"selfhost/runtime/selfhost.hosted.c",
+		harnessPath,
+		"-o",
+		exePath,
+	)
+	compile.Dir = "../.."
+	if out, err := compile.CombinedOutput(); err != nil {
+		t.Errorf("compile hosted compiler CLI smoke: %v\n%s", err, out)
+		return 1
+	}
+	failures := countHostedCompilerCLICheckFailures(t, exePath)
+	failures += countHostedCompilerCLIStageFailures(t, exePath)
+	failures += countHostedCompilerCLIUnsupportedFailures(t, exePath)
+	return failures
+}
+
+// countHostedCompilerCLICheckFailures runs `check selfhost` through the artifact.
+func countHostedCompilerCLICheckFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "check", "selfhost")
+	if code != 0 {
+		t.Errorf("hosted compiler check exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	if stdout != "check: ok\n" {
+		t.Errorf("hosted compiler check stdout mismatch: %q", stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler check stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
+// countHostedCompilerCLIStageFailures runs `stage selfhost` through the artifact.
+func countHostedCompilerCLIStageFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "stage", "selfhost")
+	if code != 0 {
+		t.Errorf("hosted compiler stage exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	want := strings.Join([]string{
+		"stage: ok",
+		"target/selfhost/selfhost.ll",
+		"target/selfhost/selfhost.ll.meta",
+		"target/selfhost/selfhost.storage.ll",
+		"target/selfhost/selfhost.storage.ll.meta",
+		"target/selfhost/selfhost.host.ll",
+		"target/selfhost/selfhost.host.ll.meta",
+		"",
+	}, "\n")
+	if stdout != want {
+		t.Errorf("hosted compiler stage stdout mismatch:\nwant:\n%s\ngot:\n%s", want, stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler stage stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
+// countHostedCompilerCLIUnsupportedFailures checks unsupported commands fail early.
+func countHostedCompilerCLIUnsupportedFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "bad", "selfhost")
+	if code != 64 {
+		t.Errorf("hosted compiler unsupported exit=%d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+		return 1
+	}
+	if stdout != "" {
+		t.Errorf("hosted compiler unsupported stdout mismatch: %q", stdout)
+		return 1
+	}
+	if stderr != "unsupported selfhost command\n" {
+		t.Errorf("hosted compiler unsupported stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
+// runHostedCompilerCLI captures stdout, stderr, and exit code for the CLI artifact.
+func runHostedCompilerCLI(t *testing.T, exePath string, args ...string) (string, string, int) {
+	t.Helper()
+	run := exec.Command(exePath, args...)
+	run.Dir = "../.."
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	run.Stdout = &stdout
+	run.Stderr = &stderr
+	err := run.Run()
+	if err == nil {
+		return stdout.String(), stderr.String(), 0
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Errorf("run hosted compiler CLI: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout.String(), stderr.String())
+		return stdout.String(), stderr.String(), -1
+	}
+	return stdout.String(), stderr.String(), exitErr.ExitCode()
+}
+
 const hostCapabilityHarnessSource = `
 #include <stdint.h>
 
@@ -474,6 +609,18 @@ int64_t kizu_selfhost__host_capability_smoke(void);
 int main(int argc, char **argv) {
     kizu_host_init(argc, argv);
     return kizu_selfhost__host_capability_smoke() == 0 ? 0 : 1;
+}
+`
+
+const hostedCompilerCLIHarnessSource = `
+#include <stdint.h>
+
+void kizu_host_init(int argc, char **argv);
+int64_t kizu_selfhost__cli_main(void);
+
+int main(int argc, char **argv) {
+    kizu_host_init(argc, argv);
+    return (int)kizu_selfhost__cli_main();
 }
 `
 
