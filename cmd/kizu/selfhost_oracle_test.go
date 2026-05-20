@@ -49,13 +49,8 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		runSelfhostParserProductionOracle(t),
 		runSelfhostParserErrorOracle(t),
 		runSelfhostSourceOracle(t),
-		runSelfhostResolverOracle(t),
-		runSelfhostTypeOracle(t),
-		runSelfhostOwnershipOracle(t),
-		runSelfhostIRHandoffOracle(t),
-		runSelfhostIRArtifactOracle(t),
-		runSelfhostBackendArtifactOracle(t),
 	}
+	results = append(results, runSelfhostPipelineOracle(t)...)
 	failures := 0
 	for _, result := range results {
 		failures += result.failures
@@ -236,84 +231,6 @@ func runSelfhostSourceOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "selfhost",
 		scanned:   4,
 		compared:  4,
-		failures:  failures,
-	}
-}
-
-// runSelfhostResolverOracle checks the Kizu-owned resolver component gate.
-func runSelfhostResolverOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	failures := countSelfhostResolverGateFailures(t)
-	return selfhostOracleResult{
-		component: "resolver",
-		corpus:    "selfhost",
-		scanned:   4,
-		compared:  4,
-		failures:  failures,
-	}
-}
-
-// runSelfhostTypeOracle checks the Kizu-owned type checker component gate.
-func runSelfhostTypeOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	failures := countSelfhostTypeGateFailures(t)
-	return selfhostOracleResult{
-		component: "types",
-		corpus:    "selfhost",
-		scanned:   9,
-		compared:  9,
-		failures:  failures,
-	}
-}
-
-// runSelfhostOwnershipOracle checks the Kizu-owned ownership component gate.
-func runSelfhostOwnershipOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	failures := countSelfhostOwnershipGateFailures(t)
-	return selfhostOracleResult{
-		component: "ownership",
-		corpus:    "selfhost",
-		scanned:   7,
-		compared:  7,
-		failures:  failures,
-	}
-}
-
-// runSelfhostIRHandoffOracle checks the checked ownership package reaches IR lowering.
-func runSelfhostIRHandoffOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	failures := countSelfhostIRHandoffGateFailures(t)
-	return selfhostOracleResult{
-		component: "ir-handoff",
-		corpus:    "selfhost",
-		scanned:   1,
-		compared:  1,
-		failures:  failures,
-	}
-}
-
-// runSelfhostIRArtifactOracle checks Kizu-owned IR artifact emission and backend read.
-func runSelfhostIRArtifactOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	failures := countSelfhostIRArtifactGateFailures(t)
-	return selfhostOracleResult{
-		component: "ir-artifact",
-		corpus:    "selfhost",
-		scanned:   1,
-		compared:  1,
-		failures:  failures,
-	}
-}
-
-// runSelfhostBackendArtifactOracle checks Kizu-owned LLVM artifact emission.
-func runSelfhostBackendArtifactOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	failures := countSelfhostBackendArtifactGateFailures(t)
-	return selfhostOracleResult{
-		component: "backend-artifact",
-		corpus:    "selfhost",
-		scanned:   1,
-		compared:  1,
 		failures:  failures,
 	}
 }

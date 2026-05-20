@@ -35,14 +35,21 @@ just selfhost-oracle
 
 It runs with `KIZU_RUN_SELFHOST_ORACLE=1` and compares Go-owned behavior against
 Kizu-owned lexer, parser, source, resolver, type, ownership, IR, and backend
-oracle paths. This is intentionally explicit because it interprets the selfhost
-package repeatedly and is not suitable for every edit-save-test loop.
+oracle paths. Production resolver/type/ownership/IR/backend checks run through a
+single Kizu-owned pipeline oracle so that the selfhost package is loaded,
+checked, and interpreted once for those stages.
 
 Measured locally during #456/#503:
 
 | Command | Elapsed |
 | --- | ---: |
 | `just selfhost-oracle` | about 295s |
+
+Measured locally on 2026-05-21 after #506:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-oracle` | 77.8s |
 
 ## Direct Heavyweight Gates
 
@@ -54,15 +61,20 @@ just selfhost-integration-gates
 ```
 
 This tier runs with `KIZU_RUN_SELFHOST_GATES=1`. It should not be chained after
-`just selfhost-oracle` in routine preflight, because the aggregate oracle already
-executes the same stage gate functions. Use it when a specific resolver, type,
-ownership, IR, or backend gate needs focused output.
+`just selfhost-oracle` in routine preflight. Use it when a specific resolver,
+type, ownership, IR, backend, or one-pass pipeline gate needs focused output.
 
 Measured locally during #456/#503:
 
 | Command | Elapsed |
 | --- | ---: |
 | `KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -timeout=10m -v` | 55.8s |
+
+Measured locally on 2026-05-21 after #506:
+
+| Command | Elapsed |
+| --- | ---: |
+| `KIZU_RUN_SELFHOST_GATES=1 go test ./cmd/kizu -run TestSelfhostPipelineGate -count=1 -timeout=10m -v` | 56.4s |
 
 ## Bootstrap Preflight
 
@@ -79,7 +91,7 @@ selfhost package loading, checking, and interpreted `RunEntry` execution.
 
 ## Cost Model
 
-The heavyweight gates are slow because each one currently performs this full
+The heavyweight gates are slow because each direct gate performs this full
 sequence:
 
 ```text
@@ -88,24 +100,40 @@ checkProgram(program)
 interp.New(...).RunEntry(program, ...)
 ```
 
-During #456 this cost was about 55s per heavy gate, while the aggregate oracle
-was about 295s. Repeating that path in the daily gate pushed `cmd/kizu` close to
-Go's default ten-minute package timeout.
+Profiling `TestSelfhostBackendArtifactGate` during #506 showed that one direct
+backend gate spent its time inside interpreted selfhost execution, not Go test
+startup. The representative command completed in 55.8s. CPU samples were
+dominated by interpreter evaluation plus allocation/copying and GC work:
+`internal/interp.(*Interpreter).evalExpr`, `evalWhileStmt`, `evalLetStmt`,
+`evalFieldCallExpr`, `evalQualifiedUserCall`, `runtime.duffcopy`,
+`runtime.duffzero`, `runtime.mallocgc`, and `runtime.gcDrain`.
+
+During #456/#503 this per-gate cost was multiplied across resolver, type,
+ownership, IR, and backend production gates, so the aggregate oracle took about
+295s. After #506 the aggregate oracle still pays for one full interpreted
+selfhost production pipeline, but no longer repeats it per stage; the measured
+aggregate cost is 77.8s.
 
 ## Current Decision
 
-Do not cache or share checked selfhost program state between these tests yet.
-The interpreter path has observable I/O and artifact side effects, and the
-backend gates write `target/selfhost`. A shared setup would need a stronger
-contract for immutable program state, isolated target directories, and entry
-point side effects.
+Do not cache or share checked selfhost program state between tests yet. The
+interpreter path has observable I/O and artifact side effects, and the backend
+gates write `target/selfhost`. A shared setup would need a stronger contract for
+immutable program state, isolated target directories, and entry point side
+effects.
+
+Instead, the aggregate oracle uses one explicit selfhost production pipeline
+entry point. That keeps the Go compiler layer thin, leaves direct focused gates
+available for debugging, and avoids silently sharing mutable interpreter state.
 
 The accepted policy for now is:
 
 - daily gate: fast default `go test ./...`;
 - aggregate oracle: explicit bootstrap/preflight command;
 - direct heavyweight gates: explicit debugging command;
+- aggregate production checks: one pass through `selfhost::pipeline_oracle`;
 - no routine recipe runs both aggregate oracle and direct heavyweight gates.
 
-Future optimization can revisit checked-package caching, isolated artifact
-directories, or smaller interpreted corpora once those contracts are explicit.
+Future optimization can revisit interpreter value representation, checked-package
+caching, isolated artifact directories, or smaller interpreted corpora once
+those contracts are explicit.
