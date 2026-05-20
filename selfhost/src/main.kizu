@@ -4,6 +4,7 @@ import selfhost::lexer;
 import selfhost::ownership;
 import selfhost::parser;
 import selfhost::resolver;
+import selfhost::source;
 import selfhost::types;
 
 pub fn smoke() -> parser::ParseError!i64 {
@@ -84,5 +85,140 @@ pub fn backend_artifact_gate() -> !void {
     print(llvm.host_bytes);
     print("host-capability-metadata-bytes");
     print(llvm.host_metadata_bytes);
+    return;
+}
+
+pub fn cli_main() -> !i64 {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    if std::process::arg_count() != 2 {
+        try write_cli_usage(allocator, io);
+        return std::process::exit_code(64);
+    }
+
+    let command = try std::process::arg(0);
+    let target = try std::process::arg(1);
+    if !std::mem::equal_bytes(target, "selfhost") {
+        try write_cli_usage(allocator, io);
+        return std::process::exit_code(64);
+    }
+    if std::mem::equal_bytes(command, "check") {
+        try check_selfhost(allocator, io);
+        try write_cli_line(allocator, io, "check: ok");
+        return std::process::exit_code(0);
+    }
+    if std::mem::equal_bytes(command, "stage") {
+        let llvm = try stage_selfhost(allocator, io);
+        try write_cli_line(allocator, io, "stage: ok");
+        try write_cli_line(allocator, io, llvm.ll_path);
+        try write_cli_line(allocator, io, llvm.metadata_path);
+        try write_cli_line(allocator, io, llvm.storage_path);
+        try write_cli_line(allocator, io, llvm.storage_metadata_path);
+        try write_cli_line(allocator, io, llvm.host_path);
+        try write_cli_line(allocator, io, llvm.host_metadata_path);
+        return std::process::exit_code(0);
+    }
+
+    try write_cli_error_line(allocator, io, "unsupported selfhost command");
+    return std::process::exit_code(64);
+}
+
+pub fn cli_gate() -> !void {
+    let code = try cli_main();
+    print("exit-code");
+    print(code);
+    return;
+}
+
+pub fn cli_contract_gate() -> !void {
+    let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
+    let llvm = try check_and_stage_selfhost(allocator, io);
+
+    try write_cli_line(allocator, io, "check: ok");
+    print("exit-code");
+    print(std::process::exit_code(0));
+    try write_cli_line(allocator, io, "stage: ok");
+    try write_cli_line(allocator, io, llvm.ll_path);
+    try write_cli_line(allocator, io, llvm.metadata_path);
+    try write_cli_line(allocator, io, llvm.storage_path);
+    try write_cli_line(allocator, io, llvm.storage_metadata_path);
+    try write_cli_line(allocator, io, llvm.host_path);
+    try write_cli_line(allocator, io, llvm.host_metadata_path);
+    print("exit-code");
+    print(std::process::exit_code(0));
+    return;
+}
+
+fn check_selfhost(allocator: Allocator, io: Io) -> !void {
+    var files = try source::load_selfhost_sources(allocator, io, "selfhost");
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let checked = try ownership::check_package(allocator, files, typed);
+    let diagnostics = checked.diagnostics;
+    files.deinit();
+    if diagnostics != 0 {
+        return error("selfhost check failed");
+    }
+    return;
+}
+
+fn stage_selfhost(allocator: Allocator, io: Io) -> !backend::LlvmArtifact {
+    let llvm = try check_and_stage_selfhost(allocator, io);
+    return llvm;
+}
+
+fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !backend::LlvmArtifact {
+    var files = try source::load_selfhost_sources(allocator, io, "selfhost");
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let checked = try ownership::check_package(allocator, files, typed);
+    if checked.diagnostics != 0 {
+        return error("selfhost check failed");
+    }
+
+    let artifact = try ir::emit_checked_artifacts(allocator, io, checked);
+    files.deinit();
+    let llvm = try backend::emit_llvm_artifact(
+        allocator,
+        io,
+        artifact.ir_path,
+        artifact.manifest_path
+    );
+    return llvm;
+}
+
+fn write_cli_usage(allocator: Allocator, io: Io) -> !void {
+    try write_cli_error_line(allocator, io, "usage: selfhost <check|stage> selfhost");
+    return;
+}
+
+fn write_cli_line(allocator: Allocator, io: Io, text: []const u8) -> !void {
+    try std::io::write_stdout(io, text);
+    try write_cli_stdout_newline(allocator, io);
+    return;
+}
+
+fn write_cli_error_line(allocator: Allocator, io: Io, text: []const u8) -> !void {
+    try std::io::write_stderr(io, text);
+    try write_cli_stderr_newline(allocator, io);
+    return;
+}
+
+fn write_cli_stdout_newline(allocator: Allocator, io: Io) -> !void {
+    var line = std::string::String(allocator);
+    try line.append_byte(cast<u8>(10));
+    let bytes = line.as_bytes();
+    try std::io::write_stdout(io, bytes);
+    line.deinit();
+    return;
+}
+
+fn write_cli_stderr_newline(allocator: Allocator, io: Io) -> !void {
+    var line = std::string::String(allocator);
+    try line.append_byte(cast<u8>(10));
+    let bytes = line.as_bytes();
+    try std::io::write_stderr(io, bytes);
+    line.deinit();
     return;
 }

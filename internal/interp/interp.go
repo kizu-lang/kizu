@@ -1444,6 +1444,7 @@ func (i *Interpreter) evalIoBytes(
 	if err != nil {
 		return voidValue(), "", err
 	}
+	bytes = unwrapRefValue(bytes)
 	if bytes.kind != kindString {
 		return voidValue(), "", fmt.Errorf("runtime error: %s expects []const u8 bytes", name)
 	}

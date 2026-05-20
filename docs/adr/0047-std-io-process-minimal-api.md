@@ -13,8 +13,8 @@ globals where an `Io` capability is the correct boundary.
 Stdio helpers require explicit `Io`.
 
 ```text
-std::io::write_stdout(io: Io, bytes: []const u8) -> !void
-std::io::write_stderr(io: Io, bytes: []const u8) -> !void
+std::io::write_stdout(io: Io, bytes: &[]const u8) -> !void
+std::io::write_stderr(io: Io, bytes: &[]const u8) -> !void
 std::io::read_stdin(io: Io) -> ![]const u8
 ```
 
