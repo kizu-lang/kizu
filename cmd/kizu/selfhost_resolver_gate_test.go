@@ -7,7 +7,11 @@ import (
 	"github.com/kizu-lang/kizu/internal/interp"
 )
 
-const selfhostResolverOracleOutput = `resolver-symbols
+const selfhostResolverOracleOutput = `resolver-modules
+31
+resolver-production-symbols
+480
+resolver-symbols
 4
 resolver-diagnostics
 4
@@ -40,7 +44,13 @@ func countSelfhostResolverGateFailures(t *testing.T) int {
 // runSelfhostResolverGate loads the selfhost package and runs its resolver oracle.
 func runSelfhostResolverGate(t *testing.T) (string, error) {
 	t.Helper()
-	_, program, err := loadPackageProgram("../../selfhost")
+	restore, err := chdirRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	defer restore()
+
+	_, program, err := loadPackageProgram("selfhost")
 	if err != nil {
 		return "", err
 	}
