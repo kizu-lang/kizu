@@ -10,7 +10,7 @@ import (
 const selfhostResolverOracleOutput = `resolver-modules
 31
 resolver-production-symbols
-620
+668
 resolver-symbols
 4
 resolver-diagnostics
