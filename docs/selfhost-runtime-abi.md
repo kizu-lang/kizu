@@ -6,6 +6,7 @@ by the #453 IR manifest:
 
 ```text
 kizu-ir-shape-v0
+manifest-version selfhost-abi-v0
 node-kind function
 node-kind block
 node-kind diagnostic
@@ -18,9 +19,22 @@ storage borrowed-view
 call direct
 call std-primitive
 cleanup deinit
+host-capabilities selfhost-host-v0
+external std::mem::page_allocator
+external std::fs::exists
+external std::fs::metadata
+external std::fs::read_dir
 external std::fs::read_file
 external std::fs::write_file
+external std::fs::create_dir
 external std::io::blocking
+external std::io::write_stdout
+external std::io::write_stderr
+external std::process::arg_count
+external std::process::arg
+external std::process::env
+external std::process::exit_code
+manifest-complete selfhost-abi-v0
 ```
 
 Broader ABI work is tracked by #495. #454, #456, and #457 must treat any shape
@@ -41,9 +55,22 @@ Kizu module and function symbols lower to deterministic LLVM symbol names:
 | --- | --- |
 | package entry `selfhost::smoke` | `@kizu_selfhost__smoke` |
 | module function `selfhost::m::f` | `@kizu_selfhost_m__f` |
+| allocator capability | `@kizu_rt_mem_page_allocator` |
+| std primitive `std::fs::exists` | `@kizu_rt_fs_exists` |
+| std primitive `std::fs::metadata` | `@kizu_rt_fs_metadata` |
+| std primitive `std::fs::read_dir` | `@kizu_rt_fs_read_dir` |
 | std primitive `std::fs::read_file` | `@kizu_rt_fs_read_file` |
 | std primitive `std::fs::write_file` | `@kizu_rt_fs_write_file` |
+| std primitive `std::fs::create_dir` | `@kizu_rt_fs_create_dir` |
+| artifact publish rename boundary | `@kizu_rt_fs_rename` |
 | std primitive `std::io::blocking` | `@kizu_rt_io_blocking` |
+| std primitive `std::io::write_stdout` | `@kizu_rt_io_write_stdout` |
+| std primitive `std::io::write_stderr` | `@kizu_rt_io_write_stderr` |
+| std primitive `std::process::arg_count` | `@kizu_rt_process_arg_count` |
+| std primitive `std::process::arg` | `@kizu_rt_process_arg` |
+| std primitive `std::process::env` | `@kizu_rt_process_env` |
+| std primitive `std::process::exit_code` | `@kizu_rt_process_exit_code` |
+| process exit boundary | `@kizu_rt_process_exit` |
 | trap boundary | `@kizu_rt_trap` |
 
 Name lowering replaces `::` module separators with `_` inside the module path
@@ -205,12 +232,47 @@ artifact lists a concrete reachable call site.
 
 | Kizu primitive | Runtime symbol | Signature |
 | --- | --- | --- |
+| `std::mem::page_allocator` | `@kizu_rt_mem_page_allocator` | `() -> %kizu.owned` |
 | `std::io::blocking` | `@kizu_rt_io_blocking` | `() -> %kizu.owned` |
+| `std::fs::exists` | `@kizu_rt_fs_exists` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.bool` |
+| `std::fs::metadata` | `@kizu_rt_fs_metadata` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.metadata` |
+| `std::fs::read_dir` | `@kizu_rt_fs_read_dir` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.owned` |
 | `std::fs::read_file` | `@kizu_rt_fs_read_file` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.slice.u8` |
 | `std::fs::write_file` | `@kizu_rt_fs_write_file` | `(%kizu.owned, %kizu.slice.u8, %kizu.slice.u8) -> %kizu.error.void` |
+| `std::fs::create_dir` | `@kizu_rt_fs_create_dir` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
+| `std::io::write_stdout` | `@kizu_rt_io_write_stdout` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
+| `std::io::write_stderr` | `@kizu_rt_io_write_stderr` | `(%kizu.owned, %kizu.slice.u8) -> %kizu.error.void` |
+| `std::process::arg_count` | `@kizu_rt_process_arg_count` | `() -> i64` |
+| `std::process::arg` | `@kizu_rt_process_arg` | `(i64) -> %kizu.error.slice.u8` |
+| `std::process::env` | `@kizu_rt_process_env` | `(%kizu.slice.u8) -> %kizu.error.slice.u8` |
+| `std::process::exit_code` | `@kizu_rt_process_exit_code` | `(i64) -> i64` |
+| process termination | `@kizu_rt_process_exit` | `(i64) -> noreturn` |
 
 The first argument is the explicit `Io` capability. The runtime must not use a
 hidden global default capability.
+
+## Host Capability Binding
+
+#457 binds the host-facing side of the ABI through
+`selfhost/runtime/selfhost.host.ll`, copied by the Kizu backend to:
+
+```text
+target/selfhost/selfhost.host.ll
+target/selfhost/selfhost.host.ll.meta
+```
+
+The host artifact defines the `@kizu_rt_*` symbols consumed by the selfhost
+compiler artifact and delegates to lower-level `@kizu_host_*` imports. Those
+imports are the only allowed OS boundary for the first bootstrap path. Metadata
+must include `go-stdprim-host none`, `interpreter-host none`, and explicit
+allocator, filesystem, process, stdout, stderr, and exit boundaries.
+
+The current bootstrap comparison is artifact-only before external linking, so
+process spawn/wait is deferred to #459 unless that issue chooses a hosted linker
+execution path. `@kizu_rt_fs_rename` is included as the deterministic artifact
+publish boundary without adding a public `std::fs::rename` wrapper yet;
+additional filesystem calls require a concrete selfhost call site and a linked
+roadmap issue.
 
 ## Textual LLVM Validation
 
@@ -228,8 +290,10 @@ The gate checks that `target/selfhost/selfhost.ll`:
 - defines `%kizu.slice.u8`, `%kizu.owned`, `%kizu.error.slice.u8`, and
   `%kizu.error.void`
 - declares all unresolved runtime symbols used by the bootstrap artifact:
-  `@kizu_rt_io_blocking`, `@kizu_rt_fs_read_file`,
-  `@kizu_rt_fs_write_file`, `@kizu_rt_owned_deinit`, and `@kizu_rt_trap`
+  `@kizu_rt_mem_page_allocator`, `@kizu_rt_io_blocking`,
+  `@kizu_rt_fs_read_file`, `@kizu_rt_fs_write_file`,
+  `@kizu_rt_fs_read_dir`, stdout/stderr, process, exit,
+  `@kizu_rt_owned_deinit`, and `@kizu_rt_trap`
 - defines the stable bootstrap entry symbol `@kizu_selfhost__smoke`
 
 The same gate checks that `target/selfhost/selfhost.ll.meta` records
@@ -245,6 +309,12 @@ The storage validation requires the reachable Array, String, Map, and diagnostic
 runtime symbols, the `@kizu_selfhost__runtime_storage_smoke` entry, explicit
 allocator-boundary metadata, and the absence of Go interpreter/stdprim fallback
 markers in the storage LLVM artifact.
+
+For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
+`target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper
+symbols, the `@kizu_selfhost__host_capability_smoke` entry, explicit host
+boundary metadata, and the absence of Go interpreter/stdprim fallback markers
+for host access.
 
 ## Unsupported Shapes Tracked By #495
 

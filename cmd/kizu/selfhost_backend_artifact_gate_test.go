@@ -30,10 +30,14 @@ func countSelfhostBackendArtifactGateFailures(t *testing.T) int {
 		"llvm-metadata-path\ntarget/selfhost/selfhost.ll.meta\n",
 		"runtime-storage-path\ntarget/selfhost/selfhost.storage.ll\n",
 		"runtime-storage-metadata-path\ntarget/selfhost/selfhost.storage.ll.meta\n",
+		"host-capability-path\ntarget/selfhost/selfhost.host.ll\n",
+		"host-capability-metadata-path\ntarget/selfhost/selfhost.host.ll.meta\n",
 		"llvm-artifact-bytes\n",
 		"llvm-metadata-bytes\n",
 		"runtime-storage-bytes\n",
 		"runtime-storage-metadata-bytes\n",
+		"host-capability-bytes\n",
+		"host-capability-metadata-bytes\n",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(out, fragment) {
@@ -67,11 +71,26 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 		t.Errorf("read runtime storage metadata: %v", err)
 		return 1
 	}
+	hostBytes, err := os.ReadFile("../../target/selfhost/selfhost.host.ll")
+	if err != nil {
+		t.Errorf("read host capability artifact: %v", err)
+		return 1
+	}
+	hostMetaBytes, err := os.ReadFile("../../target/selfhost/selfhost.host.ll.meta")
+	if err != nil {
+		t.Errorf("read host capability metadata: %v", err)
+		return 1
+	}
 	failures := countTextualLLVMValidationFailures(t, string(llBytes), string(metaBytes))
 	failures += countRuntimeStorageValidationFailures(
 		t,
 		string(storageBytes),
 		string(storageMetaBytes),
+	)
+	failures += countHostCapabilityValidationFailures(
+		t,
+		string(hostBytes),
+		string(hostMetaBytes),
 	)
 	return failures
 }
@@ -84,12 +103,28 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"source_filename = \"target/selfhost/selfhost.ir\"\n",
 		"%kizu.slice.u8 = type { ptr, i64 }\n",
 		"%kizu.owned = type { ptr }\n",
+		"%kizu.error.bool = type { i1, i1, %kizu.slice.u8 }\n",
+		"%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }\n",
+		"declare %kizu.owned @kizu_rt_mem_page_allocator()\n",
 		"declare %kizu.owned @kizu_rt_io_blocking()\n",
+		"declare %kizu.error.bool @kizu_rt_fs_exists",
+		"declare %kizu.error.metadata @kizu_rt_fs_metadata",
+		"declare %kizu.error.owned @kizu_rt_fs_read_dir",
 		"declare %kizu.error.slice.u8 @kizu_rt_fs_read_file",
 		"declare %kizu.error.void @kizu_rt_fs_write_file",
+		"declare %kizu.error.void @kizu_rt_fs_create_dir",
+		"declare %kizu.error.void @kizu_rt_fs_rename",
+		"declare %kizu.error.void @kizu_rt_io_write_stdout",
+		"declare %kizu.error.void @kizu_rt_io_write_stderr",
+		"declare i64 @kizu_rt_process_arg_count()\n",
+		"declare %kizu.error.slice.u8 @kizu_rt_process_arg",
+		"declare %kizu.error.slice.u8 @kizu_rt_process_env",
+		"declare i64 @kizu_rt_process_exit_code",
+		"declare void @kizu_rt_process_exit(i64) noreturn\n",
 		"declare void @kizu_rt_owned_deinit(%kizu.owned)\n",
 		"declare void @kizu_rt_trap(%kizu.slice.u8) noreturn\n",
 		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
+		"declare i64 @kizu_selfhost__host_capability_smoke()\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
 	}
 	for _, fragment := range requiredLL {
@@ -111,12 +146,30 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"manifest target/selfhost/selfhost.ir.manifest\n",
 		"output target/selfhost/selfhost.ll\n",
 		"runtime-storage target/selfhost/selfhost.storage.ll\n",
+		"host-runtime target/selfhost/selfhost.host.ll\n",
+		"host-runtime-metadata target/selfhost/selfhost.host.ll.meta\n",
 		"storage-backend selfhost-runtime-ll\n",
+		"host-capabilities selfhost-host-v0\n",
 		"go-stdprim-storage none\n",
+		"go-stdprim-host none\n",
+		"linker-process deferred issue-459\n",
 		"validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate\n",
+		"external @kizu_rt_mem_page_allocator\n",
 		"external @kizu_rt_io_blocking\n",
+		"external @kizu_rt_fs_exists\n",
+		"external @kizu_rt_fs_metadata\n",
+		"external @kizu_rt_fs_read_dir\n",
 		"external @kizu_rt_fs_read_file\n",
 		"external @kizu_rt_fs_write_file\n",
+		"external @kizu_rt_fs_create_dir\n",
+		"external @kizu_rt_fs_rename\n",
+		"external @kizu_rt_io_write_stdout\n",
+		"external @kizu_rt_io_write_stderr\n",
+		"external @kizu_rt_process_arg_count\n",
+		"external @kizu_rt_process_arg\n",
+		"external @kizu_rt_process_env\n",
+		"external @kizu_rt_process_exit_code\n",
+		"external @kizu_rt_process_exit\n",
 		"external @kizu_rt_owned_deinit\n",
 		"external @kizu_rt_trap\n",
 		"unsupported-policy blocker\n",
@@ -208,6 +261,124 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 	for _, fragment := range requiredMeta {
 		if !strings.Contains(metaContent, fragment) {
 			t.Errorf("runtime storage metadata missing %q:\n%s", fragment, metaContent)
+			return 1
+		}
+	}
+	return 0
+}
+
+// countHostCapabilityValidationFailures validates the non-Go host boundary artifact.
+func countHostCapabilityValidationFailures(t *testing.T, llContent string, metaContent string) int {
+	t.Helper()
+	if failures := countHostCapabilityLLFailures(t, llContent); failures > 0 {
+		return failures
+	}
+	return countHostCapabilityMetadataFailures(t, metaContent)
+}
+
+// countHostCapabilityLLFailures checks host capability wrappers and smoke calls.
+func countHostCapabilityLLFailures(t *testing.T, llContent string) int {
+	t.Helper()
+	requiredLL := []string{
+		"; kizu selfhost host capabilities ll v0\n",
+		"declare ptr @kizu_host_page_allocator()\n",
+		"declare ptr @kizu_host_io_blocking()\n",
+		"declare ptr @kizu_host_alloc(ptr, i64)\n",
+		"declare void @kizu_host_free(ptr, ptr)\n",
+		"declare %kizu.error.bool @kizu_host_fs_exists",
+		"declare %kizu.error.metadata @kizu_host_fs_metadata",
+		"declare %kizu.error.owned @kizu_host_fs_read_dir",
+		"declare %kizu.error.slice.u8 @kizu_host_fs_read_file",
+		"declare %kizu.error.void @kizu_host_fs_write_file",
+		"declare %kizu.error.void @kizu_host_fs_create_dir",
+		"declare %kizu.error.void @kizu_host_fs_rename",
+		"declare %kizu.error.void @kizu_host_io_write_stdout",
+		"declare %kizu.error.void @kizu_host_io_write_stderr",
+		"declare i64 @kizu_host_process_arg_count()\n",
+		"declare %kizu.error.slice.u8 @kizu_host_process_arg",
+		"declare %kizu.error.slice.u8 @kizu_host_process_env",
+		"declare i64 @kizu_host_process_exit_code",
+		"declare void @kizu_host_process_exit(i64) noreturn\n",
+		"define %kizu.owned @kizu_rt_mem_page_allocator()",
+		"define %kizu.owned @kizu_rt_io_blocking()",
+		"define ptr @kizu_rt_alloc",
+		"define void @kizu_rt_free",
+		"define %kizu.error.bool @kizu_rt_fs_exists",
+		"define %kizu.error.metadata @kizu_rt_fs_metadata",
+		"define %kizu.error.owned @kizu_rt_fs_read_dir",
+		"define %kizu.error.slice.u8 @kizu_rt_fs_read_file",
+		"define %kizu.error.void @kizu_rt_fs_write_file",
+		"define %kizu.error.void @kizu_rt_fs_create_dir",
+		"define %kizu.error.void @kizu_rt_fs_rename",
+		"define %kizu.error.void @kizu_rt_io_write_stdout",
+		"define %kizu.error.void @kizu_rt_io_write_stderr",
+		"define i64 @kizu_rt_process_arg_count()",
+		"define %kizu.error.slice.u8 @kizu_rt_process_arg",
+		"define %kizu.error.slice.u8 @kizu_rt_process_env",
+		"define i64 @kizu_rt_process_exit_code",
+		"define void @kizu_rt_process_exit",
+		"define i64 @kizu_selfhost__host_capability_smoke()",
+	}
+	for _, fragment := range requiredLL {
+		if !strings.Contains(llContent, fragment) {
+			t.Errorf("host capability artifact missing %q:\n%s", fragment, llContent)
+			return 1
+		}
+	}
+	forbiddenMarkers := []string{"std.builtin", "stdprim", "internal/interp", "internal global"}
+	for _, forbidden := range forbiddenMarkers {
+		if strings.Contains(llContent, forbidden) {
+			t.Errorf("host capability artifact contains Go fallback marker %q", forbidden)
+			return 1
+		}
+	}
+	return 0
+}
+
+// countHostCapabilityMetadataFailures checks host boundary metadata and guards.
+func countHostCapabilityMetadataFailures(t *testing.T, metaContent string) int {
+	t.Helper()
+	requiredMeta := []string{
+		"kizu-host-capabilities-v0\n",
+		"abi selfhost-abi-v0\n",
+		"ir target/selfhost/selfhost.ir\n",
+		"manifest target/selfhost/selfhost.ir.manifest\n",
+		"linked-llvm target/selfhost/selfhost.ll\n",
+		"output target/selfhost/selfhost.host.ll\n",
+		"host-capabilities selfhost-host-v0\n",
+		"allocator-boundary explicit\n",
+		"io-boundary explicit\n",
+		"filesystem-boundary explicit\n",
+		"process-boundary explicit\n",
+		"stdout-boundary explicit\n",
+		"stderr-boundary explicit\n",
+		"exit-boundary explicit\n",
+		"external @kizu_host_page_allocator\n",
+		"external @kizu_host_io_blocking\n",
+		"external @kizu_host_alloc\n",
+		"external @kizu_host_free\n",
+		"external @kizu_host_fs_exists\n",
+		"external @kizu_host_fs_metadata\n",
+		"external @kizu_host_fs_read_dir\n",
+		"external @kizu_host_fs_read_file\n",
+		"external @kizu_host_fs_write_file\n",
+		"external @kizu_host_fs_create_dir\n",
+		"external @kizu_host_fs_rename\n",
+		"external @kizu_host_io_write_stdout\n",
+		"external @kizu_host_io_write_stderr\n",
+		"external @kizu_host_process_arg_count\n",
+		"external @kizu_host_process_arg\n",
+		"external @kizu_host_process_env\n",
+		"external @kizu_host_process_exit_code\n",
+		"external @kizu_host_process_exit\n",
+		"external @kizu_host_trap\n",
+		"go-stdprim-host none\n",
+		"interpreter-host none\n",
+		"linker-process deferred issue-459\n",
+	}
+	for _, fragment := range requiredMeta {
+		if !strings.Contains(metaContent, fragment) {
+			t.Errorf("host capability metadata missing %q:\n%s", fragment, metaContent)
 			return 1
 		}
 	}
