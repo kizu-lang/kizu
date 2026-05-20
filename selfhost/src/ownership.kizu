@@ -27,6 +27,36 @@ pub struct OwnershipSummary {
     pub errors: i64;
 }
 
+pub struct CheckedModuleRef {
+    pub source_id: i64;
+    pub module: []const u8;
+    pub path: []const u8;
+}
+
+pub struct CheckedFunctionRef {
+    pub module: []const u8;
+    pub name: []const u8;
+    pub span_start: i64;
+    pub span_end: i64;
+}
+
+pub struct OwnershipFact {
+    pub name: []const u8;
+    pub kind: ResourceKind;
+    pub state: OwnershipState;
+}
+
+pub struct CheckedPackage {
+    pub diagnostics: i64;
+    pub resources: i64;
+    pub checked_nodes: i64;
+    pub borrows: i64;
+    pub module: CheckedModuleRef;
+    pub entry_function: CheckedFunctionRef;
+    pub root_fact: OwnershipFact;
+    pub summary: OwnershipSummary;
+}
+
 pub fn check(typed: types::TypeSummary) -> OwnershipSummary {
     return OwnershipSummary {
         resources: typed.symbols,
@@ -37,6 +67,52 @@ pub fn check(typed: types::TypeSummary) -> OwnershipSummary {
 }
 
 pub fn check_sources(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    typed: types::TypeSummary
+) -> !OwnershipSummary {
+    let checked = try check_package(allocator, files, typed);
+    return summary_of(checked);
+}
+
+pub fn check_package(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    typed: types::TypeSummary
+) -> !CheckedPackage {
+    let summary = try check_source_summary(allocator, files, typed);
+    let module = try first_checked_module(files);
+    return checked_package_from_refs(
+        summary,
+        module,
+        entry_function_ref(),
+        package_root_fact()
+    );
+}
+
+pub fn checked_package_from_summary(summary: OwnershipSummary) -> CheckedPackage {
+    return checked_package_from_refs(
+        summary,
+        CheckedModuleRef {
+            source_id: 0,
+            module: "memory",
+            path: "<memory>"
+        },
+        entry_function_ref(),
+        package_root_fact()
+    );
+}
+
+pub fn summary_of(checked: &CheckedPackage) -> OwnershipSummary {
+    return ownership_summary(
+        checked.resources,
+        checked.checked_nodes,
+        checked.borrows,
+        checked.diagnostics
+    );
+}
+
+fn check_source_summary(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
     typed: types::TypeSummary
@@ -54,6 +130,57 @@ pub fn check_sources(
         index = index + 1;
     }
     return summary;
+}
+
+fn checked_package_from_refs(
+    summary: OwnershipSummary,
+    module: CheckedModuleRef,
+    entry_function: CheckedFunctionRef,
+    root_fact: OwnershipFact
+) -> CheckedPackage {
+    return CheckedPackage {
+        diagnostics: summary.errors,
+        resources: summary.resources,
+        checked_nodes: summary.checked_nodes,
+        borrows: summary.borrows,
+        module: module,
+        entry_function: entry_function,
+        root_fact: root_fact,
+        summary: summary
+    };
+}
+
+fn first_checked_module(files: &std::array::Array<source::SourceFile>) -> !CheckedModuleRef {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if file.kind == source::SourceKind::Selfhost {
+            return CheckedModuleRef {
+                source_id: file.id,
+                module: file.module,
+                path: file.path
+            };
+        }
+        index = index + 1;
+    }
+    return error("ownership handoff requires selfhost module");
+}
+
+fn entry_function_ref() -> CheckedFunctionRef {
+    return CheckedFunctionRef {
+        module: "main",
+        name: "smoke",
+        span_start: 0,
+        span_end: 0
+    };
+}
+
+fn package_root_fact() -> OwnershipFact {
+    return OwnershipFact {
+        name: "selfhost package",
+        kind: ResourceKind::Value,
+        state: OwnershipState::Available
+    };
 }
 
 pub fn declare_resource(
