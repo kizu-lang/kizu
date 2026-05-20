@@ -1174,12 +1174,14 @@ fn check_function_statements(
     var local_types = std::map::Map<[]const u8, []const u8>(allocator);
     var local_mutability = std::map::Map<[]const u8, bool>(allocator);
     var summary = try collect_function_statement_locals(
+        allocator,
         file,
         ast,
         params,
         body,
         local_types,
-        local_mutability
+        local_mutability,
+        function_returns
     );
     let expected_return = try function_statement_return_type(
         allocator,
@@ -1191,7 +1193,16 @@ fn check_function_statements(
     );
     summary = merge_type_summaries(
         summary,
-        try check_statement_node(file, ast, body, local_types, local_mutability, expected_return)
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
     );
     local_types.deinit();
     local_mutability.deinit();
@@ -1199,12 +1210,14 @@ fn check_function_statements(
 }
 
 fn collect_function_statement_locals(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
     local_types: &mut std::map::Map<[]const u8, []const u8>,
-    local_mutability: &mut std::map::Map<[]const u8, bool>
+    local_mutability: &mut std::map::Map<[]const u8, bool>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     var diagnostics = 0;
     var index = 0;
@@ -1248,7 +1261,19 @@ fn collect_function_statement_locals(
             let name_token = std::kizu::lexer::next_token(body_text, body_token);
             let name = token_text(body_text, name_token);
             if !local_types.contains(name) {
-                try local_types.insert(name, "unknown");
+                let assign = std::kizu::lexer::next_token(body_text, name_token);
+                let first_value = std::kizu::lexer::next_token(body_text, assign);
+                let value_end = local_initializer_end(body_text, first_value);
+                let type_name = try infer_initializer_text_type(
+                    allocator,
+                    file,
+                    body_text,
+                    first_value,
+                    value_end,
+                    local_types,
+                    function_returns
+                );
+                try local_types.insert(name, type_name);
                 try local_mutability.insert(name, std::mem::equal_bytes(text, "var"));
             }
         }
@@ -1279,54 +1304,67 @@ fn function_statement_return_type(
 }
 
 fn check_statement_node(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
     local_mutability: &std::map::Map<[]const u8, bool>,
-    expected_return: []const u8
+    expected_return: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     let node = ast.get(node_id);
     match node.data {
         Block(block) => return check_statement_block(
+            allocator,
             file,
             ast,
             block.statements,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         Let(let_node) => return check_let_statement(
+            allocator,
             file,
             ast,
             let_node.mutable,
             let_node.name,
             let_node.value,
             local_types,
-            local_mutability
+            local_mutability,
+            function_returns
         );
         Assign(assign_node) => return check_assign_statement(
+            allocator,
             file,
             ast,
             assign_node.target,
             assign_node.value,
             local_types,
-            local_mutability
+            local_mutability,
+            function_returns
         );
         Return(return_node) => return check_return_statement(
+            allocator,
             file,
             ast,
             return_node.value,
             local_types,
-            expected_return
+            expected_return,
+            function_returns
         );
         ExprStmt(expr_stmt) => return check_expr_statement(
+            allocator,
             file,
             ast,
             expr_stmt.expr,
-            local_types
+            local_types,
+            function_returns
         );
         If(if_node) => return check_if_statement(
+            allocator,
             file,
             ast,
             if_node.condition,
@@ -1334,18 +1372,22 @@ fn check_statement_node(
             if_node.else_block,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         While(while_node) => return check_while_statement(
+            allocator,
             file,
             ast,
             while_node.condition,
             while_node.body,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         For(for_node) => return check_for_statement(
+            allocator,
             file,
             ast,
             for_node.name,
@@ -1354,33 +1396,41 @@ fn check_statement_node(
             for_node.body,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         Match(match_node) => return check_statement_range(
+            allocator,
             file,
             ast,
             match_node.arms,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         MatchArm(match_arm) => return check_statement_node(
+            allocator,
             file,
             ast,
             match_arm.body,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         Unsafe(unsafe_node) => return check_statement_node(
+            allocator,
             file,
             ast,
             unsafe_node.body,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         ComptimeIf(comptime_if_node) => return check_if_statement(
+            allocator,
             file,
             ast,
             comptime_if_node.condition,
@@ -1388,7 +1438,8 @@ fn check_statement_node(
             comptime_if_node.else_block,
             local_types,
             local_mutability,
-            expected_return
+            expected_return,
+            function_returns
         );
         Break(break_node) => return type_scan_summary(0, 1, 0);
         Continue(continue_node) => return type_scan_summary(0, 1, 0);
@@ -1424,12 +1475,14 @@ fn check_statement_node(
 }
 
 fn check_statement_block(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]const u8, []const u8>,
     local_mutability: &std::map::Map<[]const u8, bool>,
-    expected_return: []const u8
+    expected_return: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     var summary = type_scan_summary(0, 1, 0);
     var index = 0;
@@ -1438,12 +1491,14 @@ fn check_statement_block(
         summary = merge_type_summaries(
             summary,
             try check_statement_node(
+                allocator,
                 file,
                 ast,
                 child,
                 local_types,
                 local_mutability,
-                expected_return
+                expected_return,
+                function_returns
             )
         );
         index = index + 1;
@@ -1452,12 +1507,14 @@ fn check_statement_block(
 }
 
 fn check_statement_range(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]const u8, []const u8>,
     local_mutability: &std::map::Map<[]const u8, bool>,
-    expected_return: []const u8
+    expected_return: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     var summary = type_scan_summary(0, 1, 0);
     var index = 0;
@@ -1466,12 +1523,14 @@ fn check_statement_range(
         summary = merge_type_summaries(
             summary,
             try check_statement_node(
+                allocator,
                 file,
                 ast,
                 child,
                 local_types,
                 local_mutability,
-                expected_return
+                expected_return,
+                function_returns
             )
         );
         index = index + 1;
@@ -1480,16 +1539,25 @@ fn check_statement_range(
 }
 
 fn check_let_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     mutable: bool,
     name_id: std::kizu::ast::NodeId,
     value: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
-    local_mutability: &std::map::Map<[]const u8, bool>
+    local_mutability: &std::map::Map<[]const u8, bool>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     let name = ast_node_text(file, ast, name_id);
-    let value_type = try infer_expression_type(file, ast, value, local_types);
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
     var diagnostics = 0;
     if !local_types.contains(name) {
         diagnostics = diagnostics + 1;
@@ -1498,22 +1566,26 @@ fn check_let_statement(
 }
 
 fn check_assign_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     target: std::kizu::ast::NodeId,
     value: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
-    local_mutability: &std::map::Map<[]const u8, bool>
+    local_mutability: &std::map::Map<[]const u8, bool>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     let target_node = ast.get(target);
     match target_node.data {
         Var(var_node) => return check_assign_var_statement(
+            allocator,
             file,
             ast,
             target,
             value,
             local_types,
-            local_mutability
+            local_mutability,
+            function_returns
         );
         FieldExpr(field_expr_node) => return type_scan_summary(0, 1, 0);
         DerefExpr(deref_expr_node) => return type_scan_summary(0, 1, 0);
@@ -1560,12 +1632,14 @@ fn check_assign_statement(
 }
 
 fn check_assign_var_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     target: std::kizu::ast::NodeId,
     value: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
-    local_mutability: &std::map::Map<[]const u8, bool>
+    local_mutability: &std::map::Map<[]const u8, bool>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     let name = ast_node_text(file, ast, target);
     if !local_types.contains(name) {
@@ -1577,7 +1651,14 @@ fn check_assign_var_statement(
         diagnostics = diagnostics + 1;
     }
     let target_type = try local_types.get(name);
-    let value_type = try infer_expression_type(file, ast, value, local_types);
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
     if known_type_mismatch(target_type, value_type) {
         diagnostics = diagnostics + 1;
     }
@@ -1589,13 +1670,22 @@ fn invalid_assignment_target_summary() -> TypeScanSummary {
 }
 
 fn check_return_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     value: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
-    expected_return: []const u8
+    expected_return: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
-    let value_type = try infer_expression_type(file, ast, value, local_types);
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
     var diagnostics = 0;
     if std::mem::equal_bytes(expected_return, "void") and known_type_mismatch(expected_return, value_type) {
         diagnostics = 1;
@@ -1604,12 +1694,21 @@ fn check_return_statement(
 }
 
 fn check_expr_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     expr: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]const u8, []const u8>
+    local_types: &std::map::Map<[]const u8, []const u8>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
-    let value_type = try infer_expression_type(file, ast, expr, local_types);
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        expr,
+        local_types,
+        function_returns
+    );
     if std::mem::equal_bytes(value_type, "unknown") {
         return type_scan_summary(0, 1, 0);
     }
@@ -1617,6 +1716,7 @@ fn check_expr_statement(
 }
 
 fn check_if_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     condition: std::kizu::ast::NodeId,
@@ -1624,38 +1724,83 @@ fn check_if_statement(
     else_block: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
     local_mutability: &std::map::Map<[]const u8, bool>,
-    expected_return: []const u8
+    expected_return: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
-    var summary = try check_condition_statement(file, ast, condition, local_types);
-    summary = merge_type_summaries(
-        summary,
-        try check_statement_node(file, ast, then_block, local_types, local_mutability, expected_return)
+    var summary = try check_condition_statement(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
     );
     summary = merge_type_summaries(
         summary,
-        try check_statement_node(file, ast, else_block, local_types, local_mutability, expected_return)
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            then_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
+    );
+    summary = merge_type_summaries(
+        summary,
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            else_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
     );
     return summary;
 }
 
 fn check_while_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     condition: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
     local_mutability: &std::map::Map<[]const u8, bool>,
-    expected_return: []const u8
+    expected_return: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
-    var summary = try check_condition_statement(file, ast, condition, local_types);
+    var summary = try check_condition_statement(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
+    );
     summary = merge_type_summaries(
         summary,
-        try check_statement_node(file, ast, body, local_types, local_mutability, expected_return)
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
     );
     return summary;
 }
 
 fn check_for_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     name_id: std::kizu::ast::NodeId,
@@ -1664,15 +1809,30 @@ fn check_for_statement(
     body: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]const u8, []const u8>,
     local_mutability: &std::map::Map<[]const u8, bool>,
-    expected_return: []const u8
+    expected_return: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
     let name = ast_node_text(file, ast, name_id);
     var diagnostics = 0;
     if local_types.contains(name) {
         diagnostics = diagnostics + 1;
     }
-    let start_type = try infer_expression_type(file, ast, start, local_types);
-    let end_type = try infer_expression_type(file, ast, end, local_types);
+    let start_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        start,
+        local_types,
+        function_returns
+    );
+    let end_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        end,
+        local_types,
+        function_returns
+    );
     if known_type_mismatch("i64", start_type) {
         diagnostics = diagnostics + 1;
     }
@@ -1682,18 +1842,36 @@ fn check_for_statement(
     var summary = type_scan_summary(0, 1, diagnostics);
     summary = merge_type_summaries(
         summary,
-        try check_statement_node(file, ast, body, local_types, local_mutability, expected_return)
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
     );
     return summary;
 }
 
 fn check_condition_statement(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     condition: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]const u8, []const u8>
+    local_types: &std::map::Map<[]const u8, []const u8>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> !TypeScanSummary {
-    let condition_type = try infer_expression_type(file, ast, condition, local_types);
+    let condition_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
+    );
     var diagnostics = 0;
     if known_type_mismatch("bool", condition_type) {
         diagnostics = 1;
@@ -1702,10 +1880,12 @@ fn check_condition_statement(
 }
 
 fn infer_expression_type(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    local_types: &std::map::Map<[]const u8, []const u8>
+    local_types: &std::map::Map<[]const u8, []const u8>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
 ) -> ![]const u8 {
     let node = ast.get(node_id);
     match node.data {
@@ -1718,20 +1898,48 @@ fn infer_expression_type(
         Prefix(prefix_node) => return prefix_expression_type(prefix_node.op);
         CastExpr(cast_expr) => return ast_return_type_text(file, ast, cast_expr.type_node);
         ComptimeExpr(comptime_expr_node) => return infer_expression_type(
+            allocator,
             file,
             ast,
             comptime_expr_node.value,
-            local_types
+            local_types,
+            function_returns
         );
-        TryExpr(try_expr_node) => return "unknown";
-        FieldExpr(field_expr_node) => return "unknown";
+        TryExpr(try_expr_node) => return success_type_of(try infer_expression_type(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types,
+            function_returns
+        ));
+        FieldExpr(field_expr_node) => return field_expression_type(
+            file,
+            ast,
+            field_expr_node.name
+        );
         DerefExpr(deref_expr_node) => return "unknown";
-        Call(call_node) => return "unknown";
-        TypeApplyExpr(type_apply) => return "unknown";
-        IndexExpr(index_expr) => return "unknown";
-        StructLiteralExpr(struct_literal) => return "unknown";
+        Call(call_node) => return call_expression_type(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            local_types,
+            function_returns
+        );
+        TypeApplyExpr(type_apply) => return ast_node_text(file, ast, node_id);
+        IndexExpr(index_expr) => return index_expression_type(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.slice,
+            local_types,
+            function_returns
+        );
+        StructLiteralExpr(struct_literal) => return ast_node_text(file, ast, struct_literal.type_name);
         StructFieldInit(struct_field_init) => return "unknown";
-        ArenaNewExpr(arena_new) => return "unknown";
+        ArenaNewExpr(arena_new) => return arena_expression_type(file, ast, arena_new.type_node);
         Block(block) => return "unknown";
         If(if_node) => return "unknown";
         Let(let_node) => return "unknown";
@@ -1757,6 +1965,486 @@ fn infer_expression_type(
         FnDecl(fn_decl) => return "unknown";
         TypeName(type_name) => return ast_node_text(file, ast, node_id);
     }
+}
+
+fn local_initializer_end(
+    source_text: []const u8,
+    start: std::kizu::lexer::Token
+) -> std::kizu::lexer::Token {
+    var cursor = start;
+    var end = start;
+    var angle_depth = 0;
+    var paren_depth = 0;
+    var bracket_depth = 0;
+    var brace_depth = 0;
+    while !std::mem::equal_bytes(token_text(source_text, cursor), "") {
+        let text = token_text(source_text, cursor);
+        if angle_depth == 0 and
+            paren_depth == 0 and
+            bracket_depth == 0 and
+            brace_depth == 0 and
+            std::mem::equal_bytes(text, ";") {
+            return end;
+        }
+        if std::mem::equal_bytes(text, "<") {
+            angle_depth = angle_depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                angle_depth = angle_depth - 1;
+            } else {
+                if std::mem::equal_bytes(text, "(") {
+                    paren_depth = paren_depth + 1;
+                } else {
+                    if std::mem::equal_bytes(text, ")") {
+                        paren_depth = paren_depth - 1;
+                    } else {
+                        if std::mem::equal_bytes(text, "[") {
+                            bracket_depth = bracket_depth + 1;
+                        } else {
+                            if std::mem::equal_bytes(text, "]") {
+                                bracket_depth = bracket_depth - 1;
+                            } else {
+                                if std::mem::equal_bytes(text, "{") {
+                                    brace_depth = brace_depth + 1;
+                                } else {
+                                    if std::mem::equal_bytes(text, "}") {
+                                        brace_depth = brace_depth - 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        end = cursor;
+        cursor = std::kizu::lexer::next_token(source_text, cursor);
+    }
+    return end;
+}
+
+fn infer_initializer_text_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    source_text: []const u8,
+    start: std::kizu::lexer::Token,
+    end: std::kizu::lexer::Token,
+    local_types: &std::map::Map<[]const u8, []const u8>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
+) -> ![]const u8 {
+    if end.end < start.start {
+        return "unknown";
+    }
+    let expression = std::mem::trim_ascii(source_text[start.start..end.end]);
+    return infer_expression_text_type(allocator, file, expression, local_types, function_returns);
+}
+
+fn infer_expression_text_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    expression: []const u8,
+    local_types: &std::map::Map<[]const u8, []const u8>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
+) -> ![]const u8 {
+    let text = std::mem::trim_ascii(expression);
+    if std::mem::len(text) < 1 {
+        return "unknown";
+    }
+    let first = std::kizu::lexer::first_token(text);
+    let first_text = token_text(text, first);
+    if std::mem::equal_bytes(first_text, "try") {
+        return success_type_of(try infer_expression_text_type(
+            allocator,
+            file,
+            text[first.end..std::mem::len(text)],
+            local_types,
+            function_returns
+        ));
+    }
+    if std::mem::equal_bytes(first_text, "true") or std::mem::equal_bytes(first_text, "false") {
+        return "bool";
+    }
+    if text[0] == cast<u8>(34) {
+        return "[]const u8";
+    }
+    if text[0] >= cast<u8>(48) and text[0] <= cast<u8>(57) {
+        return "i64";
+    }
+    if std::mem::equal_bytes(first_text, "cast") {
+        return cast_expression_text_type(text);
+    }
+    if local_types.contains(text) {
+        return local_types.get(text);
+    }
+    let callee = expression_callee_text(text);
+    if !std::mem::equal_bytes(callee, "") {
+        if is_generic_constructor_text(callee) {
+            return callee;
+        }
+        let method_type = try method_call_text_type(callee, local_types);
+        if !std::mem::equal_bytes(method_type, "unknown") {
+            return method_type;
+        }
+        return resolved_function_return_type(allocator, file, callee, function_returns);
+    }
+    return field_text_type(text);
+}
+
+fn expression_callee_text(expression: []const u8) -> []const u8 {
+    var cursor = std::kizu::lexer::first_token(expression);
+    var end = cursor;
+    var angle_depth = 0;
+    while !std::mem::equal_bytes(token_text(expression, cursor), "") {
+        let text = token_text(expression, cursor);
+        if angle_depth == 0 and std::mem::equal_bytes(text, "(") {
+            return std::mem::trim_ascii(expression[0..end.end]);
+        }
+        if std::mem::equal_bytes(text, "<") {
+            angle_depth = angle_depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                angle_depth = angle_depth - 1;
+            }
+        }
+        end = cursor;
+        cursor = std::kizu::lexer::next_token(expression, cursor);
+    }
+    return "";
+}
+
+fn cast_expression_text_type(expression: []const u8) -> []const u8 {
+    var cursor = std::kizu::lexer::first_token(expression);
+    while !std::mem::equal_bytes(token_text(expression, cursor), "") and
+        !std::mem::equal_bytes(token_text(expression, cursor), "<") {
+        cursor = std::kizu::lexer::next_token(expression, cursor);
+    }
+    if !std::mem::equal_bytes(token_text(expression, cursor), "<") {
+        return "unknown";
+    }
+    let first_type = std::kizu::lexer::next_token(expression, cursor);
+    var type_end = first_type;
+    var depth = 1;
+    cursor = first_type;
+    while !std::mem::equal_bytes(token_text(expression, cursor), "") and depth > 0 {
+        let text = token_text(expression, cursor);
+        if std::mem::equal_bytes(text, "<") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                depth = depth - 1;
+                if depth == 0 {
+                    return std::mem::trim_ascii(expression[first_type.start..type_end.end]);
+                }
+            }
+        }
+        type_end = cursor;
+        cursor = std::kizu::lexer::next_token(expression, cursor);
+    }
+    return "unknown";
+}
+
+fn success_type_of(value_type: []const u8) -> []const u8 {
+    if std::mem::starts_with(value_type, "!") {
+        return value_type[1..std::mem::len(value_type)];
+    }
+    var index = 0;
+    while index < std::mem::len(value_type) {
+        if value_type[index] == cast<u8>(33) {
+            return value_type[index + 1..std::mem::len(value_type)];
+        }
+        index = index + 1;
+    }
+    return value_type;
+}
+
+fn field_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId
+) -> []const u8 {
+    return field_name_type(ast_node_text(file, ast, name));
+}
+
+fn call_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]const u8, []const u8>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
+) -> ![]const u8 {
+    let callee_text = ast_node_text(file, ast, callee);
+    if is_generic_constructor_text(callee_text) {
+        return callee_text;
+    }
+    let method_type = try method_call_text_type(callee_text, local_types);
+    if !std::mem::equal_bytes(method_type, "unknown") {
+        return method_type;
+    }
+    return resolved_function_return_type(allocator, file, callee_text, function_returns);
+}
+
+fn index_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    slice: bool,
+    local_types: &std::map::Map<[]const u8, []const u8>,
+    function_returns: &std::map::Map<[]const u8, []const u8>
+) -> ![]const u8 {
+    let target_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        target,
+        local_types,
+        function_returns
+    );
+    if slice {
+        if is_const_u8_slice(target_type) {
+            return "[]const u8";
+        }
+        if std::mem::starts_with(target_type, "[]") {
+            return target_type;
+        }
+        return "unknown";
+    }
+    if is_const_u8_slice(target_type) {
+        return "u8";
+    }
+    return "unknown";
+}
+
+fn arena_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> []const u8 {
+    let type_name = ast_node_text(file, ast, type_node);
+    if std::mem::equal_bytes(type_name, "") {
+        return "unknown";
+    }
+    return "unknown";
+}
+
+fn field_text_type(expression: []const u8) -> []const u8 {
+    var start = 0;
+    var index = 0;
+    while index < std::mem::len(expression) {
+        if expression[index] == cast<u8>(46) {
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return field_name_type(expression[start..std::mem::len(expression)]);
+}
+
+fn field_name_type(field: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(field, "start") or
+        std::mem::equal_bytes(field, "end") or
+        std::mem::equal_bytes(field, "line") or
+        std::mem::equal_bytes(field, "column") or
+        std::mem::equal_bytes(field, "raw") or
+        std::mem::equal_bytes(field, "len") or
+        std::mem::equal_bytes(field, "source_id") or
+        std::mem::equal_bytes(field, "byte_start") or
+        std::mem::equal_bytes(field, "byte_end") or
+        std::mem::equal_bytes(field, "span_start") or
+        std::mem::equal_bytes(field, "span_end") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(field, "modules") or
+        std::mem::equal_bytes(field, "symbols") or
+        std::mem::equal_bytes(field, "functions") or
+        std::mem::equal_bytes(field, "typed_nodes") or
+        std::mem::equal_bytes(field, "diagnostics") or
+        std::mem::equal_bytes(field, "params") or
+        std::mem::equal_bytes(field, "tokens") or
+        std::mem::equal_bytes(field, "bytes") or
+        std::mem::equal_bytes(field, "declarations") or
+        std::mem::equal_bytes(field, "nodes") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(field, "public") or
+        std::mem::equal_bytes(field, "unsafe_decl") or
+        std::mem::equal_bytes(field, "comptime_param") or
+        std::mem::equal_bytes(field, "mutable") or
+        std::mem::equal_bytes(field, "slice") or
+        std::mem::equal_bytes(field, "namespace") or
+        std::mem::equal_bytes(field, "value") or
+        std::mem::equal_bytes(field, "diagnostic") or
+        std::mem::equal_bytes(field, "is_dir") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(field, "path") or
+        std::mem::equal_bytes(field, "text") or
+        std::mem::equal_bytes(field, "module") or
+        std::mem::equal_bytes(field, "message") or
+        std::mem::equal_bytes(field, "name") or
+        std::mem::equal_bytes(field, "return_type") or
+        std::mem::equal_bytes(field, "param_source") {
+        return "[]const u8";
+    }
+    return "unknown";
+}
+
+fn method_call_text_type(
+    callee: []const u8,
+    local_types: &std::map::Map<[]const u8, []const u8>
+) -> ![]const u8 {
+    let method = last_field_segment(callee);
+    var receiver_type = "unknown";
+    var last_dot = -1;
+    var index = 0;
+    while index < std::mem::len(callee) {
+        if callee[index] == cast<u8>(46) {
+            last_dot = index;
+        }
+        index = index + 1;
+    }
+    if last_dot > 0 {
+        let receiver = callee[0..last_dot];
+        if local_types.contains(receiver) {
+            receiver_type = try local_types.get(receiver);
+        }
+    }
+    return method_return_type(method, receiver_type);
+}
+
+fn last_field_segment(text: []const u8) -> []const u8 {
+    var start = 0;
+    var index = 0;
+    while index < std::mem::len(text) {
+        if text[index] == cast<u8>(46) {
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return text[start..std::mem::len(text)];
+}
+
+fn method_return_type(method: []const u8, receiver_type: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "capacity") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(method, "contains") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(method, "as_bytes") {
+        return "[]const u8";
+    }
+    if std::mem::equal_bytes(method, "append") or
+        std::mem::equal_bytes(method, "append_bytes") or
+        std::mem::equal_bytes(method, "append_byte") or
+        std::mem::equal_bytes(method, "reserve") or
+        std::mem::equal_bytes(method, "set") or
+        std::mem::equal_bytes(method, "clear") or
+        std::mem::equal_bytes(method, "truncate") or
+        std::mem::equal_bytes(method, "deinit") {
+        return "void";
+    }
+    if std::mem::equal_bytes(method, "get") or
+        std::mem::equal_bytes(method, "at") or
+        std::mem::equal_bytes(method, "at_mut") {
+        return container_element_type(receiver_type);
+    }
+    return "unknown";
+}
+
+fn container_element_type(type_name: []const u8) -> []const u8 {
+    if std::mem::starts_with(type_name, "std::array::Array<") {
+        return first_generic_argument(type_name);
+    }
+    if std::mem::starts_with(type_name, "std::map::Map<") {
+        return second_generic_argument(type_name);
+    }
+    return "unknown";
+}
+
+fn first_generic_argument(type_name: []const u8) -> []const u8 {
+    var index = 0;
+    while index < std::mem::len(type_name) and type_name[index] != cast<u8>(60) {
+        index = index + 1;
+    }
+    if index >= std::mem::len(type_name) {
+        return "unknown";
+    }
+    let start = index + 1;
+    index = start;
+    var depth = 1;
+    while index < std::mem::len(type_name) and depth > 0 {
+        let byte = type_name[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                depth = depth - 1;
+                if depth == 0 {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+            } else {
+                if depth == 1 and byte == cast<u8>(44) {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+fn second_generic_argument(type_name: []const u8) -> []const u8 {
+    var index = 0;
+    var depth = 0;
+    var start = -1;
+    while index < std::mem::len(type_name) {
+        let byte = type_name[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                if depth == 1 and start >= 0 {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+                depth = depth - 1;
+            } else {
+                if byte == cast<u8>(44) and depth == 1 {
+                    start = index + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+fn is_generic_constructor_text(text: []const u8) -> bool {
+    return std::mem::starts_with(text, "std::array::Array<") or
+        std::mem::starts_with(text, "std::map::Map<") or
+        std::mem::starts_with(text, "std::mem::Box<") or
+        std::mem::starts_with(text, "arena<") or
+        std::mem::starts_with(text, "handle<");
+}
+
+fn resolved_function_return_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    name: []const u8,
+    function_returns: &std::map::Map<[]const u8, []const u8>
+) -> ![]const u8 {
+    if should_skip_function_reference(name) {
+        return "unknown";
+    }
+    var resolved = std::string::String(allocator);
+    try append_resolved_function_name(resolved, file, name);
+    let key = resolved.as_bytes();
+    var result = "unknown";
+    if function_returns.contains(key) {
+        result = try function_returns.get(key);
+    }
+    resolved.deinit();
+    return result;
 }
 
 fn infer_var_expression_type(
@@ -1806,7 +2494,50 @@ fn known_type_mismatch(expected: []const u8, actual: []const u8) -> bool {
     if std::mem::starts_with(expected, "!") {
         return false;
     }
+    if std::mem::starts_with(actual, "!") or bytes_contains(actual, "!") {
+        return false;
+    }
+    if is_const_u8_slice(expected) or is_const_u8_slice(actual) {
+        return !(is_const_u8_slice(expected) and is_const_u8_slice(actual));
+    }
+    if !is_scalar_comparable_type(expected) or !is_scalar_comparable_type(actual) {
+        return false;
+    }
     return !std::mem::equal_bytes(expected, actual);
+}
+
+fn is_scalar_comparable_type(type_name: []const u8) -> bool {
+    return std::mem::equal_bytes(type_name, "void") or
+        std::mem::equal_bytes(type_name, "bool") or
+        std::mem::equal_bytes(type_name, "i64") or
+        std::mem::equal_bytes(type_name, "u8") or
+        std::mem::equal_bytes(type_name, "Allocator") or
+        std::mem::equal_bytes(type_name, "Io");
+}
+
+fn is_const_u8_slice(type_name: []const u8) -> bool {
+    if std::mem::equal_bytes(type_name, "[]const u8") {
+        return true;
+    }
+    return std::mem::starts_with(type_name, "[]") and bytes_contains(type_name, "const u8");
+}
+
+fn bytes_contains(haystack: []const u8, needle: []const u8) -> bool {
+    let needle_len = std::mem::len(needle);
+    if needle_len < 1 {
+        return true;
+    }
+    if needle_len > std::mem::len(haystack) {
+        return false;
+    }
+    var index = 0;
+    while index + needle_len <= std::mem::len(haystack) {
+        if std::mem::equal_bytes(haystack[index..index + needle_len], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
 }
 
 fn ast_return_type_text(
@@ -2436,6 +3167,51 @@ pub fn return_type_mismatch(
     byte_end: i64
 ) -> std::kizu::diagnostic::Diagnostic {
     return make_diagnostic(allocator, path, byte_start, byte_end, "return type mismatch");
+}
+
+pub fn argument_type_mismatch(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "argument type mismatch");
+}
+
+pub fn field_type_mismatch(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "field type mismatch");
+}
+
+pub fn struct_literal_type_mismatch(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "struct literal type mismatch");
+}
+
+pub fn cast_type_mismatch(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "cast type mismatch");
+}
+
+pub fn generic_constructor_type_mismatch(
+    allocator: Allocator,
+    path: []const u8,
+    byte_start: i64,
+    byte_end: i64
+) -> std::kizu::diagnostic::Diagnostic {
+    return make_diagnostic(allocator, path, byte_start, byte_end, "generic constructor type mismatch");
 }
 
 fn make_diagnostic(
