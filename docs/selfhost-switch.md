@@ -35,7 +35,7 @@ just perf-cache-isolated
 | AST / parser | `std::kizu::{ast, parser}`, `selfhost::{ast, parser, parser_oracle}` | Go parser / AST | Kizu source component gate | Arena + NodeId parser parity and parser-error seeds remain green for examples and `selfhost/src`; the selfhost parser consumes token arrays, returns structured `ParseResult` values, and explicitly adapts lower-level untyped failures into typed parser errors. |
 | source manager / loader | `selfhost::{source, source_oracle}` | Go project loader | Kizu source component gate | Loading `kizu.toml`, `selfhost/src`, and required std sources uses explicit fs/io capabilities; the source table preserves source ids, module paths, file paths, and text; missing file, invalid manifest, duplicate module, and import cycle diagnostics keep stable spans and related spans. |
 | diagnostics / resolver | `selfhost::{diagnostic, resolver, resolver_oracle}` | Go project resolver | Kizu source component gate | The resolver consumes the source table, registers selfhost/std modules, scans top-level declarations into qualified symbols, and keeps missing symbol, duplicate symbol, private access, import cycle diagnostics green. |
-| type checker | `selfhost::{types, types_oracle}` | Go type checker | oracle-only | Type-kind, arity, copyability, and stable diagnostic span gate remains green. |
+| type checker | `selfhost::{types, types_oracle}` | Go type checker | Kizu source component gate | The type checker consumes the resolver source table, registers declared selfhost/std types, validates signature/field/variant/cast/generic-constructor type references, and keeps type-kind, arity, copyability, and stable diagnostic span gates green. |
 | ownership / borrow checker | `selfhost::{ownership, ownership_oracle}` | Go ownership checker | oracle-only | Move, borrow, deinit, array, map, string, arena, handle, and borrowed-view gate remains green. |
 | interpreter | none | Go interpreter | Go-owned | No switch planned before Kizu compiler frontend can emit a stable execution IR. |
 | IR / backend | `selfhost::{ir, backend}` skeleton | Go IR / backend | Go-owned | Requires a separate backend fingerprint and artifact/cache issue before any production switch. |
@@ -65,3 +65,17 @@ merged:
 
 No production CLI path, backend target, cache key, or artifact location is
 changed by #435.
+
+## Local Evidence For #451
+
+Recorded on 2026-05-20 after the selfhost type checker source-table pass was
+added:
+
+| Command | Result | Notes |
+| --- | --- | --- |
+| `go test ./cmd/kizu -run 'TestSelfhostResolverGate\|TestSelfhostTypeGate' -v` | passed, `ok ... 32.526s` | Resolver production symbols = 513; type production symbols = 97; type production typed nodes = 2185. |
+| `just selfhost-oracle` | passed, `ok ... 43.498s` | Oracle output reported lexer/parser/source/resolver/type/ownership failures = 0. |
+| `go test ./...` | passed, `cmd/kizu 96.172s` | Full suite remains green; the selfhost type gate is currently interpreter-heavy. |
+
+No production CLI path, backend target, cache key, or artifact location is
+changed by #451.

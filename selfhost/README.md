@@ -53,9 +53,12 @@ and scans top-level declarations into qualified symbol and visibility maps using
 `std::kizu::diagnostic` and the oracle covers missing symbols, duplicate
 symbols, private access, and import cycles.
 
-The type checker boundary uses explicit type-kind, arity, and copyability maps.
-The oracle covers primitive, function, struct, union, enum, error-union,
-optional, and std-container seed shapes plus stable diagnostic spans.
+The type checker boundary consumes the resolver source table, registers
+selfhost/std declared types into explicit type-kind, arity, and copyability
+maps, and validates signature, field, variant, cast, and generic-constructor
+type references. The oracle covers the production source-table pass plus
+primitive, function, struct, union, enum, error-union, optional, and
+std-container seed shapes with stable diagnostic spans.
 
 The ownership boundary uses explicit resource-kind and ownership-state maps. The
 oracle covers value, array, map, string, arena, handle, and borrowed-view seed
