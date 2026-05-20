@@ -1,9 +1,14 @@
 import selfhost::ownership;
+import selfhost::resolver;
+import selfhost::source;
+import selfhost::types;
 
 pub fn gate() -> !void {
     let allocator = std::mem::page_allocator();
+    let io = std::io::blocking();
     var states = std::map::Map<[]const u8, ownership::OwnershipState>(allocator);
     var kinds = std::map::Map<[]const u8, ownership::ResourceKind>(allocator);
+    var files = try source::load_selfhost_sources(allocator, io, "selfhost");
 
     try ownership::declare_resource(states, kinds, "value", ownership::ResourceKind::Value);
     try ownership::declare_resource(states, kinds, "tokens", ownership::ResourceKind::Array);
@@ -29,14 +34,28 @@ pub fn gate() -> !void {
     try expect_diagnostics(allocator);
 
     let summary = ownership::summarize(states, 2, 4);
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let production = try ownership::check_sources(allocator, files, typed);
     try std::testing::expect_equal_i64(7, summary.resources);
     try std::testing::expect_equal_i64(7, summary.checked_nodes);
     try std::testing::expect_equal_i64(2, summary.borrows);
     try std::testing::expect_equal_i64(4, summary.errors);
+    try std::testing::expect_equal_i64(1369, production.resources);
+    try std::testing::expect_equal_i64(39053, production.checked_nodes);
+    try std::testing::expect_equal_i64(265, production.borrows);
+    try std::testing::expect_equal_i64(0, production.errors);
 
+    files.deinit();
     states.deinit();
     kinds.deinit();
 
+    print("ownership-production-resources");
+    print(production.resources);
+    print("ownership-production-checked-nodes");
+    print(production.checked_nodes);
+    print("ownership-production-borrows");
+    print(production.borrows);
     print("ownership-resources");
     print(summary.resources);
     print("ownership-borrows");

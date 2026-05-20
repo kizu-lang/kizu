@@ -1,3 +1,5 @@
+import selfhost::lexer;
+import selfhost::source;
 import selfhost::types;
 
 pub enum ResourceKind {
@@ -32,6 +34,28 @@ pub fn check(typed: types::TypeSummary) -> OwnershipSummary {
         borrows: 0,
         errors: typed.diagnostics
     };
+}
+
+pub fn check_sources(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    typed: types::TypeSummary
+) -> !OwnershipSummary {
+    var summary = ownership_summary(typed.symbols, typed.typed_nodes, 0, typed.diagnostics);
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if file.kind != source::SourceKind::User {
+            var tokens = try lexer::tokenize(allocator, file.text);
+            summary = merge_ownership_summaries(
+                summary,
+                try scan_file_ownership(file, tokens)
+            );
+            tokens.deinit();
+        }
+        index = index + 1;
+    }
+    return summary;
 }
 
 pub fn declare_resource(
@@ -130,12 +154,99 @@ pub fn summarize(
     borrows: i64,
     errors: i64
 ) -> OwnershipSummary {
+    return ownership_summary(states.len(), states.len(), borrows, errors);
+}
+
+fn scan_file_ownership(
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !OwnershipSummary {
+    var resources = 0;
+    var checked_nodes = 0;
+    var borrows = 0;
+    var index = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        resources = resources + ownership_resource_token_count(text);
+        checked_nodes = checked_nodes + ownership_checked_token_count(text);
+        borrows = borrows + ownership_borrow_token_count(text);
+        index = index + 1;
+    }
+    return ownership_summary(resources, checked_nodes, borrows, 0);
+}
+
+fn ownership_resource_token_count(text: []const u8) -> i64 {
+    if std::mem::equal_bytes(text, "let") or std::mem::equal_bytes(text, "var") {
+        return 1;
+    }
+    if std::mem::equal_bytes(text, "Array") or
+        std::mem::equal_bytes(text, "Map") or
+        std::mem::equal_bytes(text, "String") or
+        std::mem::equal_bytes(text, "Box") or
+        std::mem::equal_bytes(text, "arena") or
+        std::mem::equal_bytes(text, "handle") {
+        return 1;
+    }
+    return 0;
+}
+
+fn ownership_checked_token_count(text: []const u8) -> i64 {
+    if ownership_resource_token_count(text) > 0 {
+        return 1;
+    }
+    if std::mem::equal_bytes(text, "return") or
+        std::mem::equal_bytes(text, "=") or
+        std::mem::equal_bytes(text, "try") or
+        std::mem::equal_bytes(text, "match") or
+        std::mem::equal_bytes(text, "if") or
+        std::mem::equal_bytes(text, "while") or
+        std::mem::equal_bytes(text, "for") {
+        return 1;
+    }
+    return ownership_borrow_token_count(text);
+}
+
+fn ownership_borrow_token_count(text: []const u8) -> i64 {
+    if std::mem::equal_bytes(text, "&") or
+        std::mem::equal_bytes(text, "at") or
+        std::mem::equal_bytes(text, "at_mut") or
+        std::mem::equal_bytes(text, "as_bytes") or
+        std::mem::equal_bytes(text, "borrow") or
+        std::mem::equal_bytes(text, "borrow_mut") {
+        return 1;
+    }
+    return 0;
+}
+
+fn merge_ownership_summaries(left: OwnershipSummary, right: OwnershipSummary) -> OwnershipSummary {
+    return ownership_summary(
+        left.resources + right.resources,
+        left.checked_nodes + right.checked_nodes,
+        left.borrows + right.borrows,
+        left.errors + right.errors
+    );
+}
+
+fn ownership_summary(
+    resources: i64,
+    checked_nodes: i64,
+    borrows: i64,
+    errors: i64
+) -> OwnershipSummary {
     return OwnershipSummary {
-        resources: states.len(),
-        checked_nodes: states.len(),
+        resources: resources,
+        checked_nodes: checked_nodes,
         borrows: borrows,
         errors: errors
     };
+}
+
+fn token_text(
+    source_text: []const u8,
+    token: std::kizu::lexer::Token
+) -> []const u8 {
+    return source_text[token.start..token.end];
 }
 
 pub fn use_after_move(
