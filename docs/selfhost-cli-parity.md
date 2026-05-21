@@ -23,8 +23,8 @@ The current hosted stage2 artifact supports these command slices:
 | `parse <missing-expression source file>` | #586 negative source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `run <print-hello source file>` | #588 positive source-shape slice via canonical emitted artifact | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
-| `test selfhost/tests/cli/test_expect_ok.kizu` | #570 positive single-file test artifact | `just selfhost-test-parity-gate` |
-| `test selfhost/tests/cli/test_expect_failure.kizu` | #570 negative assertion diagnostic artifact | `just selfhost-test-parity-gate` |
+| `test <expect-ok source file>` | #590 positive source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
+| `test <expect-failure source file>` | #590 assertion-failure source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
 
 `selfhost/tests/cli/parse-parity.tsv` is the #525/#579/#586 parse parity
 manifest. It records command args, fixture paths, expected exit codes, and
@@ -51,13 +51,16 @@ bound to one fixed path. The hosted compiler emits fixture artifacts under
 `target/selfhost/run/`; the gate links and executes those artifacts with the
 explicit selfhost host runtime and records `go.cmd-kizu-fallback none`.
 
-`selfhost/tests/cli/test-parity.tsv` is the #570 single-file test parity
+`selfhost/tests/cli/test-parity.tsv` is the #570/#590 single-file test parity
 manifest. It records command args, fixture paths, expected exit codes,
-checked-in stdout/stderr golden paths, and hosted artifact mode for the bounded
-`test <file>` slice. The hosted compiler emits fixture artifacts under
+checked-in stdout/stderr golden paths, hosted artifact mode, and the canonical
+artifact stem for the bounded `test <file>` slice. The expect-ok and
+expect-failure rows each include the original fixture plus an alias fixture with
+the same source bytes, proving the hosted dispatch paths are no longer bound to
+one fixed path. The hosted compiler emits fixture artifacts under
 `target/selfhost/test/`; the gate links and executes those artifacts with the
-explicit selfhost host runtime, records `go.cmd-kizu-fallback none`, and does
-not claim general test discovery.
+explicit selfhost host runtime, records `go.cmd-kizu-fallback none`, and does not
+claim general test discovery.
 
 Unsupported commands, wrong arity, and arguments beginning with `-` remain
 deterministic usage/unsupported paths with exit code `64`.
@@ -110,9 +113,11 @@ writes `test: ok\n`.
 
 ```text
 selfhost/tests/cli/test-parity.tsv
-# Columns: name command fixture exit stdout_golden stderr_golden artifact_mode
-test_expect_ok test selfhost/tests/cli/test_expect_ok.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact
-test_expect_failure test selfhost/tests/cli/test_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact
+# Columns: name command fixture exit stdout_golden stderr_golden artifact_mode artifact_stem
+test_expect_ok test selfhost/tests/cli/test_expect_ok.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_ok
+test_expect_ok_alias test selfhost/tests/cli/test_expect_ok_alias.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_ok
+test_expect_failure test selfhost/tests/cli/test_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure
+test_expect_failure_alias test selfhost/tests/cli/test_expect_failure_alias.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure
 ```
 
 `test_expect_ok.kizu` is the first positive fixture:
@@ -152,7 +157,7 @@ release scope:
 | --- | --- | --- | --- |
 | broader `parse <file>` diagnostics | Partially deferred | #579 and #586 move the first positive and negative parse shapes off single hardcoded paths, but broader parsing and diagnostic recovery are not claimed. | Add one parse diagnostic/source shape at a time, keeping checked-in goldens and no Go fallback. |
 | broader `run <file>` | Partially deferred | #588 moves the first positive and negative run shapes off single hardcoded paths, but broader frontend, lowering, and artifact naming are not claimed. | Extend `run-parity.tsv` one source shape at a time, using hosted-artifact validation and no Go fallback. |
-| broader `kizu test <file>` | Deferred | #570 only claims the first fixture pair and no discovery. | Extend `test-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no discovery. |
+| broader `kizu test <file>` | Partially deferred | #590 moves the first expect-ok and expect-failure shapes off single hardcoded paths, but broader frontend, lowering, artifact naming, and discovery are not claimed. | Extend `test-parity.tsv` one source shape at a time, using hosted-artifact validation and no discovery. |
 | cache/status, cache/prune, why-rebuild, cache artifact commands | Deferred | Hosted artifact cache ownership, persistence, pruning, and no-op rebuild semantics are not designed. | Split into cache command issues with explicit cache directory, artifact paths, mutation rules, stdout/stderr, and cache-size acceptance checks. |
 | non-critical diagnostic/display parity commands | Deferred | Diagnostic formatting must be command-specific to avoid broad parity without contracts. | Create one command/display contract per slice, including exact stdout/stderr and unsupported behavior. |
 
