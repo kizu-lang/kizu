@@ -79,7 +79,7 @@ Io capability
 Task / TaskGroup
 std::task structured API
 contract
-satisfy
+impl Contract for Type
 &Dyn<Contract>
 ```
 
@@ -1907,15 +1907,15 @@ safe structured API の後に追加します。
 実並行 runtime を導入する場合も、上記の ownership / borrow / structured scope の制約を維持します。
 詳細な runtime selection 方針は ADR-0039 に従います。
 
-## 16. contract / satisfy / Dyn 方針
+## 16. contract / impl / Dyn 方針
 
 Kizu v0.1 では、Rust trait clone ではない明示的な抽象化として、
-`contract`、`satisfy`、`Dyn` を実装対象にします。
+`contract`、`impl Contract for Type`、`Dyn` を実装対象にします。
 
 ```text
-contract  型が満たすべき要求
-satisfy   型が contract を満たすことの明示宣言
-Dyn       runtime dynamic dispatch を見せる型
+contract                型が満たすべき要求
+impl Contract for Type  型が contract を満たすことの明示宣言と method body
+Dyn                     runtime dynamic dispatch を見せる型
 ```
 
 `contract` は required method signatures だけを書きます。
@@ -1927,22 +1927,20 @@ contract Writer {
 }
 ```
 
-`satisfy` は明示適合だけを表します。
+`impl Contract for Type` は明示適合と method body を 1 箇所に置きます。
 Go のような暗黙 interface 適合は採用しません。
 
 ```kizu
-satisfy Writer for File
-```
-
-method body は型のそばに置きます。
-
-```kizu
-impl File {
-    fn write(self: &File, bytes: &Bytes) -> !i64 {
+impl Writer for File {
+    fn write(self: &Self, bytes: &Bytes) -> !i64 {
         return os.write(self.fd, bytes);
     }
 }
 ```
+
+`impl File { ... }` は inherent method 用として残します。contract method body は
+`impl Writer for File { ... }` に置きます。旧 `satisfy Writer for File` 構文は
+採用しません。
 
 `Dyn<Contract>` は dynamic dispatch を型に見せます。
 
@@ -2085,7 +2083,7 @@ borrow expression
 arena type and constructor
 error union type
 comptime expression and statement
-contract / satisfy / dyn type
+contract / impl / dyn type
 ```
 
 ### Milestone 3: Interpreter

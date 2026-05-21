@@ -105,6 +105,10 @@ func (d *FunctionDecl) String() string {
 		return fmt.Sprintf("%sextern %q fn %s%s(%s)%s",
 			prefix, d.ExternABI, d.Name, typeParams, strings.Join(params, ", "), ret)
 	}
+	if d.Body == nil {
+		return fmt.Sprintf("%sfn %s%s(%s)%s;",
+			prefix, d.Name, typeParams, strings.Join(params, ", "), ret)
+	}
 	return fmt.Sprintf("%sfn %s%s(%s)%s %s",
 		prefix, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
 }
@@ -225,10 +229,11 @@ func (d *ContractDecl) String() string {
 	return fmt.Sprintf("%scontract %s { %s }", prefix, d.Name, strings.Join(methods, "; "))
 }
 
-// ImplDecl represents methods implemented for one concrete type.
+// ImplDecl represents inherent or contract methods implemented for one concrete type.
 type ImplDecl struct {
-	TypeName string
-	Methods  []*FunctionDecl
+	ContractName string
+	TypeName     string
+	Methods      []*FunctionDecl
 }
 
 // declNode marks ImplDecl as a declaration node.
@@ -240,21 +245,11 @@ func (d *ImplDecl) String() string {
 	for _, method := range d.Methods {
 		methods = append(methods, method.String())
 	}
+	if d.ContractName != "" {
+		return fmt.Sprintf("impl %s for %s { %s }",
+			d.ContractName, d.TypeName, strings.Join(methods, "; "))
+	}
 	return fmt.Sprintf("impl %s { %s }", d.TypeName, strings.Join(methods, "; "))
-}
-
-// SatisfyDecl represents explicit contract satisfaction.
-type SatisfyDecl struct {
-	ContractName string
-	TypeName     string
-}
-
-// declNode marks SatisfyDecl as a declaration node.
-func (*SatisfyDecl) declNode() {}
-
-// String returns a compact debug representation of the satisfy declaration.
-func (d *SatisfyDecl) String() string {
-	return fmt.Sprintf("satisfy %s for %s", d.ContractName, d.TypeName)
 }
 
 // Field represents a named struct field.

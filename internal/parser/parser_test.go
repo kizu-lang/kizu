@@ -203,6 +203,28 @@ fn main() {  }`
 	}
 }
 
+// TestParseContractImplDecl checks explicit contract implementation syntax.
+func TestParseContractImplDecl(t *testing.T) {
+	input := `contract Writer {
+    fn write(self: &Self) -> !i64;
+}
+impl Writer for File {
+    fn write(self: &Self) -> !i64 {
+        return 1;
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `contract Writer { fn write(self: &Self) -> !i64; }
+impl Writer for File { fn write(self: &Self) -> !i64 { return 1; } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseImportsAndPublicDeclarations checks module imports and visibility syntax.
 func TestParseImportsAndPublicDeclarations(t *testing.T) {
 	input := `import app::lexer;

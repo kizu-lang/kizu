@@ -65,9 +65,6 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Impl:
 			program.Decls = append(program.Decls, p.parseImplDecl())
 			p.nextToken()
-		case token.Satisfy:
-			program.Decls = append(program.Decls, p.parseSatisfyDecl())
-			p.nextToken()
 		default:
 			p.errorf("expected declaration, got %s", p.cur.Type)
 			p.nextToken()
@@ -264,7 +261,17 @@ func (p *Parser) parseImplDecl() ast.Decl {
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
-	decl.TypeName = p.cur.Literal
+	firstName := p.cur.Literal
+	if p.peek.Type == token.For {
+		decl.ContractName = firstName
+		p.nextToken()
+		if !p.expectPeek(token.Ident) {
+			return decl
+		}
+		decl.TypeName = p.cur.Literal
+	} else {
+		decl.TypeName = firstName
+	}
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
@@ -288,23 +295,6 @@ func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
 		p.nextToken()
 	}
 	return methods
-}
-
-// parseSatisfyDecl parses an explicit contract satisfaction declaration.
-func (p *Parser) parseSatisfyDecl() ast.Decl {
-	decl := &ast.SatisfyDecl{}
-	if !p.expectPeek(token.Ident) {
-		return decl
-	}
-	decl.ContractName = p.cur.Literal
-	if !p.expectPeek(token.For) {
-		return decl
-	}
-	if !p.expectPeek(token.Ident) {
-		return decl
-	}
-	decl.TypeName = p.cur.Literal
-	return decl
 }
 
 // parseStructDecl parses a top-level struct declaration.
