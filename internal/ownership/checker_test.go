@@ -784,6 +784,39 @@ func TestCheckComptimeRejectsRuntimeBoundary(t *testing.T) {
 	}
 }
 
+// TestCheckMinimalGenericInstantiation checks ownership after explicit type application.
+func TestCheckMinimalGenericInstantiation(t *testing.T) {
+	source := `struct Name { value: []const u8 }
+fn Pass<T>(value: T) -> T {
+    return value;
+}
+fn main() {
+    let name = Name { value: "alice" };
+    let other = Pass<Name>(name);
+    print(other.value);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsGenericMoveCallWithoutTypeArgs keeps generic calls explicit.
+func TestCheckRejectsGenericMoveCallWithoutTypeArgs(t *testing.T) {
+	source := `fn Pass<T>(value: T) -> T {
+    return value;
+}
+fn main() {
+    print(Pass(1));
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "requires explicit type arguments") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // runErrorCases checks that each source fails with the expected message.
 func runErrorCases(t *testing.T, cases []struct {
 	name   string

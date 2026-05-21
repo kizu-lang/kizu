@@ -738,6 +738,8 @@ slice<T>
 
 v0.1 では full generics を実装しません。
 `arena<T>`、`handle<T>`、`!T`、raw pointer 型は専用の型構文として扱います。
+v0.2 では self-host と Kizu source stdlib のため、ADR-0066 の最小明示 function
+generics だけを採用します。
 
 ### 7.1 index / slice expression
 
@@ -1292,8 +1294,17 @@ fn sized(comptime n: i64) -> i64 {
 }
 ```
 
-Std source may define restricted generic wrappers when the type
-argument is forwarded to an explicit trusted primitive:
+v0.2 の最小 generics は、明示型引数付きの function generics に限定します。
+宣言は `fn f<T>(value: T) -> T`、呼び出しは `f<i64>(value)` または
+`std::testing::expect_equal<i64>(expected, actual)` のように書きます。
+型引数推論、generic methods、bounds、associated types、higher-kinded types、
+specialization、reflection は実装しません。
+
+Generic function body は未 instantiation のまま top-level runtime code としては検査せず、
+明示型引数付き call が発生した時に、その型集合で type / ownership / borrow check します。
+
+Std source may define generic wrappers when the type argument is forwarded to an
+explicit trusted primitive:
 
 ```kizu
 pub fn Channel<T>() -> Channel<T> {
@@ -1317,9 +1328,9 @@ pub fn Map<K, V>(allocator: Allocator) -> std::map::Map<K, V> {
 }
 ```
 
-This is not a general monomorphization system. v0.2 uses it only to move public
-stdlib constructor spelling into Kizu source while keeping runtime storage as an
-explicit primitive boundary.
+This is not a full monomorphization system. v0.2 uses it to move public stdlib
+constructor and testing spelling into Kizu source while keeping runtime storage,
+test traps, and host interaction as explicit primitive boundaries.
 
 comptime branch:
 
@@ -1331,8 +1342,20 @@ comptime if 1 + 1 == 2 {
 }
 ```
 
-v0.1 の `comptime` expression は、整数、真偽値、文字列、単項演算、二項演算だけを評価します。
+v0.2 の `comptime` expression は、整数、真偽値、文字列、compile-time type value、
+単項演算、二項演算だけを評価します。`type<i64>` のような `type<T>` literal と、
+instantiated generic body 内の type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
+
+```kizu
+fn IsI64<T>(value: T) -> bool {
+    comptime if T == type<i64> {
+        return true;
+    } else {
+        return false;
+    }
+}
+```
 
 `comptime Function` parameter is a restricted function-name token for std
 wrappers that must forward a named function to a trusted primitive. It is not a
@@ -1572,6 +1595,7 @@ v0.2 の `std::testing` は、self-host compiler component test 用の
 
 ```text
 std::testing::expect(condition: bool) -> void
+std::testing::expect_equal<T>(expected: T, actual: T) -> void
 std::testing::fail(message: []const u8) -> !void
 ```
 
@@ -1580,9 +1604,10 @@ condition failure は `std::builtin::test_fail` 経由で runtime error とし�
 test source は assertion ごとの `try` を書きません。
 `fail` は caller-provided `[]const u8` を通常の `!void` error として返します。
 unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。
-generic equality は v0.2 では導入せず、比較は `expect(left == right)` または
-`expect(std::mem::equal_bytes(left, right))` のように caller 側で明示します。
-typed `expect_equal_<type>` family は v0.2 API に含めません。
+`expect_equal<T>` は明示型引数付きの generic assertion です。
+failure は `expected ... got ...` 形式の diagnostic を出し、assertion ごとの `try` は不要です。
+type argument inference はないため、caller は `expect_equal<i64>(1, actual)` のように
+期待型を明示します。per-type `expect_equal_i64` family は導入しません。
 `kizu test <file>` は v0.2 では discovery なしの single-file runner です。
 file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示します。
 test discovery、location-aware diagnostics、message builder helper は後続で扱います。

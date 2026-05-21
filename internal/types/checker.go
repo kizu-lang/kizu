@@ -19,6 +19,7 @@ const (
 	typeU8         Type = "u8"
 	typeByteString Type = "[]const u8"
 	typeSelf       Type = "Self"
+	typeType       Type = "type"
 	typeVoid       Type = "void"
 )
 
@@ -39,6 +40,7 @@ var knownTypes = map[Type]bool{
 	"f32":                 true,
 	"f64":                 true,
 	typeFunction:          true,
+	typeType:              true,
 	"Io":                  true,
 	"Allocator":           true,
 	"std::fs::Metadata":   true,
@@ -124,6 +126,7 @@ type Checker struct {
 	currentFunction *functionType
 	currentStd      bool
 	typeParams      map[string]bool
+	typeArgValues   map[string]Type
 	lifetimeParams  map[string]bool
 	loopLabels      []string
 }
@@ -197,6 +200,9 @@ func (c *Checker) Check(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.FunctionDecl:
+			if len(d.TypeParams) > 0 {
+				continue
+			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
 				return err
 			}
@@ -600,9 +606,6 @@ type functionParamInfo struct {
 
 // newFunctionType converts a parsed function declaration into its static type.
 func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
-	if len(fn.TypeParams) > 0 && !fn.Std {
-		return nil, fmt.Errorf("type error: generic function `%s` is reserved for std", fn.Name)
-	}
 	if len(fn.LifetimeParams) > 0 {
 		return nil, fmt.Errorf(
 			"type error: explicit lifetime parameters are not supported; use `borrows`")
@@ -956,6 +959,9 @@ func substituteTypeParams(typ Type, subst map[string]Type) Type {
 	out := string(typ)
 	for name, replacement := range subst {
 		repl := string(replacement)
+		out = strings.ReplaceAll(out, "[]const "+name, "[]const "+repl)
+		out = strings.ReplaceAll(out, "[]mut "+name, "[]mut "+repl)
+		out = strings.ReplaceAll(out, "[]"+name, "[]"+repl)
 		out = strings.ReplaceAll(out, "!&mut "+name, "!&mut "+repl)
 		out = strings.ReplaceAll(out, "!&"+name, "!&"+repl)
 		out = strings.ReplaceAll(out, "&mut "+name, "&mut "+repl)
@@ -966,6 +972,21 @@ func substituteTypeParams(typ Type, subst map[string]Type) Type {
 		out = strings.ReplaceAll(out, ", "+name+">", ", "+repl+">")
 	}
 	return Type(out)
+}
+
+// instantiateTypeArgText replaces in-scope generic type parameters in a type-apply list.
+func (c *Checker) instantiateTypeArgText(typeArg string) string {
+	if len(c.typeArgValues) == 0 {
+		return typeArg
+	}
+	args, ok := splitGenericArgs(typeArg)
+	if !ok {
+		return string(substituteTypeParams(Type(typeArg), c.typeArgValues))
+	}
+	for idx, arg := range args {
+		args[idx] = string(substituteTypeParams(Type(arg), c.typeArgValues))
+	}
+	return strings.Join(args, ", ")
 }
 
 // parseType validates a source-level type name.
@@ -2369,12 +2390,12 @@ func matchVariantCount(enumType *enumType, unionType *unionType) int {
 // checkExpr computes the static type of an expression.
 func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
-		return literalType(e)
+	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
+		return c.checkScalarExpr(e)
 	case *ast.ComptimeExpr:
 		return c.checkComptimeExpr(e, env, unsafe)
 	case *ast.IdentExpr:
-		return checkIdentExpr(e, env)
+		return c.checkIdentExpr(e, env)
 	case *ast.PrefixExpr:
 		return c.checkPrefixExpr(e, env, unsafe)
 	case *ast.BinaryExpr:
@@ -2398,6 +2419,17 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 	default:
 		return c.checkControlExpr(expr, env, unsafe)
 	}
+}
+
+// checkScalarExpr computes types for literal-like scalar expressions.
+func (c *Checker) checkScalarExpr(expr ast.Expression) (Type, error) {
+	if typeExpr, ok := expr.(*ast.TypeExpr); ok {
+		if _, err := c.parseType(typeExpr.TypeName); err != nil {
+			return "", err
+		}
+		return typeType, nil
+	}
+	return literalType(expr)
 }
 
 // checkControlExpr validates statement-compatible control flow used as expressions.
@@ -2702,11 +2734,14 @@ func integerLiteralFitsType(value int64, typ Type) bool {
 	}
 }
 
-// checkIdentExpr resolves a variable reference in lexical scopes.
-func checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) {
+// checkIdentExpr resolves variables and instantiated compile-time type params.
+func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) {
 	typ, ok := env.lookup(expr.Name)
 	if ok {
 		return typ, nil
+	}
+	if _, ok := c.typeArgValues[expr.Name]; ok {
+		return typeType, nil
 	}
 	if expr.Name == "void" {
 		return "", fmt.Errorf("type error: void is not a value")
@@ -3456,29 +3491,30 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if !ok {
 		return "", fmt.Errorf("type error: unsupported type application `%s`", expr.String())
 	}
+	typeArg := c.instantiateTypeArgText(expr.TypeArg)
 	if typ, ok, err := c.checkGenericUserTypeApply(
-		name, expr.TypeArg, args, env, unsafe,
+		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinMapTypeApply(
-		name, expr.TypeArg, args, env, unsafe,
+		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinThreadScopedTypeApply(
-		name, expr.TypeArg, args, env, unsafe,
+		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinTypeApply(
-		name, expr.TypeArg, args, env, unsafe,
+		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
 		return typ, err
 	}
 	switch name {
 	case "std.sync.Mutex":
-		arg, err := c.parseType(expr.TypeArg)
+		arg, err := c.parseType(typeArg)
 		if err != nil {
 			return "", err
 		}
@@ -3502,6 +3538,44 @@ func (c *Checker) checkBuiltinTypeApply(
 	); ok || err != nil {
 		return typ, ok, err
 	}
+	if typ, ok, err := c.checkBuiltinTestingTypeApply(
+		name, typeArg, args, env, unsafe,
+	); ok || err != nil {
+		return typ, ok, err
+	}
+	return c.checkBuiltinConstructorTypeApply(name, typeArg, args, env, unsafe)
+}
+
+// checkBuiltinTestingTypeApply validates typed std::testing primitives.
+func (c *Checker) checkBuiltinTestingTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
+	if name != "std.builtin.test_fail_equal" {
+		return "", false, nil
+	}
+	if !c.currentStd {
+		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::testing", name)
+	}
+	arg, err := c.parseType(typeArg)
+	if err != nil {
+		return "", true, err
+	}
+	typ, err := c.checkBuiltinTestFailEqual(arg, args, env, unsafe)
+	return typ, true, err
+}
+
+// checkBuiltinConstructorTypeApply validates typed std constructor primitives.
+func (c *Checker) checkBuiltinConstructorTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, bool, error) {
 	switch name {
 	case "std.builtin.channel":
 		if !c.currentStd {
@@ -3546,6 +3620,34 @@ func (c *Checker) checkBuiltinTypeApply(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkBuiltinTestFailEqual validates the std::testing typed failure primitive.
+func (c *Checker) checkBuiltinTestFailEqual(
+	typ Type,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	if len(args) != 2 {
+		return "", fmt.Errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
+	}
+	for idx, arg := range args {
+		got, err := c.checkContextualExpr(arg, typ, env, unsafe)
+		if err != nil {
+			return "", err
+		}
+		if !sameType(got, typ) {
+			return "", fmt.Errorf(
+				"type error: arg %d of `std::testing::expect_equal<%s>` expects %s, got %s",
+				idx+1,
+				typ,
+				typ,
+				got,
+			)
+		}
+	}
+	return typeVoid, nil
 }
 
 // checkBuiltinMethodTypeApply validates std-only method primitive calls.
@@ -3996,7 +4098,53 @@ func (c *Checker) checkGenericUserTypeApply(
 			return "", true, err
 		}
 	}
+	if err := c.checkGenericInstantiation(fn, subst); err != nil {
+		return "", true, err
+	}
 	return substituteTypeParams(fn.returnType, subst), true, nil
+}
+
+// checkGenericInstantiation checks a generic function body for one explicit type set.
+func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
+	env := newScope(nil)
+	for idx, param := range fn.decl.Params {
+		typ := substituteTypeParams(fn.params[idx], subst)
+		if err := env.defineParam(param.Name, typ, param.Borrow, param.MutBorrow); err != nil {
+			return err
+		}
+	}
+	returnType := substituteTypeParams(fn.returnType, subst)
+	previousReturn := c.currentReturn
+	previousFunction := c.currentFunction
+	previousStd := c.currentStd
+	previousTypeParams := c.typeParams
+	previousTypeArgValues := c.typeArgValues
+	previousLifetimeParams := c.lifetimeParams
+	previousLoops := c.loopLabels
+	c.currentReturn = returnType
+	c.currentFunction = fn
+	c.currentStd = fn.decl.Std
+	c.typeParams = typeParamSet(fn.typeParams)
+	c.typeArgValues = subst
+	c.lifetimeParams = lifetimeParamSet(fn.lifetimeParams)
+	c.loopLabels = nil
+	defer func() {
+		c.currentReturn = previousReturn
+		c.currentFunction = previousFunction
+		c.currentStd = previousStd
+		c.typeParams = previousTypeParams
+		c.typeArgValues = previousTypeArgValues
+		c.lifetimeParams = previousLifetimeParams
+		c.loopLabels = previousLoops
+	}()
+	returns, err := c.checkBlock(fn.decl.Body, env, returnType, fn.unsafe)
+	if err != nil {
+		return err
+	}
+	if returnType != typeVoid && !returns {
+		return fmt.Errorf("type error: function `%s` must return %s", fn.name, returnType)
+	}
+	return nil
 }
 
 // parseGenericWrapperTypeArgs validates source-level generic wrapper arguments.
@@ -4142,6 +4290,9 @@ func (c *Checker) checkUserCall(
 	if (fn.unsafe || fn.externABI != "") && !unsafe {
 		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name)
 	}
+	if len(fn.typeParams) > 0 {
+		return "", fmt.Errorf("type error: `%s` requires explicit type arguments", name)
+	}
 	if len(args) != len(fn.params) {
 		return "", userCallArityError(name, fn, len(args))
 	}
@@ -4179,7 +4330,7 @@ func (c *Checker) checkUserCallArg(
 		return err
 	}
 	if fn.comptimeParams[idx] {
-		if _, err := evalComptime(arg); err != nil {
+		if _, err := c.evalComptime(arg); err != nil {
 			return err
 		}
 	}

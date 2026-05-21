@@ -84,3 +84,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0063: page_allocator capability stability](0063-page-allocator-capability.md)
 - [ADR-0064: comma list delimiters](0064-comma-list-delimiters.md)
 - [ADR-0065: contextual integer literals](0065-contextual-integer-literals.md)
+- [ADR-0066: minimal explicit function generics](0066-minimal-explicit-generics.md)

@@ -1054,6 +1054,9 @@ func (p *Parser) parseIdentPrefixExpression() ast.Expression {
 	if p.cur.Literal == "cast" && p.peek.Type == token.LT {
 		return p.parseCastExpr()
 	}
+	if p.cur.Literal == "type" && p.peek.Type == token.LT {
+		return p.parseTypeExpr()
+	}
 	if p.cur.Literal == "arena" && p.peek.Type == token.LT {
 		return p.parseArenaNewExpr()
 	}
@@ -1061,6 +1064,20 @@ func (p *Parser) parseIdentPrefixExpression() ast.Expression {
 		return p.parseStructLiteralExpr(p.cur.Literal)
 	}
 	return &ast.IdentExpr{Name: p.cur.Literal}
+}
+
+// parseTypeExpr parses type<T> compile-time type literals.
+func (p *Parser) parseTypeExpr() ast.Expression {
+	expr := &ast.TypeExpr{}
+	if !p.expectPeek(token.LT) {
+		return expr
+	}
+	p.nextToken()
+	expr.TypeName = p.parseTypeArg()
+	if expr.TypeName == "" || !p.expectTypeClose() {
+		return expr
+	}
+	return expr
 }
 
 // parseCastExpr parses cast<T>(value).
@@ -1499,6 +1516,12 @@ func startsUpper(name string) bool {
 
 // canTypeApply reports whether expr may be followed by a constructor type argument.
 func canTypeApply(expr ast.Expression) bool {
-	field, ok := expr.(*ast.FieldExpr)
-	return ok && field.Namespace
+	switch e := expr.(type) {
+	case *ast.FieldExpr:
+		return e.Namespace
+	case *ast.IdentExpr:
+		return startsUpper(e.Name)
+	default:
+		return false
+	}
 }

@@ -31,6 +31,7 @@ const (
 	kindBox
 	kindRef
 	kindFunctionName
+	kindType
 )
 
 // Value is a runtime value produced by the Phase 2 interpreter.
@@ -203,6 +204,8 @@ func (v Value) scalarString() (string, bool) {
 		return "false", true
 	case kindString:
 		return v.s, true
+	case kindType:
+		return v.typeName, true
 	default:
 		return "", false
 	}
@@ -287,6 +290,11 @@ func boolValue(v bool) Value {
 // stringValue returns a string runtime value.
 func stringValue(v string) Value {
 	return Value{kind: kindString, s: v}
+}
+
+// typeValue returns a compile-time type runtime value.
+func typeValue(name string) Value {
+	return Value{kind: kindType, typeName: name}
 }
 
 // structValue returns a runtime struct value.

@@ -562,6 +562,14 @@ func (c *graphChecker) qualifyTypeOrControlExpr(
 	switch e := expr.(type) {
 	case *ast.TypeApplyExpr:
 		return c.qualifyTypeApplyExpr(module, e)
+	case *ast.TypeExpr:
+		cp := *e
+		typ, err := c.resolveType(module, e.TypeName)
+		if err != nil {
+			return &cp, err
+		}
+		cp.TypeName = typ
+		return &cp, nil
 	case *ast.ArenaNewExpr:
 		cp := *e
 		typ, err := c.resolveType(module, e.TypeName)
@@ -1023,7 +1031,8 @@ func (r typeResolver) resolveQualifiedBase(name string) (string, error) {
 func isPrimitiveType(name string) bool {
 	switch name {
 	case "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-		"usize", "isize", "f32", "f64", "void", "Io", "Allocator", "Function", "Self":
+		"usize", "isize", "f32", "f64", "void", "Io", "Allocator", "Function", "Self",
+		"type":
 		return true
 	default:
 		return false

@@ -13,7 +13,7 @@ func (c *Checker) checkComptimeIfStmt(stmt *ast.ComptimeIfStmt, env *scope) erro
 		return err
 	}
 	selected := stmt.Consequence
-	value, known := comptimeBool(stmt.Condition)
+	value, known := c.comptimeBool(stmt.Condition)
 	if known && !value {
 		selected = stmt.Alternative
 	}
@@ -106,6 +106,13 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 		return "[]const u8", nil
 	case *ast.BoolExpr:
 		return "bool", nil
+	case *ast.TypeExpr:
+		return "type", nil
+	case *ast.IdentExpr:
+		if _, ok := c.typeArgValues[e.Name]; ok {
+			return "type", nil
+		}
+		return "", fmt.Errorf("borrow error: runtime value cannot cross comptime boundary")
 	case *ast.PrefixExpr:
 		return c.readComptimeOnly(e.Right)
 	case *ast.BinaryExpr:
@@ -123,18 +130,23 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 }
 
 // comptimeBool evaluates simple compile-time boolean expressions for ownership branch checks.
-func comptimeBool(expr ast.Expression) (bool, bool) {
+func (c *Checker) comptimeBool(expr ast.Expression) (bool, bool) {
 	switch e := expr.(type) {
 	case *ast.ComptimeExpr:
-		return comptimeBool(e.Expr)
+		return c.comptimeBool(e.Expr)
 	case *ast.BoolExpr:
 		return e.Value, true
 	case *ast.PrefixExpr:
-		value, ok := comptimeBool(e.Right)
+		value, ok := c.comptimeBool(e.Right)
 		return !value, ok && e.Operator == "!"
 	case *ast.BinaryExpr:
 		if e.Operator == "and" || e.Operator == "or" {
-			return comptimeLogicalBool(e)
+			return c.comptimeLogicalBool(e)
+		}
+		leftType, leftTypeOK := c.comptimeTypeValue(e.Left)
+		rightType, rightTypeOK := c.comptimeTypeValue(e.Right)
+		if leftTypeOK && rightTypeOK {
+			return compareComptimeTypes(e.Operator, leftType, rightType)
 		}
 		left, leftOK := intLiteral(e.Left)
 		right, rightOK := intLiteral(e.Right)
@@ -145,9 +157,36 @@ func comptimeBool(expr ast.Expression) (bool, bool) {
 	return false, false
 }
 
+// comptimeTypeValue returns a type value from the minimal compile-time type subset.
+func (c *Checker) comptimeTypeValue(expr ast.Expression) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.ComptimeExpr:
+		return c.comptimeTypeValue(e.Expr)
+	case *ast.TypeExpr:
+		return e.TypeName, e.TypeName != ""
+	case *ast.IdentExpr:
+		value, ok := c.typeArgValues[e.Name]
+		return value, ok
+	default:
+		return "", false
+	}
+}
+
+// compareComptimeTypes evaluates equality on compile-time type values.
+func compareComptimeTypes(op string, left string, right string) (bool, bool) {
+	switch op {
+	case "==":
+		return left == right, true
+	case "!=":
+		return left != right, true
+	default:
+		return false, false
+	}
+}
+
 // comptimeLogicalBool evaluates constant boolean logical expressions.
-func comptimeLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
-	left, leftOK := comptimeBool(expr.Left)
+func (c *Checker) comptimeLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
+	left, leftOK := c.comptimeBool(expr.Left)
 	if !leftOK {
 		return false, false
 	}
@@ -157,7 +196,7 @@ func comptimeLogicalBool(expr *ast.BinaryExpr) (bool, bool) {
 	if expr.Operator == "or" && left {
 		return true, true
 	}
-	right, rightOK := comptimeBool(expr.Right)
+	right, rightOK := c.comptimeBool(expr.Right)
 	if !rightOK {
 		return false, false
 	}

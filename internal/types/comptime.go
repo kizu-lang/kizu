@@ -27,7 +27,7 @@ func (c *Checker) checkComptimeExpr(
 	if hasExplicitNonStaticLifetime(typ) {
 		return "", fmt.Errorf("type error: lifetime view cannot cross comptime boundary")
 	}
-	value, err := evalComptime(expr.Expr)
+	value, err := c.evalComptime(expr.Expr)
 	if err != nil {
 		return "", err
 	}
@@ -44,7 +44,7 @@ func (c *Checker) checkComptimeIfStmt(
 	wantReturn Type,
 	unsafe bool,
 ) (bool, error) {
-	cond, err := evalComptime(stmt.Condition)
+	cond, err := c.evalComptime(stmt.Condition)
 	if err != nil {
 		return false, err
 	}
@@ -61,10 +61,10 @@ func (c *Checker) checkComptimeIfStmt(
 }
 
 // evalComptime evaluates the side-effect-free expression subset allowed at compile time.
-func evalComptime(expr ast.Expression) (comptimeValue, error) {
+func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 	switch e := expr.(type) {
 	case *ast.ComptimeExpr:
-		return evalComptime(e.Expr)
+		return c.evalComptime(e.Expr)
 	case *ast.IntExpr:
 		value, err := strconv.ParseInt(e.Value, 10, 64)
 		if err != nil {
@@ -75,18 +75,30 @@ func evalComptime(expr ast.Expression) (comptimeValue, error) {
 		return comptimeValue{typ: typeBool, b: e.Value}, nil
 	case *ast.StringExpr:
 		return comptimeValue{typ: typeByteString, s: e.Value}, nil
+	case *ast.TypeExpr:
+		typ, err := c.parseType(e.TypeName)
+		if err != nil {
+			return comptimeValue{}, err
+		}
+		return comptimeValue{typ: typeType, s: string(typ)}, nil
+	case *ast.IdentExpr:
+		typ, ok := c.typeArgValues[e.Name]
+		if ok {
+			return comptimeValue{typ: typeType, s: string(typ)}, nil
+		}
+		return comptimeValue{}, fmt.Errorf("comptime error: runtime value cannot be used")
 	case *ast.PrefixExpr:
-		return evalComptimePrefix(e)
+		return c.evalComptimePrefix(e)
 	case *ast.BinaryExpr:
-		return evalComptimeBinary(e)
+		return c.evalComptimeBinary(e)
 	default:
 		return comptimeValue{}, fmt.Errorf("comptime error: runtime value cannot be used")
 	}
 }
 
 // evalComptimePrefix evaluates compile-time unary operators.
-func evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error) {
-	right, err := evalComptime(expr.Right)
+func (c *Checker) evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error) {
+	right, err := c.evalComptime(expr.Right)
 	if err != nil {
 		return comptimeValue{}, err
 	}
@@ -107,15 +119,15 @@ func evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error) {
 }
 
 // evalComptimeBinary evaluates compile-time binary operators.
-func evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error) {
+func (c *Checker) evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error) {
 	if expr.Operator == "and" || expr.Operator == "or" {
-		return evalComptimeLogical(expr)
+		return c.evalComptimeLogical(expr)
 	}
-	left, err := evalComptime(expr.Left)
+	left, err := c.evalComptime(expr.Left)
 	if err != nil {
 		return comptimeValue{}, err
 	}
-	right, err := evalComptime(expr.Right)
+	right, err := c.evalComptime(expr.Right)
 	if err != nil {
 		return comptimeValue{}, err
 	}
@@ -132,8 +144,8 @@ func evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error) {
 }
 
 // evalComptimeLogical evaluates short-circuit compile-time boolean operators.
-func evalComptimeLogical(expr *ast.BinaryExpr) (comptimeValue, error) {
-	left, err := evalComptime(expr.Left)
+func (c *Checker) evalComptimeLogical(expr *ast.BinaryExpr) (comptimeValue, error) {
+	left, err := c.evalComptime(expr.Left)
 	if err != nil {
 		return comptimeValue{}, err
 	}
@@ -146,7 +158,7 @@ func evalComptimeLogical(expr *ast.BinaryExpr) (comptimeValue, error) {
 	if expr.Operator == "or" && left.b {
 		return comptimeValue{typ: typeBool, b: true}, nil
 	}
-	right, err := evalComptime(expr.Right)
+	right, err := c.evalComptime(expr.Right)
 	if err != nil {
 		return comptimeValue{}, err
 	}
