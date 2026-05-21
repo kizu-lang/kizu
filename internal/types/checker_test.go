@@ -715,10 +715,44 @@ fn main() {
     let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
+    users.deinit();
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
 	}
+}
+
+// TestCheckRejectsArenaDeinitErrors checks explicit arena cleanup syntax.
+func TestCheckRejectsArenaDeinitErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "arg",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    users.deinit(1);
+}`,
+			want: "`arena.deinit` expects 0 args",
+		},
+		{
+			name: "field receiver",
+			source: `struct User { name: []const u8 }
+struct Registry { users: arena<User> }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    let registry = Registry { users: users };
+    registry.users.deinit();
+}`,
+			want: "`arena.deinit` requires local arena receiver",
+		},
+	}
+	runErrorCases(t, cases)
 }
 
 // TestCheckAcceptsUnsafePointerOperations checks raw pointer ops inside unsafe.

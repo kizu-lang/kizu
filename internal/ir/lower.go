@@ -316,6 +316,8 @@ func (l *lowerer) lowerMethodCallExpr(
 		return l.emit("arena.add", handleType(receiver.Type), allArgs, ""), nil
 	case "get":
 		return l.emit("arena.get", arenaElementType(receiver.Type), allArgs, ""), nil
+	case "deinit":
+		return l.emit("arena.deinit", "void", allArgs, ""), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unknown method `%s`", field.Name)
 	}

@@ -4519,6 +4519,8 @@ func (c *Checker) checkArenaOrImplMethod(
 		return c.checkArenaAdd(arg, args, env, unsafe)
 	case "get":
 		return c.checkArenaGet(arg, args, env, unsafe)
+	case "deinit":
+		return c.checkArenaDeinit(field, args, env)
 	default:
 		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
 	}
@@ -5695,6 +5697,25 @@ func (c *Checker) checkArenaGet(
 		return "", fmt.Errorf("type error: `arena.get` expects %s, got %s", want, got)
 	}
 	return Type(arg), nil
+}
+
+// checkArenaDeinit validates explicit arena cleanup syntax.
+func (c *Checker) checkArenaDeinit(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (Type, error) {
+	ident, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok && !c.currentStd {
+		return "", fmt.Errorf("type error: `arena.deinit` requires local arena receiver")
+	}
+	if ok && env.isBorrowed(ident.Name) {
+		return "", fmt.Errorf("type error: `arena.deinit` requires owned arena receiver")
+	}
+	if len(args) != 0 {
+		return "", fmt.Errorf("type error: `arena.deinit` expects 0 args, got %d", len(args))
+	}
+	return typeVoid, nil
 }
 
 // checkPtrRead validates unsafe raw pointer reads.

@@ -940,8 +940,11 @@ v0 core arena の構築は明示 allocator capability を要求し、
 * `arena<T>.add(value)` は value を arena に move する
 * `arena<T>.add(value)` は `handle<T>` を返す
 * `arena<T>.get(handle)` はローカル borrow を返す
+* `arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
+* `arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
 * handle は borrow より長生きしてよい
 * handle は対応する arena より長生きしてはいけない
+* `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない
 * handle は raw pointer ではない
 * v0.1 では arena からの削除は実装しない
 
@@ -1931,7 +1934,8 @@ borrow escape、borrow 中の move、mutable borrow conflict を検査します�
 
 ### Milestone 7: arena / handle
 
-`arena<T>(allocator)`、`arena.add(value)`、`arena.get(handle)` を runtime-level で実装します。
+`arena<T>(allocator)`、`arena.add(value)`、`arena.get(handle)`、`arena.deinit()` を
+runtime-level で実装します。
 
 ### Milestone 8: typed SSA IR
 

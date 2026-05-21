@@ -35,15 +35,19 @@ print(users.get(alice).name);
 - `arena.add(value)` は `value` を arena に move する
 - `arena.add(value)` は `handle<T>` を返す
 - `arena.get(handle)` は所有権を移さず、ローカル borrow 相当の値を返す
+- `arena.deinit()` は明示 cleanup boundary であり、arena binding を無効化する
 - `handle<T>` は raw pointer ではなく opaque ID として扱う
 - `handle<T>` は対応する arena より長生きしてはいけない
 - 別 arena 由来の handle を `get` に渡してはいけない
+- `deinit` 後の arena と、その arena 由来の既知 handle は使ってはいけない
 
 ## v0 の制約
 
 `arena<T>(allocator)` は generic function call ではない。
 parser と checker は、v0 専用 construct として扱う。
 `arena<T>()`、`arena<T>(a, b)`、非 `Allocator` 引数は拒否する。
+`arena.deinit()` は 0 引数で、owned local arena receiver だけに許可する。
+borrow 中の arena、field receiver、temporary receiver、deinit 後の再利用は拒否する。
 
 v0 では次を実装しない。
 

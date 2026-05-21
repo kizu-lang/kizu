@@ -128,6 +128,7 @@ fn main(allocator: Allocator) {
     let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
+    users.deinit();
 }`
 
 const comptimeSource = `fn main() {
@@ -229,6 +230,7 @@ entry:
   %5: User = arena.get %1: arena<User>, %4: handle<User>
   %6: []const u8 = field.name %5: User
   call.print %6: []const u8
+  arena.deinit %1: arena<User>
   return void: void
 }`
 

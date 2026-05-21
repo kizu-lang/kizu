@@ -131,6 +131,7 @@ fn main() {
     let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
+    users.deinit();
 }`)
 	want := "alice\n"
 	if got != want {
@@ -149,6 +150,23 @@ fn main() {
 		t.Fatal("expected runtime error")
 	}
 	if !strings.Contains(err.Error(), "expects Allocator") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestRunRejectsArenaUseAfterDeinit checks runtime arena cleanup state.
+func TestRunRejectsArenaUseAfterDeinit(t *testing.T) {
+	_, err := parseAndRun(`struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    users.deinit();
+    users.add(User { name: "alice" });
+}`)
+	if err == nil {
+		t.Fatal("expected runtime error")
+	}
+	if !strings.Contains(err.Error(), "Arena was deinitialized") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
