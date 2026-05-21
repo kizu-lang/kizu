@@ -19,6 +19,61 @@ func TestSelfhostBackendArtifactGate(t *testing.T) {
 	}
 }
 
+// TestSelfhostRuntimeStorageGate exercises the checked-in no-Go storage template.
+func TestSelfhostRuntimeStorageGate(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for selfhost runtime storage smoke")
+	}
+	if failures := countSelfhostRuntimeStorageGateFailures(t); failures > 0 {
+		t.Fatalf("selfhost runtime storage gate failures=%d", failures)
+	}
+}
+
+// countSelfhostRuntimeStorageGateFailures validates the runtime template directly.
+func countSelfhostRuntimeStorageGateFailures(t *testing.T) int {
+	t.Helper()
+	storageBytes, err := os.ReadFile("../../selfhost/runtime/selfhost.storage.ll")
+	if err != nil {
+		t.Errorf("read runtime storage template: %v", err)
+		return 1
+	}
+	if failures := countRuntimeStorageLLFailures(t, string(storageBytes)); failures > 0 {
+		return failures
+	}
+	metaBytes, err := os.ReadFile("../../selfhost/runtime/selfhost.storage.ll.meta.tail")
+	if err != nil {
+		t.Errorf("read runtime storage metadata template: %v", err)
+		return 1
+	}
+	if failures := countRuntimeStorageTemplateMetadataFailures(t, string(metaBytes)); failures > 0 {
+		return failures
+	}
+	return runRuntimeStorageSmoke(
+		t,
+		"selfhost/runtime/selfhost.storage.ll",
+		"selfhost/runtime/selfhost.host.ll",
+	)
+}
+
+// countRuntimeStorageTemplateMetadataFailures checks template-only metadata.
+func countRuntimeStorageTemplateMetadataFailures(t *testing.T, metaContent string) int {
+	t.Helper()
+	required := []string{
+		"reachable arena ast-node-storage\n",
+		"reachable handle ast-node-id\n",
+		"arena-allocator-boundary explicit\n",
+		"arena-handle-provenance checked\n",
+		"arena-invalid-handle-diagnostic invalid arena handle\n",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(metaContent, fragment) {
+			t.Errorf("runtime storage metadata template missing %q", fragment)
+			return 1
+		}
+	}
+	return 0
+}
+
 // countSelfhostBackendArtifactGateFailures returns backend artifact gate failures.
 func countSelfhostBackendArtifactGateFailures(t *testing.T) int {
 	t.Helper()
@@ -108,6 +163,7 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"source_filename = \"target/selfhost/selfhost.ir\"\n",
 		"%kizu.slice.u8 = type { ptr, i64 }\n",
 		"%kizu.owned = type { ptr }\n",
+		"%kizu.handle = type { ptr, i64 }\n",
 		"%kizu.error.bool = type { i1, i1, %kizu.slice.u8 }\n",
 		"%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }\n",
 		"declare %kizu.owned @kizu_rt_mem_page_allocator()\n",
@@ -200,7 +256,9 @@ func countRuntimeStorageValidationFailures(t *testing.T, llContent string, metaC
 	if failures := countRuntimeStorageLLFailures(t, llContent); failures > 0 {
 		return failures
 	}
-	return countRuntimeStorageMetadataFailures(t, metaContent)
+	failures := countRuntimeStorageMetadataFailures(t, metaContent)
+	failures += countRuntimeStorageLinkSmokeFailures(t)
+	return failures
 }
 
 // countRuntimeStorageLLFailures checks storage symbols and smoke calls.
@@ -208,9 +266,12 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 	t.Helper()
 	requiredLL := []string{
 		"; kizu selfhost runtime storage ll v0\n",
+		"%kizu.handle = type { ptr, i64 }\n",
 		"%kizu.rt.array = type { ptr, i64, i64 }\n",
 		"%kizu.rt.string = type { ptr, i64, i64 }\n",
 		"%kizu.rt.map = type { ptr, i1, i64 }\n",
+		"%kizu.rt.arena = type { ptr, i64, i64, i1 }\n",
+		"@.kizu.rt.arena_invalid_handle",
 		"declare ptr @kizu_rt_alloc(ptr, i64)\n",
 		"declare void @kizu_rt_free(ptr, ptr)\n",
 		"define %kizu.owned @kizu_rt_array_new",
@@ -221,11 +282,18 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 		"define %kizu.error.void @kizu_rt_map_insert",
 		"define %kizu.owned @kizu_rt_diagnostic_buffer_new",
 		"define %kizu.error.void @kizu_rt_diagnostic_push",
+		"define %kizu.owned @kizu_rt_arena_new",
+		"define %kizu.handle @kizu_rt_arena_add",
+		"define %kizu.error.slice.u8 @kizu_rt_arena_get",
+		"define void @kizu_rt_arena_deinit",
 		"define i64 @kizu_selfhost__runtime_storage_smoke() {\n",
 		"call %kizu.error.void @kizu_rt_array_append",
 		"call %kizu.error.void @kizu_rt_string_append_bytes",
 		"call %kizu.error.void @kizu_rt_map_insert",
 		"call %kizu.error.void @kizu_rt_diagnostic_push",
+		"call %kizu.handle @kizu_rt_arena_add",
+		"call %kizu.error.slice.u8 @kizu_rt_arena_get",
+		"call void @kizu_rt_arena_deinit",
 	}
 	for _, fragment := range requiredLL {
 		if !strings.Contains(llContent, fragment) {
@@ -267,13 +335,67 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 		"reachable map type-symbol-table\n",
 		"reachable map ownership-state-table\n",
 		"reachable diagnostic compiler-failure-buffer\n",
-		"deferred box-arena-handle issue-496\n",
+		"reachable arena ast-node-storage\n",
+		"reachable handle ast-node-id\n",
+		"arena-allocator-boundary explicit\n",
+		"arena-handle-provenance checked\n",
+		"arena-invalid-handle-diagnostic invalid arena handle\n",
+		"deferred box issue-496\n",
 	}
 	for _, fragment := range requiredMeta {
 		if !strings.Contains(metaContent, fragment) {
 			t.Errorf("runtime storage metadata missing %q:\n%s", fragment, metaContent)
 			return 1
 		}
+	}
+	return 0
+}
+
+// countRuntimeStorageLinkSmokeFailures links and runs the storage smoke.
+func countRuntimeStorageLinkSmokeFailures(t *testing.T) int {
+	t.Helper()
+	return runRuntimeStorageSmoke(
+		t,
+		"target/selfhost/selfhost.storage.ll",
+		"target/selfhost/selfhost.host.ll",
+	)
+}
+
+// runRuntimeStorageSmoke links a storage artifact with host capabilities.
+func runRuntimeStorageSmoke(t *testing.T, storagePath string, hostPath string) int {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Errorf("runtime storage smoke requires clang: %v", err)
+		return 1
+	}
+	tempDir := t.TempDir()
+	harnessPath := filepath.Join(tempDir, "runtime_storage_main.c")
+	exePath := filepath.Join(tempDir, "runtime-storage-smoke")
+	if err := os.WriteFile(harnessPath, []byte(runtimeStorageHarnessSource), 0o644); err != nil {
+		t.Errorf("write runtime storage harness: %v", err)
+		return 1
+	}
+	compile := exec.Command(
+		clang,
+		"-Wno-override-module",
+		storagePath,
+		hostPath,
+		"selfhost/runtime/selfhost.hosted.c",
+		harnessPath,
+		"-o",
+		exePath,
+	)
+	compile.Dir = "../.."
+	if out, err := compile.CombinedOutput(); err != nil {
+		t.Errorf("compile runtime storage smoke: %v\n%s", err, out)
+		return 1
+	}
+	run := exec.Command(exePath)
+	run.Dir = "../.."
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Errorf("run runtime storage smoke: %v\n%s", err, out)
+		return 1
 	}
 	return 0
 }
@@ -609,6 +731,18 @@ int64_t kizu_selfhost__host_capability_smoke(void);
 int main(int argc, char **argv) {
     kizu_host_init(argc, argv);
     return kizu_selfhost__host_capability_smoke() == 0 ? 0 : 1;
+}
+`
+
+const runtimeStorageHarnessSource = `
+#include <stdint.h>
+
+void kizu_host_init(int argc, char **argv);
+int64_t kizu_selfhost__runtime_storage_smoke(void);
+
+int main(int argc, char **argv) {
+    kizu_host_init(argc, argv);
+    return kizu_selfhost__runtime_storage_smoke() == 0 ? 0 : 1;
 }
 `
 

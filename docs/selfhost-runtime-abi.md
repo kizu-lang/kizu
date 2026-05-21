@@ -13,9 +13,12 @@ node-kind diagnostic
 value-type i64
 value-type bool
 value-type []const u8
+value-type handle
 storage local
 storage owned-container
 storage borrowed-view
+storage arena
+storage handle
 call direct
 call std-primitive
 cleanup deinit
@@ -87,6 +90,7 @@ resolved by host linker defaults.
 | `i64` | `i64` | direct | none |
 | `u8` | `i8` | direct | none |
 | `[]const u8` | `%kizu.slice.u8 = type { ptr, i64 }` | passed and returned by value | borrowed; no cleanup |
+| `handle<T>` | `%kizu.handle = type { ptr, i64 }` | passed and returned by value | copyable opaque ID |
 
 The slice pointer is read-only for safe Kizu. Length is signed `i64` because
 the current language surface uses `i64` for lengths and indexes. A slice with
@@ -99,9 +103,12 @@ length `0` may use a null pointer only when no dereference occurs.
 | `local` | SSA value or stack slot chosen by backend | valid inside the current function | none unless it owns a container |
 | `owned-container` | opaque runtime handle `%kizu.owned = type { ptr }` for #453 | owner must call its deinit hook exactly once | `deinit` hook |
 | `borrowed-view` | same value layout as the viewed type, with no ownership bit | cannot outlive the owner | none |
+| `arena` | opaque runtime handle `%kizu.owned = type { ptr }` | owns values inserted through `arena.add` | `arena.deinit` |
+| `handle` | `%kizu.handle = type { ptr, i64 }` | tied to the arena pointer that produced it | none |
 
-The first artifact may keep owned containers opaque. #456 owns reachable runtime
-storage behind those handles. #454 must not guess array, string, or map internals.
+The first artifact may keep owned containers opaque. #456 and #519 own reachable
+runtime storage behind those handles. #454 must not guess array, string, map, or
+arena internals.
 
 ## Records And Diagnostics
 
@@ -214,6 +221,10 @@ selfhost storage symbols are:
 | Diagnostic buffer construction | `@kizu_rt_diagnostic_buffer_new` | compiler failure storage |
 | Diagnostic push | `@kizu_rt_diagnostic_push` | copies diagnostic message text |
 | Diagnostic cleanup | `@kizu_rt_diagnostic_buffer_deinit` | releases diagnostic storage |
+| Arena construction | `@kizu_rt_arena_new` | `std::kizu::ast::Ast` node arena |
+| Arena add | `@kizu_rt_arena_add` | appends one lowered AST node and returns a handle |
+| Arena get | `@kizu_rt_arena_get` | checks handle provenance and returns a borrowed node view |
+| Arena cleanup | `@kizu_rt_arena_deinit` | releases arena storage at `Ast.deinit()` |
 
 Construction takes an explicit allocator capability represented as `%kizu.owned`
 and allocates through runtime-internal `@kizu_rt_alloc(ptr, i64)`. Cleanup calls
@@ -226,8 +237,18 @@ metadata must include `allocator-boundary explicit`, `go-stdprim-storage none`,
 and `interpreter-storage none`; Go-backed interpreter storage is allowed only
 for stage0/oracle execution, not for this artifact path.
 
-Box, Arena, and Handle storage are deferred to #496 unless a later selfhost IR
-artifact lists a concrete reachable call site.
+For #519, the first concrete arena/handle call site is the
+`std::kizu::ast::Ast` node arena. Handles use `%kizu.handle = type { ptr, i64 }`:
+the first field is the producing arena runtime pointer and the second field is
+the zero-based slot index. `@kizu_rt_arena_get` rejects mismatched or out-of-range
+handles with the diagnostic `invalid arena handle`; valid gets return a local
+borrowed view. The storage artifact metadata records `reachable arena
+ast-node-storage`, `reachable handle ast-node-id`, `arena-allocator-boundary
+explicit`, `arena-handle-provenance checked`, and
+`arena-invalid-handle-diagnostic invalid arena handle`.
+
+Box storage remains deferred to #496 unless a later selfhost IR artifact lists a
+concrete reachable call site.
 
 ## External Primitives
 
@@ -328,7 +349,8 @@ The gate checks that `target/selfhost/selfhost.ll`:
 
 - starts with the `; kizu selfhost bootstrap ll v0` marker
 - records `target/selfhost/selfhost.ir` as `source_filename`
-- defines `%kizu.slice.u8`, `%kizu.owned`, `%kizu.error.slice.u8`, and
+- defines `%kizu.slice.u8`, `%kizu.owned`, `%kizu.handle`,
+  `%kizu.error.slice.u8`, and
   `%kizu.error.void`
 - declares all unresolved runtime symbols used by the bootstrap artifact:
   `@kizu_rt_mem_page_allocator`, `@kizu_rt_io_blocking`,
@@ -347,10 +369,13 @@ comparison.
 For #456 the Kizu backend performs cheap header validation before copying the
 runtime storage template. The same Go gate checks
 `target/selfhost/selfhost.storage.ll` and `target/selfhost/selfhost.storage.ll.meta`.
-The storage validation requires the reachable Array, String, Map, and diagnostic
-runtime symbols, the `@kizu_selfhost__runtime_storage_smoke` entry, explicit
-allocator-boundary metadata, and the absence of Go interpreter/stdprim fallback
-markers in the storage LLVM artifact.
+The storage validation requires the reachable Array, String, Map, diagnostic,
+Arena, and Handle runtime symbols, the `@kizu_selfhost__runtime_storage_smoke`
+entry, explicit allocator-boundary metadata, handle provenance metadata, and the
+absence of Go interpreter/stdprim fallback markers in the storage LLVM artifact.
+The gate also links `selfhost.storage.ll` with the host capability runtime and a
+tiny C harness, then runs the storage smoke so Arena/Handle calls cannot be only
+dead textual declarations.
 
 For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
 `target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper
@@ -375,7 +400,8 @@ The following are intentionally outside `selfhost-abi-v0`:
 - raw pointers and nullable pointers
 - floats and integer widths other than `i64` and `u8`
 - mutable slices
-- public array, string, and map storage layout beyond opaque runtime handles
+- public array, string, map, arena, and handle storage layout beyond the listed
+  opaque runtime representations
 - tagged-union payload ABI beyond blocker-specific additions
 - task, thread, channel, mutex, and atomic runtime ABI
 - C ABI interop and native object/linker metadata beyond textual LLVM emission
