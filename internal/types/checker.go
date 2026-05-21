@@ -4686,7 +4686,7 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 	return "", fmt.Errorf("type error: unknown namespace `%s`", expr.Receiver.String())
 }
 
-// checkDerefExpr returns the value type behind a local borrow parameter.
+// checkDerefExpr returns the value type behind a local borrow or raw pointer.
 func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe bool) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
 		typ, _ := env.lookup(ident.Name)
@@ -4696,7 +4696,20 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe bool) (
 	if err != nil {
 		return "", err
 	}
-	return "", fmt.Errorf("type error: `%s` is not a borrow and cannot be dereferenced", receiver)
+	if isPointerType(receiver) {
+		if !unsafe {
+			return "", fmt.Errorf("unsafe error: raw pointer dereference requires unsafe block")
+		}
+		typ, err := rawPointerDerefType(receiver)
+		if err != nil {
+			return "", err
+		}
+		return typ, nil
+	}
+	return "", fmt.Errorf(
+		"type error: `%s` is not a borrow or raw pointer and cannot be dereferenced",
+		receiver,
+	)
 }
 
 // checkAssignableField validates mutation of a field on a mutable value.
@@ -4724,13 +4737,22 @@ func (c *Checker) checkAssignableField(expr *ast.FieldExpr, env *scope, unsafe b
 	return c.checkFieldExpr(expr, env, unsafe)
 }
 
-// checkAssignableDeref validates mutation through an &mut local borrow.
+// checkAssignableDeref validates mutation through an &mut borrow or raw pointer.
 func (c *Checker) checkAssignableDeref(expr *ast.DerefExpr, env *scope, unsafe bool) (Type, error) {
-	ident, ok := expr.Receiver.(*ast.IdentExpr)
-	if !ok || !env.isMutBorrowed(ident.Name) {
-		return "", fmt.Errorf("type error: `%s` is not a mutable borrow", expr.Receiver.String())
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
+		return c.checkDerefExpr(expr, env, unsafe)
 	}
-	return c.checkDerefExpr(expr, env, unsafe)
+	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if isPointerType(receiver) {
+		if !unsafe {
+			return "", fmt.Errorf("unsafe error: raw pointer dereference requires unsafe block")
+		}
+		return assignableRawPointerDerefType(receiver)
+	}
+	return "", fmt.Errorf("type error: `%s` is not a mutable borrow", expr.Receiver.String())
 }
 
 // enumReceiver returns an enum namespace used by EnumName.Tag expressions.
@@ -6175,6 +6197,33 @@ func pointerElement(typ Type) (string, bool) {
 		return "", false
 	}
 	return arg, true
+}
+
+// rawPointerDerefType returns the value type read by raw pointer dereference.
+func rawPointerDerefType(typ Type) (Type, error) {
+	elem, ok := pointerElement(typ)
+	if !ok {
+		return "", fmt.Errorf("type error: `%s` is not a raw pointer", typ)
+	}
+	if strings.HasPrefix(string(typ), "?") {
+		return "", fmt.Errorf("type error: nullable raw pointer `%s` cannot be dereferenced", typ)
+	}
+	return Type(strings.TrimPrefix(elem, "const ")), nil
+}
+
+// assignableRawPointerDerefType returns the value type written through a raw pointer.
+func assignableRawPointerDerefType(typ Type) (Type, error) {
+	elem, ok := pointerElement(typ)
+	if !ok {
+		return "", fmt.Errorf("type error: `%s` is not a raw pointer", typ)
+	}
+	if strings.HasPrefix(string(typ), "?") {
+		return "", fmt.Errorf("type error: nullable raw pointer `%s` cannot be dereferenced", typ)
+	}
+	if strings.HasPrefix(elem, "const ") {
+		return "", fmt.Errorf("type error: cannot assign through const raw pointer `%s`", typ)
+	}
+	return Type(elem), nil
 }
 
 // isPointerType reports whether typ is ptr<T> or ?ptr<T>.

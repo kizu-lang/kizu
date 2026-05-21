@@ -272,6 +272,31 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsRawPointerDerefSyntax keeps unsafe pointer access out of borrow rules.
+func TestCheckAcceptsRawPointerDerefSyntax(t *testing.T) {
+	source := `struct Node { tag: i64, name: []const u8 }
+fn read_tag(node: ptr<const Node>) -> i64 {
+    unsafe {
+        return node.*.tag;
+    }
+}
+fn write_tag(node: ptr<Node>, tag: i64) -> void {
+    unsafe {
+        node.*.tag = tag;
+        return;
+    }
+}
+fn replace(node: ptr<Node>, value: Node) -> void {
+    unsafe {
+        node.* = value;
+        return;
+    }
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsMoveWhileBorrowed checks overlapping borrow and move in a call.
 func TestCheckRejectsMoveWhileBorrowed(t *testing.T) {
 	source := `struct Name { value: []const u8 }

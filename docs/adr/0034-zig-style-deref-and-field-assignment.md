@@ -1,7 +1,8 @@
 # ADR 0034: Zig-Style Dereference and Field Assignment
 
 Status: Superseded by [ADR-0068](0068-safe-borrow-field-access.md) for safe
-borrow field access.
+borrow field access and [ADR-0069](0069-raw-pointer-dereference-syntax.md) for
+raw pointer dereference.
 
 ## Context
 
@@ -41,4 +42,5 @@ The original v0.1 rules were:
 
 Mutation originally remained visually explicit at borrow boundaries.
 ADR-0068 changes that tradeoff for safe borrow field access while keeping raw
-pointer behavior explicit.
+pointer behavior explicit. ADR-0069 keeps raw pointer dereference explicit with
+postfix `.*` inside `unsafe`.

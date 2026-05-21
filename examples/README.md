@@ -57,6 +57,7 @@ go test ./...
 | tagged `union` with payloads | `union.kizu` | binds payload values in `match` arms |
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper; caller owns the unsafe obligation |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
+| raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `unsafe { p.*.field }` pointer access |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
 | `contract`, `satisfy`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit satisfaction |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
@@ -171,6 +172,10 @@ single source file. Run them with `kizu check <package-root>`.
 | unsafe-only calls require `unsafe` | `negative/unsafe_call.kizu` | `requires unsafe block` |
 | pointer reads require `unsafe` | `negative/ptr_read_without_unsafe.kizu` | `requires unsafe block` |
 | nullable raw pointers cannot be read directly | `negative/nullable_ptr_read.kizu` | `non-null raw pointer` |
+| raw pointer dereference requires `unsafe` | `negative/raw_pointer_deref_without_unsafe.kizu` | `requires unsafe block` |
+| const raw pointer dereference cannot be written | `negative/raw_pointer_const_write.kizu` | `const raw pointer` |
+| nullable raw pointer dereference is rejected | `negative/raw_pointer_nullable_deref.kizu` | `nullable raw pointer` |
+| raw pointer field access needs explicit dereference | `negative/raw_pointer_direct_field.kizu` | `has no fields` |
 | handles are not raw pointers | `negative/handle_as_pointer.kizu` | `cannot cast handle` |
 | unsafe does not permit moved safe values | `negative/unsafe_moved_value.kizu` | `moved value` |
 | unsafe does not permit borrow escape | `negative/unsafe_borrow_escape.kizu` | `borrowed value` |
