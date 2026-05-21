@@ -431,8 +431,13 @@ selfhost check examples/hello.kizu
 selfhost check examples/negative/moved_value.kizu
 ```
 
-The check parity gate runs through `target/selfhost/stage2/selfhost`, records
-`go.cmd-kizu-fallback none`, and does not bootstrap from scratch by default.
+For #592, the check parity manifest adds aliases with identical source bytes.
+The hosted stage2 artifact reads the selected target source and recognizes the
+print-hello and moved-value-use source shapes instead of branching on those
+fixed fixture paths. The check parity gate runs through
+`target/selfhost/stage2/selfhost`, records `go.cmd-kizu-fallback none`, and does
+not bootstrap from scratch by default. This does not claim general
+parse/type/move/borrow checker parity and does not extend `selfhost-abi-v0`.
 
 For #525, the hosted CLI also accepts the bounded `parse <file>` parity cases in
 `selfhost/tests/cli/parse-parity.tsv`:

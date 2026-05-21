@@ -129,6 +129,12 @@ Measured locally on 2026-05-22 during #590:
 | --- | ---: |
 | `just selfhost-oracle` | 55.3s |
 
+Measured locally on 2026-05-22 during #592:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-oracle` | 55.3s |
+
 ## Direct Heavyweight Gates
 
 Direct heavyweight gates are for debugging one selfhost stage without running

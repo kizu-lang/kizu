@@ -246,8 +246,8 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"entry @kizu_selfhost__cli_main\n",
 		"cli-command check selfhost\n",
 		"cli-command stage selfhost\n",
-		"cli-command check examples/hello.kizu\n",
-		"cli-command check examples/negative/moved_value.kizu\n",
+		"cli-command check source-shape print-hello\n",
+		"cli-command check source-shape moved-value-use\n",
 		"cli-command parse selfhost/tests/cli/parse_ok_minimal.kizu\n",
 		"cli-command parse source-shape minimal-main-return\n",
 		"cli-command parse source-shape missing-expression\n",
@@ -285,6 +285,21 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 	for _, fragment := range requiredMeta {
 		if !strings.Contains(metaContent, fragment) {
 			t.Errorf("LLVM artifact metadata missing %q:\n%s", fragment, metaContent)
+			return 1
+		}
+	}
+	return countForbiddenCheckMetadataFailures(t, metaContent)
+}
+
+// countForbiddenCheckMetadataFailures rejects stale fixed-path check metadata.
+func countForbiddenCheckMetadataFailures(t *testing.T, metaContent string) int {
+	t.Helper()
+	for _, fragment := range []string{
+		"cli-command check examples/hello.kizu\n",
+		"cli-command check examples/negative/moved_value.kizu\n",
+	} {
+		if strings.Contains(metaContent, fragment) {
+			t.Errorf("LLVM artifact metadata keeps fixed check path %q:\n%s", fragment, metaContent)
 			return 1
 		}
 	}

@@ -17,8 +17,8 @@ The current hosted stage2 artifact supports these command slices:
 | --- | --- | --- |
 | `check selfhost` | Minimum compiler package check from #458 | `just selfhost-production-gate` |
 | `stage selfhost` | Stage2 artifact materialization from #459 | `just selfhost-production-gate` |
-| `check examples/hello.kizu` | #530 positive check fixture, also a #460 corpus row | `just selfhost-check-parity-gate` |
-| `check examples/negative/moved_value.kizu` | #530 negative check fixture, also a #460 corpus row | `just selfhost-check-parity-gate` |
+| `check <print-hello source file>` | #530/#592 positive source-shape check slice | `just selfhost-check-parity-gate` |
+| `check <moved-value source file>` | #530/#592 negative source-shape check slice | `just selfhost-check-parity-gate` |
 | `parse <minimal-main-return source file>` | #579 positive source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `parse <missing-expression source file>` | #586 negative source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `run <print-hello source file>` | #588 positive source-shape slice via canonical emitted artifact | `just selfhost-run-parity-gate` |
@@ -36,7 +36,10 @@ records `go.cmd-kizu-fallback none`.
 
 `selfhost/tests/cli/check-parity.tsv` is the #530 check parity manifest. It
 records command args, fixture paths, expected exit codes, and checked-in
-stdout/stderr golden paths for the bounded `check <file>` slice. The fast
+stdout/stderr golden paths for the bounded `check <file>` slice. For #592, the
+positive hello and negative moved-value rows each include the original fixture
+plus an alias fixture with the same source bytes, proving the hosted dispatch
+paths are no longer bound to one fixed path. The fast
 `just selfhost-check-parity-gate` recipe reuses an existing passing
 `target/selfhost/stage2/selfhost` artifact and records `go.cmd-kizu-fallback
 none`; it does not bootstrap from scratch by default.
@@ -155,6 +158,7 @@ release scope:
 
 | Slice | Decision | Reason | Next child issue shape |
 | --- | --- | --- | --- |
+| broader `check <file>` frontend | Partially deferred | #592 moves the first positive and negative check shapes off single hardcoded paths, but broader parsing, type checking, move checking, and borrow checking are not claimed. | Add one check source shape at a time, keeping checked-in goldens and no Go fallback. |
 | broader `parse <file>` diagnostics | Partially deferred | #579 and #586 move the first positive and negative parse shapes off single hardcoded paths, but broader parsing and diagnostic recovery are not claimed. | Add one parse diagnostic/source shape at a time, keeping checked-in goldens and no Go fallback. |
 | broader `run <file>` | Partially deferred | #588 moves the first positive and negative run shapes off single hardcoded paths, but broader frontend, lowering, and artifact naming are not claimed. | Extend `run-parity.tsv` one source shape at a time, using hosted-artifact validation and no Go fallback. |
 | broader `kizu test <file>` | Partially deferred | #590 moves the first expect-ok and expect-failure shapes off single hardcoded paths, but broader frontend, lowering, artifact naming, and discovery are not claimed. | Extend `test-parity.tsv` one source shape at a time, using hosted-artifact validation and no discovery. |
