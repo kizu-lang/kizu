@@ -33,6 +33,11 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std.builtin.test_fail":          {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
+// TypedCoreBuiltins lists typed primitives that require explicit type application.
+var TypedCoreBuiltins = map[string]string{
+	"std.builtin.test_fail_equal": "std::testing::expect_equal",
+}
+
 var removedExact = map[string]string{
 	"std.builtin.mem_byte_at":       "std::mem::byte_at",
 	"std.builtin.mem_slice":         "std::mem::slice",

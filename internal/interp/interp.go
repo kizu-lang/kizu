@@ -142,6 +142,9 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: undefined function `%s`", name)
 	}
+	if len(fn.TypeParams) > 0 && !i.hasTypeArguments(fn) {
+		return voidValue(), fmt.Errorf("runtime error: `%s` requires explicit type arguments", name)
+	}
 	if len(args) != len(fn.Params) {
 		return voidValue(), fmt.Errorf("runtime error: `%s` expected %d args", name, len(fn.Params))
 	}
@@ -156,6 +159,16 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 		return wrapTypedErrorReturn(fn.ReturnType, result), err
 	}
 	return voidValue(), nil
+}
+
+// hasTypeArguments reports whether a generic wrapper is already being invoked with type args.
+func (i *Interpreter) hasTypeArguments(fn *ast.FunctionDecl) bool {
+	for _, param := range fn.TypeParams {
+		if _, ok := i.typeArgs[param]; !ok {
+			return false
+		}
+	}
+	return len(fn.TypeParams) > 0
 }
 
 // wrapTypedErrorReturn converts Error!T error payloads into propagated errors.
@@ -611,10 +624,12 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
 		return evalLiteralExpr(e)
+	case *ast.TypeExpr:
+		return typeValue(i.resolveTypeArg(e.TypeName)), nil
 	case *ast.ComptimeExpr:
 		return i.evalExpr(e.Expr, env)
 	case *ast.IdentExpr:
-		return evalIdent(e.Name, env)
+		return i.evalIdent(e.Name, env)
 	case *ast.PrefixExpr:
 		return i.evalPrefixExpr(e, env)
 	case *ast.BinaryExpr:
@@ -791,11 +806,14 @@ func parseInt(lit string) (Value, error) {
 	return intValue(v), nil
 }
 
-// evalIdent resolves a name from the current environment.
-func evalIdent(name string, env *Env) (Value, error) {
+// evalIdent resolves a name from runtime bindings or generic type arguments.
+func (i *Interpreter) evalIdent(name string, env *Env) (Value, error) {
 	value, ok := env.Get(name)
 	if ok {
 		return value, nil
+	}
+	if typ, ok := i.typeArgs[name]; ok {
+		return typeValue(typ), nil
 	}
 	if name == "void" {
 		return voidValue(), fmt.Errorf("runtime error: void is not a value")
@@ -936,6 +954,8 @@ func valuesEqual(left Value, right Value) bool {
 		return left.b == right.b
 	case kindString:
 		return left.s == right.s
+	case kindType:
+		return left.typeName == right.typeName
 	case kindHandle:
 		return left.handle == right.handle
 	case kindEnum:
@@ -1000,6 +1020,12 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 		return voidValue(), fmt.Errorf("runtime error: callee must be a function name")
 	}
 	if fn, ok := i.functions[name.Name]; ok {
+		if len(fn.TypeParams) > 0 {
+			return voidValue(), fmt.Errorf(
+				"runtime error: `%s` requires explicit type arguments",
+				name.Name,
+			)
+		}
 		return i.callFunctionExpr(fn, expr.Args, env)
 	}
 	args, err := i.evalArgs(expr.Args, env)
@@ -1051,6 +1077,9 @@ func (i *Interpreter) evalQualifiedUserCall(
 	}
 	fn, ok := i.functions[name]
 	if !ok {
+		return voidValue(), false, nil
+	}
+	if len(fn.TypeParams) > 0 {
 		return voidValue(), false, nil
 	}
 	value, err := i.callFunctionExpr(fn, args, env)
@@ -1676,6 +1705,9 @@ func (i *Interpreter) evalBuiltinTypeApply(
 	env *Env,
 ) (Value, bool, error) {
 	switch name {
+	case "std.builtin.test_fail_equal":
+		value, err := i.evalTestingEqualBuiltin(i.resolveTypeArg(typeArg), args, env)
+		return value, true, err
 	case "std.builtin.channel":
 		return callChannelFromExprs(i.resolveTypeArg(typeArg), args), true, nil
 	case "std.builtin.channel_send", "std.builtin.channel_recv":
@@ -1721,6 +1753,44 @@ func (i *Interpreter) evalBuiltinTypeApply(
 	default:
 		return voidValue(), false, nil
 	}
+}
+
+// evalTestingEqualBuiltin raises a typed std::testing equality diagnostic.
+func (i *Interpreter) evalTestingEqualBuiltin(
+	typeArg string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	if len(args) != 2 {
+		return voidValue(), fmt.Errorf(
+			"runtime error: std::testing::expect_equal<%s> expects 2 args",
+			typeArg,
+		)
+	}
+	expected, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	actual, err := i.evalExpr(args[1], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return voidValue(), fmt.Errorf(
+		"runtime error: expected %s, got %s",
+		formatTestValue(expected),
+		formatTestValue(actual),
+	)
+}
+
+// formatTestValue renders assertion values without losing string boundaries.
+func formatTestValue(value Value) string {
+	if value.kind == kindString {
+		return strconv.Quote(value.s)
+	}
+	if value.kind == kindType {
+		return "type<" + value.typeName + ">"
+	}
+	return value.String()
 }
 
 // evalChannelPrimitive executes reserved Channel method primitives.

@@ -19,6 +19,7 @@ type Checker struct {
 	loopDepth       int
 	currentFunction *functionInfo
 	currentStd      bool
+	typeArgValues   map[string]string
 }
 
 type functionInfo struct {
@@ -86,6 +87,9 @@ func (c *Checker) Check(program *ast.Program) error {
 	for _, decl := range program.Decls {
 		fnDecl, ok := decl.(*ast.FunctionDecl)
 		if !ok {
+			continue
+		}
+		if len(fnDecl.TypeParams) > 0 {
 			continue
 		}
 		if err := c.checkFunction(c.functions[fnDecl.Name]); err != nil {
@@ -182,12 +186,15 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	previousLoopDepth := c.loopDepth
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
+	previousTypeArgValues := c.typeArgValues
 	c.loopDepth = 0
 	c.currentFunction = fn
 	c.currentStd = fn.decl.Std
+	c.typeArgValues = nil
 	defer func() { c.loopDepth = previousLoopDepth }()
 	defer func() { c.currentFunction = previousFunction }()
 	defer func() { c.currentStd = previousStd }()
+	defer func() { c.typeArgValues = previousTypeArgValues }()
 	return c.checkBlock(fn.decl.Body, env)
 }
 
@@ -910,11 +917,14 @@ func (c *Checker) matchTags(typeName string) (map[string]bool, map[string]string
 // readExpr checks an expression without consuming owned values.
 func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	switch e := expr.(type) {
-	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr:
-		return readLiteralType(e)
+	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
+		return c.readScalarExpr(e)
 	case *ast.ComptimeExpr:
 		return c.readComptimeExpr(e, env)
 	case *ast.IdentExpr:
+		if _, ok := c.typeArgValues[e.Name]; ok {
+			return "type", nil
+		}
 		return readIdent(e.Name, env)
 	case *ast.PrefixExpr:
 		return c.readExpr(e.Right, env)
@@ -939,6 +949,14 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	default:
 		return c.readControlExpr(expr, env)
 	}
+}
+
+// readScalarExpr reads literal-like scalar expressions without ownership effects.
+func (c *Checker) readScalarExpr(expr ast.Expression) (string, error) {
+	if _, ok := expr.(*ast.TypeExpr); ok {
+		return "type", nil
+	}
+	return readLiteralType(expr)
 }
 
 // readArenaNewExpr validates allocator use without consuming its capability.
@@ -1406,6 +1424,9 @@ func (c *Checker) checkUserCall(
 	fn, ok := c.functions[name]
 	if !ok {
 		return "", fmt.Errorf("move error: undefined function `%s`", name)
+	}
+	if len(fn.decl.TypeParams) > 0 {
+		return "", fmt.Errorf("move error: `%s` requires explicit type arguments", name)
 	}
 	if len(args) != len(fn.params) {
 		return "", fmt.Errorf("move error: `%s` expects %d args, got %d",
@@ -1984,19 +2005,20 @@ func (c *Checker) checkTypeApplyCallExpr(
 	if !ok {
 		return "", fmt.Errorf("move error: unsupported type application `%s`", expr.String())
 	}
-	if typ, ok, err := c.checkGenericUserTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
+	typeArg := c.instantiateTypeArgText(expr.TypeArg)
+	if typ, ok, err := c.checkGenericUserTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, err
 	}
-	if typ, ok, err := c.checkBuiltinMapTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
+	if typ, ok, err := c.checkBuiltinMapTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinThreadScopedTypeApply(
-		name, expr.TypeArg, args, env,
+		name, typeArg, args, env,
 	); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBuiltinContainerTypeApply(
-		name, expr.TypeArg, args, env,
+		name, typeArg, args, env,
 	); ok || err != nil {
 		return typ, err
 	}
@@ -2016,6 +2038,36 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 	if typ, ok, err := c.checkBuiltinArrayTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, ok, err
 	}
+	if typ, ok, err := c.checkBuiltinTestingTypeApply(name, typeArg, args, env); ok || err != nil {
+		return typ, ok, err
+	}
+	return c.checkBuiltinChannelSyncTypeApply(name, typeArg, args, env)
+}
+
+// checkBuiltinTestingTypeApply validates typed std::testing primitives.
+func (c *Checker) checkBuiltinTestingTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	if name != "std.builtin.test_fail_equal" {
+		return "", false, nil
+	}
+	if !c.currentStd {
+		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::testing", name)
+	}
+	typ, err := c.checkBuiltinTestFailEqual(typeArg, args, env)
+	return typ, true, err
+}
+
+// checkBuiltinChannelSyncTypeApply validates typed concurrency primitives.
+func (c *Checker) checkBuiltinChannelSyncTypeApply(
+	name string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
 	switch name {
 	case "std.builtin.channel":
 		if !c.currentStd {
@@ -2047,6 +2099,33 @@ func (c *Checker) checkBuiltinContainerTypeApply(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkBuiltinTestFailEqual validates ownership for the typed testing failure primitive.
+func (c *Checker) checkBuiltinTestFailEqual(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 2 {
+		return "", fmt.Errorf("move error: `std::testing::expect_equal<%s>` expects 2 args", typeArg)
+	}
+	for idx, arg := range args {
+		got, err := c.readContextualExpr(arg, typeArg, env)
+		if err != nil {
+			return "", err
+		}
+		if got != typeArg {
+			return "", fmt.Errorf(
+				"move error: arg %d of `std::testing::expect_equal<%s>` expects %s, got %s",
+				idx+1,
+				typeArg,
+				typeArg,
+				got,
+			)
+		}
+	}
+	return "void", nil
 }
 
 // checkBuiltinArrayTypeApply validates std-only generic Array primitives.
@@ -2453,7 +2532,36 @@ func (c *Checker) checkGenericUserTypeApply(
 			return "", true, err
 		}
 	}
+	if err := c.checkGenericInstantiation(fn, subst); err != nil {
+		return "", true, err
+	}
 	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
+}
+
+// checkGenericInstantiation checks a generic function body for one type argument set.
+func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
+	env := newScope(nil)
+	for idx, param := range fn.decl.Params {
+		value := c.newBinding(param.Name, substituteOwnershipType(fn.params[idx].typeName, subst))
+		value.borrowedParam = fn.params[idx].borrow
+		value.mutBorrow = fn.params[idx].mutBorrow
+		env.define(value)
+	}
+	previousLoopDepth := c.loopDepth
+	previousFunction := c.currentFunction
+	previousStd := c.currentStd
+	previousTypeArgValues := c.typeArgValues
+	c.loopDepth = 0
+	c.currentFunction = fn
+	c.currentStd = fn.decl.Std
+	c.typeArgValues = subst
+	defer func() {
+		c.loopDepth = previousLoopDepth
+		c.currentFunction = previousFunction
+		c.currentStd = previousStd
+		c.typeArgValues = previousTypeArgValues
+	}()
+	return c.checkBlock(fn.decl.Body, env)
 }
 
 // checkGenericWrapperTypeArgs validates std wrapper-specific ownership contracts.
@@ -4818,6 +4926,9 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 	}
 	out := typeName
 	for name, replacement := range subst {
+		out = strings.ReplaceAll(out, "[]const "+name, "[]const "+replacement)
+		out = strings.ReplaceAll(out, "[]mut "+name, "[]mut "+replacement)
+		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
 		out = strings.ReplaceAll(out, "!&mut "+name, "!&mut "+replacement)
 		out = strings.ReplaceAll(out, "!&"+name, "!&"+replacement)
 		out = strings.ReplaceAll(out, "&mut "+name, "&mut "+replacement)
@@ -4828,6 +4939,21 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 		out = strings.ReplaceAll(out, ", "+name+">", ", "+replacement+">")
 	}
 	return out
+}
+
+// instantiateTypeArgText replaces in-scope generic type parameters in a type-apply list.
+func (c *Checker) instantiateTypeArgText(typeArg string) string {
+	if len(c.typeArgValues) == 0 {
+		return typeArg
+	}
+	args, ok := splitGenericArgs(typeArg)
+	if !ok {
+		return substituteOwnershipType(typeArg, c.typeArgValues)
+	}
+	for idx, arg := range args {
+		args[idx] = substituteOwnershipType(arg, c.typeArgValues)
+	}
+	return strings.Join(args, ", ")
 }
 
 // isCopyType reports whether values of typeName can be reused after move contexts.

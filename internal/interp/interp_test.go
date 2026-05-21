@@ -323,6 +323,28 @@ fn main() {
 	}
 }
 
+// TestRunMinimalGenerics checks explicit instantiation and type-value branches.
+func TestRunMinimalGenerics(t *testing.T) {
+	got := runSource(t, `fn Identity<T>(value: T) -> T { return value; }
+fn IsI64<T>(value: T) -> bool {
+    comptime if T == type<i64> {
+        return true;
+    } else {
+        return false;
+    }
+}
+fn main() {
+    print(Identity<i64>(7));
+    print(Identity<[]const u8>("kizu"));
+    print(IsI64<i64>(1));
+    print(IsI64<bool>(false));
+}`)
+	want := "7\nkizu\ntrue\nfalse\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunErrorUnionTry checks minimal !T propagation at runtime.
 func TestRunErrorUnionTry(t *testing.T) {
 	got := runSource(t, `fn parse() -> !i64 {

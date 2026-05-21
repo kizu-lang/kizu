@@ -94,7 +94,8 @@ go test ./...
 | owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&mut Map` |
 | deferred cleanup | `defer_cleanup.kizu` | registers explicit cleanup for Array, String, Map, and arena owners |
 | deferred cleanup order | `defer_order.kizu` | runs nested block cleanups and function cleanups in reverse registration order |
-| minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions through `kizu test` |
+| minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions and typed equality through `kizu test` |
+| minimal explicit generics | `minimal_generics.kizu` | checks explicit function type arguments and `comptime if T == type<i64>` |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -204,7 +205,7 @@ single source file. Run them with `kizu check <package-root>`.
 | mutex method primitives are reserved | `negative/std_mutex_get_builtin_direct_call.kizu` | `reserved` |
 | array method primitives are reserved | `negative/std_array_append_builtin_direct_call.kizu` | `reserved` |
 | map method primitives are reserved | `negative/std_map_insert_builtin_direct_call.kizu` | `reserved` |
-| generic functions are std-only | `negative/generic_function_user_reserved.kizu` | `reserved for std` |
+| generic calls require explicit type args | `negative/generic_function_missing_type_args.kizu` | `requires explicit type arguments` |
 | `Function` parameters are std-only | `negative/function_parameter_runtime.kizu` | `reserved for std` |
 | task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |
 | old spawn Io argument is rejected | `negative/task_spawn_old_io_arg.kizu` | `function name` |
@@ -287,12 +288,13 @@ single source file. Run them with `kizu check <package-root>`.
 | maps cannot cross task boundaries | `negative/std_map_task_spawn.kizu` | `Map cannot cross concurrency boundary` |
 | maps cannot cross channel boundaries | `negative/std_map_channel_send.kizu` | `Map cannot cross concurrency boundary` |
 | arrays cannot store maps in v0.2 | `negative/std_array_map_element.kizu` | `std::map::Map` |
-| testing assertion failure is readable | `negative/std_testing_failure.kizu` | `expected condition to be true` |
+| testing equality failure is readable | `negative/std_testing_failure.kizu` | `expected 4, got 3` |
 | testing expect failure is readable | `negative/std_testing_expect_failure.kizu` | `expected condition to be true` |
 | testing bool condition failure is readable | `negative/std_testing_bool_failure.kizu` | `expected condition to be true` |
-| testing bytes condition failure is readable | `negative/std_testing_bytes_failure.kizu` | `expected condition to be true` |
+| testing bytes equality failure is readable | `negative/std_testing_bytes_failure.kizu` | `expected "token", got "lexer"` |
 | testing fail uses caller message | `negative/std_testing_fail.kizu` | `custom failure` |
 | testing helpers enforce argument types | `negative/std_testing_wrong_type.kizu` | `expects bool` |
+| testing equality builtin is std-only | `negative/std_testing_equal_builtin_direct_call.kizu` | `reserved` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |

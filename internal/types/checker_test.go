@@ -1232,6 +1232,45 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckMinimalExplicitGenerics checks explicit instantiation and type branches.
+func TestCheckMinimalExplicitGenerics(t *testing.T) {
+	source := `fn Identity<T>(value: T) -> T {
+    return value;
+}
+fn IsI64<T>(value: T) -> bool {
+    comptime if T == type<i64> {
+        return true;
+    } else {
+        return false;
+    }
+}
+fn main() {
+    print(Identity<i64>(7));
+    print(IsI64<i64>(1));
+    print(IsI64<bool>(false));
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsGenericCallWithoutTypeArgs keeps instantiation explicit.
+func TestCheckRejectsGenericCallWithoutTypeArgs(t *testing.T) {
+	source := `fn Identity<T>(value: T) -> T {
+    return value;
+}
+fn main() {
+    print(Identity(7));
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "requires explicit type arguments") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // checkSource parses and type-checks a source snippet.
 func checkSource(source string) error {
 	p := parser.New(lexer.New(source))

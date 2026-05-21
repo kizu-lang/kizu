@@ -648,6 +648,19 @@ func (e *BoolExpr) String() string {
 	return "false"
 }
 
+// TypeExpr represents a compile-time type value.
+type TypeExpr struct {
+	TypeName string
+}
+
+// expressionNode marks TypeExpr as an expression node.
+func (*TypeExpr) expressionNode() {}
+
+// String returns the type literal spelling.
+func (e *TypeExpr) String() string {
+	return "type<" + e.TypeName + ">"
+}
+
 // ComptimeExpr represents an expression evaluated during compilation.
 type ComptimeExpr struct {
 	Expr Expression
