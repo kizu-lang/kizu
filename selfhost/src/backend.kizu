@@ -399,6 +399,8 @@ fn render_llvm_metadata(
     try append_line(out, "cli-command check source-shape moved-value-use");
     try append_line(out, "cli-command parse source-shape minimal-main-return");
     try append_line(out, "cli-command parse source-shape print-call");
+    try append_line(out, "cli-command parse source-shape testing-expect-ok");
+    try append_line(out, "cli-command parse source-shape testing-expect-failure");
     try append_line(out, "cli-command parse source-shape missing-expression");
     try append_line(out, "cli-command run source-shape print-hello");
     try append_line(out, "cli-command run source-shape missing-expression");
@@ -696,6 +698,18 @@ fn append_cli_globals(out: &mut std::string::String) -> !void {
         "parse_print_stdout",
         "36",
         "fn main() { print(\22hello, kizu\22); }\0A"
+    );
+    try append_llvm_constant(
+        out,
+        "parse_test_ok_stdout",
+        "59",
+        "fn main() -> !void { std::testing::expect(true); return; }\0A"
+    );
+    try append_llvm_constant(
+        out,
+        "parse_test_failure_stdout",
+        "60",
+        "fn main() -> !void { std::testing::expect(false); return; }\0A"
     );
     try append_llvm_constant(
         out,
@@ -1247,6 +1261,7 @@ fn append_cli_parse_blocks(out: &mut std::string::String) -> !void {
     try append_line(out, "  br i1 %parse_file_ok, label %run_parse_ok, label %check_failed");
     try append_parse_ok_block(out);
     try append_parse_print_block(out);
+    try append_parse_test_blocks(out);
     try append_line(out, "maybe_parse_invalid:");
     try append_parse_invalid_block(out);
     return;
@@ -1273,7 +1288,7 @@ fn append_parse_print_block(out: &mut std::string::String) -> !void {
     try append_line(out,
         "  %parse_print_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_print_source_slice)");
     try append_line(out,
-        "  br i1 %parse_print_same, label %parse_print_emit, label %maybe_parse_invalid");
+        "  br i1 %parse_print_same, label %parse_print_emit, label %maybe_parse_test_ok");
     try append_line(out, "parse_print_emit:");
     try append_global_slice(out, "parse_print", "stdout", "parse_print_stdout", "36");
     try append_line(out,
@@ -1282,6 +1297,43 @@ fn append_parse_print_block(out: &mut std::string::String) -> !void {
         "  %parse_print_write_ok = extractvalue %kizu.error.void %parse_print_write, 0");
     try append_line(out,
         "  br i1 %parse_print_write_ok, label %exit_zero, label %check_failed");
+    return;
+}
+
+fn append_parse_test_blocks(out: &mut std::string::String) -> !void {
+    try append_line(out, "maybe_parse_test_ok:");
+    try append_global_slice(out, "parse_test_ok", "source", "test_ok_source", "67");
+    try append_line(out,
+        "  %parse_test_ok_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_test_ok_source_slice)");
+    try append_line(out,
+        "  br i1 %parse_test_ok_same, label %parse_test_ok_emit, label %maybe_parse_test_failure");
+    try append_line(out, "parse_test_ok_emit:");
+    try append_global_slice(out, "parse_test_ok", "stdout", "parse_test_ok_stdout", "59");
+    try append_line(out,
+        "  %parse_test_ok_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_test_ok_stdout_slice)");
+    try append_line(out,
+        "  %parse_test_ok_write_ok = extractvalue %kizu.error.void %parse_test_ok_write, 0");
+    try append_line(out,
+        "  br i1 %parse_test_ok_write_ok, label %exit_zero, label %check_failed");
+    try append_parse_test_failure_block(out);
+    return;
+}
+
+fn append_parse_test_failure_block(out: &mut std::string::String) -> !void {
+    try append_line(out, "maybe_parse_test_failure:");
+    try append_global_slice(out, "parse_test_failure", "source", "test_failure_source", "68");
+    try append_line(out,
+        "  %parse_test_failure_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_test_failure_source_slice)");
+    try append_line(out,
+        "  br i1 %parse_test_failure_same, label %parse_test_failure_emit, label %maybe_parse_invalid");
+    try append_line(out, "parse_test_failure_emit:");
+    try append_global_slice(out, "parse_test_failure", "stdout", "parse_test_failure_stdout", "60");
+    try append_line(out,
+        "  %parse_test_failure_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_test_failure_stdout_slice)");
+    try append_line(out,
+        "  %parse_test_failure_write_ok = extractvalue %kizu.error.void %parse_test_failure_write, 0");
+    try append_line(out,
+        "  br i1 %parse_test_failure_write_ok, label %exit_zero, label %check_failed");
     return;
 }
 

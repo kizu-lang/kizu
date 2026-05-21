@@ -56,7 +56,9 @@ paths, expected exit codes, and hosted-artifact output fingerprints in
 For #579, `parse_ok_minimal_alias.kizu` uses the same positive source text as
 `parse_ok_minimal.kizu` to prove the hosted positive parse path is source-driven
 instead of tied to one fixture path. For #594, `parse_print_hello_alias.kizu`
-does the same for the first print-call statement parse shape. For #586,
+does the same for the first print-call statement parse shape. For #598,
+`test_expect_ok_alias.kizu` and `test_expect_failure_alias.kizu` do the same for
+the first `std::testing::expect` qualified-call parse shapes. For #586,
 `parse_invalid_missing_expr_alias.kizu` does the same for the first negative
 missing-expression diagnostic path.
 

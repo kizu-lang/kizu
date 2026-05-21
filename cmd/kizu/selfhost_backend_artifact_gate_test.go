@@ -250,6 +250,8 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"cli-command check source-shape moved-value-use\n",
 		"cli-command parse source-shape minimal-main-return\n",
 		"cli-command parse source-shape print-call\n",
+		"cli-command parse source-shape testing-expect-ok\n",
+		"cli-command parse source-shape testing-expect-failure\n",
 		"cli-command parse source-shape missing-expression\n",
 		"cli-command run source-shape print-hello\n",
 		"cli-command run source-shape missing-expression\n",
