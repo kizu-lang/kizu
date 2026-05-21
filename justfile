@@ -58,6 +58,7 @@ selfhost-production-from-scratch:
     just selfhost-corpus-gate
     just selfhost-parse-parity-gate
     just selfhost-check-parity-gate
+    just selfhost-run-parity-gate
 
 # Run the supported corpus through the hosted selfhost artifact.
 selfhost-corpus-gate:
@@ -80,6 +81,15 @@ selfhost-check-parity-gate:
 selfhost-check-parity-gate-from-scratch:
     just selfhost-bootstrap
     just selfhost-check-parity-gate
+
+# Run #569 run <file> parity through the hosted selfhost artifact.
+selfhost-run-parity-gate:
+    KIZU_RUN_SELFHOST_RUN_PARITY=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostRunParityGate$' -count=1 -v
+
+# Build the hosted artifact once, then run run <file> parity.
+selfhost-run-parity-gate-from-scratch:
+    just selfhost-bootstrap
+    just selfhost-run-parity-gate
 
 # Install local git hooks.
 hooks:
