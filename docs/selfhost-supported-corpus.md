@@ -55,7 +55,9 @@ paths, expected exit codes, and hosted-artifact output fingerprints in
 `target/selfhost/reports/parse-parity.txt`.
 For #579, `parse_ok_minimal_alias.kizu` uses the same positive source text as
 `parse_ok_minimal.kizu` to prove the hosted positive parse path is source-driven
-instead of tied to one fixture path.
+instead of tied to one fixture path. For #586,
+`parse_invalid_missing_expr_alias.kizu` does the same for the first negative
+missing-expression diagnostic path.
 
 The #530 `check <file>` parity cases are also tracked in a separate CLI
 manifest so repeated local validation stays focused:
