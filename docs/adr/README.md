@@ -86,3 +86,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0065: contextual integer literals](0065-contextual-integer-literals.md)
 - [ADR-0066: minimal explicit function generics](0066-minimal-explicit-generics.md)
 - [ADR-0067: direct field method receivers](0067-direct-field-method-receivers.md)
+- [ADR-0068: safe borrow field access](0068-safe-borrow-field-access.md)

@@ -201,6 +201,9 @@ func (i *Interpreter) callFunctionExpr(
 		if err := env.Define(param.Name, value, false); err != nil {
 			return voidValue(), err
 		}
+		if param.MutBorrow {
+			env.SetMutable(param.Name)
+		}
 	}
 	result, returned, err := i.evalBlock(fn.Body, env)
 	if err != nil || returned {
@@ -417,6 +420,9 @@ func assignBindingField(name string, field string, value Value, env *Env) error 
 	if !binding.mutable {
 		return fmt.Errorf("runtime error: cannot assign field of immutable binding `%s`", name)
 	}
+	if binding.value.kind == kindRef {
+		return assignRefField(binding.value.ref, field, value)
+	}
 	return assignStructField(&binding.value, field, value)
 }
 
@@ -429,6 +435,17 @@ func assignStructField(target *Value, field string, value Value) error {
 		return fmt.Errorf("runtime error: unknown field `%s`", field)
 	}
 	target.fields[field] = value
+	return nil
+}
+
+// assignRefField writes one field through a safe borrow reference.
+func assignRefField(ref *binding, field string, value Value) error {
+	if err := assignStructField(&ref.value, field, value); err != nil {
+		return err
+	}
+	if ref.fieldParent != nil {
+		ref.fieldParent.value.fields[ref.fieldName] = ref.value
+	}
 	return nil
 }
 

@@ -4701,8 +4701,20 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe bool) (
 
 // checkAssignableField validates mutation of a field on a mutable value.
 func (c *Checker) checkAssignableField(expr *ast.FieldExpr, env *scope, unsafe bool) (Type, error) {
-	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && !env.isMutable(ident.Name) {
-		return "", fmt.Errorf("type error: cannot assign field of immutable binding `%s`", ident.Name)
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
+		if env.isBorrowed(ident.Name) {
+			if !env.isMutBorrowed(ident.Name) {
+				return "", fmt.Errorf(
+					"type error: cannot assign field through shared borrow `%s`",
+					ident.Name,
+				)
+			}
+		} else if !env.isMutable(ident.Name) {
+			return "", fmt.Errorf(
+				"type error: cannot assign field of immutable binding `%s`",
+				ident.Name,
+			)
+		}
 	}
 	if _, ok := expr.Receiver.(*ast.DerefExpr); ok {
 		if _, err := c.checkAssignableDeref(expr.Receiver.(*ast.DerefExpr), env, unsafe); err != nil {

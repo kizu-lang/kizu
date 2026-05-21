@@ -528,10 +528,10 @@ fn main() {
 // TestCheckAcceptsMutableBorrowForwarding checks call-scoped &mut reborrows.
 func TestCheckAcceptsMutableBorrowForwarding(t *testing.T) {
 	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) -> void { user.*.name = "bob" ;}
+fn rename(user: &mut User) -> void { user.name = "bob" ;}
 fn outer(user: &mut User) -> void {
     rename(user);
-    user.*.name = "carol";
+    user.name = "carol";
 }
 fn main() -> void {
     var user = User { name: "alice" };
@@ -545,7 +545,7 @@ fn main() -> void {
 // TestCheckRejectsSharedBorrowForwarding rejects shared-to-mutable reborrows.
 func TestCheckRejectsSharedBorrowForwarding(t *testing.T) {
 	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) -> void { user.*.name = "bob" ;}
+fn rename(user: &mut User) -> void { user.name = "bob" ;}
 fn outer(user: &User) -> void {
     rename(user);
 }`
@@ -561,7 +561,7 @@ fn outer(user: &User) -> void {
 // TestCheckFieldAndDerefAssignment validates mutable assignment targets.
 func TestCheckFieldAndDerefAssignment(t *testing.T) {
 	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) -> void { user.*.name = "bob" ;}
+fn rename(user: &mut User) -> void { user.name = "bob" ;}
 fn main() -> void {
     var user = User { name: "alice" };
     user.name = "carol";
@@ -589,10 +589,10 @@ fn main() -> void {
 			want: "cannot assign field of immutable binding `user`",
 		},
 		{
-			name: "shared borrow deref",
+			name: "shared borrow field",
 			source: `struct User { name: []const u8 }
-fn rename(user: &User) -> void { user.*.name = "bob" ;}`,
-			want: "`user` is not a mutable borrow",
+fn rename(user: &User) -> void { user.name = "bob" ;}`,
+			want: "cannot assign field through shared borrow `user`",
 		},
 	}
 	runErrorCases(t, cases)
