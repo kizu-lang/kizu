@@ -4748,6 +4748,9 @@ func (c *Checker) checkMethodCallExpr(
 	env *scope,
 	unsafe bool,
 ) (Type, error) {
+	if err := c.checkMethodReceiverPath(field, env); err != nil {
+		return "", err
+	}
 	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
 	if err != nil {
 		return "", err
@@ -4757,6 +4760,41 @@ func (c *Checker) checkMethodCallExpr(
 		return typ, err
 	}
 	return c.checkArenaOrImplMethod(field, receiver, args, env, unsafe)
+}
+
+// checkMethodReceiverPath enforces the v0.2 direct field receiver boundary.
+func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) error {
+	receiver, ok := field.Receiver.(*ast.FieldExpr)
+	if !ok {
+		return nil
+	}
+	if _, ok := receiver.Receiver.(*ast.IdentExpr); !ok {
+		return fmt.Errorf("type error: field method receiver only supports one direct field")
+	}
+	if field.Name != "deinit" || c.allowsDirectFieldCleanup(receiver, env) {
+		return nil
+	}
+	return fmt.Errorf(
+		"type error: field cleanup `%s.deinit` is only allowed inside owner deinit",
+		receiver.String(),
+	)
+}
+
+// allowsDirectFieldCleanup reports whether owner.field.deinit is in owner deinit.
+func (c *Checker) allowsDirectFieldCleanup(field *ast.FieldExpr, env *scope) bool {
+	fn := c.currentFunction
+	if fn == nil || fn.decl == nil || fn.decl.Name != "deinit" || fn.returnType != typeVoid {
+		return false
+	}
+	owner, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok || len(fn.params) == 0 || len(fn.decl.Params) == 0 {
+		return false
+	}
+	ownerType, ok := env.lookup(owner.Name)
+	if !ok || fn.decl.Params[0].Name != owner.Name {
+		return false
+	}
+	return sameType(fn.params[0], ownerType)
 }
 
 // checkKnownReceiverMethod validates non-arena builtin receiver families.
@@ -4824,7 +4862,8 @@ func (c *Checker) checkBoxReceiverMethod(
 		return "", fmt.Errorf(
 			"type error: `Box.borrow_mut` must be bound with `let name = box.borrow_mut()`")
 	case "deinit":
-		if _, ok := field.Receiver.(*ast.IdentExpr); !ok {
+		if _, ok := field.Receiver.(*ast.IdentExpr); !ok &&
+			!c.directFieldCleanupReceiver(field.Receiver, env) {
 			return "", fmt.Errorf("type error: `Box.deinit` requires local Box receiver")
 		}
 		if len(args) != 0 {
@@ -6053,7 +6092,7 @@ func (c *Checker) checkArenaDeinit(
 	env *scope,
 ) (Type, error) {
 	ident, ok := field.Receiver.(*ast.IdentExpr)
-	if !ok && !c.currentStd {
+	if !ok && !c.directFieldCleanupReceiver(field.Receiver, env) {
 		return "", fmt.Errorf("type error: `arena.deinit` requires local arena receiver")
 	}
 	if ok && env.isBorrowed(ident.Name) {
@@ -6063,6 +6102,12 @@ func (c *Checker) checkArenaDeinit(
 		return "", fmt.Errorf("type error: `arena.deinit` expects 0 args, got %d", len(args))
 	}
 	return typeVoid, nil
+}
+
+// directFieldCleanupReceiver reports whether expr is an allowed field cleanup target.
+func (c *Checker) directFieldCleanupReceiver(expr ast.Expression, env *scope) bool {
+	field, ok := expr.(*ast.FieldExpr)
+	return ok && c.allowsDirectFieldCleanup(field, env)
 }
 
 // checkPtrRead validates unsafe raw pointer reads.

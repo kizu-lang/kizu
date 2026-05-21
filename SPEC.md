@@ -417,10 +417,24 @@ let group = std::task::Group(io);
 ```kizu
 print(user.name);
 let handle = users.add(user);
+self.related.len();
 ```
 
 `Color.Red` や `Shape.Circle(10)` のような dot による enum / union lookup は
 compile error です。互換構文としては扱いません。
+
+v0.2 の method receiver path は local binding または one-level direct field に限定します。
+
+```kizu
+values.len();          // ok: local receiver
+self.related.len();    // ok: direct field receiver
+self.a.b.len();        // error in v0.2
+```
+
+direct field receiver は owner の ownership state に従います。read-only method は
+owner / field が読めるときだけ、mutating method は owner / field が borrow 中でないときだけ
+呼べます。`field.deinit()` のような destructive cleanup は、owner 型自身の
+`deinit(self: Owner) -> void` method body の中だけ許可します。
 
 ### 6.6 import と visibility
 
@@ -995,6 +1009,7 @@ v0 core arena の構築は明示 allocator capability を要求し、
 * `arena<T>.get(handle)` はローカル borrow を返す
 * `arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
 * `arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
+* `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可する
 * handle は borrow より長生きしてよい
 * handle は対応する arena より長生きしてはいけない
 * `deinit` 後の arena と、その arena 由来の既知 handle は使用してはいけない
@@ -1455,6 +1470,8 @@ view が生きている間は `append_bytes`、`append_byte`、`truncate`、`cle
 `&mut std::string::String` から呼べます。
 `clear` は length を 0 にしますが、capacity は保持します。
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
+例外として、owner 型自身の `deinit(self: Owner) -> void` method 内では
+`self.field.deinit()` の direct field cleanup を許可します。
 v0.2 では UTF-8 validation、C ABI string 変換、raw pointer exposure、
 owned bytes 取り出し、String 専用 comparison、String 専用 indexing / slicing は実装しません。
 `std::string::String` の public behavior は `std/src/string.kizu` に実装します。
@@ -1563,6 +1580,8 @@ non-copy element は `at` / `at_mut` で local borrow として読み書きし�
 element borrow が生きている間は `append`、`set`、`deinit` を禁止します。
 mutable element borrow が生きている間は array 全体の read も禁止します。
 `deinit` 後の array 使用は safe Kizu では禁止します。
+`owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可し、
+その field は同じ body 内で以後使用できません。
 v0.2 の `Array<T>` element には raw pointer、arena、handle、nested array、
 `std::map::Map<K, V>`、concurrency capability type を入れられません。
 この制限は struct field と union payload の中も再帰的に検査します。

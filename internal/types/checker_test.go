@@ -813,10 +813,31 @@ fn main() {
     let registry = Registry { users: users };
     registry.users.deinit();
 }`,
-			want: "`arena.deinit` requires local arena receiver",
+			want: "field cleanup `registry.users.deinit` is only allowed inside owner deinit",
 		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckAcceptsOwnerFieldCleanup allows direct field cleanup inside owner deinit.
+func TestCheckAcceptsOwnerFieldCleanup(t *testing.T) {
+	source := `struct User { name: []const u8 }
+struct Registry { users: arena<User> }
+impl Registry {
+    fn deinit(self: Registry) -> void {
+        self.users.deinit();
+        return;
+    }
+}
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    let registry = Registry { users: users };
+    registry.deinit();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
 }
 
 // TestCheckAcceptsUnsafePointerOperations checks raw pointer ops inside unsafe.
