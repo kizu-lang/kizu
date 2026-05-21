@@ -70,6 +70,10 @@ func countRuntimeStorageTemplateMetadataFailures(t *testing.T, metaContent strin
 		"string-as-bytes returns-stored-bytes\n",
 		"string-deinit releases-byte-buffer\n",
 		"string-invalid-slice-diagnostic invalid slice\n",
+		"map-storage string-key-i64-two-entry\n",
+		"map-key-ownership copies-key-bytes\n",
+		"map-missing-key-diagnostic Map.get key not found\n",
+		"map-capacity-diagnostic map capacity exceeded\n",
 		"reachable arena ast-node-storage\n",
 		"reachable handle ast-node-id\n",
 		"arena-allocator-boundary explicit\n",
@@ -288,21 +292,73 @@ func countRuntimeStorageValidationFailures(t *testing.T, llContent string, metaC
 // countRuntimeStorageLLFailures checks storage symbols and smoke calls.
 func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 	t.Helper()
-	requiredLL := []string{
+	for _, group := range runtimeStorageRequiredLLFragmentGroups() {
+		if failures := countRuntimeStorageMissingLLFragments(t, llContent, group); failures > 0 {
+			return failures
+		}
+	}
+	forbiddenMarkers := []string{"std.builtin", "stdprim", "internal/interp", "internal global"}
+	for _, forbidden := range forbiddenMarkers {
+		if strings.Contains(llContent, forbidden) {
+			t.Errorf("runtime storage artifact contains Go fallback marker %q", forbidden)
+			return 1
+		}
+	}
+	return 0
+}
+
+// countRuntimeStorageMissingLLFragments checks one fragment group.
+func countRuntimeStorageMissingLLFragments(
+	t *testing.T,
+	llContent string,
+	requiredLL []string,
+) int {
+	t.Helper()
+	for _, fragment := range requiredLL {
+		if !strings.Contains(llContent, fragment) {
+			t.Errorf("runtime storage artifact missing %q:\n%s", fragment, llContent)
+			return 1
+		}
+	}
+	return 0
+}
+
+// runtimeStorageRequiredLLFragmentGroups returns bounded validation groups.
+func runtimeStorageRequiredLLFragmentGroups() [][]string {
+	return [][]string{
+		runtimeStorageLayoutLLFragments(),
+		runtimeStorageFunctionLLFragments(),
+		runtimeStorageSmokeLLFragments(),
+	}
+}
+
+// runtimeStorageLayoutLLFragments returns storage layout fragments.
+func runtimeStorageLayoutLLFragments() []string {
+	return []string{
 		"; kizu selfhost runtime storage ll v0\n",
 		"%kizu.handle = type { ptr, i64 }\n",
 		"%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }\n",
 		"%kizu.rt.string = type { ptr, ptr, i64, i64 }\n",
-		"%kizu.rt.map = type { ptr, i1, i64 }\n",
+		"%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }\n",
 		"%kizu.rt.arena = type { ptr, i64, i64, i1 }\n",
 		"@.kizu.rt.arena_invalid_handle",
 		"@.kizu.rt.array_smoke",
 		"@.kizu.rt.invalid_array_element",
 		"@.kizu.rt.string_smoke",
+		"@.kizu.rt.map_key_alpha",
+		"@.kizu.rt.map_key_beta",
+		"@.kizu.rt.map_key_not_found",
+		"@.kizu.rt.map_full",
 		"@.kizu.rt.invalid_slice",
 		"declare ptr @kizu_rt_alloc(ptr, i64)\n",
 		"declare void @kizu_rt_free(ptr, ptr)\n",
 		"declare void @llvm.memcpy.p0.p0.i64",
+	}
+}
+
+// runtimeStorageFunctionLLFragments returns storage function fragments.
+func runtimeStorageFunctionLLFragments() []string {
+	return []string{
 		"define %kizu.owned @kizu_rt_array_new",
 		"define %kizu.error.void @kizu_rt_array_append",
 		"define %kizu.error.slice.u8 @kizu_rt_array_at",
@@ -312,6 +368,9 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 		"define %kizu.slice.u8 @kizu_rt_string_as_bytes",
 		"define %kizu.owned @kizu_rt_map_new",
 		"define %kizu.error.void @kizu_rt_map_insert",
+		"define i1 @kizu_rt_map_key_equal",
+		"define i1 @kizu_rt_map_contains",
+		"define %kizu.error.i64 @kizu_rt_map_get_i64",
 		"define %kizu.owned @kizu_rt_diagnostic_buffer_new",
 		"define %kizu.error.void @kizu_rt_diagnostic_push",
 		"define %kizu.owned @kizu_rt_arena_new",
@@ -325,6 +384,12 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 		"define i1 @kizu_selfhost__runtime_invalid_slice_message_ok",
 		"define i64 @kizu_selfhost__runtime_string_invalid_smoke() {\n",
 		"define i64 @kizu_selfhost__runtime_storage_smoke() {\n",
+	}
+}
+
+// runtimeStorageSmokeLLFragments returns smoke call fragments.
+func runtimeStorageSmokeLLFragments() []string {
+	return []string{
 		"call %kizu.error.void @kizu_rt_array_append",
 		"call %kizu.error.slice.u8 @kizu_rt_array_at",
 		"call %kizu.error.void @kizu_rt_string_append_bytes",
@@ -332,25 +397,13 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 		"call %kizu.slice.u8 @kizu_rt_string_as_bytes",
 		"call i64 @kizu_selfhost__runtime_string_invalid_smoke",
 		"call %kizu.error.void @kizu_rt_map_insert",
+		"call i1 @kizu_rt_map_contains",
+		"call %kizu.error.i64 @kizu_rt_map_get_i64",
 		"call %kizu.error.void @kizu_rt_diagnostic_push",
 		"call %kizu.handle @kizu_rt_arena_add",
 		"call %kizu.error.slice.u8 @kizu_rt_arena_get",
 		"call void @kizu_rt_arena_deinit",
 	}
-	for _, fragment := range requiredLL {
-		if !strings.Contains(llContent, fragment) {
-			t.Errorf("runtime storage artifact missing %q:\n%s", fragment, llContent)
-			return 1
-		}
-	}
-	forbiddenMarkers := []string{"std.builtin", "stdprim", "internal/interp", "internal global"}
-	for _, forbidden := range forbiddenMarkers {
-		if strings.Contains(llContent, forbidden) {
-			t.Errorf("runtime storage artifact contains Go fallback marker %q", forbidden)
-			return 1
-		}
-	}
-	return 0
 }
 
 // countRuntimeStorageMetadataFailures checks reachable storage metadata and guards.
@@ -385,6 +438,10 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 		"reachable map resolver-symbol-table\n",
 		"reachable map type-symbol-table\n",
 		"reachable map ownership-state-table\n",
+		"map-storage string-key-i64-two-entry\n",
+		"map-key-ownership copies-key-bytes\n",
+		"map-missing-key-diagnostic Map.get key not found\n",
+		"map-capacity-diagnostic map capacity exceeded\n",
 		"reachable diagnostic compiler-failure-buffer\n",
 		"reachable arena ast-node-storage\n",
 		"reachable handle ast-node-id\n",
