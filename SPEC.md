@@ -778,6 +778,14 @@ v0.2 では mutable indexed assignment、indexed borrow、multi-dimensional slic
 
 Kizu は暗黙の numeric promotion をしません。
 異なる numeric type の間で値を渡す場合は、明示的に `cast<T>(value)` を使います。
+ただし整数 literal だけは、期待型が明確な文脈では、その整数型として扱えます。
+
+文脈型が効くのは、関数引数、戻り値、既に型が決まっている代入先、struct literal field、
+union payload、標準ライブラリの typed container API など、期待する整数型が一意に決まる場所です。
+literal の値は対象型の範囲に収まらなければなりません。
+範囲外の literal は type error です。
+`let x = 1;` のように期待型がない局所 binding では、`x` は従来どおり `i64` です。
+一度 `i64` として束縛された値を `u8` / `i32` などへ渡す場合は `cast<T>(x)` が必要です。
 
 ```kizu
 fn take(x: i32) -> i32 {
@@ -785,8 +793,10 @@ fn take(x: i32) -> i32 {
 }
 
 fn main() {
-    let x = cast<i32>(1);
-    print(take(x));
+    print(take(1));
+
+    let x = 1;
+    print(take(cast<i32>(x)));
 }
 ```
 

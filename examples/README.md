@@ -76,6 +76,7 @@ go test ./...
 | borrowed-return provenance | `borrow_provenance_return.kizu` | returns shared and mutable borrows tied to local owners |
 | checked index / slice syntax | `slice_syntax.kizu` | asserts trapping `[]const u8` indexing and slicing through `bytes[...]` |
 | boolean logic | `logical.kizu` | asserts `and` / `or` precedence and short-circuit shape |
+| contextual integer literals | `contextual_integer_literals.kizu` | narrows integer literals in explicit `u8` / `i32` std and user API contexts |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
 | token list shape | `std_array_token_list.kizu` | stores copy enum tokens in `Array<TokenKind>` |
 | parse result AST access | `std_kizu_ast_parse_result_access.kizu` | reads parser root metadata through `ParseResult` helper methods |

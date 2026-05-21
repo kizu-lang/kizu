@@ -14,7 +14,9 @@ Kizu の source-level type として `int` は採用しない。
 整数 literal のデフォルト型は `i64` とする。
 
 幅を変えたい場合は、明示的に `i32` / `u32` などの型を使い、
-literal から幅付き型へ渡すときは `cast<T>(value)` を書く。
+非 literal の値を幅付き型へ渡すときは `cast<T>(value)` を書く。
+整数 literal は ADR-0065 に従い、期待型が明確で値が範囲内の文脈では
+`cast<T>(literal)` なしで渡せる。
 
 ```kizu
 fn add(a: i64, b: i64) -> i64 {
@@ -26,7 +28,7 @@ fn take_i32(x: i32) -> i32 {
 }
 
 fn main() {
-    print(take_i32(cast<i32>(1)));
+    print(take_i32(1));
 }
 ```
 

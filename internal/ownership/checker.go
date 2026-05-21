@@ -2,6 +2,7 @@ package ownership
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -757,11 +758,11 @@ func (c *Checker) activateBorrow(target *binding, field string, mutable bool) {
 
 // checkAssignStmt moves the assigned value into an existing binding.
 func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
-	typeName, err := c.moveExpr(stmt.Value, env)
-	if err != nil {
-		return err
-	}
 	if target, ok := directAssignmentRoot(stmt.Target, env); ok {
+		typeName, err := c.moveContextualExpr(stmt.Value, target.typeName, env)
+		if err != nil {
+			return err
+		}
 		if target.hasAnyBorrow() {
 			return fmt.Errorf("borrow error: value `%s` cannot be assigned while borrowed",
 				target.name)
@@ -774,6 +775,9 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		target.rangeArenaID = 0
 		c.setArenaProvenance(target, stmt.Value, env)
 		return nil
+	}
+	if _, err := c.moveExpr(stmt.Value, env); err != nil {
+		return err
 	}
 	if err := c.checkAssignmentBorrowConflict(stmt.Target, env); err != nil {
 		return err
@@ -1004,6 +1008,102 @@ func readLiteralType(expr ast.Expression) (string, error) {
 		return "bool", nil
 	default:
 		return "", fmt.Errorf("move error: unsupported literal %T", expr)
+	}
+}
+
+// readContextualExpr reads expr and treats fit-checked integer literals as want.
+func (c *Checker) readContextualExpr(
+	expr ast.Expression,
+	want string,
+	env *scope,
+) (string, error) {
+	got, err := c.readExpr(expr, env)
+	if err != nil {
+		return "", err
+	}
+	return coerceContextualIntegerLiteral(expr, want, got)
+}
+
+// moveContextualExpr moves expr and treats fit-checked integer literals as want.
+func (c *Checker) moveContextualExpr(
+	expr ast.Expression,
+	want string,
+	env *scope,
+) (string, error) {
+	got, err := c.moveExpr(expr, env)
+	if err != nil {
+		return "", err
+	}
+	return coerceContextualIntegerLiteral(expr, want, got)
+}
+
+// coerceContextualIntegerLiteral narrows only source integer literals.
+func coerceContextualIntegerLiteral(expr ast.Expression, want string, got string) (string, error) {
+	if got == want || got != "i64" || !isIntegerOwnershipType(want) {
+		return got, nil
+	}
+	value, ok := integerLiteralValue(expr)
+	if !ok {
+		return got, nil
+	}
+	if !integerLiteralFitsType(value, want) {
+		return "", fmt.Errorf("move error: integer literal `%s` does not fit %s",
+			expr.String(), want)
+	}
+	return want, nil
+}
+
+// integerLiteralValue returns an interpreter-representable integer literal.
+func integerLiteralValue(expr ast.Expression) (int64, bool) {
+	switch e := expr.(type) {
+	case *ast.IntExpr:
+		value, err := strconv.ParseInt(e.Value, 10, 64)
+		return value, err == nil
+	case *ast.PrefixExpr:
+		if e.Operator != "-" {
+			return 0, false
+		}
+		value, ok := integerLiteralValue(e.Right)
+		if !ok {
+			return 0, false
+		}
+		return -value, true
+	default:
+		return 0, false
+	}
+}
+
+// isIntegerOwnershipType reports whether a type is a fixed-width integer.
+func isIntegerOwnershipType(typeName string) bool {
+	switch typeName {
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
+		return true
+	default:
+		return false
+	}
+}
+
+// integerLiteralFitsType checks the fixed-width bounds for contextual literals.
+func integerLiteralFitsType(value int64, typeName string) bool {
+	switch typeName {
+	case "i8":
+		return value >= -128 && value <= 127
+	case "i16":
+		return value >= -32768 && value <= 32767
+	case "i32":
+		return value >= -2147483648 && value <= 2147483647
+	case "i64", "isize":
+		return true
+	case "u8":
+		return value >= 0 && value <= 255
+	case "u16":
+		return value >= 0 && value <= 65535
+	case "u32":
+		return value >= 0 && value <= 4294967295
+	case "u64", "usize":
+		return value >= 0
+	default:
+		return false
 	}
 }
 
@@ -1530,7 +1630,7 @@ func (c *Checker) checkCoreArg(
 	if want == stdprim.ArgIo {
 		return c.checkIoArg(arg, env, name)
 	}
-	got, err := c.readExpr(arg, env)
+	got, err := c.readContextualExpr(arg, string(want), env)
 	if err != nil {
 		return err
 	}
@@ -2006,7 +2106,7 @@ func (c *Checker) checkBoxConstructor(
 	if got != "Allocator" {
 		return "", fmt.Errorf("box error: `std::mem::Box<%s>` expects Allocator, got %s", elem, got)
 	}
-	got, err = c.moveExpr(args[1], env)
+	got, err = c.moveContextualExpr(args[1], elem, env)
 	if err != nil {
 		return "", err
 	}
@@ -2229,7 +2329,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 		} else if got != keyType {
 			return "", fmt.Errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
-		got, err := c.readExpr(args[1], env)
+		got, err := c.readContextualExpr(args[1], valueType, env)
 		if err != nil {
 			return "", err
 		}
@@ -2399,7 +2499,7 @@ func (c *Checker) checkGenericUserArg(
 		}
 		return nil
 	}
-	got, err := c.readExpr(arg, env)
+	got, err := c.readContextualExpr(arg, want, env)
 	if err != nil {
 		return err
 	}
@@ -2438,7 +2538,7 @@ func (c *Checker) checkMovedGenericArg(
 	arg ast.Expression,
 	env *scope,
 ) error {
-	got, err := c.moveExpr(arg, env)
+	got, err := c.moveContextualExpr(arg, want, env)
 	if err != nil {
 		return err
 	}
@@ -3567,7 +3667,7 @@ func (c *Checker) checkStringByteArg(
 	if len(args) != 1 {
 		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
-	got, err := c.readExpr(args[0], env)
+	got, err := c.readContextualExpr(args[0], "u8", env)
 	if err != nil {
 		return "", err
 	}
@@ -3766,7 +3866,7 @@ func (c *Checker) checkChannelMethod(
 		if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
 			return "", err
 		}
-		got, err := c.moveExpr(args[0], env)
+		got, err := c.moveContextualExpr(args[0], elem, env)
 		if err != nil {
 			return "", err
 		}
@@ -3924,7 +4024,7 @@ func (c *Checker) checkArrayAppend(
 	if len(args) != 1 {
 		return "", fmt.Errorf("array error: `Array.append` expects 1 arg, got %d", len(args))
 	}
-	got, err := c.moveExpr(args[0], env)
+	got, err := c.moveContextualExpr(args[0], elem, env)
 	if err != nil {
 		return "", err
 	}
@@ -3967,7 +4067,7 @@ func (c *Checker) checkArraySet(
 	} else if got != "i64" {
 		return "", fmt.Errorf("array error: `Array.set` expects i64 index, got %s", got)
 	}
-	got, err := c.moveExpr(args[1], env)
+	got, err := c.moveContextualExpr(args[1], elem, env)
 	if err != nil {
 		return "", err
 	}
@@ -4048,7 +4148,7 @@ func (c *Checker) checkMapInsert(
 	} else if !sameOwnershipType(got, "[]const u8") {
 		return "", fmt.Errorf("map error: `Map.insert` expects []const u8 key, got %s", got)
 	}
-	got, err := c.readExpr(args[1], env)
+	got, err := c.readContextualExpr(args[1], valueType, env)
 	if err != nil {
 		return "", err
 	}
@@ -4110,7 +4210,7 @@ func (c *Checker) checkAtomicMethod(
 		if len(args) != 1 {
 			return "", fmt.Errorf("atomic error: `atomic.store` expects 1 arg, got %d", len(args))
 		}
-		got, err := c.readExpr(args[0], env)
+		got, err := c.readContextualExpr(args[0], elem, env)
 		if err != nil {
 			return "", err
 		}
@@ -4169,7 +4269,7 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 	if !ok || base != "arena" {
 		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
 	}
-	got, err := c.moveExpr(args[0], env)
+	got, err := c.moveContextualExpr(args[0], arg, env)
 	if err != nil {
 		return "", err
 	}
@@ -5097,7 +5197,7 @@ func (c *Checker) checkThreadScopedTyped(
 	if _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
 		return "", fmt.Errorf("thread error: `std::thread::scoped` expects function name")
 	}
-	got, err := c.moveExpr(args[2], env)
+	got, err := c.moveContextualExpr(args[2], argType, env)
 	if err != nil {
 		return "", err
 	}
@@ -5138,7 +5238,7 @@ func (c *Checker) checkAtomic(
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("atomic error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
 	}
-	got, err := c.readExpr(args[0], env)
+	got, err := c.readContextualExpr(args[0], elem, env)
 	if err != nil {
 		return "", true, err
 	}
@@ -5159,7 +5259,7 @@ func (c *Checker) checkMutex(elem string, args []ast.Expression, env *scope) (st
 			return "", true, err
 		}
 	}
-	got, err := c.moveExpr(args[0], env)
+	got, err := c.moveContextualExpr(args[0], elem, env)
 	if err != nil {
 		return "", true, err
 	}
