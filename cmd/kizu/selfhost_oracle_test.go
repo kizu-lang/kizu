@@ -6,11 +6,14 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 const (
 	selfhostGateEnv   = "KIZU_RUN_SELFHOST_GATES"
 	selfhostOracleEnv = "KIZU_RUN_SELFHOST_ORACLE"
+
+	selfhostOracleBudget = 60 * time.Second
 )
 
 // requireSelfhostGate skips heavyweight selfhost integration gates by default.
@@ -38,106 +41,41 @@ func TestSelfhostOracleRunner(t *testing.T) {
 	if os.Getenv(selfhostOracleEnv) != "1" {
 		t.Skipf("set %s=1 to run the aggregate selfhost oracle", selfhostOracleEnv)
 	}
+	start := time.Now()
 	results := []selfhostOracleResult{
-		runSelfhostLexerOracle(t),
-		runSelfhostLexerTokenizeOracle(t),
-		runSelfhostLexerSourceOracle(t),
-		runSelfhostLexerTokenizeSourceOracle(t),
-		runSelfhostLexerProductionOracle(t),
-		runSelfhostParserOracle(t),
-		runSelfhostParserSourceOracle(t),
-		runSelfhostParserProductionOracle(t),
-		runSelfhostParserErrorOracle(t),
-		runSelfhostSourceOracle(t),
+		timedSelfhostOracle(t, "lexer-production", runSelfhostLexerProductionOracle),
+		timedSelfhostOracle(t, "parser-production", runSelfhostParserProductionOracle),
+		timedSelfhostOracle(t, "source", runSelfhostSourceOracle),
 	}
+	pipelineStart := time.Now()
 	results = append(results, runSelfhostPipelineOracle(t)...)
+	t.Logf("oracle elapsed pipeline=%s", time.Since(pipelineStart))
 	failures := 0
 	for _, result := range results {
 		failures += result.failures
 		logSelfhostOracleResult(t, result)
 	}
+	elapsed := time.Since(start)
+	t.Logf("oracle elapsed aggregate=%s budget=%s", elapsed, selfhostOracleBudget)
 	if failures > 0 {
 		t.Fatalf("selfhost oracle failures=%d", failures)
 	}
-}
-
-// runSelfhostLexerOracle compares the supported examples through the lexer oracle.
-func runSelfhostLexerOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	examples, stats := collectLexerParityExamples(t)
-	seeds := lexerParitySeedCases(t)
-	cases := append(seeds, examples...)
-	got := runStdKizuLexerParityHarness(t, cases)
-	failures := countLexerParityFailures(cases, got)
-	if failures > 0 {
-		assertLexerParityCases(t, cases, got)
-	}
-	return selfhostOracleResult{
-		component:          "lexer",
-		corpus:             "examples",
-		scanned:            stats.scanned,
-		compared:           len(cases),
-		unsupported:        stats.unsupported,
-		seeds:              len(seeds),
-		failures:           failures,
-		unsupportedReasons: stats.unsupportedReasons,
-		unsupportedSamples: stats.unsupportedSamples,
+	if elapsed > selfhostOracleBudget {
+		t.Fatalf("selfhost oracle exceeded budget elapsed=%s budget=%s", elapsed, selfhostOracleBudget)
 	}
 }
 
-// runSelfhostLexerTokenizeOracle compares the Array-backed tokenization path.
-func runSelfhostLexerTokenizeOracle(t *testing.T) selfhostOracleResult {
+// timedSelfhostOracle logs one aggregate oracle component wall time.
+func timedSelfhostOracle(
+	t *testing.T,
+	name string,
+	run func(*testing.T) selfhostOracleResult,
+) selfhostOracleResult {
 	t.Helper()
-	cases := lexerParitySeedCases(t)
-	got := runStdKizuLexerTokenizeParityHarness(t, cases)
-	failures := countLexerParityFailures(cases, got)
-	if failures > 0 {
-		assertLexerParityCases(t, cases, got)
-	}
-	return selfhostOracleResult{
-		component: "lexer-tokenize",
-		corpus:    "seeds",
-		scanned:   len(cases),
-		compared:  len(cases),
-		seeds:     len(cases),
-		failures:  failures,
-	}
-}
-
-// runSelfhostLexerSourceOracle compares the source-owned selfhost package lexer surface.
-func runSelfhostLexerSourceOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	cases := collectLexerParitySelfhostSources(t)
-	got := runStdKizuLexerParityHarness(t, cases)
-	failures := countLexerParityFailures(cases, got)
-	if failures > 0 {
-		assertLexerParityCases(t, cases, got)
-	}
-	return selfhostOracleResult{
-		component: "lexer",
-		corpus:    "selfhost",
-		scanned:   len(cases),
-		compared:  len(cases),
-		failures:  failures,
-	}
-}
-
-// runSelfhostLexerTokenizeSourceOracle compares selfhost sources through token arrays.
-func runSelfhostLexerTokenizeSourceOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	cases := collectLexerParitySelfhostSources(t)
-	got := runStdKizuLexerTokenizeParityHarness(t, cases)
-	failures := countLexerParityFailures(cases, got)
-	if failures > 0 {
-		assertLexerParityCases(t, cases, got)
-	}
-	return selfhostOracleResult{
-		component: "lexer-tokenize",
-		corpus:    "selfhost",
-		scanned:   len(cases),
-		compared:  len(cases),
-		failures:  failures,
-	}
+	start := time.Now()
+	result := run(t)
+	t.Logf("oracle elapsed %s=%s", name, time.Since(start))
+	return result
 }
 
 // runSelfhostLexerProductionOracle checks the selfhost lexer component gate.
@@ -153,48 +91,6 @@ func runSelfhostLexerProductionOracle(t *testing.T) selfhostOracleResult {
 	}
 }
 
-// runSelfhostParserOracle compares the supported examples through the parser oracle.
-func runSelfhostParserOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	examples, stats := collectParserParityExamples(t)
-	seeds := parserParitySeedCases(t)
-	cases := append(seeds, examples...)
-	got := runStdKizuParserParityHarness(t, cases)
-	failures := countParserParityFailures(cases, got)
-	if failures > 0 {
-		assertParserParityCases(t, cases, got)
-	}
-	return selfhostOracleResult{
-		component:          "parser",
-		corpus:             "examples",
-		scanned:            stats.scanned,
-		compared:           len(cases),
-		unsupported:        stats.unsupported,
-		seeds:              len(seeds),
-		failures:           failures,
-		unsupportedReasons: stats.unsupportedReasons,
-		unsupportedSamples: stats.unsupportedSamples,
-	}
-}
-
-// runSelfhostParserSourceOracle compares the source-owned selfhost package parser surface.
-func runSelfhostParserSourceOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	cases := collectParserParitySelfhostSources(t)
-	got := runStdKizuParserParityHarness(t, cases)
-	failures := countParserParityFailures(cases, got)
-	if failures > 0 {
-		assertParserParityCases(t, cases, got)
-	}
-	return selfhostOracleResult{
-		component: "parser",
-		corpus:    "selfhost",
-		scanned:   len(cases),
-		compared:  len(cases),
-		failures:  failures,
-	}
-}
-
 // runSelfhostParserProductionOracle checks the selfhost parser component gate.
 func runSelfhostParserProductionOracle(t *testing.T) selfhostOracleResult {
 	t.Helper()
@@ -204,20 +100,6 @@ func runSelfhostParserProductionOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "selfhost",
 		scanned:   1,
 		compared:  1,
-		failures:  failures,
-	}
-}
-
-// runSelfhostParserErrorOracle checks parser errors stay recoverable and readable.
-func runSelfhostParserErrorOracle(t *testing.T) selfhostOracleResult {
-	t.Helper()
-	failures := countStdKizuParserErrorSeedFailures(t)
-	cases := stdKizuParserErrorSeedCases()
-	return selfhostOracleResult{
-		component: "parser-errors",
-		corpus:    "negative-seeds",
-		scanned:   len(cases),
-		compared:  len(cases),
 		failures:  failures,
 	}
 }
@@ -263,44 +145,6 @@ func collectLexerParitySelfhostSources(t *testing.T) []lexerParityCase {
 	}
 	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
 	return cases
-}
-
-// countLexerParityFailures returns a compact failure count for oracle logging.
-func countLexerParityFailures(cases []lexerParityCase, got map[string]string) int {
-	wantNames := map[string]bool{}
-	failures := 0
-	for _, testCase := range cases {
-		wantNames[testCase.name] = true
-		actual, ok := got[testCase.name]
-		if !ok || actual != testCase.want {
-			failures++
-		}
-	}
-	for name := range got {
-		if !wantNames[name] {
-			failures++
-		}
-	}
-	return failures
-}
-
-// countParserParityFailures returns a compact failure count for oracle logging.
-func countParserParityFailures(cases []parserParityCase, got map[string]string) int {
-	wantNames := map[string]bool{}
-	failures := 0
-	for _, testCase := range cases {
-		wantNames[testCase.name] = true
-		actual, ok := got[testCase.name]
-		if !ok || actual != testCase.want {
-			failures++
-		}
-	}
-	for name := range got {
-		if !wantNames[name] {
-			failures++
-		}
-	}
-	return failures
 }
 
 // logSelfhostOracleResult reports the stable summary required by issue gates.

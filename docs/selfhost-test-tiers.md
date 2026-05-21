@@ -34,10 +34,16 @@ just selfhost-oracle
 ```
 
 It runs with `KIZU_RUN_SELFHOST_ORACLE=1` and compares Go-owned behavior against
-Kizu-owned lexer, parser, source, resolver, type, ownership, IR, and backend
-oracle paths. Production resolver/type/ownership/IR/backend checks run through a
-single Kizu-owned pipeline oracle so that the selfhost package is loaded,
-checked, and interpreted once for those stages.
+Kizu-owned production lexer, parser, source, resolver, type, ownership, IR, and
+backend oracle paths. Production resolver/type/ownership/IR/backend checks run
+through a single Kizu-owned pipeline oracle so that the selfhost package is
+loaded, checked, and interpreted once for those stages.
+
+The aggregate oracle has a 60 second local budget enforced by
+`TestSelfhostOracleRunner`. `just selfhost-oracle` sets `GOGC=1000` for this
+allocation-heavy interpreted path. The broader std lexer/parser examples and
+selfhost-source parity harnesses remain in ordinary `go test ./cmd/kizu` tests;
+the aggregate oracle must not duplicate them.
 
 Measured locally during #456/#503:
 
@@ -56,6 +62,12 @@ Measured locally on 2026-05-21 during #458 CLI work:
 | Command | Elapsed |
 | --- | ---: |
 | `just selfhost-oracle` | 84.0s |
+
+Measured locally on 2026-05-22 during #568:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-oracle` | 54.8s |
 
 ## Direct Heavyweight Gates
 
@@ -223,6 +235,13 @@ again dominated by interpreter evaluation and allocation/GC work. The gate now
 uses one Kizu-owned CLI contract entry and leaves detailed backend artifact and
 host-link validation to `TestSelfhostBackendArtifactGate`.
 
+During #568, profiling the aggregate oracle showed interpreter allocation
+pressure in lexical environments, struct values, std wrapper calls, and
+qualified namespace rendering. The current mitigation returns unborrowed child
+environments to pools and caches immutable qualified AST names per interpreter
+run. The aggregate oracle remains one interpreted production pass and must stay
+under its 60s budget before adding more oracle coverage.
+
 ## Current Decision
 
 Do not cache or share checked selfhost program state between tests yet. The
@@ -238,7 +257,7 @@ available for debugging, and avoids silently sharing mutable interpreter state.
 The accepted policy for now is:
 
 - daily gate: fast default `go test ./...`;
-- aggregate oracle: explicit bootstrap/preflight command;
+- aggregate oracle: explicit bootstrap/preflight command with a 60s local budget;
 - direct heavyweight gates: explicit debugging commands;
 - aggregate production checks: one pass through `selfhost::pipeline_oracle`;
 - CLI contract checks: one pass through `selfhost::cli_contract_gate`;
