@@ -196,7 +196,7 @@ func countCheckParityGuardFailures(
 	return failures
 }
 
-// checkParityGuardCases returns the #530 unsupported behavior contract.
+// checkParityGuardCases returns the #530/#602 unsupported behavior contract.
 func checkParityGuardCases() []checkParityGuardCase {
 	return []checkParityGuardCase{
 		{
@@ -225,7 +225,7 @@ func checkParityGuardCases() []checkParityGuardCase {
 		},
 		{
 			name:     "unsupported_target",
-			args:     []string{"check", "selfhost/tests/cli/parse_ok_minimal.kizu"},
+			args:     []string{"check", "selfhost/src/main.kizu"},
 			exitCode: 64,
 			stderr:   selfhostUsageStderr(),
 		},
@@ -241,7 +241,7 @@ func checkParityGuardCases() []checkParityGuardCase {
 // appendCheckParityHeader writes durable #530 gate metadata.
 func appendCheckParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "kizu-selfhost-check-parity-v0\n")
-	fmt.Fprintf(out, "issue #530\n")
+	fmt.Fprintf(out, "issue #530/#602\n")
 	fmt.Fprintf(out, "tracker #497\n")
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/check-parity.tsv\n")
 	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
