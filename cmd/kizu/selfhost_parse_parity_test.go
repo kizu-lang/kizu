@@ -217,7 +217,7 @@ func parseParityGuardCases() []parseParityGuardCase {
 
 // selfhostUsageStderr returns the stable hosted CLI usage line.
 func selfhostUsageStderr() string {
-	return "usage: selfhost <check|stage|parse|run> <target>\n"
+	return "usage: selfhost <check|stage|parse|run|test> <target>\n"
 }
 
 // appendParseParityHeader writes durable #525 gate metadata.

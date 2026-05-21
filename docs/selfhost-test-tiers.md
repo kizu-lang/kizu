@@ -69,6 +69,12 @@ Measured locally on 2026-05-22 during #568:
 | --- | ---: |
 | `just selfhost-oracle` | 54.8s |
 
+Measured locally on 2026-05-22 during #570:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-oracle` | 57.0s |
+
 ## Direct Heavyweight Gates
 
 Direct heavyweight gates are for debugging one selfhost stage without running
@@ -158,10 +164,11 @@ just selfhost-production-from-scratch
 
 That command runs `just selfhost-bootstrap`, `just selfhost-production-gate`,
 `just selfhost-corpus-gate`, `just selfhost-parse-parity-gate`,
-`just selfhost-check-parity-gate`, and `just selfhost-run-parity-gate` in
-sequence. Go is present only as the explicit stage0 bootstrap/oracle harness in
-the first step and as the test runner for the gate; the production commands are
-direct executions of the hosted artifact.
+`just selfhost-check-parity-gate`, `just selfhost-run-parity-gate`, and
+`just selfhost-test-parity-gate` in sequence. Go is present only as the
+explicit stage0 bootstrap/oracle harness in the first step and as the test
+runner for the gate; the production commands are direct executions of the
+hosted artifact.
 
 Measured locally on 2026-05-21 during #461:
 
@@ -176,6 +183,13 @@ Measured locally on 2026-05-22 during #569:
 | --- | ---: |
 | `just selfhost-run-parity-gate` after bootstrap | 0.52s |
 | `just selfhost-production-from-scratch` including run parity | about 58s |
+
+Measured locally on 2026-05-22 during #570:
+
+| Command | Elapsed |
+| --- | ---: |
+| `just selfhost-test-parity-gate` after bootstrap | 0.69s |
+| `just selfhost-production-from-scratch` including run/test parity | 61.6s |
 
 ## Supported Corpus Gate
 
