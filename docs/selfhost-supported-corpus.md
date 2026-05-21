@@ -70,3 +70,10 @@ just selfhost-check-parity-gate
 That gate records command args, fixture paths, checked-in stdout/stderr golden
 paths, expected exit codes, and hosted-artifact output fingerprints in
 `target/selfhost/reports/check-parity.txt`.
+
+Issue #531 defines the first hosted `run <file>` and `kizu test <file>`
+strategy, but those cases are not part of the production-switch corpus yet.
+Their implementation children must use separate `run-parity.tsv` and
+`test-parity.tsv` manifests, emit/link/execute backend artifacts, and record
+`go.cmd-kizu-fallback none` before any row is promoted into this supported
+corpus.

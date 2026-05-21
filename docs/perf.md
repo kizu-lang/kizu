@@ -64,6 +64,17 @@ Selfhost compiler checks are split into daily and heavyweight tiers in
 [`docs/selfhost-test-tiers.md`](selfhost-test-tiers.md). The daily gate must not
 hide multi-minute interpreted selfhost oracle work inside default `go test`.
 
+Hosted `run <file>` and `kizu test <file>` parity gates use backend artifact
+emit/link/execute as decided by #531. Those gates must record elapsed time,
+emitted artifact paths, emitted artifact byte size, report byte size, and the
+explicit link/execute command in `target/selfhost/reports/`. The first gates
+must reuse an existing passing `target/selfhost/stage2/selfhost` artifact by
+default and keep generated files under bounded `target/selfhost/run/` or
+`target/selfhost/test/` subdirectories. They must not introduce a persistent
+cache outside the cache design above; if a run/test cache is added later, the
+same change must define key inputs, prune behavior, status reporting, and
+no-op rebuild measurement.
+
 v0.1 の完了条件に Rust 同等以上の runtime performance guarantee は含めない。
 この段階では、継続的に同じ対象を測り、悪化を見つけられることを優先する。
 
