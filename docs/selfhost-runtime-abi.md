@@ -445,6 +445,8 @@ For #525, the hosted CLI also accepts the bounded `parse <file>` parity cases in
 ```sh
 selfhost parse selfhost/tests/cli/parse_ok_minimal.kizu
 selfhost parse selfhost/tests/cli/parse_ok_minimal_alias.kizu
+selfhost parse selfhost/tests/cli/parse_print_hello.kizu
+selfhost parse selfhost/tests/cli/parse_print_hello_alias.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr_alias.kizu
 ```
@@ -453,12 +455,15 @@ The parse parity gate compares byte-for-byte stdout, stderr, and exit codes
 against checked-in goldens and runs through `target/selfhost/stage2/selfhost`.
 It does not invoke Go `cmd/kizu` as a fallback. For #579, the positive minimal
 parse shape is source-driven: any file containing exactly the newline-terminated
-`fn main() { return; }` source uses the same hosted parse path. For #586, the
-negative missing-expression shape is also source-driven: any file containing
-exactly the newline-terminated `fn main() { let value = ; }` source uses the same
-hosted diagnostic path. The alias fixtures prove these parse branches are no
-longer bound to a single path. Broader parse and diagnostic recovery remain
-deferred. The current CLI parity support and deferrals are recorded in
+`fn main() { return; }` source uses the same hosted parse path. For #594, the
+print-call shape reads the target once and recognizes the newline-terminated
+multi-line `print("hello, kizu")` source shape, emitting the same canonical
+parse stdout as the Go CLI. For #586, the negative missing-expression shape is
+also source-driven: any file containing exactly the newline-terminated
+`fn main() { let value = ; }` source uses the same hosted diagnostic path. The
+alias fixtures prove these parse branches are no longer bound to a single path.
+Broader parse and diagnostic recovery remain deferred. The current CLI parity
+support and deferrals are recorded in
 `docs/selfhost-cli-parity.md`.
 
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
