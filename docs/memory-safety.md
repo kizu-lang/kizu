@@ -101,6 +101,17 @@ policy.
 - A handle cannot outlive its arena.
 - A known handle cannot be used after its source arena is deinitialized.
 - A handle cannot be cast to a raw pointer in safe Kizu.
+- For selfhost AST storage, `std::kizu::ast::NodeId` is the only handle wrapper
+  allowed in AST child lists and AST node relationships.
+- Selfhost AST arena payloads cannot contain owned containers, allocator or I/O
+  capabilities, arbitrary arenas or handles, concurrency capabilities, or raw
+  pointers.
+- This selfhost AST rule is not the final general-purpose `arena<T>` payload
+  policy. Broader arena payload support may be added when explicit cleanup,
+  allocator, borrow, and checker rules are specified.
+- Runtime arena diagnostics cover mismatched or out-of-range handles with
+  unknown provenance; known invalid handle use remains a static checker
+  responsibility.
 
 ### Deferred Cleanup
 
@@ -113,6 +124,9 @@ policy.
   Drop / RAII semantics.
 - The cleanup receiver must satisfy the same ownership and borrow rules as an
   explicit cleanup call when the block exits.
+- Selfhost-owned containers should register `defer x.deinit();` in the same
+  lexical block once the owner is established, unless the owner is returned or a
+  narrower compiler subset does not yet support `defer` for that path.
 
 ### Unsafe and Raw Pointers
 

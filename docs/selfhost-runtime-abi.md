@@ -247,6 +247,29 @@ ast-node-storage`, `reachable handle ast-node-id`, `arena-allocator-boundary
 explicit`, `arena-handle-provenance checked`, and
 `arena-invalid-handle-diagnostic invalid arena handle`.
 
+ADR-0062 fixes the selfhost AST storage constraints for this ABI slice. This is
+not the final general-purpose `arena<T>` payload policy for all Kizu programs;
+future arena payload expansion remains allowed when explicit cleanup,
+allocator, borrow, and checker rules are specified.
+`AstNode` arena payloads may contain scalar copy values, spans, token/symbol
+ids, child ranges, `NodeId`, borrowed source views tied to the owning `Ast`, and
+payload records that recursively obey the same rule. They must not contain
+owned containers, allocator or I/O capabilities, arbitrary arenas or handles,
+concurrency capabilities, or raw pointers. Variable-length AST relationships
+must use `ChildRange` into the AST-owned child array.
+
+Static checking owns known safe-side lifetime failures: cross-`Ast` `NodeId`
+use, use after `Ast.deinit()`, `NodeId` outliving the owning `Ast`, raw-pointer
+escape, and storing borrowed views returned by `Array.at`, `String.as_bytes`, or
+`arena.get`. Runtime `@kizu_rt_arena_get` diagnostics are a backstop for unknown
+provenance or corrupted handles, not a replacement for static checking.
+
+`Allocator` is a visible copyable capability. Passing it to an owned container
+constructor reads the capability and the created runtime object stores the
+allocator pointer needed for its own `deinit`; the allocator itself is not moved.
+Allocating operations that can fail return `!T` or `!void`. No hosted selfhost
+path may add a hidden default allocator or implicit global allocator.
+
 Box storage remains deferred to #496 unless a later selfhost IR artifact lists a
 concrete reachable call site.
 
