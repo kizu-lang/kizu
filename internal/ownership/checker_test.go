@@ -800,6 +800,71 @@ fn main() {
 	}
 }
 
+// TestCheckImplMethodReturnTypeFeedsGenericCall keeps method result types precise.
+func TestCheckImplMethodReturnTypeFeedsGenericCall(t *testing.T) {
+	source := `struct Counter { value: i64 }
+impl Counter {
+    fn len(self: Counter) -> i64 {
+        return self.value;
+    }
+}
+fn ExpectEqual<T>(expected: T, actual: T) -> void {
+    return;
+}
+fn main() {
+    let counter = Counter { value: 1 };
+    ExpectEqual<i64>(1, counter.len());
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsImplMethodReturnTypeMismatch checks generic calls see method returns.
+func TestCheckRejectsImplMethodReturnTypeMismatch(t *testing.T) {
+	source := `struct Counter { value: i64 }
+impl Counter {
+    fn label(self: Counter) -> []const u8 {
+        return "one";
+    }
+}
+fn ExpectEqual<T>(expected: T, actual: T) -> void {
+    return;
+}
+fn main() {
+    let counter = Counter { value: 1 };
+    ExpectEqual<i64>(1, counter.label());
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "arg 2 of `ExpectEqual` expects i64, got []const u8") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestCheckRejectsImplMethodArgCount checks method signatures replace unknown fallback.
+func TestCheckRejectsImplMethodArgCount(t *testing.T) {
+	source := `struct Counter { value: i64 }
+impl Counter {
+    fn add(self: Counter, value: i64) -> i64 {
+        return value;
+    }
+}
+fn main() {
+    let counter = Counter { value: 1 };
+    print(counter.add());
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "`Counter.add` expects 1 args, got 0") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsGenericMoveCallWithoutTypeArgs keeps generic calls explicit.
 func TestCheckRejectsGenericMoveCallWithoutTypeArgs(t *testing.T) {
 	source := `fn Pass<T>(value: T) -> T {

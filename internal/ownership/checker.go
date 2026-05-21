@@ -12,6 +12,7 @@ import (
 // Checker validates ownership and move rules for a parsed program.
 type Checker struct {
 	functions       map[string]*functionInfo
+	impls           map[string]map[string]*functionInfo
 	structs         map[string]map[string]string
 	enums           map[string]map[string]bool
 	unions          map[string]map[string]string
@@ -68,6 +69,7 @@ type scope struct {
 func New() *Checker {
 	return &Checker{
 		functions: map[string]*functionInfo{},
+		impls:     map[string]map[string]*functionInfo{},
 		structs:   map[string]map[string]string{},
 		enums:     map[string]map[string]bool{},
 		unions:    map[string]map[string]string{},
@@ -152,23 +154,51 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 // collectFunctions registers top-level signatures before body checks.
 func (c *Checker) collectFunctions(program *ast.Program) error {
 	for _, decl := range program.Decls {
-		fn, ok := decl.(*ast.FunctionDecl)
-		if !ok {
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			c.functions[d.Name] = functionInfoFromDecl(d.Name, d)
+		case *ast.ImplDecl:
+			if err := c.collectImpl(d); err != nil {
+				return err
+			}
+		default:
 			continue
-		}
-		params := make([]paramInfo, 0, len(fn.Params))
-		for _, param := range fn.Params {
-			params = append(params, paramInfo{
-				typeName: param.TypeName, borrow: param.Borrow, mutBorrow: param.MutBorrow,
-				comptime: param.Comptime,
-			})
-		}
-		c.functions[fn.Name] = &functionInfo{
-			name: fn.Name, params: params, returnType: fn.ReturnType,
-			returnBorrow: fn.ReturnBorrow, decl: fn,
 		}
 	}
 	return nil
+}
+
+// collectImpl registers concrete impl method signatures before call checks.
+func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
+	methods := c.impls[decl.TypeName]
+	if methods == nil {
+		methods = map[string]*functionInfo{}
+		c.impls[decl.TypeName] = methods
+	}
+	for _, method := range decl.Methods {
+		if _, exists := methods[method.Name]; exists {
+			return fmt.Errorf("move error: duplicate impl method `%s.%s`",
+				decl.TypeName, method.Name)
+		}
+		name := fmt.Sprintf("%s.%s", decl.TypeName, method.Name)
+		methods[method.Name] = functionInfoFromDecl(name, method)
+	}
+	return nil
+}
+
+// functionInfoFromDecl extracts the ownership-facing signature for a function.
+func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
+	params := make([]paramInfo, 0, len(fn.Params))
+	for _, param := range fn.Params {
+		params = append(params, paramInfo{
+			typeName: param.TypeName, borrow: param.Borrow, mutBorrow: param.MutBorrow,
+			comptime: param.Comptime,
+		})
+	}
+	return &functionInfo{
+		name: name, params: params, returnType: fn.ReturnType,
+		returnBorrow: fn.ReturnBorrow, decl: fn,
+	}
 }
 
 // checkFunction validates one function body.
@@ -3154,6 +3184,9 @@ func (c *Checker) checkNonArenaMethod(
 	if ok || err != nil {
 		return typ, err
 	}
+	if typ, ok, err := c.checkImplMethodCall(value, name, args, env); ok || err != nil {
+		return typ, err
+	}
 	return c.checkPlainMethodArgs(args, env)
 }
 
@@ -4384,6 +4417,81 @@ func (c *Checker) checkPlainMethodArgs(args []ast.Expression, env *scope) (strin
 	return "!unknown", nil
 }
 
+// checkImplMethodCall applies a concrete impl method signature to a receiver call.
+func (c *Checker) checkImplMethodCall(
+	value *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	method := c.implMethod(value.typeName, name)
+	if method == nil {
+		return "", false, nil
+	}
+	if len(method.params) == 0 {
+		return "", true, fmt.Errorf("move error: method `%s` must have self parameter",
+			method.name)
+	}
+	if len(args) != len(method.params)-1 {
+		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
+			method.name, len(method.params)-1, len(args))
+	}
+	if err := c.checkImplMethodArgs(method, args, env); err != nil {
+		return "", true, err
+	}
+	return returnTypeName(method), true, nil
+}
+
+// checkImplMethodArgs applies ownership effects for explicit method arguments.
+func (c *Checker) checkImplMethodArgs(
+	method *functionInfo,
+	args []ast.Expression,
+	env *scope,
+) error {
+	call := &functionInfo{name: method.name, params: method.params[1:], decl: method.decl}
+	borrowed, err := c.activateBorrowArgs(call, args, env)
+	if err != nil {
+		return err
+	}
+	defer releaseBorrows(borrowed)
+	for idx, arg := range args {
+		if err := c.checkImplMethodArg(method, idx+1, arg, env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkImplMethodArg mirrors user-call argument ownership for one method parameter.
+func (c *Checker) checkImplMethodArg(
+	method *functionInfo,
+	paramIndex int,
+	arg ast.Expression,
+	env *scope,
+) error {
+	param := method.params[paramIndex]
+	if param.typeName == "Function" && param.comptime {
+		return c.checkFunctionNameParam(method.name, method, paramIndex, arg)
+	}
+	if param.comptime {
+		_, err := c.readExpr(arg, env)
+		return err
+	}
+	if param.borrow {
+		if param.mutBorrow {
+			return nil
+		}
+		_, err := c.readExpr(arg, env)
+		return err
+	}
+	if isAstType(param.typeName) {
+		_, err := c.readExpr(arg, env)
+		return err
+	}
+	_, err := c.moveExpr(arg, env)
+	return err
+}
+
 // checkArenaAdd moves one value into an arena and returns a handle.
 func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
 	if len(args) != 1 {
@@ -4917,6 +5025,15 @@ func returnTypeName(fn *functionInfo) string {
 		return "void"
 	}
 	return fn.returnType
+}
+
+// implMethod returns the concrete method signature for typeName when known.
+func (c *Checker) implMethod(typeName string, method string) *functionInfo {
+	methods := c.impls[typeName]
+	if methods == nil {
+		return nil
+	}
+	return methods[method]
 }
 
 // substituteOwnershipType instantiates simple generic wrapper type spellings.
