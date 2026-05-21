@@ -37,6 +37,85 @@ none`; it does not bootstrap from scratch by default.
 Unsupported commands, wrong arity, and arguments beginning with `-` remain
 deterministic usage/unsupported paths with exit code `64`.
 
+## Hosted Run And Test Strategy
+
+Issue #531 fixes the execution model for the first no-Go hosted `run <file>`
+and `kizu test <file>` children. Hosted execution uses backend artifact
+emit/link/execute. It must not add a selfhost interpreter, Go `cmd/kizu`
+fallback, Go interpreter fallback, or hidden runtime dispatch.
+
+The hosted compiler artifact remains responsible for parsing, checking, and
+lowering the selected fixture. The runnable program or test is a separate
+backend artifact linked with the explicit selfhost runtime. The parity gate may
+own executing that emitted artifact for the first child issue; the hosted
+compiler must still record `go.cmd-kizu-fallback none`. A future single-command
+launcher may wrap the same sequence, but broad user-facing run/test parity is
+not claimed until the bounded manifests below pass through hosted-artifact
+gates.
+
+The first `run <file>` child must start with this manifest shape:
+
+```text
+selfhost/tests/cli/run-parity.tsv
+# Columns: name command fixture exit stdout_golden stderr_golden artifact_mode
+run_hello run selfhost/tests/cli/run_hello.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact
+run_invalid_missing_expr run selfhost/tests/cli/run_invalid_missing_expr.kizu 1 selfhost/tests/cli/golden/run_invalid_missing_expr.stdout selfhost/tests/cli/golden/run_invalid_missing_expr.stderr hosted-artifact
+```
+
+`run_hello.kizu` is the first positive fixture:
+
+```kizu
+fn main() {
+    print("hello, kizu");
+}
+```
+
+Its golden output is stdout `hello, kizu\n`, empty stderr, and exit code `0`.
+The negative fixture reuses the smallest parse failure shape,
+`fn main() { let value = ; }`; its golden output is empty stdout, the hosted
+parse diagnostic on stderr, and exit code `1`. The `run` child must not execute
+an artifact when frontend checking fails.
+
+The first `kizu test <file>` child layers on the same backend artifact path. It
+does not add test discovery. It emits a test artifact whose entry runs `main`;
+after `main` returns without unhandled error or test trap, the test runner
+writes `test: ok\n`.
+
+```text
+selfhost/tests/cli/test-parity.tsv
+# Columns: name command fixture exit stdout_golden stderr_golden artifact_mode
+test_expect_ok test selfhost/tests/cli/test_expect_ok.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact
+test_expect_failure test selfhost/tests/cli/test_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact
+```
+
+`test_expect_ok.kizu` is the first positive fixture:
+
+```kizu
+fn main() -> !void {
+    std::testing::expect(true);
+    return;
+}
+```
+
+Its golden output is stdout `test: ok\n`, empty stderr, and exit code `0`.
+`test_expect_failure.kizu` uses `std::testing::expect(false)` and must produce
+empty stdout, a deterministic assertion diagnostic containing
+`expected condition to be true`, and exit code `1`.
+
+The first `run` and `test` children use the existing `selfhost-abi-v0` runtime
+surface: explicit `std::io::blocking`, `std::io::write_stdout`,
+`std::io::write_stderr`, `std::process::exit_code`, process exit, and trap
+boundaries. They do not require new storage layout from #496. They also do not
+require in-artifact child process spawn/wait; the first gate can execute the
+emitted artifact outside the hosted compiler process. If a later single-process
+hosted CLI needs spawn/wait or broader process management, that ABI extension
+must be tracked by #495 before claiming public parity.
+
+Each implementation child must write its artifacts under a bounded
+`target/selfhost/run/` or `target/selfhost/test/` subdirectory, record artifact
+paths and sizes in `target/selfhost/reports/`, and avoid persistent cache growth
+outside the explicit build/cache design.
+
 ## Deferred Slices
 
 These #497 slices are explicitly deferred from the current hosted artifact
@@ -44,8 +123,8 @@ release scope:
 
 | Slice | Decision | Reason | Next child issue shape |
 | --- | --- | --- | --- |
-| `run <file>` | Deferred | Runtime execution responsibility is not defined for the no-Go hosted path. Adding it now would require either an interpreter fallback or a new runtime execution surface. | Define one fixture command contract, runtime ownership boundary, stdout/stderr, exit codes, and hosted-artifact validation. |
-| `kizu test <file>` | Deferred | Test discovery, assertion reporting, and program execution still depend on semantics outside the hosted compiler artifact. | Define one test fixture contract and the no-Go test runner responsibility before implementation. |
+| `run <file>` | Deferred implementation | #531 selects backend artifact emit/link/execute, but no run parity manifest is active yet. | Implement `run-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no Go fallback. |
+| `kizu test <file>` | Deferred implementation | #531 layers single-file tests on the backend artifact path, but no test parity manifest is active yet. | Implement `test-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no discovery. |
 | cache/status, cache/prune, why-rebuild, cache artifact commands | Deferred | Hosted artifact cache ownership, persistence, pruning, and no-op rebuild semantics are not designed. | Split into cache command issues with explicit cache directory, artifact paths, mutation rules, stdout/stderr, and cache-size acceptance checks. |
 | non-critical diagnostic/display parity commands | Deferred | Diagnostic formatting must be command-specific to avoid broad parity without contracts. | Create one command/display contract per slice, including exact stdout/stderr and unsupported behavior. |
 

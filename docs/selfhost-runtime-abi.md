@@ -386,6 +386,31 @@ It does not invoke Go `cmd/kizu` as a fallback. General `parse <file>` parity
 outside those fixture paths remains under #497. The current CLI parity support
 and deferrals are recorded in `docs/selfhost-cli-parity.md`.
 
+For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
+emit/link/execute instead of a selfhost interpreter. The first runnable fixture
+pair only requires the existing stdout, stderr, process exit, and trap
+boundaries:
+
+```text
+std::io::blocking
+std::io::write_stdout
+std::io::write_stderr
+std::process::exit_code
+@kizu_rt_process_exit
+@kizu_rt_trap
+```
+
+The target program/test fixtures do not require new container storage layout or
+box storage, so #496 is not a blocker for the first slice. The hosted compiler
+may still use the existing selfhost storage ABI while parsing, checking, and
+emitting those artifacts.
+
+The first #531 parity gate may execute the emitted program/test artifact outside
+the hosted compiler process. Therefore `selfhost-abi-v0` does not add a process
+spawn/wait primitive for the first slice. If later public `run` parity requires
+the hosted compiler process itself to spawn and wait for child artifacts, that
+new process ABI belongs in #495 and must be documented here before use.
+
 ## Textual LLVM Validation
 
 Until CI requires an LLVM verifier binary, #454 uses this repository command as
