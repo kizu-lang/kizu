@@ -58,9 +58,11 @@ For #579, `parse_ok_minimal_alias.kizu` uses the same positive source text as
 instead of tied to one fixture path. For #594, `parse_print_hello_alias.kizu`
 does the same for the first print-call statement parse shape. For #598,
 `test_expect_ok_alias.kizu` and `test_expect_failure_alias.kizu` do the same for
-the first `std::testing::expect` qualified-call parse shapes. For #586,
-`parse_invalid_missing_expr_alias.kizu` does the same for the first negative
-missing-expression diagnostic path.
+the first `std::testing::expect` qualified-call parse shapes. For #600,
+`check_moved_value_alias.kizu` reuses the `examples/negative/moved_value.kizu`
+source bytes for the first declaration, record-literal, field-access, and direct
+call parse shape. For #586, `parse_invalid_missing_expr_alias.kizu` does the
+same for the first negative missing-expression diagnostic path.
 
 The #530 `check <file>` parity cases are also tracked in a separate CLI
 manifest so repeated local validation stays focused:

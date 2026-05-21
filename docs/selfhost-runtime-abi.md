@@ -451,6 +451,8 @@ selfhost parse selfhost/tests/cli/test_expect_ok.kizu
 selfhost parse selfhost/tests/cli/test_expect_ok_alias.kizu
 selfhost parse selfhost/tests/cli/test_expect_failure.kizu
 selfhost parse selfhost/tests/cli/test_expect_failure_alias.kizu
+selfhost parse examples/negative/moved_value.kizu
+selfhost parse selfhost/tests/cli/check_moved_value_alias.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr_alias.kizu
 ```
@@ -465,13 +467,14 @@ multi-line `print("hello, kizu")` source shape, emitting the same canonical
 parse stdout as the Go CLI. For #598, the `std::testing::expect(true|false)`
 shapes add the first parse slice with an error-union return type and a
 qualified call expression that matches the hosted test artifact sources. For
-#586, the negative missing-expression shape is
-also source-driven: any file containing exactly the newline-terminated
+#600, the moved-value source shape adds a struct declaration, record literal,
+field access, direct calls, and repeated value use to the positive parse
+surface. For #586, the negative missing-expression shape is also source-driven:
+any file containing exactly the newline-terminated
 `fn main() { let value = ; }` source uses the same hosted diagnostic path. The
 alias fixtures prove these parse branches are no longer bound to a single path.
 Broader parse and diagnostic recovery remain deferred. The current CLI parity
-support and deferrals are recorded in
-`docs/selfhost-cli-parity.md`.
+support and deferrals are recorded in `docs/selfhost-cli-parity.md`.
 
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
 emit/link/execute instead of a selfhost interpreter. The first runnable fixture
