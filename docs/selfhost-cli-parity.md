@@ -21,6 +21,8 @@ The current hosted stage2 artifact supports these command slices:
 | `check examples/negative/moved_value.kizu` | #530 negative check fixture, also a #460 corpus row | `just selfhost-check-parity-gate` |
 | `parse selfhost/tests/cli/parse_ok_minimal.kizu` | #525 positive parse fixture only | `just selfhost-parse-parity-gate` |
 | `parse selfhost/tests/cli/parse_invalid_missing_expr.kizu` | #525 negative parse fixture only | `just selfhost-parse-parity-gate` |
+| `run selfhost/tests/cli/run_hello.kizu` | #569 positive run fixture via emitted artifact | `just selfhost-run-parity-gate` |
+| `run selfhost/tests/cli/run_invalid_missing_expr.kizu` | #569 negative frontend failure, no artifact execution | `just selfhost-run-parity-gate` |
 
 `selfhost/tests/cli/parse-parity.tsv` is the #525 parse parity manifest. It
 records command args, fixture paths, expected exit codes, and checked-in
@@ -33,6 +35,13 @@ stdout/stderr golden paths for the bounded `check <file>` slice. The fast
 `just selfhost-check-parity-gate` recipe reuses an existing passing
 `target/selfhost/stage2/selfhost` artifact and records `go.cmd-kizu-fallback
 none`; it does not bootstrap from scratch by default.
+
+`selfhost/tests/cli/run-parity.tsv` is the #569 run parity manifest. It records
+command args, fixture paths, expected exit codes, checked-in stdout/stderr
+golden paths, and the hosted artifact mode for the bounded `run <file>` slice.
+The hosted compiler emits fixture artifacts under `target/selfhost/run/`; the
+gate links and executes those artifacts with the explicit selfhost host runtime
+and records `go.cmd-kizu-fallback none`.
 
 Unsupported commands, wrong arity, and arguments beginning with `-` remain
 deterministic usage/unsupported paths with exit code `64`.
@@ -53,7 +62,7 @@ launcher may wrap the same sequence, but broad user-facing run/test parity is
 not claimed until the bounded manifests below pass through hosted-artifact
 gates.
 
-The first `run <file>` child must start with this manifest shape:
+The first `run <file>` child starts with this manifest shape:
 
 ```text
 selfhost/tests/cli/run-parity.tsv
@@ -123,7 +132,7 @@ release scope:
 
 | Slice | Decision | Reason | Next child issue shape |
 | --- | --- | --- | --- |
-| `run <file>` | Deferred implementation | #531 selects backend artifact emit/link/execute, but no run parity manifest is active yet. | Implement `run-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no Go fallback. |
+| broader `run <file>` | Deferred | #569 only claims the first fixture pair and artifact path. | Extend `run-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no Go fallback. |
 | `kizu test <file>` | Deferred implementation | #531 layers single-file tests on the backend artifact path, but no test parity manifest is active yet. | Implement `test-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no discovery. |
 | cache/status, cache/prune, why-rebuild, cache artifact commands | Deferred | Hosted artifact cache ownership, persistence, pruning, and no-op rebuild semantics are not designed. | Split into cache command issues with explicit cache directory, artifact paths, mutation rules, stdout/stderr, and cache-size acceptance checks. |
 | non-critical diagnostic/display parity commands | Deferred | Diagnostic formatting must be command-specific to avoid broad parity without contracts. | Create one command/display contract per slice, including exact stdout/stderr and unsupported behavior. |

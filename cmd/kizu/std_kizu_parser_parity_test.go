@@ -749,7 +749,13 @@ func isParserParityNegativeCLIFixture(path string) bool {
 	if err != nil {
 		return false
 	}
-	return filepath.ToSlash(rel) == "tests/cli/parse_invalid_missing_expr.kizu"
+	switch filepath.ToSlash(rel) {
+	case "tests/cli/parse_invalid_missing_expr.kizu",
+		"tests/cli/run_invalid_missing_expr.kizu":
+		return true
+	default:
+		return false
+	}
 }
 
 // parserParityExampleCase summarizes one example when both parser subsets can handle it.
