@@ -47,6 +47,7 @@ func TestSelfhostProductionBoundaryRecipes(t *testing.T) {
 	requireRecipeFragment(t, fromScratch, "just selfhost-corpus-gate")
 	requireRecipeFragment(t, fromScratch, "just selfhost-check-parity-gate")
 	requireRecipeFragment(t, fromScratch, "just selfhost-run-parity-gate")
+	requireRecipeFragment(t, fromScratch, "just selfhost-test-parity-gate")
 
 	switchGate := justRecipe(content, "selfhost-switch-gate")
 	requireRecipeFragment(t, switchGate, "just selfhost-production-from-scratch")
