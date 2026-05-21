@@ -145,6 +145,8 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		value, err := l.lowerExpr(s.Value)
 		l.block.Terminator = Terminator{Op: "return", Value: value}
 		return err
+	case *ast.DeferStmt:
+		return fmt.Errorf("ir error: defer is not supported by native lowering yet")
 	case *ast.ExprStmt:
 		_, err := l.lowerExpr(s.Expr)
 		return err

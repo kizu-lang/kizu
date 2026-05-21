@@ -73,6 +73,7 @@ fn dump_node(
         ComptimeExpr(comptime_expr) => try dump_comptime_expr(source, ast, comptime_expr);
         Block(block) => try dump_block(source, ast, block);
         Return(return_node) => try dump_return(source, ast, return_node);
+        Defer(defer_node) => try dump_defer(source, ast, defer_node);
         ExprStmt(expr_stmt) => try dump_expr_stmt(source, ast, expr_stmt);
         If(if_node) => try dump_if(source, ast, if_node);
         Let(let_node) => try dump_let(source, ast, let_node);
@@ -256,6 +257,16 @@ fn dump_return(
 ) -> !void {
     print("Return");
     try dump_node(source, ast, return_node.value);
+    return;
+}
+
+fn dump_defer(
+    source: []const u8,
+    ast: std::kizu::ast::Ast,
+    defer_node: std::kizu::ast::DeferNode
+) -> !void {
+    print("Defer");
+    try dump_node(source, ast, defer_node.expr);
     return;
 }
 
@@ -832,6 +843,7 @@ func parserParityFunctionSignatureSeedCases() []parserParityCase {
 func parserParityFunctionBodySeedCases() []parserParityCase {
 	return []parserParityCase{
 		{name: "seed/fn_return_int", source: "fn main() { return 1; }"},
+		{name: "seed/fn_defer_cleanup", source: "fn main() { defer values.deinit(); return; }"},
 		{name: "seed/fn_expr_stmt_string", source: `fn main() { print("hello"); }`},
 		{name: "seed/fn_expr_stmt_precedence", source: "fn main() { print(1 + 2 * 3); }"},
 		{name: "seed/fn_expr_stmt_mul_then_add", source: "fn main() { print(1 * 2 + 3); }"},
@@ -1308,6 +1320,8 @@ func summarizeStatementSubset(stmt kizuast.Statement) ([]string, string) {
 		return summarizeAssignSubset(node)
 	case *kizuast.ReturnStmt:
 		return summarizeReturnSubset(node)
+	case *kizuast.DeferStmt:
+		return summarizeDeferSubset(node)
 	case *kizuast.ExprStmt:
 		return summarizeExprStmtSubset(node)
 	case *kizuast.IfStmt:
@@ -1369,6 +1383,15 @@ func summarizeReturnSubset(node *kizuast.ReturnStmt) ([]string, string) {
 		return nil, reason
 	}
 	return append([]string{"Return"}, value...), ""
+}
+
+// summarizeDeferSubset summarizes deferred cleanup statements.
+func summarizeDeferSubset(node *kizuast.DeferStmt) ([]string, string) {
+	value, reason := summarizeExprSubset(node.Expr)
+	if reason != "" {
+		return nil, reason
+	}
+	return append([]string{"Defer"}, value...), ""
 }
 
 // summarizeExprStmtSubset summarizes expression statements.

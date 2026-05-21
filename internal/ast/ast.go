@@ -394,6 +394,19 @@ func (s *ReturnStmt) String() string {
 	return "return " + s.Value.String() + ";"
 }
 
+// DeferStmt registers one cleanup expression for the current lexical block.
+type DeferStmt struct {
+	Expr Expression
+}
+
+// statementNode marks DeferStmt as a statement node.
+func (*DeferStmt) statementNode() {}
+
+// String returns a compact debug representation of the defer statement.
+func (s *DeferStmt) String() string {
+	return "defer " + s.Expr.String() + ";"
+}
+
 // IfStmt represents a conditional branch.
 type IfStmt struct {
 	Condition   Expression

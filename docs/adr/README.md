@@ -79,3 +79,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0058: selfhost AST NodeId arena](0058-selfhost-ast-nodeid-arena.md)
 - [ADR-0059: explicit lifetime syntax for borrowed views](0059-explicit-lifetime-syntax.md) (置換)
 - [ADR-0060: borrowed-return provenance without named lifetimes](0060-borrowed-return-provenance.md)
+- [ADR-0061: defer explicit cleanup statement](0061-defer-explicit-cleanup.md)

@@ -1012,7 +1012,7 @@ func qualifyStdTypeName(module string, typ string) string {
 			"BinaryNode", "FieldExprNode", "DerefExprNode", "CallNode", "TypeApplyExprNode",
 			"CastExprNode", "IndexExprNode", "StructLiteralExprNode", "StructFieldInitNode",
 			"ArenaNewExprNode", "TryExprNode", "ComptimeExprNode",
-			"BlockNode", "IfNode", "LetNode", "AssignNode", "ReturnNode", "ExprStmtNode",
+			"BlockNode", "IfNode", "LetNode", "AssignNode", "ReturnNode", "DeferNode", "ExprStmtNode",
 			"WhileNode", "ForNode", "BreakNode", "ContinueNode", "ParamNode", "FieldNode",
 			"StructDeclNode", "ImportDeclNode", "EnumDeclNode", "UnionDeclNode",
 			"UnionVariantNode", "MatchNode", "MatchArmNode", "UnsafeNode", "ComptimeIfNode",

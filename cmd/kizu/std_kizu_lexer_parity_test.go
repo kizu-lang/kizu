@@ -65,6 +65,7 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         Let => return false;
         Var => return false;
         Return => return false;
+        Defer => return false;
         If => return false;
         Else => return false;
         While => return false;
@@ -129,6 +130,7 @@ fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
         Let => print("Let");
         Var => print("Var");
         Return => print("Return");
+        Defer => print("Defer");
         If => print("If");
         Else => print("Else");
         While => print("While");
@@ -214,6 +216,7 @@ var lexerParityTokenKinds = map[token.Type]string{
 	token.Let:         "Let",
 	token.Var:         "Var",
 	token.Return:      "Return",
+	token.Defer:       "Defer",
 	token.If:          "If",
 	token.Else:        "Else",
 	token.While:       "While",

@@ -117,6 +117,7 @@ std::process
 kizu test <file>
 self-host compiler skeleton
 module/import syntax and manifest groundwork
+defer explicit cleanup statement
 ```
 
 v0.2 の stdlib は self-host compiler を進めるための最小 subset です。
@@ -353,6 +354,42 @@ fn log(message: []const u8) -> void {
     print(message);
 }
 ```
+
+### 6.3.1 defer cleanup statement
+
+`defer <expr-stmt>;` は、現在の lexical block に明示 cleanup 呼び出しを登録します。
+function body も block として扱います。
+
+```kizu
+fn main() -> !void {
+    let allocator = std::mem::page_allocator();
+    let values = std::array::Array<i64>(allocator);
+    defer values.deinit();
+
+    try values.append(1);
+    return;
+}
+```
+
+登録された cleanup は block を出るときに、登録順の逆順で実行します。
+通常の block exit、明示 `return`、`try` などの error return path でも実行します。
+
+v0.2 で許可する形は cleanup method call の expression statement だけです。
+
+```kizu
+defer values.deinit();
+defer text.deinit();
+defer users.deinit();
+```
+
+`defer let ...;`、`defer return ...;`、`defer { ... }`、
+`defer defer ...;` は構文として扱いません。
+deferred expression は `.deinit()` のような `void` cleanup call でなければなりません。
+cleanup 対象は自動探索しません。Drop / RAII / implicit destructor はありません。
+
+deferred cleanup は明示 cleanup call と同じ ownership rule で検査します。
+登録時点で receiver を参照できる必要があり、block exit で実行する時点でも
+receiver が move 済み、deinit 済み、borrow 中なら拒否します。
 
 ### 6.4 struct
 
@@ -1878,6 +1915,7 @@ let declaration
 var declaration
 assignment
 return statement
+defer cleanup statement
 if statement
 if expression
 while statement
@@ -1918,6 +1956,7 @@ arena / handle
 error union / try
 limited comptime
 std task / channel / thread prototypes
+defer cleanup statement
 ```
 
 ### Milestone 4: Type checker

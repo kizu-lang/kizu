@@ -102,6 +102,18 @@ policy.
 - A known handle cannot be used after its source arena is deinitialized.
 - A handle cannot be cast to a raw pointer in safe Kizu.
 
+### Deferred Cleanup
+
+- `defer <expr-stmt>;` registers an explicit cleanup call for the current
+  lexical block; function bodies are blocks.
+- Deferred cleanup runs in reverse registration order when the block exits,
+  including explicit return and error-return paths.
+- The first supported form is a cleanup method call such as `defer x.deinit();`.
+- Deferred cleanup does not discover resources automatically and does not add
+  Drop / RAII semantics.
+- The cleanup receiver must satisfy the same ownership and borrow rules as an
+  explicit cleanup call when the block exits.
+
 ### Unsafe and Raw Pointers
 
 - Raw pointer types are distinct from safe borrows.
@@ -234,6 +246,7 @@ memory-safety invariants to representative examples.
 | handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu`; invalid-index handles are covered by `internal/interp` unit tests |
 | handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
 | handle is not a raw pointer | | `examples/negative/handle_as_pointer.kizu` |
+| deferred cleanup is explicit and ownership-checked | `examples/defer_cleanup.kizu`, `examples/defer_order.kizu` | `examples/negative/defer_non_cleanup_expr.kizu`, `examples/negative/defer_invalid_statement.kizu`, `examples/negative/defer_after_move.kizu`, `examples/negative/defer_after_explicit_deinit.kizu`, `examples/negative/defer_cleanup_while_borrowed.kizu` |
 | unsafe is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
 | unsafe does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |

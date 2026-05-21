@@ -193,11 +193,23 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 // checkBlock validates statements in a lexical block.
 func (c *Checker) checkBlock(block *ast.BlockStmt, env *scope) error {
 	lastUses := blockLastUses(block)
+	defers := []ast.Expression{}
 	for idx, stmt := range block.Statements {
+		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
+			if err := c.checkDeferStmt(deferStmt, env); err != nil {
+				return err
+			}
+			defers = append(defers, deferStmt.Expr)
+			env.releaseLastUseBorrows(idx, lastUses)
+			continue
+		}
 		if err := c.checkStmt(stmt, env); err != nil {
 			return err
 		}
 		env.releaseLastUseBorrows(idx, lastUses)
+	}
+	if err := c.checkDeferredCleanups(defers, env); err != nil {
+		return err
 	}
 	return env.checkPendingTasks()
 }
@@ -211,6 +223,8 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 		return c.checkAssignStmt(s, env)
 	case *ast.ReturnStmt:
 		return c.checkReturnStmt(s, env)
+	case *ast.DeferStmt:
+		return fmt.Errorf("move error: defer statement must appear directly in a block")
 	case *ast.ExprStmt:
 		return c.checkExprStmt(s, env)
 	case *ast.IfStmt:
@@ -232,6 +246,31 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 	default:
 		return fmt.Errorf("move error: unsupported statement %T", stmt)
 	}
+}
+
+// checkDeferStmt validates a deferred cleanup registration without running it.
+func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
+	call, ok := stmt.Expr.(*ast.CallExpr)
+	if !ok {
+		return fmt.Errorf("move error: defer expects cleanup method call")
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "deinit" {
+		return fmt.Errorf("move error: defer expects cleanup method call")
+	}
+	_, err := c.readExpr(field.Receiver, env)
+	return err
+}
+
+// checkDeferredCleanups applies deferred cleanup effects in reverse order.
+func (c *Checker) checkDeferredCleanups(defers []ast.Expression, env *scope) error {
+	for idx := len(defers) - 1; idx >= 0; idx-- {
+		stmt := &ast.ExprStmt{Expr: defers[idx], Semicolon: true}
+		if err := c.checkExprStmt(stmt, env); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkReturnStmt rejects borrowed values before applying normal move rules.
@@ -1143,12 +1182,32 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail boo
 	if block == nil || len(block.Statements) == 0 {
 		return "", fmt.Errorf("move error: expression block must end with a value")
 	}
-	for _, stmt := range block.Statements[:len(block.Statements)-1] {
+	lastUses := blockLastUses(block)
+	defers := []ast.Expression{}
+	lastIdx := len(block.Statements) - 1
+	for idx, stmt := range block.Statements[:lastIdx] {
+		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
+			if err := c.checkDeferStmt(deferStmt, env); err != nil {
+				return "", err
+			}
+			defers = append(defers, deferStmt.Expr)
+			env.releaseLastUseBorrows(idx, lastUses)
+			continue
+		}
 		if err := c.checkStmt(stmt, env); err != nil {
 			return "", err
 		}
+		env.releaseLastUseBorrows(idx, lastUses)
 	}
-	return c.checkStmtValue(block.Statements[len(block.Statements)-1], env, moveTail)
+	valueType, err := c.checkStmtValue(block.Statements[lastIdx], env, moveTail)
+	if err != nil {
+		return "", err
+	}
+	env.releaseLastUseBorrows(lastIdx, lastUses)
+	if err := c.checkDeferredCleanups(defers, env); err != nil {
+		return "", err
+	}
+	return valueType, nil
 }
 
 // checkStmtValue checks a value-producing tail statement.
@@ -3110,7 +3169,7 @@ func (c *Checker) checkAstAddStmtMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
-	case "add_return":
+	case "add_return", "add_defer":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
@@ -4479,7 +4538,7 @@ func astNodeIDMethod(name string) bool {
 	case "add_node", "add_int", "add_string", "add_type_name", "add_var", "add_bool",
 		"add_prefix", "add_binary", "add_field_expr", "add_deref_expr", "add_call", "add_try_expr",
 		"add_comptime_expr", "add_block", "add_if", "add_let", "add_assign",
-		"add_return", "add_expr_stmt", "add_while", "add_for", "add_break",
+		"add_return", "add_defer", "add_expr_stmt", "add_while", "add_for", "add_break",
 		"add_continue", "add_program", "add_param", "add_import_decl", "add_field",
 		"add_struct_decl", "add_enum_decl", "add_union_decl", "add_union_variant", "add_match",
 		"add_match_arm", "add_unsafe", "add_comptime_if",
@@ -4870,6 +4929,7 @@ func isAstScalarType(typeName string) bool {
 		"LetNode", "std::kizu::ast::LetNode",
 		"AssignNode", "std::kizu::ast::AssignNode",
 		"ReturnNode", "std::kizu::ast::ReturnNode",
+		"DeferNode", "std::kizu::ast::DeferNode",
 		"ExprStmtNode", "std::kizu::ast::ExprStmtNode",
 		"WhileNode", "std::kizu::ast::WhileNode",
 		"ForNode", "std::kizu::ast::ForNode",
@@ -5432,6 +5492,8 @@ func stmtIdentUses(stmt ast.Statement) []string {
 		return append(uses, exprIdentUses(s.Target)...)
 	case *ast.ReturnStmt:
 		return exprIdentUses(s.Value)
+	case *ast.DeferStmt:
+		return exprIdentUses(s.Expr)
 	case *ast.ExprStmt:
 		return exprIdentUses(s.Expr)
 	case *ast.IfStmt:

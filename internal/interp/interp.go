@@ -228,17 +228,41 @@ func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env)
 // evalBlock executes statements in a lexical block.
 func (i *Interpreter) evalBlock(block *ast.BlockStmt, env *Env) (Value, bool, error) {
 	result := voidValue()
+	defers := []ast.Expression{}
 	for _, stmt := range block.Statements {
+		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
+			defers = append(defers, deferStmt.Expr)
+			continue
+		}
 		value, returned, err := i.evalStmt(stmt, env)
 		if signal, ok := err.(trySignal); ok {
+			if err := i.runDeferredCleanups(defers, env); err != nil {
+				return voidValue(), false, err
+			}
 			return signal.value, true, nil
 		}
 		if err != nil || returned {
+			if cleanupErr := i.runDeferredCleanups(defers, env); cleanupErr != nil {
+				return voidValue(), false, cleanupErr
+			}
 			return value, returned, err
 		}
 		result = value
 	}
+	if err := i.runDeferredCleanups(defers, env); err != nil {
+		return voidValue(), false, err
+	}
 	return result, false, nil
+}
+
+// runDeferredCleanups executes block-exit cleanups in reverse registration order.
+func (i *Interpreter) runDeferredCleanups(defers []ast.Expression, env *Env) error {
+	for idx := len(defers) - 1; idx >= 0; idx-- {
+		if _, err := i.evalExpr(defers[idx], env); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // evalStmt executes one statement and reports explicit return flow.
@@ -254,6 +278,9 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		}
 		value, err := i.evalExpr(s.Value, env)
 		return value, true, err
+	case *ast.DeferStmt:
+		return voidValue(), false,
+			fmt.Errorf("runtime error: defer statement must appear directly in a block")
 	case *ast.ExprStmt:
 		value, err := i.evalExpr(s.Expr, env)
 		if s.Semicolon {
@@ -266,10 +293,8 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		return i.evalWhileStmt(s, env)
 	case *ast.ForStmt:
 		return i.evalForStmt(s, env)
-	case *ast.BreakStmt:
-		return voidValue(), false, loopSignal{kind: "break", label: s.Label}
-	case *ast.ContinueStmt:
-		return voidValue(), false, loopSignal{kind: "continue", label: s.Label}
+	case *ast.BreakStmt, *ast.ContinueStmt:
+		return evalLoopControlStmt(s)
 	case *ast.MatchStmt:
 		return i.evalMatchStmt(s, env)
 	case *ast.UnsafeStmt:
@@ -278,6 +303,18 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 		return i.evalComptimeIfStmt(s, env)
 	default:
 		return voidValue(), false, fmt.Errorf("runtime error: unsupported statement %T", stmt)
+	}
+}
+
+// evalLoopControlStmt converts loop control statements into loop signals.
+func evalLoopControlStmt(stmt ast.Statement) (Value, bool, error) {
+	switch s := stmt.(type) {
+	case *ast.BreakStmt:
+		return voidValue(), false, loopSignal{kind: "break", label: s.Label}
+	case *ast.ContinueStmt:
+		return voidValue(), false, loopSignal{kind: "continue", label: s.Label}
+	default:
+		return voidValue(), false, fmt.Errorf("runtime error: unsupported loop control %T", stmt)
 	}
 }
 

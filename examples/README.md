@@ -89,6 +89,8 @@ go test ./...
 | resolver scope map shape | `std_map_resolver_scope.kizu` | uses `Map<[]const u8, V>` for selfhost-style symbol lookup |
 | loop-built string map key | `std_map_string_key_loop.kizu` | builds copied map keys from `String.as_bytes()` and deinitializes builders inside a loop |
 | owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&mut Map` |
+| deferred cleanup | `defer_cleanup.kizu` | registers explicit cleanup for Array, String, Map, and arena owners |
+| deferred cleanup order | `defer_order.kizu` | runs nested block cleanups and function cleanups in reverse registration order |
 | minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions through `kizu test` |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
@@ -141,6 +143,8 @@ single source file. Run them with `kizu check <package-root>`.
 | arena cannot be used after deinit | `negative/arena_double_deinit.kizu`, `negative/arena_add_after_deinit.kizu`, `negative/arena_get_after_deinit.kizu` | `deinitialized` |
 | borrowed arenas cannot be deinitialized | `negative/arena_deinit_while_borrowed.kizu` | `cannot run while arena is borrowed` |
 | arena deinit needs an owned local receiver | `negative/arena_deinit_wrong_receiver.kizu`, `negative/arena_deinit_borrowed_receiver.kizu`, `negative/arena_deinit_temporary_receiver.kizu`, `negative/arena_deinit_moved_receiver.kizu` | `receiver` |
+| defer only registers cleanup expression statements | `negative/defer_invalid_statement.kizu`, `negative/defer_non_cleanup_expr.kizu` | `defer expects` |
+| deferred cleanup obeys ownership at block exit | `negative/defer_after_move.kizu`, `negative/defer_after_explicit_deinit.kizu`, `negative/defer_cleanup_while_borrowed.kizu` | `moved value` / `deinitialized` / `borrowed` |
 | handles die with their arena | `negative/arena_handle_after_deinit.kizu` | `cannot be used after arena` |
 | handles are tied to one arena | `negative/arena_wrong_handle.kizu` | `does not belong to arena` |
 | inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |

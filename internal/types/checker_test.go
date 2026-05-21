@@ -722,6 +722,37 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsDeferredArenaCleanup checks block-exit cleanup registration.
+func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
+	source := `struct User {
+    name: []const u8
+}
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    defer users.deinit();
+    let alice = users.add(User { name: "alice" });
+    print(users.get(alice).name);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsInvalidDeferredCleanup checks the first supported defer form.
+func TestCheckRejectsInvalidDeferredCleanup(t *testing.T) {
+	source := `fn main() {
+    defer print("not cleanup");
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "defer expects cleanup method call") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsArenaDeinitErrors checks explicit arena cleanup syntax.
 func TestCheckRejectsArenaDeinitErrors(t *testing.T) {
 	cases := []struct {
