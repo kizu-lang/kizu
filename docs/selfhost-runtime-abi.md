@@ -428,13 +428,17 @@ For #530, those same bounded `check <file>` targets are also recorded in
 
 ```sh
 selfhost check examples/hello.kizu
+selfhost check selfhost/tests/cli/parse_ok_minimal.kizu
+selfhost check selfhost/tests/cli/parse_ok_minimal_alias.kizu
 selfhost check examples/negative/moved_value.kizu
 ```
 
 For #592, the check parity manifest adds aliases with identical source bytes.
-The hosted stage2 artifact reads the selected target source and recognizes the
-print-hello and moved-value-use source shapes instead of branching on those
-fixed fixture paths. The check parity gate runs through
+For #602, the manifest also covers the positive minimal-main-return source and
+its alias. The hosted stage2 artifact reads the selected target source and
+recognizes the print-hello, minimal-main-return, and moved-value-use source
+shapes instead of branching on those fixed fixture paths. The check parity gate
+runs through
 `target/selfhost/stage2/selfhost`, records `go.cmd-kizu-fallback none`, and does
 not bootstrap from scratch by default. This does not claim general
 parse/type/move/borrow checker parity and does not extend `selfhost-abi-v0`.

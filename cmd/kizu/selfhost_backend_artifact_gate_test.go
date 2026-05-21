@@ -247,6 +247,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"cli-command check selfhost\n",
 		"cli-command stage selfhost\n",
 		"cli-command check source-shape print-hello\n",
+		"cli-command check source-shape minimal-main-return\n",
 		"cli-command check source-shape moved-value-use\n",
 		"cli-command parse source-shape minimal-main-return\n",
 		"cli-command parse source-shape print-call\n",
