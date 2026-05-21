@@ -54,6 +54,25 @@ Trusted Go primitives live under `internal/stdprim`. New host or runtime
 boundaries should be added there first, then exposed through Kizu `std` wrappers
 under `std/src`.
 
+## Allocator Capability
+
+`std::mem::page_allocator() -> Allocator` is the stable v0.2 allocator factory.
+`Allocator` is a visible opaque capability type, not a user-facing contract or
+struct. It is copyable: passing it to `Array<T>`, `String`, `Map<K, V>`,
+`Box<T>`, or `arena<T>` reads the capability and does not move the binding.
+
+Owned storage created with an allocator stores the runtime allocator handle it
+needs for allocation and `deinit`. The allocator value itself has no public
+cleanup method. Allocating operations continue to report allocation failure as
+`!T` or `!void`.
+
+There is no hidden default allocator and no implicit fallback to
+`page_allocator()`. Safe `std::mem` APIs do not expose raw pointer allocation
+methods, allocator metadata, mutable backing slices, or deallocation primitives.
+User-defined allocators, `fixed_buffer_allocator`, and `testing_allocator` are
+deferred to #549 so their ownership, alignment, failure, and unsafe-boundary
+rules can be specified explicitly.
+
 ## Builtin Thinning Policy
 
 `std::builtin::*` is not a permanent home for ordinary library behavior. It is a
@@ -95,7 +114,7 @@ Current builtin thinning candidates:
 | `std::builtin::mem_len` | Host primitive for now | Keep as slice metadata access |
 | `std::builtin::mem_byte_at` | Removed | Implemented in `std/src/mem.kizu` using checked index syntax |
 | `std::builtin::mem_slice` | Removed | Implemented in `std/src/mem.kizu` using checked slice syntax |
-| `std::builtin::mem_page_allocator` | Host primitive | Keep as allocator capability boundary |
+| `std::builtin::mem_page_allocator` | Host primitive | Keep as the small runtime primitive behind stable `std::mem::page_allocator() -> Allocator`; custom allocators are deferred to #549 |
 | `std::builtin::box<T>`, `std::builtin::box_borrow<T>`, `std::builtin::box_borrow_mut<T>`, `std::builtin::box_deinit<T>` | Runtime primitive | Public constructor and methods live in `std/src/mem.kizu`; direct user calls are rejected |
 | `std::builtin::string_*` | Removed | `std::string::String` behavior lives in `std/src/string.kizu`; storage uses the lower-level `std::array::Array<u8>` runtime boundary |
 | `std::builtin::io_*` | Host primitive | Keep as explicit Io / host stream boundary |

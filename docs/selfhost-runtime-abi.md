@@ -264,11 +264,13 @@ escape, and storing borrowed views returned by `Array.at`, `String.as_bytes`, or
 `arena.get`. Runtime `@kizu_rt_arena_get` diagnostics are a backstop for unknown
 provenance or corrupted handles, not a replacement for static checking.
 
-`Allocator` is a visible copyable capability. Passing it to an owned container
-constructor reads the capability and the created runtime object stores the
-allocator pointer needed for its own `deinit`; the allocator itself is not moved.
-Allocating operations that can fail return `!T` or `!void`. No hosted selfhost
-path may add a hidden default allocator or implicit global allocator.
+ADR-0063 stabilizes `std::mem::page_allocator() -> Allocator` as the hosted
+selfhost allocator factory. `Allocator` is a visible copyable capability.
+Passing it to an owned container constructor reads the capability and the
+created runtime object stores the allocator pointer needed for its own `deinit`;
+the allocator itself is not moved. Allocating operations that can fail return
+`!T` or `!void`. No hosted selfhost path may add a hidden default allocator or
+implicit global allocator.
 
 Box storage remains deferred to #496 unless a later selfhost IR artifact lists a
 concrete reachable call site.

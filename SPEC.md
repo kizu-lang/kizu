@@ -1367,6 +1367,30 @@ owned string は primitive ではなく、将来 `std::string::String` で扱い
 C ABI へ `std::string::String` を暗黙に渡してはいけません。
 C へ渡す場合は、将来 `std::string::as_c_string` のような明示 API を使います。
 
+v0.2 で安定化する allocator factory は `std::mem::page_allocator()` です。
+
+```text
+std::mem::page_allocator() -> Allocator
+```
+
+`Allocator` は visible opaque capability type です。
+v0.2 では user-facing `contract` ではなく、field を持つ struct でもなく、
+user code が実装できる interface でもありません。
+safe Kizu code は `Allocator` 型を名前として使い、local binding に束縛し、
+明示 allocator を要求する API に渡せます。
+
+`Allocator` は copy 型です。`Array<T>`、`String`、`Map<K, V>`、`Box<T>`、
+`arena<T>` の構築に渡しても allocator binding は move されません。
+作られた owner は自身の allocation と `deinit` に必要な runtime allocator handle を
+保持しますが、`Allocator` 値そのものに user-visible cleanup method はありません。
+allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
+
+hidden default allocator、implicit global allocator、missing allocator argument から
+`page_allocator()` への fallback は使いません。
+safe `std::mem` は raw pointer、allocation method、mutable backing slice、
+allocator metadata、deallocation primitive を公開しません。
+user-defined allocator、fixed-buffer allocator、testing allocator は #549 で別途仕様化します。
+
 v0.2 の `std::string::String` は、明示 allocator capability を受け取る
 owned byte buffer です。
 
@@ -1457,6 +1481,11 @@ std::mem::starts_with(bytes: []const u8, prefix: []const u8) -> bool
 std::mem::slice(bytes: []const u8, start: i64, end: i64) -> ![]const u8 borrows bytes
 std::mem::trim_ascii(bytes: []const u8) -> []const u8 borrows bytes
 ```
+
+`std::mem::page_allocator()` は v0.2 の安定 allocator capability factory です。
+返された `Allocator` は copy 型であり、複数の owned container や arena の構築に
+再利用できます。allocator を受け取る constructor は capability を読み取るだけで、
+allocator binding を move しません。
 
 `std::mem::Box<T>` は明示 allocator capability で 1 つの owned value を確保する
 non-copy / move-only な indirection です。`Box<T>` は struct / union payload に保存できます。
