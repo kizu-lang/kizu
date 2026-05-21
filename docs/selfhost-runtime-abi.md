@@ -13,6 +13,8 @@ node-kind diagnostic
 value-type i64
 value-type bool
 value-type []const u8
+value-type record
+value-type error-union
 value-type handle
 storage local
 storage owned-container
@@ -20,6 +22,7 @@ storage borrowed-view
 storage arena
 storage handle
 call direct
+call direct-record-roundtrip
 call std-primitive
 cleanup deinit
 host-capabilities selfhost-host-v0
@@ -90,6 +93,8 @@ resolved by host linker defaults.
 | `i64` | `i64` | direct | none |
 | `u8` | `i8` | direct | none |
 | `[]const u8` | `%kizu.slice.u8 = type { ptr, i64 }` | passed and returned by value | borrowed; no cleanup |
+| selfhost record | `%kizu.record.<name> = type { <fields> }` | passed and returned by value | field-dependent |
+| `!T` | `%kizu.error.T = type { i1, T, %kizu.slice.u8 }` | passed and returned by value | field-dependent |
 | `std::arena::Handle<T>` | `%kizu.handle = type { ptr, i64 }` | passed and returned by value | copyable opaque ID |
 
 The slice pointer is read-only for safe Kizu. Length is signed `i64` because
@@ -128,6 +133,12 @@ Diagnostics use the same record rule. Diagnostic message text is `[]const u8`.
 The renderer is outside this ABI; only the record layout and recoverable error
 boundary are specified here.
 
+For #578, the hosted artifact exercises the first concrete record ABI shape:
+`%kizu.record.abi.summary = type { i64, %kizu.slice.u8 }`. Direct calls return
+that record by value, and `%kizu.error.record.abi.summary` covers both success
+and failure return paths. Tagged-union payload ABI remains deferred to #495 and
+must not be silently lowered through a Go fallback.
+
 ## Error And Trap Representation
 
 Recoverable `!T` values use:
@@ -162,6 +173,7 @@ shape is linked to a follow-up issue.
 | IR call form | Lowering |
 | --- | --- |
 | `direct` | direct LLVM `call` to the lowered Kizu symbol |
+| `direct-record-roundtrip` | direct LLVM `call` passing and returning the #578 record shape |
 | `std-primitive` | direct LLVM `call` to the runtime symbol in the external table |
 
 Borrowed arguments are passed by value using their ABI layout. Owned-container
@@ -503,7 +515,9 @@ markers in the storage LLVM artifact.
 The gate also links `selfhost.storage.ll` with the host capability runtime and a
 tiny C harness, then runs the storage smoke so Array payload storage, String
 byte storage, Map key/value storage, and Arena payload/Handle behavior cannot be
-only dead textual declarations.
+only dead textual declarations. For #578, the same smoke also runs a direct
+record and error-union ABI round-trip, including `!record` success and failure
+paths.
 
 For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
 `target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper
