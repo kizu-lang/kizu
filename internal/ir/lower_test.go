@@ -125,7 +125,7 @@ const arenaSource = `struct User {
     name: []const u8,
 }
 fn main(allocator: Allocator) {
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
     users.deinit();
@@ -223,14 +223,14 @@ while.end.3:
 
 const arenaSnapshot = `fn main(%allocator: Allocator) -> void {
 entry:
-  %1: arena<User> = arena.new %allocator: Allocator, User
+  %1: std::arena::Arena<User> = arena.new %allocator: Allocator, User
   %2: []const u8 = const "alice"
   %3: User = struct.new {name: %2: []const u8}
-  %4: handle<User> = arena.add %1: arena<User>, %3: User
-  %5: User = arena.get %1: arena<User>, %4: handle<User>
+  %4: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %3: User
+  %5: User = arena.get %1: std::arena::Arena<User>, %4: std::arena::Handle<User>
   %6: []const u8 = field.name %5: User
   call.print %6: []const u8
-  arena.deinit %1: arena<User>
+  arena.deinit %1: std::arena::Arena<User>
   return void: void
 }`
 

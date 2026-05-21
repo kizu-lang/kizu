@@ -32,7 +32,7 @@ Implemented language-core pieces:
 - type checker
 - move checker
 - local borrow checker
-- `arena<T>` / `handle<T>`
+- `std::arena::Arena<T>` / `std::arena::Handle<T>`
 - `while`, `break`, `continue`, labeled loop branches, and bounded `for`
 - limited `comptime` expressions, parameters, and branch selection
 - minimal `!T` and `try` error propagation

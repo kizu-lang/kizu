@@ -22,7 +22,7 @@ Kizu v0.1 は、safe Kizu に対して次を release blocker として扱う。
 - borrow escape を許さない
 - borrow を struct field に保存させない
 - borrow を task / comptime / unsafe 境界で延命させない
-- `arena<T>.get(handle<T>)` は local borrow だけを返す
+- `std::arena::Arena<T>.get(std::arena::Handle<T>)` は local borrow だけを返す
 - handle は対応する arena 以外に使えない
 - handle は raw pointer として扱えない
 - mutable borrow conflict を検査する

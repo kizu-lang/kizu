@@ -919,8 +919,8 @@ func parserParityExpressionSeedCases() []parserParityCase {
 			source: `fn main() { let user = User { name: "a", age: 1 }; }`,
 		},
 		{
-			name:   "seed/fn_arena_new_expr",
-			source: "fn main() { let nodes = arena<Node>(allocator); }",
+			name:   "seed/fn_arena_type_apply_call",
+			source: "fn main() { let nodes = std::arena::Arena<Node>(allocator); }",
 		},
 	}
 }
@@ -1893,7 +1893,7 @@ func summarizeStructFieldInitSubset(field kizuast.FieldValue) ([]string, string)
 	return append(lines, value...), ""
 }
 
-// summarizeArenaNewExprSubset summarizes arena<T>(allocator) construction.
+// summarizeArenaNewExprSubset summarizes the legacy arena constructor AST node.
 func summarizeArenaNewExprSubset(expr *kizuast.ArenaNewExpr) ([]string, string) {
 	typeName, reason := summarizeTypeNameSubset(expr.TypeName)
 	if reason != "" {

@@ -11,7 +11,7 @@ lifetime programming. That remains a valid ergonomics concern, but v0.2 stdlib
 work now needs zero-copy borrowed views for slices, strings, parser source
 spans, and future matrix row/submatrix APIs.
 
-Owned handles such as `arena<T>` / `handle<T>` solve graph and AST identity, but
+Owned handles such as `std::arena::Arena<T>` / `std::arena::Handle<T>` solve graph and AST identity, but
 they do not model view values that borrow contiguous storage. Without explicit
 lifetime syntax, public signatures cannot say which input owns a returned view.
 
@@ -61,5 +61,5 @@ Those are tracked as follow-up work instead of hidden compatibility behavior.
 the language adopts explicit lifetimes only where borrowed views cross function
 or type boundaries.
 
-`arena<T>` / `handle<T>` remain opaque IDs, not references. They continue to
+`std::arena::Arena<T>` / `std::arena::Handle<T>` remain opaque IDs, not references. They continue to
 model long-lived graph identity separately from slice/view borrowing.

@@ -675,14 +675,20 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 // evalArenaNewExpr checks the explicit allocator before creating arena storage.
 func (i *Interpreter) evalArenaNewExpr(expr *ast.ArenaNewExpr, env *Env) (Value, error) {
 	if expr.Allocator == nil {
-		return voidValue(), fmt.Errorf("runtime error: arena<%s> expects allocator", expr.TypeName)
+		return voidValue(), fmt.Errorf(
+			"runtime error: std::arena::Arena<%s> expects exactly one allocator argument",
+			expr.TypeName,
+		)
 	}
 	allocator, err := i.evalExpr(expr.Allocator, env)
 	if err != nil {
 		return voidValue(), err
 	}
 	if allocator.kind != kindAllocator {
-		return voidValue(), fmt.Errorf("runtime error: arena<%s> expects Allocator", expr.TypeName)
+		return voidValue(), fmt.Errorf(
+			"runtime error: std::arena::Arena<%s> expects Allocator",
+			expr.TypeName,
+		)
 	}
 	return arenaValue(), nil
 }
@@ -1684,6 +1690,9 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: unsupported type application `%s`", expr.String())
 	}
+	if name == "std.arena.Arena" {
+		return i.evalArenaTypeApply(expr.TypeArg, args, env)
+	}
 	if value, ok, err := i.evalBuiltinTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
 		return value, err
 	}
@@ -1691,6 +1700,32 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 		return value, err
 	}
 	return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
+}
+
+// evalArenaTypeApply creates runtime arena storage with an explicit allocator.
+func (i *Interpreter) evalArenaTypeApply(
+	typeArg string,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	parts, ok := splitGenericArgs(typeArg)
+	if !ok || len(parts) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std::arena::Arena expects 1 type argument")
+	}
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf(
+			"runtime error: std::arena::Arena<%s> expects exactly one allocator argument",
+			parts[0])
+	}
+	allocator, err := i.evalExpr(args[0], env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if allocator.kind != kindAllocator {
+		return voidValue(), fmt.Errorf("runtime error: std::arena::Arena<%s> expects Allocator",
+			parts[0])
+	}
+	return arenaValue(), nil
 }
 
 // evalGenericUserTypeApply invokes source-defined std generic wrappers.

@@ -1194,8 +1194,8 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 // isKnownSingleArgGeneric reports whether base currently takes exactly one type argument.
 func isKnownSingleArgGeneric(base string) bool {
 	switch base {
-	case "arena", "handle", "option", "std::array::Array", "Task",
-		"Channel", "Mutex", "Atomic", "std::mem::Box":
+	case "std::arena::Arena", "std::arena::Handle", "option",
+		"std::array::Array", "Task", "Channel", "Mutex", "Atomic", "std::mem::Box":
 		return true
 	default:
 		return false
@@ -3418,9 +3418,9 @@ func (c *Checker) rejectArrayStorageGeneric(typ Type, seen map[Type]bool) error 
 		return nil
 	}
 	switch base {
-	case "arena":
+	case "std::arena::Arena":
 		return fmt.Errorf("type error: Array element cannot be arena in v0.2")
-	case "handle":
+	case "std::arena::Handle":
 		return fmt.Errorf("type error: Array element cannot be handle in v0.2")
 	case "std::array::Array":
 		return fmt.Errorf("type error: Array element cannot be nested array in v0.2")
@@ -3504,6 +3504,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return "", fmt.Errorf("type error: unsupported type application `%s`", expr.String())
 	}
 	typeArg := c.instantiateTypeArgText(expr.TypeArg)
+	if name == "std.arena.Arena" {
+		return c.checkArenaTypeApply(typeArg, args, env, unsafe)
+	}
 	if typ, ok, err := c.checkGenericUserTypeApply(
 		name, typeArg, args, env, unsafe,
 	); ok || err != nil {
@@ -3535,6 +3538,37 @@ func (c *Checker) checkTypeApplyCallExpr(
 	default:
 		return "", fmt.Errorf("type error: `%s` does not take a type argument", name)
 	}
+}
+
+// checkArenaTypeApply validates std::arena::Arena<T>(allocator).
+func (c *Checker) checkArenaTypeApply(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	parts, ok := splitGenericArgs(typeArg)
+	if !ok || len(parts) != 1 {
+		return "", fmt.Errorf("type error: std::arena::Arena expects 1 type argument")
+	}
+	elem, err := c.parseType(parts[0])
+	if err != nil {
+		return "", err
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf(
+			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
+			elem)
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", fmt.Errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
+			elem, got)
+	}
+	return Type(fmt.Sprintf("std::arena::Arena<%s>", elem)), nil
 }
 
 // checkBuiltinTypeApply validates std-only generic runtime primitives.
@@ -4501,7 +4535,7 @@ func (c *Checker) checkUnionConstructorCall(
 	return Type(unionType.name), true, nil
 }
 
-// checkArenaNewExpr validates arena<T>(allocator) and returns the arena type.
+// checkArenaNewExpr validates std::arena::Arena<T>(allocator) and returns the arena type.
 func (c *Checker) checkArenaNewExpr(
 	expr *ast.ArenaNewExpr,
 	env *scope,
@@ -4511,17 +4545,19 @@ func (c *Checker) checkArenaNewExpr(
 		return "", err
 	}
 	if expr.Allocator == nil {
-		return "", fmt.Errorf("type error: `arena<%s>` expects allocator argument", expr.TypeName)
+		return "", fmt.Errorf(
+			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
+			expr.TypeName)
 	}
 	got, err := c.checkExpr(expr.Allocator, env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("type error: `arena<%s>` expects Allocator, got %s",
+		return "", fmt.Errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
 			expr.TypeName, got)
 	}
-	return Type(fmt.Sprintf("arena<%s>", expr.TypeName)), nil
+	return Type(fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName)), nil
 }
 
 // checkStructLiteralExpr validates field names and initializer types.
@@ -4938,7 +4974,7 @@ func (c *Checker) checkArenaOrImplMethod(
 	unsafe bool,
 ) (Type, error) {
 	base, arg, ok := splitGenericType(string(receiver))
-	if !ok || base != "arena" {
+	if !ok || base != "std::arena::Arena" {
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
 			return c.checkMethodArgs(method, receiver, args, env, unsafe)
@@ -6093,7 +6129,7 @@ func checkBorrowTargetShape(expr ast.Expression) error {
 	}
 }
 
-// checkArenaAdd validates arena<T>.add(value).
+// checkArenaAdd validates std::arena::Arena<T>.add(value).
 func (c *Checker) checkArenaAdd(
 	arg string,
 	args []ast.Expression,
@@ -6110,10 +6146,10 @@ func (c *Checker) checkArenaAdd(
 	if !sameType(got, Type(arg)) {
 		return "", fmt.Errorf("type error: `arena.add` expects %s, got %s", arg, got)
 	}
-	return Type(fmt.Sprintf("handle<%s>", arg)), nil
+	return Type(fmt.Sprintf("std::arena::Handle<%s>", arg)), nil
 }
 
-// checkArenaGet validates arena<T>.get(handle<T>).
+// checkArenaGet validates std::arena::Arena<T>.get(std::arena::Handle<T>).
 func (c *Checker) checkArenaGet(
 	arg string,
 	args []ast.Expression,
@@ -6127,7 +6163,7 @@ func (c *Checker) checkArenaGet(
 	if err != nil {
 		return "", err
 	}
-	want := Type(fmt.Sprintf("handle<%s>", arg))
+	want := Type(fmt.Sprintf("std::arena::Handle<%s>", arg))
 	if !sameType(got, want) {
 		return "", fmt.Errorf("type error: `arena.get` expects %s, got %s", want, got)
 	}
@@ -6494,13 +6530,13 @@ func (c *Checker) rejectThreadBoundaryGeneric(typ Type, seen map[Type]bool) erro
 		return nil
 	}
 	switch base {
-	case "arena":
+	case "std::arena::Arena":
 		return fmt.Errorf("type error: arena cannot cross concurrency boundary")
 	case "std::array::Array":
 		return fmt.Errorf("type error: Array cannot cross concurrency boundary in v0.2")
 	case "std::map::Map":
 		return fmt.Errorf("type error: Map cannot cross concurrency boundary in v0.2")
-	case "handle":
+	case "std::arena::Handle":
 		return fmt.Errorf("type error: handle cannot cross concurrency boundary")
 	case "Dyn":
 		return fmt.Errorf("type error: Dyn cannot cross concurrency boundary")

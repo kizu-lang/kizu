@@ -90,7 +90,7 @@ resolved by host linker defaults.
 | `i64` | `i64` | direct | none |
 | `u8` | `i8` | direct | none |
 | `[]const u8` | `%kizu.slice.u8 = type { ptr, i64 }` | passed and returned by value | borrowed; no cleanup |
-| `handle<T>` | `%kizu.handle = type { ptr, i64 }` | passed and returned by value | copyable opaque ID |
+| `std::arena::Handle<T>` | `%kizu.handle = type { ptr, i64 }` | passed and returned by value | copyable opaque ID |
 
 The slice pointer is read-only for safe Kizu. Length is signed `i64` because
 the current language surface uses `i64` for lengths and indexes. A slice with
@@ -248,7 +248,7 @@ explicit`, `arena-handle-provenance checked`, and
 `arena-invalid-handle-diagnostic invalid arena handle`.
 
 ADR-0062 fixes the selfhost AST storage constraints for this ABI slice. This is
-not the final general-purpose `arena<T>` payload policy for all Kizu programs;
+not the final general-purpose `std::arena::Arena<T>` payload policy for all Kizu programs;
 future arena payload expansion remains allowed when explicit cleanup,
 allocator, borrow, and checker rules are specified.
 `AstNode` arena payloads may contain scalar copy values, spans, token/symbol

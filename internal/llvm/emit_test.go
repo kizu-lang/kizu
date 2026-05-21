@@ -148,7 +148,7 @@ fn main() {
 
 const arenaSource = `struct User { age: i64, }
 fn main(allocator: Allocator) {
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     print(1);
 }`
 

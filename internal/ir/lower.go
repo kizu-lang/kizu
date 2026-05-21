@@ -201,7 +201,8 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		return l.emit("arena.new", "arena<"+e.TypeName+">", []Value{allocator}, e.TypeName), nil
+		return l.emit("arena.new", "std::arena::Arena<"+e.TypeName+">",
+			[]Value{allocator}, e.TypeName), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression %T", expr)
 	}
@@ -271,6 +272,11 @@ func (l *lowerer) lowerBinaryExpr(expr *ast.BinaryExpr) (Value, error) {
 
 // lowerCallExpr lowers builtin, user, and method calls.
 func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
+	if typeApply, ok := expr.Callee.(*ast.TypeApplyExpr); ok {
+		if typeApply.Callee.String() == "std::arena::Arena" {
+			return l.lowerArenaConstructor(typeApply.TypeArg, expr.Args)
+		}
+	}
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
 		return l.lowerMethodCallExpr(field, expr.Args)
 	}
@@ -290,6 +296,21 @@ func (l *lowerer) lowerCallExpr(expr *ast.CallExpr) (Value, error) {
 		ret = sig.Return
 	}
 	return l.emit("call."+name.Name, ret, args, ""), nil
+}
+
+// lowerArenaConstructor lowers std::arena::Arena<T>(allocator).
+func (l *lowerer) lowerArenaConstructor(typeArg string, args []ast.Expression) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf(
+			"ir error: std::arena::Arena<%s> expects exactly one allocator argument",
+			typeArg,
+		)
+	}
+	allocator, err := l.lowerExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	return l.emit("arena.new", "std::arena::Arena<"+typeArg+">", []Value{allocator}, typeArg), nil
 }
 
 // lowerTryExpr lowers error-union propagation as an explicit IR instruction.

@@ -7,7 +7,7 @@ Accepted.
 ## Context
 
 Kizu stdlib owners such as `std::array::Array<T>`, `std::string::String`,
-`std::map::Map<K, V>`, `std::mem::Box<T>`, and `arena<T>` require explicit
+`std::map::Map<K, V>`, `std::mem::Box<T>`, and `std::arena::Arena<T>` require explicit
 cleanup. Manual cleanup at every return site is noisy and easy to miss, but
 implicit destructors would hide runtime work and move Kizu toward RAII.
 

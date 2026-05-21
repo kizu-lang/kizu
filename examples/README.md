@@ -44,7 +44,7 @@ go test ./...
 | copy through borrow dereference | `borrow_deref_copy.kizu` | copies an `i64` through `.*` |
 | copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
 | mutable borrow parameter | `mutable_borrow.kizu` | `&mut` updates through checked field access |
-| `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
+| `std::arena::Arena<T>` / `std::arena::Handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |

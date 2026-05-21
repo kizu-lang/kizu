@@ -22,13 +22,13 @@ Kizu は明示 lifetime annotation を採用しない。
 - borrow を struct field に保存できない
 - borrow を関数から返せない
 - borrow を lexical block の外へ escape できない
-- 長寿命の関係は `arena<T>` と `handle<T>` で表す
+- 長寿命の関係は `std::arena::Arena<T>` と `std::arena::Handle<T>` で表す
 - raw pointer は `unsafe` 境界で扱う
 
 ## arena / handle
 
-`handle<T>` は参照ではなく opaque ID とする。
-`arena<T>.get(handle<T>)` はローカル borrow を返す。
+`std::arena::Handle<T>` は参照ではなく opaque ID とする。
+`std::arena::Arena<T>.get(std::arena::Handle<T>)` はローカル borrow を返す。
 
 handle は borrow より長生きしてよいが、対応する arena より長生きしてはいけない。
 

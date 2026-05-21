@@ -69,21 +69,22 @@ func (l *lowerer) fieldType(structName string, fieldName string) string {
 	return "unknown"
 }
 
-// handleType returns handle<T> for arena<T>.
+// handleType returns std::arena::Handle<T> for std::arena::Arena<T>.
 func handleType(arena string) string {
 	elem := arenaElementType(arena)
 	if elem == "unknown" {
-		return "handle<unknown>"
+		return "std::arena::Handle<unknown>"
 	}
-	return "handle<" + elem + ">"
+	return "std::arena::Handle<" + elem + ">"
 }
 
-// arenaElementType returns T for arena<T>.
+// arenaElementType returns T for std::arena::Arena<T>.
 func arenaElementType(arena string) string {
-	if !strings.HasPrefix(arena, "arena<") || !strings.HasSuffix(arena, ">") {
+	const prefix = "std::arena::Arena<"
+	if !strings.HasPrefix(arena, prefix) || !strings.HasSuffix(arena, ">") {
 		return "unknown"
 	}
-	return strings.TrimSuffix(strings.TrimPrefix(arena, "arena<"), ">")
+	return strings.TrimSuffix(strings.TrimPrefix(arena, prefix), ">")
 }
 
 // errorUnionElementType returns T for !T.
