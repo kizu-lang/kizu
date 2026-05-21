@@ -11,7 +11,7 @@ source_filename = "target/selfhost/selfhost.storage"
 %kizu.rt.string = type { ptr, ptr, i64, i64 }
 %kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }
 %kizu.rt.diagnostics = type { ptr, i64 }
-%kizu.rt.arena = type { ptr, i64, i64, i1 }
+%kizu.rt.arena = type { ptr, i64, i64, [48 x i8] }
 
 @.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c"invalid arena handle"
 @.kizu.rt.allocation_failed = private unnamed_addr constant [17 x i8] c"allocation failed"
@@ -27,6 +27,8 @@ source_filename = "target/selfhost/selfhost.storage"
 @.kizu.rt.map_key_alpha = private unnamed_addr constant [5 x i8] c"alpha"
 @.kizu.rt.map_key_beta = private unnamed_addr constant [4 x i8] c"beta"
 @.kizu.rt.map_key_gamma = private unnamed_addr constant [5 x i8] c"gamma"
+@.kizu.rt.arena_smoke = private unnamed_addr constant [24 x i8] c"ast-node-payload-storage"
+@.kizu.rt.arena_smoke_second = private unnamed_addr constant [24 x i8] c"ast-node-payload-second!"
 
 declare ptr @kizu_rt_alloc(ptr, i64)
 declare void @kizu_rt_free(ptr, ptr)
@@ -628,15 +630,13 @@ entry:
 define %kizu.owned @kizu_rt_arena_new(%kizu.owned %allocator, i64 %element_size) {
 entry:
   %allocator_ptr = extractvalue %kizu.owned %allocator, 0
-  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 32)
+  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 72)
   %allocator_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 0
   store ptr %allocator_ptr, ptr %allocator_field
   %len_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 1
   store i64 0, ptr %len_field
-  %cap_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 2
-  store i64 0, ptr %cap_field
-  %deinit_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 3
-  store i1 false, ptr %deinit_field
+  %size_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 2
+  store i64 %element_size, ptr %size_field
   %handle = insertvalue %kizu.owned poison, ptr %raw, 0
   ret %kizu.owned %handle
 }
@@ -644,13 +644,44 @@ entry:
 define %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %value) {
 entry:
   %raw = extractvalue %kizu.owned %arena, 0
+  %value_ptr = extractvalue %kizu.slice.u8 %value, 0
+  %value_len = extractvalue %kizu.slice.u8 %value, 1
+  %size_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 2
+  %element_size = load i64, ptr %size_field
+  %size_nonnegative = icmp sge i64 %element_size, 0
+  %size_bounded = icmp sle i64 %element_size, 24
+  %size_ok = icmp eq i64 %value_len, %element_size
+  %positive_size = icmp sgt i64 %element_size, 0
+  %value_ptr_ok = icmp ne ptr %value_ptr, null
+  %empty_size = icmp eq i64 %element_size, 0
+  %shape_ptr_ok = or i1 %value_ptr_ok, %empty_size
+  %shape_size_bound_ok = and i1 %size_nonnegative, %size_bounded
+  %shape_size_ok = and i1 %shape_size_bound_ok, %size_ok
+  %shape_ok = and i1 %shape_size_ok, %shape_ptr_ok
+  br i1 %shape_ok, label %load_len, label %invalid
+load_len:
   %len_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 1
   %current = load i64, ptr %len_field
+  %has_capacity = icmp slt i64 %current, 2
+  br i1 %has_capacity, label %store_value, label %invalid
+store_value:
+  %inline_storage = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 3
+  %offset = mul i64 %current, %element_size
+  %slot = getelementptr i8, ptr %inline_storage, i64 %offset
+  br i1 %positive_size, label %copy_value, label %finish
+copy_value:
+  call void @llvm.memcpy.p0.p0.i64(ptr %slot, ptr %value_ptr, i64 %element_size, i1 false)
+  br label %finish
+finish:
   %next = add i64 %current, 1
   store i64 %next, ptr %len_field
   %handle_base = insertvalue %kizu.handle poison, ptr %raw, 0
   %handle = insertvalue %kizu.handle %handle_base, i64 %current, 1
   ret %kizu.handle %handle
+invalid:
+  %invalid_base = insertvalue %kizu.handle poison, ptr %raw, 0
+  %invalid_handle = insertvalue %kizu.handle %invalid_base, i64 -1, 1
+  ret %kizu.handle %invalid_handle
 }
 
 define %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %handle) {
@@ -667,8 +698,15 @@ entry:
   %ok = and i1 %provenance_ok, %in_bounds
   br i1 %ok, label %valid, label %invalid
 valid:
+  %inline_storage = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 3
+  %size_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 2
+  %element_size = load i64, ptr %size_field
+  %offset = mul i64 %index, %element_size
+  %slot = getelementptr i8, ptr %inline_storage, i64 %offset
+  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %slot, 0
+  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %element_size, 1
   %valid_ok = insertvalue %kizu.error.slice.u8 poison, i1 true, 0
-  %valid_value = insertvalue %kizu.error.slice.u8 %valid_ok, %kizu.slice.u8 zeroinitializer, 1
+  %valid_value = insertvalue %kizu.error.slice.u8 %valid_ok, %kizu.slice.u8 %slice, 1
   %valid_result = insertvalue %kizu.error.slice.u8 %valid_value, %kizu.slice.u8 zeroinitializer, 2
   ret %kizu.error.slice.u8 %valid_result
 invalid:
@@ -684,8 +722,6 @@ invalid:
 define void @kizu_rt_arena_deinit(%kizu.owned %arena) {
 entry:
   %raw = extractvalue %kizu.owned %arena, 0
-  %deinit_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 3
-  store i1 true, ptr %deinit_field
   %allocator_field = getelementptr inbounds %kizu.rt.arena, ptr %raw, i32 0, i32 0
   %allocator_ptr = load ptr, ptr %allocator_field
   call void @kizu_rt_free(ptr %allocator_ptr, ptr %raw)
@@ -1243,9 +1279,86 @@ map_pass:
   %diagnostic_push = call %kizu.error.void @kizu_rt_diagnostic_push(%kizu.owned %diagnostics, %kizu.slice.u8 zeroinitializer)
   call void @kizu_rt_diagnostic_buffer_deinit(%kizu.owned %diagnostics)
   %arena = call %kizu.owned @kizu_rt_arena_new(%kizu.owned zeroinitializer, i64 24)
-  %node_id = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 zeroinitializer)
+  %arena_payload_ptr = getelementptr inbounds [24 x i8], ptr @.kizu.rt.arena_smoke, i64 0, i64 0
+  %arena_payload_base = insertvalue %kizu.slice.u8 poison, ptr %arena_payload_ptr, 0
+  %arena_payload = insertvalue %kizu.slice.u8 %arena_payload_base, i64 24, 1
+  %node_id = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %arena_payload)
   %node = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %node_id)
   %node_ok = extractvalue %kizu.error.slice.u8 %node, 0
+  %node_payload = extractvalue %kizu.error.slice.u8 %node, 1
+  %arena_payload_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %arena_payload_ptr,
+    i64 24,
+    %kizu.slice.u8 %node_payload
+  )
+  %arena_payload2_ptr = getelementptr inbounds [24 x i8], ptr @.kizu.rt.arena_smoke_second, i64 0, i64 0
+  %arena_payload2_base = insertvalue %kizu.slice.u8 poison, ptr %arena_payload2_ptr, 0
+  %arena_payload2 = insertvalue %kizu.slice.u8 %arena_payload2_base, i64 24, 1
+  %node2_id = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %arena_payload2)
+  %node2 = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %node2_id)
+  %node2_ok = extractvalue %kizu.error.slice.u8 %node2, 0
+  %node2_payload = extractvalue %kizu.error.slice.u8 %node2, 1
+  %arena_payload2_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %arena_payload2_ptr,
+    i64 24,
+    %kizu.slice.u8 %node2_payload
+  )
+  %node3_id = call %kizu.handle @kizu_rt_arena_add(%kizu.owned %arena, %kizu.slice.u8 %arena_payload)
+  %node3_index = extractvalue %kizu.handle %node3_id, 1
+  %arena_full_rejected = icmp eq i64 %node3_index, -1
+  %node3 = call %kizu.error.slice.u8 @kizu_rt_arena_get(%kizu.owned %arena, %kizu.handle %node3_id)
+  %node3_ok = extractvalue %kizu.error.slice.u8 %node3, 0
+  %arena_full_get_rejected = icmp eq i1 %node3_ok, false
+  %arena_full_message = extractvalue %kizu.error.slice.u8 %node3, 2
+  %arena_invalid_ptr = getelementptr inbounds [20 x i8], ptr @.kizu.rt.arena_invalid_handle, i64 0, i64 0
+  %arena_full_message_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %arena_invalid_ptr,
+    i64 20,
+    %kizu.slice.u8 %arena_full_message
+  )
+  %arena_raw = extractvalue %kizu.owned %arena, 0
+  %arena_oob_base = insertvalue %kizu.handle poison, ptr %arena_raw, 0
+  %arena_oob_handle = insertvalue %kizu.handle %arena_oob_base, i64 2, 1
+  %arena_oob = call %kizu.error.slice.u8 @kizu_rt_arena_get(
+    %kizu.owned %arena,
+    %kizu.handle %arena_oob_handle
+  )
+  %arena_oob_ok = extractvalue %kizu.error.slice.u8 %arena_oob, 0
+  %arena_oob_rejected = icmp eq i1 %arena_oob_ok, false
+  %arena_oob_message = extractvalue %kizu.error.slice.u8 %arena_oob, 2
+  %arena_oob_message_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %arena_invalid_ptr,
+    i64 20,
+    %kizu.slice.u8 %arena_oob_message
+  )
+  %arena_foreign_base = insertvalue %kizu.handle poison, ptr null, 0
+  %arena_foreign_handle = insertvalue %kizu.handle %arena_foreign_base, i64 0, 1
+  %arena_foreign = call %kizu.error.slice.u8 @kizu_rt_arena_get(
+    %kizu.owned %arena,
+    %kizu.handle %arena_foreign_handle
+  )
+  %arena_foreign_ok = extractvalue %kizu.error.slice.u8 %arena_foreign, 0
+  %arena_foreign_rejected = icmp eq i1 %arena_foreign_ok, false
+  %arena_foreign_message = extractvalue %kizu.error.slice.u8 %arena_foreign, 2
+  %arena_foreign_message_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %arena_invalid_ptr,
+    i64 20,
+    %kizu.slice.u8 %arena_foreign_message
+  )
+  %arena_get_ok_a = and i1 %node_ok, %arena_payload_ok
+  %arena_get_ok_b = and i1 %node2_ok, %arena_payload2_ok
+  %arena_get_ok = and i1 %arena_get_ok_a, %arena_get_ok_b
+  %arena_full_ok_a = and i1 %arena_full_rejected, %arena_full_get_rejected
+  %arena_full_ok = and i1 %arena_full_ok_a, %arena_full_message_ok
+  %arena_oob_all_ok = and i1 %arena_oob_rejected, %arena_oob_message_ok
+  %arena_foreign_all_ok = and i1 %arena_foreign_rejected, %arena_foreign_message_ok
+  %arena_invalid_ok_a = and i1 %arena_full_ok, %arena_oob_all_ok
+  %arena_invalid_ok = and i1 %arena_invalid_ok_a, %arena_foreign_all_ok
+  %arena_ok = and i1 %arena_get_ok, %arena_invalid_ok
   call void @kizu_rt_arena_deinit(%kizu.owned %arena)
+  br i1 %arena_ok, label %arena_pass, label %arena_fail
+arena_fail:
+  ret i64 1
+arena_pass:
   ret i64 0
 }
