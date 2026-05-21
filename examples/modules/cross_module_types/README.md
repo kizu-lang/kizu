@@ -66,8 +66,8 @@ pub fn main() -> !void {
     let source_text = "fn main";
     let token = std::kizu::lexer::first_token(source_text);
     checks::accept_token(&token);
-    try std::testing::expect_equal_i64(0, token.start);
-    try std::testing::expect_equal_i64(2, token.end);
+    std::testing::expect(0 == token.start);
+    std::testing::expect(2 == token.end);
 
     let source = std::kizu::ast::source_file("main.kizu", source_text);
     let result = try std::kizu::parser::parse_first_node(allocator, source);
@@ -81,12 +81,12 @@ pub fn main() -> !void {
     try checks::expect_ident(ident.ast, ident_root, ident_source, "token", 0, 5);
 
     let indented = std::kizu::lexer::first_token("   lexer");
-    try std::testing::expect_equal_i64(3, indented.start);
-    try std::testing::expect_equal_i64(8, indented.end);
+    std::testing::expect(3 == indented.start);
+    std::testing::expect(8 == indented.end);
 
     let eof = std::kizu::lexer::first_token("   ");
-    try std::testing::expect_equal_i64(3, eof.start);
-    try std::testing::expect_equal_i64(3, eof.end);
+    std::testing::expect(3 == eof.start);
+    std::testing::expect(3 == eof.end);
 
     print(token.start);
     print(token.end);

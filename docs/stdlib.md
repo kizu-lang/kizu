@@ -107,7 +107,8 @@ Current builtin thinning candidates:
 | `std::builtin::path_basename` | Removed | Implemented in `std/src/path.kizu` |
 | `std::builtin::path_dirname` | Removed | Implemented in `std/src/path.kizu` |
 | `std::builtin::path_extension` | Removed | Implemented in `std/src/path.kizu` |
-| `std::builtin::testing_*` | Removed | Implemented in `std/src/testing.kizu` using `std::fmt` |
+| `std::builtin::testing_*` | Removed | Replaced by the single explicit `std::builtin::test_fail` trap primitive |
+| `std::builtin::test_fail` | Host primitive | Keep as the explicit trap boundary behind `std::testing::expect` |
 | `std::builtin::path_clean` | Removed | Implemented in `std/src/path.kizu` with explicit allocator-backed `String` output |
 | `std::builtin::path_join` | Removed | Implemented in `std/src/path.kizu` with explicit allocator-backed `String` output |
 | `std::builtin::fs_*` | Host primitive | Keep as explicit-Io filesystem boundary; public wrappers live in `std/src/fs.kizu` |
@@ -128,10 +129,12 @@ Current builtin thinning candidates:
 | `std::builtin::map<K, V>`, `std::builtin::map_*<K, V>` | Runtime primitive | Public constructor and methods live in `std/src/map.kizu`; direct user calls are rejected |
 | `std::builtin::thread_scoped<T>` | Runtime primitive | Public `std::thread::scoped<T>(io, worker, arg)` lives in `std/src/thread.kizu`; direct user calls are rejected |
 
-`std::testing` now performs assertion checks and message construction in
-`std/src/testing.kizu`. Equality diagnostics are built with `std::fmt` into an
-explicit allocator-backed `std::string::String`; Go remains only the test runner
-and error-union reporting boundary, not the assertion implementation.
+`std::testing` now keeps the public assertion surface in `std/src/testing.kizu`.
+`expect(condition)` returns `void` and uses the single explicit
+`std::builtin::test_fail` trap on failure, so normal assertions do not require
+`try`. Typed `expect_equal_<type>` helpers are not part of v0.2; callers compare
+values explicitly and may build richer diagnostics with `std::fmt` plus
+`std::testing::fail`.
 
 Stateful runtime APIs such as `std::array::Array`, `std::map::Map`,
 `std::task::parallel_for`, `std::task::parallel_map`, `std::channel::Channel`,
@@ -158,11 +161,11 @@ forwarding through Kizu std source.
 | Module | Current APIs | Current Go responsibility | Kizu migration target |
 | --- | --- | --- | --- |
 | `std::mem` | `page_allocator`, `Box<T>`, `borrow`, `borrow_mut`, `deinit`, `len`, `byte_at`, `equal_bytes`, `starts_with`, `slice`, `trim_ascii` | Kizu module in `std/src/mem.kizu`; allocator, Box storage, Box local borrow, Box deinit, and len use trusted primitives | keep only allocator capability, Box storage/local-borrow boundary, and slice metadata primitives trusted |
-| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
+| `std::array` | `Array<T>`, `append`, `len`, `capacity`, `get`, `get_or_panic`, `at`, `at_mut`, `set`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::array_*`; Go owned storage, bounds checks, element borrow tracking, deinit state | keep allocation/storage and local element borrow primitives trusted |
 | `std::string` | `String`, `append_bytes`, `append_byte`, `reserve`, `truncate`, `clear`, `len`, `capacity`, `as_bytes`, `deinit` | Kizu implementation in `std/src/string.kizu` backed by private `std::array::Array<u8>` storage | use as the explicit owned byte buffer for path construction and diagnostics; keep raw storage and mutable slices unexposed |
 | `std::fmt` | `append_i64`, `append_bool`, `append_bytes_literal` | Kizu source over `String` | no hidden allocation or Go scalar formatting |
 | `std::map` | `Map<[]const u8, V>`, `insert`, `get`, `contains`, `len`, `deinit` | Kizu constructor and method wrappers over reserved `std::builtin::map_*`; Go owned key/value storage, key copy, copy-only value rule, boundary checks | keep hash table primitive until Kizu has arrays/slices robust enough |
-| `std::testing` | `expect`, equality helpers, `fail` | Kizu source over `std::fmt` and `String` | keep Go limited to the runner and error-union reporting boundary |
+| `std::testing` | `expect`, `fail` | Kizu source over one explicit `std::builtin::test_fail` trap | keep Go limited to the runner, assertion trap, and error-union reporting boundary |
 | `std::kizu::{ast,lexer,parser}` | `SourceFile`, `Ast`, `AstNode`, `AstData`, `NodeId`, `ChildRange`, `Span`, `TokenKind`, `Token`, minimal fn/params/struct-fields/block/return/defer/call/binary/parser arena expression APIs | Kizu source under `std/src/kizu/`; Go only loads nested std modules and runs normal type/ownership/interpreter checks. `NodeId` is an AST-scoped opaque wrapper over `handle<AstNode>`, node storage uses `arena<AstNode>(allocator)`, `Ast.deinit()` releases node and child storage, child storage uses `std::array::Array<NodeId>`, and the checker rejects known cross-`Ast` `NodeId` use. ADR-0062 restricts AST arena payloads to scalar/id/range/source-view records and rejects owned containers, capabilities, arbitrary handles, and raw pointers inside nodes. | grow into the self-host compiler frontend without adding parser builtins |
 | `std::fs` | `read_file`, `write_file`, `exists`, `metadata`, `read_dir`, `create_dir`, `remove_dir`, `remove_file`, `Metadata`, `DirEntry` | Kizu wrappers in `std/src/fs.kizu` over `std::builtin::fs_*` host filesystem primitives | migrated wrapper module; keep host filesystem calls primitive |
 | `std::path` | `join`, `clean`, `basename`, `dirname`, `extension` | Kizu module in `std/src/path.kizu`; `join` and `clean` return allocator-backed `std::string::String` | keep only allocator and Array storage primitives trusted |

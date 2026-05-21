@@ -1555,6 +1555,9 @@ func (c *Checker) checkQualifiedStdRuntimeBuiltin(
 	if typ, ok, err := c.checkProcessBuiltin(name, args, env); ok || err != nil {
 		return typ, ok, err
 	}
+	if typ, ok, err := c.checkSimpleCoreBuiltin(name, args, env); ok || err != nil {
+		return typ, ok, err
+	}
 	if typ, ok, err := checkConcurrencyConstructor(name); ok || err != nil {
 		return typ, ok, err
 	}
@@ -2061,7 +2064,8 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 		typ, err := c.checkArrayConstructor(typeArg, args, env)
 		return typ, true, err
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_get", "std.builtin.array_at", "std.builtin.array_at_mut",
+		"std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env)
 	default:
@@ -2245,21 +2249,25 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", err
 		}
 		return "!&mut " + elem, nil
-	case "get":
+	case "get", "get_or_panic":
 		if len(args) != 1 {
-			return "", fmt.Errorf("array error: `Array.get` expects 1 arg, got %d", len(args))
+			return "", fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d",
+				name, len(args))
 		}
 		got, err := c.readExpr(args[0], env)
 		if err != nil {
 			return "", err
 		}
 		if got != "i64" {
-			return "", fmt.Errorf("array error: `Array.get` expects i64 index, got %s", got)
+			return "", fmt.Errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
 		}
 		if !isGenericParamName(elem) && !c.isCopyType(elem) {
-			return "", fmt.Errorf("array error: `Array.get` requires copy element in v0.2")
+			return "", fmt.Errorf("array error: `Array.%s` requires copy element in v0.2", name)
 		}
-		return "!" + elem, nil
+		if name == "get" {
+			return "!" + elem, nil
+		}
+		return elem, nil
 	default:
 		array := &binding{typeName: fmt.Sprintf("std::array::Array<%s>", elem)}
 		return c.checkArrayMethod(array, elem, name, args, env)
@@ -3929,11 +3937,11 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArrayAppend(array, elem, args, env)
 	case "len", "capacity":
 		return c.checkArrayReadNoArgs(array, name, args)
-	case "get":
+	case "get", "get_or_panic":
 		if array.activeMutBorrows > 0 {
-			return "", fmt.Errorf("array error: `Array.get` cannot read while mutably borrowed")
+			return "", fmt.Errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
 		}
-		return c.checkArrayGet(elem, args, env)
+		return c.checkArrayGet(elem, name, args, env)
 	case "at", "at_mut":
 		return "", fmt.Errorf("array error: `Array.%s` must be bound with `let name = try array.%s(...)`",
 			name, name)
@@ -4078,21 +4086,29 @@ func (c *Checker) checkArraySet(
 }
 
 // checkArrayGet validates copy-only Array<T> reads in the v0.2 prototype.
-func (c *Checker) checkArrayGet(elem string, args []ast.Expression, env *scope) (string, error) {
+func (c *Checker) checkArrayGet(
+	elem string,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("array error: `Array.get` expects 1 arg, got %d", len(args))
+		return "", fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", err
 	}
 	if got != "i64" {
-		return "", fmt.Errorf("array error: `Array.get` expects i64 index, got %s", got)
+		return "", fmt.Errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
 	}
 	if !c.isCopyType(elem) {
-		return "", fmt.Errorf("array error: `Array.get` requires copy element in v0.2")
+		return "", fmt.Errorf("array error: `Array.%s` requires copy element in v0.2", name)
 	}
-	return "!" + elem, nil
+	if name == "get" {
+		return "!" + elem, nil
+	}
+	return elem, nil
 }
 
 // checkMapMethod validates ownership effects for owned Map<[]const u8, V> methods.

@@ -2997,7 +2997,7 @@ func (c *Checker) checkStdCoreBuiltin(
 	if typ, ok, err := c.checkProcessBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
 	}
-	return "", false, nil
+	return c.checkSimpleCoreBuiltin(name, args, env, unsafe)
 }
 
 // checkStdRuntimeBuiltin validates task and constructor std calls.
@@ -3668,7 +3668,8 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_get", "std.builtin.array_at", "std.builtin.array_at_mut",
+		"std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
 	default:
@@ -3797,14 +3798,17 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", err
 		}
 		return Type("!&mut " + string(elem)), nil
-	case "get":
+	case "get", "get_or_panic":
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
 		if !isGenericParamType(elem) && !c.isCopyType(elem) {
-			return "", fmt.Errorf("type error: `Array.get` requires copy element in v0.2")
+			return "", fmt.Errorf("type error: `Array.%s` requires copy element in v0.2", name)
 		}
-		return Type("!" + string(elem)), nil
+		if name == "get" {
+			return Type("!" + string(elem)), nil
+		}
+		return elem, nil
 	default:
 		return c.checkArrayMethod(elem, name, args, env, unsafe)
 	}
@@ -4953,8 +4957,8 @@ func (c *Checker) checkArrayMethod(
 			return "", fmt.Errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeI64, nil
-	case "get":
-		return c.checkArrayGet(elem, args, env, unsafe)
+	case "get", "get_or_panic":
+		return c.checkArrayGet(elem, name, args, env, unsafe)
 	case "at", "at_mut":
 		return "", fmt.Errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
 			name, name)
@@ -5036,17 +5040,21 @@ func checkArrayAsBytes(elem Type, args []ast.Expression) (Type, error) {
 // checkArrayGet validates checked copy reads from an Array.
 func (c *Checker) checkArrayGet(
 	elem Type,
+	name string,
 	args []ast.Expression,
 	env *scope,
 	unsafe bool,
 ) (Type, error) {
-	if err := c.checkArrayIndexArg("get", args, env, unsafe); err != nil {
+	if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 		return "", err
 	}
 	if !c.isCopyType(elem) {
-		return "", fmt.Errorf("type error: `Array.get` requires copy element in v0.2")
+		return "", fmt.Errorf("type error: `Array.%s` requires copy element in v0.2", name)
 	}
-	return Type("!" + string(elem)), nil
+	if name == "get" {
+		return Type("!" + string(elem)), nil
+	}
+	return elem, nil
 }
 
 // isStdType reports whether a type belongs to the reserved std namespace.

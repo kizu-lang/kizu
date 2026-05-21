@@ -1524,6 +1524,7 @@ array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
 array.get(index: i64) -> !T
+array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
 array.at_mut(index: i64) -> !&mut T borrows self
 array.set(index: i64, value: T) -> !void
@@ -1532,7 +1533,9 @@ array.deinit() -> void
 
 `std::array::Array<T>()` のような hidden default allocator は使いません。
 `array.get` は bounds check し、範囲外なら `!T` の error を返します。
-v0.2 の `get` は copy element 限定です。
+`array.get_or_panic` は testing や invariant-checked code 用の明示 trap variant です。
+範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。
+v0.2 の `get` / `get_or_panic` は copy element 限定です。
 non-copy element は `at` / `at_mut` で local borrow として読み書きします。
 element borrow が生きている間は `append`、`set`、`deinit` を禁止します。
 mutable element borrow が生きている間は array 全体の read も禁止します。
@@ -1568,24 +1571,21 @@ v0.2 の `std::testing` は、self-host compiler component test 用の
 最小 assertion API です。
 
 ```text
-std::testing::expect(condition: bool) -> !void
-std::testing::expect_equal_i64(expected: i64, actual: i64) -> !void
-std::testing::expect_equal_bool(expected: bool, actual: bool) -> !void
-std::testing::expect_equal_bytes(expected: []const u8, actual: []const u8) -> !void
+std::testing::expect(condition: bool) -> void
 std::testing::fail(message: []const u8) -> !void
 ```
 
-assertion failure は panic ではなく `!void` の error として返します。
-`std::testing` は Kizu source で実装し、`std::builtin::testing_*` は持ちません。
-`expect` は condition failure を fixed message の `!void` error として返します。
-`fail` は caller-provided `[]const u8` を error message として返します。
-Equality helpers は `std::mem` で比較し、失敗時だけ明示 allocator-backed
-`std::string::String` に `std::fmt` で deterministic な expected / actual
-diagnostic を構築します。`error(...)` は message bytes を copy して所有するため、
-testing diagnostic は local `String.as_bytes()` view を返しません。
+`expect` は test assertion 用の void helper です。
+condition failure は `std::builtin::test_fail` 経由で runtime error として停止し、
+test source は assertion ごとの `try` を書きません。
+`fail` は caller-provided `[]const u8` を通常の `!void` error として返します。
+unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。
+generic equality は v0.2 では導入せず、比較は `expect(left == right)` または
+`expect(std::mem::equal_bytes(left, right))` のように caller 側で明示します。
+typed `expect_equal_<type>` family は v0.2 API に含めません。
 `kizu test <file>` は v0.2 では discovery なしの single-file runner です。
 file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示します。
-generic equality、test discovery、location-aware diagnostics は後続で扱います。
+test discovery、location-aware diagnostics、message builder helper は後続で扱います。
 
 ## 15. concurrency / async 方針
 
