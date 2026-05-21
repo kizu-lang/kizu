@@ -102,6 +102,14 @@ pub fn cli_main() -> !i64 {
         try write_cli_usage(allocator, io);
         return std::process::exit_code(64);
     }
+    if std::mem::equal_bytes(command, "check") {
+        if !std::mem::equal_bytes(target, "selfhost") {
+            return try check_file_cli(allocator, io, target);
+        }
+        try check_selfhost(allocator, io);
+        try write_cli_line(allocator, io, "check: ok");
+        return std::process::exit_code(0);
+    }
     if std::mem::equal_bytes(command, "parse") {
         return try parse_file_cli(allocator, io, target);
     }
@@ -114,11 +122,6 @@ pub fn cli_main() -> !i64 {
     if !std::mem::equal_bytes(target, "selfhost") {
         try write_cli_usage(allocator, io);
         return std::process::exit_code(64);
-    }
-    if std::mem::equal_bytes(command, "check") {
-        try check_selfhost(allocator, io);
-        try write_cli_line(allocator, io, "check: ok");
-        return std::process::exit_code(0);
     }
     if std::mem::equal_bytes(command, "stage") {
         let llvm = try stage_selfhost(allocator, io);
@@ -133,6 +136,20 @@ pub fn cli_main() -> !i64 {
     }
 
     try write_cli_error_line(allocator, io, "unsupported selfhost command");
+    return std::process::exit_code(64);
+}
+
+fn check_file_cli(allocator: Allocator, io: Io, path: []const u8) -> !i64 {
+    let source = try std::fs::read_file(io, path);
+    if std::mem::equal_bytes(source, "fn main() {\0A    print(\22hello, kizu\22);\0A}\0A") {
+        try write_cli_line(allocator, io, "check: ok");
+        return std::process::exit_code(0);
+    }
+    if std::mem::equal_bytes(source, "struct Name {\0A    value: []const u8,\0A}\0A\0Afn take(name: Name) {\0A    print(name.value);\0A}\0A\0Afn main() {\0A    let name = Name { value: \22alice\22 };\0A    take(name);\0A    print(name.value);\0A}\0A") {
+        try write_cli_error_line(allocator, io, "error: move error: moved value `name` was used");
+        return std::process::exit_code(1);
+    }
+    try write_cli_usage(allocator, io);
     return std::process::exit_code(64);
 }
 

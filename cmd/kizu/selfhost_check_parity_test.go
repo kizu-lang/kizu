@@ -225,7 +225,7 @@ func checkParityGuardCases() []checkParityGuardCase {
 		},
 		{
 			name:     "unsupported_target",
-			args:     []string{"check", "selfhost/tests/cli/check_unknown.kizu"},
+			args:     []string{"check", "selfhost/tests/cli/parse_ok_minimal.kizu"},
 			exitCode: 64,
 			stderr:   selfhostUsageStderr(),
 		},

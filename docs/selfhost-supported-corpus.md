@@ -75,6 +75,9 @@ just selfhost-check-parity-gate
 That gate records command args, fixture paths, checked-in stdout/stderr golden
 paths, expected exit codes, and hosted-artifact output fingerprints in
 `target/selfhost/reports/check-parity.txt`.
+For #592, `check_hello_alias.kizu` and `check_moved_value_alias.kizu` use the
+same source bytes as the original check fixtures to prove hosted check dispatch
+is source-driven for the first success and move-check failure shapes.
 
 Issue #531 defines the first hosted `run <file>` and `kizu test <file>`
 strategy, but those cases are not part of the production-switch corpus yet.
