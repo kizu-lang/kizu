@@ -83,6 +83,10 @@ func countRuntimeStorageTemplateMetadataFailures(t *testing.T, metaContent strin
 		"arena-allocator-boundary explicit\n",
 		"arena-handle-provenance checked\n",
 		"arena-invalid-handle-diagnostic invalid arena handle\n",
+		"abi-record summary-i64-slice\n",
+		"abi-error-union summary-success-failure\n",
+		"abi-call direct-record-roundtrip\n",
+		"deferred tagged-union-payload issue-495\n",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(metaContent, fragment) {
@@ -233,6 +237,9 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"host-runtime-metadata target/selfhost/selfhost.host.ll.meta\n",
 		"storage-backend selfhost-runtime-ll\n",
 		"host-capabilities selfhost-host-v0\n",
+		"abi-record summary-i64-slice\n",
+		"abi-error-union summary-success-failure\n",
+		"abi-call direct-record-roundtrip\n",
 		"go-stdprim-storage none\n",
 		"go-stdprim-host none\n",
 		"linker-process deferred issue-459\n",
@@ -272,6 +279,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"external @kizu_rt_owned_deinit\n",
 		"external @kizu_rt_trap\n",
 		"unsupported-policy blocker\n",
+		"deferred tagged-union-payload issue-495\n",
 	}
 	for _, fragment := range requiredMeta {
 		if !strings.Contains(metaContent, fragment) {
@@ -341,11 +349,15 @@ func runtimeStorageLayoutLLFragments() []string {
 	return []string{
 		"; kizu selfhost runtime storage ll v0\n",
 		"%kizu.handle = type { ptr, i64 }\n",
+		"%kizu.record.abi.summary = type { i64, %kizu.slice.u8 }\n",
+		"%kizu.error.record.abi.summary = type { i1, %kizu.record.abi.summary, %kizu.slice.u8 }\n",
 		"%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }\n",
 		"%kizu.rt.string = type { ptr, ptr, i64, i64 }\n",
 		"%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }\n",
 		"%kizu.rt.arena = type { ptr, i64, i64, [48 x i8] }\n",
 		"@.kizu.rt.arena_invalid_handle",
+		"@.kizu.rt.abi_summary_name",
+		"@.kizu.rt.abi_failure",
 		"@.kizu.rt.arena_smoke",
 		"@.kizu.rt.arena_smoke_second",
 		"@.kizu.rt.array_smoke",
@@ -377,6 +389,11 @@ func runtimeStorageFunctionLLFragments() []string {
 		"define i1 @kizu_rt_map_key_equal",
 		"define i1 @kizu_rt_map_contains",
 		"define %kizu.error.i64 @kizu_rt_map_get_i64",
+		"define %kizu.record.abi.summary @kizu_selfhost__abi_summary_make",
+		"define %kizu.record.abi.summary @kizu_selfhost__abi_summary_passthrough",
+		"define %kizu.error.record.abi.summary @kizu_selfhost__abi_summary_success",
+		"define %kizu.error.record.abi.summary @kizu_selfhost__abi_summary_failure",
+		"define i64 @kizu_selfhost__runtime_abi_roundtrip_smoke() {\n",
 		"define %kizu.owned @kizu_rt_diagnostic_buffer_new",
 		"define %kizu.error.void @kizu_rt_diagnostic_push",
 		"define %kizu.owned @kizu_rt_arena_new",
@@ -405,6 +422,8 @@ func runtimeStorageSmokeLLFragments() []string {
 		"call %kizu.error.void @kizu_rt_map_insert",
 		"call i1 @kizu_rt_map_contains",
 		"call %kizu.error.i64 @kizu_rt_map_get_i64",
+		"call %kizu.record.abi.summary @kizu_selfhost__abi_summary_passthrough",
+		"call i64 @kizu_selfhost__runtime_abi_roundtrip_smoke",
 		"call %kizu.error.void @kizu_rt_diagnostic_push",
 		"call %kizu.handle @kizu_rt_arena_add",
 		"call %kizu.error.slice.u8 @kizu_rt_arena_get",
@@ -458,6 +477,10 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 		"arena-allocator-boundary explicit\n",
 		"arena-handle-provenance checked\n",
 		"arena-invalid-handle-diagnostic invalid arena handle\n",
+		"abi-record summary-i64-slice\n",
+		"abi-error-union summary-success-failure\n",
+		"abi-call direct-record-roundtrip\n",
+		"deferred tagged-union-payload issue-495\n",
 		"deferred box issue-496\n",
 	}
 	for _, fragment := range requiredMeta {

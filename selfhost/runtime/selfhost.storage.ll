@@ -7,6 +7,8 @@ source_filename = "target/selfhost/selfhost.storage"
 %kizu.error.void = type { i1, %kizu.slice.u8 }
 %kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }
 %kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }
+%kizu.record.abi.summary = type { i64, %kizu.slice.u8 }
+%kizu.error.record.abi.summary = type { i1, %kizu.record.abi.summary, %kizu.slice.u8 }
 %kizu.rt.array = type { ptr, ptr, i64, i64, i64 }
 %kizu.rt.string = type { ptr, ptr, i64, i64 }
 %kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }
@@ -29,6 +31,8 @@ source_filename = "target/selfhost/selfhost.storage"
 @.kizu.rt.map_key_gamma = private unnamed_addr constant [5 x i8] c"gamma"
 @.kizu.rt.arena_smoke = private unnamed_addr constant [24 x i8] c"ast-node-payload-storage"
 @.kizu.rt.arena_smoke_second = private unnamed_addr constant [24 x i8] c"ast-node-payload-second!"
+@.kizu.rt.abi_summary_name = private unnamed_addr constant [5 x i8] c"token"
+@.kizu.rt.abi_failure = private unnamed_addr constant [16 x i8] c"abi round failed"
 
 declare ptr @kizu_rt_alloc(ptr, i64)
 declare void @kizu_rt_free(ptr, ptr)
@@ -491,6 +495,116 @@ pass:
   ret i1 true
 fail:
   ret i1 false
+}
+
+define %kizu.record.abi.summary @kizu_selfhost__abi_summary_make(
+  %kizu.slice.u8 %name,
+  i64 %tokens
+) {
+entry:
+  %with_tokens = insertvalue %kizu.record.abi.summary poison, i64 %tokens, 0
+  %record = insertvalue %kizu.record.abi.summary %with_tokens, %kizu.slice.u8 %name, 1
+  ret %kizu.record.abi.summary %record
+}
+
+define %kizu.record.abi.summary @kizu_selfhost__abi_summary_passthrough(
+  %kizu.record.abi.summary %record
+) {
+entry:
+  ret %kizu.record.abi.summary %record
+}
+
+define %kizu.error.record.abi.summary @kizu_selfhost__abi_summary_success(
+  %kizu.slice.u8 %name,
+  i64 %tokens
+) {
+entry:
+  %record = call %kizu.record.abi.summary @kizu_selfhost__abi_summary_make(
+    %kizu.slice.u8 %name,
+    i64 %tokens
+  )
+  %ok = insertvalue %kizu.error.record.abi.summary poison, i1 true, 0
+  %with_value = insertvalue %kizu.error.record.abi.summary %ok, %kizu.record.abi.summary %record, 1
+  %result = insertvalue %kizu.error.record.abi.summary %with_value, %kizu.slice.u8 zeroinitializer, 2
+  ret %kizu.error.record.abi.summary %result
+}
+
+define %kizu.error.record.abi.summary @kizu_selfhost__abi_summary_failure() {
+entry:
+  %message_ptr = getelementptr inbounds [16 x i8], ptr @.kizu.rt.abi_failure, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 16, 1
+  %failed = insertvalue %kizu.error.record.abi.summary poison, i1 false, 0
+  %with_value = insertvalue %kizu.error.record.abi.summary %failed, %kizu.record.abi.summary zeroinitializer, 1
+  %result = insertvalue %kizu.error.record.abi.summary %with_value, %kizu.slice.u8 %message, 2
+  ret %kizu.error.record.abi.summary %result
+}
+
+define i64 @kizu_selfhost__runtime_abi_roundtrip_smoke() {
+entry:
+  %name_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.rt.abi_summary_name, i64 0, i64 0
+  %name_base = insertvalue %kizu.slice.u8 poison, ptr %name_ptr, 0
+  %name = insertvalue %kizu.slice.u8 %name_base, i64 5, 1
+  %record = call %kizu.record.abi.summary @kizu_selfhost__abi_summary_make(
+    %kizu.slice.u8 %name,
+    i64 7
+  )
+  %record_tokens = extractvalue %kizu.record.abi.summary %record, 0
+  %record_tokens_ok = icmp eq i64 %record_tokens, 7
+  %record_name = extractvalue %kizu.record.abi.summary %record, 1
+  %record_name_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %name_ptr,
+    i64 5,
+    %kizu.slice.u8 %record_name
+  )
+  %passed_record = call %kizu.record.abi.summary @kizu_selfhost__abi_summary_passthrough(
+    %kizu.record.abi.summary %record
+  )
+  %passed_tokens = extractvalue %kizu.record.abi.summary %passed_record, 0
+  %passed_tokens_ok = icmp eq i64 %passed_tokens, 7
+  %passed_name = extractvalue %kizu.record.abi.summary %passed_record, 1
+  %passed_name_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %name_ptr,
+    i64 5,
+    %kizu.slice.u8 %passed_name
+  )
+  %success = call %kizu.error.record.abi.summary @kizu_selfhost__abi_summary_success(
+    %kizu.slice.u8 %name,
+    i64 11
+  )
+  %success_ok = extractvalue %kizu.error.record.abi.summary %success, 0
+  %success_record = extractvalue %kizu.error.record.abi.summary %success, 1
+  %success_tokens = extractvalue %kizu.record.abi.summary %success_record, 0
+  %success_tokens_ok = icmp eq i64 %success_tokens, 11
+  %success_name = extractvalue %kizu.record.abi.summary %success_record, 1
+  %success_name_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %name_ptr,
+    i64 5,
+    %kizu.slice.u8 %success_name
+  )
+  %failure = call %kizu.error.record.abi.summary @kizu_selfhost__abi_summary_failure()
+  %failure_ok = extractvalue %kizu.error.record.abi.summary %failure, 0
+  %failure_rejected = icmp eq i1 %failure_ok, false
+  %failure_message = extractvalue %kizu.error.record.abi.summary %failure, 2
+  %failure_ptr = getelementptr inbounds [16 x i8], ptr @.kizu.rt.abi_failure, i64 0, i64 0
+  %failure_message_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %failure_ptr,
+    i64 16,
+    %kizu.slice.u8 %failure_message
+  )
+  %record_ok = and i1 %record_tokens_ok, %record_name_ok
+  %success_payload_ok = and i1 %success_tokens_ok, %success_name_ok
+  %success_all_ok = and i1 %success_ok, %success_payload_ok
+  %failure_all_ok = and i1 %failure_rejected, %failure_message_ok
+  %passed_ok = and i1 %passed_tokens_ok, %passed_name_ok
+  %direct_record_ok = and i1 %record_ok, %passed_ok
+  %ok_a = and i1 %direct_record_ok, %success_all_ok
+  %ok = and i1 %ok_a, %failure_all_ok
+  br i1 %ok, label %pass, label %fail
+pass:
+  ret i64 0
+fail:
+  ret i64 1
 }
 
 define i1 @kizu_rt_map_contains(%kizu.owned %map, %kizu.slice.u8 %key) {
@@ -1360,5 +1474,11 @@ map_pass:
 arena_fail:
   ret i64 1
 arena_pass:
+  %abi_roundtrip = call i64 @kizu_selfhost__runtime_abi_roundtrip_smoke()
+  %abi_roundtrip_ok = icmp eq i64 %abi_roundtrip, 0
+  br i1 %abi_roundtrip_ok, label %abi_pass, label %abi_fail
+abi_fail:
+  ret i64 1
+abi_pass:
   ret i64 0
 }
