@@ -205,7 +205,7 @@ selfhost storage symbols are:
 | Array construction | `@kizu_rt_array_new` | token lists and AST child lists |
 | Array append | `@kizu_rt_array_append` | copies one lowered element into storage |
 | Array length | `@kizu_rt_array_len` | returns the checked element count |
-| Array borrowed view | `@kizu_rt_array_at` | returns a local read-only element view |
+| Array borrowed view | `@kizu_rt_array_at` | returns `![]const u8` with a local read-only element view |
 | Array cleanup | `@kizu_rt_array_deinit` | releases owned array storage |
 | String construction | `@kizu_rt_string_new` | diagnostic and path buffers |
 | String append bytes | `@kizu_rt_string_append_bytes` | copies borrowed bytes |
@@ -231,6 +231,21 @@ and allocates through runtime-internal `@kizu_rt_alloc(ptr, i64)`. Cleanup calls
 `@kizu_rt_free(ptr, ptr)` using the allocator pointer stored inside the opaque
 runtime object. #457 owns binding allocator capability creation to host
 facilities; #456 keeps the storage calls capability-shaped and non-Go.
+
+For #575, Array storage is no longer a count-only smoke for the hosted runtime
+template. The runtime object stores allocator pointer, element byte buffer
+pointer, length, capacity, and element byte size. `append` copies exactly one
+copy-element payload whose byte length matches the Array element size, `at`
+returns a borrowed `[]const u8` view of the stored element bytes for in-bounds
+indexes, and returns the diagnostic `array index out of bounds` for invalid
+indexes. `deinit` releases both the element buffer and the Array object.
+Invalid element shape, null payload for positive element size, and
+length/capacity overflow are rejected with the diagnostic `invalid array
+element`. The storage artifact metadata records
+`array-storage copy-element-byte-buffer`, `array-at returns-stored-element`,
+`array-deinit releases-element-buffer`, and
+`array-invalid-element-diagnostic invalid array element`,
+`array-oob-diagnostic array index out of bounds`.
 
 For #574, owned String storage is no longer a length-only smoke. The runtime
 object stores allocator pointer, byte buffer pointer, byte length, and capacity.
@@ -458,12 +473,12 @@ runtime storage template. The same Go gate checks
 `target/selfhost/selfhost.storage.ll` and `target/selfhost/selfhost.storage.ll.meta`.
 The storage validation requires the reachable Array, String, Map, diagnostic,
 Arena, and Handle runtime symbols, the `@kizu_selfhost__runtime_storage_smoke`
-entry, explicit allocator-boundary metadata, String byte-buffer metadata, handle
-provenance metadata, and the absence of Go interpreter/stdprim fallback markers
-in the storage LLVM artifact.
+entry, explicit allocator-boundary metadata, Array copy-element metadata, String
+byte-buffer metadata, handle provenance metadata, and the absence of Go
+interpreter/stdprim fallback markers in the storage LLVM artifact.
 The gate also links `selfhost.storage.ll` with the host capability runtime and a
-tiny C harness, then runs the storage smoke so String byte storage and
-Arena/Handle calls cannot be only dead textual declarations.
+tiny C harness, then runs the storage smoke so Array payload storage, String
+byte storage, and Arena/Handle calls cannot be only dead textual declarations.
 
 For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
 `target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper

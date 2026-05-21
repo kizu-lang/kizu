@@ -7,7 +7,7 @@ source_filename = "target/selfhost/selfhost.storage"
 %kizu.error.void = type { i1, %kizu.slice.u8 }
 %kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }
 %kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }
-%kizu.rt.array = type { ptr, i64, i64 }
+%kizu.rt.array = type { ptr, ptr, i64, i64, i64 }
 %kizu.rt.string = type { ptr, ptr, i64, i64 }
 %kizu.rt.map = type { ptr, i1, i64 }
 %kizu.rt.diagnostics = type { ptr, i64 }
@@ -16,6 +16,10 @@ source_filename = "target/selfhost/selfhost.storage"
 @.kizu.rt.arena_invalid_handle = private unnamed_addr constant [20 x i8] c"invalid arena handle"
 @.kizu.rt.allocation_failed = private unnamed_addr constant [17 x i8] c"allocation failed"
 @.kizu.rt.invalid_slice = private unnamed_addr constant [13 x i8] c"invalid slice"
+@.kizu.rt.invalid_array_element = private unnamed_addr constant [21 x i8] c"invalid array element"
+@.kizu.rt.array_index_out_of_bounds = private unnamed_addr constant [25 x i8] c"array index out of bounds"
+@.kizu.rt.array_smoke = private unnamed_addr constant [8 x i8] c"array-ok"
+@.kizu.rt.array_smoke_second = private unnamed_addr constant [8 x i8] c"payload2"
 @.kizu.rt.string_smoke = private unnamed_addr constant [3 x i8] c"kiz"
 
 declare ptr @kizu_rt_alloc(ptr, i64)
@@ -25,38 +29,139 @@ declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 define %kizu.owned @kizu_rt_array_new(%kizu.owned %allocator, i64 %element_size) {
 entry:
   %allocator_ptr = extractvalue %kizu.owned %allocator, 0
-  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 24)
+  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 40)
   %allocator_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 0
   store ptr %allocator_ptr, ptr %allocator_field
-  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  store ptr null, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
   store i64 0, ptr %len_field
-  %cap_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
+  %cap_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 3
   store i64 0, ptr %cap_field
+  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4
+  store i64 %element_size, ptr %element_size_field
   %handle = insertvalue %kizu.owned poison, ptr %raw, 0
   ret %kizu.owned %handle
 }
 
 define %kizu.error.void @kizu_rt_array_append(%kizu.owned %array, %kizu.slice.u8 %element) {
 entry:
+  %element_ptr = extractvalue %kizu.slice.u8 %element, 0
+  %element_len = extractvalue %kizu.slice.u8 %element, 1
   %raw = extractvalue %kizu.owned %array, 0
-  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %allocator_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 0
+  %allocator_ptr = load ptr, ptr %allocator_field
+  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %current_data = load ptr, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
   %current = load i64, ptr %len_field
+  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4
+  %element_size = load i64, ptr %element_size_field
+  %size_positive = icmp sgt i64 %element_size, 0
+  br i1 %size_positive, label %check_element_len, label %invalid_element
+check_element_len:
+  %len_matches = icmp eq i64 %element_len, %element_size
+  br i1 %len_matches, label %check_element_ptr, label %invalid_element
+check_element_ptr:
+  %element_ptr_ok = icmp ne ptr %element_ptr, null
+  br i1 %element_ptr_ok, label %check_current, label %invalid_element
+check_current:
+  %current_valid = icmp sge i64 %current, 0
+  br i1 %current_valid, label %check_count_capacity, label %invalid_element
+check_count_capacity:
+  %max_count = sdiv i64 9223372036854775807, %element_size
+  %fits_count = icmp slt i64 %current, %max_count
+  br i1 %fits_count, label %check_old_data, label %invalid_element
+check_old_data:
+  %has_old = icmp sgt i64 %current, 0
+  %old_data_ok = icmp ne ptr %current_data, null
+  %no_old = icmp eq i64 %current, 0
+  %old_ok = or i1 %old_data_ok, %no_old
+  br i1 %old_ok, label %allocate, label %invalid_element
+allocate:
   %next = add i64 %current, 1
+  %old_bytes = mul i64 %current, %element_size
+  %new_bytes = mul i64 %next, %element_size
+  %new_data = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %new_bytes)
+  %allocated = icmp ne ptr %new_data, null
+  br i1 %allocated, label %copy_old_check, label %allocation_failed
+copy_old_check:
+  br i1 %has_old, label %copy_old, label %copy_element
+copy_old:
+  call void @llvm.memcpy.p0.p0.i64(ptr %new_data, ptr %current_data, i64 %old_bytes, i1 false)
+  br label %copy_element
+copy_element:
+  %dest = getelementptr i8, ptr %new_data, i64 %old_bytes
+  call void @llvm.memcpy.p0.p0.i64(ptr %dest, ptr %element_ptr, i64 %element_size, i1 false)
+  %has_old_data = icmp ne ptr %current_data, null
+  br i1 %has_old_data, label %free_old, label %store
+free_old:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %current_data)
+  br label %store
+store:
+  store ptr %new_data, ptr %data_field
   store i64 %next, ptr %len_field
+  %cap_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 3
+  store i64 %next, ptr %cap_field
   ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+allocation_failed:
+  %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 17, 1
+  %failed_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %failed = insertvalue %kizu.error.void %failed_base, %kizu.slice.u8 %message, 1
+  ret %kizu.error.void %failed
+invalid_element:
+  %invalid_ptr = getelementptr inbounds [21 x i8], ptr @.kizu.rt.invalid_array_element, i64 0, i64 0
+  %invalid_message_base = insertvalue %kizu.slice.u8 poison, ptr %invalid_ptr, 0
+  %invalid_message = insertvalue %kizu.slice.u8 %invalid_message_base, i64 21, 1
+  %invalid_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %invalid_result = insertvalue %kizu.error.void %invalid_base, %kizu.slice.u8 %invalid_message, 1
+  ret %kizu.error.void %invalid_result
 }
 
 define i64 @kizu_rt_array_len(%kizu.owned %array) {
 entry:
   %raw = extractvalue %kizu.owned %array, 0
-  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
   %len = load i64, ptr %len_field
   ret i64 %len
 }
 
-define %kizu.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index) {
+define %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 %index) {
 entry:
-  ret %kizu.slice.u8 zeroinitializer
+  %raw = extractvalue %kizu.owned %array, 0
+  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %data = load ptr, ptr %data_field
+  %len_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 2
+  %len = load i64, ptr %len_field
+  %element_size_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 4
+  %element_size = load i64, ptr %element_size_field
+  %index_nonnegative = icmp sge i64 %index, 0
+  %index_in_bounds = icmp slt i64 %index, %len
+  %data_ok = icmp ne ptr %data, null
+  %size_ok = icmp sgt i64 %element_size, 0
+  %bounds_ok = and i1 %index_nonnegative, %index_in_bounds
+  %storage_ok = and i1 %data_ok, %size_ok
+  %ok = and i1 %bounds_ok, %storage_ok
+  br i1 %ok, label %valid, label %invalid
+valid:
+  %offset = mul i64 %index, %element_size
+  %element_ptr = getelementptr i8, ptr %data, i64 %offset
+  %slice_base = insertvalue %kizu.slice.u8 poison, ptr %element_ptr, 0
+  %slice = insertvalue %kizu.slice.u8 %slice_base, i64 %element_size, 1
+  %valid_ok = insertvalue %kizu.error.slice.u8 poison, i1 true, 0
+  %valid_value = insertvalue %kizu.error.slice.u8 %valid_ok, %kizu.slice.u8 %slice, 1
+  %valid_result = insertvalue %kizu.error.slice.u8 %valid_value, %kizu.slice.u8 zeroinitializer, 2
+  ret %kizu.error.slice.u8 %valid_result
+invalid:
+  %message_ptr = getelementptr inbounds [25 x i8], ptr @.kizu.rt.array_index_out_of_bounds, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 25, 1
+  %invalid_ok = insertvalue %kizu.error.slice.u8 poison, i1 false, 0
+  %invalid_value = insertvalue %kizu.error.slice.u8 %invalid_ok, %kizu.slice.u8 zeroinitializer, 1
+  %invalid_result = insertvalue %kizu.error.slice.u8 %invalid_value, %kizu.slice.u8 %message, 2
+  ret %kizu.error.slice.u8 %invalid_result
 }
 
 define void @kizu_rt_array_deinit(%kizu.owned %array) {
@@ -64,6 +169,14 @@ entry:
   %raw = extractvalue %kizu.owned %array, 0
   %allocator_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 0
   %allocator_ptr = load ptr, ptr %allocator_field
+  %data_field = getelementptr inbounds %kizu.rt.array, ptr %raw, i32 0, i32 1
+  %data = load ptr, ptr %data_field
+  %has_data = icmp ne ptr %data, null
+  br i1 %has_data, label %free_data, label %free_array
+free_data:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %data)
+  br label %free_array
+free_array:
   call void @kizu_rt_free(ptr %allocator_ptr, ptr %raw)
   ret void
 }
@@ -471,11 +584,288 @@ fail:
   ret i64 1
 }
 
+define i1 @kizu_selfhost__runtime_array_first_payload_ok(%kizu.slice.u8 %value) {
+entry:
+  %ptr = extractvalue %kizu.slice.u8 %value, 0
+  %len = extractvalue %kizu.slice.u8 %value, 1
+  %len_ok = icmp eq i64 %len, 8
+  %ptr_ok = icmp ne ptr %ptr, null
+  %base_ok = and i1 %len_ok, %ptr_ok
+  br i1 %base_ok, label %bytes, label %fail
+bytes:
+  %b0p = getelementptr i8, ptr %ptr, i64 0
+  %b0 = load i8, ptr %b0p
+  %b1p = getelementptr i8, ptr %ptr, i64 1
+  %b1 = load i8, ptr %b1p
+  %b2p = getelementptr i8, ptr %ptr, i64 2
+  %b2 = load i8, ptr %b2p
+  %b3p = getelementptr i8, ptr %ptr, i64 3
+  %b3 = load i8, ptr %b3p
+  %b4p = getelementptr i8, ptr %ptr, i64 4
+  %b4 = load i8, ptr %b4p
+  %b5p = getelementptr i8, ptr %ptr, i64 5
+  %b5 = load i8, ptr %b5p
+  %b6p = getelementptr i8, ptr %ptr, i64 6
+  %b6 = load i8, ptr %b6p
+  %b7p = getelementptr i8, ptr %ptr, i64 7
+  %b7 = load i8, ptr %b7p
+  %b0_ok = icmp eq i8 %b0, 97
+  %b1_ok = icmp eq i8 %b1, 114
+  %b2_ok = icmp eq i8 %b2, 114
+  %b3_ok = icmp eq i8 %b3, 97
+  %b4_ok = icmp eq i8 %b4, 121
+  %b5_ok = icmp eq i8 %b5, 45
+  %b6_ok = icmp eq i8 %b6, 111
+  %b7_ok = icmp eq i8 %b7, 107
+  %p0 = and i1 %b0_ok, %b1_ok
+  %p1 = and i1 %b2_ok, %b3_ok
+  %p2 = and i1 %b4_ok, %b5_ok
+  %p3 = and i1 %b6_ok, %b7_ok
+  %p4 = and i1 %p0, %p1
+  %p5 = and i1 %p2, %p3
+  %ok = and i1 %p4, %p5
+  ret i1 %ok
+fail:
+  ret i1 false
+}
+
+define i1 @kizu_selfhost__runtime_array_second_payload_ok(%kizu.slice.u8 %value) {
+entry:
+  %ptr = extractvalue %kizu.slice.u8 %value, 0
+  %len = extractvalue %kizu.slice.u8 %value, 1
+  %len_ok = icmp eq i64 %len, 8
+  %ptr_ok = icmp ne ptr %ptr, null
+  %base_ok = and i1 %len_ok, %ptr_ok
+  br i1 %base_ok, label %bytes, label %fail
+bytes:
+  %b0p = getelementptr i8, ptr %ptr, i64 0
+  %b0 = load i8, ptr %b0p
+  %b1p = getelementptr i8, ptr %ptr, i64 1
+  %b1 = load i8, ptr %b1p
+  %b2p = getelementptr i8, ptr %ptr, i64 2
+  %b2 = load i8, ptr %b2p
+  %b3p = getelementptr i8, ptr %ptr, i64 3
+  %b3 = load i8, ptr %b3p
+  %b4p = getelementptr i8, ptr %ptr, i64 4
+  %b4 = load i8, ptr %b4p
+  %b5p = getelementptr i8, ptr %ptr, i64 5
+  %b5 = load i8, ptr %b5p
+  %b6p = getelementptr i8, ptr %ptr, i64 6
+  %b6 = load i8, ptr %b6p
+  %b7p = getelementptr i8, ptr %ptr, i64 7
+  %b7 = load i8, ptr %b7p
+  %b0_ok = icmp eq i8 %b0, 112
+  %b1_ok = icmp eq i8 %b1, 97
+  %b2_ok = icmp eq i8 %b2, 121
+  %b3_ok = icmp eq i8 %b3, 108
+  %b4_ok = icmp eq i8 %b4, 111
+  %b5_ok = icmp eq i8 %b5, 97
+  %b6_ok = icmp eq i8 %b6, 100
+  %b7_ok = icmp eq i8 %b7, 50
+  %p0 = and i1 %b0_ok, %b1_ok
+  %p1 = and i1 %b2_ok, %b3_ok
+  %p2 = and i1 %b4_ok, %b5_ok
+  %p3 = and i1 %b6_ok, %b7_ok
+  %p4 = and i1 %p0, %p1
+  %p5 = and i1 %p2, %p3
+  %ok = and i1 %p4, %p5
+  ret i1 %ok
+fail:
+  ret i1 false
+}
+
+define i1 @kizu_selfhost__runtime_invalid_array_element_message_ok(%kizu.slice.u8 %message) {
+entry:
+  %ptr = extractvalue %kizu.slice.u8 %message, 0
+  %len = extractvalue %kizu.slice.u8 %message, 1
+  %len_ok = icmp eq i64 %len, 21
+  %ptr_ok = icmp ne ptr %ptr, null
+  %base_ok = and i1 %len_ok, %ptr_ok
+  br i1 %base_ok, label %bytes, label %fail
+bytes:
+  %b0p = getelementptr i8, ptr %ptr, i64 0
+  %b0 = load i8, ptr %b0p
+  %b1p = getelementptr i8, ptr %ptr, i64 1
+  %b1 = load i8, ptr %b1p
+  %b2p = getelementptr i8, ptr %ptr, i64 2
+  %b2 = load i8, ptr %b2p
+  %b3p = getelementptr i8, ptr %ptr, i64 3
+  %b3 = load i8, ptr %b3p
+  %b4p = getelementptr i8, ptr %ptr, i64 4
+  %b4 = load i8, ptr %b4p
+  %b5p = getelementptr i8, ptr %ptr, i64 5
+  %b5 = load i8, ptr %b5p
+  %b6p = getelementptr i8, ptr %ptr, i64 6
+  %b6 = load i8, ptr %b6p
+  %b7p = getelementptr i8, ptr %ptr, i64 7
+  %b7 = load i8, ptr %b7p
+  %b8p = getelementptr i8, ptr %ptr, i64 8
+  %b8 = load i8, ptr %b8p
+  %b9p = getelementptr i8, ptr %ptr, i64 9
+  %b9 = load i8, ptr %b9p
+  %b10p = getelementptr i8, ptr %ptr, i64 10
+  %b10 = load i8, ptr %b10p
+  %b11p = getelementptr i8, ptr %ptr, i64 11
+  %b11 = load i8, ptr %b11p
+  %b12p = getelementptr i8, ptr %ptr, i64 12
+  %b12 = load i8, ptr %b12p
+  %b13p = getelementptr i8, ptr %ptr, i64 13
+  %b13 = load i8, ptr %b13p
+  %b14p = getelementptr i8, ptr %ptr, i64 14
+  %b14 = load i8, ptr %b14p
+  %b15p = getelementptr i8, ptr %ptr, i64 15
+  %b15 = load i8, ptr %b15p
+  %b16p = getelementptr i8, ptr %ptr, i64 16
+  %b16 = load i8, ptr %b16p
+  %b17p = getelementptr i8, ptr %ptr, i64 17
+  %b17 = load i8, ptr %b17p
+  %b18p = getelementptr i8, ptr %ptr, i64 18
+  %b18 = load i8, ptr %b18p
+  %b19p = getelementptr i8, ptr %ptr, i64 19
+  %b19 = load i8, ptr %b19p
+  %b20p = getelementptr i8, ptr %ptr, i64 20
+  %b20 = load i8, ptr %b20p
+  %b0_ok = icmp eq i8 %b0, 105
+  %b1_ok = icmp eq i8 %b1, 110
+  %b2_ok = icmp eq i8 %b2, 118
+  %b3_ok = icmp eq i8 %b3, 97
+  %b4_ok = icmp eq i8 %b4, 108
+  %b5_ok = icmp eq i8 %b5, 105
+  %b6_ok = icmp eq i8 %b6, 100
+  %b7_ok = icmp eq i8 %b7, 32
+  %b8_ok = icmp eq i8 %b8, 97
+  %b9_ok = icmp eq i8 %b9, 114
+  %b10_ok = icmp eq i8 %b10, 114
+  %b11_ok = icmp eq i8 %b11, 97
+  %b12_ok = icmp eq i8 %b12, 121
+  %b13_ok = icmp eq i8 %b13, 32
+  %b14_ok = icmp eq i8 %b14, 101
+  %b15_ok = icmp eq i8 %b15, 108
+  %b16_ok = icmp eq i8 %b16, 101
+  %b17_ok = icmp eq i8 %b17, 109
+  %b18_ok = icmp eq i8 %b18, 101
+  %b19_ok = icmp eq i8 %b19, 110
+  %b20_ok = icmp eq i8 %b20, 116
+  %p0 = and i1 %b0_ok, %b1_ok
+  %p1 = and i1 %b2_ok, %b3_ok
+  %p2 = and i1 %b4_ok, %b5_ok
+  %p3 = and i1 %b6_ok, %b7_ok
+  %p4 = and i1 %b8_ok, %b9_ok
+  %p5 = and i1 %b10_ok, %b11_ok
+  %p6 = and i1 %b12_ok, %b13_ok
+  %p7 = and i1 %b14_ok, %b15_ok
+  %p8 = and i1 %b16_ok, %b17_ok
+  %p9 = and i1 %b18_ok, %b19_ok
+  %q0 = and i1 %p0, %p1
+  %q1 = and i1 %p2, %p3
+  %q2 = and i1 %p4, %p5
+  %q3 = and i1 %p6, %p7
+  %q4 = and i1 %p8, %p9
+  %r0 = and i1 %q0, %q1
+  %r1 = and i1 %q2, %q3
+  %r2 = and i1 %q4, %b20_ok
+  %s0 = and i1 %r0, %r1
+  %ok = and i1 %s0, %r2
+  ret i1 %ok
+fail:
+  ret i1 false
+}
+
+define i1 @kizu_selfhost__runtime_array_oob_message_ok(%kizu.slice.u8 %message) {
+entry:
+  %ptr = extractvalue %kizu.slice.u8 %message, 0
+  %len = extractvalue %kizu.slice.u8 %message, 1
+  %len_ok = icmp eq i64 %len, 25
+  %ptr_ok = icmp ne ptr %ptr, null
+  %base_ok = and i1 %len_ok, %ptr_ok
+  br i1 %base_ok, label %bytes, label %fail
+bytes:
+  %b0p = getelementptr i8, ptr %ptr, i64 0
+  %b0 = load i8, ptr %b0p
+  %b6p = getelementptr i8, ptr %ptr, i64 6
+  %b6 = load i8, ptr %b6p
+  %b12p = getelementptr i8, ptr %ptr, i64 12
+  %b12 = load i8, ptr %b12p
+  %b19p = getelementptr i8, ptr %ptr, i64 19
+  %b19 = load i8, ptr %b19p
+  %b24p = getelementptr i8, ptr %ptr, i64 24
+  %b24 = load i8, ptr %b24p
+  %b0_ok = icmp eq i8 %b0, 97
+  %b6_ok = icmp eq i8 %b6, 105
+  %b12_ok = icmp eq i8 %b12, 111
+  %b19_ok = icmp eq i8 %b19, 98
+  %b24_ok = icmp eq i8 %b24, 115
+  %p0 = and i1 %b0_ok, %b6_ok
+  %p1 = and i1 %b12_ok, %b19_ok
+  %p2 = and i1 %p0, %p1
+  %ok = and i1 %p2, %b24_ok
+  ret i1 %ok
+fail:
+  ret i1 false
+}
+
 define i64 @kizu_selfhost__runtime_storage_smoke() {
 entry:
-  %array = call %kizu.owned @kizu_rt_array_new(%kizu.owned zeroinitializer, i64 16)
-  %array_append = call %kizu.error.void @kizu_rt_array_append(%kizu.owned %array, %kizu.slice.u8 zeroinitializer)
+  %array = call %kizu.owned @kizu_rt_array_new(%kizu.owned zeroinitializer, i64 8)
+  %array_input_ptr = getelementptr inbounds [8 x i8], ptr @.kizu.rt.array_smoke, i64 0, i64 0
+  %array_input_base = insertvalue %kizu.slice.u8 poison, ptr %array_input_ptr, 0
+  %array_input = insertvalue %kizu.slice.u8 %array_input_base, i64 8, 1
+  %array_append = call %kizu.error.void @kizu_rt_array_append(%kizu.owned %array, %kizu.slice.u8 %array_input)
+  %array_append_ok = extractvalue %kizu.error.void %array_append, 0
+  %array_second_ptr = getelementptr inbounds [8 x i8], ptr @.kizu.rt.array_smoke_second, i64 0, i64 0
+  %array_second_base = insertvalue %kizu.slice.u8 poison, ptr %array_second_ptr, 0
+  %array_second = insertvalue %kizu.slice.u8 %array_second_base, i64 8, 1
+  %array_append_second = call %kizu.error.void @kizu_rt_array_append(
+    %kizu.owned %array,
+    %kizu.slice.u8 %array_second
+  )
+  %array_append_second_ok = extractvalue %kizu.error.void %array_append_second, 0
   %array_len = call i64 @kizu_rt_array_len(%kizu.owned %array)
+  %array_len_ok = icmp eq i64 %array_len, 2
+  %array_view_result = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 0)
+  %array_view_ok = extractvalue %kizu.error.slice.u8 %array_view_result, 0
+  %array_view = extractvalue %kizu.error.slice.u8 %array_view_result, 1
+  %array_first_ok = call i1 @kizu_selfhost__runtime_array_first_payload_ok(
+    %kizu.slice.u8 %array_view
+  )
+  %array_second_result = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 1)
+  %array_second_ok = extractvalue %kizu.error.slice.u8 %array_second_result, 0
+  %array_second_view = extractvalue %kizu.error.slice.u8 %array_second_result, 1
+  %array_second_payload_ok = call i1 @kizu_selfhost__runtime_array_second_payload_ok(
+    %kizu.slice.u8 %array_second_view
+  )
+  %array_oob = call %kizu.error.slice.u8 @kizu_rt_array_at(%kizu.owned %array, i64 2)
+  %array_oob_ok = extractvalue %kizu.error.slice.u8 %array_oob, 0
+  %array_oob_rejected = icmp eq i1 %array_oob_ok, false
+  %array_oob_message = extractvalue %kizu.error.slice.u8 %array_oob, 2
+  %array_oob_message_ok = call i1 @kizu_selfhost__runtime_array_oob_message_ok(
+    %kizu.slice.u8 %array_oob_message
+  )
+  %array_invalid = call %kizu.error.void @kizu_rt_array_append(
+    %kizu.owned %array,
+    %kizu.slice.u8 zeroinitializer
+  )
+  %array_invalid_ok = extractvalue %kizu.error.void %array_invalid, 0
+  %array_invalid_rejected = icmp eq i1 %array_invalid_ok, false
+  %array_invalid_message = extractvalue %kizu.error.void %array_invalid, 1
+  %array_invalid_message_ok = call i1 @kizu_selfhost__runtime_invalid_array_element_message_ok(
+    %kizu.slice.u8 %array_invalid_message
+  )
+  %array_append_all_ok = and i1 %array_append_ok, %array_append_second_ok
+  %array_first_all_ok = and i1 %array_view_ok, %array_first_ok
+  %array_second_all_ok = and i1 %array_second_ok, %array_second_payload_ok
+  %array_oob_all_ok = and i1 %array_oob_rejected, %array_oob_message_ok
+  %array_invalid_all_ok = and i1 %array_invalid_rejected, %array_invalid_message_ok
+  %array_ok_a = and i1 %array_append_all_ok, %array_len_ok
+  %array_ok_b = and i1 %array_first_all_ok, %array_second_all_ok
+  %array_ok_c = and i1 %array_oob_all_ok, %array_invalid_all_ok
+  %array_ok_d = and i1 %array_ok_a, %array_ok_b
+  %array_base_ok = and i1 %array_ok_c, %array_ok_d
+  br i1 %array_base_ok, label %array_pass, label %array_fail
+array_fail:
+  call void @kizu_rt_array_deinit(%kizu.owned %array)
+  ret i64 1
+array_pass:
   call void @kizu_rt_array_deinit(%kizu.owned %array)
   %string = call %kizu.owned @kizu_rt_string_new(%kizu.owned zeroinitializer)
   %string_input_ptr = getelementptr inbounds [3 x i8], ptr @.kizu.rt.string_smoke, i64 0, i64 0
