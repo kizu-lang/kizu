@@ -53,3 +53,20 @@ just selfhost-parse-parity-gate
 That gate records command args, fixture paths, checked-in stdout/stderr golden
 paths, expected exit codes, and hosted-artifact output fingerprints in
 `target/selfhost/reports/parse-parity.txt`.
+
+The #530 `check <file>` parity cases are also tracked in a separate CLI
+manifest so repeated local validation stays focused:
+
+```text
+selfhost/tests/cli/check-parity.tsv
+```
+
+Run them against an existing passing bootstrap artifact with:
+
+```sh
+just selfhost-check-parity-gate
+```
+
+That gate records command args, fixture paths, checked-in stdout/stderr golden
+paths, expected exit codes, and hosted-artifact output fingerprints in
+`target/selfhost/reports/check-parity.txt`.

@@ -353,11 +353,22 @@ selfhost check examples/hello.kizu
 selfhost check examples/negative/moved_value.kizu
 ```
 
-These targets exist only for the supported corpus manifest in
-`selfhost/tests/supported-corpus.tsv`. They verify user-visible stdout, stderr,
-and exit-code behavior through the hosted artifact. Broad CLI parity, broad
+These targets are bounded to checked manifests. The supported corpus manifest in
+`selfhost/tests/supported-corpus.tsv` verifies user-visible stdout, stderr, and
+exit-code behavior through the hosted artifact. Broad CLI parity, broad
 example/conformance coverage, and unsupported ABI shapes remain blocked by #497
 and #495.
+
+For #530, those same bounded `check <file>` targets are also recorded in
+`selfhost/tests/cli/check-parity.tsv` with checked-in stdout/stderr goldens:
+
+```sh
+selfhost check examples/hello.kizu
+selfhost check examples/negative/moved_value.kizu
+```
+
+The check parity gate runs through `target/selfhost/stage2/selfhost`, records
+`go.cmd-kizu-fallback none`, and does not bootstrap from scratch by default.
 
 For #525, the hosted CLI also accepts the bounded `parse <file>` parity cases in
 `selfhost/tests/cli/parse-parity.tsv`:

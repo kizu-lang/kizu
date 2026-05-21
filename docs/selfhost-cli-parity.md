@@ -1,7 +1,7 @@
 # Selfhost CLI Parity Scope
 
 Issue #497 tracks hosted selfhost CLI parity after the first bootstrap path.
-This document records the release-scope decision after #525.
+This document records the release-scope decision after #530.
 
 The hosted selfhost artifact is not a general-purpose replacement for Go
 `cmd/kizu` yet. It must not add hidden Go parser, Go interpreter, Go test
@@ -17,8 +17,8 @@ The current hosted stage2 artifact supports these command slices:
 | --- | --- | --- |
 | `check selfhost` | Minimum compiler package check from #458 | `just selfhost-production-gate` |
 | `stage selfhost` | Stage2 artifact materialization from #459 | `just selfhost-production-gate` |
-| `check examples/hello.kizu` | Positive supported corpus row from #460 | `just selfhost-corpus-gate` |
-| `check examples/negative/moved_value.kizu` | Negative supported corpus row from #460 | `just selfhost-corpus-gate` |
+| `check examples/hello.kizu` | #530 positive check fixture, also a #460 corpus row | `just selfhost-check-parity-gate` |
+| `check examples/negative/moved_value.kizu` | #530 negative check fixture, also a #460 corpus row | `just selfhost-check-parity-gate` |
 | `parse selfhost/tests/cli/parse_ok_minimal.kizu` | #525 positive parse fixture only | `just selfhost-parse-parity-gate` |
 | `parse selfhost/tests/cli/parse_invalid_missing_expr.kizu` | #525 negative parse fixture only | `just selfhost-parse-parity-gate` |
 
@@ -26,6 +26,13 @@ The current hosted stage2 artifact supports these command slices:
 records command args, fixture paths, expected exit codes, and checked-in
 stdout/stderr golden paths. The gate runs through
 `target/selfhost/stage2/selfhost` and records `go.cmd-kizu-fallback none`.
+
+`selfhost/tests/cli/check-parity.tsv` is the #530 check parity manifest. It
+records command args, fixture paths, expected exit codes, and checked-in
+stdout/stderr golden paths for the bounded `check <file>` slice. The fast
+`just selfhost-check-parity-gate` recipe reuses an existing passing
+`target/selfhost/stage2/selfhost` artifact and records `go.cmd-kizu-fallback
+none`; it does not bootstrap from scratch by default.
 
 Unsupported commands, wrong arity, and arguments beginning with `-` remain
 deterministic usage/unsupported paths with exit code `64`.
