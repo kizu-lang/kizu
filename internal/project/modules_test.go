@@ -73,6 +73,45 @@ func TestResolveModules(t *testing.T) {
 	if !sameStrings(got, want) {
 		t.Fatalf("got modules %#v, want %#v", got, want)
 	}
+	if !graph.Exports["app"] || len(graph.Exports) != 1 {
+		t.Fatalf("got exports %#v, want root export", graph.Exports)
+	}
+}
+
+// TestResolveModulesRecordsExplicitExports checks package surface metadata.
+func TestResolveModulesRecordsExplicitExports(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "src/main.kizu")
+	writeFile(t, root, "src/lexer.kizu")
+
+	graph, err := ResolveModules(root, Manifest{
+		PackageName: "app",
+		Root:        "src/main.kizu",
+		Paths:       []string{"src"},
+		Exports:     []string{"app", "app::lexer"},
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if !graph.Exports["app"] || !graph.Exports["app::lexer"] || len(graph.Exports) != 2 {
+		t.Fatalf("got exports %#v, want app and app::lexer", graph.Exports)
+	}
+}
+
+// TestResolveModulesRejectsMissingExport checks exported modules must exist.
+func TestResolveModulesRejectsMissingExport(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "src/main.kizu")
+
+	_, err := ResolveModules(root, Manifest{
+		PackageName: "app",
+		Root:        "src/main.kizu",
+		Paths:       []string{"src"},
+		Exports:     []string{"app::missing"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exported module `app::missing`") {
+		t.Fatalf("got error %v, want missing export", err)
+	}
 }
 
 // TestResolveModulesRejectsDuplicateModulePaths checks mod/file collisions.

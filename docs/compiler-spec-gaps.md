@@ -38,11 +38,14 @@ Rules:
 
 ### Visibility
 
-Source: [ADR-0050](adr/0050-visibility-diagnostics.md).
+Source: [ADR-0050](adr/0050-visibility-diagnostics.md) and
+[ADR-0070](adr/0070-package-export-surface.md).
 
 - top-level declarations are private by default
 - struct fields are private by default
 - `pub` exposes top-level declarations and fields
+- `[modules].exports` lists package modules visible outside the package
+- non-exported package modules may share `pub` helpers inside the package
 - public signatures may not expose private types
 - external modules may not construct or access private fields
 - public enum tags and union variants are visible when their type is public

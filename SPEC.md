@@ -476,6 +476,19 @@ name resolution order:
 同じ last segment を持つ import は compile error です。
 local declaration が import module name を shadow することも compile error です。
 
+`kizu.toml` の `[modules].exports` は package 外へ公開する module を明示します。
+
+```toml
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+exports = ["app", "app::lexer"]
+```
+
+`exports` にない module は package 内部 module です。
+package 内部 module には同じ package から import できますが、package 外からは import /
+参照できません。`exports` を省略した場合は root module だけを export します。
+
 visibility は default private です。
 
 ```kizu
@@ -509,6 +522,7 @@ fn lex_source(source: []const u8) -> !std::array::Array<Token> {
 * public API に private type を出してはいけない
 * 外部 module から private field を construct / access してはいけない
 * `pub` な enum の tag と `pub` な union の variant は外部から使える
+* package 外から見える API は `exports` された module の `pub` declaration に限る
 * `pub(crate)`、`pub(super)`、`protected` は v0.2/v0.3 では採用しない
 
 ### 6.7 enum

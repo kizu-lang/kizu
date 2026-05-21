@@ -2989,11 +2989,23 @@ func (c *Checker) checkQualifiedUserCall(
 	if !ok {
 		return "", false, nil
 	}
+	if err := c.rejectPrivateStdFunction(name, fn); err != nil {
+		return "", true, err
+	}
 	if len(fn.typeParams) > 0 {
 		return "", false, nil
 	}
 	typ, err := c.checkUserCall(name, args, env, unsafe)
 	return typ, true, err
+}
+
+// rejectPrivateStdFunction blocks non-std source from std-private helpers.
+func (c *Checker) rejectPrivateStdFunction(name string, fn *functionType) error {
+	if !fn.decl.Std || fn.decl.Public || c.currentStd {
+		return nil
+	}
+	sourceName := strings.ReplaceAll(name, ".", "::")
+	return fmt.Errorf("type error: function `%s` is private", sourceName)
 }
 
 // checkQualifiedBuiltin validates std:: namespace prototype calls.
@@ -4073,6 +4085,9 @@ func (c *Checker) checkGenericUserTypeApply(
 	fn := c.functions[name]
 	if fn == nil || len(fn.typeParams) == 0 {
 		return "", false, nil
+	}
+	if err := c.rejectPrivateStdFunction(name, fn); err != nil {
+		return "", true, err
 	}
 	argsText, ok := splitGenericArgs(typeArg)
 	if !ok || len(argsText) != len(fn.typeParams) {

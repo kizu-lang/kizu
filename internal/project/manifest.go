@@ -11,14 +11,26 @@ type Manifest struct {
 	Version     string
 	Root        string
 	Paths       []string
+	Exports     []string
 }
 
 // ParseManifest parses the declarative subset of kizu.toml used by Kizu.
 func ParseManifest(source string) (Manifest, error) {
+	return parseManifest(source, false)
+}
+
+// ParseStdManifest parses the std package manifest with its reserved name.
+func ParseStdManifest(source string) (Manifest, error) {
+	return parseManifest(source, true)
+}
+
+// parseManifest parses the declarative subset shared by user and std manifests.
+func parseManifest(source string, allowReservedName bool) (Manifest, error) {
 	var manifest Manifest
 	section := ""
-	for lineNo, raw := range strings.Split(source, "\n") {
-		line := strings.TrimSpace(stripComment(raw))
+	lines := strings.Split(source, "\n")
+	for lineNo := 0; lineNo < len(lines); lineNo++ {
+		line := strings.TrimSpace(stripComment(lines[lineNo]))
 		if line == "" {
 			continue
 		}
@@ -34,11 +46,39 @@ func ParseManifest(source string) (Manifest, error) {
 		if err != nil {
 			return manifest, err
 		}
+		if startsMultilineArray(value) {
+			value, lineNo, err = collectMultilineArray(value, lines, lineNo)
+			if err != nil {
+				return manifest, err
+			}
+		}
 		if err := assignManifestValue(&manifest, section, key, value, lineNo+1); err != nil {
 			return manifest, err
 		}
 	}
-	return validateManifest(manifest)
+	return validateManifest(manifest, allowReservedName)
+}
+
+// startsMultilineArray reports arrays that continue on later lines.
+func startsMultilineArray(value string) bool {
+	return strings.HasPrefix(value, "[") && !strings.HasSuffix(value, "]")
+}
+
+// collectMultilineArray joins the supported TOML string array subset.
+func collectMultilineArray(value string, lines []string, lineNo int) (string, int, error) {
+	var builder strings.Builder
+	builder.WriteString(value)
+	for next := lineNo + 1; next < len(lines); next++ {
+		line := strings.TrimSpace(stripComment(lines[next]))
+		if line == "" {
+			continue
+		}
+		builder.WriteString(line)
+		if strings.HasSuffix(line, "]") {
+			return builder.String(), next, nil
+		}
+	}
+	return "", lineNo, fmt.Errorf("manifest error:%d: unterminated string array", lineNo+1)
 }
 
 // stripComment removes a full-line or suffix TOML comment in the supported subset.
@@ -110,6 +150,12 @@ func assignManifestValue(
 			return err
 		}
 		manifest.Paths = parsed
+	case "modules.exports":
+		parsed, err := parseStringList(value, lineNo)
+		if err != nil {
+			return err
+		}
+		manifest.Exports = parsed
 	default:
 		return fmt.Errorf("manifest error:%d: unsupported key `%s.%s`", lineNo, section, key)
 	}
@@ -134,8 +180,13 @@ func parseStringList(value string, lineNo int) ([]string, error) {
 		return nil, nil
 	}
 	values := []string{}
-	for _, part := range strings.Split(body, ",") {
-		parsed, err := parseStringValue(strings.TrimSpace(part), lineNo)
+	parts := strings.Split(body, ",")
+	for idx, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" && idx == len(parts)-1 {
+			continue
+		}
+		parsed, err := parseStringValue(trimmed, lineNo)
 		if err != nil {
 			return nil, err
 		}
@@ -145,11 +196,11 @@ func parseStringList(value string, lineNo int) ([]string, error) {
 }
 
 // validateManifest checks required fields and reserved package names.
-func validateManifest(manifest Manifest) (Manifest, error) {
+func validateManifest(manifest Manifest, allowReservedName bool) (Manifest, error) {
 	if manifest.PackageName == "" {
 		return manifest, fmt.Errorf("manifest error: missing [package].name")
 	}
-	if manifest.PackageName == "std" {
+	if manifest.PackageName == "std" && !allowReservedName {
 		return manifest, fmt.Errorf("manifest error: package name `std` is reserved")
 	}
 	if manifest.Root == "" {
@@ -158,5 +209,27 @@ func validateManifest(manifest Manifest) (Manifest, error) {
 	if len(manifest.Paths) == 0 {
 		manifest.Paths = []string{"src"}
 	}
+	if err := validateModuleExports(manifest); err != nil {
+		return manifest, err
+	}
 	return manifest, nil
+}
+
+// validateModuleExports checks package-qualified module export names.
+func validateModuleExports(manifest Manifest) error {
+	seen := map[string]bool{}
+	for _, path := range manifest.Exports {
+		if path == "" {
+			return fmt.Errorf("manifest error: empty module export")
+		}
+		if path != manifest.PackageName && !strings.HasPrefix(path, manifest.PackageName+"::") {
+			return fmt.Errorf("manifest error: export `%s` is outside package `%s`",
+				path, manifest.PackageName)
+		}
+		if seen[path] {
+			return fmt.Errorf("manifest error: duplicate module export `%s`", path)
+		}
+		seen[path] = true
+	}
+	return nil
 }
