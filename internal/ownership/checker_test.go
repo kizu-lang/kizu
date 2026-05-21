@@ -365,7 +365,8 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
     name: []const u8
 }
 fn main() {
-    let users = arena<User>();
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
 }`
@@ -374,8 +375,25 @@ fn main() {
 	}
 }
 
-// TestCheckRejectsArenaHandleErrors checks Phase 6 provenance errors.
-func TestCheckRejectsArenaHandleErrors(t *testing.T) {
+// TestCheckArenaAllocatorReadOnly checks arena construction reads allocator capabilities.
+func TestCheckArenaAllocatorReadOnly(t *testing.T) {
+	source := `struct User {
+    name: []const u8
+}
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let left = arena<User>(allocator);
+    let right = arena<User>(allocator);
+    print(left);
+    print(right);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsArenaHandleProvenanceErrors checks Phase 6 provenance errors.
+func TestCheckRejectsArenaHandleProvenanceErrors(t *testing.T) {
 	cases := []struct {
 		name   string
 		source string
@@ -385,8 +403,9 @@ func TestCheckRejectsArenaHandleErrors(t *testing.T) {
 			name: "wrong arena",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let left = arena<User>();
-    let right = arena<User>();
+    let allocator = std::builtin::mem_page_allocator();
+    let left = arena<User>(allocator);
+    let right = arena<User>(allocator);
     let alice = left.add(User { name: "alice" });
     print(right.get(alice).name);
 }`,
@@ -396,8 +415,9 @@ fn main() {
 			name: "inline wrong arena",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let left = arena<User>();
-    let right = arena<User>();
+    let allocator = std::builtin::mem_page_allocator();
+    let left = arena<User>(allocator);
+    let right = arena<User>(allocator);
     print(right.get(left.add(User { name: "alice" })).name);
 }`,
 			want: "handle from `left` does not belong to arena `right`",
@@ -414,17 +434,30 @@ fn show(users: arena<User>, user: handle<User>) {
 			name: "returned handle",
 			source: `struct User { name: []const u8 }
 fn make() -> handle<User> {
-    let users = arena<User>();
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     return alice;
 }`,
 			want: "handle `alice` cannot outlive its arena",
 		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsArenaHandleMoveErrors checks arena move diagnostics.
+func TestCheckRejectsArenaHandleMoveErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
 		{
 			name: "move after arena add",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let users = arena<User>();
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
     let user = User { name: "alice" };
     let alice = users.add(user);
     print(user.name);
@@ -438,7 +471,8 @@ fn main() {
 struct Box { user: User }
 fn take(user: User) { print(user.name); }
 fn main() {
-    let boxes = arena<Box>();
+    let allocator = std::builtin::mem_page_allocator();
+    let boxes = arena<Box>(allocator);
     let h = boxes.add(Box { user: User { name: "alice" } });
     take(boxes.get(h).user);
 }`,

@@ -967,6 +967,7 @@ func renameStdTypeExpr(module string, expr ast.Expression) bool {
 		renameStdExpr(module, e.Value)
 	case *ast.ArenaNewExpr:
 		e.TypeName = qualifyStdTypeName(module, e.TypeName)
+		renameStdExpr(module, e.Allocator)
 	default:
 		return false
 	}

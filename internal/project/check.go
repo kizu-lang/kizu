@@ -536,12 +536,27 @@ func (c *graphChecker) qualifyExpr(
 		return c.qualifyCastExpr(module, e)
 	case *ast.TryExpr:
 		return c.qualifyTryExpr(module, e)
+	default:
+		return c.qualifyTypeOrControlExpr(module, expr)
+	}
+}
+
+// qualifyTypeOrControlExpr rewrites type-bearing and control expressions.
+func (c *graphChecker) qualifyTypeOrControlExpr(
+	module *moduleUnit,
+	expr ast.Expression,
+) (ast.Expression, error) {
+	switch e := expr.(type) {
 	case *ast.TypeApplyExpr:
 		return c.qualifyTypeApplyExpr(module, e)
 	case *ast.ArenaNewExpr:
 		cp := *e
 		typ, err := c.resolveType(module, e.TypeName)
+		if err != nil {
+			return &cp, err
+		}
 		cp.TypeName = typ
+		cp.Allocator, err = c.qualifyExpr(module, e.Allocator)
 		return &cp, err
 	case *ast.StructLiteralExpr:
 		return c.qualifyStructLiteral(module, e)

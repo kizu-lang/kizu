@@ -2315,7 +2315,7 @@ func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type,
 	case *ast.IndexExpr:
 		return c.checkIndexExpr(e, env, unsafe)
 	case *ast.ArenaNewExpr:
-		return c.checkArenaNewExpr(e)
+		return c.checkArenaNewExpr(e, env, unsafe)
 	case *ast.StructLiteralExpr:
 		return c.checkStructLiteralExpr(e, env, unsafe)
 	case *ast.FieldExpr:
@@ -4147,10 +4147,25 @@ func (c *Checker) checkUnionConstructorCall(
 	return Type(unionType.name), true, nil
 }
 
-// checkArenaNewExpr validates arena<T>() and returns the arena type.
-func (c *Checker) checkArenaNewExpr(expr *ast.ArenaNewExpr) (Type, error) {
+// checkArenaNewExpr validates arena<T>(allocator) and returns the arena type.
+func (c *Checker) checkArenaNewExpr(
+	expr *ast.ArenaNewExpr,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
 	if _, err := c.parseType(expr.TypeName); err != nil {
 		return "", err
+	}
+	if expr.Allocator == nil {
+		return "", fmt.Errorf("type error: `arena<%s>` expects allocator argument", expr.TypeName)
+	}
+	got, err := c.checkExpr(expr.Allocator, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", fmt.Errorf("type error: `arena<%s>` expects Allocator, got %s",
+			expr.TypeName, got)
 	}
 	return Type(fmt.Sprintf("arena<%s>", expr.TypeName)), nil
 }

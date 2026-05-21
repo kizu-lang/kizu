@@ -193,7 +193,11 @@ func (l *lowerer) lowerExpr(expr ast.Expression) (Value, error) {
 	case *ast.DerefExpr:
 		return l.lowerExpr(e.Receiver)
 	case *ast.ArenaNewExpr:
-		return l.emit("arena.new", "arena<"+e.TypeName+">", nil, e.TypeName), nil
+		allocator, err := l.lowerExpr(e.Allocator)
+		if err != nil {
+			return Value{}, err
+		}
+		return l.emit("arena.new", "arena<"+e.TypeName+">", []Value{allocator}, e.TypeName), nil
 	default:
 		return Value{}, fmt.Errorf("ir error: unsupported expression %T", expr)
 	}

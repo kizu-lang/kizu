@@ -711,7 +711,8 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
     name: []const u8
 }
 fn main() {
-    let users = arena<User>();
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
 }`
@@ -862,12 +863,22 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 			name: "handle is not pointer",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let users = arena<User>();
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     let p = cast<ptr<User>>(alice);
     print(p);
 }`,
 			want: "cannot cast handle<User> to ptr<User>",
+		},
+		{
+			name: "arena non allocator",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let users = arena<User>(1);
+    print(users);
+}`,
+			want: "`arena<User>` expects Allocator, got i64",
 		},
 	}
 	runErrorCases(t, cases)

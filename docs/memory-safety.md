@@ -89,6 +89,8 @@ policy.
 
 ### Arena and Handle
 
+- `arena<T>(allocator)` requires an explicit `Allocator` capability.
+- Arena construction reads the allocator capability; it does not move it.
 - `arena<T>.add(value)` moves `value` into the arena.
 - `arena<T>.add(value)` returns `handle<T>`.
 - `handle<T>` is an opaque ID, not a raw pointer.
@@ -223,6 +225,7 @@ memory-safety invariants to representative examples.
 | mutable borrow requires mutable binding | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_immutable.kizu` |
 | shared and mutable borrows cannot conflict | `examples/mutable_borrow.kizu` | `examples/negative/mut_borrow_conflict.kizu` |
 | shared borrow cannot mutate | | `examples/negative/shared_borrow_assignment.kizu` |
+| arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
 | arena get is local-borrow-like | `examples/arena.kizu` | `examples/negative/arena_get_move.kizu` |
 | handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu`; invalid-index handles are covered by `internal/interp` unit tests |
