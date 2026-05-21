@@ -20,6 +20,7 @@ type runParityCase struct {
 	stdoutGolden string
 	stderrGolden string
 	artifactMode string
+	artifactStem string
 }
 
 type runParityGuardCase struct {
@@ -128,14 +129,14 @@ func parseRunParityLine(line string) (runParityCase, bool, error) {
 		return runParityCase{}, false, nil
 	}
 	fields := strings.Fields(trimmed)
-	if len(fields) != 7 {
-		return runParityCase{}, false, fmt.Errorf("expected 7 fields")
+	if len(fields) != 7 && len(fields) != 8 {
+		return runParityCase{}, false, fmt.Errorf("expected 7 or 8 fields")
 	}
 	code, err := strconv.Atoi(fields[3])
 	if err != nil {
 		return runParityCase{}, false, err
 	}
-	return runParityCase{
+	item := runParityCase{
 		name:         fields[0],
 		command:      fields[1],
 		fixture:      fields[2],
@@ -143,7 +144,12 @@ func parseRunParityLine(line string) (runParityCase, bool, error) {
 		stdoutGolden: fields[4],
 		stderrGolden: fields[5],
 		artifactMode: fields[6],
-	}, true, nil
+		artifactStem: fields[0],
+	}
+	if len(fields) == 8 {
+		item.artifactStem = fields[7]
+	}
+	return item, true, nil
 }
 
 // countRunParityCaseFailures compares manifest cases to checked-in goldens.
@@ -239,7 +245,11 @@ func linkAndRunRunParityArtifact(
 	result *runParityResult,
 ) int {
 	t.Helper()
-	result.llPath = filepath.Join("target/selfhost/run", item.name+".ll")
+	if item.artifactStem == "" || item.artifactStem == "-" {
+		t.Errorf("run parity %s missing artifact stem", item.name)
+		return 1
+	}
+	result.llPath = filepath.Join("target/selfhost/run", item.artifactStem+".ll")
 	result.metadataPath = result.llPath + ".meta"
 	result.exePath = filepath.Join("target/selfhost/run", item.name)
 	if result.compiler.code != 0 || result.compiler.stdout != "" || result.compiler.stderr != "" {
@@ -405,7 +415,7 @@ func runParityGuardCases() []runParityGuardCase {
 		},
 		{
 			name:     "unsupported_target",
-			args:     []string{"run", "selfhost/tests/cli/run_unknown.kizu"},
+			args:     []string{"run", "selfhost/tests/cli/parse_ok_minimal.kizu"},
 			exitCode: 64,
 			stderr:   selfhostUsageStderr(),
 		},
@@ -441,6 +451,7 @@ func appendRunParityResult(
 	fmt.Fprintf(out, "case.%s.command %s %s\n", item.name, item.command, item.fixture)
 	fmt.Fprintf(out, "case.%s.fixture %s\n", item.name, item.fixture)
 	fmt.Fprintf(out, "case.%s.artifact_mode %s\n", item.name, item.artifactMode)
+	fmt.Fprintf(out, "case.%s.artifact_stem %s\n", item.name, item.artifactStem)
 	fmt.Fprintf(out, "case.%s.compiler.exit %d\n", item.name, result.compiler.code)
 	fmt.Fprintf(
 		out,
