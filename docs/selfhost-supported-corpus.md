@@ -84,7 +84,10 @@ For #592, `check_hello_alias.kizu` and `check_moved_value_alias.kizu` use the
 same source bytes as the original check fixtures to prove hosted check dispatch
 is source-driven for the first success and move-check failure shapes. For #602,
 `parse_ok_minimal.kizu` and `parse_ok_minimal_alias.kizu` are also check parity
-inputs for the first minimal return-statement success shape.
+inputs for the first minimal return-statement success shape. For #604,
+`test_expect_ok(.kizu/_alias)` and `test_expect_failure(.kizu/_alias)` are check
+parity inputs for the first `std::testing::expect` qualified-call success
+shapes.
 
 Issue #531 defines the first hosted `run <file>` and `kizu test <file>`
 strategy, but those cases are not part of the production-switch corpus yet.
