@@ -44,7 +44,7 @@ Implemented language-core pieces:
 - `std::task::Queue` deterministic deferred task queue
 - `std::task::parallel_for` and `std::task::parallel_map` safe data-parallel prototypes
 - scoped thread, `Atomic<T>`, and `Mutex<T>` boundary prototypes
-- `contract`, `satisfy`, and `&Dyn<Contract>`
+- `contract`, `impl Contract for Type`, and `&Dyn<Contract>`
 - minimal `std::mem`, `std::array::Array<T>`, `std::string::String`,
   `std::map::Map<K, V>`, and `std::testing`
 - explicit-Io `std::fs`, `std::path`, `std::io`, and `std::process` helpers

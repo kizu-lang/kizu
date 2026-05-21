@@ -193,7 +193,7 @@ func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
 				decl.TypeName, method.Name)
 		}
 		name := fmt.Sprintf("%s.%s", decl.TypeName, method.Name)
-		methods[method.Name] = functionInfoFromDecl(name, method)
+		methods[method.Name] = functionInfoFromImplDecl(name, decl.TypeName, method)
 	}
 	return nil
 }
@@ -211,6 +211,16 @@ func functionInfoFromDecl(name string, fn *ast.FunctionDecl) *functionInfo {
 		name: name, params: params, returnType: fn.ReturnType,
 		returnBorrow: fn.ReturnBorrow, decl: fn,
 	}
+}
+
+// functionInfoFromImplDecl binds Self to the concrete receiver type in impl methods.
+func functionInfoFromImplDecl(name string, typeName string, fn *ast.FunctionDecl) *functionInfo {
+	info := functionInfoFromDecl(name, fn)
+	for idx := range info.params {
+		info.params[idx].typeName = substituteSelfTypeName(info.params[idx].typeName, typeName)
+	}
+	info.returnType = substituteSelfTypeName(info.returnType, typeName)
+	return info
 }
 
 // checkFunction validates one function body.
@@ -5383,6 +5393,28 @@ func returnTypeName(fn *functionInfo) string {
 		return "void"
 	}
 	return fn.returnType
+}
+
+// substituteSelfTypeName replaces only standalone Self segments in a type spelling.
+func substituteSelfTypeName(name string, typeName string) string {
+	var out strings.Builder
+	for idx := 0; idx < len(name); {
+		if strings.HasPrefix(name[idx:], "Self") &&
+			(idx == 0 || !isTypeIdentByte(name[idx-1])) &&
+			(idx+len("Self") == len(name) || !isTypeIdentByte(name[idx+len("Self")])) {
+			out.WriteString(typeName)
+			idx += len("Self")
+			continue
+		}
+		out.WriteByte(name[idx])
+		idx++
+	}
+	return out.String()
+}
+
+// isTypeIdentByte reports whether b belongs to an identifier segment in a type name.
+func isTypeIdentByte(b byte) bool {
+	return b == '_' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
 }
 
 // implMethod returns the concrete method signature for typeName when known.

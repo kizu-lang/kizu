@@ -223,7 +223,7 @@ func (c *Checker) collectFunctions(program *ast.Program) error {
 	if err := c.collectTopLevelFunctions(program); err != nil {
 		return err
 	}
-	return c.collectSatisfyDecls(program)
+	return nil
 }
 
 // collectTypesAndMethods registers declarations needed before function signatures.
@@ -232,15 +232,20 @@ func (c *Checker) collectTypesAndMethods(program *ast.Program) error {
 		return err
 	}
 	for _, decl := range program.Decls {
-		if err := c.collectTypeOrMethodDecl(decl); err != nil {
+		if err := c.collectTypeDecl(decl); err != nil {
+			return err
+		}
+	}
+	for _, decl := range program.Decls {
+		if err := c.collectMethodDecl(decl); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// collectTypeOrMethodDecl registers one type-level declaration.
-func (c *Checker) collectTypeOrMethodDecl(decl ast.Decl) error {
+// collectTypeDecl registers one type declaration before methods are validated.
+func (c *Checker) collectTypeDecl(decl ast.Decl) error {
 	switch d := decl.(type) {
 	case *ast.StructDecl:
 		return c.collectStruct(d)
@@ -250,13 +255,20 @@ func (c *Checker) collectTypeOrMethodDecl(decl ast.Decl) error {
 		return c.collectUnion(d)
 	case *ast.ContractDecl:
 		return c.collectContract(d)
-	case *ast.ImplDecl:
-		return c.collectImpl(d)
-	case *ast.SatisfyDecl, *ast.ImportDecl, *ast.FunctionDecl:
+	case *ast.ImportDecl, *ast.FunctionDecl, *ast.ImplDecl:
 		return nil
 	default:
 		return fmt.Errorf("type error: unsupported declaration %T", decl)
 	}
+}
+
+// collectMethodDecl registers one method declaration after contracts are known.
+func (c *Checker) collectMethodDecl(decl ast.Decl) error {
+	impl, ok := decl.(*ast.ImplDecl)
+	if !ok {
+		return nil
+	}
+	return c.collectImpl(impl)
 }
 
 // predeclareTypeNames lets recursive fields refer to later declarations through Box.
@@ -397,20 +409,6 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 	return nil
 }
 
-// collectSatisfyDecls validates explicit satisfy declarations after impls exist.
-func (c *Checker) collectSatisfyDecls(program *ast.Program) error {
-	for _, decl := range program.Decls {
-		satisfy, ok := decl.(*ast.SatisfyDecl)
-		if !ok {
-			continue
-		}
-		if err := c.collectSatisfy(satisfy); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // collectContract registers a required method set.
 func (c *Checker) collectContract(decl *ast.ContractDecl) error {
 	if _, exists := c.contracts[decl.Name]; exists {
@@ -436,6 +434,9 @@ func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
 	if _, err := c.parseType(decl.TypeName); err != nil {
 		return err
 	}
+	if decl.ContractName != "" && c.contracts[decl.ContractName] == nil {
+		return fmt.Errorf("type error: unknown contract `%s`", decl.ContractName)
+	}
 	methods := c.impls[decl.TypeName]
 	if methods == nil {
 		methods = map[string]*functionType{}
@@ -445,24 +446,22 @@ func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
 		if _, exists := methods[method.Name]; exists {
 			return fmt.Errorf("type error: duplicate impl method `%s.%s`", decl.TypeName, method.Name)
 		}
-		fnType, err := c.newFunctionType(method)
+		fnType, err := c.newImplFunctionType(decl.TypeName, method)
 		if err != nil {
 			return err
 		}
+		fnType.name = fmt.Sprintf("%s.%s", decl.TypeName, method.Name)
 		methods[method.Name] = fnType
 	}
-	return nil
+	if decl.ContractName == "" {
+		return nil
+	}
+	return c.recordContractImpl(decl)
 }
 
-// collectSatisfy validates and records explicit contract satisfaction.
-func (c *Checker) collectSatisfy(decl *ast.SatisfyDecl) error {
+// recordContractImpl validates and records explicit contract implementation.
+func (c *Checker) recordContractImpl(decl *ast.ImplDecl) error {
 	contract := c.contracts[decl.ContractName]
-	if contract == nil {
-		return fmt.Errorf("type error: unknown contract `%s`", decl.ContractName)
-	}
-	if _, err := c.parseType(decl.TypeName); err != nil {
-		return err
-	}
 	for name, want := range contract.methods {
 		got := c.implMethod(decl.TypeName, name)
 		if got == nil {
@@ -479,6 +478,22 @@ func (c *Checker) collectSatisfy(decl *ast.SatisfyDecl) error {
 	}
 	c.satisfactions[decl.ContractName][decl.TypeName] = true
 	return nil
+}
+
+// newImplFunctionType converts a method declaration and binds Self to its receiver.
+func (c *Checker) newImplFunctionType(
+	typeName string,
+	method *ast.FunctionDecl,
+) (*functionType, error) {
+	fnType, err := c.newFunctionType(method)
+	if err != nil {
+		return nil, err
+	}
+	for idx, param := range fnType.params {
+		fnType.params[idx] = substituteSelfType(param, typeName)
+	}
+	fnType.returnType = substituteSelfType(fnType.returnType, typeName)
+	return fnType, nil
 }
 
 // collectEnum registers and validates a tag enum declaration.
@@ -6656,19 +6671,47 @@ func (c *Checker) satisfies(contractName string, typ Type) bool {
 
 // methodMatches checks an impl method against a contract method.
 func methodMatches(typeName string, want *functionType, got *functionType) bool {
-	if len(want.params) != len(got.params) || want.returnType != got.returnType {
+	wantReturn := substituteSelfType(want.returnType, typeName)
+	if len(want.params) != len(got.params) || !sameType(wantReturn, got.returnType) {
 		return false
 	}
 	for idx, wantParam := range want.params {
-		expected := wantParam
-		if expected == typeSelf {
-			expected = Type(typeName)
-		}
-		if expected != got.params[idx] || want.borrowParams[idx] != got.borrowParams[idx] {
+		expected := substituteSelfType(wantParam, typeName)
+		if !sameType(expected, got.params[idx]) ||
+			want.borrowParams[idx] != got.borrowParams[idx] ||
+			want.mutBorrowParams[idx] != got.mutBorrowParams[idx] ||
+			want.comptimeParams[idx] != got.comptimeParams[idx] {
 			return false
 		}
 	}
 	return true
+}
+
+// substituteSelfType replaces the Self type segment inside one impl signature type.
+func substituteSelfType(typ Type, typeName string) Type {
+	return Type(substituteSelfTypeName(string(typ), typeName))
+}
+
+// substituteSelfTypeName replaces only standalone Self segments in a type spelling.
+func substituteSelfTypeName(name string, typeName string) string {
+	var out strings.Builder
+	for idx := 0; idx < len(name); {
+		if strings.HasPrefix(name[idx:], "Self") &&
+			(idx == 0 || !isTypeIdentByte(name[idx-1])) &&
+			(idx+len("Self") == len(name) || !isTypeIdentByte(name[idx+len("Self")])) {
+			out.WriteString(typeName)
+			idx += len("Self")
+			continue
+		}
+		out.WriteByte(name[idx])
+		idx++
+	}
+	return out.String()
+}
+
+// isTypeIdentByte reports whether b belongs to an identifier segment in a type name.
+func isTypeIdentByte(b byte) bool {
+	return b == '_' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
 }
 
 // errorUnionElement extracts T from legacy !T.

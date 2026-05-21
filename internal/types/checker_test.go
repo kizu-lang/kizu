@@ -36,6 +36,55 @@ fn main() { print(add(1, 2)); }`,
 	}
 }
 
+// TestCheckAcceptsContractImpl checks explicit contract implementation syntax.
+func TestCheckAcceptsContractImpl(t *testing.T) {
+	source := `struct Bytes { text: []const u8 }
+struct File { name: []const u8 }
+contract Writer {
+    fn write(self: &Self, bytes: &Bytes) -> !i64;
+}
+impl Writer for File {
+    fn write(self: &Self, bytes: &Bytes) -> !i64 {
+        print(self.name);
+        print(bytes.text);
+        return 1;
+    }
+}
+fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
+    let n = try writer.write(bytes);
+    print(n);
+    return;
+}
+fn main() -> !void {
+    let file = File { name: "out" };
+    let bytes = Bytes { text: "hello" };
+    try save(file, bytes);
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsIncompleteContractImpl checks contract method validation.
+func TestCheckRejectsIncompleteContractImpl(t *testing.T) {
+	source := `struct Bytes { text: []const u8 }
+struct File { name: []const u8 }
+contract Writer {
+    fn write(self: &Self, bytes: &Bytes) -> !i64;
+}
+impl Writer for File {
+}
+fn main() {}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "missing method `write`") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsNameAndCallErrors checks scope and call errors.
 func TestCheckRejectsNameAndCallErrors(t *testing.T) {
 	cases := []struct {

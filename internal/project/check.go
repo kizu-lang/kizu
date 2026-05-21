@@ -288,6 +288,10 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 		return &cp, nil
 	case *ast.UnionDecl:
 		return c.qualifyUnion(module, d)
+	case *ast.ContractDecl:
+		return c.qualifyContract(module, d)
+	case *ast.ImplDecl:
+		return c.qualifyImpl(module, d)
 	case *ast.FunctionDecl:
 		return c.qualifyFunction(module, d, module.path+"::"+d.Name)
 	default:
@@ -330,6 +334,50 @@ func (c *graphChecker) qualifyUnion(
 			return nil, err
 		}
 		cp.Variants[idx].Payload = typ
+	}
+	return &cp, nil
+}
+
+// qualifyContract rewrites contract method signature type references.
+func (c *graphChecker) qualifyContract(
+	module *moduleUnit,
+	decl *ast.ContractDecl,
+) (*ast.ContractDecl, error) {
+	cp := *decl
+	cp.Name = module.path + "::" + decl.Name
+	cp.Methods = append([]*ast.FunctionDecl(nil), decl.Methods...)
+	for idx, method := range cp.Methods {
+		qualified, err := c.qualifyFunction(module, method, method.Name)
+		if err != nil {
+			return nil, err
+		}
+		cp.Methods[idx] = qualified
+	}
+	return &cp, nil
+}
+
+// qualifyImpl rewrites an impl receiver, contract name, and method bodies.
+func (c *graphChecker) qualifyImpl(module *moduleUnit, decl *ast.ImplDecl) (*ast.ImplDecl, error) {
+	cp := *decl
+	typeName, err := c.resolveType(module, decl.TypeName)
+	if err != nil {
+		return nil, err
+	}
+	cp.TypeName = typeName
+	if decl.ContractName != "" {
+		contractName, err := c.resolveType(module, decl.ContractName)
+		if err != nil {
+			return nil, err
+		}
+		cp.ContractName = contractName
+	}
+	cp.Methods = append([]*ast.FunctionDecl(nil), decl.Methods...)
+	for idx, method := range cp.Methods {
+		qualified, err := c.qualifyFunction(module, method, method.Name)
+		if err != nil {
+			return nil, err
+		}
+		cp.Methods[idx] = qualified
 	}
 	return &cp, nil
 }

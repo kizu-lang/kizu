@@ -1020,7 +1020,7 @@ func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
 		return summarizeEnumDeclSubset(node)
 	case *kizuast.UnionDecl:
 		return summarizeUnionDeclSubset(node)
-	case *kizuast.ContractDecl, *kizuast.ImplDecl, *kizuast.SatisfyDecl:
+	case *kizuast.ContractDecl, *kizuast.ImplDecl:
 		return nil, "non-selfhost contract declaration outside std parser subset"
 	default:
 		return nil, "top-level declaration outside std parser subset"

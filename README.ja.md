@@ -42,7 +42,7 @@ v0.1 の対象は interpreter-first の language core です。
 - `std::task::Queue` deterministic deferred task queue
 - `std::task::parallel_for` / `std::task::parallel_map` safe data-parallel prototype
 - scoped thread、`Atomic<T>`、`Mutex<T>` boundary prototype
-- `contract`、`satisfy`、`&Dyn<Contract>`
+- `contract`、`impl Contract for Type`、`&Dyn<Contract>`
 - 最小の `std::mem`、`std::array::Array<T>`、`std::string::String`、
   `std::map::Map<K, V>`、`std::testing`
 - explicit-Io の `std::fs`、`std::path`、`std::io`、`std::process` helper

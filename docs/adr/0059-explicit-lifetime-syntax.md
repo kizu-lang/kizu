@@ -48,7 +48,7 @@ The first implementation intentionally does not include:
 
 - lifetime bounds such as `where 'b: 'a`
 - anonymous lifetime `'_`
-- lifetime parameters on `impl`, `satisfy`, or `contract`
+- lifetime parameters on `impl` or `contract`
 - type aliases with lifetime parameters
 - full dangling/escape enforcement
 - mutable view alias analysis
