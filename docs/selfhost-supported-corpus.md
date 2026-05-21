@@ -53,6 +53,9 @@ just selfhost-parse-parity-gate
 That gate records command args, fixture paths, checked-in stdout/stderr golden
 paths, expected exit codes, and hosted-artifact output fingerprints in
 `target/selfhost/reports/parse-parity.txt`.
+For #579, `parse_ok_minimal_alias.kizu` uses the same positive source text as
+`parse_ok_minimal.kizu` to prove the hosted positive parse path is source-driven
+instead of tied to one fixture path.
 
 The #530 `check <file>` parity cases are also tracked in a separate CLI
 manifest so repeated local validation stays focused:

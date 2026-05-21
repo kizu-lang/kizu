@@ -439,14 +439,19 @@ For #525, the hosted CLI also accepts the bounded `parse <file>` parity cases in
 
 ```sh
 selfhost parse selfhost/tests/cli/parse_ok_minimal.kizu
+selfhost parse selfhost/tests/cli/parse_ok_minimal_alias.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr.kizu
 ```
 
 The parse parity gate compares byte-for-byte stdout, stderr, and exit codes
 against checked-in goldens and runs through `target/selfhost/stage2/selfhost`.
-It does not invoke Go `cmd/kizu` as a fallback. General `parse <file>` parity
-outside those fixture paths remains under #497. The current CLI parity support
-and deferrals are recorded in `docs/selfhost-cli-parity.md`.
+It does not invoke Go `cmd/kizu` as a fallback. For #579, the positive minimal
+parse shape is source-driven: any file containing exactly the newline-terminated
+`fn main() { return; }` source uses the same hosted parse path, and the alias
+fixture proves this is no longer bound to a single path. The parse-invalid branch
+remains path-specific because broader diagnostic recovery is still #497 work.
+The current CLI parity support and deferrals are recorded in
+`docs/selfhost-cli-parity.md`.
 
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
 emit/link/execute instead of a selfhost interpreter. The first runnable fixture
