@@ -1,218 +1,53 @@
 # AGENTS.md
 
-このリポジトリでは、Kizu というメモリ安全なシステムプログラミング言語を実装します。
+Kizu はメモリ安全な systems programming language です。
+Rust clone ではなく、ownership / move semantics / local borrowing だけを限定して採用します。
+explicit lifetime annotation、macro、proc macro、build script は v0 では扱いません。
 
-## プロジェクト目標
+## 最優先
 
-Kizu v0.1 は Go 製の interpreter-first language core です。
-現在は v0.2 stdlib prototype を基準に、言語仕様と Go 実装の品質を固めます。
-
-Kizu は Rust clone ではありません。
-
-Rust 風の安全性のうち、次を限定して採用します。
-
-- ownership
-- move semantics
-- local borrowing
-- explicit lifetime annotation なし
-- macro なし
-- proc macro なし
-- build script なし
-
-## 最優先方針
-
-go compilerを薄く保ち、常にkizu self-host compilerを意識した実装をすること。(機械的に変換できるか？を念頭にしてください)
-基本の実行経路は、次が動く CLI です。
-
-```sh
-kizu run examples/hello.kizu
-```
-
-v0.1 の中心は以下です。
-
-1. lexer
-2. parser
-3. AST
-4. interpreter
-5. type checker
-6. move checker
-7. borrow checker
-8. Arena / Handle
-
-v0.2 の中心は、最小 stdlib と tooling です。
-
-- `std::mem`
-- `std::array::Array<T>`
-- `std::string::String`
-- `std::map::Map<K, V>`
-- `std::testing`
-- explicit-Io `std::fs` / `std::path` / `std::io` / `std::process`
-- `kizu test <file>`
-
-active work は GitHub Issues を正として管理します。
-Markdown の phase TODO 文書は使いません。
-
-Kizu 固有の Codex skill は `.codex/skills/kizu-language-design/` を正として管理します。
-言語設計、stdlib、memory-safety の判断では、この skill の方針を参照してください。
-
-stdlib API の現状整理と Kizu 製 std への移行方針は `docs/stdlib.md` を参照してください。
-新しい `std::...` builtin を追加する場合は、同じ変更で registry、examples、conformance を更新してください。
-新しい `std::...` builtin を追加する場合は、極力kizuで実装し、goを薄く保ってください
-新しい positive example は原則 `std::testing` assertion style にし、CLI 出力自体を検証する例だけ stdout conformance を使ってください。
-
-開発は branch / Pull Request ベースで進めます。
-`main` への直接 commit / push は行わないでください。
-
-## リポジトリ構成
-
-次の構成を使ってください。
-
-```text
-cmd/kizu/main.go
-internal/token
-internal/lexer
-internal/ast
-internal/parser
-internal/interp
-internal/types
-internal/ownership
-internal/stdprim
-internal/native
-std
-examples
-tests
-```
+Go compiler は薄く保ち、常に Kizu self-host compiler へ移せる実装を選んでください。
+基本の実行経路は `kizu run examples/hello.kizu`、必須 CLI は `run` / `parse` / `check` です。
+active work は GitHub Issues を正とし、Markdown の phase TODO は使いません。
 
 ## 実装ルール
 
-* 賢いコードより、単純なコードを優先する
-* 大きな依存を追加しない
-* parser と AST は読みやすく保つ
-* 各 milestone にテストを追加する
-* v0 では generics を本格実装しない
-* `async fn` / `await` syntax は実装しない
-* native executable generation は限定 subset の明示 build target として扱う
-* macro は実装しない
-* package manager はまだ実装しない
-* `SPEC.md` と矛盾する構文や機能を勝手に追加しない
-* 設計判断を変更する場合は `docs/adr/` に ADR を追加または更新する
+- 賢いコードより単純なコードを優先する。
+- 大きな依存を追加しない。
+- `SPEC.md` と矛盾する構文や機能を勝手に追加しない。
+- parser / AST / checker / backend は読みやすく保つ。
+- ファイルが 1000 行を超える場合、分割を検討し、関心が分離できていない可能性を疑う。
+- 新しい TODO は Markdown ではなく GitHub Issue として作る。
+- 仕様判断を変える場合だけ `SPEC.md` または `docs/adr/` を更新する。
 
-## 品質ゲート
+## 禁止事項
 
-日常コマンドは `justfile` にまとめています。利用可能な recipe は `just --list` で確認してください。
-特に build/cache 性能確認は `just perf`、`just perf-cache`、`just cache-smoke` を使ってください。
+- テストを増やすだけの Issue は作らない。
+- テストを pass させるだけの場当たり的変更やハードコードを入れない。
+- selfhost 実装で source literal / fixture path / 静的コード生成に分岐する実装を増やさない。
+- `backend.kizu` に静的 LLVM 文字列を積み増すだけの変更をしない。
+- hidden fallback、Go fallback、削除条件のない互換分岐を入れない。
+- `main` へ直接 commit / push しない。
 
-Kizu は target / build cache が無制限に肥大化する設計を避けます。compiler、backend、
-stdlib、test、CI に関わる変更では、build time、cache size、no-op rebuild、CI 実行時間への
-影響を常に確認し、悪化があり得る場合は `docs/perf.md` または対象 Issue の受け入れ条件に
-測定方法を明記してください。
+## Selfhost Progress
 
-commit 前に次を通してください。
+selfhost の前進とは、次のいずれかです。
 
-```sh
-pre-commit run --all-files
-```
+- CLI を実際の selfhost compiler component に通す。
+- hardcoded dispatch / fallback / static artifact branch を削除する。
+- real path に必要な stdlib / runtime / backend capability を実装する。
 
-pre-commit では次を実行します。
+parity case 追加だけでは前進と見なしません。
 
-* `gofmt`
-* `go test ./...`
-* `golangci-lint run`
+## テストと性能
 
-lint は、機械的な整形だけでなく、未使用コード、静的解析、複雑度、基本的な可読性ルールを検査します。
-ただし、過度に主観的なスタイルルールは避け、保守性に直接効くものを優先します。
+テスト実行時間は 120s 以内に収めることを目標にしてください。
+遅くなったら profile、重複削除、アルゴリズム改善、不要な gate 分離で改善します。
+並列化でごまかす改善は NG です。
+commit 前は原則 `pre-commit run --all-files` を通してください。
 
-Go の compiler 実装では、次を守ります。
+## PR Workflow
 
-* 1 関数 70 行以内
-* 1 関数 45 statement 以内
-* 1 行 100 文字以内
-
-Go code comments は英語で書きます。
-package / command comment と、すべての function / method comment は必須です。
-コメントは処理の逐語説明ではなく、責務、前提、境界条件、失敗条件を説明してください。
-
-## Git ワークフロー
-
-`main` は常に merge 済みの安定状態として扱います。
-実装、仕様変更、ドキュメント更新は必ず topic branch で行い、Pull Request で review / merge します。
-
-基本手順:
-
-```sh
-git switch main
-git pull --ff-only
-git switch -c <type>/<short-name>
-```
-
-branch 名は次を基本にしてください。
-
-```text
-feat/<short-name>
-fix/<short-name>
-docs/<short-name>
-refactor/<short-name>
-test/<short-name>
-```
-
-作業後は次を実行します。
-
-```sh
-pre-commit run --all-files
-git status --short
-git commit -m "<message>"
-git push -u origin <branch>
-```
-
-Pull Request には、目的、主要変更、検証結果、対応 Issue を短く書いてください。
-PR が merge されるまで `main` へ直接 push してはいけません。
-
-repository 側でも GitHub branch protection を有効にし、少なくとも `main` への direct push を禁止してください。
-
-## CLI
-
-必須コマンド:
-
-```sh
-kizu run <file>
-kizu parse <file>
-kizu check <file>
-```
-
-将来追加してよいコマンド:
-
-```sh
-kizu lint
-```
-
-## 完了条件
-
-タスクは次を満たしたら完了です。
-
-* code が build できる
-* 関連テストが通る
-* examples が壊れていない
-* エラーが読める
-* 挙動が `SPEC.md` に合っている
-
-## Goal ワークフロー
-
-Goal は GitHub Issue を正として進めてください。
-Markdown の phase TODO 文書は削除済みであり、active TODO tracker ではありません。
-
-* 対象 Issue の本文、受け入れ条件、コメントを実装前に確認する
-* 実装は対象 Issue の範囲に絞る
-* 関連テストと examples を追加または更新する
-* 新しい TODO は Markdown ではなく GitHub Issue として作る
-* 仕様や設計判断が変わる場合だけ `SPEC.md` または `docs/adr/` を更新する
-* 明示要件と成果物を突き合わせて完了監査する
-* `pre-commit run --all-files` を通す
-* topic branch に変更を commit する
-* branch を push して Pull Request を作る
-* PR が merge されたら対応する Issue に結果をコメントし、完了したら close する
-
-commit message は、Issue 完了なら次の形を基本にします。
-
-```text
-Complete #<issue-number> <short name>
-```
+作業は topic branch / Pull Request ベースで進めます。
+PR には目的、主要変更、検証結果、対応 Issue を短く書いてください。
+PR 作成後、subagent に「無駄な後方互換分岐が残っていないか、Issue を解決する本質的な実装か、より単純にできるか」を review させ、PR にコメントさせて対応してください。
