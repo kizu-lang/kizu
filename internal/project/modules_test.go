@@ -118,8 +118,8 @@ fn main(value: lexer::Token) -> void {
     return;
 }
 `,
-		"src/lexer.kizu":        "pub struct Token { pub value: i64; }",
-		"src/parser/lexer.kizu": "pub struct Token { pub value: i64; }",
+		"src/lexer.kizu":        "pub struct Token { pub value: i64, }",
+		"src/parser/lexer.kizu": "pub struct Token { pub value: i64, }",
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "duplicate import alias `lexer`") {
@@ -157,7 +157,7 @@ fn main() -> void {
 		"src/lexer.kizu": `import app;
 
 pub struct Token {
-    pub kind: i64;
+    pub kind: i64,
 }
 `,
 	})
@@ -173,14 +173,14 @@ func TestCheckGraphRejectsImportShadowing(t *testing.T) {
 		"src/main.kizu": `import app::lexer;
 
 struct lexer {
-    pub value: i64;
+    pub value: i64,
 }
 
 fn main() -> void {
     return;
 }
 `,
-		"src/lexer.kizu": "pub struct Token { pub value: i64; }",
+		"src/lexer.kizu": "pub struct Token { pub value: i64, }",
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "declaration `lexer` shadows import") {
@@ -197,7 +197,7 @@ fn main(value: lexer::Token) -> void {
     return;
 }
 `,
-		"src/lexer.kizu": "struct Token { pub value: i64; }",
+		"src/lexer.kizu": "struct Token { pub value: i64, }",
 	})
 	err := checkTempModuleGraph(t, root)
 	if err == nil || !strings.Contains(err.Error(), "type `lexer::Token` is private") {
@@ -211,7 +211,7 @@ func TestCheckGraphAllowsCrossModuleTokenReferences(t *testing.T) {
 		"src/main.kizu": `import app::token;
 
 struct Parser {
-    pub current: token::Token;
+    pub current: token::Token,
 }
 
 fn accept(value: token::Token) -> token::Token {
@@ -227,7 +227,7 @@ fn main() -> void {
 }
 `,
 		"src/token.kizu": `pub struct Token {
-    pub kind: i64;
+    pub kind: i64,
 }
 
 pub fn make(kind: i64) -> Token {
@@ -252,7 +252,7 @@ fn main() -> void {
 }
 `,
 		"src/token.kizu": `pub struct Token {
-    pub kind: i64;
+    pub kind: i64,
 }
 
 fn make(kind: i64) -> Token {
@@ -278,7 +278,7 @@ fn main() -> void {
 }
 `,
 		"src/token.kizu": `pub struct Token {
-    pub kind: i64;
+    pub kind: i64,
 }
 `,
 	})
@@ -300,8 +300,8 @@ fn main() -> void {
 }
 `,
 		"src/token.kizu": `pub struct Token {
-    pub kind: i64;
-    secret: i64;
+    pub kind: i64,
+    secret: i64,
 }
 `,
 	})
@@ -323,8 +323,8 @@ fn main() -> void {
 }
 `,
 		"src/token.kizu": `pub struct Token {
-    pub kind: i64;
-    secret: i64;
+    pub kind: i64,
+    secret: i64,
 }
 
 pub fn make() -> Token {

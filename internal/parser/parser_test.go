@@ -186,8 +186,8 @@ func TestParseLoopControl(t *testing.T) {
 // TestParseStructDecl checks top-level struct field parsing.
 func TestParseStructDecl(t *testing.T) {
 	input := `struct User {
-    name: []const u8
-    age: i64
+    name: []const u8,
+    age: i64,
 }
 fn main() {}`
 	p := New(lexer.New(input))
@@ -196,7 +196,7 @@ fn main() {}`
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `struct User { name: []const u8; age: i64 }
+	want := `struct User { name: []const u8, age: i64 }
 fn main() {  }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -207,11 +207,11 @@ fn main() {  }`
 func TestParseImportsAndPublicDeclarations(t *testing.T) {
 	input := `import app::lexer;
 pub struct Token {
-    pub kind: TokenKind;
-    start: i64;
+    pub kind: TokenKind,
+    start: i64,
 }
 pub enum TokenKind {
-    Ident
+    Ident,
 }
 pub fn lex(source: []const u8) -> void {}`
 	p := New(lexer.New(input))
@@ -220,7 +220,7 @@ pub fn lex(source: []const u8) -> void {}`
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `import app::lexer
-pub struct Token { pub kind: TokenKind; start: i64 }
+pub struct Token { pub kind: TokenKind, start: i64 }
 pub enum TokenKind { Ident }
 pub fn lex(source: []const u8) -> void {  }`
 	if got := program.String(); got != want {
@@ -231,9 +231,9 @@ pub fn lex(source: []const u8) -> void {  }`
 // TestParseEnumDecl checks Zig/C-style tag enum parsing.
 func TestParseEnumDecl(t *testing.T) {
 	input := `enum Color {
-    Red
-    Green
-    Blue
+    Red,
+    Green,
+    Blue,
 }
 fn main() {
     print(Color::Red);
@@ -244,7 +244,7 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `enum Color { Red; Green; Blue }
+	want := `enum Color { Red, Green, Blue }
 fn main() { print(Color::Red); }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -254,16 +254,16 @@ fn main() { print(Color::Red); }`
 // TestParseUnionDecl checks tagged union declaration parsing.
 func TestParseUnionDecl(t *testing.T) {
 	input := `union Shape {
-    Point
-    Circle(i64);
-    Label([]const u8);
+    Point,
+    Circle(i64),
+    Label([]const u8),
 }
 fn main() {
     let shape = Shape::Circle(10);
     match shape {
-        Point => print("point");
-        Circle(radius) => print(radius);
-        Label(text) => print(text);
+        Point => print("point"),
+        Circle(radius) => print(radius),
+        Label(text) => print(text),
     }
 }`
 	p := New(lexer.New(input))
@@ -271,9 +271,9 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `union Shape { Point; Circle(i64); Label([]const u8) }
-fn main() { let shape = Shape::Circle(10); match shape { Point => print("point"); ` +
-		`Circle(radius) => print(radius); Label(text) => print(text); } }`
+	want := `union Shape { Point, Circle(i64), Label([]const u8) }
+fn main() { let shape = Shape::Circle(10); match shape { Point => print("point"), ` +
+		`Circle(radius) => print(radius), Label(text) => print(text) } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -282,16 +282,16 @@ fn main() { let shape = Shape::Circle(10); match shape { Point => print("point")
 // TestParseMatchStmt checks simple enum tag match parsing.
 func TestParseMatchStmt(t *testing.T) {
 	input := `enum Color {
-    Red
-    Green
-    Blue
+    Red,
+    Green,
+    Blue,
 }
 fn main() {
     let color = Color::Red;
     match color {
-        Red => print("red");
-        Green => print("green");
-        Blue => print("blue");
+        Red => print("red"),
+        Green => print("green"),
+        Blue => print("blue"),
     }
 }`
 	p := New(lexer.New(input))
@@ -299,9 +299,9 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `enum Color { Red; Green; Blue }
-fn main() { let color = Color::Red; match color { Red => print("red"); ` +
-		`Green => print("green"); Blue => print("blue"); } }`
+	want := `enum Color { Red, Green, Blue }
+fn main() { let color = Color::Red; match color { Red => print("red"), ` +
+		`Green => print("green"), Blue => print("blue") } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -309,12 +309,12 @@ fn main() { let color = Color::Red; match color { Red => print("red"); ` +
 
 // TestParseMatchWildcard checks fallback arm parsing.
 func TestParseMatchWildcard(t *testing.T) {
-	input := `enum Color { Red Green Blue }
+	input := `enum Color { Red, Green, Blue }
 fn main() {
     let color = Color::Blue;
     match color {
-        Red => print("red");
-        _ => print("other");
+        Red => print("red"),
+        _ => print("other"),
     }
 }`
 	p := New(lexer.New(input))
@@ -322,8 +322,8 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `enum Color { Red; Green; Blue }
-fn main() { let color = Color::Blue; match color { Red => print("red"); _ => print("other"); } }`
+	want := `enum Color { Red, Green, Blue }
+fn main() { let color = Color::Blue; match color { Red => print("red"), _ => print("other") } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -331,7 +331,7 @@ fn main() { let color = Color::Blue; match color { Red => print("red"); _ => pri
 
 // TestParseControlExpressions checks if/match expressions and optional semicolons.
 func TestParseControlExpressions(t *testing.T) {
-	input := `enum Color { Red Green }
+	input := `enum Color { Red, Green }
 fn main() {
     let color = Color::Green
     let value = if true { 1 } else { 2 }
@@ -344,9 +344,9 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `enum Color { Red; Green }
+	want := `enum Color { Red, Green }
 fn main() { let color = Color::Green; let value = if true { 1; } else { 2; }; ` +
-		`let name = match color { Red => "red"; Green => "green"; }; print(value); print(name); }`
+		`let name = match color { Red => "red", Green => "green" }; print(value); print(name); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -364,6 +364,46 @@ func TestParseRequiresSemicolonAfterReturn(t *testing.T) {
 	}
 	if !strings.Contains(p.Errors()[0], "expected `;` after return statement") {
 		t.Fatalf("got %v", p.Errors())
+	}
+}
+
+// TestParseRequiresCommaListDelimiters keeps lists separate from statement syntax.
+func TestParseRequiresCommaListDelimiters(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: `struct User { name: []const u8; age: i64 }`,
+			want:  "expected `,` after struct field",
+		},
+		{
+			input: `enum Color { Red Green }`,
+			want:  "expected `,` after enum tag",
+		},
+		{
+			input: `union Shape { Point Circle(i64) }`,
+			want:  "expected `,` after union variant",
+		},
+		{
+			input: `fn main() { let color = Color::Red; ` +
+				`match color { Red => print("red"); Green => print("green"); } }`,
+			want: "expected `,` after match arm",
+		},
+		{
+			input: `fn main() { let user = User { name: "alice"; age: 1 }; }`,
+			want:  "expected `,` after struct literal field",
+		},
+	}
+	for _, tc := range cases {
+		p := New(lexer.New(tc.input))
+		_ = p.ParseProgram()
+		if len(p.Errors()) == 0 {
+			t.Fatalf("expected parser error for %q", tc.input)
+		}
+		if !strings.Contains(strings.Join(p.Errors(), "\n"), tc.want) {
+			t.Fatalf("got parser errors %v, want %q", p.Errors(), tc.want)
+		}
 	}
 }
 
@@ -399,7 +439,7 @@ fn main() { let user = User { name: "alice" }; let values = std::array::Array<i6
 // TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
 func TestParseArenaAndStructLiteral(t *testing.T) {
 	input := `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main() {
     let users = arena<User>(allocator);

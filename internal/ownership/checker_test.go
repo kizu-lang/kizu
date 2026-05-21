@@ -233,7 +233,7 @@ fn bad(s: &[]const u8) {
 		{
 			name: "borrow field",
 			source: `struct Bad {
-    value: &[]const u8
+    value: &[]const u8,
 }
 fn main() {}`,
 			want: "struct field `Bad.value` cannot store borrow",
@@ -362,7 +362,7 @@ fn bad(box: &Box) {
 // TestCheckAcceptsArenaHandle checks arena handles with matching provenance.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -379,7 +379,7 @@ fn main() {
 // TestCheckAcceptsDeferredArenaCleanup checks cleanup runs at block exit.
 func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 	source := `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -396,7 +396,7 @@ fn main() {
 // TestCheckArenaAllocatorReadOnly checks arena construction reads allocator capabilities.
 func TestCheckArenaAllocatorReadOnly(t *testing.T) {
 	source := `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -731,7 +731,7 @@ fn main() {
 		{
 			name: "borrow field in unsafe-adjacent code",
 			source: `struct Bad {
-    value: &[]const u8
+    value: &[]const u8,
 }
 fn main() { unsafe { print(1); } }`,
 			want: "struct field `Bad.value` cannot store borrow",

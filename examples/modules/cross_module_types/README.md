@@ -48,9 +48,9 @@ pub fn expect_fn_decl(
 ) -> !void {
     let node = ast.get(root);
     match node.data {
-        FnDecl(fn_decl) => try expect_var_node(ast.get(fn_decl.name), source, name, start, end);
-        Var(var_node) => return std::testing::fail("expected fn decl");
-        Empty => return std::testing::fail("expected fn decl");
+        FnDecl(fn_decl) => try expect_var_node(ast.get(fn_decl.name), source, name, start, end),
+        Var(var_node) => return std::testing::fail("expected fn decl");,
+        Empty => return std::testing::fail("expected fn decl");,
     }
     return;
 }

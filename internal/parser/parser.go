@@ -328,7 +328,7 @@ func (p *Parser) parseStructDecl() ast.Decl {
 	return decl
 }
 
-// parseStructFields parses newline- or comma-separated struct fields.
+// parseStructFields parses comma-separated struct fields.
 func (p *Parser) parseStructFields() []ast.Field {
 	fields := []ast.Field{}
 	p.nextToken()
@@ -338,8 +338,8 @@ func (p *Parser) parseStructFields() []ast.Field {
 			return fields
 		}
 		fields = append(fields, field)
-		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
-			p.nextToken()
+		if !p.consumeListDelimiter("struct field") {
+			return fields
 		}
 		p.nextToken()
 	}
@@ -395,7 +395,7 @@ func (p *Parser) parseEnumDecl() ast.Decl {
 	return decl
 }
 
-// parseEnumTags parses newline-, comma-, or semicolon-separated enum tags.
+// parseEnumTags parses comma-separated enum tags.
 func (p *Parser) parseEnumTags() []string {
 	tags := []string{}
 	p.nextToken()
@@ -405,8 +405,8 @@ func (p *Parser) parseEnumTags() []string {
 			return tags
 		}
 		tags = append(tags, p.cur.Literal)
-		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
-			p.nextToken()
+		if !p.consumeListDelimiter("enum tag") {
+			return tags
 		}
 		p.nextToken()
 	}
@@ -444,8 +444,8 @@ func (p *Parser) parseUnionVariants() []ast.UnionVariant {
 			return variants
 		}
 		variants = append(variants, variant)
-		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
-			p.nextToken()
+		if !p.consumeListDelimiter("union variant") {
+			return variants
 		}
 		p.nextToken()
 	}
@@ -814,6 +814,20 @@ func (p *Parser) hasImplicitStatementTerminator() bool {
 	}
 }
 
+// consumeListDelimiter consumes a comma or accepts the end of a brace-delimited list.
+func (p *Parser) consumeListDelimiter(context string) bool {
+	switch p.peek.Type {
+	case token.Comma:
+		p.nextToken()
+		return true
+	case token.RBrace, token.EOF:
+		return true
+	default:
+		p.errorf("expected `,` after %s", context)
+		return false
+	}
+}
+
 // parseMatchStmt parses a simple enum tag match statement.
 func (p *Parser) parseMatchStmt() *ast.MatchStmt {
 	stmt := &ast.MatchStmt{}
@@ -836,8 +850,8 @@ func (p *Parser) parseMatchArms() []ast.MatchArm {
 			return arms
 		}
 		arms = append(arms, arm)
-		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
-			p.nextToken()
+		if !p.consumeListDelimiter("match arm") {
+			return arms
 		}
 		p.nextToken()
 	}
@@ -1362,8 +1376,8 @@ func (p *Parser) parseStructLiteralExpr(typeName string) ast.Expression {
 			return expr
 		}
 		expr.Fields = append(expr.Fields, field)
-		if p.peek.Type == token.Comma || p.peek.Type == token.Semicolon {
-			p.nextToken()
+		if !p.consumeListDelimiter("struct literal field") {
+			return expr
 		}
 		p.nextToken()
 	}

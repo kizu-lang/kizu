@@ -122,7 +122,7 @@ const whileSource = `fn main() {
 }`
 
 const arenaSource = `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main(allocator: Allocator) {
     let users = arena<User>(allocator);

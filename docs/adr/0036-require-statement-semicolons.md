@@ -31,7 +31,8 @@ match arm body の simple statement
 block statement、`if`、`while`、`for`、`match`、`unsafe`、`comptime if` 自体には
 終端 `;` を付けない。
 
-struct field、enum tag、union variant は declaration separator として `;` を許す。
+struct field、enum tag、union variant、match arm は list separator として `,` を使う。
+simple statement と list separator の役割を混ぜない。
 
 ## Consequences
 

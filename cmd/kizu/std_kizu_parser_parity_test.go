@@ -42,57 +42,57 @@ fn dump_node(
 ) -> !void {
     let node = ast.get(id);
     match node.data {
-        Program(program) => try dump_program(source, ast, program);
-        ImportDecl(import_decl) => try dump_import_decl(source, ast, import_decl);
-        FnDecl(fn_decl) => try dump_fn_decl(source, ast, fn_decl);
-        Var(var_node) => try dump_leaf("Var", source, &node.span);
-        Int(int_node) => try dump_leaf("Int", source, &node.span);
-        String(string_node) => try dump_string(source, &node.span);
-        TypeName(type_name) => try dump_leaf("TypeName", source, &node.span);
-        Bool(bool_node) => dump_bool(bool_node);
-        Prefix(prefix) => try dump_prefix(source, ast, prefix);
-        Binary(binary) => try dump_binary(source, ast, binary);
-        FieldExpr(field_expr) => try dump_field_expr(source, ast, field_expr);
-        DerefExpr(deref_expr) => try dump_deref_expr(source, ast, deref_expr);
-        Call(call) => try dump_call(source, ast, call);
-        TypeApplyExpr(type_apply) => try dump_type_apply_expr(source, ast, type_apply);
-        CastExpr(cast_expr) => try dump_cast_expr(source, ast, cast_expr);
-        IndexExpr(index_expr) => try dump_index_expr(source, ast, index_expr);
+        Program(program) => try dump_program(source, ast, program);,
+        ImportDecl(import_decl) => try dump_import_decl(source, ast, import_decl);,
+        FnDecl(fn_decl) => try dump_fn_decl(source, ast, fn_decl);,
+        Var(var_node) => try dump_leaf("Var", source, &node.span);,
+        Int(int_node) => try dump_leaf("Int", source, &node.span);,
+        String(string_node) => try dump_string(source, &node.span);,
+        TypeName(type_name) => try dump_leaf("TypeName", source, &node.span);,
+        Bool(bool_node) => dump_bool(bool_node);,
+        Prefix(prefix) => try dump_prefix(source, ast, prefix);,
+        Binary(binary) => try dump_binary(source, ast, binary);,
+        FieldExpr(field_expr) => try dump_field_expr(source, ast, field_expr);,
+        DerefExpr(deref_expr) => try dump_deref_expr(source, ast, deref_expr);,
+        Call(call) => try dump_call(source, ast, call);,
+        TypeApplyExpr(type_apply) => try dump_type_apply_expr(source, ast, type_apply);,
+        CastExpr(cast_expr) => try dump_cast_expr(source, ast, cast_expr);,
+        IndexExpr(index_expr) => try dump_index_expr(source, ast, index_expr);,
         StructLiteralExpr(struct_literal) => try dump_struct_literal_expr(
             source,
             ast,
             struct_literal
-        );
+        );,
         StructFieldInit(struct_field_init) => try dump_struct_field_init(
             source,
             ast,
             struct_field_init
-        );
-        ArenaNewExpr(arena_new) => try dump_arena_new_expr(source, ast, arena_new);
-        TryExpr(try_expr) => try dump_try_expr(source, ast, try_expr);
-        ComptimeExpr(comptime_expr) => try dump_comptime_expr(source, ast, comptime_expr);
-        Block(block) => try dump_block(source, ast, block);
-        Return(return_node) => try dump_return(source, ast, return_node);
-        Defer(defer_node) => try dump_defer(source, ast, defer_node);
-        ExprStmt(expr_stmt) => try dump_expr_stmt(source, ast, expr_stmt);
-        If(if_node) => try dump_if(source, ast, if_node);
-        Let(let_node) => try dump_let(source, ast, let_node);
-        Assign(assign_node) => try dump_assign(source, ast, assign_node);
-        While(while_node) => try dump_while(source, ast, while_node);
-        For(for_node) => try dump_for(source, ast, for_node);
-        Break(break_node) => try dump_break(source, ast, break_node);
-        Continue(continue_node) => try dump_continue(source, ast, continue_node);
-        Param(param_node) => try dump_param(source, ast, param_node);
-        Field(field_node) => try dump_field(source, ast, field_node);
-        StructDecl(struct_decl) => try dump_struct_decl(source, ast, struct_decl);
-        EnumDecl(enum_decl) => try dump_enum_decl(source, ast, enum_decl);
-        UnionDecl(union_decl) => try dump_union_decl(source, ast, union_decl);
-        UnionVariant(union_variant) => try dump_union_variant(source, ast, union_variant);
-        Match(match_node) => try dump_match(source, ast, match_node);
-        MatchArm(match_arm) => try dump_match_arm(source, ast, match_arm);
-        Unsafe(unsafe_node) => try dump_unsafe(source, ast, unsafe_node);
-        ComptimeIf(comptime_if) => try dump_comptime_if(source, ast, comptime_if);
-        Empty => print("Empty");
+        );,
+        ArenaNewExpr(arena_new) => try dump_arena_new_expr(source, ast, arena_new);,
+        TryExpr(try_expr) => try dump_try_expr(source, ast, try_expr);,
+        ComptimeExpr(comptime_expr) => try dump_comptime_expr(source, ast, comptime_expr);,
+        Block(block) => try dump_block(source, ast, block);,
+        Return(return_node) => try dump_return(source, ast, return_node);,
+        Defer(defer_node) => try dump_defer(source, ast, defer_node);,
+        ExprStmt(expr_stmt) => try dump_expr_stmt(source, ast, expr_stmt);,
+        If(if_node) => try dump_if(source, ast, if_node);,
+        Let(let_node) => try dump_let(source, ast, let_node);,
+        Assign(assign_node) => try dump_assign(source, ast, assign_node);,
+        While(while_node) => try dump_while(source, ast, while_node);,
+        For(for_node) => try dump_for(source, ast, for_node);,
+        Break(break_node) => try dump_break(source, ast, break_node);,
+        Continue(continue_node) => try dump_continue(source, ast, continue_node);,
+        Param(param_node) => try dump_param(source, ast, param_node);,
+        Field(field_node) => try dump_field(source, ast, field_node);,
+        StructDecl(struct_decl) => try dump_struct_decl(source, ast, struct_decl);,
+        EnumDecl(enum_decl) => try dump_enum_decl(source, ast, enum_decl);,
+        UnionDecl(union_decl) => try dump_union_decl(source, ast, union_decl);,
+        UnionVariant(union_variant) => try dump_union_variant(source, ast, union_variant);,
+        Match(match_node) => try dump_match(source, ast, match_node);,
+        MatchArm(match_arm) => try dump_match_arm(source, ast, match_arm);,
+        Unsafe(unsafe_node) => try dump_unsafe(source, ast, unsafe_node);,
+        ComptimeIf(comptime_if) => try dump_comptime_if(source, ast, comptime_if);,
+        Empty => print("Empty");,
     }
     return;
 }
@@ -362,19 +362,19 @@ fn dump_binary(
 ) -> !void {
     print("Binary");
     match binary.op {
-        Add => print("Add");
-        Sub => print("Sub");
-        Mul => print("Mul");
-        Div => print("Div");
-        Mod => print("Mod");
-        Eq => print("Eq");
-        NotEq => print("NotEq");
-        LT => print("LT");
-        LTE => print("LTE");
-        GT => print("GT");
-        GTE => print("GTE");
-        And => print("And");
-        Or => print("Or");
+        Add => print("Add");,
+        Sub => print("Sub");,
+        Mul => print("Mul");,
+        Div => print("Div");,
+        Mod => print("Mod");,
+        Eq => print("Eq");,
+        NotEq => print("NotEq");,
+        LT => print("LT");,
+        LTE => print("LTE");,
+        GT => print("GT");,
+        GTE => print("GTE");,
+        And => print("And");,
+        Or => print("Or");,
     }
     try dump_node(source, ast, binary.left);
     try dump_node(source, ast, binary.right);
@@ -388,10 +388,10 @@ fn dump_prefix(
 ) -> !void {
     print("Prefix");
     match prefix.op {
-        Not => print("Not");
-        Neg => print("Neg");
-        Borrow => print("Borrow");
-        MutBorrow => print("MutBorrow");
+        Not => print("Not");,
+        Neg => print("Neg");,
+        Borrow => print("Borrow");,
+        MutBorrow => print("MutBorrow");,
     }
     try dump_node(source, ast, prefix.right);
     return;
@@ -891,7 +891,7 @@ func parserParityFunctionBodySeedCases() []parserParityCase {
 		{
 			name: "seed/fn_match_statement",
 			source: "fn main() { let color = Color::Blue; match color { " +
-				"Red => print(\"red\"); Blue(value) => print(value); } }",
+				"Red => print(\"red\");, Blue(value) => print(value);, } }",
 		},
 		{
 			name: "seed/fn_unsafe_comptime_if",
@@ -931,14 +931,14 @@ func parserParityDeclarationSeedCases() []parserParityCase {
 		{name: "seed/import_decl", source: "import app::lexer;"},
 		{
 			name:   "seed/pub_struct_decl",
-			source: "pub struct User { pub name: []const u8; age: i64; }",
+			source: "pub struct User { pub name: []const u8, age: i64, }",
 		},
 		{
 			name:   "seed/generic_struct_decl",
-			source: "struct Row<T> { data: []const T; }",
+			source: "struct Row<T> { data: []const T, }",
 		},
-		{name: "seed/enum_decl", source: "enum Color { Red; Blue; }"},
-		{name: "seed/union_decl", source: "union Shape { Point; Circle(i64); }"},
+		{name: "seed/enum_decl", source: "enum Color { Red, Blue, }"},
+		{name: "seed/union_decl", source: "union Shape { Point, Circle(i64), }"},
 		{name: "seed/extern_fn", source: `extern "c" fn puts(s: ptr<const u8>) -> i32`},
 		{name: "seed/unsafe_fn", source: "unsafe fn poke() {}"},
 	}

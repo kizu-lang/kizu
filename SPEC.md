@@ -466,15 +466,15 @@ visibility は default private です。
 
 ```kizu
 pub struct Token {
-    pub kind: TokenKind;
-    pub start: i64;
-    pub end: i64;
+    pub kind: TokenKind,
+    pub start: i64,
+    pub end: i64,
 }
 
 enum TokenKind {
-    Ident
-    Number
-    Eof
+    Ident,
+    Number,
+    Eof,
 }
 
 pub fn lex(source: []const u8) -> !std::array::Array<Token> {
@@ -506,9 +506,9 @@ v0.1 の enum は、payload を持たない named tag だけを実装します�
 
 ```kizu
 enum Color {
-    Red
-    Green
-    Blue
+    Red,
+    Green,
+    Blue,
 }
 ```
 
@@ -528,9 +528,9 @@ tag だけの値が必要な場合は `enum` を使います。
 
 ```kizu
 union Shape {
-    Point;
-    Circle(i64);
-    Label([]const u8);
+    Point,
+    Circle(i64),
+    Label([]const u8),
 }
 ```
 
@@ -546,9 +546,9 @@ let b = Shape::Point;
 
 ```kizu
 match a {
-    Point => print("point");
-    Circle(radius) => print(radius);
-    Label(text) => print(text);
+    Point => print("point"),
+    Circle(radius) => print(radius),
+    Label(text) => print(text),
 }
 ```
 
@@ -659,9 +659,9 @@ fn main() {
     let color = Color::Red;
 
     match color {
-        Red => print("red");
-        Green => print("green");
-        Blue => print("blue");
+        Red => print("red"),
+        Green => print("green"),
+        Blue => print("blue"),
     }
 }
 ```
@@ -1028,24 +1028,24 @@ custom error type を明示的に扱う例:
 
 ```kizu
 union ConfigError {
-    NotFound([]const u8);
-    InvalidPort(i64);
+    NotFound([]const u8),
+    InvalidPort(i64),
 }
 
 union ConfigRead {
-    Ok(i64);
-    Err(ConfigError);
+    Ok(i64),
+    Err(ConfigError),
 }
 
 fn main() -> void {
     let result = ConfigRead::Err(ConfigError::NotFound("config.kizu"));
 
     match result {
-        Ok(port) => print(port);
+        Ok(port) => print(port),
         Err(err) => match err {
-            NotFound(path) => print(path);
-            InvalidPort(port) => print(port);
-        }
+            NotFound(path) => print(path),
+            InvalidPort(port) => print(port),
+        },
     }
 }
 ```
