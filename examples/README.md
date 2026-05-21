@@ -138,6 +138,10 @@ single source file. Run them with `kizu check <package-root>`.
 | arena construction requires an allocator | `negative/arena_missing_allocator.kizu` | `allocator argument` |
 | arena construction accepts one allocator | `negative/arena_extra_allocator_arg.kizu` | `allocator argument` |
 | arena allocator argument must be `Allocator` | `negative/arena_non_allocator_arg.kizu` | `expects Allocator` |
+| arena cannot be used after deinit | `negative/arena_double_deinit.kizu`, `negative/arena_add_after_deinit.kizu`, `negative/arena_get_after_deinit.kizu` | `deinitialized` |
+| borrowed arenas cannot be deinitialized | `negative/arena_deinit_while_borrowed.kizu` | `cannot run while arena is borrowed` |
+| arena deinit needs an owned local receiver | `negative/arena_deinit_wrong_receiver.kizu`, `negative/arena_deinit_borrowed_receiver.kizu`, `negative/arena_deinit_temporary_receiver.kizu`, `negative/arena_deinit_moved_receiver.kizu` | `receiver` |
+| handles die with their arena | `negative/arena_handle_after_deinit.kizu` | `cannot be used after arena` |
 | handles are tied to one arena | `negative/arena_wrong_handle.kizu` | `does not belong to arena` |
 | inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |
 | unknown handle provenance is rejected | `negative/arena_unknown_handle.kizu` | `unknown provenance` |

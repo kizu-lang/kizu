@@ -24,6 +24,8 @@ one AST arena and are only resolved through AST methods.
 - `std::array::Array<NodeId>` for variable-length child ranges
 - `SourceFile` metadata
 
+`Ast.deinit()` explicitly releases both node arena storage and child array storage.
+
 `NodeId` is an AST-scoped opaque wrapper over `handle<AstNode>`. It is copyable
 as an id value, but it does not expose pointer operations and is resolved only
 through `Ast.get`.

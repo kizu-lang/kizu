@@ -369,6 +369,7 @@ fn main() {
     let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
+    users.deinit();
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -477,6 +478,98 @@ fn main() {
     take(boxes.get(h).user);
 }`,
 			want: "arena.get returns a local borrow and its fields cannot be moved",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsArenaUseAfterDeinit checks arenas cannot be reused after cleanup.
+func TestCheckRejectsArenaUseAfterDeinit(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "double deinit",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    users.deinit();
+    users.deinit();
+}`,
+			want: "arena `users` was deinitialized",
+		},
+		{
+			name: "add after deinit",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    users.deinit();
+    users.add(User { name: "alice" });
+}`,
+			want: "arena `users` was deinitialized",
+		},
+		{
+			name: "get after deinit",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    let alice = users.add(User { name: "alice" });
+    users.deinit();
+    print(users.get(alice).name);
+			}`,
+			want: "arena `users` was deinitialized",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsArenaDeinitWithLiveReferences checks cleanup reference rules.
+func TestCheckRejectsArenaDeinitWithLiveReferences(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "deinit while borrowed",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    let borrowed = &users;
+    users.deinit();
+    print(borrowed);
+}`,
+			want: "`arena.deinit` cannot run while arena is borrowed",
+		},
+		{
+			name: "handle after deinit",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    let alice = users.add(User { name: "alice" });
+    users.deinit();
+    print(alice);
+}`,
+			want: "handle `alice` cannot be used after arena `users` deinit",
+		},
+		{
+			name: "borrow after deinit",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    users.deinit();
+    let borrowed = &users;
+    print(borrowed);
+}`,
+			want: "arena `users` was deinitialized",
 		},
 	}
 	runErrorCases(t, cases)

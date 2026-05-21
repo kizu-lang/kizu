@@ -64,6 +64,7 @@ type Value struct {
 // Arena stores values and gives out opaque handles.
 type Arena struct {
 	values []Value
+	deinit bool
 }
 
 // Handle identifies an arena element without exposing a raw pointer.

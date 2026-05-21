@@ -1985,11 +1985,16 @@ func (i *Interpreter) evalMethodCallExpr(
 	if receiver.kind != kindArena {
 		return i.evalNonArenaMethod(receiver, field.Name, args, env)
 	}
+	if receiver.arena.deinit {
+		return voidValue(), fmt.Errorf("runtime error: Arena was deinitialized")
+	}
 	switch field.Name {
 	case "add":
 		return i.evalArenaAdd(receiver.arena, args, env)
 	case "get":
 		return i.evalArenaGet(receiver.arena, args, env)
+	case "deinit":
+		return i.evalArenaDeinit(receiver.arena, args)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
 	}
@@ -3160,6 +3165,9 @@ func (i *Interpreter) callMethod(fn *ast.FunctionDecl, args []Value) (Value, err
 
 // evalArenaAdd appends one value and returns an opaque handle.
 func (i *Interpreter) evalArenaAdd(arena *Arena, args []ast.Expression, env *Env) (Value, error) {
+	if arena.deinit {
+		return voidValue(), fmt.Errorf("runtime error: Arena was deinitialized")
+	}
 	if len(args) != 1 {
 		return voidValue(), fmt.Errorf("runtime error: arena.add expected 1 arg")
 	}
@@ -3173,6 +3181,9 @@ func (i *Interpreter) evalArenaAdd(arena *Arena, args []ast.Expression, env *Env
 
 // evalArenaGet resolves a handle back to its arena value.
 func (i *Interpreter) evalArenaGet(arena *Arena, args []ast.Expression, env *Env) (Value, error) {
+	if arena.deinit {
+		return voidValue(), fmt.Errorf("runtime error: Arena was deinitialized")
+	}
 	if len(args) != 1 {
 		return voidValue(), fmt.Errorf("runtime error: arena.get expected 1 arg")
 	}
@@ -3187,6 +3198,15 @@ func (i *Interpreter) evalArenaGet(arena *Arena, args []ast.Expression, env *Env
 		return voidValue(), fmt.Errorf("runtime error: invalid arena handle")
 	}
 	return arena.values[handle.handle.index], nil
+}
+
+// evalArenaDeinit releases an arena at an explicit cleanup boundary.
+func (i *Interpreter) evalArenaDeinit(arena *Arena, args []ast.Expression) (Value, error) {
+	if len(args) != 0 {
+		return voidValue(), fmt.Errorf("runtime error: arena.deinit expected 0 args")
+	}
+	arena.deinit = true
+	return voidValue(), nil
 }
 
 // evalArgs evaluates call arguments from left to right.

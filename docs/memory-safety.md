@@ -95,9 +95,11 @@ policy.
 - `arena<T>.add(value)` returns `handle<T>`.
 - `handle<T>` is an opaque ID, not a raw pointer.
 - `arena<T>.get(handle<T>)` returns a local borrow-like value.
+- `arena<T>.deinit()` explicitly releases the arena and invalidates the binding.
 - Values read through `arena.get` cannot be moved out.
 - A handle can only be used with the arena that produced it.
 - A handle cannot outlive its arena.
+- A known handle cannot be used after its source arena is deinitialized.
 - A handle cannot be cast to a raw pointer in safe Kizu.
 
 ### Unsafe and Raw Pointers
@@ -228,6 +230,7 @@ memory-safety invariants to representative examples.
 | arena construction requires explicit allocator | `examples/arena.kizu` | `examples/negative/arena_missing_allocator.kizu`, `examples/negative/arena_extra_allocator_arg.kizu`, `examples/negative/arena_non_allocator_arg.kizu` |
 | arena add moves values | `examples/arena.kizu` | `examples/negative/arena_add_move.kizu` |
 | arena get is local-borrow-like | `examples/arena.kizu` | `examples/negative/arena_get_move.kizu` |
+| arena cleanup invalidates arena and handles | `examples/arena.kizu` | `examples/negative/arena_double_deinit.kizu`, `examples/negative/arena_add_after_deinit.kizu`, `examples/negative/arena_get_after_deinit.kizu`, `examples/negative/arena_deinit_while_borrowed.kizu`, `examples/negative/arena_deinit_wrong_receiver.kizu`, `examples/negative/arena_deinit_borrowed_receiver.kizu`, `examples/negative/arena_deinit_temporary_receiver.kizu`, `examples/negative/arena_deinit_moved_receiver.kizu`, `examples/negative/arena_handle_after_deinit.kizu` |
 | handle provenance is enforced | `examples/arena.kizu` | `examples/negative/arena_wrong_handle.kizu`, `examples/negative/arena_inline_wrong_handle.kizu`, `examples/negative/arena_unknown_handle.kizu`; invalid-index handles are covered by `internal/interp` unit tests |
 | handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
 | handle is not a raw pointer | | `examples/negative/handle_as_pointer.kizu` |

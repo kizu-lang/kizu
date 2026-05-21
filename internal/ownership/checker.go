@@ -53,6 +53,7 @@ type binding struct {
 	arenaID          int
 	handleArenaID    int
 	rangeArenaID     int
+	deinitialized    bool
 	taskDone         bool
 }
 
@@ -664,6 +665,9 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 		if !ok {
 			return nil, "", fmt.Errorf("borrow error: undefined variable `%s`", target.Name)
 		}
+		if err := checkDeinitializedBorrow(target.Name, value); err != nil {
+			return nil, "", err
+		}
 		if value.moved {
 			return nil, "", fmt.Errorf("borrow error: moved value `%s` was borrowed", target.Name)
 		}
@@ -676,6 +680,9 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 		value, ok := env.lookup(ident.Name)
 		if !ok {
 			return nil, "", fmt.Errorf("borrow error: undefined variable `%s`", ident.Name)
+		}
+		if err := checkDeinitializedBorrow(ident.Name, value); err != nil {
+			return nil, "", err
 		}
 		if value.moved {
 			return nil, "", fmt.Errorf("borrow error: moved value `%s` was borrowed", ident.Name)
@@ -722,6 +729,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 		}
 		target.typeName = typeName
 		target.moved = false
+		target.deinitialized = false
 		target.arenaID = 0
 		target.handleArenaID = 0
 		target.rangeArenaID = 0
@@ -976,6 +984,9 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 			return "", fmt.Errorf("move error: void is not a value")
 		}
 		return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
+	}
+	if err := checkDeinitializedUse(ident.Name, value, env); err != nil {
+		return "", err
 	}
 	if value.moved {
 		return "", fmt.Errorf("move error: moved value `%s` was used", ident.Name)
@@ -2764,6 +2775,9 @@ func (c *Checker) checkLocalReceiverMethod(
 	if !exists {
 		return "", fmt.Errorf("arena error: undefined arena `%s`", receiver.Name)
 	}
+	if arena.deinitialized {
+		return "", fmt.Errorf("arena error: arena `%s` was deinitialized", receiver.Name)
+	}
 	if arena.moved {
 		return "", fmt.Errorf("move error: moved value `%s` was used", receiver.Name)
 	}
@@ -2785,6 +2799,8 @@ func (c *Checker) checkLocalReceiverMethod(
 		return c.checkArenaAdd(arena, args, env)
 	case "get":
 		return c.checkArenaGet(arena, args, env)
+	case "deinit":
+		return c.checkArenaDeinit(arena, args)
 	default:
 		return "", fmt.Errorf("arena error: unknown arena method `%s`", field.Name)
 	}
@@ -2807,7 +2823,15 @@ func (c *Checker) checkStdFieldStorageMethod(
 		return "", true, err
 	}
 	base, elem, ok := splitGenericType(receiverType)
-	if !ok || base != "std::array::Array" {
+	if !ok {
+		return "", false, nil
+	}
+	if base == "arena" && field.Name == "deinit" {
+		arena := &binding{typeName: receiverType}
+		typ, err := c.checkArenaDeinit(arena, args)
+		return typ, true, err
+	}
+	if base != "std::array::Array" {
 		return "", false, nil
 	}
 	array := &binding{typeName: receiverType}
@@ -4106,6 +4130,19 @@ func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scop
 	return arg, nil
 }
 
+// checkArenaDeinit validates explicit arena cleanup and invalidates the binding.
+func (c *Checker) checkArenaDeinit(arena *binding, args []ast.Expression) (string, error) {
+	if arena.hasAnyBorrow() {
+		return "", fmt.Errorf("arena error: `arena.deinit` cannot run while arena is borrowed")
+	}
+	if len(args) != 0 {
+		return "", fmt.Errorf("arena error: `arena.deinit` expects 0 args, got %d", len(args))
+	}
+	arena.deinitialized = true
+	arena.moved = true
+	return "void", nil
+}
+
 // checkHandleProvenance rejects handles that came from a different known arena.
 func (c *Checker) checkHandleProvenance(arena *binding, expr ast.Expression, env *scope) error {
 	if arena.arenaID == 0 {
@@ -4522,6 +4559,9 @@ func (c *Checker) containsArenaGet(expr ast.Expression, env *scope) bool {
 func readIdent(name string, env *scope) (string, error) {
 	value, ok := env.lookup(name)
 	if ok {
+		if err := checkDeinitializedUse(name, value, env); err != nil {
+			return "", err
+		}
 		if value.moved {
 			return "", fmt.Errorf("move error: moved value `%s` was used", name)
 		}
@@ -4535,6 +4575,30 @@ func readIdent(name string, env *scope) (string, error) {
 		return "", fmt.Errorf("move error: void is not a value")
 	}
 	return "", fmt.Errorf("move error: undefined variable `%s`", name)
+}
+
+// checkDeinitializedUse rejects arenas and known handles after arena cleanup.
+func checkDeinitializedUse(name string, value *binding, env *scope) error {
+	if value.deinitialized {
+		return fmt.Errorf("arena error: arena `%s` was deinitialized", name)
+	}
+	if value.handleArenaID == 0 {
+		return nil
+	}
+	arena, ok := env.lookupArenaID(value.handleArenaID)
+	if ok && arena.deinitialized {
+		return fmt.Errorf("arena error: handle `%s` cannot be used after arena `%s` deinit",
+			name, arena.name)
+	}
+	return nil
+}
+
+// checkDeinitializedBorrow rejects borrowing an arena after cleanup.
+func checkDeinitializedBorrow(name string, value *binding) error {
+	if value.deinitialized {
+		return fmt.Errorf("arena error: arena `%s` was deinitialized", name)
+	}
+	return nil
 }
 
 // errorUnionElement extracts T from !T.
@@ -5268,6 +5332,18 @@ func (s *scope) lookup(name string) (*binding, bool) {
 	return nil, false
 }
 
+// lookupArenaID resolves a tracked arena owner by provenance ID.
+func (s *scope) lookupArenaID(arenaID int) (*binding, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		for _, value := range cur.values {
+			if value.arenaID == arenaID {
+				return value, true
+			}
+		}
+	}
+	return nil, false
+}
+
 // checkPendingTasks rejects tasks that leave scope without await or cancel.
 func (s *scope) checkPendingTasks() error {
 	for name, value := range s.values {
@@ -5469,6 +5545,11 @@ func (s *scope) mergeMovedFrom(other *scope) {
 		if value.moved {
 			if target, ok := byID[value.id]; ok {
 				target.moved = true
+			}
+		}
+		if value.deinitialized {
+			if target, ok := byID[value.id]; ok {
+				target.deinitialized = true
 			}
 		}
 	})
