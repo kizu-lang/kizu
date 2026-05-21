@@ -336,6 +336,19 @@ and exit-code behavior through the hosted artifact. Broad CLI parity, broad
 example/conformance coverage, and unsupported ABI shapes remain blocked by #497
 and #495.
 
+For #525, the hosted CLI also accepts the bounded `parse <file>` parity cases in
+`selfhost/tests/cli/parse-parity.tsv`:
+
+```sh
+selfhost parse selfhost/tests/cli/parse_ok_minimal.kizu
+selfhost parse selfhost/tests/cli/parse_invalid_missing_expr.kizu
+```
+
+The parse parity gate compares byte-for-byte stdout, stderr, and exit codes
+against checked-in goldens and runs through `target/selfhost/stage2/selfhost`.
+It does not invoke Go `cmd/kizu` as a fallback. General `parse <file>` parity
+outside those fixture paths remains under #497.
+
 ## Textual LLVM Validation
 
 Until CI requires an LLVM verifier binary, #454 uses this repository command as

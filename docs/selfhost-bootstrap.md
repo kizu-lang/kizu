@@ -79,6 +79,11 @@ interpreter. `TestSelfhostBackendArtifactGate` also links the generated
 for `check selfhost`, `stage selfhost`, and unsupported command diagnostics.
 The latter is the no-Go smoke for the #458 artifact CLI path.
 
+`just selfhost-parse-parity-gate` validates the #525 `parse <file>` slice
+through `target/selfhost/stage2/selfhost` after `just selfhost-bootstrap`. It
+uses `selfhost/tests/cli/parse-parity.tsv` and checked-in stdout/stderr goldens;
+Go `cmd/kizu` is not part of that validation path.
+
 The bootstrap runner introduced by #459 provides this shape:
 
 ```sh
