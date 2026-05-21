@@ -347,7 +347,8 @@ selfhost parse selfhost/tests/cli/parse_invalid_missing_expr.kizu
 The parse parity gate compares byte-for-byte stdout, stderr, and exit codes
 against checked-in goldens and runs through `target/selfhost/stage2/selfhost`.
 It does not invoke Go `cmd/kizu` as a fallback. General `parse <file>` parity
-outside those fixture paths remains under #497.
+outside those fixture paths remains under #497. The current CLI parity support
+and deferrals are recorded in `docs/selfhost-cli-parity.md`.
 
 ## Textual LLVM Validation
 
