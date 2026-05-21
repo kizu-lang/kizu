@@ -208,7 +208,7 @@ func parseParityGuardCases() []parseParityGuardCase {
 		},
 		{
 			name:     "unsupported_target",
-			args:     []string{"parse", "selfhost/tests/cli/check_moved_value_alias.kizu"},
+			args:     []string{"parse", "selfhost/src/main.kizu"},
 			exitCode: 64,
 			stderr:   selfhostUsageStderr(),
 		},
