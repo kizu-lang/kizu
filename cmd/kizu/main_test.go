@@ -363,7 +363,7 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 // TestBuildTargetNativeRejectsUnsupportedFeature checks native build fails before clang.
 func TestBuildTargetNativeRejectsUnsupportedFeature(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "struct.kizu")
-	code := []byte(`struct User { age: i64; }
+	code := []byte(`struct User { age: i64, }
 fn main() {
     let user = User { age: 30 };
     print(user.age);

@@ -140,13 +140,13 @@ const whileSource = `fn main() {
     }
 }`
 
-const structSource = `struct User { age: i64; }
+const structSource = `struct User { age: i64, }
 fn main() {
     let user = User { age: 30 };
     print(1);
 }`
 
-const arenaSource = `struct User { age: i64; }
+const arenaSource = `struct User { age: i64, }
 fn main(allocator: Allocator) {
     let users = arena<User>(allocator);
     print(1);

@@ -17,8 +17,8 @@ v0.1 の `enum` は payload を持たない。
 ```kizu
 enum Color {
     Red
-    Green
-    Blue
+    Green,
+    Blue,
 }
 
 fn main() {
@@ -31,9 +31,9 @@ v0.1 では `union` として別機能で実装する。
 
 ```kizu
 union Shape {
-    Point;
-    Circle(i64);
-    Label([]const u8);
+    Point,
+    Circle(i64),
+    Label([]const u8),
 }
 ```
 
@@ -44,9 +44,9 @@ Rust-style の広い pattern matching ではなく、Zig `switch` 寄りの tag 
 
 ```kizu
 match color {
-    Red => print("red");
-    Green => print("green");
-    Blue => print("blue");
+    Red => print("red"),
+    Green => print("green"),
+    Blue => print("blue"),
 }
 ```
 

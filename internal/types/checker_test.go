@@ -229,8 +229,8 @@ fn main() {}`,
 // TestCheckAcceptsStructDeclarations checks Phase 5 struct declarations.
 func TestCheckAcceptsStructDeclarations(t *testing.T) {
 	source := `struct User {
-    name: []const u8
-    age: i64
+    name: []const u8,
+    age: i64,
 }
 fn take(user: User) {}
 fn main() {}`
@@ -316,11 +316,11 @@ func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
 // TestCheckAcceptsPublicAPIWithPublicTypes checks public boundary declarations.
 func TestCheckAcceptsPublicAPIWithPublicTypes(t *testing.T) {
 	source := `pub enum TokenKind {
-    Ident
+    Ident,
 }
 pub struct Token {
-    pub kind: TokenKind;
-    start: i64;
+    pub kind: TokenKind,
+    start: i64,
 }
 pub fn take(token: Token) -> Token {
     return token;
@@ -351,7 +351,7 @@ fn main() {}`,
 			name: "public field",
 			source: `struct Secret {}
 pub struct Token {
-    pub secret: Secret;
+    pub secret: Secret,
 }
 fn main() {}`,
 			want: "public field `Token.secret` exposes private type `Secret`",
@@ -360,7 +360,7 @@ fn main() {}`,
 			name: "public union payload",
 			source: `struct Secret {}
 pub union Result {
-    Ok(Secret)
+    Ok(Secret),
 }
 fn main() {}`,
 			want: "public union variant `Result::Ok` exposes private type `Secret`",
@@ -372,9 +372,9 @@ fn main() {}`,
 // TestCheckAcceptsEnumDeclarations checks Zig/C-style tag enum values.
 func TestCheckAcceptsEnumDeclarations(t *testing.T) {
 	source := `enum Color {
-    Red
-    Green
-    Blue
+    Red,
+    Green,
+    Blue,
 }
 fn take(color: Color) -> Color { return color ;}
 fn main() {
@@ -402,7 +402,7 @@ fn main() {}`,
 		},
 		{
 			name: "duplicate tag",
-			source: `enum Color { Red Red }
+			source: `enum Color { Red, Red }
 fn main() {}`,
 			want: "duplicate enum tag `Color::Red`",
 		},
@@ -424,16 +424,16 @@ fn main() { print(Color::Blue); }`,
 // TestCheckAcceptsEnumMatch checks exhaustive simple enum match statements.
 func TestCheckAcceptsEnumMatch(t *testing.T) {
 	source := `enum Color {
-    Red
-    Green
-    Blue
+    Red,
+    Green,
+    Blue,
 }
 fn main() {
     let color = Color::Green;
     match color {
-        Red => print("red");
-        Green => print("green");
-        Blue => print("blue");
+        Red => print("red");,
+        Green => print("green");,
+        Blue => print("blue");,
     }
 }`
 	if err := checkSource(source); err != nil {
@@ -443,12 +443,12 @@ fn main() {
 
 // TestCheckAcceptsMatchWildcard checks fallback arms preserve exhaustiveness.
 func TestCheckAcceptsMatchWildcard(t *testing.T) {
-	source := `enum Color { Red Green Blue }
-union Shape { Point Circle(i64); Label([]const u8); }
+	source := `enum Color { Red, Green, Blue }
+union Shape { Point, Circle(i64), Label([]const u8), }
 fn describe(shape: &Shape) -> void {
     match shape {
-        Circle(radius) => print(radius);
-        _ => print("other");
+        Circle(radius) => print(radius);,
+        _ => print("other");,
     }
 }
 fn main() -> void {
@@ -464,7 +464,7 @@ fn main() -> void {
 
 // TestCheckAcceptsControlExpressions checks value-producing if and match forms.
 func TestCheckAcceptsControlExpressions(t *testing.T) {
-	source := `enum Color { Red Green }
+	source := `enum Color { Red, Green }
 fn main() -> void {
     let color = Color::Green
     let value = if true { 1 } else { 2 }
@@ -495,15 +495,15 @@ func TestCheckRejectsSemicolonTailControlExpressions(t *testing.T) {
 // TestCheckAcceptsTaggedUnionMatch checks tagged union constructors and payload matches.
 func TestCheckAcceptsTaggedUnionMatch(t *testing.T) {
 	source := `union Shape {
-    Point
-    Circle(i64);
-    Label([]const u8);
+    Point,
+    Circle(i64),
+    Label([]const u8),
 }
 fn describe(shape: &Shape) -> void {
     match shape {
-        Point => print("point");
-        Circle(radius) => print(radius);
-        Label(text) => print(text);
+        Point => print("point");,
+        Circle(radius) => print(radius);,
+        Label(text) => print(text);,
     }
 }
 fn main() {
@@ -613,7 +613,7 @@ func TestCheckRejectsTaggedUnionErrors(t *testing.T) {
 	}{
 		{
 			name: "constructor type",
-			source: `union Shape { Circle(i64); }
+			source: `union Shape { Circle(i64), }
 fn main() {
     let shape = Shape::Circle("large");
     print(shape);
@@ -622,10 +622,10 @@ fn main() {
 		},
 		{
 			name: "exhaustiveness",
-			source: `union Shape { Point Circle(i64); }
+			source: `union Shape { Point, Circle(i64), }
 fn main() {
     let shape = Shape::Point;
-    match shape { Point => print("point"); }
+    match shape { Point => print("point");, }
 }`,
 			want: "match on `Shape` is not exhaustive",
 		},
@@ -634,7 +634,7 @@ fn main() {
 			source: `union Shape { Point }
 fn main() {
     let shape = Shape::Point;
-    match shape { Point(x) => print(x); }
+    match shape { Point(x) => print(x);, }
 }`,
 			want: "union variant `Shape::Point` has no payload",
 		},
@@ -691,52 +691,52 @@ func TestCheckRejectsEnumMatchErrors(t *testing.T) {
 		{
 			name: "non enum",
 			source: `fn main() {
-    match 1 { Red => print("red"); }
+    match 1 { Red => print("red");, }
 }`,
 			want: "match expects enum or union, got i64",
 		},
 		{
 			name: "unknown tag",
-			source: `enum Color { Red Green }
+			source: `enum Color { Red, Green }
 fn main() {
     let color = Color::Red;
-    match color { Red => print("red"); Blue => print("blue"); }
+    match color { Red => print("red");, Blue => print("blue");, }
 }`,
 			want: "unknown match tag `Color::Blue`",
 		},
 		{
 			name: "duplicate tag",
-			source: `enum Color { Red Green }
+			source: `enum Color { Red, Green }
 fn main() {
     let color = Color::Red;
-    match color { Red => print("red"); Red => print("again"); Green => print("green"); }
+    match color { Red => print("red");, Red => print("again");, Green => print("green");, }
 }`,
 			want: "duplicate match tag `Color::Red`",
 		},
 		{
 			name: "not exhaustive",
-			source: `enum Color { Red Green }
+			source: `enum Color { Red, Green }
 fn main() {
     let color = Color::Red;
-    match color { Red => print("red"); }
+    match color { Red => print("red");, }
 }`,
 			want: "match on `Color` is not exhaustive",
 		},
 		{
 			name: "wildcard before tag",
-			source: `enum Color { Red Green }
+			source: `enum Color { Red, Green }
 fn main() {
     let color = Color::Red;
-    match color { _ => print("other"); Red => print("red"); }
+    match color { _ => print("other");, Red => print("red");, }
 }`,
 			want: "wildcard match arm must be last",
 		},
 		{
 			name: "wildcard payload binding",
-			source: `union Shape { Point Circle(i64); }
+			source: `union Shape { Point, Circle(i64), }
 fn main() {
     let shape = Shape::Circle(1);
-    match shape { _(value) => print(value); }
+    match shape { _(value) => print(value);, }
 }`,
 			want: "wildcard match arm cannot bind payload",
 		},
@@ -747,7 +747,7 @@ fn main() {
 // TestCheckAcceptsArenaHandle checks Phase 6 arena and handle types.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -764,7 +764,7 @@ fn main() {
 // TestCheckAcceptsDeferredArenaCleanup checks block-exit cleanup registration.
 func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 	source := `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -1044,7 +1044,7 @@ func TestCheckAcceptsErrorFromStringView(t *testing.T) {
 // TestCheckAcceptsTypedErrorCast checks explicit untyped-to-typed error mapping.
 func TestCheckAcceptsTypedErrorCast(t *testing.T) {
 	source := `union CompileError {
-    Message([]const u8);
+    Message([]const u8),
 }
 fn lower(ok: bool) -> !i64 {
     if ok {
@@ -1095,7 +1095,7 @@ fn main() {
 		{
 			name: "typed cast requires message variant",
 			source: `union CompileError {
-    Diagnostic(i64);
+    Diagnostic(i64),
 }
 fn lower() -> !i64 {
     return error("bad");

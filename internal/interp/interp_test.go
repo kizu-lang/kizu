@@ -50,8 +50,8 @@ func TestRunVariablesAndAssignment(t *testing.T) {
 // TestRunFieldAndDerefAssignment checks mutable fields and &mut writes.
 func TestRunFieldAndDerefAssignment(t *testing.T) {
 	got := runSource(t, `struct User {
-    name: []const u8
-    age: i64
+    name: []const u8,
+    age: i64,
 }
 fn rename(user: &mut User) -> void {
     user.*.name = "bob";
@@ -124,7 +124,7 @@ func TestRunLoopControl(t *testing.T) {
 // TestRunArenaHandle checks Phase 6 arena add/get and field access.
 func TestRunArenaHandle(t *testing.T) {
 	got := runSource(t, `struct User {
-    name: []const u8
+    name: []const u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -174,7 +174,7 @@ fn main() {
 // TestRunDeferCleanupOrder checks nested blocks and reverse cleanup order.
 func TestRunDeferCleanupOrder(t *testing.T) {
 	got := runSource(t, `struct Trace {
-    label: []const u8
+    label: []const u8,
 }
 impl Trace {
     fn deinit(self: Trace) -> void {
@@ -204,9 +204,9 @@ fn main() {
 // TestRunEnumValueAccess checks Zig/C-style tag enum runtime values.
 func TestRunEnumValueAccess(t *testing.T) {
 	got := runSource(t, `enum Color {
-    Red
-    Green
-    Blue
+    Red,
+    Green,
+    Blue,
 }
 fn main() {
     let color = Color::Green;
@@ -222,16 +222,16 @@ fn main() {
 // TestRunEnumMatch checks simple enum tag match execution.
 func TestRunEnumMatch(t *testing.T) {
 	got := runSource(t, `enum Color {
-    Red
-    Green
-    Blue
+    Red,
+    Green,
+    Blue,
 }
 fn main() {
     let color = Color::Blue;
     match color {
-        Red => print("red");
-        Green => print("green");
-        Blue => print("blue");
+        Red => print("red");,
+        Green => print("green");,
+        Blue => print("blue");,
     }
 }`)
 	want := "blue\n"
@@ -242,12 +242,12 @@ fn main() {
 
 // TestRunMatchWildcard checks fallback arms for enum and union matches.
 func TestRunMatchWildcard(t *testing.T) {
-	got := runSource(t, `enum Color { Red Green Blue }
-union Shape { Point Circle(i64); Label([]const u8); }
+	got := runSource(t, `enum Color { Red, Green, Blue }
+union Shape { Point, Circle(i64), Label([]const u8), }
 fn describe(shape: &Shape) -> void {
     match shape {
-        Circle(radius) => print(radius);
-        _ => print("not circle");
+        Circle(radius) => print(radius);,
+        _ => print("not circle");,
     }
 }
 fn main() {
@@ -264,7 +264,7 @@ fn main() {
 
 // TestRunControlExpressions checks if/match expressions and semicolonless statements.
 func TestRunControlExpressions(t *testing.T) {
-	got := runSource(t, `enum Color { Red Green }
+	got := runSource(t, `enum Color { Red, Green }
 fn main() {
     let color = Color::Green
     let value = if false { 1 } else { 2 }
@@ -281,9 +281,9 @@ fn main() {
 // TestRunTaggedUnionMatch checks payload binding in tagged union matches.
 func TestRunTaggedUnionMatch(t *testing.T) {
 	got := runSource(t, `union Shape {
-    Point
-    Circle(i64);
-    Label([]const u8);
+    Point,
+    Circle(i64),
+    Label([]const u8),
 }
 fn main() {
     let first = Shape::Circle(10);
@@ -294,9 +294,9 @@ fn main() {
 }
 fn describe(shape: &Shape) -> void {
     match shape {
-        Point => print("point");
-        Circle(radius) => print(radius);
-        Label(text) => print(text);
+        Point => print("point");,
+        Circle(radius) => print(radius);,
+        Label(text) => print(text);,
     }
 }`)
 	want := "10\nname\npoint\n"
@@ -360,7 +360,7 @@ fn main() -> !i64 {
 // TestRunTypedErrorTryPropagatesFunctionExpr checks typed errors from calls.
 func TestRunTypedErrorTryPropagatesFunctionExpr(t *testing.T) {
 	got, err := parseAndRun(`union CompileError {
-    Message([]const u8);
+    Message([]const u8),
 }
 fn parse(ok: bool) -> CompileError!i64 {
     if ok {
@@ -385,7 +385,7 @@ fn main() -> CompileError!void {
 // TestRunTypedErrorCastMapsUntypedError checks explicit message adaptation at runtime.
 func TestRunTypedErrorCastMapsUntypedError(t *testing.T) {
 	got, err := parseAndRun(`union CompileError {
-    Message([]const u8);
+    Message([]const u8),
 }
 fn lower(ok: bool) -> !i64 {
     if ok {

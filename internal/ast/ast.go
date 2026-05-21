@@ -136,7 +136,7 @@ func (d *StructDecl) String() string {
 		typeParams = "<" + typeParams + ">"
 	}
 	return fmt.Sprintf("%sstruct %s%s { %s }",
-		prefix, d.Name, typeParams, strings.Join(fields, "; "))
+		prefix, d.Name, typeParams, strings.Join(fields, ", "))
 }
 
 // EnumDecl represents a Zig/C-style tag enum declaration.
@@ -155,7 +155,7 @@ func (d *EnumDecl) String() string {
 	if d.Public {
 		prefix = "pub "
 	}
-	return fmt.Sprintf("%senum %s { %s }", prefix, d.Name, strings.Join(d.Tags, "; "))
+	return fmt.Sprintf("%senum %s { %s }", prefix, d.Name, strings.Join(d.Tags, ", "))
 }
 
 // UnionDecl represents a tagged union declaration.
@@ -185,7 +185,7 @@ func (d *UnionDecl) String() string {
 		typeParams = "<" + typeParams + ">"
 	}
 	return fmt.Sprintf("%sunion %s%s { %s }",
-		prefix, d.Name, typeParams, strings.Join(variants, "; "))
+		prefix, d.Name, typeParams, strings.Join(variants, ", "))
 }
 
 // UnionVariant represents one tagged union variant.
@@ -520,7 +520,7 @@ func (s *MatchStmt) String() string {
 	for _, arm := range s.Arms {
 		arms = append(arms, arm.String())
 	}
-	return fmt.Sprintf("match %s { %s }", s.Value.String(), strings.Join(arms, " "))
+	return fmt.Sprintf("match %s { %s }", s.Value.String(), strings.Join(arms, ", "))
 }
 
 // MatchArm represents one enum tag branch in a match statement.
@@ -537,10 +537,14 @@ func (a MatchArm) IsWildcard() bool {
 
 // String returns a compact debug representation of the match arm.
 func (a MatchArm) String() string {
-	if a.Binding != "" {
-		return fmt.Sprintf("%s(%s) => %s", a.Tag, a.Binding, a.Body.String())
+	body := a.Body.String()
+	if expr, ok := a.Body.(*ExprStmt); ok && !expr.Semicolon {
+		body = expr.Expr.String()
 	}
-	return fmt.Sprintf("%s => %s", a.Tag, a.Body.String())
+	if a.Binding != "" {
+		return fmt.Sprintf("%s(%s) => %s", a.Tag, a.Binding, body)
+	}
+	return fmt.Sprintf("%s => %s", a.Tag, body)
 }
 
 // UnsafeStmt represents an explicit unsafe block.
