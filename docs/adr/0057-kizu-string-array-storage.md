@@ -27,6 +27,12 @@ The remaining trusted boundary is `std::array::Array<T>` storage. For
 and a read-only `Array<u8>.as_bytes()` view. That is a storage primitive, not a
 string implementation.
 
+The hosted selfhost runtime template is an exception at the ABI artifact layer:
+it may define String byte-buffer runtime symbols for `selfhost-abi-v0` so the
+bootstrap artifact can run without Go stdprim storage. Those symbols are not
+public `std::builtin::string_*` calls and do not change the Kizu-facing stdlib
+decision in this ADR.
+
 The Array helpers needed only by `String` are std-only in v0.2; they are not
 public `std::array` API.
 
