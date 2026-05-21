@@ -259,6 +259,18 @@ storage artifact metadata records `string-storage byte-buffer`,
 `string-deinit releases-byte-buffer`,
 `string-invalid-slice-diagnostic invalid slice`.
 
+For #576, Map storage is no longer a single found/value slot. The hosted
+runtime template implements the first bounded `Map<[]const u8, i64>` shape with
+two owned key slots. `insert` copies key bytes into map-owned storage and stores
+the copy value, `contains` and `get_i64` compare key bytes instead of only
+checking whether any insert happened, and `deinit` releases copied keys plus the
+Map object. Missing keys return `Map.get key not found`; inserting beyond the
+bounded two-entry slice returns `map capacity exceeded`. The storage artifact
+metadata records `map-storage string-key-i64-two-entry`,
+`map-key-ownership copies-key-bytes`,
+`map-missing-key-diagnostic Map.get key not found`, and
+`map-capacity-diagnostic map capacity exceeded`.
+
 Append operations return `!void` using `%kizu.error.void`. The runtime artifact
 metadata must include `allocator-boundary explicit`, `go-stdprim-storage none`,
 and `interpreter-storage none`; Go-backed interpreter storage is allowed only
@@ -474,11 +486,13 @@ runtime storage template. The same Go gate checks
 The storage validation requires the reachable Array, String, Map, diagnostic,
 Arena, and Handle runtime symbols, the `@kizu_selfhost__runtime_storage_smoke`
 entry, explicit allocator-boundary metadata, Array copy-element metadata, String
-byte-buffer metadata, handle provenance metadata, and the absence of Go
-interpreter/stdprim fallback markers in the storage LLVM artifact.
+byte-buffer metadata, Map string-key/i64 metadata, handle provenance metadata,
+and the absence of Go interpreter/stdprim fallback markers in the storage LLVM
+artifact.
 The gate also links `selfhost.storage.ll` with the host capability runtime and a
 tiny C harness, then runs the storage smoke so Array payload storage, String
-byte storage, and Arena/Handle calls cannot be only dead textual declarations.
+byte storage, Map key/value storage, and Arena/Handle calls cannot be only dead
+textual declarations.
 
 For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
 `target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper

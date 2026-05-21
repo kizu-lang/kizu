@@ -9,7 +9,7 @@ source_filename = "target/selfhost/selfhost.storage"
 %kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }
 %kizu.rt.array = type { ptr, ptr, i64, i64, i64 }
 %kizu.rt.string = type { ptr, ptr, i64, i64 }
-%kizu.rt.map = type { ptr, i1, i64 }
+%kizu.rt.map = type { ptr, i64, ptr, i64, i64, ptr, i64, i64 }
 %kizu.rt.diagnostics = type { ptr, i64 }
 %kizu.rt.arena = type { ptr, i64, i64, i1 }
 
@@ -21,6 +21,12 @@ source_filename = "target/selfhost/selfhost.storage"
 @.kizu.rt.array_smoke = private unnamed_addr constant [8 x i8] c"array-ok"
 @.kizu.rt.array_smoke_second = private unnamed_addr constant [8 x i8] c"payload2"
 @.kizu.rt.string_smoke = private unnamed_addr constant [3 x i8] c"kiz"
+@.kizu.rt.invalid_map_key = private unnamed_addr constant [15 x i8] c"invalid map key"
+@.kizu.rt.map_full = private unnamed_addr constant [21 x i8] c"map capacity exceeded"
+@.kizu.rt.map_key_not_found = private unnamed_addr constant [21 x i8] c"Map.get key not found"
+@.kizu.rt.map_key_alpha = private unnamed_addr constant [5 x i8] c"alpha"
+@.kizu.rt.map_key_beta = private unnamed_addr constant [4 x i8] c"beta"
+@.kizu.rt.map_key_gamma = private unnamed_addr constant [5 x i8] c"gamma"
 
 declare ptr @kizu_rt_alloc(ptr, i64)
 declare void @kizu_rt_free(ptr, ptr)
@@ -319,44 +325,248 @@ free_string:
 define %kizu.owned @kizu_rt_map_new(%kizu.owned %allocator) {
 entry:
   %allocator_ptr = extractvalue %kizu.owned %allocator, 0
-  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 24)
+  %raw = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 64)
   %allocator_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 0
   store ptr %allocator_ptr, ptr %allocator_field
-  %found_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 1
-  store i1 false, ptr %found_field
-  %value_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
-  store i64 0, ptr %value_field
+  %len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 1
+  store i64 0, ptr %len_field
+  %key0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
+  store ptr null, ptr %key0_field
+  %key0_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 3
+  store i64 0, ptr %key0_len_field
+  %value0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 4
+  store i64 0, ptr %value0_field
+  %key1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 5
+  store ptr null, ptr %key1_field
+  %key1_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 6
+  store i64 0, ptr %key1_len_field
+  %value1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 7
+  store i64 0, ptr %value1_field
   %handle = insertvalue %kizu.owned poison, ptr %raw, 0
   ret %kizu.owned %handle
 }
 
 define %kizu.error.void @kizu_rt_map_insert(%kizu.owned %map, %kizu.slice.u8 %key, i64 %value) {
 entry:
+  %key_ptr = extractvalue %kizu.slice.u8 %key, 0
+  %key_len = extractvalue %kizu.slice.u8 %key, 1
+  %len_negative = icmp slt i64 %key_len, 0
+  br i1 %len_negative, label %invalid_key, label %check_ptr
+check_ptr:
+  %has_key_bytes = icmp sgt i64 %key_len, 0
+  %ptr_ok = icmp ne ptr %key_ptr, null
+  %empty_key = icmp eq i64 %key_len, 0
+  %key_ok = or i1 %ptr_ok, %empty_key
+  br i1 %key_ok, label %load_map, label %invalid_key
+load_map:
   %raw = extractvalue %kizu.owned %map, 0
-  %found_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 1
-  store i1 true, ptr %found_field
-  %value_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
-  store i64 %value, ptr %value_field
+  %len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 1
+  %len = load i64, ptr %len_field
+  %has_slot0 = icmp sgt i64 %len, 0
+  br i1 %has_slot0, label %check_existing_slot0, label %check_capacity
+check_existing_slot0:
+  %existing_key0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
+  %existing_key0 = load ptr, ptr %existing_key0_field
+  %existing_key0_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 3
+  %existing_key0_len = load i64, ptr %existing_key0_len_field
+  %slot0_matches = call i1 @kizu_rt_map_key_equal(
+    ptr %existing_key0,
+    i64 %existing_key0_len,
+    %kizu.slice.u8 %key
+  )
+  br i1 %slot0_matches, label %update_slot0, label %check_existing_slot1_capacity
+update_slot0:
+  %update_value0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 4
+  store i64 %value, ptr %update_value0_field
   ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+check_existing_slot1_capacity:
+  %has_slot1 = icmp sgt i64 %len, 1
+  br i1 %has_slot1, label %check_existing_slot1, label %check_capacity
+check_existing_slot1:
+  %existing_key1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 5
+  %existing_key1 = load ptr, ptr %existing_key1_field
+  %existing_key1_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 6
+  %existing_key1_len = load i64, ptr %existing_key1_len_field
+  %slot1_matches = call i1 @kizu_rt_map_key_equal(
+    ptr %existing_key1,
+    i64 %existing_key1_len,
+    %kizu.slice.u8 %key
+  )
+  br i1 %slot1_matches, label %update_slot1, label %check_capacity
+update_slot1:
+  %update_value1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 7
+  store i64 %value, ptr %update_value1_field
+  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+check_capacity:
+  %has_capacity = icmp slt i64 %len, 2
+  br i1 %has_capacity, label %copy_key, label %map_full
+copy_key:
+  %allocator_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 0
+  %allocator_ptr = load ptr, ptr %allocator_field
+  %stored_key = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %key_len)
+  %allocated = icmp ne ptr %stored_key, null
+  br i1 %allocated, label %copy_key_bytes_check, label %allocation_failed
+copy_key_bytes_check:
+  br i1 %has_key_bytes, label %copy_key_bytes, label %store_entry
+copy_key_bytes:
+  call void @llvm.memcpy.p0.p0.i64(ptr %stored_key, ptr %key_ptr, i64 %key_len, i1 false)
+  br label %store_entry
+store_entry:
+  %slot0 = icmp eq i64 %len, 0
+  br i1 %slot0, label %store_slot0, label %store_slot1
+store_slot0:
+  %key0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
+  store ptr %stored_key, ptr %key0_field
+  %key0_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 3
+  store i64 %key_len, ptr %key0_len_field
+  %value0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 4
+  store i64 %value, ptr %value0_field
+  br label %finish
+store_slot1:
+  %key1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 5
+  store ptr %stored_key, ptr %key1_field
+  %key1_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 6
+  store i64 %key_len, ptr %key1_len_field
+  %value1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 7
+  store i64 %value, ptr %value1_field
+  br label %finish
+finish:
+  %next = add i64 %len, 1
+  store i64 %next, ptr %len_field
+  ret %kizu.error.void { i1 true, %kizu.slice.u8 zeroinitializer }
+allocation_failed:
+  %message_ptr = getelementptr inbounds [17 x i8], ptr @.kizu.rt.allocation_failed, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 17, 1
+  %failed_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %failed = insertvalue %kizu.error.void %failed_base, %kizu.slice.u8 %message, 1
+  ret %kizu.error.void %failed
+invalid_key:
+  %invalid_ptr = getelementptr inbounds [15 x i8], ptr @.kizu.rt.invalid_map_key, i64 0, i64 0
+  %invalid_base = insertvalue %kizu.slice.u8 poison, ptr %invalid_ptr, 0
+  %invalid_message = insertvalue %kizu.slice.u8 %invalid_base, i64 15, 1
+  %invalid_result_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %invalid_result = insertvalue %kizu.error.void %invalid_result_base, %kizu.slice.u8 %invalid_message, 1
+  ret %kizu.error.void %invalid_result
+map_full:
+  %full_ptr = getelementptr inbounds [21 x i8], ptr @.kizu.rt.map_full, i64 0, i64 0
+  %full_base = insertvalue %kizu.slice.u8 poison, ptr %full_ptr, 0
+  %full_message = insertvalue %kizu.slice.u8 %full_base, i64 21, 1
+  %full_result_base = insertvalue %kizu.error.void poison, i1 false, 0
+  %full_result = insertvalue %kizu.error.void %full_result_base, %kizu.slice.u8 %full_message, 1
+  ret %kizu.error.void %full_result
+}
+
+define i1 @kizu_rt_map_key_equal(ptr %stored_key, i64 %stored_len, %kizu.slice.u8 %key) {
+entry:
+  %key_ptr = extractvalue %kizu.slice.u8 %key, 0
+  %key_len = extractvalue %kizu.slice.u8 %key, 1
+  %len_ok = icmp eq i64 %stored_len, %key_len
+  br i1 %len_ok, label %check_empty, label %fail
+check_empty:
+  %empty = icmp eq i64 %stored_len, 0
+  br i1 %empty, label %pass, label %check_ptrs
+check_ptrs:
+  %stored_ok = icmp ne ptr %stored_key, null
+  %key_ok = icmp ne ptr %key_ptr, null
+  %ptrs_ok = and i1 %stored_ok, %key_ok
+  br i1 %ptrs_ok, label %loop, label %fail
+loop:
+  %index = phi i64 [0, %check_ptrs], [%next, %continue]
+  %done = icmp eq i64 %index, %stored_len
+  br i1 %done, label %pass, label %compare
+compare:
+  %stored_byte_ptr = getelementptr i8, ptr %stored_key, i64 %index
+  %stored_byte = load i8, ptr %stored_byte_ptr
+  %key_byte_ptr = getelementptr i8, ptr %key_ptr, i64 %index
+  %key_byte = load i8, ptr %key_byte_ptr
+  %same = icmp eq i8 %stored_byte, %key_byte
+  br i1 %same, label %continue, label %fail
+continue:
+  %next = add i64 %index, 1
+  br label %loop
+pass:
+  ret i1 true
+fail:
+  ret i1 false
 }
 
 define i1 @kizu_rt_map_contains(%kizu.owned %map, %kizu.slice.u8 %key) {
 entry:
   %raw = extractvalue %kizu.owned %map, 0
-  %found_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 1
-  %found = load i1, ptr %found_field
-  ret i1 %found
+  %len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 1
+  %len = load i64, ptr %len_field
+  %has_slot0 = icmp sgt i64 %len, 0
+  br i1 %has_slot0, label %check_slot0, label %missing
+check_slot0:
+  %key0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
+  %key0 = load ptr, ptr %key0_field
+  %key0_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 3
+  %key0_len = load i64, ptr %key0_len_field
+  %slot0_matches = call i1 @kizu_rt_map_key_equal(ptr %key0, i64 %key0_len, %kizu.slice.u8 %key)
+  br i1 %slot0_matches, label %found, label %check_slot1_capacity
+check_slot1_capacity:
+  %has_slot1 = icmp sgt i64 %len, 1
+  br i1 %has_slot1, label %check_slot1, label %missing
+check_slot1:
+  %key1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 5
+  %key1 = load ptr, ptr %key1_field
+  %key1_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 6
+  %key1_len = load i64, ptr %key1_len_field
+  %slot1_matches = call i1 @kizu_rt_map_key_equal(ptr %key1, i64 %key1_len, %kizu.slice.u8 %key)
+  br i1 %slot1_matches, label %found, label %missing
+found:
+  ret i1 true
+missing:
+  ret i1 false
 }
 
 define %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned %map, %kizu.slice.u8 %key) {
 entry:
   %raw = extractvalue %kizu.owned %map, 0
-  %value_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
-  %value = load i64, ptr %value_field
+  %len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 1
+  %len = load i64, ptr %len_field
+  %has_slot0 = icmp sgt i64 %len, 0
+  br i1 %has_slot0, label %check_slot0, label %missing
+check_slot0:
+  %key0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
+  %key0 = load ptr, ptr %key0_field
+  %key0_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 3
+  %key0_len = load i64, ptr %key0_len_field
+  %slot0_matches = call i1 @kizu_rt_map_key_equal(ptr %key0, i64 %key0_len, %kizu.slice.u8 %key)
+  br i1 %slot0_matches, label %found_slot0, label %check_slot1_capacity
+found_slot0:
+  %value0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 4
+  %value0 = load i64, ptr %value0_field
+  br label %found
+check_slot1_capacity:
+  %has_slot1 = icmp sgt i64 %len, 1
+  br i1 %has_slot1, label %check_slot1, label %missing
+check_slot1:
+  %key1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 5
+  %key1 = load ptr, ptr %key1_field
+  %key1_len_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 6
+  %key1_len = load i64, ptr %key1_len_field
+  %slot1_matches = call i1 @kizu_rt_map_key_equal(ptr %key1, i64 %key1_len, %kizu.slice.u8 %key)
+  br i1 %slot1_matches, label %found_slot1, label %missing
+found_slot1:
+  %value1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 7
+  %value1 = load i64, ptr %value1_field
+  br label %found
+found:
+  %value = phi i64 [%value0, %found_slot0], [%value1, %found_slot1]
   %ok = insertvalue %kizu.error.i64 poison, i1 true, 0
   %with_value = insertvalue %kizu.error.i64 %ok, i64 %value, 1
   %result = insertvalue %kizu.error.i64 %with_value, %kizu.slice.u8 zeroinitializer, 2
   ret %kizu.error.i64 %result
+missing:
+  %message_ptr = getelementptr inbounds [21 x i8], ptr @.kizu.rt.map_key_not_found, i64 0, i64 0
+  %message_base = insertvalue %kizu.slice.u8 poison, ptr %message_ptr, 0
+  %message = insertvalue %kizu.slice.u8 %message_base, i64 21, 1
+  %missing_ok = insertvalue %kizu.error.i64 poison, i1 false, 0
+  %missing_value = insertvalue %kizu.error.i64 %missing_ok, i64 0, 1
+  %missing_result = insertvalue %kizu.error.i64 %missing_value, %kizu.slice.u8 %message, 2
+  ret %kizu.error.i64 %missing_result
 }
 
 define void @kizu_rt_map_deinit(%kizu.owned %map) {
@@ -364,6 +574,22 @@ entry:
   %raw = extractvalue %kizu.owned %map, 0
   %allocator_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 0
   %allocator_ptr = load ptr, ptr %allocator_field
+  %key0_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 2
+  %key0 = load ptr, ptr %key0_field
+  %key0_present = icmp ne ptr %key0, null
+  br i1 %key0_present, label %free_key0, label %check_key1
+free_key0:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %key0)
+  br label %check_key1
+check_key1:
+  %key1_field = getelementptr inbounds %kizu.rt.map, ptr %raw, i32 0, i32 5
+  %key1 = load ptr, ptr %key1_field
+  %key1_present = icmp ne ptr %key1, null
+  br i1 %key1_present, label %free_key1, label %free_map
+free_key1:
+  call void @kizu_rt_free(ptr %allocator_ptr, ptr %key1)
+  br label %free_map
+free_map:
   call void @kizu_rt_free(ptr %allocator_ptr, ptr %raw)
   ret void
 }
@@ -916,8 +1142,102 @@ storage_fail:
   ret i64 1
 storage_continue:
   %map = call %kizu.owned @kizu_rt_map_new(%kizu.owned zeroinitializer)
-  %map_insert = call %kizu.error.void @kizu_rt_map_insert(%kizu.owned %map, %kizu.slice.u8 zeroinitializer, i64 0)
-  %map_contains = call i1 @kizu_rt_map_contains(%kizu.owned %map, %kizu.slice.u8 zeroinitializer)
+  %map_alpha_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.rt.map_key_alpha, i64 0, i64 0
+  %map_alpha_base = insertvalue %kizu.slice.u8 poison, ptr %map_alpha_ptr, 0
+  %map_alpha = insertvalue %kizu.slice.u8 %map_alpha_base, i64 5, 1
+  %map_alpha_temp = alloca [5 x i8]
+  call void @llvm.memcpy.p0.p0.i64(ptr %map_alpha_temp, ptr %map_alpha_ptr, i64 5, i1 false)
+  %map_alpha_temp_base = insertvalue %kizu.slice.u8 poison, ptr %map_alpha_temp, 0
+  %map_alpha_from_temp = insertvalue %kizu.slice.u8 %map_alpha_temp_base, i64 5, 1
+  %map_beta_ptr = getelementptr inbounds [4 x i8], ptr @.kizu.rt.map_key_beta, i64 0, i64 0
+  %map_beta_base = insertvalue %kizu.slice.u8 poison, ptr %map_beta_ptr, 0
+  %map_beta = insertvalue %kizu.slice.u8 %map_beta_base, i64 4, 1
+  %map_gamma_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.rt.map_key_gamma, i64 0, i64 0
+  %map_gamma_base = insertvalue %kizu.slice.u8 poison, ptr %map_gamma_ptr, 0
+  %map_gamma = insertvalue %kizu.slice.u8 %map_gamma_base, i64 5, 1
+  %map_insert_alpha = call %kizu.error.void @kizu_rt_map_insert(
+    %kizu.owned %map,
+    %kizu.slice.u8 %map_alpha_from_temp,
+    i64 11
+  )
+  %map_insert_alpha_ok = extractvalue %kizu.error.void %map_insert_alpha, 0
+  %map_alpha_temp_first = getelementptr i8, ptr %map_alpha_temp, i64 0
+  store i8 88, ptr %map_alpha_temp_first
+  %map_insert_beta = call %kizu.error.void @kizu_rt_map_insert(
+    %kizu.owned %map,
+    %kizu.slice.u8 %map_beta,
+    i64 22
+  )
+  %map_insert_beta_ok = extractvalue %kizu.error.void %map_insert_beta, 0
+  %map_contains_alpha = call i1 @kizu_rt_map_contains(%kizu.owned %map, %kizu.slice.u8 %map_alpha)
+  %map_contains_beta = call i1 @kizu_rt_map_contains(%kizu.owned %map, %kizu.slice.u8 %map_beta)
+  %map_contains_gamma = call i1 @kizu_rt_map_contains(%kizu.owned %map, %kizu.slice.u8 %map_gamma)
+  %map_gamma_missing = icmp eq i1 %map_contains_gamma, false
+  %map_get_alpha = call %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned %map, %kizu.slice.u8 %map_alpha)
+  %map_get_alpha_ok = extractvalue %kizu.error.i64 %map_get_alpha, 0
+  %map_get_alpha_value = extractvalue %kizu.error.i64 %map_get_alpha, 1
+  %map_alpha_value_ok = icmp eq i64 %map_get_alpha_value, 11
+  %map_get_beta = call %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned %map, %kizu.slice.u8 %map_beta)
+  %map_get_beta_ok = extractvalue %kizu.error.i64 %map_get_beta, 0
+  %map_get_beta_value = extractvalue %kizu.error.i64 %map_get_beta, 1
+  %map_beta_value_ok = icmp eq i64 %map_get_beta_value, 22
+  %map_update_alpha = call %kizu.error.void @kizu_rt_map_insert(
+    %kizu.owned %map,
+    %kizu.slice.u8 %map_alpha,
+    i64 44
+  )
+  %map_update_alpha_ok = extractvalue %kizu.error.void %map_update_alpha, 0
+  %map_get_alpha_updated = call %kizu.error.i64 @kizu_rt_map_get_i64(
+    %kizu.owned %map,
+    %kizu.slice.u8 %map_alpha
+  )
+  %map_get_alpha_updated_ok = extractvalue %kizu.error.i64 %map_get_alpha_updated, 0
+  %map_get_alpha_updated_value = extractvalue %kizu.error.i64 %map_get_alpha_updated, 1
+  %map_alpha_updated_value_ok = icmp eq i64 %map_get_alpha_updated_value, 44
+  %map_get_gamma = call %kizu.error.i64 @kizu_rt_map_get_i64(%kizu.owned %map, %kizu.slice.u8 %map_gamma)
+  %map_get_gamma_ok = extractvalue %kizu.error.i64 %map_get_gamma, 0
+  %map_get_gamma_rejected = icmp eq i1 %map_get_gamma_ok, false
+  %map_get_gamma_message = extractvalue %kizu.error.i64 %map_get_gamma, 2
+  %map_missing_ptr = getelementptr inbounds [21 x i8], ptr @.kizu.rt.map_key_not_found, i64 0, i64 0
+  %map_missing_message_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %map_missing_ptr,
+    i64 21,
+    %kizu.slice.u8 %map_get_gamma_message
+  )
+  %map_insert_gamma = call %kizu.error.void @kizu_rt_map_insert(
+    %kizu.owned %map,
+    %kizu.slice.u8 %map_gamma,
+    i64 33
+  )
+  %map_insert_gamma_ok = extractvalue %kizu.error.void %map_insert_gamma, 0
+  %map_full_rejected = icmp eq i1 %map_insert_gamma_ok, false
+  %map_full_message = extractvalue %kizu.error.void %map_insert_gamma, 1
+  %map_full_ptr = getelementptr inbounds [21 x i8], ptr @.kizu.rt.map_full, i64 0, i64 0
+  %map_full_message_ok = call i1 @kizu_rt_map_key_equal(
+    ptr %map_full_ptr,
+    i64 21,
+    %kizu.slice.u8 %map_full_message
+  )
+  %map_insert_ok_a = and i1 %map_insert_alpha_ok, %map_insert_beta_ok
+  %map_contains_ok_a = and i1 %map_contains_alpha, %map_contains_beta
+  %map_contains_ok = and i1 %map_contains_ok_a, %map_gamma_missing
+  %map_get_alpha_all_ok = and i1 %map_get_alpha_ok, %map_alpha_value_ok
+  %map_get_beta_all_ok = and i1 %map_get_beta_ok, %map_beta_value_ok
+  %map_get_ok_a = and i1 %map_get_alpha_all_ok, %map_get_beta_all_ok
+  %map_update_all_ok = and i1 %map_update_alpha_ok, %map_get_alpha_updated_ok
+  %map_update_ok = and i1 %map_update_all_ok, %map_alpha_updated_value_ok
+  %map_missing_ok_a = and i1 %map_get_gamma_rejected, %map_missing_message_ok
+  %map_full_ok_a = and i1 %map_full_rejected, %map_full_message_ok
+  %map_ok_a = and i1 %map_insert_ok_a, %map_contains_ok
+  %map_get_and_update_ok = and i1 %map_get_ok_a, %map_update_ok
+  %map_ok_b = and i1 %map_get_and_update_ok, %map_missing_ok_a
+  %map_ok_c = and i1 %map_ok_a, %map_ok_b
+  %map_ok = and i1 %map_ok_c, %map_full_ok_a
+  br i1 %map_ok, label %map_pass, label %map_fail
+map_fail:
+  call void @kizu_rt_map_deinit(%kizu.owned %map)
+  ret i64 1
+map_pass:
   call void @kizu_rt_map_deinit(%kizu.owned %map)
   %diagnostics = call %kizu.owned @kizu_rt_diagnostic_buffer_new(%kizu.owned zeroinitializer)
   %diagnostic_push = call %kizu.error.void @kizu_rt_diagnostic_push(%kizu.owned %diagnostics, %kizu.slice.u8 zeroinitializer)
