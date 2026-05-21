@@ -81,3 +81,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0060: borrowed-return provenance without named lifetimes](0060-borrowed-return-provenance.md)
 - [ADR-0061: defer explicit cleanup statement](0061-defer-explicit-cleanup.md)
 - [ADR-0062: selfhost AST storage constraints](0062-selfhost-ast-storage-constraints.md)
+- [ADR-0063: page_allocator capability stability](0063-page-allocator-capability.md)

@@ -70,6 +70,7 @@ go test ./...
 | explicit-Io directory read | `std_fs_read_dir.kizu` | lists deterministic directory entries |
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
+| stable page allocator capability | `std_page_allocator.kizu` | reuses one explicit allocator across Array, String, Map, arena, and another Array |
 | allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
 | borrowed-return provenance slice view | `borrow_return_provenance.kizu` | returns a `[]const u8` view tied to its source |
 | borrowed-return provenance | `borrow_provenance_return.kizu` | returns shared and mutable borrows tied to local owners |
