@@ -54,7 +54,7 @@ func TestRunFieldAndDerefAssignment(t *testing.T) {
     age: i64,
 }
 fn rename(user: &mut User) -> void {
-    user.*.name = "bob";
+    user.name = "bob";
 }
 fn main() -> void {
     var user = User { name: "alice", age: 30 };

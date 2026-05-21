@@ -37,6 +37,17 @@ func (e *Env) Define(name string, value Value, mutable bool) error {
 	return nil
 }
 
+// SetMutable marks an existing binding as assignable in the nearest scope.
+func (e *Env) SetMutable(name string) {
+	if b, ok := e.bindings[name]; ok {
+		b.mutable = true
+		return
+	}
+	if e.parent != nil {
+		e.parent.SetMutable(name)
+	}
+}
+
 // Get returns a binding value from the nearest environment that defines it.
 func (e *Env) Get(name string) (Value, bool) {
 	if b, ok := e.bindings[name]; ok {

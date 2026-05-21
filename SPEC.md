@@ -899,7 +899,7 @@ mutable borrow には `&mut T` を使います。
 
 ```kizu
 fn update(user: &mut User) -> void {
-    user.*.name = "bob";
+    user.name = "bob";
 }
 ```
 
@@ -934,11 +934,26 @@ fn show(value: &i64) -> &i64 borrows value
 `&'a T`、`[]'a const T`、lifetime bounds、anonymous lifetime は採用しません。
 borrow field や複数 source 由来の戻り値は、後続の bounded issue で必要性を確認します。
 
-明示 dereference は Zig に合わせて postfix の `.*` を使います。
+safe borrow binding は通常の field access 構文で field を読めます。
+`&mut T` binding は通常の field assignment 構文で field を更新できます。
+raw pointer はこの省略対象ではなく、unsafe 境界で明示的に扱います。
 
 ```kizu
+fn show(user: &User) -> void {
+    print(user.name);
+}
+
 fn rename(user: &mut User) -> void {
-    user.*.name = "bob";
+    user.name = "bob";
+}
+```
+
+明示 dereference は postfix の `.*` を使います。これは borrow そのものを読む場合や、
+field access ではない dereference を表す場合に使います。
+
+```kizu
+fn value(read: &i64) -> i64 {
+    return read.*;
 }
 ```
 
@@ -976,6 +991,8 @@ assignment のルール:
 * `var` binding の field assignment は許可
 * `&T` 経由の dereference assignment は禁止
 * `&mut T` 経由の dereference assignment は許可
+* `&T` 経由の field assignment は禁止
+* `&mut T` 経由の field assignment は許可
 
 ```kizu
 fn main() -> void {

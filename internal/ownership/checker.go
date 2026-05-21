@@ -3009,6 +3009,9 @@ func (c *Checker) checkAssignmentBorrowConflict(expr ast.Expression, env *scope)
 		}
 		return nil
 	}
+	if root.borrowedParam && !root.mutBorrow {
+		return fmt.Errorf("borrow error: cannot assign field through shared borrow `%s`", root.name)
+	}
 	if root.activeBorrows > 0 || root.activeMutBorrows > 0 {
 		return fmt.Errorf("borrow error: field `%s.%s` cannot be assigned while value is borrowed",
 			root.name, field)

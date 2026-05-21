@@ -156,10 +156,10 @@ fn main() {
 // TestCheckAcceptsMutableBorrowForwarding checks &mut params can be reborrowed for calls.
 func TestCheckAcceptsMutableBorrowForwarding(t *testing.T) {
 	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) { user.*.name = "bob"; }
+fn rename(user: &mut User) { user.name = "bob"; }
 fn outer(user: &mut User) {
     rename(user);
-    user.*.name = "carol";
+    user.name = "carol";
 }
 fn main() {
     var user = User { name: "alice" };
