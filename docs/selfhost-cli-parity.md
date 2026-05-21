@@ -19,16 +19,18 @@ The current hosted stage2 artifact supports these command slices:
 | `stage selfhost` | Stage2 artifact materialization from #459 | `just selfhost-production-gate` |
 | `check examples/hello.kizu` | #530 positive check fixture, also a #460 corpus row | `just selfhost-check-parity-gate` |
 | `check examples/negative/moved_value.kizu` | #530 negative check fixture, also a #460 corpus row | `just selfhost-check-parity-gate` |
-| `parse selfhost/tests/cli/parse_ok_minimal.kizu` | #525 positive parse fixture only | `just selfhost-parse-parity-gate` |
+| `parse <minimal-main-return source file>` | #579 positive source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `parse selfhost/tests/cli/parse_invalid_missing_expr.kizu` | #525 negative parse fixture only | `just selfhost-parse-parity-gate` |
 | `run selfhost/tests/cli/run_hello.kizu` | #569 positive run fixture via emitted artifact | `just selfhost-run-parity-gate` |
 | `run selfhost/tests/cli/run_invalid_missing_expr.kizu` | #569 negative frontend failure, no artifact execution | `just selfhost-run-parity-gate` |
 | `test selfhost/tests/cli/test_expect_ok.kizu` | #570 positive single-file test artifact | `just selfhost-test-parity-gate` |
 | `test selfhost/tests/cli/test_expect_failure.kizu` | #570 negative assertion diagnostic artifact | `just selfhost-test-parity-gate` |
 
-`selfhost/tests/cli/parse-parity.tsv` is the #525 parse parity manifest. It
+`selfhost/tests/cli/parse-parity.tsv` is the #525/#579 parse parity manifest. It
 records command args, fixture paths, expected exit codes, and checked-in
-stdout/stderr golden paths. The gate runs through
+stdout/stderr golden paths. The positive minimal-main-return rows include both
+the original fixture and an alias fixture with the same source bytes, proving the
+hosted path is no longer bound to one fixed path. The gate runs through
 `target/selfhost/stage2/selfhost` and records `go.cmd-kizu-fallback none`.
 
 `selfhost/tests/cli/check-parity.tsv` is the #530 check parity manifest. It
@@ -142,6 +144,7 @@ release scope:
 
 | Slice | Decision | Reason | Next child issue shape |
 | --- | --- | --- | --- |
+| broader `parse <file>` diagnostics | Partially deferred | #579 moves the positive minimal parse shape off a single hardcoded path, but the invalid fixture still checks the explicit missing-expression path and diagnostic. | Add one parse diagnostic/source shape at a time, keeping checked-in goldens and no Go fallback. |
 | broader `run <file>` | Deferred | #569 only claims the first fixture pair and artifact path. | Extend `run-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no Go fallback. |
 | broader `kizu test <file>` | Deferred | #570 only claims the first fixture pair and no discovery. | Extend `test-parity.tsv` one fixture pair at a time, using hosted-artifact validation and no discovery. |
 | cache/status, cache/prune, why-rebuild, cache artifact commands | Deferred | Hosted artifact cache ownership, persistence, pruning, and no-op rebuild semantics are not designed. | Split into cache command issues with explicit cache directory, artifact paths, mutation rules, stdout/stderr, and cache-size acceptance checks. |
