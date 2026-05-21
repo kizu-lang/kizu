@@ -447,6 +447,10 @@ selfhost parse selfhost/tests/cli/parse_ok_minimal.kizu
 selfhost parse selfhost/tests/cli/parse_ok_minimal_alias.kizu
 selfhost parse selfhost/tests/cli/parse_print_hello.kizu
 selfhost parse selfhost/tests/cli/parse_print_hello_alias.kizu
+selfhost parse selfhost/tests/cli/test_expect_ok.kizu
+selfhost parse selfhost/tests/cli/test_expect_ok_alias.kizu
+selfhost parse selfhost/tests/cli/test_expect_failure.kizu
+selfhost parse selfhost/tests/cli/test_expect_failure_alias.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr_alias.kizu
 ```
@@ -458,7 +462,10 @@ parse shape is source-driven: any file containing exactly the newline-terminated
 `fn main() { return; }` source uses the same hosted parse path. For #594, the
 print-call shape reads the target once and recognizes the newline-terminated
 multi-line `print("hello, kizu")` source shape, emitting the same canonical
-parse stdout as the Go CLI. For #586, the negative missing-expression shape is
+parse stdout as the Go CLI. For #598, the `std::testing::expect(true|false)`
+shapes add the first parse slice with an error-union return type and a
+qualified call expression that matches the hosted test artifact sources. For
+#586, the negative missing-expression shape is
 also source-driven: any file containing exactly the newline-terminated
 `fn main() { let value = ; }` source uses the same hosted diagnostic path. The
 alias fixtures prove these parse branches are no longer bound to a single path.
