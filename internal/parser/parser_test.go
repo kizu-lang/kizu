@@ -307,6 +307,28 @@ fn main() { let color = Color::Red; match color { Red => print("red"); ` +
 	}
 }
 
+// TestParseMatchWildcard checks fallback arm parsing.
+func TestParseMatchWildcard(t *testing.T) {
+	input := `enum Color { Red Green Blue }
+fn main() {
+    let color = Color::Blue;
+    match color {
+        Red => print("red");
+        _ => print("other");
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `enum Color { Red; Green; Blue }
+fn main() { let color = Color::Blue; match color { Red => print("red"); _ => print("other"); } }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseControlExpressions checks if/match expressions and optional semicolons.
 func TestParseControlExpressions(t *testing.T) {
 	input := `enum Color { Red Green }

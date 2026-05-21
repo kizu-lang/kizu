@@ -240,6 +240,28 @@ fn main() {
 	}
 }
 
+// TestRunMatchWildcard checks fallback arms for enum and union matches.
+func TestRunMatchWildcard(t *testing.T) {
+	got := runSource(t, `enum Color { Red Green Blue }
+union Shape { Point Circle(i64); Label([]const u8); }
+fn describe(shape: &Shape) -> void {
+    match shape {
+        Circle(radius) => print(radius);
+        _ => print("not circle");
+    }
+}
+fn main() {
+    let color = Color::Blue;
+    let name = match color { Red => "red", _ => "other" };
+    print(name);
+    describe(Shape::Label("name"));
+}`)
+	want := "other\nnot circle\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunControlExpressions checks if/match expressions and semicolonless statements.
 func TestRunControlExpressions(t *testing.T) {
 	got := runSource(t, `enum Color { Red Green }

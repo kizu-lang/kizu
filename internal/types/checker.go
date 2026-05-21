@@ -2254,17 +2254,31 @@ func (c *Checker) checkMatchArms(
 	unsafe bool,
 ) (bool, error) {
 	seen := map[string]bool{}
+	wildcard := false
 	allReturn := len(arms) > 0
-	for _, arm := range arms {
-		payload, err := matchPayloadType(enumType, unionType, arm)
-		if err != nil {
-			return false, err
+	for idx, arm := range arms {
+		payload := ""
+		if arm.IsWildcard() {
+			if err := validateWildcardMatchArm(arm, idx, len(arms)); err != nil {
+				return false, err
+			}
+			if wildcard {
+				return false, fmt.Errorf("type error: duplicate wildcard match arm")
+			}
+			wildcard = true
+		} else {
+			got, err := matchPayloadType(enumType, unionType, arm)
+			if err != nil {
+				return false, err
+			}
+			typeName := matchTypeName(enumType, unionType)
+			if seen[arm.Tag] {
+				return false, fmt.Errorf("type error: duplicate match tag `%s::%s`",
+					typeName, arm.Tag)
+			}
+			seen[arm.Tag] = true
+			payload = got
 		}
-		typeName := matchTypeName(enumType, unionType)
-		if seen[arm.Tag] {
-			return false, fmt.Errorf("type error: duplicate match tag `%s::%s`", typeName, arm.Tag)
-		}
-		seen[arm.Tag] = true
 		armEnv := env.child()
 		if payload != "" && arm.Binding != "" {
 			if err := armEnv.define(arm.Binding, Type(payload), false); err != nil {
@@ -2277,11 +2291,22 @@ func (c *Checker) checkMatchArms(
 		}
 		allReturn = allReturn && returns
 	}
-	if len(seen) != matchVariantCount(enumType, unionType) {
+	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
 		return false, fmt.Errorf("type error: match on `%s` is not exhaustive",
 			matchTypeName(enumType, unionType))
 	}
 	return allReturn, nil
+}
+
+// validateWildcardMatchArm checks the restricted fallback pattern shape.
+func validateWildcardMatchArm(arm ast.MatchArm, idx int, count int) error {
+	if arm.Binding != "" {
+		return fmt.Errorf("type error: wildcard match arm cannot bind payload")
+	}
+	if idx != count-1 {
+		return fmt.Errorf("type error: wildcard match arm must be last")
+	}
+	return nil
 }
 
 // matchPayloadType validates a match arm pattern and returns its payload type.
@@ -2453,24 +2478,42 @@ func (c *Checker) checkMatchExprArms(
 	unsafe bool,
 ) (Type, error) {
 	seen := map[string]bool{}
+	wildcard := false
 	var result Type
 	for idx, arm := range arms {
-		got, err := c.checkMatchExprArm(arm, enumType, unionType, env, unsafe)
-		if err != nil {
-			return "", err
+		var got Type
+		if arm.IsWildcard() {
+			if err := validateWildcardMatchArm(arm, idx, len(arms)); err != nil {
+				return "", err
+			}
+			if wildcard {
+				return "", fmt.Errorf("type error: duplicate wildcard match arm")
+			}
+			wildcard = true
+			var err error
+			got, err = c.checkStmtValue(arm.Body, env.child(), unsafe)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			var err error
+			got, err = c.checkMatchExprArm(arm, enumType, unionType, env, unsafe)
+			if err != nil {
+				return "", err
+			}
+			if seen[arm.Tag] {
+				return "", fmt.Errorf("type error: duplicate match tag `%s::%s`",
+					matchTypeName(enumType, unionType), arm.Tag)
+			}
+			seen[arm.Tag] = true
 		}
-		if seen[arm.Tag] {
-			return "", fmt.Errorf("type error: duplicate match tag `%s::%s`",
-				matchTypeName(enumType, unionType), arm.Tag)
-		}
-		seen[arm.Tag] = true
 		if idx == 0 {
 			result = got
 		} else if got != result {
 			return "", fmt.Errorf("type error: match arm types differ: %s vs %s", result, got)
 		}
 	}
-	if len(seen) != matchVariantCount(enumType, unionType) {
+	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
 		return "", fmt.Errorf("type error: match on `%s` is not exhaustive",
 			matchTypeName(enumType, unionType))
 	}
@@ -2485,6 +2528,9 @@ func (c *Checker) checkMatchExprArm(
 	env *scope,
 	unsafe bool,
 ) (Type, error) {
+	if arm.IsWildcard() {
+		return c.checkStmtValue(arm.Body, env.child(), unsafe)
+	}
 	payload, err := matchPayloadType(enumType, unionType, arm)
 	if err != nil {
 		return "", err

@@ -118,6 +118,7 @@ kizu test <file>
 self-host compiler skeleton
 module/import syntax and manifest groundwork
 defer explicit cleanup statement
+match wildcard `_` fallback arm
 ```
 
 v0.2 の stdlib は self-host compiler を進めるための最小 subset です。
@@ -668,7 +669,10 @@ fn main() {
 guard と多段 destructuring は v0.1 では扱いません。
 tagged union の payload binding だけを扱います。
 duplicate arm、unknown tag、non-exhaustive match は compile error です。
-wildcard pattern `_` は v0.1 では採用しません。
+v0.2 では wildcard pattern `_` を fallback arm として許可します。
+`_` arm は最後に 1 つだけ書けます。payload binding はできません。
+`_` arm がある場合、明示されていない残りの tag を束ねるため exhaustive とみなします。
+`_` arm がない場合は、すべての tag を明示しなければなりません。
 expression として使う場合は、すべての arm の value type が一致しなければなりません。
 
 ## 7. 型

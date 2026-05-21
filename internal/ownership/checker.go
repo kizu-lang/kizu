@@ -865,12 +865,16 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 		return fmt.Errorf("move error: match expects enum or union, got %s", valueType)
 	}
 	for _, arm := range stmt.Arms {
-		if !tags[arm.Tag] {
+		if arm.IsWildcard() {
+			if arm.Binding != "" {
+				return fmt.Errorf("move error: wildcard match arm cannot bind payload")
+			}
+		} else if !tags[arm.Tag] {
 			return fmt.Errorf("move error: unknown match tag `%s::%s`", valueType, arm.Tag)
 		}
 		armEnv := env.clone()
 		child := armEnv.child()
-		if payload := unionPayloads[arm.Tag]; payload != "" && arm.Binding != "" {
+		if payload := unionPayloads[arm.Tag]; !arm.IsWildcard() && payload != "" && arm.Binding != "" {
 			value := c.newBinding(arm.Binding, payload)
 			value.borrowedParam = true
 			child.define(value)
@@ -1159,12 +1163,16 @@ func (c *Checker) checkMatchExprArmValue(
 	env *scope,
 	moveTail bool,
 ) (string, error) {
-	if !tags[arm.Tag] {
+	if arm.IsWildcard() {
+		if arm.Binding != "" {
+			return "", fmt.Errorf("move error: wildcard match arm cannot bind payload")
+		}
+	} else if !tags[arm.Tag] {
 		return "", fmt.Errorf("move error: unknown match tag `%s`", arm.Tag)
 	}
 	armEnv := env.clone()
 	child := armEnv.child()
-	if payload := unionPayloads[arm.Tag]; payload != "" && arm.Binding != "" {
+	if payload := unionPayloads[arm.Tag]; !arm.IsWildcard() && payload != "" && arm.Binding != "" {
 		value := c.newBinding(arm.Binding, payload)
 		value.borrowedParam = true
 		child.define(value)
