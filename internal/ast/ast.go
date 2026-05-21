@@ -530,6 +530,11 @@ type MatchArm struct {
 	Body    Statement
 }
 
+// IsWildcard reports whether the arm is the fallback match arm.
+func (a MatchArm) IsWildcard() bool {
+	return a.Tag == "_"
+}
+
 // String returns a compact debug representation of the match arm.
 func (a MatchArm) String() string {
 	if a.Binding != "" {

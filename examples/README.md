@@ -53,6 +53,7 @@ go test ./...
 | limited `comptime` | `comptime.kizu` | evaluates compile-time expressions |
 | Zig/C-style tag `enum` | `enum.kizu` | prints and compares enum tags |
 | simple enum `match` | `match.kizu` | dispatches exhaustive enum arms |
+| wildcard `match` fallback | `match_wildcard.kizu` | groups remaining enum/union tags with `_` |
 | tagged `union` with payloads | `union.kizu` | binds payload values in `match` arms |
 | unsafe wrapper boundary | `unsafe_wrapper.kizu` | check-only extern wrapper; caller owns the unsafe obligation |
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
@@ -329,5 +330,7 @@ single source file. Run them with `kizu check <package-root>`.
 | enum match must be exhaustive | `negative/match_non_exhaustive.kizu` | `not exhaustive` |
 | duplicate match tags are rejected | `negative/match_duplicate_tag.kizu` | `duplicate match tag` |
 | unknown match tags are rejected | `negative/match_unknown_tag.kizu` | `unknown match tag` |
+| wildcard match arm must be last | `negative/match_wildcard_not_last.kizu` | `wildcard match arm must be last` |
+| wildcard match arm cannot bind payload | `negative/match_wildcard_binding.kizu` | `wildcard match arm cannot bind payload` |
 | enum variants use `::`, not `.` | `negative/enum_dot_variant.kizu` | `use ::` |
 | union variants use `::`, not `.` | `negative/union_dot_variant.kizu` | `use ::` |

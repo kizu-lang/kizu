@@ -441,6 +441,27 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsMatchWildcard checks fallback arms preserve exhaustiveness.
+func TestCheckAcceptsMatchWildcard(t *testing.T) {
+	source := `enum Color { Red Green Blue }
+union Shape { Point Circle(i64); Label([]const u8); }
+fn describe(shape: &Shape) -> void {
+    match shape {
+        Circle(radius) => print(radius);
+        _ => print("other");
+    }
+}
+fn main() -> void {
+    let color = Color::Blue;
+    let name = match color { Red => "red", _ => "other" };
+    print(name);
+    describe(Shape::Label("tag"));
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckAcceptsControlExpressions checks value-producing if and match forms.
 func TestCheckAcceptsControlExpressions(t *testing.T) {
 	source := `enum Color { Red Green }
@@ -700,6 +721,24 @@ fn main() {
     match color { Red => print("red"); }
 }`,
 			want: "match on `Color` is not exhaustive",
+		},
+		{
+			name: "wildcard before tag",
+			source: `enum Color { Red Green }
+fn main() {
+    let color = Color::Red;
+    match color { _ => print("other"); Red => print("red"); }
+}`,
+			want: "wildcard match arm must be last",
+		},
+		{
+			name: "wildcard payload binding",
+			source: `union Shape { Point Circle(i64); }
+fn main() {
+    let shape = Shape::Circle(1);
+    match shape { _(value) => print(value); }
+}`,
+			want: "wildcard match arm cannot bind payload",
 		},
 	}
 	runErrorCases(t, cases)

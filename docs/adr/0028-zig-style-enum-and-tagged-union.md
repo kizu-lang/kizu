@@ -53,7 +53,12 @@ match color {
 tagged union の payload binding は扱う。
 duplicate arm、unknown tag、non-exhaustive match は compile error とする。
 
-guard、多段 destructuring、wildcard pattern `_` は v0.1 では扱わない。
+guard と多段 destructuring は v0.1 では扱わない。
+
+v0.2 では issue #534 により wildcard pattern `_` を match fallback arm として
+採用する。`_` arm は最後に 1 つだけ書ける。payload binding はできない。
+`_` arm は明示されていない残りの tag を束ねるため exhaustive とみなすが、
+明示 arm の duplicate / unknown tag 検査は維持する。
 
 ## 影響
 

@@ -557,7 +557,7 @@ func (i *Interpreter) evalMatchStmt(stmt *ast.MatchStmt, env *Env) (Value, bool,
 		return voidValue(), false, fmt.Errorf("runtime error: match expects enum or union")
 	}
 	for _, arm := range stmt.Arms {
-		if arm.Tag == matchArmTag(value) {
+		if arm.Tag == matchArmTag(value) || arm.IsWildcard() {
 			child := env.Child()
 			if err := bindUnionPayload(value, arm, child); err != nil {
 				return voidValue(), false, err
@@ -578,7 +578,7 @@ func matchArmTag(value Value) string {
 
 // bindUnionPayload binds a tagged union payload into a matching arm scope.
 func bindUnionPayload(value Value, arm ast.MatchArm, env *Env) error {
-	if value.kind != kindUnion || arm.Binding == "" {
+	if value.kind != kindUnion || arm.Binding == "" || arm.IsWildcard() {
 		return nil
 	}
 	if value.union.payload == nil {
