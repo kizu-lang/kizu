@@ -143,7 +143,7 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 		return voidValue(), fmt.Errorf("runtime error: undefined function `%s`", name)
 	}
 	if len(fn.TypeParams) > 0 && !i.hasTypeArguments(fn) {
-		return voidValue(), fmt.Errorf("runtime error: `%s` requires explicit type arguments", name)
+		return voidValue(), fmt.Errorf("runtime error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.Params) {
 		return voidValue(), fmt.Errorf("runtime error: `%s` expected %d args", name, len(fn.Params))
@@ -161,7 +161,7 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 	return voidValue(), nil
 }
 
-// hasTypeArguments reports whether a generic wrapper is already being invoked with type args.
+// hasTypeArguments reports whether a wrapper is already invoked with static type args.
 func (i *Interpreter) hasTypeArguments(fn *ast.FunctionDecl) bool {
 	for _, param := range fn.TypeParams {
 		if _, ok := i.typeArgs[param]; !ok {
@@ -829,7 +829,7 @@ func parseInt(lit string) (Value, error) {
 	return intValue(v), nil
 }
 
-// evalIdent resolves a name from runtime bindings or generic type arguments.
+// evalIdent resolves a name from runtime bindings or static type arguments.
 func (i *Interpreter) evalIdent(name string, env *Env) (Value, error) {
 	value, ok := env.Get(name)
 	if ok {
@@ -1045,7 +1045,7 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr, env *Env) (Value, error) 
 	if fn, ok := i.functions[name.Name]; ok {
 		if len(fn.TypeParams) > 0 {
 			return voidValue(), fmt.Errorf(
-				"runtime error: `%s` requires explicit type arguments",
+				"runtime error: `%s` requires explicit static arguments",
 				name.Name,
 			)
 		}
@@ -1699,7 +1699,7 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	if value, ok, err := i.evalGenericUserTypeApply(name, expr.TypeArg, args, env); ok || err != nil {
 		return value, err
 	}
-	return voidValue(), fmt.Errorf("runtime error: `%s` does not take a type argument", name)
+	return voidValue(), fmt.Errorf("runtime error: `%s` does not take static arguments", name)
 }
 
 // evalArenaTypeApply creates runtime arena storage with an explicit allocator.
@@ -1728,7 +1728,7 @@ func (i *Interpreter) evalArenaTypeApply(
 	return arenaValue(), nil
 }
 
-// evalGenericUserTypeApply invokes source-defined std generic wrappers.
+// evalGenericUserTypeApply invokes source-defined std wrappers with static type args.
 func (i *Interpreter) evalGenericUserTypeApply(
 	name string,
 	typeArg string,
@@ -1742,7 +1742,7 @@ func (i *Interpreter) evalGenericUserTypeApply(
 	typeArgs, ok := splitGenericArgs(typeArg)
 	if !ok || len(typeArgs) != len(fn.TypeParams) {
 		return voidValue(), true, fmt.Errorf(
-			"runtime error: `%s` expects %d type arguments", name, len(fn.TypeParams),
+			"runtime error: `%s` expects %d static arguments", name, len(fn.TypeParams),
 		)
 	}
 	value, err := i.callTypeApplyFunction(fn, typeArgs, args, env)
@@ -3194,7 +3194,7 @@ func splitGenericType(name string) (string, string, bool) {
 	return "", "", false
 }
 
-// splitGenericArgs extracts top-level comma-separated generic arguments.
+// splitGenericArgs extracts top-level comma-separated static arguments.
 func splitGenericArgs(arg string) ([]string, bool) {
 	args := []string{}
 	start := 0

@@ -1363,14 +1363,24 @@ fn sized(comptime n: i64) -> i64 {
 }
 ```
 
-v0.2 の最小 generics は、明示型引数付きの function generics に限定します。
+v0.2 の最小 generics は、明示的な compile-time/static 引数リスト `<...>` を
+使う function generics に限定します。`<...>` は runtime 引数リスト `(...)` とは
+別の領域であり、v0.2 では type argument だけを受け付けます。
 宣言は `fn f<T>(value: T) -> T`、呼び出しは `f<i64>(value)` または
 `std::testing::expect_equal<i64>(expected, actual)` のように書きます。
-型引数推論、generic methods、bounds、associated types、higher-kinded types、
-specialization、reflection は実装しません。
+型引数推論、non-type static argument、generic methods、bounds、associated types、
+higher-kinded types、specialization、reflection は実装しません。
+
+`<...>` を type-only 構文として固定しません。将来 fixed-size buffer の長さや
+format string など、type 以外の comptime value が必要になった場合は、同じ
+`<...>` を static argument list として拡張します。ただし v0.2 では syntax の意味を
+予約するだけで、整数や文字列の static argument は受理しません。
 
 Generic function body は未 instantiation のまま top-level runtime code としては検査せず、
-明示型引数付き call が発生した時に、その型集合で type / ownership / borrow check します。
+明示 static 引数付き call が発生した時に、その static 引数集合で type / ownership /
+borrow check します。v0.2 の static 引数は type だけなので、`T` は instantiated body
+内で comptime-only の `type` 値として扱います。`type` 値は runtime local、field、
+collection element、return value として保持できません。
 
 Std source may define generic wrappers when the type argument is forwarded to an
 explicit trusted primitive:
@@ -1413,7 +1423,7 @@ comptime if 1 + 1 == 2 {
 
 v0.2 の `comptime` expression は、整数、真偽値、文字列、compile-time type value、
 単項演算、二項演算だけを評価します。`type<i64>` のような `type<T>` literal と、
-instantiated generic body 内の type parameter identifier は `type` 値です。
+instantiated generic body 内の static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
 
 ```kizu
@@ -1677,10 +1687,11 @@ condition failure は `std::builtin::test_fail` 経由で runtime error とし�
 test source は assertion ごとの `try` を書きません。
 `fail` は caller-provided `[]const u8` を通常の `!void` error として返します。
 unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。
-`expect_equal<T>` は明示型引数付きの generic assertion です。
+`expect_equal<T>` は明示 static 引数付きの generic assertion です。
 failure は `expected ... got ...` 形式の diagnostic を出し、assertion ごとの `try` は不要です。
-type argument inference はないため、caller は `expect_equal<i64>(1, actual)` のように
-期待型を明示します。per-type `expect_equal_i64` family は導入しません。
+v0.2 では static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
+期待型を明示します。type argument inference と per-type `expect_equal_i64` family は
+導入しません。
 `kizu test <file>` は v0.2 では discovery なしの single-file runner です。
 file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示します。
 test discovery、location-aware diagnostics、message builder helper は後続で扱います。

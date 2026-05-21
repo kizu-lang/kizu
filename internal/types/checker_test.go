@@ -206,7 +206,7 @@ func TestCheckRejectsMapTypeErrors(t *testing.T) {
     return;
 }
 fn main() {}`,
-			want: "std::map::Map expects 2 type arguments",
+			want: "std::map::Map expects 2 static arguments",
 		},
 		{
 			name: "wrong key",
@@ -1378,7 +1378,7 @@ fn main() {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "requires explicit type arguments") {
+	if !strings.Contains(err.Error(), "requires explicit static arguments") {
 		t.Fatalf("got %q", err.Error())
 	}
 }

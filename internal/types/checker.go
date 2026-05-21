@@ -1088,7 +1088,7 @@ func (c *Checker) parseErrorUnionType(name string) (Type, error) {
 func (c *Checker) parseGenericType(name string, base string, arg string) (Type, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok {
-		return "", fmt.Errorf("type error: invalid generic arguments for `%s`", base)
+		return "", fmt.Errorf("type error: invalid static arguments for `%s`", base)
 	}
 	switch base {
 	case "std::mem::Box":
@@ -1133,7 +1133,7 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 	return Type(name), nil
 }
 
-// parseUserGenericType validates lifetime and type arguments for user declarations.
+// parseUserGenericType validates lifetime and static type arguments for user declarations.
 func (c *Checker) parseUserGenericType(
 	name string,
 	base string,
@@ -1143,7 +1143,7 @@ func (c *Checker) parseUserGenericType(
 ) (Type, error) {
 	want := len(lifetimes) + len(types)
 	if len(args) != want {
-		return "", fmt.Errorf("type error: `%s` expects %d generic arguments", base, want)
+		return "", fmt.Errorf("type error: `%s` expects %d static arguments", base, want)
 	}
 	for idx := range lifetimes {
 		if !isLifetimeName(args[idx]) {
@@ -1177,7 +1177,7 @@ func (c *Checker) parseDynType(name string, base string, args []string) (Type, e
 // parseMapType validates the v0.2 symbol-table map spelling.
 func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if len(args) != 2 {
-		return "", fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+		return "", fmt.Errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(Type(args[0]), typeByteString) && !c.typeParams[args[0]] {
 		return "", fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
@@ -1191,7 +1191,7 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	return Type(name), nil
 }
 
-// isKnownSingleArgGeneric reports whether base currently takes exactly one type argument.
+// isKnownSingleArgGeneric reports whether base currently takes exactly one static argument.
 func isKnownSingleArgGeneric(base string) bool {
 	switch base {
 	case "std::arena::Arena", "std::arena::Handle", "option",
@@ -1259,7 +1259,7 @@ func referencedTypeNames(typeName string) []string {
 	return []string{typeName}
 }
 
-// splitPublicTypeArgs splits a generic argument list for public API checks.
+// splitPublicTypeArgs splits a static argument list for public API checks.
 func splitPublicTypeArgs(args string) []string {
 	parts, ok := splitGenericArgs(args)
 	if ok {
@@ -3536,7 +3536,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 		typ, _, err := c.checkMutex(arg, args, env, unsafe)
 		return typ, err
 	default:
-		return "", fmt.Errorf("type error: `%s` does not take a type argument", name)
+		return "", fmt.Errorf("type error: `%s` does not take static arguments", name)
 	}
 }
 
@@ -4125,7 +4125,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	}
 	argsText, ok := splitGenericArgs(typeArg)
 	if !ok || len(argsText) != len(fn.typeParams) {
-		return "", true, fmt.Errorf("type error: `%s` expects %d type arguments",
+		return "", true, fmt.Errorf("type error: `%s` expects %d static arguments",
 			name, len(fn.typeParams))
 	}
 	typeArgs, err := c.parseGenericWrapperTypeArgs(argsText)
@@ -4153,7 +4153,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	return substituteTypeParams(fn.returnType, subst), true, nil
 }
 
-// checkGenericInstantiation checks a generic function body for one explicit type set.
+// checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]Type) error {
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {
@@ -4196,7 +4196,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	return nil
 }
 
-// parseGenericWrapperTypeArgs validates source-level generic wrapper arguments.
+// parseGenericWrapperTypeArgs validates v0.2 static type arguments for wrappers.
 func (c *Checker) parseGenericWrapperTypeArgs(args []string) ([]Type, error) {
 	out := make([]Type, 0, len(args))
 	for _, arg := range args {
@@ -4209,7 +4209,7 @@ func (c *Checker) parseGenericWrapperTypeArgs(args []string) ([]Type, error) {
 	return out, nil
 }
 
-// checkGenericWrapperTypeArgs validates std wrapper-specific type argument contracts.
+// checkGenericWrapperTypeArgs validates std wrapper-specific static type contracts.
 func (c *Checker) checkGenericWrapperTypeArgs(name string, args []Type) error {
 	switch name {
 	case "std.channel.Channel":
@@ -4271,7 +4271,7 @@ func (c *Checker) checkGenericUserArg(
 	return nil
 }
 
-// checkGenericFunctionNameArg validates Function arguments in generic std wrappers.
+// checkGenericFunctionNameArg validates Function arguments in static std wrappers.
 func (c *Checker) checkGenericFunctionNameArg(
 	name string,
 	fn *functionType,
@@ -4340,7 +4340,7 @@ func (c *Checker) checkUserCall(
 		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name)
 	}
 	if len(fn.typeParams) > 0 {
-		return "", fmt.Errorf("type error: `%s` requires explicit type arguments", name)
+		return "", fmt.Errorf("type error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
 		return "", userCallArityError(name, fn, len(args))
@@ -5484,11 +5484,11 @@ func (c *Checker) checkMapKeyArg(
 	return nil
 }
 
-// checkedMapArgs validates and returns the two Map type arguments.
+// checkedMapArgs validates and returns the two Map static type arguments.
 func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+		return nil, fmt.Errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
 		return nil, err
@@ -5496,11 +5496,11 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	return args, nil
 }
 
-// checkedMapArgsAllowTypeParams validates Map arguments inside std generic wrappers.
+// checkedMapArgsAllowTypeParams validates Map static arguments inside std wrappers.
 func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+		return nil, fmt.Errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
 		return nil, err
@@ -5511,7 +5511,7 @@ func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
 // checkMapTypeArgContract enforces v0.2 public Map constructor restrictions.
 func (c *Checker) checkMapTypeArgContract(args []Type) error {
 	if len(args) != 2 {
-		return fmt.Errorf("type error: std::map::Map expects 2 type arguments")
+		return fmt.Errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(args[0], typeByteString) {
 		return fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
@@ -6553,7 +6553,7 @@ func (c *Checker) rejectThreadBoundaryGeneric(typ Type, seen map[Type]bool) erro
 	}
 }
 
-// rejectThreadBoundaryNamedArg parses and checks a nested generic argument.
+// rejectThreadBoundaryNamedArg parses and checks a nested static type argument.
 func (c *Checker) rejectThreadBoundaryNamedArg(name string, seen map[Type]bool) error {
 	typ, err := c.parseType(name)
 	if err != nil {
@@ -6837,7 +6837,7 @@ func splitGenericType(name string) (string, string, bool) {
 	return name[:start], arg, true
 }
 
-// splitGenericArgs extracts top-level comma-separated generic arguments.
+// splitGenericArgs extracts top-level comma-separated static arguments.
 func splitGenericArgs(arg string) ([]string, bool) {
 	args := []string{}
 	start := 0
@@ -6875,7 +6875,7 @@ func splitGenericArgs(arg string) ([]string, bool) {
 // singleGenericArg returns the only argument for one-parameter generic types.
 func singleGenericArg(base string, args []string) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `%s` expects 1 type argument", base)
+		return "", fmt.Errorf("type error: `%s` expects 1 static argument", base)
 	}
 	return args[0], nil
 }

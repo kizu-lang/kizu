@@ -1518,7 +1518,7 @@ func (c *Checker) checkUserCall(
 		return "", fmt.Errorf("move error: undefined function `%s`", name)
 	}
 	if len(fn.decl.TypeParams) > 0 {
-		return "", fmt.Errorf("move error: `%s` requires explicit type arguments", name)
+		return "", fmt.Errorf("move error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
 		return "", fmt.Errorf("move error: `%s` expects %d args, got %d",
@@ -1961,7 +1961,7 @@ func (c *Checker) checkMapConstructorAllowTypeParams(
 ) (string, error) {
 	mapArgs, ok := splitGenericArgs(argsText)
 	if !ok || len(mapArgs) != 2 {
-		return "", fmt.Errorf("map error: std::map::Map expects 2 type arguments")
+		return "", fmt.Errorf("map error: std::map::Map expects 2 static arguments")
 	}
 	if len(args) != 1 {
 		return "", fmt.Errorf("map error: `std::map::Map` expects allocator")
@@ -2117,7 +2117,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	); ok || err != nil {
 		return typ, err
 	}
-	return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
+	return "", fmt.Errorf("move error: `%s` does not take static arguments", name)
 }
 
 // checkArenaTypeApply validates std::arena::Arena<T>(allocator) ownership.
@@ -2603,7 +2603,7 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("map error: std::map::Map expects 2 type arguments")
+		return nil, fmt.Errorf("map error: std::map::Map expects 2 static arguments")
 	}
 	if isGenericParamName(args[0]) {
 		return args, nil
@@ -2639,7 +2639,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	}
 	typeArgs, ok := splitGenericArgs(typeArg)
 	if !ok || len(typeArgs) != len(fn.decl.TypeParams) {
-		return "", true, fmt.Errorf("move error: `%s` expects %d type arguments",
+		return "", true, fmt.Errorf("move error: `%s` expects %d static arguments",
 			name, len(fn.decl.TypeParams))
 	}
 	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
@@ -2660,7 +2660,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	return substituteOwnershipType(returnTypeName(fn), subst), true, nil
 }
 
-// checkGenericInstantiation checks a generic function body for one type argument set.
+// checkGenericInstantiation checks a generic function body for one static type set.
 func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]string) error {
 	env := newScope(nil)
 	for idx, param := range fn.decl.Params {
@@ -2686,7 +2686,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 	return c.checkBlock(fn.decl.Body, env)
 }
 
-// checkGenericWrapperTypeArgs validates std wrapper-specific ownership contracts.
+// checkGenericWrapperTypeArgs validates std wrapper-specific static ownership contracts.
 func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) error {
 	switch name {
 	case "std.channel.Channel":
@@ -5416,7 +5416,7 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 	return out
 }
 
-// instantiateTypeArgText replaces in-scope generic type parameters in a type-apply list.
+// instantiateTypeArgText replaces in-scope generic type parameters in a static list.
 func (c *Checker) instantiateTypeArgText(typeArg string) string {
 	if len(c.typeArgValues) == 0 {
 		return typeArg
@@ -6030,11 +6030,11 @@ func taskElement(typeName string) (string, bool) {
 	return arg, true
 }
 
-// checkedMapArgs validates and returns Map key/value type arguments.
+// checkedMapArgs validates and returns Map key/value static type arguments.
 func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("map error: std::map::Map expects 2 type arguments")
+		return nil, fmt.Errorf("map error: std::map::Map expects 2 static arguments")
 	}
 	if !sameOwnershipType(args[0], "[]const u8") {
 		return nil, fmt.Errorf("map error: std::map::Map key type must be []const u8 in v0.2")
@@ -6066,7 +6066,7 @@ func splitGenericType(name string) (string, string, bool) {
 	return "", "", false
 }
 
-// splitGenericArgs extracts top-level comma-separated generic arguments.
+// splitGenericArgs extracts top-level comma-separated static arguments.
 func splitGenericArgs(arg string) ([]string, bool) {
 	args := []string{}
 	start := 0

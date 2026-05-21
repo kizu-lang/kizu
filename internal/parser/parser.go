@@ -1070,7 +1070,7 @@ func (p *Parser) parseTypeExpr() ast.Expression {
 		return expr
 	}
 	p.nextToken()
-	expr.TypeName = p.parseTypeArg()
+	expr.TypeName = p.parseStaticTypeArg()
 	if expr.TypeName == "" || !p.expectTypeClose() {
 		return expr
 	}
@@ -1224,11 +1224,11 @@ func (p *Parser) parseTypeBaseName() string {
 	return strings.Join(parts, "::")
 }
 
-// parseTypeArgList parses one or more comma-separated generic type arguments.
+// parseTypeArgList parses one or more comma-separated v0.2 static type arguments.
 func (p *Parser) parseTypeArgList() string {
 	args := []string{}
 	for {
-		arg := p.parseTypeArg()
+		arg := p.parseStaticTypeArg()
 		if arg == "" {
 			return ""
 		}
@@ -1290,7 +1290,21 @@ func (p *Parser) expectTypeClose() bool {
 	return p.expectPeek(token.GT)
 }
 
-// parseTypeArg parses a generic type argument.
+// parseStaticTypeArg parses a v0.2 static argument whose value must be a type.
+func (p *Parser) parseStaticTypeArg() string {
+	switch p.cur.Type {
+	case token.Ident, token.Bang, token.Amp, token.LBracket, token.Question:
+		return p.parseTypeArg()
+	case token.Lifetime:
+		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
+		return ""
+	default:
+		p.errorf("expected static type argument, got %s", p.cur.Type)
+		return ""
+	}
+}
+
+// parseTypeArg parses a type embedded inside a generic-like type spelling.
 func (p *Parser) parseTypeArg() string {
 	if p.cur.Type == token.Lifetime {
 		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
@@ -1337,7 +1351,7 @@ func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 	return expr
 }
 
-// parseTypeApplyExpr parses Namespace::Item<T> before a constructor call.
+// parseTypeApplyExpr parses Namespace::Item<T> static type application.
 func (p *Parser) parseTypeApplyExpr(callee ast.Expression) ast.Expression {
 	expr := &ast.TypeApplyExpr{Callee: callee}
 	p.nextToken()
@@ -1480,7 +1494,7 @@ func startsUpper(name string) bool {
 	return len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z'
 }
 
-// canTypeApply reports whether expr may be followed by a constructor type argument.
+// canTypeApply reports whether expr may be followed by a static type argument.
 func canTypeApply(expr ast.Expression) bool {
 	switch e := expr.(type) {
 	case *ast.FieldExpr:
