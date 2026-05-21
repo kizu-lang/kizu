@@ -21,6 +21,7 @@ type Interpreter struct {
 	enums       map[string]map[string]bool
 	unions      map[string]map[string]string
 	typeArgs    map[string]string
+	qualified   map[ast.Expression]string
 	processArgs []string
 }
 
@@ -57,6 +58,7 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 		enums:       map[string]map[string]bool{},
 		unions:      map[string]map[string]string{},
 		typeArgs:    map[string]string{},
+		qualified:   map[ast.Expression]string{},
 		processArgs: append([]string{}, args...),
 	}
 }
@@ -148,7 +150,8 @@ func (i *Interpreter) callFunction(name string, args []Value) (Value, error) {
 	if len(args) != len(fn.Params) {
 		return voidValue(), fmt.Errorf("runtime error: `%s` expected %d args", name, len(fn.Params))
 	}
-	env := NewEnv()
+	env := NewEnvWithCapacity(len(fn.Params))
+	defer env.Release()
 	for idx, param := range fn.Params {
 		if err := env.Define(param.Name, args[idx], false); err != nil {
 			return voidValue(), err
@@ -192,7 +195,8 @@ func (i *Interpreter) callFunctionExpr(
 	if len(args) != len(fn.Params) {
 		return voidValue(), fmt.Errorf("runtime error: `%s` expected %d args", fn.Name, len(fn.Params))
 	}
-	env := NewEnv()
+	env := NewEnvWithCapacity(len(fn.Params))
+	defer env.Release()
 	for idx, param := range fn.Params {
 		value, err := i.evalCallArg(param, args[idx], caller)
 		if err != nil {
@@ -314,7 +318,10 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 	case *ast.MatchStmt:
 		return i.evalMatchStmt(s, env)
 	case *ast.UnsafeStmt:
-		return i.evalBlock(s.Body, env.Child())
+		child := env.Child()
+		value, returned, err := i.evalBlock(s.Body, child)
+		child.Release()
+		return value, returned, err
 	case *ast.ComptimeIfStmt:
 		return i.evalComptimeIfStmt(s, env)
 	default:
@@ -483,10 +490,16 @@ func (i *Interpreter) evalIfStmt(stmt *ast.IfStmt, env *Env) (Value, bool, error
 		return voidValue(), false, fmt.Errorf("runtime error: if condition must be bool")
 	}
 	if cond.b {
-		return i.evalBlock(stmt.Consequence, env.Child())
+		child := env.Child()
+		value, returned, err := i.evalBlock(stmt.Consequence, child)
+		child.Release()
+		return value, returned, err
 	}
 	if stmt.Alternative != nil {
-		return i.evalBlock(stmt.Alternative, env.Child())
+		child := env.Child()
+		value, returned, err := i.evalBlock(stmt.Alternative, child)
+		child.Release()
+		return value, returned, err
 	}
 	return voidValue(), false, nil
 }
@@ -504,7 +517,9 @@ func (i *Interpreter) evalWhileStmt(stmt *ast.WhileStmt, env *Env) (Value, bool,
 		if !cond.b {
 			return voidValue(), false, nil
 		}
-		result, returned, err := i.evalBlock(stmt.Body, env.Child())
+		child := env.Child()
+		result, returned, err := i.evalBlock(stmt.Body, child)
+		child.Release()
 		if signal, ok := err.(loopSignal); ok {
 			if handledLoopSignal(signal, stmt.Label) {
 				if signal.kind == "continue" {
@@ -528,9 +543,11 @@ func (i *Interpreter) evalForStmt(stmt *ast.ForStmt, env *Env) (Value, bool, err
 	for idx := start; idx < end; idx++ {
 		child := env.Child()
 		if err := child.Define(stmt.Name, intValue(idx), false); err != nil {
+			child.Release()
 			return voidValue(), false, err
 		}
 		result, returned, err := i.evalBlock(stmt.Body, child)
+		child.Release()
 		if signal, ok := err.(loopSignal); ok {
 			if handledLoopSignal(signal, stmt.Label) {
 				if signal.kind == "continue" {
@@ -590,9 +607,12 @@ func (i *Interpreter) evalMatchStmt(stmt *ast.MatchStmt, env *Env) (Value, bool,
 		if arm.Tag == matchArmTag(value) || arm.IsWildcard() {
 			child := env.Child()
 			if err := bindUnionPayload(value, arm, child); err != nil {
+				child.Release()
 				return voidValue(), false, err
 			}
-			return i.evalStmt(arm.Body, child)
+			result, returned, err := i.evalStmt(arm.Body, child)
+			child.Release()
+			return result, returned, err
 		}
 	}
 	return voidValue(), false, fmt.Errorf("runtime error: no match arm for `%s`", value.String())
@@ -628,10 +648,16 @@ func (i *Interpreter) evalComptimeIfStmt(stmt *ast.ComptimeIfStmt, env *Env) (Va
 		return voidValue(), false, fmt.Errorf("runtime error: comptime if condition must be bool")
 	}
 	if cond.b {
-		return i.evalBlock(stmt.Consequence, env.Child())
+		child := env.Child()
+		value, returned, err := i.evalBlock(stmt.Consequence, child)
+		child.Release()
+		return value, returned, err
 	}
 	if stmt.Alternative != nil {
-		return i.evalBlock(stmt.Alternative, env.Child())
+		child := env.Child()
+		value, returned, err := i.evalBlock(stmt.Alternative, child)
+		child.Release()
+		return value, returned, err
 	}
 	return voidValue(), false, nil
 }
@@ -1094,7 +1120,7 @@ func (i *Interpreter) evalQualifiedUserCall(
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
-	name, ok := qualifiedName(field)
+	name, ok := i.qualifiedName(field)
 	if !ok {
 		return voidValue(), false, nil
 	}
@@ -1115,7 +1141,7 @@ func (i *Interpreter) evalQualifiedBuiltin(
 	args []ast.Expression,
 	env *Env,
 ) (Value, bool, error) {
-	name, ok := qualifiedName(field)
+	name, ok := i.qualifiedName(field)
 	if !ok {
 		return voidValue(), false, nil
 	}
@@ -1686,7 +1712,7 @@ func (i *Interpreter) evalTypeApplyCallExpr(
 	args []ast.Expression,
 	env *Env,
 ) (Value, error) {
-	name, ok := qualifiedName(expr.Callee)
+	name, ok := i.qualifiedName(expr.Callee)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: unsupported type application `%s`", expr.String())
 	}
@@ -3347,7 +3373,8 @@ func (i *Interpreter) callMethod(fn *ast.FunctionDecl, args []Value) (Value, err
 	if len(args) != len(fn.Params) {
 		return voidValue(), fmt.Errorf("runtime error: `%s` expected %d args", fn.Name, len(fn.Params))
 	}
-	env := NewEnv()
+	env := NewEnvWithCapacity(len(fn.Params))
+	defer env.Release()
 	for idx, param := range fn.Params {
 		if err := env.Define(param.Name, args[idx], false); err != nil {
 			return voidValue(), err
@@ -3507,6 +3534,18 @@ func callQueueFromExprs(args []ast.Expression) Value {
 		return errorUnionValue("std::task::Queue expected 0 args")
 	}
 	return queueValue()
+}
+
+// qualifiedName caches immutable namespace chains for loop-heavy selfhost calls.
+func (i *Interpreter) qualifiedName(expr ast.Expression) (string, bool) {
+	if name, ok := i.qualified[expr]; ok {
+		return name, true
+	}
+	name, ok := qualifiedName(expr)
+	if ok {
+		i.qualified[expr] = name
+	}
+	return name, ok
 }
 
 // qualifiedName renders a namespace chain as an internal key such as std::task::Group.

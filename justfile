@@ -21,7 +21,7 @@ check:
 
 # Run Go/Kizu selfhost component oracle parity checks.
 selfhost-oracle:
-    KIZU_RUN_SELFHOST_ORACLE=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -v
+    GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
 
 # Run direct heavyweight selfhost gates for focused debugging.
 selfhost-integration-gates:
