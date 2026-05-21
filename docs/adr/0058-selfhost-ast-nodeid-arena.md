@@ -53,6 +53,10 @@ fields, block statements, call args, and match arms.
 - Future parser work can add parsed params, struct declaration syntax, richer
   expressions, and parsed match-arm ranges without adding parser builtins.
 
+ADR-0062 refines the allowed `AstNode` payload set, allocator semantics,
+runtime handle diagnostic responsibility, and selfhost cleanup discipline for
+this AST arena.
+
 ## Non-goals
 
 - This does not make arbitrary handle wrappers safe for array storage.
