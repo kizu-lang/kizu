@@ -865,6 +865,85 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsDirectFieldReceiverMethods checks owner fields can forward storage APIs.
+func TestCheckAcceptsDirectFieldReceiverMethods(t *testing.T) {
+	source := `struct User { name: []const u8 }
+struct Registry { users: arena<User> }
+impl Registry {
+    fn add(self: Registry, user: User) -> void {
+        let handle = self.users.add(user);
+        print(self.users.get(handle).name);
+        return;
+    }
+    fn deinit(self: Registry) -> void {
+        self.users.deinit();
+        return;
+    }
+}
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let registry = Registry { users: arena<User>(allocator) };
+    registry.add(User { name: "alice" });
+    registry.deinit();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsDirectFieldReceiverPolicy keeps field cleanup and paths bounded.
+func TestCheckRejectsDirectFieldReceiverPolicy(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "field cleanup outside owner deinit",
+			source: `struct User { name: []const u8 }
+struct Registry { users: arena<User> }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let registry = Registry { users: arena<User>(allocator) };
+    registry.users.deinit();
+}`,
+			want: "field cleanup `registry.users.deinit` is only allowed inside owner deinit",
+		},
+		{
+			name: "use after field cleanup",
+			source: `struct User { name: []const u8 }
+struct Registry { users: arena<User> }
+impl Registry {
+    fn deinit(self: Registry) -> void {
+        self.users.deinit();
+        self.users.add(User { name: "alice" });
+        return;
+    }
+}
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let registry = Registry { users: arena<User>(allocator) };
+    registry.deinit();
+}`,
+			want: "field `self.users` was deinitialized",
+		},
+		{
+			name: "nested field receiver",
+			source: `struct User { name: []const u8 }
+struct Registry { users: arena<User> }
+struct Wrapper { registry: Registry }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let registry = Registry { users: arena<User>(allocator) };
+    let wrapper = Wrapper { registry: registry };
+    wrapper.registry.users.add(User { name: "alice" });
+}`,
+			want: "field method receiver only supports one direct field",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsGenericMoveCallWithoutTypeArgs keeps generic calls explicit.
 func TestCheckRejectsGenericMoveCallWithoutTypeArgs(t *testing.T) {
 	source := `fn Pass<T>(value: T) -> T {

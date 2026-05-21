@@ -53,6 +53,8 @@ type binding struct {
 	activeMutBorrows int
 	fieldBorrows     map[string]int
 	fieldMutBorrows  map[string]int
+	fieldDeinit      map[string]bool
+	fieldArenaIDs    map[string]int
 	arenaID          int
 	handleArenaID    int
 	rangeArenaID     int
@@ -63,6 +65,13 @@ type binding struct {
 type scope struct {
 	parent *scope
 	values map[string]*binding
+}
+
+type directFieldReceiver struct {
+	owner    *binding
+	field    string
+	typeName string
+	path     string
 }
 
 // New creates an empty ownership checker.
@@ -87,15 +96,18 @@ func (c *Checker) Check(program *ast.Program) error {
 		return err
 	}
 	for _, decl := range program.Decls {
-		fnDecl, ok := decl.(*ast.FunctionDecl)
-		if !ok {
-			continue
-		}
-		if len(fnDecl.TypeParams) > 0 {
-			continue
-		}
-		if err := c.checkFunction(c.functions[fnDecl.Name]); err != nil {
-			return err
+		switch d := decl.(type) {
+		case *ast.FunctionDecl:
+			if len(d.TypeParams) > 0 {
+				continue
+			}
+			if err := c.checkFunction(c.functions[d.Name]); err != nil {
+				return err
+			}
+		case *ast.ImplDecl:
+			if err := c.checkImpl(d); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -213,6 +225,7 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 		value.mutBorrow = fn.params[idx].mutBorrow
 		env.define(value)
 	}
+	c.seedMethodParamProvenance(fn, env)
 	previousLoopDepth := c.loopDepth
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
@@ -226,6 +239,47 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	defer func() { c.currentStd = previousStd }()
 	defer func() { c.typeArgValues = previousTypeArgValues }()
 	return c.checkBlock(fn.decl.Body, env)
+}
+
+// seedMethodParamProvenance records method preconditions represented by special receivers.
+func (c *Checker) seedMethodParamProvenance(fn *functionInfo, env *scope) {
+	if len(fn.params) == 0 || !isAstType(fn.params[0].typeName) || len(fn.decl.Params) == 0 {
+		return
+	}
+	self, ok := env.lookup(fn.decl.Params[0].Name)
+	if !ok {
+		return
+	}
+	for idx, param := range fn.decl.Params[1:] {
+		value, exists := env.lookup(param.Name)
+		if !exists {
+			continue
+		}
+		if isAstNodeIDType(fn.params[idx+1].typeName) {
+			value.handleArenaID = self.arenaID
+		}
+		if isAstChildRangeType(fn.params[idx+1].typeName) {
+			value.rangeArenaID = self.arenaID
+		}
+	}
+}
+
+// checkImpl validates concrete impl method bodies after signatures are collected.
+func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
+	for _, method := range decl.Methods {
+		if len(method.TypeParams) > 0 {
+			continue
+		}
+		fn := c.implMethod(decl.TypeName, method.Name)
+		if fn == nil {
+			return fmt.Errorf("move error: missing impl method `%s.%s`",
+				decl.TypeName, method.Name)
+		}
+		if err := c.checkFunction(fn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkBlock validates statements in a lexical block.
@@ -818,6 +872,9 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 	}
 	if err := c.checkAssignmentBorrowConflict(stmt.Target, env); err != nil {
 		return err
+	}
+	if root, field, ok := directFieldRoot(stmt.Target, env); ok && field != "" {
+		root.clearFieldDeinit(field)
 	}
 	if _, ok := assignmentRoot(stmt.Target, env); !ok {
 		_, err := c.readExpr(stmt.Target, env)
@@ -2829,6 +2886,10 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 		return "", err
 	}
 	if root, field, ok := directFieldRoot(expr, env); ok {
+		if field != "" && root.fieldDeinit[field] {
+			return "", fmt.Errorf("move error: field `%s.%s` was deinitialized",
+				root.name, field)
+		}
 		if root.activeMutBorrows > 0 {
 			return "", fmt.Errorf("borrow error: value `%s` cannot be read while mutably borrowed",
 				root.name)
@@ -3059,13 +3120,13 @@ func (c *Checker) checkUnionConstructor(
 	return ident.Name, true, nil
 }
 
-// checkMethodCallExpr validates ownership effects of arena methods.
+// checkMethodCallExpr validates ownership effects of value receiver methods.
 func (c *Checker) checkMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
 ) (string, error) {
-	if typ, ok, err := c.checkStdFieldStorageMethod(field, args, env); ok || err != nil {
+	if typ, ok, err := c.checkDirectFieldReceiverMethod(field, args, env); ok || err != nil {
 		return typ, err
 	}
 	if typ, ok, err := c.checkBoxReceiverExpr(field, args, env); ok || err != nil {
@@ -3119,39 +3180,6 @@ func (c *Checker) checkLocalReceiverMethod(
 	}
 }
 
-// checkStdFieldStorageMethod allows std wrappers to mutate private storage fields.
-func (c *Checker) checkStdFieldStorageMethod(
-	field *ast.FieldExpr,
-	args []ast.Expression,
-	env *scope,
-) (string, bool, error) {
-	if !c.currentStd {
-		return "", false, nil
-	}
-	if _, ok := field.Receiver.(*ast.FieldExpr); !ok {
-		return "", false, nil
-	}
-	receiverType, err := c.readExpr(field.Receiver, env)
-	if err != nil {
-		return "", true, err
-	}
-	base, elem, ok := splitGenericType(receiverType)
-	if !ok {
-		return "", false, nil
-	}
-	if base == "arena" && field.Name == "deinit" {
-		arena := &binding{typeName: receiverType}
-		typ, err := c.checkArenaDeinit(arena, args)
-		return typ, true, err
-	}
-	if base != "std::array::Array" {
-		return "", false, nil
-	}
-	array := &binding{typeName: receiverType}
-	typ, err := c.checkArrayMethod(array, elem, field.Name, args, env)
-	return typ, true, err
-}
-
 // checkNonArenaMethod validates methods on non-arena owned values.
 func (c *Checker) checkNonArenaMethod(
 	value *binding,
@@ -3188,6 +3216,159 @@ func (c *Checker) checkNonArenaMethod(
 		return typ, err
 	}
 	return c.checkPlainMethodArgs(args, env)
+}
+
+// checkDirectFieldReceiverMethod validates owner.field.method(...) calls.
+func (c *Checker) checkDirectFieldReceiverMethod(
+	field *ast.FieldExpr,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	receiverExpr, ok := field.Receiver.(*ast.FieldExpr)
+	if !ok {
+		return "", false, nil
+	}
+	receiver, err := c.directFieldReceiver(receiverExpr, env)
+	if err != nil {
+		return "", true, err
+	}
+	if field.Name == "deinit" && !c.allowsDirectFieldCleanup(receiver) {
+		return "", true, fmt.Errorf(
+			"move error: field cleanup `%s.deinit` is only allowed inside owner deinit",
+			receiver.path,
+		)
+	}
+	value := c.bindingForDirectFieldReceiver(receiver)
+	typ, err := c.checkDirectFieldReceiverByType(value, field.Name, args, env)
+	if err != nil {
+		return "", true, err
+	}
+	if field.Name == "deinit" {
+		receiver.owner.markFieldDeinit(receiver.field)
+	}
+	return typ, true, nil
+}
+
+// directFieldReceiver resolves the one-level field path used as a method receiver.
+func (c *Checker) directFieldReceiver(
+	field *ast.FieldExpr,
+	env *scope,
+) (*directFieldReceiver, error) {
+	ownerIdent, ok := field.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return nil, fmt.Errorf("move error: field method receiver only supports one direct field")
+	}
+	owner, exists := env.lookup(ownerIdent.Name)
+	if !exists {
+		return nil, fmt.Errorf("move error: undefined variable `%s`", ownerIdent.Name)
+	}
+	if err := checkDeinitializedUse(ownerIdent.Name, owner, env); err != nil {
+		return nil, err
+	}
+	if owner.moved {
+		return nil, fmt.Errorf("move error: moved value `%s` was used", ownerIdent.Name)
+	}
+	typeName, err := c.readFieldExpr(field, env)
+	if err != nil {
+		return nil, err
+	}
+	return &directFieldReceiver{
+		owner: owner, field: field.Name, typeName: typeName,
+		path: ownerIdent.Name + "." + field.Name,
+	}, nil
+}
+
+// bindingForDirectFieldReceiver projects owner borrow state onto one owned field.
+func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *binding {
+	value := &binding{
+		name: receiver.path, typeName: receiver.typeName,
+		activeBorrows: receiver.owner.activeBorrows +
+			receiver.owner.fieldBorrows[receiver.field],
+		activeMutBorrows: receiver.owner.activeMutBorrows +
+			receiver.owner.fieldMutBorrows[receiver.field],
+	}
+	base, _, ok := splitGenericType(receiver.typeName)
+	if ok && base == "arena" {
+		value.arenaID = c.directFieldArenaID(receiver)
+	}
+	if isAstType(receiver.typeName) {
+		if isAstParseResultType(receiver.owner.typeName) {
+			value.arenaID = receiver.owner.arenaID
+		} else {
+			value.arenaID = c.directFieldArenaID(receiver)
+		}
+	}
+	return value
+}
+
+// checkDirectFieldReceiverByType dispatches a direct field receiver by its field type.
+func (c *Checker) checkDirectFieldReceiverByType(
+	value *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if value.typeName == "std::string::String" {
+		return c.checkStringMethod(value, name, args, env)
+	}
+	base, elem, ok := splitGenericType(value.typeName)
+	if ok && base == "std::array::Array" {
+		return c.checkArrayMethod(value, elem, name, args, env)
+	}
+	if ok && base == "std::map::Map" {
+		return c.checkMapMethod(value, elem, name, args, env)
+	}
+	if ok && base == "std::mem::Box" {
+		return c.checkBoxMethod(value, name, args)
+	}
+	if ok && base == "arena" {
+		return c.checkFieldArenaMethod(value, name, args, env)
+	}
+	if value.typeName == "std::kizu::ast::Ast" {
+		return c.checkAstMethod(value, name, args, env)
+	}
+	return c.checkNonArenaMethod(value, name, args, env)
+}
+
+// checkFieldArenaMethod validates direct field calls on owned arena fields.
+func (c *Checker) checkFieldArenaMethod(
+	arena *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	switch name {
+	case "add":
+		return c.checkArenaAdd(arena, args, env)
+	case "get":
+		return c.checkFieldArenaGet(arena, args, env)
+	case "deinit":
+		return c.checkArenaDeinit(arena, args)
+	default:
+		return "", fmt.Errorf("arena error: unknown arena method `%s`", name)
+	}
+}
+
+// checkFieldArenaGet permits typed wrapper methods to unwrap their own arena handles.
+func (c *Checker) checkFieldArenaGet(
+	arena *binding,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
+	}
+	base, arg, ok := splitGenericType(arena.typeName)
+	if !ok || base != "arena" {
+		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
+	}
+	if err := c.checkKnownHandleProvenance(arena, args[0], env); err != nil {
+		return "", err
+	}
+	if _, err := c.readExpr(args[0], env); err != nil {
+		return "", err
+	}
+	return arg, nil
 }
 
 // checkAstMethod validates selfhost AST arena helper methods.
@@ -4439,6 +4620,9 @@ func (c *Checker) checkImplMethodCall(
 	if err := c.checkImplMethodArgs(method, args, env); err != nil {
 		return "", true, err
 	}
+	if name == "deinit" && returnTypeName(method) == "void" {
+		value.moved = true
+	}
 	return returnTypeName(method), true, nil
 }
 
@@ -4570,6 +4754,45 @@ func (c *Checker) checkHandleProvenance(arena *binding, expr ast.Expression, env
 			ident.Name, arena.name)
 	}
 	return nil
+}
+
+// checkKnownHandleProvenance rejects only known mismatches for field-owned arenas.
+func (c *Checker) checkKnownHandleProvenance(
+	arena *binding,
+	expr ast.Expression,
+	env *scope,
+) error {
+	if arena.arenaID == 0 {
+		return nil
+	}
+	if addArena := c.arenaAddReceiver(expr, env); addArena != nil && addArena.arenaID != 0 {
+		if addArena.arenaID != arena.arenaID {
+			return fmt.Errorf("arena error: handle from `%s` does not belong to arena `%s`",
+				addArena.name, arena.name)
+		}
+		return nil
+	}
+	provenance := c.knownHandleProvenance(expr, env)
+	if provenance != 0 && provenance != arena.arenaID {
+		return fmt.Errorf("arena error: handle expression does not belong to arena `%s`",
+			arena.name)
+	}
+	return nil
+}
+
+// knownHandleProvenance returns tracked arena identity for handle-like expressions.
+func (c *Checker) knownHandleProvenance(expr ast.Expression, env *scope) int {
+	if provenance := c.astNodeIDProvenance(expr, env); provenance != 0 {
+		return provenance
+	}
+	ident, ok := expr.(*ast.IdentExpr)
+	if ok {
+		value, exists := env.lookup(ident.Name)
+		if exists {
+			return value.handleArenaID
+		}
+	}
+	return 0
 }
 
 // activateBorrowArgs marks identifier arguments that are borrowed for this call.
@@ -4775,6 +4998,34 @@ func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *s
 	}
 }
 
+// directFieldArenaID returns a stable arena identity for one owner field.
+func (c *Checker) directFieldArenaID(receiver *directFieldReceiver) int {
+	if receiver.owner.fieldArenaIDs == nil {
+		receiver.owner.fieldArenaIDs = map[string]int{}
+	}
+	if id := receiver.owner.fieldArenaIDs[receiver.field]; id != 0 {
+		return id
+	}
+	c.nextID++
+	receiver.owner.fieldArenaIDs[receiver.field] = c.nextID
+	return c.nextID
+}
+
+// allowsDirectFieldCleanup reports whether field.deinit is inside owner deinit.
+func (c *Checker) allowsDirectFieldCleanup(receiver *directFieldReceiver) bool {
+	fn := c.currentFunction
+	if fn == nil || fn.decl == nil || fn.decl.Name != "deinit" || returnTypeName(fn) != "void" {
+		return false
+	}
+	if len(fn.params) == 0 || len(fn.decl.Params) == 0 {
+		return false
+	}
+	if fn.decl.Params[0].Name != receiver.owner.name {
+		return false
+	}
+	return sameOwnershipType(fn.params[0].typeName, receiver.owner.typeName)
+}
+
 // astFieldProvenance returns the Ast identity carried by ParseResult fields.
 func (c *Checker) astFieldProvenance(expr ast.Expression, env *scope) int {
 	field, ok := expr.(*ast.FieldExpr)
@@ -4796,6 +5047,14 @@ func (c *Checker) astFieldProvenance(expr ast.Expression, env *scope) int {
 func (c *Checker) astNodeIDProvenance(expr ast.Expression, env *scope) int {
 	if provenance := c.astFieldProvenance(expr, env); provenance != 0 {
 		return provenance
+	}
+	if field, ok := expr.(*ast.FieldExpr); ok && field.Name == "raw" {
+		if receiver, ok := field.Receiver.(*ast.IdentExpr); ok {
+			value, exists := env.lookup(receiver.Name)
+			if exists && isAstNodeIDType(value.typeName) {
+				return value.handleArenaID
+			}
+		}
 	}
 	if astReceiver := c.astNodeIDReceiver(expr, env); astReceiver != nil {
 		return astReceiver.arenaID
@@ -4901,11 +5160,23 @@ func (c *Checker) arenaAddReceiver(expr ast.Expression, env *scope) *binding {
 		return nil
 	}
 	receiver, ok := field.Receiver.(*ast.IdentExpr)
+	if ok {
+		arena, _ := env.lookup(receiver.Name)
+		return arena
+	}
+	fieldReceiver, ok := field.Receiver.(*ast.FieldExpr)
 	if !ok {
 		return nil
 	}
-	arena, _ := env.lookup(receiver.Name)
-	return arena
+	direct, err := c.directFieldReceiver(fieldReceiver, env)
+	if err != nil {
+		return nil
+	}
+	base, _, ok := splitGenericType(direct.typeName)
+	if !ok || base != "arena" {
+		return nil
+	}
+	return c.bindingForDirectFieldReceiver(direct)
 }
 
 // isArenaGetExpr reports whether expr is an arena.get call.
@@ -5800,6 +6071,22 @@ func (s *scope) releaseLastUseBorrows(stmtIndex int, lastUses map[string]int) {
 func (b *binding) hasAnyBorrow() bool {
 	return b.activeBorrows > 0 || b.activeMutBorrows > 0 ||
 		len(b.fieldBorrows) > 0 || len(b.fieldMutBorrows) > 0
+}
+
+// markFieldDeinit records that an owned direct field has been cleaned up.
+func (b *binding) markFieldDeinit(field string) {
+	if b.fieldDeinit == nil {
+		b.fieldDeinit = map[string]bool{}
+	}
+	b.fieldDeinit[field] = true
+}
+
+// clearFieldDeinit records assignment of a fresh value into a direct field.
+func (b *binding) clearFieldDeinit(field string) {
+	if b.fieldDeinit == nil {
+		return
+	}
+	delete(b.fieldDeinit, field)
 }
 
 // directFieldRoot returns a direct local field assignment or read target.
