@@ -48,17 +48,23 @@ func countSelfhostRuntimeStorageGateFailures(t *testing.T) int {
 	if failures := countRuntimeStorageTemplateMetadataFailures(t, string(metaBytes)); failures > 0 {
 		return failures
 	}
-	return runRuntimeStorageSmoke(
+	failures := runRuntimeStorageSmoke(
 		t,
 		"selfhost/runtime/selfhost.storage.ll",
 		"selfhost/runtime/selfhost.host.ll",
 	)
+	failures += runRuntimeStorageCountingSmoke(t, "selfhost/runtime/selfhost.storage.ll")
+	return failures
 }
 
 // countRuntimeStorageTemplateMetadataFailures checks template-only metadata.
 func countRuntimeStorageTemplateMetadataFailures(t *testing.T, metaContent string) int {
 	t.Helper()
 	required := []string{
+		"string-storage byte-buffer\n",
+		"string-as-bytes returns-stored-bytes\n",
+		"string-deinit releases-byte-buffer\n",
+		"string-invalid-slice-diagnostic invalid slice\n",
 		"reachable arena ast-node-storage\n",
 		"reachable handle ast-node-id\n",
 		"arena-allocator-boundary explicit\n",
@@ -281,16 +287,21 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 		"; kizu selfhost runtime storage ll v0\n",
 		"%kizu.handle = type { ptr, i64 }\n",
 		"%kizu.rt.array = type { ptr, i64, i64 }\n",
-		"%kizu.rt.string = type { ptr, i64, i64 }\n",
+		"%kizu.rt.string = type { ptr, ptr, i64, i64 }\n",
 		"%kizu.rt.map = type { ptr, i1, i64 }\n",
 		"%kizu.rt.arena = type { ptr, i64, i64, i1 }\n",
 		"@.kizu.rt.arena_invalid_handle",
+		"@.kizu.rt.string_smoke",
+		"@.kizu.rt.invalid_slice",
 		"declare ptr @kizu_rt_alloc(ptr, i64)\n",
 		"declare void @kizu_rt_free(ptr, ptr)\n",
+		"declare void @llvm.memcpy.p0.p0.i64",
 		"define %kizu.owned @kizu_rt_array_new",
 		"define %kizu.error.void @kizu_rt_array_append",
 		"define %kizu.owned @kizu_rt_string_new",
 		"define %kizu.error.void @kizu_rt_string_append_bytes",
+		"define %kizu.error.void @kizu_rt_string_append_byte",
+		"define %kizu.slice.u8 @kizu_rt_string_as_bytes",
 		"define %kizu.owned @kizu_rt_map_new",
 		"define %kizu.error.void @kizu_rt_map_insert",
 		"define %kizu.owned @kizu_rt_diagnostic_buffer_new",
@@ -299,9 +310,14 @@ func countRuntimeStorageLLFailures(t *testing.T, llContent string) int {
 		"define %kizu.handle @kizu_rt_arena_add",
 		"define %kizu.error.slice.u8 @kizu_rt_arena_get",
 		"define void @kizu_rt_arena_deinit",
+		"define i1 @kizu_selfhost__runtime_invalid_slice_message_ok",
+		"define i64 @kizu_selfhost__runtime_string_invalid_smoke() {\n",
 		"define i64 @kizu_selfhost__runtime_storage_smoke() {\n",
 		"call %kizu.error.void @kizu_rt_array_append",
 		"call %kizu.error.void @kizu_rt_string_append_bytes",
+		"call %kizu.error.void @kizu_rt_string_append_byte",
+		"call %kizu.slice.u8 @kizu_rt_string_as_bytes",
+		"call i64 @kizu_selfhost__runtime_string_invalid_smoke",
 		"call %kizu.error.void @kizu_rt_map_insert",
 		"call %kizu.error.void @kizu_rt_diagnostic_push",
 		"call %kizu.handle @kizu_rt_arena_add",
@@ -344,6 +360,10 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 		"reachable array ast-child-list\n",
 		"reachable string diagnostic-buffer\n",
 		"reachable string path-buffer\n",
+		"string-storage byte-buffer\n",
+		"string-as-bytes returns-stored-bytes\n",
+		"string-deinit releases-byte-buffer\n",
+		"string-invalid-slice-diagnostic invalid slice\n",
 		"reachable map resolver-symbol-table\n",
 		"reachable map type-symbol-table\n",
 		"reachable map ownership-state-table\n",
@@ -367,11 +387,13 @@ func countRuntimeStorageMetadataFailures(t *testing.T, metaContent string) int {
 // countRuntimeStorageLinkSmokeFailures links and runs the storage smoke.
 func countRuntimeStorageLinkSmokeFailures(t *testing.T) int {
 	t.Helper()
-	return runRuntimeStorageSmoke(
+	failures := runRuntimeStorageSmoke(
 		t,
 		"target/selfhost/selfhost.storage.ll",
 		"target/selfhost/selfhost.host.ll",
 	)
+	failures += runRuntimeStorageCountingSmoke(t, "target/selfhost/selfhost.storage.ll")
+	return failures
 }
 
 // runRuntimeStorageSmoke links a storage artifact with host capabilities.
@@ -408,6 +430,37 @@ func runRuntimeStorageSmoke(t *testing.T, storagePath string, hostPath string) i
 	run.Dir = "../.."
 	if out, err := run.CombinedOutput(); err != nil {
 		t.Errorf("run runtime storage smoke: %v\n%s", err, out)
+		return 1
+	}
+	return 0
+}
+
+// runRuntimeStorageCountingSmoke checks storage cleanup without host wrappers.
+func runRuntimeStorageCountingSmoke(t *testing.T, storagePath string) int {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Errorf("runtime storage counting smoke requires clang: %v", err)
+		return 1
+	}
+	tempDir := t.TempDir()
+	harnessPath := filepath.Join(tempDir, "runtime_storage_counting_main.c")
+	exePath := filepath.Join(tempDir, "runtime-storage-counting-smoke")
+	harness := []byte(runtimeStorageCountingHarnessSource)
+	if err := os.WriteFile(harnessPath, harness, 0o644); err != nil {
+		t.Errorf("write runtime storage counting harness: %v", err)
+		return 1
+	}
+	compile := exec.Command(clang, "-Wno-override-module", storagePath, harnessPath, "-o", exePath)
+	compile.Dir = "../.."
+	if out, err := compile.CombinedOutput(); err != nil {
+		t.Errorf("compile runtime storage counting smoke: %v\n%s", err, out)
+		return 1
+	}
+	run := exec.Command(exePath)
+	run.Dir = "../.."
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Errorf("run runtime storage counting smoke: %v\n%s", err, out)
 		return 1
 	}
 	return 0
@@ -756,6 +809,40 @@ int64_t kizu_selfhost__runtime_storage_smoke(void);
 int main(int argc, char **argv) {
     kizu_host_init(argc, argv);
     return kizu_selfhost__runtime_storage_smoke() == 0 ? 0 : 1;
+}
+`
+
+const runtimeStorageCountingHarnessSource = `
+#include <stdint.h>
+#include <stdlib.h>
+
+static int64_t kizu_allocs;
+static int64_t kizu_frees;
+
+void *kizu_rt_alloc(void *allocator, int64_t bytes) {
+    (void)allocator;
+    kizu_allocs++;
+    return calloc(1, bytes <= 0 ? 1 : (size_t)bytes);
+}
+
+void kizu_rt_free(void *allocator, void *value) {
+    (void)allocator;
+    if (value != NULL) {
+        kizu_frees++;
+    }
+    free(value);
+}
+
+int64_t kizu_selfhost__runtime_storage_smoke(void);
+
+int main(void) {
+    if (kizu_selfhost__runtime_storage_smoke() != 0) {
+        return 1;
+    }
+    if (kizu_allocs != kizu_frees) {
+        return 2;
+    }
+    return 0;
 }
 `
 

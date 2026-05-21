@@ -232,6 +232,18 @@ and allocates through runtime-internal `@kizu_rt_alloc(ptr, i64)`. Cleanup calls
 runtime object. #457 owns binding allocator capability creation to host
 facilities; #456 keeps the storage calls capability-shaped and non-Go.
 
+For #574, owned String storage is no longer a length-only smoke. The runtime
+object stores allocator pointer, byte buffer pointer, byte length, and capacity.
+`append_bytes` and `append_byte` copy caller bytes into owned storage,
+`as_bytes` returns a borrowed `[]const u8` view of those stored bytes, and
+`deinit` releases both the byte buffer and the String object. `append_bytes`
+rejects negative lengths, positive lengths with null pointers, and length
+overflow with the diagnostic `invalid slice` before mutating the old buffer. The
+storage artifact metadata records `string-storage byte-buffer`,
+`string-as-bytes returns-stored-bytes`, and
+`string-deinit releases-byte-buffer`,
+`string-invalid-slice-diagnostic invalid slice`.
+
 Append operations return `!void` using `%kizu.error.void`. The runtime artifact
 metadata must include `allocator-boundary explicit`, `go-stdprim-storage none`,
 and `interpreter-storage none`; Go-backed interpreter storage is allowed only
@@ -446,11 +458,12 @@ runtime storage template. The same Go gate checks
 `target/selfhost/selfhost.storage.ll` and `target/selfhost/selfhost.storage.ll.meta`.
 The storage validation requires the reachable Array, String, Map, diagnostic,
 Arena, and Handle runtime symbols, the `@kizu_selfhost__runtime_storage_smoke`
-entry, explicit allocator-boundary metadata, handle provenance metadata, and the
-absence of Go interpreter/stdprim fallback markers in the storage LLVM artifact.
+entry, explicit allocator-boundary metadata, String byte-buffer metadata, handle
+provenance metadata, and the absence of Go interpreter/stdprim fallback markers
+in the storage LLVM artifact.
 The gate also links `selfhost.storage.ll` with the host capability runtime and a
-tiny C harness, then runs the storage smoke so Arena/Handle calls cannot be only
-dead textual declarations.
+tiny C harness, then runs the storage smoke so String byte storage and
+Arena/Handle calls cannot be only dead textual declarations.
 
 For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
 `target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper
