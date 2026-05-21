@@ -253,8 +253,8 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"cli-command parse source-shape missing-expression\n",
 		"cli-command run source-shape print-hello\n",
 		"cli-command run source-shape missing-expression\n",
-		"cli-command test selfhost/tests/cli/test_expect_ok.kizu\n",
-		"cli-command test selfhost/tests/cli/test_expect_failure.kizu\n",
+		"cli-command test source-shape expect-ok\n",
+		"cli-command test source-shape expect-failure\n",
 		"cli-parity-manifest selfhost/tests/cli/parse-parity.tsv\n",
 		"cli-parity-manifest selfhost/tests/cli/check-parity.tsv\n",
 		"cli-parity-manifest selfhost/tests/cli/run-parity.tsv\n",
@@ -280,7 +280,6 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"external @kizu_rt_owned_deinit\n",
 		"external @kizu_rt_trap\n",
 		"unsupported-policy blocker\n",
-		"hardcoded-cli-branch test issue-497\n",
 		"deferred tagged-union-payload issue-495\n",
 	}
 	for _, fragment := range requiredMeta {

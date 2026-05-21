@@ -148,7 +148,11 @@ func linkAndRunTestParityArtifact(
 	result *runParityResult,
 ) int {
 	t.Helper()
-	result.llPath = filepath.Join("target/selfhost/test", item.name+".ll")
+	if item.artifactStem == "" || item.artifactStem == "-" {
+		t.Errorf("test parity %s missing artifact stem", item.name)
+		return 1
+	}
+	result.llPath = filepath.Join("target/selfhost/test", item.artifactStem+".ll")
 	result.metadataPath = result.llPath + ".meta"
 	result.exePath = filepath.Join("target/selfhost/test", item.name)
 	if result.compiler.code != 0 || result.compiler.stdout != "" || result.compiler.stderr != "" {
@@ -265,7 +269,7 @@ func testParityGuardCases() []runParityGuardCase {
 		},
 		{
 			name:     "unsupported_target",
-			args:     []string{"test", "selfhost/tests/cli/test_unknown.kizu"},
+			args:     []string{"test", "selfhost/tests/cli/parse_ok_minimal.kizu"},
 			exitCode: 64,
 			stderr:   selfhostUsageStderr(),
 		},
@@ -302,6 +306,7 @@ func appendTestParityResult(
 	fmt.Fprintf(out, "case.%s.command %s %s\n", item.name, item.command, item.fixture)
 	fmt.Fprintf(out, "case.%s.fixture %s\n", item.name, item.fixture)
 	fmt.Fprintf(out, "case.%s.artifact_mode %s\n", item.name, item.artifactMode)
+	fmt.Fprintf(out, "case.%s.artifact_stem %s\n", item.name, item.artifactStem)
 	fmt.Fprintf(out, "case.%s.compiler.exit %d\n", item.name, result.compiler.code)
 	appendTestParityCompilerResult(out, item, result)
 	appendRunParityArtifactResult(out, item, result)
