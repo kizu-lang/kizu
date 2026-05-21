@@ -74,6 +74,30 @@ func TestNextToken(t *testing.T) {
 	}
 }
 
+// TestDeferToken checks the block cleanup keyword.
+func TestDeferToken(t *testing.T) {
+	l := New(`defer values.deinit();`)
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.Defer, "defer"},
+		{token.Ident, "values"},
+		{token.Dot, "."},
+		{token.Ident, "deinit"},
+		{token.LParen, "("},
+		{token.RParen, ")"},
+		{token.Semicolon, ";"},
+		{token.EOF, ""},
+	}
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)", i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
 // TestLogicalTokens checks and and or without changing identifiers.
 func TestLogicalTokens(t *testing.T) {
 	input := `age >= 20 and age < 130 or false

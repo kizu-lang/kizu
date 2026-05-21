@@ -376,6 +376,23 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsDeferredArenaCleanup checks cleanup runs at block exit.
+func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
+	source := `struct User {
+    name: []const u8
+}
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    defer users.deinit();
+    let alice = users.add(User { name: "alice" });
+    print(users.get(alice).name);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckArenaAllocatorReadOnly checks arena construction reads allocator capabilities.
 func TestCheckArenaAllocatorReadOnly(t *testing.T) {
 	source := `struct User {
@@ -570,6 +587,66 @@ fn main() {
     print(borrowed);
 }`,
 			want: "arena `users` was deinitialized",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsInvalidDeferredCleanup checks the supported defer shape.
+func TestCheckRejectsInvalidDeferredCleanup(t *testing.T) {
+	source := `fn main() {
+    defer print("not cleanup");
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "defer expects cleanup method call") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestCheckRejectsDeferredCleanupExitErrors checks cleanup ownership at exit.
+func TestCheckRejectsDeferredCleanupExitErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "after explicit deinit",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    users.deinit();
+    defer users.deinit();
+}`,
+			want: "arena `users` was deinitialized",
+		},
+		{
+			name: "moved before cleanup",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    defer users.deinit();
+    let moved = users;
+    print(moved);
+}`,
+			want: "moved value `users` was used",
+		},
+		{
+			name: "borrowed at cleanup",
+			source: `struct User { name: []const u8 }
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = arena<User>(allocator);
+    let borrowed = &users;
+    defer users.deinit();
+    while false { print(borrowed); }
+}`,
+			want: "`arena.deinit` cannot run while arena is borrowed",
 		},
 	}
 	runErrorCases(t, cases)

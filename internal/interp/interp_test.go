@@ -171,6 +171,36 @@ fn main() {
 	}
 }
 
+// TestRunDeferCleanupOrder checks nested blocks and reverse cleanup order.
+func TestRunDeferCleanupOrder(t *testing.T) {
+	got := runSource(t, `struct Trace {
+    label: []const u8
+}
+impl Trace {
+    fn deinit(self: Trace) -> void {
+        print(self.label);
+    }
+}
+fn done() -> i64 {
+    let first = Trace { label: "first" };
+    defer first.deinit();
+    if true {
+        let inner = Trace { label: "inner" };
+        defer inner.deinit();
+    }
+    let second = Trace { label: "second" };
+    defer second.deinit();
+    return 7;
+}
+fn main() {
+    print(done());
+}`)
+	want := "inner\nsecond\nfirst\n7\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunEnumValueAccess checks Zig/C-style tag enum runtime values.
 func TestRunEnumValueAccess(t *testing.T) {
 	got := runSource(t, `enum Color {

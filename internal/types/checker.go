@@ -1365,6 +1365,8 @@ func (c *Checker) checkStmt(
 		return c.checkAssignStmt(s, env, unsafe)
 	case *ast.ReturnStmt:
 		return c.checkReturnStmt(s, env, wantReturn, unsafe)
+	case *ast.DeferStmt:
+		return c.checkDeferStmt(s, env, unsafe)
 	case *ast.ExprStmt:
 		_, err := c.checkExpr(s.Expr, env, unsafe)
 		return false, err
@@ -1387,6 +1389,34 @@ func (c *Checker) checkStmt(
 	default:
 		return false, fmt.Errorf("type error: unsupported statement %T", stmt)
 	}
+}
+
+// checkDeferStmt validates the first supported block cleanup registration form.
+func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe bool) (bool, error) {
+	if err := validateDeferCleanupExpr(stmt.Expr); err != nil {
+		return false, err
+	}
+	got, err := c.checkExpr(stmt.Expr, env, unsafe)
+	if err != nil {
+		return false, err
+	}
+	if got != typeVoid {
+		return false, fmt.Errorf("type error: defer cleanup must return void, got %s", got)
+	}
+	return false, nil
+}
+
+// validateDeferCleanupExpr restricts defer to explicit cleanup method calls.
+func validateDeferCleanupExpr(expr ast.Expression) error {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return fmt.Errorf("type error: defer expects cleanup method call")
+	}
+	field, ok := call.Callee.(*ast.FieldExpr)
+	if !ok || field.Name != "deinit" {
+		return fmt.Errorf("type error: defer expects cleanup method call")
+	}
+	return nil
 }
 
 // checkLetStmt validates a let or var declaration.
@@ -5834,6 +5864,7 @@ func isAstScalarType(typ Type) bool {
 		"LetNode", "std::kizu::ast::LetNode",
 		"AssignNode", "std::kizu::ast::AssignNode",
 		"ReturnNode", "std::kizu::ast::ReturnNode",
+		"DeferNode", "std::kizu::ast::DeferNode",
 		"ExprStmtNode", "std::kizu::ast::ExprStmtNode",
 		"WhileNode", "std::kizu::ast::WhileNode",
 		"ForNode", "std::kizu::ast::ForNode",
