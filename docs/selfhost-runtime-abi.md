@@ -286,6 +286,17 @@ ast-node-storage`, `reachable handle ast-node-id`, `arena-allocator-boundary
 explicit`, `arena-handle-provenance checked`, and
 `arena-invalid-handle-diagnostic invalid arena handle`.
 
+For #577, Arena storage is no longer a provenance/count-only smoke. The hosted
+runtime template stores allocator pointer, length, element byte size, and inline
+storage for two `AstNode` payload slots of at most 24 bytes each. `arena.add`
+copies one payload whose byte length matches the configured element size, and
+`arena.get` returns a borrowed view of the stored payload after provenance and
+index checks. `arena.deinit` releases the Arena object containing the inline
+payload storage. The storage artifact metadata records
+`arena-storage ast-node-inline-two-slot`, `arena-get returns-stored-payload`,
+`arena-deinit releases-inline-payload-storage`, and
+`arena-payload-constraints ast-node-copy-scalar-view`.
+
 ADR-0062 fixes the selfhost AST storage constraints for this ABI slice. This is
 not the final general-purpose `std::arena::Arena<T>` payload policy for all Kizu programs;
 future arena payload expansion remains allowed when explicit cleanup,
@@ -486,13 +497,13 @@ runtime storage template. The same Go gate checks
 The storage validation requires the reachable Array, String, Map, diagnostic,
 Arena, and Handle runtime symbols, the `@kizu_selfhost__runtime_storage_smoke`
 entry, explicit allocator-boundary metadata, Array copy-element metadata, String
-byte-buffer metadata, Map string-key/i64 metadata, handle provenance metadata,
-and the absence of Go interpreter/stdprim fallback markers in the storage LLVM
-artifact.
+byte-buffer metadata, Map string-key/i64 metadata, Arena payload metadata,
+handle provenance metadata, and the absence of Go interpreter/stdprim fallback
+markers in the storage LLVM artifact.
 The gate also links `selfhost.storage.ll` with the host capability runtime and a
 tiny C harness, then runs the storage smoke so Array payload storage, String
-byte storage, Map key/value storage, and Arena/Handle calls cannot be only dead
-textual declarations.
+byte storage, Map key/value storage, and Arena payload/Handle behavior cannot be
+only dead textual declarations.
 
 For #457 the same Go gate checks `target/selfhost/selfhost.host.ll` and
 `target/selfhost/selfhost.host.ll.meta`. It validates host capability wrapper
