@@ -200,13 +200,16 @@ go test ./...
 
 `just selfhost-production-from-scratch` builds the stage2 hosted artifact
 through the explicit stage0 bootstrap/oracle boundary, then runs the #458
-production command path and the supported corpus through that artifact.
+production command path, the supported corpus, parse parity, and check parity
+through that artifact.
 
 Local jobs that already have a passing stage2 artifact can run the fast gates:
 
 ```sh
 just selfhost-production-gate
 just selfhost-corpus-gate
+just selfhost-parse-parity-gate
+just selfhost-check-parity-gate
 ```
 
 `just selfhost-production-gate` is the #461 production-boundary gate. It runs
@@ -228,6 +231,13 @@ exit codes. The corpus gate reuses the stage2 artifact and passing bootstrap
 report from `just selfhost-bootstrap`; it does not rebuild bootstrap artifacts
 inside the corpus test. Clean jobs can use
 `just selfhost-corpus-gate-from-scratch` as the explicit combined command.
+
+`just selfhost-check-parity-gate` is the #530 fast parity gate for the bounded
+`check <file>` slice. It runs only entries from
+[`selfhost/tests/cli/check-parity.tsv`](../selfhost/tests/cli/check-parity.tsv)
+through the hosted stage2 artifact and compares checked-in stdout/stderr
+goldens plus exit codes. It reuses the stage2 artifact and passing bootstrap
+report; it does not rebuild bootstrap artifacts inside the parity test.
 
 Heavy cache/perf measurements remain explicit jobs unless a switch issue changes
 the CI policy with recorded timing and cache-size evidence.

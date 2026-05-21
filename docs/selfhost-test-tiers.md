@@ -145,9 +145,11 @@ just selfhost-production-from-scratch
 ```
 
 That command runs `just selfhost-bootstrap`, `just selfhost-production-gate`,
-and `just selfhost-corpus-gate` in sequence. Go is present only as the explicit
-stage0 bootstrap/oracle harness in the first step and as the test runner for the
-gate; the production commands are direct executions of the hosted artifact.
+`just selfhost-corpus-gate`, `just selfhost-parse-parity-gate`, and
+`just selfhost-check-parity-gate` in sequence. Go is present only as the
+explicit stage0 bootstrap/oracle harness in the first step and as the test
+runner for the gate; the production commands are direct executions of the
+hosted artifact.
 
 Measured locally on 2026-05-21 during #461:
 
