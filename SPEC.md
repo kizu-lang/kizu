@@ -72,7 +72,7 @@ match payload binding
 function call
 &T / &mut T borrow parameter
 move semantics
-arena<T> / handle<T>
+std::arena::Arena<T> / std::arena::Handle<T>
 !T / error / try
 limited comptime
 Io capability
@@ -279,8 +279,8 @@ borrow は次のことができません。
 ```text
 std::mem::Box<T>
 shared<T>
-arena<T>
-handle<T>
+std::arena::Arena<T>
+std::arena::Handle<T>
 ```
 
 ## 5. v0 の実装方針
@@ -755,7 +755,7 @@ std::map::Map<K, V>
 std::set::Set<T>
 ```
 
-v0.1 では `arena<T>` / `handle<T>` だけを実装対象にします。
+v0.1 では `std::arena::Arena<T>` / `std::arena::Handle<T>` だけを実装対象にします。
 将来追加する ownership/container 型:
 
 ```text
@@ -765,7 +765,8 @@ slice<T>
 ```
 
 v0.1 では full generics を実装しません。
-`arena<T>`、`handle<T>`、`!T`、raw pointer 型は専用の型構文として扱います。
+`std::arena::Arena<T>`、`std::arena::Handle<T>` は compiler-known な stdlib 型コンストラクタです。
+`!T` と raw pointer 型は専用の型構文として扱います。
 v0.2 では self-host と Kizu source stdlib のため、ADR-0066 の最小明示 function
 generics だけを採用します。
 
@@ -1019,29 +1020,29 @@ fn main() -> void {
 
 ## 10. arena / handle
 
-Kizu は、長寿命の参照を複雑な lifetime で表さず、`arena<T>` と `handle<T>` で表します。
+Kizu は、長寿命の参照を複雑な lifetime で表さず、`std::arena::Arena<T>` と `std::arena::Handle<T>` で表します。
 
 ```kizu
 let allocator = std::mem::page_allocator();
-let users = arena<User>(allocator);
+let users = std::arena::Arena<User>(allocator);
 let alice = users.add(User { name: "alice" });
 print(users.get(alice).name);
 ```
 
-`arena<T>` は複数の `T` を所有します。
+`std::arena::Arena<T>` は複数の `T` を所有します。
 v0 core arena の構築は明示 allocator capability を要求し、
-`arena<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
+`std::arena::Arena<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
 
-`handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
+`std::arena::Handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
 
 ルール:
 
-* `arena<T>(allocator)` は `Allocator` を明示して `arena<T>` を作る
-* `arena<T>.add(value)` は value を arena に move する
-* `arena<T>.add(value)` は `handle<T>` を返す
-* `arena<T>.get(handle)` はローカル borrow を返す
-* `arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
-* `arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
+* `std::arena::Arena<T>(allocator)` は `Allocator` を明示して `std::arena::Arena<T>` を作る
+* `std::arena::Arena<T>.add(value)` は value を arena に move する
+* `std::arena::Arena<T>.add(value)` は `std::arena::Handle<T>` を返す
+* `std::arena::Arena<T>.get(handle)` はローカル borrow を返す
+* `std::arena::Arena<T>.deinit()` は arena を明示 cleanup し、binding を無効化する
+* `std::arena::Arena<T>.deinit()` は owned local receiver の 0 引数呼び出しだけを許可する
 * `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可する
 * handle は borrow より長生きしてよい
 * handle は対応する arena より長生きしてはいけない
@@ -1481,7 +1482,7 @@ safe Kizu code は `Allocator` 型を名前として使い、local binding に�
 明示 allocator を要求する API に渡せます。
 
 `Allocator` は copy 型です。`Array<T>`、`String`、`Map<K, V>`、`Box<T>`、
-`arena<T>` の構築に渡しても allocator binding は move されません。
+`std::arena::Arena<T>` の構築に渡しても allocator binding は move されません。
 作られた owner は自身の allocation と `deinit` に必要な runtime allocator handle を
 保持しますが、`Allocator` 値そのものに user-visible cleanup method はありません。
 allocation が失敗し得る API は `!T` または `!void` で失敗を返します。
@@ -1886,7 +1887,7 @@ Send 相当ルール:
 * `Channel<T>` は `T` が boundary-safe な場合だけ boundary を越えられる
 * local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない
 * raw pointer を field / payload に含む struct / union も boundary を越えられない
-* `arena<T>` / `handle<T>` / `Dyn<Contract>` / `Mutex<T>` / `Task<T>` は
+* `std::arena::Arena<T>` / `std::arena::Handle<T>` / `Dyn<Contract>` / `Mutex<T>` / `Task<T>` は
   v0.1 では boundary を越えられない
 * arena / handle の thread-safe sharing は v0.1 では扱わない
 
@@ -2113,7 +2114,7 @@ borrow escape、borrow 中の move、mutable borrow conflict を検査します�
 
 ### Milestone 7: arena / handle
 
-`arena<T>(allocator)`、`arena.add(value)`、`arena.get(handle)`、`arena.deinit()` を
+`std::arena::Arena<T>(allocator)`、`arena.add(value)`、`arena.get(handle)`、`arena.deinit()` を
 runtime-level で実装します。
 
 ### Milestone 8: typed SSA IR

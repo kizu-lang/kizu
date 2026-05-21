@@ -128,7 +128,7 @@ func TestRunArenaHandle(t *testing.T) {
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
     users.deinit();
@@ -143,7 +143,7 @@ fn main() {
 func TestRunRejectsArenaNonAllocator(t *testing.T) {
 	_, err := parseAndRun(`struct User { name: []const u8 }
 fn main() {
-    let users = arena<User>(1);
+    let users = std::arena::Arena<User>(1);
     print(users);
 }`)
 	if err == nil {
@@ -159,7 +159,7 @@ func TestRunRejectsArenaUseAfterDeinit(t *testing.T) {
 	_, err := parseAndRun(`struct User { name: []const u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     users.deinit();
     users.add(User { name: "alice" });
 }`)

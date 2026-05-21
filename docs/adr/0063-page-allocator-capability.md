@@ -8,7 +8,7 @@ Accepted.
 
 Kizu v0.2 already requires explicit allocator capabilities for owned storage:
 `std::array::Array<T>`, `std::string::String`, `std::map::Map<K, V>`,
-`std::mem::Box<T>`, and `arena<T>` all take an `Allocator` argument.
+`std::mem::Box<T>`, and `std::arena::Arena<T>` all take an `Allocator` argument.
 
 The public API shape repeatedly uses `std::mem::page_allocator() -> Allocator`,
 but `Allocator` itself was not specified as a stable capability type. That left
@@ -34,7 +34,7 @@ can implement. Safe Kizu code can name the type, bind values of that type, and
 pass those values to APIs that explicitly require an allocator capability.
 
 `Allocator` is copyable. Passing an allocator to `Array<T>`, `String`,
-`Map<K, V>`, `Box<T>`, or `arena<T>` reads the capability and does not move the
+`Map<K, V>`, `Box<T>`, or `std::arena::Arena<T>` reads the capability and does not move the
 allocator binding. The created owner stores the runtime allocator handle it
 needs for future allocation and `deinit`; the allocator value itself has no
 user-visible cleanup method.

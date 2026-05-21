@@ -790,7 +790,7 @@ func (e *IndexExpr) String() string {
 	return fmt.Sprintf("%s[%s..%s]", e.Target.String(), start, end)
 }
 
-// ArenaNewExpr represents arena<T>(allocator) construction.
+// ArenaNewExpr represents std::arena::Arena<T>(allocator) construction.
 type ArenaNewExpr struct {
 	TypeName  string
 	Allocator Expression
@@ -802,9 +802,9 @@ func (*ArenaNewExpr) expressionNode() {}
 // String returns a compact debug representation of arena construction.
 func (e *ArenaNewExpr) String() string {
 	if e.Allocator == nil {
-		return fmt.Sprintf("arena<%s>(<missing>)", e.TypeName)
+		return fmt.Sprintf("std::arena::Arena<%s>(<missing>)", e.TypeName)
 	}
-	return fmt.Sprintf("arena<%s>(%s)", e.TypeName, e.Allocator.String())
+	return fmt.Sprintf("std::arena::Arena<%s>(%s)", e.TypeName, e.Allocator.String())
 }
 
 // StructLiteralExpr represents construction of a struct value.

@@ -7,9 +7,9 @@ Accepted.
 ## Context
 
 ADR-0058 introduced `std::kizu::ast::Ast` as the narrow selfhost AST owner:
-nodes live in `arena<AstNode>(allocator)`, child lists live in
+nodes live in `std::arena::Arena<AstNode>(allocator)`, child lists live in
 `std::array::Array<NodeId>`, and `NodeId` is an opaque wrapper over
-`handle<AstNode>`.
+`std::arena::Handle<AstNode>`.
 
 Before expanding hosted `check <file>` beyond the current narrow corpus, the
 allocator, arena payload, handle provenance, cleanup, and borrowed-view rules
@@ -22,7 +22,7 @@ runtime fallback that the hosted artifact cannot support.
 The selfhost AST arena is a special-purpose storage shape for
 `std::kizu::ast::AstNode`; it is not a general-purpose arena payload expansion.
 This ADR constrains hosted selfhost AST storage only. It does not define the
-final `arena<T>` payload policy for all Kizu programs, and it must not be read
+final `std::arena::Arena<T>` payload policy for all Kizu programs, and it must not be read
 as a decision to keep Kizu's general storage model artificially small.
 
 Kizu should preserve explicit systems-language ergonomics: future arena payload
@@ -45,7 +45,7 @@ For the selfhost AST arena, `AstNode` payloads may contain only:
 - `std::string::String`
 - `std::map::Map<K, V>`
 - `std::mem::Box<T>`
-- `arena<T>` or arbitrary `handle<T>` outside `NodeId`
+- `std::arena::Arena<T>` or arbitrary `std::arena::Handle<T>` outside `NodeId`
 - `Allocator`, `Io`, task/thread/channel/mutex/atomic capabilities
 - raw pointers
 
@@ -79,7 +79,7 @@ Runtime checking is still required at the hosted artifact boundary:
   must be statically rejected before the arena is released
 
 `Allocator` is a visible copyable capability value. Passing an allocator to
-`arena<T>`, `Array<T>`, `String`, `Map<K, V>`, or `Box<T>` reads the capability;
+`std::arena::Arena<T>`, `Array<T>`, `String`, `Map<K, V>`, or `Box<T>` reads the capability;
 it does not transfer allocator ownership. The created owner stores the runtime
 allocator pointer needed by its own `deinit`. Allocation failure is recoverable
 and must be represented by `!T` or `!void` on operations that can allocate.
@@ -115,7 +115,7 @@ multi-exit cleanup patterns without a reason.
 - Any future need for arena payloads that own `String`, `Array`, `Map`, `Box`,
   nested arenas, or concurrency capabilities must become a bounded #495/#496
   child issue before implementation. That future work may broaden general
-  `arena<T>` or a specific arena owner once it defines explicit cleanup and
+  `std::arena::Arena<T>` or a specific arena owner once it defines explicit cleanup and
   checker behavior.
 - `run <file>` and `kizu test <file>` remain separate execution-strategy work;
   this ADR only fixes the storage contract needed to expand hosted

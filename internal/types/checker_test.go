@@ -745,7 +745,7 @@ func TestCheckAcceptsArenaHandle(t *testing.T) {
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
     users.deinit();
@@ -762,7 +762,7 @@ func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     defer users.deinit();
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
@@ -798,7 +798,7 @@ func TestCheckRejectsArenaDeinitErrors(t *testing.T) {
 			source: `struct User { name: []const u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     users.deinit(1);
 }`,
 			want: "`arena.deinit` expects 0 args",
@@ -806,10 +806,10 @@ fn main() {
 		{
 			name: "field receiver",
 			source: `struct User { name: []const u8 }
-struct Registry { users: arena<User> }
+struct Registry { users: std::arena::Arena<User> }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     let registry = Registry { users: users };
     registry.users.deinit();
 }`,
@@ -822,7 +822,7 @@ fn main() {
 // TestCheckAcceptsOwnerFieldCleanup allows direct field cleanup inside owner deinit.
 func TestCheckAcceptsOwnerFieldCleanup(t *testing.T) {
 	source := `struct User { name: []const u8 }
-struct Registry { users: arena<User> }
+struct Registry { users: std::arena::Arena<User> }
 impl Registry {
     fn deinit(self: Registry) -> void {
         self.users.deinit();
@@ -831,7 +831,7 @@ impl Registry {
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     let registry = Registry { users: users };
     registry.deinit();
 }`
@@ -1083,21 +1083,21 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 			source: `struct User { name: []const u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     let p = cast<ptr<User>>(alice);
     print(p);
 }`,
-			want: "cannot cast handle<User> to ptr<User>",
+			want: "cannot cast std::arena::Handle<User> to ptr<User>",
 		},
 		{
 			name: "arena non allocator",
 			source: `struct User { name: []const u8 }
 fn main() {
-    let users = arena<User>(1);
+    let users = std::arena::Arena<User>(1);
     print(users);
 }`,
-			want: "`arena<User>` expects Allocator, got i64",
+			want: "`std::arena::Arena<User>` expects Allocator, got i64",
 		},
 	}
 	runErrorCases(t, cases)

@@ -89,13 +89,13 @@ policy.
 
 ### Arena and Handle
 
-- `arena<T>(allocator)` requires an explicit `Allocator` capability.
+- `std::arena::Arena<T>(allocator)` requires an explicit `Allocator` capability.
 - Arena construction reads the allocator capability; it does not move it.
-- `arena<T>.add(value)` moves `value` into the arena.
-- `arena<T>.add(value)` returns `handle<T>`.
-- `handle<T>` is an opaque ID, not a raw pointer.
-- `arena<T>.get(handle<T>)` returns a local borrow-like value.
-- `arena<T>.deinit()` explicitly releases the arena and invalidates the binding.
+- `std::arena::Arena<T>.add(value)` moves `value` into the arena.
+- `std::arena::Arena<T>.add(value)` returns `std::arena::Handle<T>`.
+- `std::arena::Handle<T>` is an opaque ID, not a raw pointer.
+- `std::arena::Arena<T>.get(std::arena::Handle<T>)` returns a local borrow-like value.
+- `std::arena::Arena<T>.deinit()` explicitly releases the arena and invalidates the binding.
 - Values read through `arena.get` cannot be moved out.
 - A handle can only be used with the arena that produced it.
 - A handle cannot outlive its arena.
@@ -106,7 +106,7 @@ policy.
 - Selfhost AST arena payloads cannot contain owned containers, allocator or I/O
   capabilities, arbitrary arenas or handles, concurrency capabilities, or raw
   pointers.
-- This selfhost AST rule is not the final general-purpose `arena<T>` payload
+- This selfhost AST rule is not the final general-purpose `std::arena::Arena<T>` payload
   policy. Broader arena payload support may be added when explicit cleanup,
   allocator, borrow, and checker rules are specified.
 - Runtime arena diagnostics cover mismatched or out-of-range handles with
@@ -179,7 +179,7 @@ policy.
   concurrency boundaries.
 - Structs and unions containing raw pointer fields or payloads may not cross
   concurrency boundaries.
-- `arena<T>`, `handle<T>`, `Dyn<Contract>`, `Mutex<T>`, and `Task<T>` may not
+- `std::arena::Arena<T>`, `std::arena::Handle<T>`, `Dyn<Contract>`, `Mutex<T>`, and `Task<T>` may not
   cross concurrency boundaries in v0.1.
 - Arena / handle thread-safe sharing is not part of v0.1.
 - `std::task::partition_mut(init, count)` creates checked disjoint output slots.

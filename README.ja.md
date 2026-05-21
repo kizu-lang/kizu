@@ -30,7 +30,7 @@ v0.1 の対象は interpreter-first の language core です。
 - type checker
 - move checker
 - local borrow checker
-- `arena<T>` / `handle<T>`
+- `std::arena::Arena<T>` / `std::arena::Handle<T>`
 - `while`、`break`、`continue`、labeled loop branch、bounded `for`
 - unsafe 境界と C ABI 宣言の検査
 - 限定的な `comptime` expression / parameter / branch selection

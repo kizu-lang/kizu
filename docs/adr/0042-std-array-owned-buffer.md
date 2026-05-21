@@ -51,7 +51,7 @@ While a mutable element borrow is alive, reads such as `get`, `len`, and
 safety without exposing lifetime annotations.
 
 Array element types are conservative in v0.2. Safe `Array<T>` rejects raw
-pointers, `arena<T>`, `handle<T>`, nested arrays, and concurrency capability
+pointers, `std::arena::Arena<T>`, `std::arena::Handle<T>`, nested arrays, and concurrency capability
 types. The rejection is recursive through struct fields and union payloads.
 These exclusions avoid storing values whose lifetime, provenance, or
 thread-boundary rules are not yet fully specified for owned collections.

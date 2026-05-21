@@ -442,7 +442,7 @@ func TestParseArenaAndStructLiteral(t *testing.T) {
     name: []const u8,
 }
 fn main() {
-    let users = arena<User>(allocator);
+    let users = std::arena::Arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
 }`
@@ -452,30 +452,11 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `struct User { name: []const u8 }
-fn main() { let users = arena<User>(allocator); let alice = users.add(User { name: "alice" }); ` +
+fn main() { let users = std::arena::Arena<User>(allocator); ` +
+		`let alice = users.add(User { name: "alice" }); ` +
 		`print(users.get(alice).name); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-// TestParseRejectsArenaAllocatorArity keeps arena construction capability-explicit.
-func TestParseRejectsArenaAllocatorArity(t *testing.T) {
-	cases := []string{
-		`struct User { name: []const u8 }
-fn main() { let users = arena<User>(); }`,
-		`struct User { name: []const u8 }
-fn main() { let users = arena<User>(allocator, allocator); }`,
-	}
-	for _, source := range cases {
-		p := New(lexer.New(source))
-		p.ParseProgram()
-		if len(p.Errors()) == 0 {
-			t.Fatalf("expected arena allocator arity error for %q", source)
-		}
-		if !strings.Contains(p.Errors()[0], "expects exactly one allocator argument") {
-			t.Fatalf("got %q", p.Errors()[0])
-		}
 	}
 }
 

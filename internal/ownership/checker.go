@@ -1049,17 +1049,19 @@ func (c *Checker) readScalarExpr(expr ast.Expression) (string, error) {
 // readArenaNewExpr validates allocator use without consuming its capability.
 func (c *Checker) readArenaNewExpr(expr *ast.ArenaNewExpr, env *scope) (string, error) {
 	if expr.Allocator == nil {
-		return "", fmt.Errorf("arena error: `arena<%s>` expects allocator argument", expr.TypeName)
+		return "", fmt.Errorf(
+			"arena error: `std::arena::Arena<%s>` expects exactly one allocator argument",
+			expr.TypeName)
 	}
 	got, err := c.readExpr(expr.Allocator, env)
 	if err != nil {
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("arena error: `arena<%s>` expects Allocator, got %s",
+		return "", fmt.Errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
 			expr.TypeName, got)
 	}
-	return fmt.Sprintf("arena<%s>", expr.TypeName), nil
+	return fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName), nil
 }
 
 // readControlExpr checks control flow expressions without consuming owned values.
@@ -2013,9 +2015,9 @@ func (c *Checker) rejectArrayStorageGeneric(typeName string, seen map[string]boo
 		return nil
 	}
 	switch base {
-	case "arena":
+	case "std::arena::Arena":
 		return fmt.Errorf("array error: Array element cannot be arena in v0.2")
-	case "handle":
+	case "std::arena::Handle":
 		return fmt.Errorf("array error: Array element cannot be handle in v0.2")
 	case "std::array::Array":
 		return fmt.Errorf("array error: Array element cannot be nested array in v0.2")
@@ -2096,6 +2098,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return "", fmt.Errorf("move error: unsupported type application `%s`", expr.String())
 	}
 	typeArg := c.instantiateTypeArgText(expr.TypeArg)
+	if name == "std.arena.Arena" {
+		return c.checkArenaTypeApply(typeArg, args, env)
+	}
 	if typ, ok, err := c.checkGenericUserTypeApply(name, typeArg, args, env); ok || err != nil {
 		return typ, err
 	}
@@ -2113,6 +2118,33 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return typ, err
 	}
 	return "", fmt.Errorf("move error: `%s` does not take a type argument", name)
+}
+
+// checkArenaTypeApply validates std::arena::Arena<T>(allocator) ownership.
+func (c *Checker) checkArenaTypeApply(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	parts, ok := splitGenericArgs(typeArg)
+	if !ok || len(parts) != 1 {
+		return "", fmt.Errorf("arena error: std::arena::Arena expects 1 type argument")
+	}
+	elem := parts[0]
+	if len(args) != 1 {
+		return "", fmt.Errorf(
+			"arena error: `std::arena::Arena<%s>` expects exactly one allocator argument",
+			elem)
+	}
+	got, err := c.readExpr(args[0], env)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", fmt.Errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
+			elem, got)
+	}
+	return fmt.Sprintf("std::arena::Arena<%s>", elem), nil
 }
 
 // checkBuiltinContainerTypeApply validates std-only generic container primitives.
@@ -3202,7 +3234,7 @@ func (c *Checker) checkLocalReceiverMethod(
 		}
 		return c.checkMapMethod(arena, elem, field.Name, args, env)
 	}
-	if !ok || base != "arena" {
+	if !ok || base != "std::arena::Arena" {
 		return c.checkNonArenaMethod(arena, field.Name, args, env)
 	}
 	switch field.Name {
@@ -3325,7 +3357,7 @@ func (c *Checker) bindingForDirectFieldReceiver(receiver *directFieldReceiver) *
 			receiver.owner.fieldMutBorrows[receiver.field],
 	}
 	base, _, ok := splitGenericType(receiver.typeName)
-	if ok && base == "arena" {
+	if ok && base == "std::arena::Arena" {
 		value.arenaID = c.directFieldArenaID(receiver)
 	}
 	if isAstType(receiver.typeName) {
@@ -3358,7 +3390,7 @@ func (c *Checker) checkDirectFieldReceiverByType(
 	if ok && base == "std::mem::Box" {
 		return c.checkBoxMethod(value, name, args)
 	}
-	if ok && base == "arena" {
+	if ok && base == "std::arena::Arena" {
 		return c.checkFieldArenaMethod(value, name, args, env)
 	}
 	if value.typeName == "std::kizu::ast::Ast" {
@@ -3396,7 +3428,7 @@ func (c *Checker) checkFieldArenaGet(
 		return "", fmt.Errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
-	if !ok || base != "arena" {
+	if !ok || base != "std::arena::Arena" {
 		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
 	}
 	if err := c.checkKnownHandleProvenance(arena, args[0], env); err != nil {
@@ -4719,7 +4751,7 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 		return "", fmt.Errorf("arena error: `arena.add` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
-	if !ok || base != "arena" {
+	if !ok || base != "std::arena::Arena" {
 		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
 	}
 	got, err := c.moveContextualExpr(args[0], arg, env)
@@ -4729,7 +4761,7 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 	if got != arg {
 		return "", fmt.Errorf("arena error: `arena.add` expects %s, got %s", arg, got)
 	}
-	return fmt.Sprintf("handle<%s>", arg), nil
+	return fmt.Sprintf("std::arena::Handle<%s>", arg), nil
 }
 
 // checkArenaGet reads a handle and returns a local borrow-like value.
@@ -4738,7 +4770,7 @@ func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scop
 		return "", fmt.Errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
-	if !ok || base != "arena" {
+	if !ok || base != "std::arena::Arena" {
 		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
 	}
 	if err := c.checkHandleProvenance(arena, args[0], env); err != nil {
@@ -5024,6 +5056,10 @@ func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *s
 		value.arenaID = value.id
 		return
 	}
+	if isArenaConstructorExpr(expr) {
+		value.arenaID = value.id
+		return
+	}
 	if arena := c.arenaAddReceiver(expr, env); arena != nil {
 		value.handleArenaID = arena.arenaID
 	}
@@ -5033,6 +5069,20 @@ func (c *Checker) setArenaProvenance(value *binding, expr ast.Expression, env *s
 	if astReceiver := c.astChildRangeReceiver(expr, env); astReceiver != nil {
 		value.rangeArenaID = astReceiver.arenaID
 	}
+}
+
+// isArenaConstructorExpr reports the public std::arena::Arena<T>(allocator) constructor.
+func isArenaConstructorExpr(expr ast.Expression) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	typeApply, ok := call.Callee.(*ast.TypeApplyExpr)
+	if !ok {
+		return false
+	}
+	name, ok := qualifiedName(typeApply.Callee)
+	return ok && name == "std.arena.Arena"
 }
 
 // directFieldArenaID returns a stable arena identity for one owner field.
@@ -5210,7 +5260,7 @@ func (c *Checker) arenaAddReceiver(expr ast.Expression, env *scope) *binding {
 		return nil
 	}
 	base, _, ok := splitGenericType(direct.typeName)
-	if !ok || base != "arena" {
+	if !ok || base != "std::arena::Arena" {
 		return nil
 	}
 	return c.bindingForDirectFieldReceiver(direct)
@@ -5231,7 +5281,7 @@ func (c *Checker) isArenaGetExpr(expr ast.Expression, env *scope) bool {
 		return false
 	}
 	base, _, ok := splitGenericType(receiver)
-	return ok && base == "arena"
+	return ok && base == "std::arena::Arena"
 }
 
 // containsArenaGet reports whether an expression reads through arena.get.
@@ -5893,13 +5943,13 @@ func (c *Checker) rejectConcurrencyBoundaryGeneric(typeName string, seen map[str
 		return nil
 	}
 	switch base {
-	case "arena":
+	case "std::arena::Arena":
 		return fmt.Errorf("thread error: arena cannot cross concurrency boundary")
 	case "std::array::Array":
 		return fmt.Errorf("thread error: Array cannot cross concurrency boundary in v0.2")
 	case "std::map::Map":
 		return fmt.Errorf("thread error: Map cannot cross concurrency boundary in v0.2")
-	case "handle":
+	case "std::arena::Handle":
 		return fmt.Errorf("thread error: handle cannot cross concurrency boundary")
 	case "Dyn":
 		return fmt.Errorf("thread error: Dyn cannot cross concurrency boundary")

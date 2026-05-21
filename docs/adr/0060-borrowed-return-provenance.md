@@ -44,7 +44,7 @@ Kizu keeps the visible safety boundary needed for zero-copy system code without
 adding lifetime variables, lifetime bounds, or anonymous lifetime syntax.
 
 APIs that need longer-lived relationships should use owned containers,
-`arena<T>` / `handle<T>`, stable IDs, copied keys, or explicit unsafe wrappers
+`std::arena::Arena<T>` / `std::arena::Handle<T>`, stable IDs, copied keys, or explicit unsafe wrappers
 with safe-side invariants. If a future API needs a return tied to multiple
 sources, it must be added as a bounded follow-up with examples and checker
 coverage instead of reintroducing general lifetime programming.
