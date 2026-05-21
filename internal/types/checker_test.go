@@ -136,12 +136,6 @@ func TestCheckRejectsReturnAndOperatorErrors(t *testing.T) {
 }`,
 			want: "operator `+` operands must have same type",
 		},
-		{
-			name: "no integer promotion",
-			source: `fn take(a: i32) -> i32 { return a ;}
-fn main() { print(take(1)); }`,
-			want: "arg 1 of `take` expects i32, got i64",
-		},
 	}
 	runErrorCases(t, cases)
 }
@@ -918,6 +912,81 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsContextualIntegerLiterals checks literal-only integer narrowing.
+func TestCheckAcceptsContextualIntegerLiterals(t *testing.T) {
+	source := `struct Byte {
+    value: u8,
+}
+struct Counter {}
+union ByteValue {
+    Item(u8),
+}
+extern "c" fn raw_byte() -> ptr<u8>
+impl Counter {
+    fn push(self: Counter, value: u8) -> u8 {
+        return value;
+    }
+}
+fn take_u8(x: u8) -> u8 { return x ;}
+fn take_i32(x: i32) -> i32 { return x ;}
+fn returns_u8() -> u8 { return 7 ;}
+fn returns_error() -> !u8 { return 8 ;}
+fn main() -> !void {
+    var assigned = take_u8(1);
+    assigned = 2;
+    let field = Byte { value: 65 };
+    let variant = ByteValue::Item(66);
+    let counter = Counter {};
+    unsafe {
+        let p = raw_byte();
+        ptr_write(p, 67);
+    }
+    print(counter.push(68));
+    print(take_i32(-1));
+    print(returns_u8());
+    print(try returns_error());
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsContextualIntegerLiteralOverflow checks narrowing bounds.
+func TestCheckRejectsContextualIntegerLiteralOverflow(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "call literal overflow",
+			source: `fn take(x: u8) -> u8 { return x ;}
+fn main() {
+    print(take(256));
+}`,
+			want: "integer literal `256` does not fit u8",
+		},
+		{
+			name: "return literal overflow",
+			source: `fn bad() -> u8 {
+    return 300;
+}`,
+			want: "integer literal `300` does not fit u8",
+		},
+		{
+			name: "variable is not narrowed",
+			source: `fn take(x: u8) -> u8 { return x ;}
+fn main() {
+    let x = 1;
+    print(take(x));
+}`,
+			want: "arg 1 of `take` expects u8, got i64",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckAcceptsUnsafePointerCast checks pointer casts remain inside unsafe.
 func TestCheckAcceptsUnsafePointerCast(t *testing.T) {
 	source := `extern "c" fn raw() -> ptr<const u8>
@@ -925,7 +994,7 @@ fn main() {
     unsafe {
         let p = raw();
         let writable = cast<ptr<u8>>(p);
-        ptr_write(writable, cast<u8>(1));
+        ptr_write(writable, 1);
     }
 }`
 	if err := checkSource(source); err != nil {

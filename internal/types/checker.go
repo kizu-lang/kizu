@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -1596,7 +1597,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope, unsafe bool)
 	if err != nil {
 		return false, err
 	}
-	got, err := c.checkExpr(stmt.Value, env, unsafe)
+	got, err := c.checkContextualExpr(stmt.Value, want, env, unsafe)
 	if err != nil {
 		return false, err
 	}
@@ -1699,6 +1700,11 @@ func (c *Checker) checkReturnValue(
 		}
 		return true, nil
 	}
+	coerced, err := c.coerceContextualIntegerLiteral(expr, want, got)
+	if err != nil {
+		return false, err
+	}
+	got = coerced
 	if !sameType(got, want) {
 		return false, fmt.Errorf("type error: return expects %s, got %s", want, got)
 	}
@@ -1716,16 +1722,28 @@ func (c *Checker) checkErrorUnionReturn(
 	got Type,
 	unsafe bool,
 ) (bool, error) {
-	if elem, ok := errorUnionElement(want); ok && sameType(got, Type(elem)) {
-		if err := c.checkReturnBorrowSources(expr, env, Type(elem), unsafe); err != nil {
+	if elem, ok := errorUnionElement(want); ok {
+		success := Type(elem)
+		coerced, err := c.coerceContextualIntegerLiteral(expr, success, got)
+		if err != nil {
 			return false, err
 		}
-		return true, nil
+		if sameType(coerced, success) {
+			if err := c.checkReturnBorrowSources(expr, env, success, unsafe); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
 	}
 	if errorType, elem, ok := errorUnionParts(want); ok {
-		if sameType(got, Type(elem)) || sameType(got, Type(errorType)) {
-			if sameType(got, Type(elem)) {
-				if err := c.checkReturnBorrowSources(expr, env, Type(elem), unsafe); err != nil {
+		success := Type(elem)
+		coerced, err := c.coerceContextualIntegerLiteral(expr, success, got)
+		if err != nil {
+			return false, err
+		}
+		if sameType(coerced, success) || sameType(got, Type(errorType)) {
+			if sameType(coerced, success) {
+				if err := c.checkReturnBorrowSources(expr, env, success, unsafe); err != nil {
 					return false, err
 				}
 			}
@@ -2606,6 +2624,84 @@ func literalType(expr ast.Expression) (Type, error) {
 	}
 }
 
+// checkContextualExpr validates an expression and narrows integer literals to want.
+func (c *Checker) checkContextualExpr(
+	expr ast.Expression,
+	want Type,
+	env *scope,
+	unsafe bool,
+) (Type, error) {
+	got, err := c.checkExpr(expr, env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	return c.coerceContextualIntegerLiteral(expr, want, got)
+}
+
+// coerceContextualIntegerLiteral treats fit-checked integer literals as want.
+func (c *Checker) coerceContextualIntegerLiteral(
+	expr ast.Expression,
+	want Type,
+	got Type,
+) (Type, error) {
+	if sameType(got, want) || got != typeI64 || !integerTypes[want] {
+		return got, nil
+	}
+	value, ok := integerLiteralValue(expr)
+	if !ok {
+		return got, nil
+	}
+	if !integerLiteralFitsType(value, want) {
+		return "", fmt.Errorf("type error: integer literal `%s` does not fit %s",
+			expr.String(), want)
+	}
+	return want, nil
+}
+
+// integerLiteralValue returns an interpreter-representable integer literal.
+func integerLiteralValue(expr ast.Expression) (int64, bool) {
+	switch e := expr.(type) {
+	case *ast.IntExpr:
+		value, err := strconv.ParseInt(e.Value, 10, 64)
+		return value, err == nil
+	case *ast.PrefixExpr:
+		if e.Operator != "-" {
+			return 0, false
+		}
+		value, ok := integerLiteralValue(e.Right)
+		if !ok {
+			return 0, false
+		}
+		return -value, true
+	default:
+		return 0, false
+	}
+}
+
+// integerLiteralFitsType checks fixed-width integer bounds used by contextual typing.
+func integerLiteralFitsType(value int64, typ Type) bool {
+	switch typ {
+	case "i8":
+		return value >= -128 && value <= 127
+	case "i16":
+		return value >= -32768 && value <= 32767
+	case "i32":
+		return value >= -2147483648 && value <= 2147483647
+	case "i64", "isize":
+		return true
+	case "u8":
+		return value >= 0 && value <= 255
+	case "u16":
+		return value >= 0 && value <= 65535
+	case "u32":
+		return value >= 0 && value <= 4294967295
+	case "u64", "usize":
+		return value >= 0
+	default:
+		return false
+	}
+}
+
 // checkIdentExpr resolves a variable reference in lexical scopes.
 func checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) {
 	typ, ok := env.lookup(expr.Name)
@@ -3003,7 +3099,7 @@ func (c *Checker) checkCoreArg(
 	if want == stdprim.ArgIo {
 		return c.checkIoArg(arg, env, unsafe, name)
 	}
-	got, err := c.checkExpr(arg, env, unsafe)
+	got, err := c.checkContextualExpr(arg, Type(want), env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -3525,6 +3621,10 @@ func (c *Checker) checkBoxConstructor(
 	if err != nil {
 		return "", true, err
 	}
+	got, err = c.coerceContextualIntegerLiteral(args[1], elem, got)
+	if err != nil {
+		return "", true, err
+	}
 	if !sameType(got, elem) {
 		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects %s value, got %s",
 			elem, elem, got)
@@ -3789,7 +3889,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 		} else if !sameType(got, Type(keyType)) {
 			return "", fmt.Errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
-		got, err := c.checkExpr(args[1], env, unsafe)
+		got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -3824,7 +3924,7 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	got, err := c.checkContextualExpr(args[0], Type(keyType), env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -3956,7 +4056,7 @@ func (c *Checker) checkGenericUserArg(
 			return err
 		}
 	}
-	got, err := c.checkExpr(arg, env, unsafe)
+	got, err := c.checkContextualExpr(arg, want, env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -4067,6 +4167,10 @@ func (c *Checker) checkUserCallArg(
 		return c.checkFunctionNameParam(name, fn, idx, arg)
 	}
 	got, err := c.checkExpr(arg, env, unsafe)
+	if err != nil {
+		return err
+	}
+	got, err = c.coerceContextualIntegerLiteral(arg, fn.params[idx], got)
 	if err != nil {
 		return err
 	}
@@ -4209,6 +4313,10 @@ func (c *Checker) checkUnionConstructorCall(
 	if err != nil {
 		return "", true, err
 	}
+	got, err = c.coerceContextualIntegerLiteral(args[0], Type(payload), got)
+	if err != nil {
+		return "", true, err
+	}
 	if !sameType(got, Type(payload)) &&
 		!c.returnValueMatchesBorrowParam(args[0], env, Type(payload), got) {
 		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects %s, got %s",
@@ -4275,6 +4383,10 @@ func (c *Checker) checkStructLiteralExpr(
 			return "", err
 		}
 		want := fieldDeclaredType(field)
+		got, err := c.coerceContextualIntegerLiteral(exprs[field.Name], want, got)
+		if err != nil {
+			return "", err
+		}
 		if !sameType(got, want) &&
 			!c.returnValueMatchesBorrowParam(exprs[field.Name], env, want, got) {
 			return "", fmt.Errorf("type error: field `%s.%s` expects %s, got %s",
@@ -4726,11 +4838,11 @@ func (c *Checker) checkStringByteArg(
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	got, err := c.checkContextualExpr(args[0], typeU8, env, unsafe)
 	if err != nil {
 		return err
 	}
-	if got != "u8" {
+	if got != typeU8 {
 		return fmt.Errorf("type error: `String.%s` expects u8, got %s", name, got)
 	}
 	return nil
@@ -4900,7 +5012,7 @@ func (c *Checker) checkArrayAppendArg(
 	if len(args) != 1 {
 		return "", fmt.Errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -4977,7 +5089,7 @@ func (c *Checker) checkArraySet(
 	} else if got != typeI64 {
 		return "", fmt.Errorf("type error: `Array.set` expects i64 index, got %s", got)
 	}
-	got, err := c.checkExpr(args[1], env, unsafe)
+	got, err := c.checkContextualExpr(args[1], elem, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -5059,7 +5171,7 @@ func (c *Checker) checkMapInsert(
 	} else if !sameType(got, typeByteString) {
 		return "", fmt.Errorf("type error: `Map.insert` expects []const u8 key, got %s", got)
 	}
-	got, err := c.checkExpr(args[1], env, unsafe)
+	got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
 	if err != nil {
 		return "", err
 	}
@@ -5265,7 +5377,7 @@ func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope, unsafe bo
 		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
 			return "", err
 		}
-		got, err := c.checkExpr(arg, env, unsafe)
+		got, err := c.checkContextualExpr(arg, fn.params[idx], env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -5293,7 +5405,7 @@ func (c *Checker) checkChannelMethod(
 		if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
 			return "", err
 		}
-		got, err := c.checkExpr(args[0], env, unsafe)
+		got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -5380,7 +5492,7 @@ func (c *Checker) checkAtomicMethod(
 		if len(args) != 1 {
 			return "", fmt.Errorf("type error: `atomic.store` expects 1 arg, got %d", len(args))
 		}
-		got, err := c.checkExpr(args[0], env, unsafe)
+		got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -5569,7 +5681,7 @@ func (c *Checker) checkThreadScopedTyped(
 	if _, _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
 		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects function name")
 	}
-	got, err := c.checkExpr(args[2], env, unsafe)
+	got, err := c.checkContextualExpr(args[2], argType, env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
@@ -5593,7 +5705,7 @@ func (c *Checker) checkAtomic(
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("type error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
@@ -5619,7 +5731,7 @@ func (c *Checker) checkMutex(
 			return "", true, err
 		}
 	}
-	got, err := c.checkExpr(args[0], env, unsafe)
+	got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
@@ -5675,7 +5787,7 @@ func (c *Checker) checkMethodArgs(
 				return "", err
 			}
 		}
-		got, err := c.checkExpr(arg, env, unsafe)
+		got, err := c.checkContextualExpr(arg, want, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -5829,7 +5941,7 @@ func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	if !ok || strings.HasPrefix(string(ptrType), "?") || strings.HasPrefix(elem, "const ") {
 		return "", fmt.Errorf("type error: `ptr_write` expects mutable non-null raw pointer")
 	}
-	valueType, err := c.checkExpr(expr.Args[1], env, unsafe)
+	valueType, err := c.checkContextualExpr(expr.Args[1], Type(elem), env, unsafe)
 	if err != nil {
 		return "", err
 	}
