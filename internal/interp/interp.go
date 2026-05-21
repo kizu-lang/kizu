@@ -591,7 +591,7 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	case *ast.IndexExpr:
 		return i.evalIndexExpr(e, env)
 	case *ast.ArenaNewExpr:
-		return arenaValue(), nil
+		return i.evalArenaNewExpr(e, env)
 	case *ast.StructLiteralExpr:
 		return i.evalStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
@@ -601,6 +601,21 @@ func (i *Interpreter) evalExpr(expr ast.Expression, env *Env) (Value, error) {
 	default:
 		return i.evalControlExpr(expr, env)
 	}
+}
+
+// evalArenaNewExpr checks the explicit allocator before creating arena storage.
+func (i *Interpreter) evalArenaNewExpr(expr *ast.ArenaNewExpr, env *Env) (Value, error) {
+	if expr.Allocator == nil {
+		return voidValue(), fmt.Errorf("runtime error: arena<%s> expects allocator", expr.TypeName)
+	}
+	allocator, err := i.evalExpr(expr.Allocator, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if allocator.kind != kindAllocator {
+		return voidValue(), fmt.Errorf("runtime error: arena<%s> expects Allocator", expr.TypeName)
+	}
+	return arenaValue(), nil
 }
 
 // evalCastExpr evaluates casts, including explicit typed error adaptation.

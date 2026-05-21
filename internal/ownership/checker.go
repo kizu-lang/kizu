@@ -874,7 +874,7 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	case *ast.IndexExpr:
 		return c.readIndexExpr(e, env)
 	case *ast.ArenaNewExpr:
-		return fmt.Sprintf("arena<%s>", e.TypeName), nil
+		return c.readArenaNewExpr(e, env)
 	case *ast.StructLiteralExpr:
 		return c.readStructLiteralExpr(e, env)
 	case *ast.FieldExpr:
@@ -884,6 +884,22 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 	default:
 		return c.readControlExpr(expr, env)
 	}
+}
+
+// readArenaNewExpr validates allocator use without consuming its capability.
+func (c *Checker) readArenaNewExpr(expr *ast.ArenaNewExpr, env *scope) (string, error) {
+	if expr.Allocator == nil {
+		return "", fmt.Errorf("arena error: `arena<%s>` expects allocator argument", expr.TypeName)
+	}
+	got, err := c.readExpr(expr.Allocator, env)
+	if err != nil {
+		return "", err
+	}
+	if got != "Allocator" {
+		return "", fmt.Errorf("arena error: `arena<%s>` expects Allocator, got %s",
+			expr.TypeName, got)
+	}
+	return fmt.Sprintf("arena<%s>", expr.TypeName), nil
 }
 
 // readControlExpr checks control flow expressions without consuming owned values.
@@ -3032,6 +3048,7 @@ func (c *Checker) checkAstAddExtendedExprMethod(
 	case "add_arena_new_expr":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	default:

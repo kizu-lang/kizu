@@ -44,7 +44,7 @@ go test ./...
 | copy through borrow dereference | `borrow_deref_copy.kizu` | copies an `i64` through `.*` |
 | copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
 | mutable borrow parameter | `mutable_borrow.kizu` | `&mut` updates through explicit `.*` dereference |
-| `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle |
+| `arena<T>` / `handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
 | custom error type handling | `custom_error.kizu` | handles a domain error with `union` and `match` |
@@ -135,6 +135,9 @@ single source file. Run them with `kizu check <package-root>`.
 | runtime borrow cannot cross comptime | `negative/comptime_borrow_escape.kizu` | `runtime value cannot be used` |
 | `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
 | `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |
+| arena construction requires an allocator | `negative/arena_missing_allocator.kizu` | `allocator argument` |
+| arena construction accepts one allocator | `negative/arena_extra_allocator_arg.kizu` | `allocator argument` |
+| arena allocator argument must be `Allocator` | `negative/arena_non_allocator_arg.kizu` | `expects Allocator` |
 | handles are tied to one arena | `negative/arena_wrong_handle.kizu` | `does not belong to arena` |
 | inline handles are tied to one arena | `negative/arena_inline_wrong_handle.kizu` | `does not belong to arena` |
 | unknown handle provenance is rejected | `negative/arena_unknown_handle.kizu` | `unknown provenance` |

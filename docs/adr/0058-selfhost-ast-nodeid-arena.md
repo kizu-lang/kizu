@@ -20,7 +20,7 @@ one AST arena and are only resolved through AST methods.
 
 `std::kizu::ast::Ast` owns:
 
-- `arena<AstNode>` for node storage
+- `arena<AstNode>(allocator)` for node storage
 - `std::array::Array<NodeId>` for variable-length child ranges
 - `SourceFile` metadata
 

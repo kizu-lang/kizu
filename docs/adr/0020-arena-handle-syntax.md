@@ -9,25 +9,29 @@ Kizu は borrowed return の由来を `borrows <source>` で明示する。
 `arena<T>` と `handle<T>` で表す。
 
 一方で、v0 では full generics を実装しない。
-そのため `arena<T>()` を通常の generic function call として扱うと、実装範囲が広がりすぎる。
+そのため `arena<T>(allocator)` を通常の generic function call として扱うと、
+実装範囲が広がりすぎる。
 
 Phase 6 では、arena / handle の安全性と使い方を先に固定する必要がある。
 
 ## 決定
 
-v0 では `arena<T>()` を専用の組み込み構文として扱う。
+v0 では `arena<T>(allocator)` を専用の組み込み構文として扱う。
+allocator は hidden global ではなく、呼び出し側が明示する capability とする。
 
 採用する構文:
 
 ```kizu
-let users = arena<User>();
+let allocator = std::mem::page_allocator();
+let users = arena<User>(allocator);
 let alice = users.add(User { name: "alice" });
 print(users.get(alice).name);
 ```
 
 意味:
 
-- `arena<T>()` は `arena<T>` を作る
+- `arena<T>(allocator)` は `Allocator` capability を明示して `arena<T>` を作る
+- allocator 引数は読み取りであり、arena 構築で move されない
 - `arena.add(value)` は `value` を arena に move する
 - `arena.add(value)` は `handle<T>` を返す
 - `arena.get(handle)` は所有権を移さず、ローカル borrow 相当の値を返す
@@ -37,8 +41,9 @@ print(users.get(alice).name);
 
 ## v0 の制約
 
-`arena<T>()` は generic function call ではない。
+`arena<T>(allocator)` は generic function call ではない。
 parser と checker は、v0 専用 construct として扱う。
+`arena<T>()`、`arena<T>(a, b)`、非 `Allocator` 引数は拒否する。
 
 v0 では次を実装しない。
 

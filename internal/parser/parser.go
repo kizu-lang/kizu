@@ -1303,22 +1303,34 @@ func (p *Parser) parseTypeApplyExpr(callee ast.Expression) ast.Expression {
 	return expr
 }
 
-// parseArenaNewExpr parses arena<T>().
+// parseArenaNewExpr parses arena<T>(allocator).
 func (p *Parser) parseArenaNewExpr() ast.Expression {
 	expr := &ast.ArenaNewExpr{}
 	if !p.expectPeek(token.LT) {
 		return expr
 	}
-	if !p.expectPeek(token.Ident) {
+	p.nextToken()
+	expr.TypeName = p.parseTypeName()
+	if expr.TypeName == "" || !p.expectTypeClose() {
 		return expr
 	}
-	expr.TypeName = p.cur.Literal
-	if !p.expectPeek(token.GT) {
+	if !p.expectPeek(token.LParen) {
 		return expr
 	}
-	if !p.expectPeek(token.LParen) || !p.expectPeek(token.RParen) {
+	if p.peek.Type == token.RParen {
+		p.errorf("arena<%s> expects exactly one allocator argument", expr.TypeName)
+		p.nextToken()
 		return expr
 	}
+	p.nextToken()
+	expr.Allocator = p.parseExpression(lowest)
+	if p.peek.Type == token.Comma {
+		p.errorf("arena<%s> expects exactly one allocator argument", expr.TypeName)
+		for p.peek.Type != token.RParen && p.peek.Type != token.EOF {
+			p.nextToken()
+		}
+	}
+	p.expectPeek(token.RParen)
 	return expr
 }
 

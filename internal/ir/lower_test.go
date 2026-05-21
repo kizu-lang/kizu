@@ -124,8 +124,8 @@ const whileSource = `fn main() {
 const arenaSource = `struct User {
     name: []const u8
 }
-fn main() {
-    let users = arena<User>();
+fn main(allocator: Allocator) {
+    let users = arena<User>(allocator);
     let alice = users.add(User { name: "alice" });
     print(users.get(alice).name);
 }`
@@ -220,9 +220,9 @@ while.end.3:
   return void: void
 }`
 
-const arenaSnapshot = `fn main() -> void {
+const arenaSnapshot = `fn main(%allocator: Allocator) -> void {
 entry:
-  %1: arena<User> = arena.new User
+  %1: arena<User> = arena.new %allocator: Allocator, User
   %2: []const u8 = const "alice"
   %3: User = struct.new {name: %2: []const u8}
   %4: handle<User> = arena.add %1: arena<User>, %3: User

@@ -922,17 +922,21 @@ fn main() -> void {
 Kizu は、長寿命の参照を複雑な lifetime で表さず、`arena<T>` と `handle<T>` で表します。
 
 ```kizu
-let users = arena<User>();
+let allocator = std::mem::page_allocator();
+let users = arena<User>(allocator);
 let alice = users.add(User { name: "alice" });
 print(users.get(alice).name);
 ```
 
 `arena<T>` は複数の `T` を所有します。
+v0 core arena の構築は明示 allocator capability を要求し、
+`arena<T>()` は無効です。allocator 引数は読み取りとして扱われ、move されません。
 
 `handle<T>` はポインタではありません。arena 内の値を指す opaque な ID です。
 
 ルール:
 
+* `arena<T>(allocator)` は `Allocator` を明示して `arena<T>` を作る
 * `arena<T>.add(value)` は value を arena に move する
 * `arena<T>.add(value)` は `handle<T>` を返す
 * `arena<T>.get(handle)` はローカル borrow を返す
@@ -1927,7 +1931,7 @@ borrow escape、borrow 中の move、mutable borrow conflict を検査します�
 
 ### Milestone 7: arena / handle
 
-`arena<T>()`、`arena.add(value)`、`arena.get(handle)` を runtime-level で実装します。
+`arena<T>(allocator)`、`arena.add(value)`、`arena.get(handle)` を runtime-level で実装します。
 
 ### Milestone 8: typed SSA IR
 

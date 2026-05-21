@@ -491,6 +491,7 @@ fn dump_arena_new_expr(
 ) -> !void {
     print("ArenaNewExpr");
     try dump_node(source, ast, arena_new.type_node);
+    try dump_node(source, ast, arena_new.allocator);
     return;
 }
 
@@ -893,7 +894,10 @@ func parserParityExpressionSeedCases() []parserParityCase {
 			name:   "seed/fn_struct_literal",
 			source: `fn main() { let user = User { name: "a", age: 1 }; }`,
 		},
-		{name: "seed/fn_arena_new_expr", source: "fn main() { let nodes = arena<Node>(); }"},
+		{
+			name:   "seed/fn_arena_new_expr",
+			source: "fn main() { let nodes = arena<Node>(allocator); }",
+		},
 	}
 }
 
@@ -1854,13 +1858,18 @@ func summarizeStructFieldInitSubset(field kizuast.FieldValue) ([]string, string)
 	return append(lines, value...), ""
 }
 
-// summarizeArenaNewExprSubset summarizes arena<T>() construction.
+// summarizeArenaNewExprSubset summarizes arena<T>(allocator) construction.
 func summarizeArenaNewExprSubset(expr *kizuast.ArenaNewExpr) ([]string, string) {
 	typeName, reason := summarizeTypeNameSubset(expr.TypeName)
 	if reason != "" {
 		return nil, reason
 	}
-	return append([]string{"ArenaNewExpr"}, typeName...), ""
+	allocator, reason := summarizeExprSubset(expr.Allocator)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := append([]string{"ArenaNewExpr"}, typeName...)
+	return append(lines, allocator...), ""
 }
 
 // isStdParserSpace reports whitespace understood by std::kizu::lexer.
