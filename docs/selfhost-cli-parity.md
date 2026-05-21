@@ -20,19 +20,20 @@ The current hosted stage2 artifact supports these command slices:
 | `check <print-hello source file>` | #530/#592 positive source-shape check slice | `just selfhost-check-parity-gate` |
 | `check <moved-value source file>` | #530/#592 negative source-shape check slice | `just selfhost-check-parity-gate` |
 | `parse <minimal-main-return source file>` | #579 positive source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
+| `parse <print-call source file>` | #594 positive call-statement source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `parse <missing-expression source file>` | #586 negative source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `run <print-hello source file>` | #588 positive source-shape slice via canonical emitted artifact | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
 | `test <expect-ok source file>` | #590 positive source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
 | `test <expect-failure source file>` | #590 assertion-failure source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
 
-`selfhost/tests/cli/parse-parity.tsv` is the #525/#579/#586 parse parity
+`selfhost/tests/cli/parse-parity.tsv` is the #525/#579/#586/#594 parse parity
 manifest. It records command args, fixture paths, expected exit codes, and
-checked-in stdout/stderr golden paths. The positive minimal-main-return and
-negative missing-expression rows each include the original fixture plus an alias
-fixture with the same source bytes, proving the hosted paths are no longer bound
-to one fixed path. The gate runs through `target/selfhost/stage2/selfhost` and
-records `go.cmd-kizu-fallback none`.
+checked-in stdout/stderr golden paths. The positive minimal-main-return,
+positive print-call, and negative missing-expression rows each include the
+original fixture plus an alias fixture with the same source bytes, proving the
+hosted paths are no longer bound to one fixed path. The gate runs through
+`target/selfhost/stage2/selfhost` and records `go.cmd-kizu-fallback none`.
 
 `selfhost/tests/cli/check-parity.tsv` is the #530 check parity manifest. It
 records command args, fixture paths, expected exit codes, and checked-in
@@ -159,7 +160,7 @@ release scope:
 | Slice | Decision | Reason | Next child issue shape |
 | --- | --- | --- | --- |
 | broader `check <file>` frontend | Partially deferred | #592 moves the first positive and negative check shapes off single hardcoded paths, but broader parsing, type checking, move checking, and borrow checking are not claimed. | Add one check source shape at a time, keeping checked-in goldens and no Go fallback. |
-| broader `parse <file>` diagnostics | Partially deferred | #579 and #586 move the first positive and negative parse shapes off single hardcoded paths, but broader parsing and diagnostic recovery are not claimed. | Add one parse diagnostic/source shape at a time, keeping checked-in goldens and no Go fallback. |
+| broader `parse <file>` diagnostics | Partially deferred | #579, #586, and #594 move the first positive, call-statement, and negative parse shapes off single hardcoded paths, but broader parsing and diagnostic recovery are not claimed. | Add one parse diagnostic/source shape at a time, keeping checked-in goldens and no Go fallback. |
 | broader `run <file>` | Partially deferred | #588 moves the first positive and negative run shapes off single hardcoded paths, but broader frontend, lowering, and artifact naming are not claimed. | Extend `run-parity.tsv` one source shape at a time, using hosted-artifact validation and no Go fallback. |
 | broader `kizu test <file>` | Partially deferred | #590 moves the first expect-ok and expect-failure shapes off single hardcoded paths, but broader frontend, lowering, artifact naming, and discovery are not claimed. | Extend `test-parity.tsv` one source shape at a time, using hosted-artifact validation and no discovery. |
 | cache/status, cache/prune, why-rebuild, cache artifact commands | Deferred | Hosted artifact cache ownership, persistence, pruning, and no-op rebuild semantics are not designed. | Split into cache command issues with explicit cache directory, artifact paths, mutation rules, stdout/stderr, and cache-size acceptance checks. |
