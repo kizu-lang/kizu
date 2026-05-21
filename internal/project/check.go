@@ -680,7 +680,7 @@ func (c *graphChecker) qualifyCallExpr(
 	return &cp, nil
 }
 
-// qualifyTypeApplyExpr rewrites explicit type arguments in constructor calls.
+// qualifyTypeApplyExpr rewrites explicit static type arguments in constructor calls.
 func (c *graphChecker) qualifyTypeApplyExpr(
 	module *moduleUnit,
 	expr *ast.TypeApplyExpr,
@@ -962,7 +962,7 @@ func (r typeResolver) resolvePrefixed(name string, prefix string) (string, error
 	return prefix + inner, nil
 }
 
-// resolveGeneric resolves a generic base and each type argument.
+// resolveGeneric resolves a generic base and each static type argument.
 func (r typeResolver) resolveGeneric(base string, args string) (string, error) {
 	resolvedBase, err := r.resolveBase(base)
 	if err != nil {
@@ -1048,7 +1048,7 @@ func splitTypeApply(name string) (string, string, bool) {
 	return name[:start], strings.TrimSuffix(name[start+1:], ">"), true
 }
 
-// splitTypeArgs splits comma-separated type arguments with nested angle support.
+// splitTypeArgs splits comma-separated static type arguments with nested angle support.
 func splitTypeArgs(args string) ([]string, error) {
 	parts := []string{}
 	depth := 0
@@ -1066,11 +1066,11 @@ func splitTypeArgs(args string) ([]string, error) {
 			}
 		}
 		if depth < 0 {
-			return nil, fmt.Errorf("module error: invalid type arguments `%s`", args)
+			return nil, fmt.Errorf("module error: invalid static arguments `%s`", args)
 		}
 	}
 	if depth != 0 {
-		return nil, fmt.Errorf("module error: invalid type arguments `%s`", args)
+		return nil, fmt.Errorf("module error: invalid static arguments `%s`", args)
 	}
 	parts = append(parts, strings.TrimSpace(args[start:]))
 	return parts, nil

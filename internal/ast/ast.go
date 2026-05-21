@@ -721,7 +721,7 @@ func (e *CallExpr) String() string {
 	return fmt.Sprintf("%s(%s)", e.Callee.String(), strings.Join(args, ", "))
 }
 
-// TypeApplyExpr represents a namespace item with explicit type arguments.
+// TypeApplyExpr represents a call target with explicit static type arguments.
 type TypeApplyExpr struct {
 	Callee  Expression
 	TypeArg string
@@ -730,7 +730,7 @@ type TypeApplyExpr struct {
 // expressionNode marks TypeApplyExpr as an expression node.
 func (*TypeApplyExpr) expressionNode() {}
 
-// String returns a compact debug representation of the type application.
+// String returns a compact debug representation of the static type application.
 func (e *TypeApplyExpr) String() string {
 	return fmt.Sprintf("%s<%s>", e.Callee.String(), e.TypeArg)
 }

@@ -478,7 +478,7 @@ fn main() { let token = token::Token { kind: 1 }; }`
 	}
 }
 
-// TestParseMultiArgGenericTypes checks generic type argument lists.
+// TestParseMultiArgGenericTypes checks static type argument lists.
 func TestParseMultiArgGenericTypes(t *testing.T) {
 	input := `fn lookup(table: std::map::Map<[]const u8, i64>) -> i64 {
     return table.get("main");
@@ -571,7 +571,7 @@ fn main() { let size = comptime (4 * 1024); ` +
 	}
 }
 
-// TestParseMinimalGenerics checks explicit function type args and type literals.
+// TestParseMinimalGenerics checks explicit static type args and type literals.
 func TestParseMinimalGenerics(t *testing.T) {
 	input := `fn IsI64<T>(value: T) -> bool {
     comptime if T == type<i64> {
@@ -594,6 +594,24 @@ fn main() {
 fn main() { print(IsI64<i64>(1)); print(IsI64<bool>(false)); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseRejectsNonTypeStaticArg keeps v0.2 static arguments type-only.
+func TestParseRejectsNonTypeStaticArg(t *testing.T) {
+	input := `fn Identity<T>(value: T) -> T {
+    return value;
+}
+fn main() {
+    print(Identity<1>(1));
+}`
+	p := New(lexer.New(input))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatalf("expected parser error")
+	}
+	if !strings.Contains(p.Errors()[0], "expected static type argument") {
+		t.Fatalf("got %q", p.Errors()[0])
 	}
 }
 

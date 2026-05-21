@@ -96,7 +96,7 @@ go test ./...
 | deferred cleanup | `defer_cleanup.kizu` | registers explicit cleanup for Array, String, Map, and arena owners |
 | deferred cleanup order | `defer_order.kizu` | runs nested block cleanups and function cleanups in reverse registration order |
 | minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions and typed equality through `kizu test` |
-| minimal explicit generics | `minimal_generics.kizu` | checks explicit function type arguments and `comptime if T == type<i64>` |
+| minimal explicit generics | `minimal_generics.kizu` | checks explicit static type arguments and `comptime if T == type<i64>` |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
 | typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
@@ -210,7 +210,8 @@ single source file. Run them with `kizu check <package-root>`.
 | mutex method primitives are reserved | `negative/std_mutex_get_builtin_direct_call.kizu` | `reserved` |
 | array method primitives are reserved | `negative/std_array_append_builtin_direct_call.kizu` | `reserved` |
 | map method primitives are reserved | `negative/std_map_insert_builtin_direct_call.kizu` | `reserved` |
-| generic calls require explicit type args | `negative/generic_function_missing_type_args.kizu` | `requires explicit type arguments` |
+| generic calls require explicit static args | `negative/generic_function_missing_type_args.kizu` | `requires explicit static arguments` |
+| non-type static args are reserved | `negative/generic_function_non_type_static_arg.kizu` | `expected static type argument` |
 | `Function` parameters are std-only | `negative/function_parameter_runtime.kizu` | `reserved for std` |
 | task groups require Io | `negative/task_group_without_io.kizu` | `expects io` |
 | old spawn Io argument is rejected | `negative/task_spawn_old_io_arg.kizu` | `function name` |
