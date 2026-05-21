@@ -30,6 +30,7 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std.builtin.process_arg_count":  {Return: "i64"},
 	"std.builtin.process_arg":        {Args: []ArgKind{ArgI64}, Return: "![]const u8"},
 	"std.builtin.process_env":        {Args: []ArgKind{ArgBytes}, Return: "![]const u8"},
+	"std.builtin.test_fail":          {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
 var removedExact = map[string]string{

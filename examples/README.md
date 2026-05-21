@@ -231,6 +231,7 @@ single source file. Run them with `kizu check <package-root>`.
 | array append element type must match `T` | `negative/std_array_wrong_type.kizu` | `Array.append` |
 | array append moves non-copy values | `negative/std_array_append_moves.kizu` | `moved value` |
 | array get is copy-only in v0.2 | `negative/std_array_get_non_copy.kizu` | `requires copy element` |
+| array get_or_panic traps on invalid indexes | `negative/std_array_get_or_panic_bounds.kizu` | `Array.get_or_panic index out of bounds` |
 | array elements cannot be raw pointers | `negative/std_array_raw_pointer_element.kizu` | `raw pointer` |
 | array elements cannot be handles | `negative/std_array_handle_element.kizu` | `handle` |
 | arrays cannot cross channel boundary | `negative/std_array_channel_send.kizu` | `Array cannot cross concurrency boundary` |
@@ -286,12 +287,12 @@ single source file. Run them with `kizu check <package-root>`.
 | maps cannot cross task boundaries | `negative/std_map_task_spawn.kizu` | `Map cannot cross concurrency boundary` |
 | maps cannot cross channel boundaries | `negative/std_map_channel_send.kizu` | `Map cannot cross concurrency boundary` |
 | arrays cannot store maps in v0.2 | `negative/std_array_map_element.kizu` | `std::map::Map` |
-| testing assertion failure is readable | `negative/std_testing_failure.kizu` | `expected 4, got 3` |
+| testing assertion failure is readable | `negative/std_testing_failure.kizu` | `expected condition to be true` |
 | testing expect failure is readable | `negative/std_testing_expect_failure.kizu` | `expected condition to be true` |
-| testing bool equality failure is readable | `negative/std_testing_bool_failure.kizu` | `expected true, got false` |
-| testing bytes equality failure is readable | `negative/std_testing_bytes_failure.kizu` | `expected "token", got "lexer"` |
+| testing bool condition failure is readable | `negative/std_testing_bool_failure.kizu` | `expected condition to be true` |
+| testing bytes condition failure is readable | `negative/std_testing_bytes_failure.kizu` | `expected condition to be true` |
 | testing fail uses caller message | `negative/std_testing_fail.kizu` | `custom failure` |
-| testing helpers enforce argument types | `negative/std_testing_wrong_type.kizu` | `expects i64` |
+| testing helpers enforce argument types | `negative/std_testing_wrong_type.kizu` | `expects bool` |
 | channel send moves non-copy values | `negative/channel_send_move.kizu` | `moved value` |
 | channel cannot send borrows | `negative/channel_send_borrow.kizu` | `concurrency boundary` |
 | channel cannot send safe raw pointers | `negative/channel_send_pointer.kizu` | `raw pointer` |

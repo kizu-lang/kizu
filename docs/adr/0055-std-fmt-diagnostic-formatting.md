@@ -4,10 +4,10 @@ Status: 採用
 
 ## Context
 
-`std::testing` diagnostics should move out of Go-backed builtins without losing
-useful assertion messages. A shortcut such as replacing value-aware diagnostics
-with fixed messages would reduce the trusted Go surface, but it would also make
-the test runner less useful for self-host compiler component tests.
+Caller-owned diagnostics should move out of Go-backed builtins without adding
+hidden formatting or allocation. `std::testing::expect` intentionally keeps a
+fixed failure message in v0.2, but domain-specific tests still need an explicit
+way to build messages before returning `std::testing::fail(...)`.
 
 Kizu already has `std::string::String` as the explicit allocator-backed owned
 byte buffer. Diagnostic formatting should build on that buffer instead of adding
@@ -47,8 +47,8 @@ or implicit conversion to C strings.
 
 ## Consequences
 
-- `std::testing` can construct value-aware assertion diagnostics in Kizu source
-  and delete `std::builtin::testing_*` formatting behavior after this API exists.
+- Caller code can construct value-aware test diagnostics in Kizu source and pass
+  the resulting bytes to `std::testing::fail`.
 - Diagnostic construction stays explicit about ownership and allocation.
 - The Go implementation may keep only lower-level storage primitives and other
   host/runtime boundaries; scalar formatting should be Kizu-movable behavior.

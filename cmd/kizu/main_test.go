@@ -156,13 +156,13 @@ func TestResolveStdModulesIncludesTransitiveStdSourceDeps(t *testing.T) {
 // TestResolveStdModulesOrdersTestingDeps checks dependency-before-dependent order.
 func TestResolveStdModulesOrdersTestingDeps(t *testing.T) {
 	got, err := resolveStdModules(`fn main() -> !void {
-    try std::testing::expect_equal_i64(1, 1);
+    std::testing::expect(1 == 1);
     return void;
 }`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mem", "array", "string", "fmt", "testing"}
+	want := []string{"testing"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v, want %v", got, want)
 	}

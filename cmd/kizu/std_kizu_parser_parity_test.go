@@ -875,7 +875,7 @@ func parserParityFunctionBodySeedCases() []parserParityCase {
 		{
 			name: "seed/fn_let_assignment_bool_qualified_call",
 			source: "fn main() -> !void { let ok = true; var age = 30; " +
-				"age = age + 1; try std::testing::expect(ok); return; }",
+				"age = age + 1; std::testing::expect(ok); return; }",
 		},
 		{
 			name: "seed/fn_if_else_logical",

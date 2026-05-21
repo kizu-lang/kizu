@@ -15,25 +15,24 @@ Go の test suite だけに依存すると、self-host compiler へ移行する�
 v0.2 で `std::testing` の最小 API を Kizu source として実装する。
 
 ```text
-std::testing::expect(condition: bool) -> !void
-std::testing::expect_equal_i64(expected: i64, actual: i64) -> !void
-std::testing::expect_equal_bool(expected: bool, actual: bool) -> !void
-std::testing::expect_equal_bytes(expected: []const u8, actual: []const u8) -> !void
+std::testing::expect(condition: bool) -> void
 std::testing::fail(message: []const u8) -> !void
 ```
 
-Assertion failure は panic ではなく `!void` の error として返す。
-test source は `try` で失敗を伝播し、runner が readable な failure message を表示する。
+`expect` は assertion ごとの `try` を不要にするため void を返す。
+condition failure は `std::builtin::test_fail(message: []const u8) -> void`
+経由で runtime error として停止し、runner が readable な failure message を表示する。
+Go 側の責務は、この明示 trap primitive と runner の未処理 runtime error 表示境界に限定する。
 
-`expect` と `fail` は fixed message または caller-provided byte message を
-`error(...)` に渡す。Equality helpers は `std::mem` で比較し、失敗時だけ
-明示 allocator-backed `std::string::String` を作り、`std::fmt` で deterministic な
-expected / actual diagnostic を構築して `error(...)` に渡す。
+`fail` は caller-provided byte message を通常の `error(...)` に渡す `!void`
+helper のまま残す。unreachable match arm など、呼び出し側の error-union 経路へ
+明示的に戻したい場合は `return std::testing::fail("...");` を使う。
 
-`error(...)` は message bytes を error payload に copy して所有するため、
-`std::testing` は local `String.as_bytes()` view を返さない。Go 側の責務は
-`kizu test` runner、error payload の所有境界、unhandled error 表示境界に限定し、
-`std::builtin::testing_*` は持たない。
+Generics 不在のまま `expect_equal_<type>` family を増やすと API と diagnostic 実装が
+型ごとに爆発するため、v0.2 の public testing API には含めない。
+値の比較は `expect(left == right)`、byte slice は
+`expect(std::mem::equal_bytes(left, right))` のように caller 側で明示する。
+必要なら caller が `std::fmt` と `fail` で domain-specific diagnostic を構築する。
 
 `kizu test <file>` は v0.2 では discovery なしの single-file runner とする。
 file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示する。
@@ -41,8 +40,9 @@ file を check して `main` を実行し、未処理 error がなければ `tes
 ## Consequences
 
 - self-host compiler component tests を Kizu source として書き始められる。
-- expected / actual の順序を固定できる。
-- assertion diagnostics can evolve in Kizu with `std::fmt` instead of growing
-  Go-backed stdlib behavior.
-- generic equality、test discovery、location-aware diagnostics は後続に残す。
-- failure は通常の error-union 経路を通るため、例外や hidden runtime は不要。
+- assertion の大半から `try` が消え、テストコードの signal/noise が下がる。
+- generics なしで typed equality helper を増やす圧力を避けられる。
+- expected / actual の rich diagnostic は generic equality か message builder helper の
+  設計後に再導入する。
+- `expect` failure は通常の recoverable error ではなく、明示 test trap になる。
+- test discovery、location-aware diagnostics は後続に残す。

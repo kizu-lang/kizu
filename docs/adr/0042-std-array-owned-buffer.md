@@ -28,6 +28,7 @@ array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
 array.get(index: i64) -> !T
+array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
 array.at_mut(index: i64) -> !&mut T borrows self
 array.set(index: i64, value: T) -> !void
@@ -38,9 +39,11 @@ array.deinit() -> void
 allocator factory or binding; `std::array::Array<T>()` is rejected.
 
 `append` moves non-copy values into the array. In v0.2, `get` is copy-only and
-returns `!T` so out-of-bounds access is a recoverable checked error. Non-copy
-elements are read or updated through local borrow views returned by `at` and
-`at_mut`.
+returns `!T` so out-of-bounds access is a recoverable checked error.
+`get_or_panic` is the explicit trap variant for tests and invariant-checked
+code where a bounds failure should stop execution instead of propagating.
+Non-copy elements are read or updated through local borrow views returned by
+`at` and `at_mut`.
 
 While an element borrow is alive, `append`, `set`, and `deinit` are rejected.
 While a mutable element borrow is alive, reads such as `get`, `len`, and
@@ -59,7 +62,8 @@ after `deinit` is a move/use-after-free style error in safe Kizu.
 ## Consequences
 
 - Safe Kizu has an explicit allocator boundary before owned collections.
-- Bounds failures are readable `!T` errors, not traps or unchecked access.
+- Recoverable bounds failures stay readable `!T` errors through `get`.
+- Test/invariant code can opt into a named trap with `get_or_panic`.
 - `Array<T>` does not expose raw pointers.
 - `Array<T>` cannot cross task/thread/channel boundaries in v0.2.
 - Self-host work can use copy token enums with `get` and non-copy token structs

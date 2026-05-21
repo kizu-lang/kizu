@@ -1094,6 +1094,9 @@ func (i *Interpreter) evalQualifiedCoreBuiltin(
 	if value, ok, err := i.evalProcessBuiltin(name, args, env); ok || err != nil {
 		return value, ok, err
 	}
+	if value, ok, err := i.evalTestingBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
 	return voidValue(), false, nil
 }
 
@@ -1250,6 +1253,22 @@ func (i *Interpreter) evalProcessBuiltin(
 	default:
 		return voidValue(), false, nil
 	}
+}
+
+// evalTestingBuiltin evaluates explicit std::testing failure traps.
+func (i *Interpreter) evalTestingBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	if name != "std.builtin.test_fail" {
+		return voidValue(), false, nil
+	}
+	message, err := i.evalMemOneBytes("std::testing::expect", args, env)
+	if err != nil {
+		return voidValue(), true, err
+	}
+	return voidValue(), true, fmt.Errorf("runtime error: %s", message)
 }
 
 // evalTaskBuiltin evaluates structured task and data-parallel std functions.
@@ -1684,7 +1703,8 @@ func (i *Interpreter) evalBuiltinTypeApply(
 		value, err := i.evalArrayConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_get", "std.builtin.array_at", "std.builtin.array_at_mut",
+		"std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		value, err := i.evalArrayPrimitive(name, args, env)
 		return value, true, err
@@ -2710,6 +2730,8 @@ func (i *Interpreter) evalArrayRuntimeMethod(
 		return evalArrayAsBytes(array, args)
 	case "get":
 		return i.evalArrayGet(array, args, env)
+	case "get_or_panic":
+		return i.evalArrayGetOrPanic(array, args, env)
 	case "at":
 		return i.evalArrayAt(array, args, env, false)
 	case "at_mut":
@@ -2862,6 +2884,22 @@ func (i *Interpreter) evalArrayGet(array Value, args []ast.Expression, env *Env)
 	}
 	if index < 0 || index >= len(array.array.values) {
 		return errorUnionValue("Array.get index out of bounds"), nil
+	}
+	return array.array.values[index], nil
+}
+
+// evalArrayGetOrPanic reads one element or traps on an invalid test-time index.
+func (i *Interpreter) evalArrayGetOrPanic(
+	array Value,
+	args []ast.Expression,
+	env *Env,
+) (Value, error) {
+	index, err := i.evalArrayIndex("Array.get_or_panic", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= len(array.array.values) {
+		return voidValue(), fmt.Errorf("runtime error: Array.get_or_panic index out of bounds")
 	}
 	return array.array.values[index], nil
 }
