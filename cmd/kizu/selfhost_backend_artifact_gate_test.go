@@ -187,6 +187,7 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
 		"declare i64 @kizu_selfhost__host_capability_smoke()\n",
 		"define i1 @kizu_selfhost__slice_equal",
+		"define i1 @kizu_selfhost__slice_starts_with_dash",
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
 	}
@@ -219,6 +220,9 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"entry @kizu_selfhost__cli_main\n",
 		"cli-command check selfhost\n",
 		"cli-command stage selfhost\n",
+		"cli-command parse selfhost/tests/cli/parse_ok_minimal.kizu\n",
+		"cli-command parse selfhost/tests/cli/parse_invalid_missing_expr.kizu\n",
+		"cli-parity-manifest selfhost/tests/cli/parse-parity.tsv\n",
 		"cli-hosted-smoke no-go\n",
 		"validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate\n",
 		"external @kizu_rt_mem_page_allocator\n",

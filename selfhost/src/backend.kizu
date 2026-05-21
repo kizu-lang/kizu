@@ -282,6 +282,9 @@ fn render_llvm_metadata(
     try append_line(out, "entry @kizu_selfhost__cli_main");
     try append_line(out, "cli-command check selfhost");
     try append_line(out, "cli-command stage selfhost");
+    try append_line(out, "cli-command parse selfhost/tests/cli/parse_ok_minimal.kizu");
+    try append_line(out, "cli-command parse selfhost/tests/cli/parse_invalid_missing_expr.kizu");
+    try append_line(out, "cli-parity-manifest selfhost/tests/cli/parse-parity.tsv");
     try append_line(out, "cli-hosted-smoke no-go");
     try append_line(out, "validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate");
     try append_line(out, "external @kizu_rt_mem_page_allocator");
@@ -378,7 +381,33 @@ fn load_host_capability_metadata_tail(io: Io) -> ![]const u8 {
 fn append_cli_globals(out: &mut std::string::String) -> !void {
     try append_llvm_constant(out, "check", "5", "check");
     try append_llvm_constant(out, "stage", "5", "stage");
+    try append_llvm_constant(out, "parse", "5", "parse");
     try append_llvm_constant(out, "selfhost", "8", "selfhost");
+    try append_llvm_constant(
+        out,
+        "parse_ok_fixture",
+        "40",
+        "selfhost/tests/cli/parse_ok_minimal.kizu"
+    );
+    try append_llvm_constant(
+        out,
+        "parse_invalid_fixture",
+        "50",
+        "selfhost/tests/cli/parse_invalid_missing_expr.kizu"
+    );
+    try append_llvm_constant(out, "parse_ok_source", "22", "fn main() { return; }\0A");
+    try append_llvm_constant(
+        out,
+        "parse_invalid_source",
+        "28",
+        "fn main() { let value = ; }\0A"
+    );
+    try append_llvm_constant(
+        out,
+        "parse_invalid_stderr",
+        "62",
+        "error: expected expression, got ; at 1:25\0Aerror: parse failed\0A"
+    );
     try append_llvm_constant(out, "hello_example", "19", "examples/hello.kizu");
     try append_llvm_constant(
         out,
@@ -490,6 +519,7 @@ fn append_llvm_constant(
 
 fn append_cli_functions(out: &mut std::string::String) -> !void {
     try append_slice_equal_function(out);
+    try append_slice_starts_with_dash_function(out);
     try append_cli_main_function(out);
     return;
 }
@@ -529,10 +559,31 @@ fn append_slice_equal_function(out: &mut std::string::String) -> !void {
     return;
 }
 
+fn append_slice_starts_with_dash_function(out: &mut std::string::String) -> !void {
+    try append_line(out, "define i1 @kizu_selfhost__slice_starts_with_dash(");
+    try append_line(out, "  %kizu.slice.u8 %value");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %len = extractvalue %kizu.slice.u8 %value, 1");
+    try append_line(out, "  %has_byte = icmp sgt i64 %len, 0");
+    try append_line(out, "  br i1 %has_byte, label %load, label %false");
+    try append_line(out, "load:");
+    try append_line(out, "  %ptr = extractvalue %kizu.slice.u8 %value, 0");
+    try append_line(out, "  %byte = load i8, ptr %ptr");
+    try append_line(out, "  %is_dash = icmp eq i8 %byte, 45");
+    try append_line(out, "  ret i1 %is_dash");
+    try append_line(out, "false:");
+    try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
 fn append_cli_main_function(out: &mut std::string::String) -> !void {
     try append_cli_main_header(out);
     try append_cli_main_dispatch(out);
     try append_cli_corpus_blocks(out);
+    try append_cli_parse_blocks(out);
     try append_cli_check_blocks(out);
     try append_cli_stage_blocks(out);
     try append_cli_error_blocks(out);
@@ -561,6 +612,22 @@ fn append_cli_main_dispatch(out: &mut std::string::String) -> !void {
     try append_line(out, "dispatch:");
     try append_line(out, "  %command = extractvalue %kizu.error.slice.u8 %command_result, 1");
     try append_line(out, "  %target = extractvalue %kizu.error.slice.u8 %target_result, 1");
+    try append_line(out,
+        "  %command_is_flag = call i1 @kizu_selfhost__slice_starts_with_dash(%kizu.slice.u8 %command)");
+    try append_line(out, "  br i1 %command_is_flag, label %usage, label %check_target_flag");
+    try append_line(out, "check_target_flag:");
+    try append_line(out,
+        "  %target_is_flag = call i1 @kizu_selfhost__slice_starts_with_dash(%kizu.slice.u8 %target)");
+    try append_line(out, "  br i1 %target_is_flag, label %usage, label %maybe_parse");
+    try append_line(out, "maybe_parse:");
+    try append_line(out,
+        "  %parse_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.parse, i64 0, i64 0");
+    try append_line(out, "  %parse_base = insertvalue %kizu.slice.u8 poison, ptr %parse_ptr, 0");
+    try append_line(out, "  %parse_slice = insertvalue %kizu.slice.u8 %parse_base, i64 5, 1");
+    try append_line(out,
+        "  %is_parse = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %command, %kizu.slice.u8 %parse_slice)");
+    try append_line(out, "  br i1 %is_parse, label %dispatch_parse, label %match_selfhost");
+    try append_line(out, "match_selfhost:");
     try append_line(out,
         "  %selfhost_ptr = getelementptr inbounds [8 x i8], ptr @.kizu.cli.selfhost, i64 0, i64 0");
     try append_line(out, "  %selfhost_base = insertvalue %kizu.slice.u8 poison, ptr %selfhost_ptr, 0");
@@ -616,6 +683,74 @@ fn append_cli_corpus_blocks(out: &mut std::string::String) -> !void {
     try append_line(out, "  br i1 %is_moved, label %run_negative_moved_value, label %usage");
     try append_positive_corpus_block(out);
     try append_moved_value_negative_block(out);
+    return;
+}
+
+fn append_cli_parse_blocks(out: &mut std::string::String) -> !void {
+    try append_line(out, "dispatch_parse:");
+    try append_global_slice(out, "parse_ok", "fixture", "parse_ok_fixture", "40");
+    try append_line(out,
+        "  %parse_ok_target = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %target, %kizu.slice.u8 %parse_ok_fixture_slice)");
+    try append_line(out, "  br i1 %parse_ok_target, label %run_parse_ok, label %maybe_parse_invalid");
+    try append_line(out, "maybe_parse_invalid:");
+    try append_global_slice(out, "parse_invalid", "fixture", "parse_invalid_fixture", "50");
+    try append_line(out,
+        "  %parse_invalid_target = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %target, %kizu.slice.u8 %parse_invalid_fixture_slice)");
+    try append_line(out, "  br i1 %parse_invalid_target, label %run_parse_invalid, label %usage");
+    try append_parse_ok_block(out);
+    try append_parse_invalid_block(out);
+    return;
+}
+
+fn append_parse_ok_block(out: &mut std::string::String) -> !void {
+    try append_line(out, "run_parse_ok:");
+    try append_line(out, "  %parse_ok_io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "  %parse_ok_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %parse_ok_io, %kizu.slice.u8 %target)");
+    try append_line(out, "  %parse_ok_file_ok = extractvalue %kizu.error.slice.u8 %parse_ok_file, 0");
+    try append_line(out, "  br i1 %parse_ok_file_ok, label %parse_ok_compare, label %check_failed");
+    try append_line(out, "parse_ok_compare:");
+    try append_global_slice(out, "parse_ok", "source", "parse_ok_source", "22");
+    try append_line(out, "  %parse_ok_bytes = extractvalue %kizu.error.slice.u8 %parse_ok_file, 1");
+    try append_line(out,
+        "  %parse_ok_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_ok_bytes, %kizu.slice.u8 %parse_ok_source_slice)");
+    try append_line(out, "  br i1 %parse_ok_same, label %parse_ok_emit, label %check_failed");
+    try append_line(out, "parse_ok_emit:");
+    try append_line(out,
+        "  %parse_ok_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_ok_io, %kizu.slice.u8 %parse_ok_source_slice)");
+    try append_line(out, "  %parse_ok_write_ok = extractvalue %kizu.error.void %parse_ok_write, 0");
+    try append_line(out, "  br i1 %parse_ok_write_ok, label %exit_zero, label %check_failed");
+    return;
+}
+
+fn append_parse_invalid_block(out: &mut std::string::String) -> !void {
+    try append_line(out, "run_parse_invalid:");
+    try append_line(out, "  %parse_invalid_io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "  %parse_invalid_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %parse_invalid_io, %kizu.slice.u8 %target)");
+    try append_line(out,
+        "  %parse_invalid_file_ok = extractvalue %kizu.error.slice.u8 %parse_invalid_file, 0");
+    try append_line(out,
+        "  br i1 %parse_invalid_file_ok, label %parse_invalid_compare, label %check_failed");
+    try append_line(out, "parse_invalid_compare:");
+    try append_global_slice(out, "parse_invalid", "source", "parse_invalid_source", "28");
+    try append_line(out,
+        "  %parse_invalid_bytes = extractvalue %kizu.error.slice.u8 %parse_invalid_file, 1");
+    try append_line(out,
+        "  %parse_invalid_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_invalid_bytes, %kizu.slice.u8 %parse_invalid_source_slice)");
+    try append_line(out,
+        "  br i1 %parse_invalid_same, label %parse_invalid_emit, label %check_failed");
+    try append_line(out, "parse_invalid_emit:");
+    try append_global_slice(out, "parse_invalid", "stderr", "parse_invalid_stderr", "62");
+    try append_line(out,
+        "  %parse_invalid_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %parse_invalid_io, %kizu.slice.u8 %parse_invalid_stderr_slice)");
+    try append_line(out,
+        "  %parse_invalid_write_ok = extractvalue %kizu.error.void %parse_invalid_write, 0");
+    try append_line(out,
+        "  br i1 %parse_invalid_write_ok, label %parse_invalid_exit, label %check_failed");
+    try append_line(out, "parse_invalid_exit:");
+    try append_line(out, "  %parse_invalid_code = call i64 @kizu_rt_process_exit_code(i64 1)");
+    try append_line(out, "  ret i64 %parse_invalid_code");
     return;
 }
 

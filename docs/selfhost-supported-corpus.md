@@ -36,3 +36,20 @@ Cases outside the manifest are excluded by selector. Broad command parity,
 general example/conformance coverage, and unsupported ABI shapes remain blocked
 by #497 and #495. Adding a corpus entry requires updating the manifest and the
 hosted artifact behavior in the same change.
+
+The #525 `parse <file>` parity cases are intentionally tracked in a separate
+CLI manifest:
+
+```text
+selfhost/tests/cli/parse-parity.tsv
+```
+
+Run them against an existing passing bootstrap artifact with:
+
+```sh
+just selfhost-parse-parity-gate
+```
+
+That gate records command args, fixture paths, checked-in stdout/stderr golden
+paths, expected exit codes, and hosted-artifact output fingerprints in
+`target/selfhost/reports/parse-parity.txt`.

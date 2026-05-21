@@ -718,6 +718,9 @@ func collectParserParitySelfhostSources(t *testing.T) []parserParityCase {
 		if err != nil || entry.IsDir() || filepath.Ext(path) != ".kizu" {
 			return err
 		}
+		if isParserParityNegativeCLIFixture(path) {
+			return nil
+		}
 		next, ok, reason, parseErrs := parserParityFileCase(
 			path,
 			parserParitySelfhostRoot,
@@ -738,6 +741,15 @@ func collectParserParitySelfhostSources(t *testing.T) []parserParityCase {
 	}
 	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
 	return cases
+}
+
+// isParserParityNegativeCLIFixture excludes intentional CLI parse-error cases.
+func isParserParityNegativeCLIFixture(path string) bool {
+	rel, err := filepath.Rel(parserParitySelfhostRoot, path)
+	if err != nil {
+		return false
+	}
+	return filepath.ToSlash(rel) == "tests/cli/parse_invalid_missing_expr.kizu"
 }
 
 // parserParityExampleCase summarizes one example when both parser subsets can handle it.
