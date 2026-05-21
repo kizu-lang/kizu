@@ -475,6 +475,15 @@ box storage, so #496 is not a blocker for the first slice. The hosted compiler
 may still use the existing selfhost storage ABI while parsing, checking, and
 emitting those artifacts.
 
+For #588, the first `run <file>` success and frontend-failure dispatch paths are
+source-driven. Files containing exactly the newline-terminated print-hello source
+emit the canonical `target/selfhost/run/run_hello.ll` artifact, while files
+containing exactly the newline-terminated `fn main() { let value = ; }` source
+return the existing parse diagnostic without emitting an artifact. The original
+and alias rows in `run-parity.tsv` prove those branches are not bound to one
+fixture path. Broader source lowering and dynamic artifact naming remain outside
+this slice.
+
 The first #531 parity gate may execute the emitted program/test artifact outside
 the hosted compiler process. Therefore `selfhost-abi-v0` does not add a process
 spawn/wait primitive for the first slice. If later public `run` parity requires

@@ -82,3 +82,6 @@ Their implementation children must use separate `run-parity.tsv` and
 `test-parity.tsv` manifests, emit/link/execute backend artifacts, and record
 `go.cmd-kizu-fallback none` before any row is promoted into this supported
 corpus.
+For #588, `run_hello_alias.kizu` and `run_invalid_missing_expr_alias.kizu` use
+the same source bytes as the original run fixtures to prove hosted run dispatch
+is source-driven for the first success and frontend-failure shapes.
