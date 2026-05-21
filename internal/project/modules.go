@@ -16,8 +16,10 @@ type Module struct {
 
 // Graph is the deterministic module list resolved from a manifest.
 type Graph struct {
-	Root    string
-	Modules []Module
+	Root        string
+	PackageName string
+	Modules     []Module
+	Exports     map[string]bool
 }
 
 // ResolveModules maps configured source files to Kizu module paths.
@@ -34,7 +36,16 @@ func ResolveModules(baseDir string, manifest Manifest) (Graph, error) {
 	if _, ok := modules[rootModule]; !ok {
 		return Graph{}, fmt.Errorf("module error: root module `%s` was not found", manifest.Root)
 	}
-	return Graph{Root: rootModule, Modules: sortedModules(modules)}, nil
+	exports, err := resolveModuleExports(rootModule, manifest.Exports, modules)
+	if err != nil {
+		return Graph{}, err
+	}
+	return Graph{
+		Root:        rootModule,
+		PackageName: manifest.PackageName,
+		Modules:     sortedModules(modules),
+		Exports:     exports,
+	}, nil
 }
 
 // collectSourceRoot walks one source root and records Kizu source modules.
@@ -100,4 +111,24 @@ func sortedModules(modules map[string]string) []Module {
 		out = append(out, Module{Path: path, File: modules[path]})
 	}
 	return out
+}
+
+// resolveModuleExports validates and records the package surface modules.
+func resolveModuleExports(
+	rootModule string,
+	manifestExports []string,
+	modules map[string]string,
+) (map[string]bool, error) {
+	exports := map[string]bool{}
+	if len(manifestExports) == 0 {
+		exports[rootModule] = true
+		return exports, nil
+	}
+	for _, path := range manifestExports {
+		if _, ok := modules[path]; !ok {
+			return nil, fmt.Errorf("module error: exported module `%s` was not found", path)
+		}
+		exports[path] = true
+	}
+	return exports, nil
 }

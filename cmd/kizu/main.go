@@ -17,6 +17,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
 	"github.com/kizu-lang/kizu/internal/project"
+	"github.com/kizu-lang/kizu/internal/token"
 	"github.com/kizu-lang/kizu/internal/types"
 	"github.com/kizu-lang/kizu/internal/wasm"
 )
@@ -682,16 +683,53 @@ func sourceStdModules(path string) ([]string, error) {
 
 // resolveStdModules returns std modules in dependency-before-dependent order.
 func resolveStdModules(source string) ([]string, error) {
+	exports, err := loadStdModuleExports()
+	if err != nil {
+		return nil, err
+	}
 	resolver := &stdModuleResolver{
 		visited:  map[string]bool{},
 		visiting: map[string]bool{},
 	}
 	for _, module := range referencedStdModules(source) {
+		if !exports[module] {
+			return nil, fmt.Errorf("std module `%s` is not exported", stdModulePath(module))
+		}
 		if err := resolver.visit(module); err != nil {
 			return nil, err
 		}
 	}
 	return resolver.modules, nil
+}
+
+// loadStdModuleExports reads the std manifest package surface.
+func loadStdModuleExports() (map[string]bool, error) {
+	path, err := findRepoFile("std/kizu.toml")
+	if err != nil {
+		return nil, err
+	}
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := project.ParseStdManifest(string(source))
+	if err != nil {
+		return nil, err
+	}
+	return stdModuleExports(manifest.Exports)
+}
+
+// stdModuleExports converts package-qualified std paths to resolver module names.
+func stdModuleExports(paths []string) (map[string]bool, error) {
+	exports := map[string]bool{}
+	for _, path := range paths {
+		module, ok := strings.CutPrefix(path, "std::")
+		if !ok || module == "" {
+			return nil, fmt.Errorf("std manifest error: invalid export `%s`", path)
+		}
+		exports[module] = true
+	}
+	return exports, nil
 }
 
 type stdModuleResolver struct {
@@ -739,13 +777,69 @@ func readStdModuleSource(module string) (string, error) {
 
 // referencedStdModules scans source text for std module namespace references.
 func referencedStdModules(source string) []string {
+	refs := scanStdModuleRefs(source)
 	modules := []string{}
 	for _, module := range stdSourceModuleOrder {
-		if strings.Contains(source, "std::"+module+"::") {
+		if refs[module] {
 			modules = append(modules, module)
 		}
 	}
 	return modules
+}
+
+// scanStdModuleRefs records std namespace uses outside strings and comments.
+func scanStdModuleRefs(source string) map[string]bool {
+	refs := map[string]bool{}
+	lex := lexer.New(source)
+	for {
+		tok := lex.NextToken()
+		if tok.Type == token.EOF {
+			return refs
+		}
+		if tok.Type == token.Ident && tok.Literal == "std" {
+			parts := readNamespaceParts(lex)
+			recordStdModuleRefs(refs, parts)
+		}
+	}
+}
+
+// readNamespaceParts reads a namespace chain after the initial root name.
+func readNamespaceParts(lex *lexer.Lexer) []string {
+	parts := []string{}
+	for {
+		sep := lex.NextToken()
+		if sep.Type != token.DoubleColon {
+			return parts
+		}
+		part := lex.NextToken()
+		if part.Type != token.Ident {
+			return parts
+		}
+		parts = append(parts, part.Literal)
+	}
+}
+
+// recordStdModuleRefs marks known std modules that prefix a namespace chain.
+func recordStdModuleRefs(refs map[string]bool, parts []string) {
+	for _, module := range stdSourceModuleOrder {
+		moduleParts := strings.Split(module, "::")
+		if hasModulePrefix(parts, moduleParts) {
+			refs[module] = true
+		}
+	}
+}
+
+// hasModulePrefix reports whether parts start with module and name an item below it.
+func hasModulePrefix(parts []string, module []string) bool {
+	if len(parts) <= len(module) {
+		return false
+	}
+	for idx := range module {
+		if parts[idx] != module[idx] {
+			return false
+		}
+	}
+	return true
 }
 
 var stdSourceModuleOrder = []string{
@@ -759,6 +853,7 @@ var stdSourceModuleOrder = []string{
 	"kizu::diagnostic",
 	"kizu::parser",
 	"fs",
+	"path_bits",
 	"path",
 	"io",
 	"process",
@@ -820,6 +915,11 @@ func stdModuleFile(module string) string {
 	return "std/src/" + strings.ReplaceAll(module, "::", "/") + ".kizu"
 }
 
+// stdModulePath renders a resolver module name as its public namespace path.
+func stdModulePath(module string) string {
+	return "std::" + module
+}
+
 // renameStdStruct rewrites a std wrapper struct into its qualified form.
 func renameStdStruct(module string, decl *ast.StructDecl) {
 	decl.Name = qualifyStdTypeName(module, decl.Name)
@@ -844,7 +944,6 @@ func renameStdUnion(module string, decl *ast.UnionDecl) {
 // renameStdFunction rewrites a std wrapper function into its qualified form.
 func renameStdFunction(module string, fn *ast.FunctionDecl) {
 	fn.Name = "std." + strings.ReplaceAll(module, "::", ".") + "." + fn.Name
-	fn.Public = false
 	renameStdFunctionTypes(module, fn)
 	renameStdBlockExprs(module, fn.Body)
 }

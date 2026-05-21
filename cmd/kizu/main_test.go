@@ -185,6 +185,46 @@ func TestResolveStdModulesOrdersNestedKizuDeps(t *testing.T) {
 	}
 }
 
+// TestResolveStdModulesLoadsPrivateStdDeps keeps internal std modules usable by std.
+func TestResolveStdModulesLoadsPrivateStdDeps(t *testing.T) {
+	got, err := resolveStdModules(`fn main() -> void {
+    print(std::path::basename("src/main.kizu"));
+    return;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mem", "array", "string", "path_bits", "path"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestResolveStdModulesRejectsPrivateStdModule blocks user access to std internals.
+func TestResolveStdModulesRejectsPrivateStdModule(t *testing.T) {
+	_, err := resolveStdModules(`fn main() -> void {
+    print(std::path_bits::basename("src/main.kizu"));
+    return;
+}`)
+	if err == nil || !strings.Contains(err.Error(), "std module `std::path_bits` is not exported") {
+		t.Fatalf("got error %v, want private std module rejection", err)
+	}
+}
+
+// TestResolveStdModulesIgnoresStringLiterals avoids false std dependency edges.
+func TestResolveStdModulesIgnoresStringLiterals(t *testing.T) {
+	got, err := resolveStdModules(`fn main() -> void {
+    print("std::path_bits::basename");
+    return;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got modules %v, want none", got)
+	}
+}
+
 // TestIROptCommandSmoke checks the CLI can dump optimized typed SSA IR.
 func TestIROptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
