@@ -855,6 +855,31 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsRawPointerDerefSyntax checks explicit unsafe pointer dereference.
+func TestCheckAcceptsRawPointerDerefSyntax(t *testing.T) {
+	source := `struct Node { tag: i64, name: []const u8 }
+fn read_tag(node: ptr<const Node>) -> i64 {
+    unsafe {
+        return node.*.tag;
+    }
+}
+fn write_tag(node: ptr<Node>, tag: i64) -> void {
+    unsafe {
+        node.*.tag = tag;
+        return;
+    }
+}
+fn replace(node: ptr<Node>, value: Node) -> void {
+    unsafe {
+        node.* = value;
+        return;
+    }
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckAcceptsPointerTypes checks non-null and nullable raw pointer types.
 func TestCheckAcceptsPointerTypes(t *testing.T) {
 	source := `extern "c" fn read_const(p: ptr<const u8>) -> u8
@@ -1248,6 +1273,72 @@ fn main() {
     }
 }`,
 			want: "ptr_write` expects mutable non-null raw pointer",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
+// TestCheckRejectsRawPointerDerefSyntaxErrors checks explicit pointer deref limits.
+func TestCheckRejectsRawPointerDerefSyntaxErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "raw pointer deref outside unsafe",
+			source: `fn read(p: ptr<u8>) -> u8 {
+    return p.*;
+}`,
+			want: "raw pointer dereference requires unsafe block",
+		},
+		{
+			name: "raw pointer field outside unsafe",
+			source: `struct Node { tag: i64 }
+fn read(p: ptr<Node>) -> i64 {
+    return p.*.tag;
+}`,
+			want: "raw pointer dereference requires unsafe block",
+		},
+		{
+			name: "nullable raw pointer deref",
+			source: `fn read(p: ?ptr<u8>) -> u8 {
+    unsafe {
+        return p.*;
+    }
+}`,
+			want: "nullable raw pointer `?ptr<u8>` cannot be dereferenced",
+		},
+		{
+			name: "assign through const raw pointer",
+			source: `fn write(p: ptr<const u8>) -> void {
+    unsafe {
+        p.* = 1;
+        return;
+    }
+}`,
+			want: "cannot assign through const raw pointer `ptr<const u8>`",
+		},
+		{
+			name: "assign field through const raw pointer",
+			source: `struct Node { tag: i64 }
+fn write(p: ptr<const Node>) -> void {
+    unsafe {
+        p.*.tag = 1;
+        return;
+    }
+}`,
+			want: "cannot assign through const raw pointer `ptr<const Node>`",
+		},
+		{
+			name: "direct raw pointer field access",
+			source: `struct Node { tag: i64 }
+fn read(p: ptr<Node>) -> i64 {
+    unsafe {
+        return p.tag;
+    }
+}`,
+			want: "`ptr<Node>` has no fields",
 		},
 	}
 	runErrorCases(t, cases)

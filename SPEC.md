@@ -936,6 +936,8 @@ borrow field や複数 source 由来の戻り値は、後続の bounded issue �
 
 safe borrow binding は通常の field access 構文で field を読めます。
 `&mut T` binding は通常の field assignment 構文で field を更新できます。
+safe borrow は実装上 pointer-like な表現を持ち得ますが、言語上は
+checker が lifetime、aliasing、move を検査する borrow capability です。
 raw pointer はこの省略対象ではなく、unsafe 境界で明示的に扱います。
 
 ```kizu
@@ -948,8 +950,8 @@ fn rename(user: &mut User) -> void {
 }
 ```
 
-明示 dereference は postfix の `.*` を使います。これは borrow そのものを読む場合や、
-field access ではない dereference を表す場合に使います。
+明示 dereference は postfix の `.*` を使います。safe borrow では borrow
+そのものを読む場合や、field access ではない dereference を表す場合に使います。
 
 ```kizu
 fn value(read: &i64) -> i64 {
@@ -1170,9 +1172,29 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * `ptr<const T>` は non-null const raw pointer
 * `?ptr<T>` / `?ptr<const T>` は nullable raw pointer
 * safe borrow と raw pointer は別物として扱う
+* `p.*` は `ptr<T>` / `ptr<const T>` から `T` を読む
+* `p.* = value` は `ptr<T>` に `T` を書く
+* `p.*.field` は struct raw pointer の field read / assignment に使える
+* raw pointer dereference syntax は `unsafe` 内でのみ使える
+* `ptr<const T>` 経由の assignment は禁止
+* `?ptr<T>` / `?ptr<const T>` は直接 dereference できない
+* `p.field` のような raw pointer field access は禁止
 * `ptr_read(p)` は `ptr<T>` / `ptr<const T>` から `T` を読む
 * `ptr_write(p, value)` は `ptr<T>` に `T` を書く
 * `ptr_write` は `ptr<const T>` と nullable pointer には使えない
+
+```kizu
+struct Node {
+    tag: i64,
+}
+
+fn update(node: ptr<Node>) -> void {
+    unsafe {
+        node.*.tag = 1;
+        return;
+    }
+}
+```
 
 unsafe code の memory safety obligation はプログラマが負います。
 ただし、`unsafe` は compiler check を全面的に無効化するものではありません。

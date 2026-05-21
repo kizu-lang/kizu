@@ -16,8 +16,9 @@ fn rename(user: &mut User) -> void {
 ```
 
 That made borrow boundaries visible, but it also made ordinary safe code noisy.
-Kizu safe borrows are not raw pointers: the checker already knows whether a
-binding is `&T` or `&mut T`, enforces aliasing rules, and rejects moves through
+Kizu safe borrows can have a pointer-like implementation, but they are checked
+borrow capabilities rather than raw pointers: the checker already knows whether
+a binding is `&T` or `&mut T`, enforces aliasing rules, and rejects moves through
 borrowed storage.
 
 ## Decision
@@ -40,7 +41,7 @@ The rules are:
 - only `&mut T` may assign fields with `borrow.field = value`
 - assigning through `&T` is rejected
 - raw pointers remain outside this shortcut and require explicit unsafe
-  operations or explicit dereference forms
+  operations or explicit `.*` dereference
 - postfix `.*` remains available for explicit safe-borrow dereference and for
   copy reads such as `value.*`
 
@@ -52,6 +53,5 @@ The rules are:
 - Existing explicit `borrow.*.field` code remains valid, but examples should use
   direct safe-borrow field access unless demonstrating dereference itself.
 
-ADR-0034 is superseded for safe borrow field access. Its explicit dereference
-syntax still applies where direct field access is not the operation being
-expressed.
+ADR-0034 is superseded for safe borrow field access. ADR-0069 defines raw
+pointer dereference with the same postfix `.*` spelling inside `unsafe`.

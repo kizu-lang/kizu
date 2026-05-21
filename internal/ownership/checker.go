@@ -1443,8 +1443,11 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, moveTail bool) 
 	}
 }
 
-// moveDerefExpr rejects moving a non-copy value out through a local borrow.
+// moveDerefExpr rejects moving non-copy values out through checked borrows.
 func (c *Checker) moveDerefExpr(expr *ast.DerefExpr, env *scope) (string, error) {
+	if typeName, ok, err := c.rawPointerDerefExprType(expr, env); ok || err != nil {
+		return typeName, err
+	}
 	typeName, err := c.readDerefExpr(expr, env)
 	if err != nil {
 		return "", err
@@ -3038,20 +3041,51 @@ func (c *Checker) borrowedFieldRoot(expr ast.Expression, env *scope) (string, bo
 	}
 }
 
-// readDerefExpr reads the value behind a local borrow parameter.
+// readDerefExpr reads the value behind a local borrow or raw pointer.
 func (c *Checker) readDerefExpr(expr *ast.DerefExpr, env *scope) (string, error) {
-	ident, ok := expr.Receiver.(*ast.IdentExpr)
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
+		value, exists := env.lookup(ident.Name)
+		if !exists {
+			return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
+		}
+		if value.borrowedParam {
+			return value.typeName, nil
+		}
+	}
+	if typeName, ok, err := c.rawPointerDerefExprType(expr, env); ok || err != nil {
+		return typeName, err
+	}
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
+		return "", fmt.Errorf("borrow error: `%s` is not a borrow or raw pointer", ident.Name)
+	}
+	return "", fmt.Errorf("borrow error: dereference expects a local borrow or raw pointer")
+}
+
+// rawPointerDerefExprType returns the element type for unchecked pointer dereference.
+func (c *Checker) rawPointerDerefExprType(
+	expr *ast.DerefExpr,
+	env *scope,
+) (string, bool, error) {
+	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
+		if value, exists := env.lookup(ident.Name); exists && value.borrowedParam {
+			return "", false, nil
+		}
+	}
+	receiverType, err := c.readExpr(expr.Receiver, env)
+	if err != nil {
+		return "", false, err
+	}
+	elem, ok := rawPointerElement(receiverType)
 	if !ok {
-		return "", fmt.Errorf("borrow error: dereference expects a local borrow")
+		return "", false, nil
 	}
-	value, ok := env.lookup(ident.Name)
-	if !ok {
-		return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
+	if strings.HasPrefix(receiverType, "?") {
+		return "", true, fmt.Errorf(
+			"borrow error: nullable raw pointer `%s` cannot be dereferenced",
+			receiverType,
+		)
 	}
-	if !value.borrowedParam {
-		return "", fmt.Errorf("borrow error: `%s` is not a borrow", ident.Name)
-	}
-	return value.typeName, nil
+	return strings.TrimPrefix(elem, "const "), true, nil
 }
 
 // assignmentRoot finds the binding invalidated by an assignment target.
@@ -5604,12 +5638,21 @@ func isAstScalarType(typeName string) bool {
 
 // isRawPointerType reports whether typeName is a raw pointer spelling.
 func isRawPointerType(typeName string) bool {
+	_, ok := rawPointerElement(typeName)
+	return ok
+}
+
+// rawPointerElement extracts the element spelling from ptr<T> or ?ptr<T>.
+func rawPointerElement(typeName string) (string, bool) {
 	name := typeName
 	if len(name) > 0 && name[0] == '?' {
 		name = name[1:]
 	}
-	base, _, ok := splitGenericType(name)
-	return ok && base == "ptr"
+	base, elem, ok := splitGenericType(name)
+	if !ok || base != "ptr" {
+		return "", false
+	}
+	return elem, true
 }
 
 // checkNoArgOwnershipCall validates a zero-argument builtin constructor.
