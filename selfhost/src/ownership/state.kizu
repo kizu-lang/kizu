@@ -1,0 +1,126 @@
+import selfhost::ownership::data;
+
+pub fn declare_resource(
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    name: []u8,
+    kind: data::ResourceKind
+) -> !void {
+    if states.contains(name) {
+        return error("duplicate resource");
+    }
+    try states.insert(name, data::OwnershipState::Available);
+    try kinds.insert(name, kind);
+    return;
+}
+
+pub fn move_value(
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    name: []u8
+) -> !void {
+    let current = try states.get(name);
+    if current != data::OwnershipState::Available {
+        return error("move requires available value");
+    }
+    try states.insert(name, data::OwnershipState::Moved);
+    return;
+}
+
+pub fn shared_borrow(
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    name: []u8
+) -> !void {
+    let current = try states.get(name);
+    if current == data::OwnershipState::MutBorrowed or current == data::OwnershipState::Moved {
+        return error("shared borrow blocked");
+    }
+    if current == data::OwnershipState::Deinitialized {
+        return error("borrow after deinit");
+    }
+    try states.insert(name, data::OwnershipState::SharedBorrowed);
+    return;
+}
+
+pub fn record_borrow(
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    name: []u8,
+    mutable: bool
+) -> !void {
+    if mutable {
+        try mut_borrow(states, name);
+        return;
+    }
+    let current = try states.get(name);
+    if current == data::OwnershipState::MutBorrowed or current == data::OwnershipState::Moved {
+        return error("shared borrow blocked");
+    }
+    if current == data::OwnershipState::Deinitialized {
+        return error("borrow after deinit");
+    }
+    try states.insert(name, data::OwnershipState::SharedBorrowed);
+    return;
+}
+
+pub fn mut_borrow(
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    name: []u8
+) -> !void {
+    let current = try states.get(name);
+    if current != data::OwnershipState::Available {
+        return error("mutable borrow requires available value");
+    }
+    try states.insert(name, data::OwnershipState::MutBorrowed);
+    return;
+}
+
+pub fn release_borrow(
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    name: []u8
+) -> !void {
+    let current = try states.get(name);
+    if current == data::OwnershipState::SharedBorrowed or
+        current == data::OwnershipState::MutBorrowed {
+        try states.insert(name, data::OwnershipState::Available);
+        return;
+    }
+    return error("release requires active borrow");
+}
+
+pub fn deinit_resource(
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    name: []u8
+) -> !void {
+    let current = try states.get(name);
+    if current != data::OwnershipState::Available {
+        return error("deinit requires available value");
+    }
+    try states.insert(name, data::OwnershipState::Deinitialized);
+    return;
+}
+
+pub fn state_of(
+    states: &std::map::Map<[]u8, data::OwnershipState>,
+    name: []u8
+) -> !data::OwnershipState {
+    return states.get(name);
+}
+
+pub fn kind_of(
+    kinds: &std::map::Map<[]u8, data::ResourceKind>,
+    name: []u8
+) -> !data::ResourceKind {
+    return kinds.get(name);
+}
+
+pub fn summarize(
+    states: &std::map::Map<[]u8, data::OwnershipState>,
+    borrows: i64,
+    errors: i64
+) -> data::OwnershipSummary {
+    return data::OwnershipSummary {
+        resources: states.len(),
+        checked_nodes: states.len(),
+        borrows: borrows,
+        errors: errors
+    };
+}

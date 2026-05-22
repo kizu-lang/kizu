@@ -1,0 +1,969 @@
+import selfhost::lexer;
+import selfhost::source;
+import selfhost::types::model;
+
+pub struct TypeReferenceScan {
+    pub next: i64,
+    pub typed_nodes: i64,
+    pub diagnostics: i64,
+}
+
+pub fn seed_builtin_types(
+    kinds: &var std::map::Map<[]u8, model::TypeKind>,
+    arities: &var std::map::Map<[]u8, i64>,
+    copyable: &var std::map::Map<[]u8, bool>
+) -> !void {
+    try kinds.insert("void", model::TypeKind::Primitive);
+    try arities.insert("void", 0);
+    try copyable.insert("void", true);
+    try kinds.insert("bool", model::TypeKind::Primitive);
+    try arities.insert("bool", 0);
+    try copyable.insert("bool", true);
+    try kinds.insert("i64", model::TypeKind::Primitive);
+    try arities.insert("i64", 0);
+    try copyable.insert("i64", true);
+    try kinds.insert("u8", model::TypeKind::Primitive);
+    try arities.insert("u8", 0);
+    try copyable.insert("u8", true);
+    try kinds.insert("Allocator", model::TypeKind::Primitive);
+    try arities.insert("Allocator", 0);
+    try copyable.insert("Allocator", true);
+    try kinds.insert("Io", model::TypeKind::Primitive);
+    try arities.insert("Io", 0);
+    try copyable.insert("Io", true);
+    try kinds.insert("Function", model::TypeKind::Primitive);
+    try arities.insert("Function", 0);
+    try copyable.insert("Function", true);
+    try kinds.insert("std::arena::Arena", model::TypeKind::Container);
+    try arities.insert("std::arena::Arena", 1);
+    try copyable.insert("std::arena::Arena", false);
+    try kinds.insert("std::arena::Handle", model::TypeKind::Container);
+    try arities.insert("std::arena::Handle", 1);
+    try copyable.insert("std::arena::Handle", true);
+    try kinds.insert("std::array::Array", model::TypeKind::Container);
+    try arities.insert("std::array::Array", 1);
+    try copyable.insert("std::array::Array", false);
+    try kinds.insert("std::map::Map", model::TypeKind::Container);
+    try arities.insert("std::map::Map", 2);
+    try copyable.insert("std::map::Map", false);
+    try kinds.insert("std::mem::Box", model::TypeKind::Container);
+    try arities.insert("std::mem::Box", 1);
+    try copyable.insert("std::mem::Box", false);
+    try kinds.insert("std::fs::Metadata", model::TypeKind::Struct);
+    try arities.insert("std::fs::Metadata", 0);
+    try copyable.insert("std::fs::Metadata", true);
+    return;
+}
+
+pub fn collect_declared_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    kinds: &var std::map::Map<[]u8, model::TypeKind>,
+    arities: &var std::map::Map<[]u8, i64>,
+    copyable: &var std::map::Map<[]u8, bool>
+) -> !void {
+    var index = 0;
+    var depth = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        var handled = false;
+        if std::mem::equal_bytes(text, "{") {
+            depth = depth + 1;
+            handled = true;
+        }
+        if !handled and std::mem::equal_bytes(text, "}") {
+            depth = depth - 1;
+            handled = true;
+        }
+        if !handled and depth == 0 and is_type_declaration(text) {
+            if index + 1 < tokens.len() {
+                let name = try tokens.get(index + 1);
+                let name_text = token_text(file.text, name);
+                var qualified = std::string::String(allocator);
+                try append_module_name(qualified, file);
+                try qualified.append_bytes("::");
+                try qualified.append_bytes(name_text);
+                let type_name = qualified.as_bytes();
+                try kinds.insert(type_name, type_kind(text));
+                try arities.insert(type_name, try type_decl_arity(file.text, tokens, index + 2));
+                try copyable.insert(type_name, type_decl_copyable(text));
+                qualified.deinit();
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+pub fn collect_type_parameters(
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    kinds: &var std::map::Map<[]u8, model::TypeKind>,
+    arities: &var std::map::Map<[]u8, i64>,
+    copyable: &var std::map::Map<[]u8, bool>
+) -> !void {
+    var index = 0;
+    var depth = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        if std::mem::equal_bytes(text, "{") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, "}") {
+                depth = depth - 1;
+            } else {
+                if depth == 0 and (is_type_declaration(text) or std::mem::equal_bytes(text, "fn")) {
+                    let open = index + 2;
+                    if open < tokens.len() and try token_at_equals(file.text, tokens, open, "<") {
+                        try collect_type_parameters_at(file, tokens, open, kinds, arities, copyable);
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_type_parameters_at(
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open: i64,
+    kinds: &var std::map::Map<[]u8, model::TypeKind>,
+    arities: &var std::map::Map<[]u8, i64>,
+    copyable: &var std::map::Map<[]u8, bool>
+) -> !void {
+    var index = open + 1;
+    var depth = 1;
+    while index < tokens.len() and depth > 0 {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        if std::mem::equal_bytes(text, "<") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                depth = depth - 1;
+            } else {
+                if depth == 1 and starts_with_uppercase(text) and !kinds.contains(text) {
+                    try kinds.insert(text, model::TypeKind::Primitive);
+                    try arities.insert(text, 0);
+                    try copyable.insert(text, true);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+pub fn check_file_type_references(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    var typed_nodes = 0;
+    var diagnostics = 0;
+    var index = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        var handled = false;
+        if std::mem::equal_bytes(text, "->") or
+            (std::mem::equal_bytes(text, ":") and try is_type_annotation_colon(file.text, tokens, index)) {
+            let scan = try scan_type_range(
+                allocator,
+                file,
+                tokens,
+                "",
+                index + 1,
+                kinds,
+                arities
+            );
+            typed_nodes = typed_nodes + scan.typed_nodes;
+            diagnostics = diagnostics + scan.diagnostics;
+            index = scan.next;
+            handled = true;
+        }
+        if !handled and try is_cast_type_start(file.text, tokens, index) {
+            let scan = try scan_type_arguments(
+                allocator,
+                file,
+                tokens,
+                "",
+                index + 2,
+                kinds,
+                arities
+            );
+            typed_nodes = typed_nodes + scan.typed_nodes;
+            diagnostics = diagnostics + scan.diagnostics;
+            index = scan.next;
+            handled = true;
+        }
+        if !handled {
+            let path_end = try qualified_path_end(file.text, tokens, index);
+            if path_end >= index and try is_generic_constructor_at(file.text, tokens, index, path_end) {
+                let scan = try scan_type_arguments(
+                    allocator,
+                    file,
+                    tokens,
+                    "",
+                    path_end + 2,
+                    kinds,
+                    arities
+                );
+                typed_nodes = typed_nodes + scan.typed_nodes;
+                diagnostics = diagnostics + scan.diagnostics;
+                index = scan.next;
+                handled = true;
+            }
+        }
+        if !handled {
+            index = index + 1;
+        }
+    }
+    return TypeReferenceScan {
+        next: index,
+        typed_nodes: typed_nodes,
+        diagnostics: diagnostics
+    };
+}
+
+pub fn first_type_error_in_file(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    var index = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        var handled = false;
+        if std::mem::equal_bytes(text, "->") or
+            (std::mem::equal_bytes(text, ":") and try is_type_annotation_colon(file.text, tokens, index)) {
+            let found = try first_type_error_in_range(allocator, file, tokens, index + 1, kinds, arities);
+            if found.found {
+                return found;
+            }
+            index = index + 1;
+            handled = true;
+        }
+        if !handled and try is_cast_type_start(file.text, tokens, index) {
+            let found = try first_type_error_in_arguments(allocator, file, tokens, index + 2, kinds, arities);
+            if found.found {
+                return found;
+            }
+            index = index + 1;
+            handled = true;
+        }
+        if !handled {
+            let path_end = try qualified_path_end(file.text, tokens, index);
+            if path_end >= index and try is_generic_constructor_at(file.text, tokens, index, path_end) {
+                let found = try first_type_error_in_arguments(
+                    allocator,
+                    file,
+                    tokens,
+                    path_end + 2,
+                    kinds,
+                    arities
+                );
+                if found.found {
+                    return found;
+                }
+                index = index + 1;
+                handled = true;
+            }
+        }
+        if !handled {
+            index = index + 1;
+        }
+    }
+    return type_reference_summary(false, 0, 0, 0, 0, 0);
+}
+fn scan_type_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    module: []u8,
+    start: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    var index = start;
+    var angle_depth = 0;
+    var paren_depth = 0;
+    var typed_nodes = 0;
+    var diagnostics = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        if angle_depth == 0 and paren_depth == 0 and is_type_range_end(text) {
+            return type_reference_scan(index, typed_nodes, diagnostics);
+        }
+        if std::mem::equal_bytes(text, "<") {
+            angle_depth = angle_depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                angle_depth = angle_depth - 1;
+            } else {
+                if std::mem::equal_bytes(text, "(") {
+                    paren_depth = paren_depth + 1;
+                } else {
+                    if std::mem::equal_bytes(text, ")") {
+                        paren_depth = paren_depth - 1;
+                    }
+                }
+            }
+        }
+        let path_end = try qualified_path_end(file.text, tokens, index);
+        if path_end >= index {
+            let checked = try check_type_name_at(
+                allocator,
+                file,
+                tokens,
+                module,
+                index,
+                path_end,
+                kinds,
+                arities
+            );
+            typed_nodes = typed_nodes + checked.typed_nodes;
+            diagnostics = diagnostics + checked.diagnostics;
+            index = path_end + 1;
+        } else {
+            index = index + 1;
+        }
+    }
+    return type_reference_scan(index, typed_nodes, diagnostics);
+}
+
+fn first_type_error_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    start: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    var index = start;
+    var angle_depth = 0;
+    var paren_depth = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        if angle_depth == 0 and paren_depth == 0 and is_type_range_end(text) {
+            return type_reference_summary(false, 0, 0, index, 0, 0);
+        }
+        if std::mem::equal_bytes(text, "<") {
+            angle_depth = angle_depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                angle_depth = angle_depth - 1;
+            } else {
+                if std::mem::equal_bytes(text, "(") {
+                    paren_depth = paren_depth + 1;
+                } else {
+                    if std::mem::equal_bytes(text, ")") {
+                        paren_depth = paren_depth - 1;
+                    }
+                }
+            }
+        }
+        let path_end = try qualified_path_end(file.text, tokens, index);
+        if path_end >= index {
+            let found = try type_error_at(allocator, file, tokens, index, path_end, kinds, arities);
+            if found.found {
+                return found;
+            }
+            index = path_end + 1;
+        } else {
+            index = index + 1;
+        }
+    }
+    return type_reference_summary(false, 0, 0, index, 0, 0);
+}
+
+fn scan_type_arguments(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    module: []u8,
+    start: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    var index = start;
+    var depth = 1;
+    var typed_nodes = 0;
+    var diagnostics = 0;
+    while index < tokens.len() and depth > 0 {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        if std::mem::equal_bytes(text, "<") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                depth = depth - 1;
+            }
+        }
+        if depth > 0 {
+            let path_end = try qualified_path_end(file.text, tokens, index);
+            if path_end >= index {
+                let checked = try check_type_name_at(
+                    allocator,
+                    file,
+                    tokens,
+                    module,
+                    index,
+                    path_end,
+                    kinds,
+                    arities
+                );
+                typed_nodes = typed_nodes + checked.typed_nodes;
+                diagnostics = diagnostics + checked.diagnostics;
+                index = path_end + 1;
+            } else {
+                index = index + 1;
+            }
+        } else {
+            index = index + 1;
+        }
+    }
+    return type_reference_scan(index, typed_nodes, diagnostics);
+}
+
+fn first_type_error_in_arguments(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    start: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    var index = start;
+    var depth = 1;
+    while index < tokens.len() and depth > 0 {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        if std::mem::equal_bytes(text, "<") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                depth = depth - 1;
+            }
+        }
+        if depth > 0 {
+            let path_end = try qualified_path_end(file.text, tokens, index);
+            if path_end >= index {
+                let found = try type_error_at(allocator, file, tokens, index, path_end, kinds, arities);
+                if found.found {
+                    return found;
+                }
+                index = path_end + 1;
+            } else {
+                index = index + 1;
+            }
+        } else {
+            index = index + 1;
+        }
+    }
+    return type_reference_summary(false, 0, 0, index, 0, 0);
+}
+
+fn check_type_name_at(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    module: []u8,
+    start: i64,
+    end: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !TypeReferenceScan {
+    let first = try tokens.get(start);
+    let last = try tokens.get(end);
+    let name = file.text[first.start..last.end];
+    if should_ignore_type_name(name) {
+        return type_reference_scan(end + 1, 0, 0);
+    }
+    if type_name_exists(kinds, name) {
+        let observed = try observed_type_arity(file.text, tokens, end + 1);
+        return type_reference_scan(end + 1, 1, try arity_diagnostic(arities, name, observed));
+    }
+    return type_reference_scan(end + 1, 1, 1);
+}
+
+fn type_error_at(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    start: i64,
+    end: i64,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    let first = try tokens.get(start);
+    let last = try tokens.get(end);
+    let name = file.text[first.start..last.end];
+    if should_ignore_type_name(name) {
+        return type_reference_summary(false, 0, 0, end + 1, 0, 0);
+    }
+    if try type_reference_exists(allocator, file, kinds, name) {
+        let observed = try observed_type_arity(file.text, tokens, end + 1);
+        var arity_name = std::string::String(allocator);
+        try append_resolved_type_reference_name(arity_name, file, kinds, name);
+        let key = arity_name.as_bytes();
+        var expected = -1;
+        if arities.contains(key) {
+            expected = try arities.get(key);
+        }
+        arity_name.deinit();
+        if expected >= 0 and expected != observed {
+            return type_reference_summary(true, 2, first.start, last.end, expected, observed);
+        }
+        return type_reference_summary(false, 0, 0, end + 1, 0, 0);
+    }
+    return type_reference_summary(true, 1, first.start, last.end, 0, 0);
+}
+
+fn type_reference_exists(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    name: []u8
+) -> !bool {
+    var resolved = std::string::String(allocator);
+    try append_resolved_type_reference_name(resolved, file, kinds, name);
+    let key = resolved.as_bytes();
+    let exists = kinds.contains(key);
+    resolved.deinit();
+    return exists;
+}
+
+fn append_resolved_type_reference_name(
+    resolved: &var std::string::String,
+    file: &source::SourceFile,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    name: []u8
+) -> !void {
+    if kinds.contains(name) or is_qualified_name(name) {
+        try resolved.append_bytes(name);
+        return;
+    }
+    if is_unqualified_type_like(name) {
+        try append_module_name(resolved, file);
+        try resolved.append_bytes("::");
+        try resolved.append_bytes(name);
+        return;
+    }
+    try resolved.append_bytes(name);
+    return;
+}
+
+fn type_name_exists(
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    name: []u8
+) -> bool {
+    if kinds.contains(name) {
+        return true;
+    }
+    if is_unqualified_type_like(name) {
+        return true;
+    }
+    if is_relative_qualified_name(name) {
+        return true;
+    }
+    if is_qualified_name(name) {
+        return false;
+    }
+    return false;
+}
+
+fn qualified_module_name(
+    allocator: Allocator,
+    file: &source::SourceFile
+) -> !std::string::String {
+    var name = std::string::String(allocator);
+    try append_module_name(name, file);
+    return name;
+}
+
+fn append_module_name(
+    name: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    if file.kind == source::SourceKind::Std {
+        try name.append_bytes("std::");
+    } else {
+        try name.append_bytes("selfhost::");
+    }
+    try source::append_module_path(name, file);
+    return;
+}
+
+fn token_text(
+    source_text: []u8,
+    token: std::kizu::lexer::Token
+) -> []u8 {
+    return source_text[token.start..token.end];
+}
+
+fn token_at_equals(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    expected: []u8
+) -> !bool {
+    let token = try tokens.get(index);
+    return std::mem::equal_bytes(token_text(source_text, token), expected);
+}
+
+fn type_reference_scan(next: i64, typed_nodes: i64, diagnostics: i64) -> TypeReferenceScan {
+    return TypeReferenceScan {
+        next: next,
+        typed_nodes: typed_nodes,
+        diagnostics: diagnostics
+    };
+}
+
+fn type_reference_summary(
+    found: bool,
+    kind: i64,
+    start: i64,
+    end: i64,
+    expected: i64,
+    observed: i64
+) -> model::TypeReferenceSummary {
+    return model::TypeReferenceSummary {
+        found: found,
+        kind: kind,
+        start: start,
+        end: end,
+        expected: expected,
+        observed: observed
+    };
+}
+
+fn bytes_contains(haystack: []u8, needle: []u8) -> bool {
+    let needle_len = std::mem::len(needle);
+    if needle_len < 1 {
+        return true;
+    }
+    if needle_len > std::mem::len(haystack) {
+        return false;
+    }
+    var index = 0;
+    while index + needle_len <= std::mem::len(haystack) {
+        if std::mem::equal_bytes(haystack[index..index + needle_len], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+fn is_type_declaration(text: []u8) -> bool {
+    return std::mem::equal_bytes(text, "struct") or
+        std::mem::equal_bytes(text, "enum") or
+        std::mem::equal_bytes(text, "union");
+}
+
+fn type_kind(text: []u8) -> model::TypeKind {
+    if std::mem::equal_bytes(text, "enum") {
+        return model::TypeKind::Enum;
+    }
+    if std::mem::equal_bytes(text, "union") {
+        return model::TypeKind::Union;
+    }
+    return model::TypeKind::Struct;
+}
+
+fn type_decl_copyable(text: []u8) -> bool {
+    return !std::mem::equal_bytes(text, "union");
+}
+
+fn type_decl_arity(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    if index >= tokens.len() {
+        return 0;
+    }
+    let token = try tokens.get(index);
+    if !std::mem::equal_bytes(token_text(source_text, token), "<") {
+        return 0;
+    }
+    return count_type_arguments(source_text, tokens, index);
+}
+
+fn is_type_range_end(text: []u8) -> bool {
+    return std::mem::equal_bytes(text, ",") or
+        std::mem::equal_bytes(text, ")") or
+        std::mem::equal_bytes(text, "{") or
+        std::mem::equal_bytes(text, ";") or
+        std::mem::equal_bytes(text, "=") or
+        std::mem::equal_bytes(text, "borrows");
+}
+
+fn is_type_start_candidate(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !bool {
+    if index >= tokens.len() {
+        return false;
+    }
+    let token = try tokens.get(index);
+    let text = token_text(source_text, token);
+    if std::mem::equal_bytes(text, "!") or
+        std::mem::equal_bytes(text, "?") or
+        std::mem::equal_bytes(text, "&") or
+        std::mem::equal_bytes(text, "[") {
+        return true;
+    }
+    if is_builtin_type_name(text) {
+        return true;
+    }
+    if starts_with_uppercase(text) {
+        return true;
+    }
+    if index + 1 < tokens.len() {
+        let next = try tokens.get(index + 1);
+        if std::mem::equal_bytes(token_text(source_text, next), "::") {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn is_type_annotation_colon(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !bool {
+    let candidate = try is_type_start_candidate(source_text, tokens, index + 1);
+    if !candidate {
+        return false;
+    }
+    var cursor = index + 1;
+    var angle_depth = 0;
+    var paren_depth = 0;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        let text = token_text(source_text, token);
+        if angle_depth == 0 and paren_depth == 0 and is_type_range_end(text) {
+            return true;
+        }
+        if std::mem::equal_bytes(text, ".") {
+            return false;
+        }
+        if std::mem::equal_bytes(text, "(") {
+            return false;
+        }
+        if std::mem::equal_bytes(text, "<") {
+            angle_depth = angle_depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                angle_depth = angle_depth - 1;
+            } else {
+                if std::mem::equal_bytes(text, ")") {
+                    paren_depth = paren_depth - 1;
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return true;
+}
+
+fn is_builtin_type_name(text: []u8) -> bool {
+    return std::mem::equal_bytes(text, "void") or
+        std::mem::equal_bytes(text, "bool") or
+        std::mem::equal_bytes(text, "i64") or
+        std::mem::equal_bytes(text, "u8") or
+        std::mem::equal_bytes(text, "Allocator") or
+        std::mem::equal_bytes(text, "Io") or
+        std::mem::equal_bytes(text, "Function");
+}
+
+fn should_ignore_type_name(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "const") or
+        std::mem::equal_bytes(name, "mut") or
+        std::mem::equal_bytes(name, "var") or
+        std::mem::equal_bytes(name, "comptime") or
+        std::mem::equal_bytes(name, "pub");
+}
+
+fn is_unqualified_type_like(name: []u8) -> bool {
+    if std::mem::len(name) < 1 {
+        return false;
+    }
+    return starts_with_uppercase(name);
+}
+
+fn starts_with_uppercase(name: []u8) -> bool {
+    if std::mem::len(name) < 1 {
+        return false;
+    }
+    let byte = name[0];
+    return byte >= cast<u8>(65) and byte <= cast<u8>(90);
+}
+
+fn is_qualified_name(name: []u8) -> bool {
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn is_relative_qualified_name(name: []u8) -> bool {
+    if !is_qualified_name(name) {
+        return false;
+    }
+    return !std::mem::starts_with(name, "std::") and
+        !std::mem::starts_with(name, "selfhost::");
+}
+
+fn observed_type_arity(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    if index >= tokens.len() {
+        return 0;
+    }
+    let token = try tokens.get(index);
+    if !std::mem::equal_bytes(token_text(source_text, token), "<") {
+        return 0;
+    }
+    return count_type_arguments(source_text, tokens, index);
+}
+
+fn count_type_arguments(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64
+) -> !i64 {
+    var count = 1;
+    var depth = 1;
+    var cursor = open_index + 1;
+    while cursor < tokens.len() and depth > 0 {
+        let current = try tokens.get(cursor);
+        let text = token_text(source_text, current);
+        if std::mem::equal_bytes(text, "<") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                depth = depth - 1;
+            } else {
+                if depth == 1 and std::mem::equal_bytes(text, ",") {
+                    count = count + 1;
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return count;
+}
+
+fn arity_diagnostic(
+    arities: &std::map::Map<[]u8, i64>,
+    name: []u8,
+    observed: i64
+) -> !i64 {
+    if !arities.contains(name) {
+        return 0;
+    }
+    let expected = try arities.get(name);
+    if expected != observed {
+        return 1;
+    }
+    return 0;
+}
+
+fn qualified_path_end(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    if index >= tokens.len() {
+        return -1;
+    }
+    let first = try tokens.get(index);
+    if !is_type_name_segment(token_text(source_text, first)) {
+        return -1;
+    }
+    var end = index;
+    var cursor = index + 1;
+    while cursor + 1 < tokens.len() {
+        let separator = try tokens.get(cursor);
+        let next = try tokens.get(cursor + 1);
+        if std::mem::equal_bytes(token_text(source_text, separator), "::") and
+            is_type_name_segment(token_text(source_text, next)) {
+            end = cursor + 1;
+            cursor = cursor + 2;
+        } else {
+            return end;
+        }
+    }
+    return end;
+}
+
+fn is_type_name_segment(text: []u8) -> bool {
+    if should_ignore_type_name(text) {
+        return false;
+    }
+    if std::mem::equal_bytes(text, "") {
+        return false;
+    }
+    let byte = text[0];
+    return (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
+        (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+        byte == cast<u8>(95);
+}
+
+fn is_cast_type_start(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !bool {
+    if index + 1 >= tokens.len() {
+        return false;
+    }
+    let current = try tokens.get(index);
+    let next = try tokens.get(index + 1);
+    return std::mem::equal_bytes(token_text(source_text, current), "cast") and
+        std::mem::equal_bytes(token_text(source_text, next), "<");
+}
+
+fn is_generic_constructor_at(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    start: i64,
+    end: i64
+) -> !bool {
+    if end + 1 >= tokens.len() {
+        return false;
+    }
+    let open = try tokens.get(end + 1);
+    if !std::mem::equal_bytes(token_text(source_text, open), "<") {
+        return false;
+    }
+    let first = try tokens.get(start);
+    let last = try tokens.get(end);
+    let name = source_text[first.start..last.end];
+    return std::mem::equal_bytes(name, "std::array::Array") or
+        std::mem::equal_bytes(name, "std::map::Map") or
+        std::mem::equal_bytes(name, "std::mem::Box") or
+        std::mem::equal_bytes(name, "std::arena::Arena") or
+        std::mem::equal_bytes(name, "std::arena::Handle");
+}

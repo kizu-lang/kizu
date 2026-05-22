@@ -1,0 +1,325 @@
+import selfhost::backend::data;
+
+pub fn emit_run_hello_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !data::RunArtifact {
+    try std::fs::create_dir(io, "target/selfhost/run");
+
+    var module = try render_run_hello_llvm(allocator, source_path);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        "target/selfhost/run/run_hello.ll",
+        module_view,
+        module.len()
+    );
+    module.deinit();
+
+    var metadata = try render_run_hello_metadata(allocator, source_path);
+    let metadata_view = metadata.as_bytes();
+    let metadata_len = try write_backend_bytes(
+        io,
+        "target/selfhost/run/run_hello.ll.meta",
+        metadata_view,
+        metadata.len()
+    );
+    metadata.deinit();
+
+    return data::RunArtifact {
+        ll_path: "target/selfhost/run/run_hello.ll",
+        metadata_path: "target/selfhost/run/run_hello.ll.meta",
+        bytes: module_len,
+        metadata_bytes: metadata_len
+    };
+}
+
+pub fn emit_test_expect_ok_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !data::TestArtifact {
+    try std::fs::create_dir(io, "target/selfhost/test");
+
+    var module = try render_test_expect_ok_llvm(allocator, source_path);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        "target/selfhost/test/test_expect_ok.ll",
+        module_view,
+        module.len()
+    );
+    module.deinit();
+
+    var metadata = try render_test_expect_ok_metadata(allocator, source_path);
+    let metadata_view = metadata.as_bytes();
+    let metadata_len = try write_backend_bytes(
+        io,
+        "target/selfhost/test/test_expect_ok.ll.meta",
+        metadata_view,
+        metadata.len()
+    );
+    metadata.deinit();
+
+    return data::TestArtifact {
+        ll_path: "target/selfhost/test/test_expect_ok.ll",
+        metadata_path: "target/selfhost/test/test_expect_ok.ll.meta",
+        bytes: module_len,
+        metadata_bytes: metadata_len
+    };
+}
+
+pub fn emit_test_expect_failure_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !data::TestArtifact {
+    try std::fs::create_dir(io, "target/selfhost/test");
+
+    var module = try render_test_expect_failure_llvm(allocator, source_path);
+    let module_view = module.as_bytes();
+    let module_len = try write_backend_bytes(
+        io,
+        "target/selfhost/test/test_expect_failure.ll",
+        module_view,
+        module.len()
+    );
+    module.deinit();
+
+    var metadata = try render_test_expect_failure_metadata(allocator, source_path);
+    let metadata_view = metadata.as_bytes();
+    let metadata_len = try write_backend_bytes(
+        io,
+        "target/selfhost/test/test_expect_failure.ll.meta",
+        metadata_view,
+        metadata.len()
+    );
+    metadata.deinit();
+
+    return data::TestArtifact {
+        ll_path: "target/selfhost/test/test_expect_failure.ll",
+        metadata_path: "target/selfhost/test/test_expect_failure.ll.meta",
+        bytes: module_len,
+        metadata_bytes: metadata_len
+    };
+}
+
+fn write_backend_bytes(
+    io: Io,
+    path: &[]u8,
+    bytes: &[]u8,
+    byte_len: i64
+) -> !i64 {
+    try std::fs::write_file(io, path, bytes);
+    return byte_len;
+}
+fn render_run_hello_llvm(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "; kizu run artifact ll v0");
+    try out.append_bytes("source_filename = ");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(source_path);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "");
+    try append_line(out, "%kizu.slice.u8 = type { ptr, i64 }");
+    try append_line(out, "%kizu.owned = type { ptr }");
+    try append_line(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
+    try append_line(out, "");
+    try out.append_bytes("@.kizu.run.stdout = private unnamed_addr constant [12 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("hello, kizu\0A");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "");
+    try append_line(out, "declare %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "declare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)");
+    try append_line(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try append_line(out, "");
+    try append_line(out, "define i64 @kizu_run_main() {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try append_line(out,
+        "  %ptr = getelementptr inbounds [12 x i8], ptr @.kizu.run.stdout, i64 0, i64 0");
+    try append_line(out, "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0");
+    try append_line(out, "  %slice = insertvalue %kizu.slice.u8 %base, i64 12, 1");
+    try append_line(out,
+        "  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)");
+    try append_line(out, "  %code = call i64 @kizu_rt_process_exit_code(i64 0)");
+    try append_line(out, "  ret i64 %code");
+    try append_line(out, "}");
+    return out;
+}
+
+fn render_run_hello_metadata(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "kizu-run-artifact-v0");
+    try append_line(out, "issue #569");
+    try append_key_value(out, "source ", source_path);
+    try append_line(out, "output target/selfhost/run/run_hello.ll");
+    try append_line(out, "abi selfhost-abi-v0");
+    try append_line(out, "entry @kizu_run_main");
+    try append_line(out, "runtime target/selfhost/stage2/selfhost.host.ll");
+    try append_line(out, "go.cmd-kizu-fallback none");
+    try append_line(out, "artifact_mode hosted-artifact");
+    return out;
+}
+
+fn render_test_expect_ok_llvm(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_test_artifact_header(out, source_path);
+    try out.append_bytes("@.kizu.test.ok = private unnamed_addr constant [9 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("test: ok\0A");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_test_artifact_body(out, "ok", "9", "stdout", "0");
+    return out;
+}
+
+fn render_test_expect_failure_llvm(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_test_artifact_header(out, source_path);
+    try out.append_bytes("@.kizu.test.failure = private unnamed_addr constant [52 x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("error: runtime error: expected condition to be true\0A");
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_test_artifact_body(out, "failure", "52", "stderr", "1");
+    return out;
+}
+
+fn append_test_artifact_header(
+    out: &var std::string::String,
+    source: []u8
+) -> !void {
+    try append_line(out, "; kizu test artifact ll v0");
+    try out.append_bytes("source_filename = ");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(source);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "");
+    try append_line(out, "%kizu.slice.u8 = type { ptr, i64 }");
+    try append_line(out, "%kizu.owned = type { ptr }");
+    try append_line(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
+    try append_line(out, "");
+    return;
+}
+
+fn append_test_artifact_body(
+    out: &var std::string::String,
+    global: []u8,
+    size: []u8,
+    stream: []u8,
+    code: []u8
+) -> !void {
+    try append_line(out, "");
+    try append_line(out, "declare %kizu.owned @kizu_rt_io_blocking()");
+    try out.append_bytes("declare %kizu.error.void @kizu_rt_io_write_");
+    try out.append_bytes(stream);
+    try out.append_bytes("(%kizu.owned, %kizu.slice.u8)");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try append_line(out, "");
+    try append_line(out, "define i64 @kizu_test_main() {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
+    try out.append_bytes("  %ptr = getelementptr inbounds [");
+    try out.append_bytes(size);
+    try out.append_bytes(" x i8], ptr @.kizu.test.");
+    try out.append_bytes(global);
+    try out.append_bytes(", i64 0, i64 0");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0");
+    try out.append_bytes("  %slice = insertvalue %kizu.slice.u8 %base, i64 ");
+    try out.append_bytes(size);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %write = call %kizu.error.void @kizu_rt_io_write_");
+    try out.append_bytes(stream);
+    try out.append_bytes("(%kizu.owned %io, %kizu.slice.u8 %slice)");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %code = call i64 @kizu_rt_process_exit_code(i64 ");
+    try out.append_bytes(code);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  ret i64 %code");
+    try append_line(out, "}");
+    return;
+}
+
+fn render_test_expect_ok_metadata(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_test_metadata(
+        out,
+        source_path,
+        "target/selfhost/test/test_expect_ok.ll"
+    );
+    return out;
+}
+
+fn render_test_expect_failure_metadata(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_test_metadata(
+        out,
+        source_path,
+        "target/selfhost/test/test_expect_failure.ll"
+    );
+    return out;
+}
+
+fn append_test_metadata(
+    out: &var std::string::String,
+    source: []u8,
+    output: []u8
+) -> !void {
+    try append_line(out, "kizu-test-artifact-v0");
+    try append_line(out, "issue #570");
+    try append_key_value(out, "source ", source);
+    try append_key_value(out, "output ", output);
+    try append_line(out, "abi selfhost-abi-v0");
+    try append_line(out, "entry @kizu_test_main");
+    try append_line(out, "runtime target/selfhost/stage2/selfhost.host.ll");
+    try append_line(out, "go.cmd-kizu-fallback none");
+    try append_line(out, "artifact_mode hosted-artifact");
+    try append_line(out, "discovery none");
+    return;
+}
+
+fn append_key_value(
+    out: &var std::string::String,
+    key: []u8,
+    value: []u8
+) -> !void {
+    try out.append_bytes(key);
+    try out.append_bytes(value);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_line(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}

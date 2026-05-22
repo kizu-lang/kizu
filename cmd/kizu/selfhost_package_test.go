@@ -16,8 +16,8 @@ func TestSelfhostPackageSkeletonChecks(t *testing.T) {
 func TestSelfhostCheckPhasesUseParserFacade(t *testing.T) {
 	paths := []string{
 		"../../selfhost/src/resolver.kizu",
-		"../../selfhost/src/types.kizu",
-		"../../selfhost/src/ownership.kizu",
+		"../../selfhost/src/types/checker.kizu",
+		"../../selfhost/src/ownership/checker.kizu",
 	}
 	for _, path := range paths {
 		bytes, err := os.ReadFile(path)
@@ -121,9 +121,9 @@ func TestSelfhostParserSummaryUsesParsedAST(t *testing.T) {
 
 // TestSelfhostFunctionCallDiagnosticsUseSourcePath keeps file selection path-owned.
 func TestSelfhostFunctionCallDiagnosticsUseSourcePath(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
 	if err != nil {
-		t.Fatalf("read selfhost types: %v", err)
+		t.Fatalf("read selfhost function calls: %v", err)
 	}
 	content := string(bytes)
 	if strings.Contains(content, "std::mem::equal_bytes(file.text, source_text)") {
@@ -136,9 +136,9 @@ func TestSelfhostFunctionCallDiagnosticsUseSourcePath(t *testing.T) {
 
 // TestSelfhostPackageCallDiagnosticsBorrowAST keeps target parsing single-pass.
 func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
 	if err != nil {
-		t.Fatalf("read selfhost types: %v", err)
+		t.Fatalf("read selfhost function calls: %v", err)
 	}
 	content := string(bytes)
 	required := []string{
@@ -182,7 +182,7 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 
 // TestSelfhostTypeLocalsUseParsedAST rejects raw body text scans for function locals.
 func TestSelfhostTypeLocalsUseParsedAST(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost types: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestSelfhostTypeLocalsUseParsedAST(t *testing.T) {
 
 // TestSelfhostArgumentTypesUseParsedParams rejects param-source re-lexing.
 func TestSelfhostArgumentTypesUseParsedParams(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost types: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestSelfhostArgumentTypesUseParsedParams(t *testing.T) {
 
 // TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST rejects return-type token scans.
 func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost types: %v", err)
 	}
@@ -296,9 +296,9 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 
 // TestSelfhostCheckEntryRunsPackageCallDiagnostics rejects raw source prefilters.
 func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/main.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/cli/check.kizu")
 	if err != nil {
-		t.Fatalf("read selfhost main: %v", err)
+		t.Fatalf("read selfhost cli check: %v", err)
 	}
 	content := string(bytes)
 	if strings.Contains(content, "source_has_qualified_name") {
@@ -315,12 +315,12 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 
 // TestSelfhostCheckEntrySharesDiagnosticPasses keeps per-file checks grouped by phase.
 func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/main.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/cli/check.kizu")
 	if err != nil {
-		t.Fatalf("read selfhost main: %v", err)
+		t.Fatalf("read selfhost cli check: %v", err)
 	}
 	content := string(bytes)
-	body := selfhostKizuFunctionBody(t, content, "fn check_file_fast_diagnostics(")
+	body := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics(")
 	required := []string{
 		"types::first_pre_move_check_diagnostic(allocator, path, file_text)",
 		"types::first_post_move_check_diagnostic(allocator, path, file_text)",
@@ -328,7 +328,7 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	}
 	for _, fragment := range required {
 		if !strings.Contains(body, fragment) {
-			t.Fatalf("check_file_fast_diagnostics missing shared phase %q", fragment)
+			t.Fatalf("fast_diagnostics missing shared phase %q", fragment)
 		}
 	}
 	forbidden := []string{
@@ -344,7 +344,7 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(body, fragment) {
-			t.Fatalf("check_file_fast_diagnostics keeps per-diagnostic call %q", fragment)
+			t.Fatalf("fast_diagnostics keeps per-diagnostic call %q", fragment)
 		}
 	}
 	oldWrappers := []string{
@@ -359,14 +359,14 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	}
 	for _, fragment := range oldWrappers {
 		if strings.Contains(content, fragment) {
-			t.Fatalf("selfhost main keeps unused diagnostic wrapper %q", fragment)
+			t.Fatalf("selfhost cli check keeps unused diagnostic wrapper %q", fragment)
 		}
 	}
 }
 
 // TestSelfhostTypeCheckSkipsStdDiagnosticPass keeps std as declarations-only for user checks.
 func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost types: %v", err)
 	}
@@ -382,9 +382,9 @@ func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
 
 // TestSelfhostPackageAritySelectionUsesModulePaths rejects hardcoded std module IDs.
 func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
 	if err != nil {
-		t.Fatalf("read selfhost types: %v", err)
+		t.Fatalf("read selfhost function calls: %v", err)
 	}
 	content := string(bytes)
 	forbidden := []string{
@@ -407,6 +407,158 @@ func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
 			t.Fatalf("package arity selection missing %q", fragment)
 		}
 	}
+}
+
+// TestSelfhostFrontendResponsibilitiesStaySplit keeps frontend boundaries split.
+func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
+	assertSelfhostSplitFiles(t)
+	assertSelfhostRootOmitsResponsibilities(t)
+}
+
+var selfhostSplitFileExpectations = map[string][]string{
+	"../../selfhost/src/types/model.kizu": {
+		"pub enum TypeKind",
+		"pub struct CheckDiagnosticSummary",
+	},
+	"../../selfhost/src/types/diagnostic.kizu": {
+		"pub fn unknown_type(",
+		"pub fn non_exhaustive_match(",
+	},
+	"../../selfhost/src/types/symbols.kizu": {
+		"pub fn declare_type(",
+		"pub fn lookup_kind(",
+	},
+	"../../selfhost/src/types/checker.kizu": {
+		"pub fn check_sources(",
+		"pub fn first_pre_move_check_diagnostic(",
+	},
+	"../../selfhost/src/types/function_calls.kizu": {
+		"pub fn first_function_call_error(",
+		"pub fn check_file_function_references(",
+	},
+	"../../selfhost/src/types/body_scan.kizu": {
+		"pub fn scan_body_ast_node(",
+		"fn scan_body_child_range(",
+	},
+	"../../selfhost/src/types/type_refs.kizu": {
+		"pub fn check_file_type_references(",
+		"pub fn first_type_error_in_file(",
+	},
+	"../../selfhost/src/ownership/data.kizu": {
+		"pub enum ResourceKind",
+		"pub struct CheckedPackage",
+	},
+	"../../selfhost/src/ownership/state.kizu": {
+		"pub fn declare_resource(",
+		"pub fn move_value(",
+	},
+	"../../selfhost/src/ownership/diagnostic.kizu": {
+		"pub fn use_after_move(",
+		"pub fn deinit_while_borrowed(",
+	},
+	"../../selfhost/src/ownership/checker.kizu": {
+		"pub fn check_package(",
+		"fn check_ownership_ast_node(",
+	},
+	"../../selfhost/src/ownership/kind.kizu": {
+		"pub fn initializer_resource_kind(",
+		"pub fn ast_node_text(",
+	},
+	"../../selfhost/src/ownership/move_diagnostic.kizu": {
+		"pub fn first_use_after_move_name(",
+		"fn first_use_after_move_ast_node(",
+	},
+	"../../selfhost/src/backend/runtime.kizu": {
+		"pub fn load_storage_module(",
+		"pub fn render_host_metadata(",
+	},
+	"../../selfhost/src/backend/hosted.kizu": {
+		"pub fn emit_run_hello_artifact(",
+		"fn render_test_expect_ok_llvm(",
+	},
+	"../../selfhost/src/backend/llvm.kizu": {
+		"pub fn emit_llvm_artifact(",
+		"fn render_llvm_module(",
+	},
+	"../../selfhost/src/backend/cli_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+	},
+	"../../selfhost/src/cli/check.kizu": {
+		"pub fn file_cli(",
+		"pub fn fast_diagnostics(",
+	},
+}
+
+// assertSelfhostSplitFiles checks the expected responsibility modules exist.
+func assertSelfhostSplitFiles(t *testing.T) {
+	t.Helper()
+	for path, required := range selfhostSplitFileExpectations {
+		content := readSelfhostFile(t, path)
+		for _, fragment := range required {
+			if !strings.Contains(content, fragment) {
+				t.Fatalf("%s missing split responsibility %q", filepath.Clean(path), fragment)
+			}
+		}
+	}
+}
+
+// assertSelfhostRootOmitsResponsibilities keeps split code out of root modules.
+func assertSelfhostRootOmitsResponsibilities(t *testing.T) {
+	t.Helper()
+	rootTypes := readSelfhostFile(t, "../../selfhost/src/types.kizu")
+	rootOwnership := readSelfhostFile(t, "../../selfhost/src/ownership.kizu")
+	rootMain := readSelfhostFile(t, "../../selfhost/src/main.kizu")
+	rootBackend := readSelfhostFile(t, "../../selfhost/src/backend.kizu")
+	forbidden := map[string][]string{
+		"types.kizu": {
+			"pub enum TypeKind",
+			"pub fn unknown_type(",
+			"pub fn declare_type(",
+			"fn first_function_call_error_ast_node(",
+		},
+		"ownership.kizu": {
+			"pub enum ResourceKind",
+			"pub fn declare_resource(",
+			"pub fn use_after_move(",
+			"fn first_use_after_move_ast_node(",
+			"fn check_ownership_ast_node(",
+			"fn resource_kind_for_text(",
+		},
+		"main.kizu": {
+			"pub fn fast_diagnostics(",
+			"fn write_check_diagnostic(",
+		},
+		"backend.kizu": {
+			"fn render_llvm_module(",
+			"fn append_cli_globals(",
+			"fn render_run_hello_llvm(",
+			"fn render_test_expect_ok_llvm(",
+		},
+	}
+	contents := map[string]string{
+		"types.kizu":     rootTypes,
+		"ownership.kizu": rootOwnership,
+		"main.kizu":      rootMain,
+		"backend.kizu":   rootBackend,
+	}
+	for name, fragments := range forbidden {
+		for _, fragment := range fragments {
+			if strings.Contains(contents[name], fragment) {
+				t.Fatalf("%s keeps split responsibility %q", name, fragment)
+			}
+		}
+	}
+}
+
+// readSelfhostFile reads a selfhost source file for structural assertions.
+func readSelfhostFile(t *testing.T, path string) string {
+	t.Helper()
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", filepath.Clean(path), err)
+	}
+	return string(bytes)
 }
 
 // selfhostKizuFunctionBody extracts a simple Kizu function body for structural checks.
@@ -450,7 +602,7 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 	required := []string{
 		"parser::parse_diagnostic_file(allocator, path, file_text)",
 		"if !parsed_validation.ok {",
-		"return try write_check_parse_failure(allocator, io, parsed_validation);",
+		"return try write_parse_failure(allocator, io, parsed_validation);",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
@@ -461,9 +613,9 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 
 // TestSelfhostMoveDiagnosticsUseSourcePath keeps move diagnostics file-owned.
 func TestSelfhostMoveDiagnosticsUseSourcePath(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/ownership.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/ownership/move_diagnostic.kizu")
 	if err != nil {
-		t.Fatalf("read selfhost ownership: %v", err)
+		t.Fatalf("read selfhost move diagnostic: %v", err)
 	}
 	content := string(bytes)
 	required := []string{

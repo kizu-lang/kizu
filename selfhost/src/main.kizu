@@ -1,4 +1,8 @@
 import selfhost::backend;
+import selfhost::backend::data;
+import selfhost::cli::check;
+import selfhost::cli::diagnostics;
+import selfhost::cli::output;
 import selfhost::ir;
 import selfhost::lexer;
 import selfhost::ownership;
@@ -97,22 +101,22 @@ pub fn cli_main() -> !i64 {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
     if std::process::arg_count() != 2 {
-        try write_cli_usage(allocator, io);
+        try output::usage(allocator, io);
         return std::process::exit_code(64);
     }
 
     let command = try std::process::arg(0);
     let target = try std::process::arg(1);
     if std::mem::starts_with(command, "-") or std::mem::starts_with(target, "-") {
-        try write_cli_usage(allocator, io);
+        try output::usage(allocator, io);
         return std::process::exit_code(64);
     }
     if std::mem::equal_bytes(command, "check") {
         if !std::mem::equal_bytes(target, "selfhost") {
-            return try check_file_cli(allocator, io, target);
+            return try check::file_cli(allocator, io, target);
         }
         try check_selfhost(allocator, io);
-        try write_cli_line(allocator, io, "check: ok");
+        try output::line(allocator, io, "check: ok");
         return std::process::exit_code(0);
     }
     if std::mem::equal_bytes(command, "parse") {
@@ -125,48 +129,23 @@ pub fn cli_main() -> !i64 {
         return try test_file_cli(allocator, io, target);
     }
     if !std::mem::equal_bytes(target, "selfhost") {
-        try write_cli_usage(allocator, io);
+        try output::usage(allocator, io);
         return std::process::exit_code(64);
     }
     if std::mem::equal_bytes(command, "stage") {
         let llvm = try stage_selfhost(allocator, io);
-        try write_cli_line(allocator, io, "stage: ok");
-        try write_cli_line(allocator, io, llvm.ll_path);
-        try write_cli_line(allocator, io, llvm.metadata_path);
-        try write_cli_line(allocator, io, llvm.storage_path);
-        try write_cli_line(allocator, io, llvm.storage_metadata_path);
-        try write_cli_line(allocator, io, llvm.host_path);
-        try write_cli_line(allocator, io, llvm.host_metadata_path);
+        try output::line(allocator, io, "stage: ok");
+        try output::line(allocator, io, llvm.ll_path);
+        try output::line(allocator, io, llvm.metadata_path);
+        try output::line(allocator, io, llvm.storage_path);
+        try output::line(allocator, io, llvm.storage_metadata_path);
+        try output::line(allocator, io, llvm.host_path);
+        try output::line(allocator, io, llvm.host_metadata_path);
         return std::process::exit_code(0);
     }
 
-    try write_cli_error_line(allocator, io, "unsupported selfhost command");
+    try output::error_line(allocator, io, "unsupported selfhost command");
     return std::process::exit_code(64);
-}
-
-fn check_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
-    let file_text = try std::fs::read_file(io, path);
-    if !(try check_file_fast_diagnostics(allocator, io, path, file_text)) {
-        return std::process::exit_code(1);
-    }
-
-    var files = try source::load_file_sources(allocator, io, path, file_text);
-    let resolved = try resolver::resolve_sources(allocator, files);
-    let typed = try types::check_sources(allocator, files, resolved);
-    let checked = try ownership::check_package(allocator, files, typed);
-    let call_error = try types::first_function_call_error(allocator, files, path);
-    files.deinit();
-
-    if call_error.found {
-        try write_function_call_error(allocator, io, file_text, call_error);
-        return std::process::exit_code(1);
-    }
-    if checked.diagnostics != 0 {
-        try write_cli_error_line(allocator, io, "error: check failed");
-        return std::process::exit_code(1);
-    }
-    try write_cli_line(allocator, io, "check: ok");
-    return std::process::exit_code(0);
 }
 
 fn parse_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
@@ -186,7 +165,7 @@ fn write_parse_success(
     var formatted = try format::format_source(allocator, file_text);
     let formatted_bytes = formatted.as_bytes();
     try std::io::write_stdout(io, formatted_bytes);
-    try write_cli_stdout_newline(allocator, io);
+    try output::stdout_newline(allocator, io);
     formatted.deinit();
     return std::process::exit_code(0);
 }
@@ -196,13 +175,13 @@ fn write_parse_failure(
     io: Io,
     parsed_validation: validation::ParseValidation
 ) -> !i64 {
-    try write_parse_validation_error(allocator, io, parsed_validation);
+    try diagnostics::parse_validation_error(allocator, io, parsed_validation);
     return std::process::exit_code(1);
 }
 
 fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
-    if !(try check_file_fast_diagnostics(allocator, io, path, file_text)) {
+    if !(try check::fast_diagnostics(allocator, io, path, file_text)) {
         return std::process::exit_code(1);
     }
     var parsed = try parser::parse_checked_file(allocator, path, file_text);
@@ -214,13 +193,13 @@ fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
             return std::process::exit_code(0);
         }
     }
-    try write_cli_usage(allocator, io);
+    try output::usage(allocator, io);
     return std::process::exit_code(64);
 }
 
 fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
-    if !(try check_file_fast_diagnostics(allocator, io, path, file_text)) {
+    if !(try check::fast_diagnostics(allocator, io, path, file_text)) {
         return std::process::exit_code(1);
     }
     var parsed = try parser::parse_checked_file(allocator, path, file_text);
@@ -238,168 +217,8 @@ fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
             return std::process::exit_code(0);
         }
     }
-    try write_cli_usage(allocator, io);
+    try output::usage(allocator, io);
     return std::process::exit_code(64);
-}
-
-fn check_file_fast_diagnostics(
-    allocator: Allocator,
-    io: Io,
-    path: []u8,
-    file_text: []u8
-) -> !bool {
-    let parsed_validation = try parser::parse_diagnostic_file(allocator, path, file_text);
-    if !parsed_validation.ok {
-        return try write_check_parse_failure(allocator, io, parsed_validation);
-    }
-
-    let duplicate = try resolver::first_duplicate_declaration(allocator, path, file_text);
-    if duplicate.found {
-        try write_duplicate_symbol_error(allocator, io, file_text[duplicate.start..duplicate.end]);
-        return false;
-    }
-
-    let pre_move = try types::first_pre_move_check_diagnostic(allocator, path, file_text);
-    if !(try write_check_diagnostic(allocator, io, file_text, &pre_move)) {
-        return false;
-    }
-
-    let moved_name = try ownership::first_use_after_move_name(allocator, path, file_text);
-    if !std::mem::equal_bytes(moved_name, "") {
-        try write_move_error(allocator, io, moved_name);
-        return false;
-    }
-
-    let post_move = try types::first_post_move_check_diagnostic(allocator, path, file_text);
-    if !(try write_check_diagnostic(allocator, io, file_text, &post_move)) {
-        return false;
-    }
-    if !(try write_package_function_call_diagnostic(allocator, io, path, file_text)) {
-        return false;
-    }
-    return true;
-}
-
-fn write_check_parse_failure(
-    allocator: Allocator,
-    io: Io,
-    parsed_validation: validation::ParseValidation
-) -> !bool {
-    try write_parse_validation_error(allocator, io, parsed_validation);
-    return false;
-}
-
-fn write_check_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    file_text: []u8,
-    diagnostic: &types::CheckDiagnosticSummary
-) -> !bool {
-    if !diagnostic.found {
-        return true;
-    }
-    if diagnostic.kind == 1 {
-        return try write_check_type_reference_diagnostic(allocator, io, file_text, diagnostic);
-    }
-    if diagnostic.kind == 2 {
-        let match_summary = types::MatchDiagnosticSummary {
-            found: true,
-            kind: diagnostic.detail_kind,
-            name: diagnostic.name,
-            tag: diagnostic.tag
-        };
-        try write_match_error(allocator, io, match_summary);
-        return false;
-    }
-    if diagnostic.kind == 3 {
-        try write_cli_error_line(allocator, io, "error: type error: return type mismatch");
-        return false;
-    }
-    if diagnostic.kind == 4 {
-        let call_summary = types::FunctionCallSummary {
-            found: true,
-            kind: diagnostic.detail_kind,
-            start: diagnostic.start,
-            end: diagnostic.end,
-            expected: diagnostic.expected,
-            observed: diagnostic.observed
-        };
-        try write_function_call_error(allocator, io, file_text, call_summary);
-        return false;
-    }
-    if diagnostic.kind == 5 {
-        try std::io::write_stderr(io, "error: type error: undefined variable `");
-        try std::io::write_stderr(io, diagnostic.name);
-        try write_cli_error_line(allocator, io, "`");
-        return false;
-    }
-    if diagnostic.kind == 6 {
-        try write_cli_error_line(allocator, io, "error: type error: argument type mismatch");
-        return false;
-    }
-    if diagnostic.kind == 7 {
-        try std::io::write_stderr(io, "error: type error: cannot assign to immutable binding `");
-        try std::io::write_stderr(io, diagnostic.name);
-        try write_cli_error_line(allocator, io, "`");
-        return false;
-    }
-    if diagnostic.kind == 8 {
-        try std::io::write_stderr(io, "error: type error: invalid assignment target `");
-        try std::io::write_stderr(io, file_text[diagnostic.start..diagnostic.end]);
-        try write_cli_error_line(allocator, io, "`");
-        return false;
-    }
-    if diagnostic.kind == 9 {
-        try write_cli_error_line(allocator, io, "error: type error: assignment type mismatch");
-        return false;
-    }
-    try write_cli_error_line(allocator, io, "error: check failed");
-    return false;
-}
-
-fn write_check_type_reference_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    file_text: []u8,
-    diagnostic: &types::CheckDiagnosticSummary
-) -> !bool {
-    let name = file_text[diagnostic.start..diagnostic.end];
-    if diagnostic.detail_kind == 1 {
-        try write_unknown_type_error(allocator, io, name);
-        return false;
-    }
-    if diagnostic.detail_kind == 2 {
-        try write_type_arity_error(
-            allocator,
-            io,
-            name,
-            diagnostic.expected,
-            diagnostic.observed
-        );
-        return false;
-    }
-    try write_cli_error_line(allocator, io, "error: check failed");
-    return false;
-}
-
-fn write_package_function_call_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    path: []u8,
-    file_text: []u8
-) -> !bool {
-    let has_package_call = try types::source_has_package_function_call(allocator, path, file_text);
-    if !has_package_call {
-        return true;
-    }
-    var files = try source::load_file_sources(allocator, io, path, file_text);
-    let call_error = try types::first_function_call_error(allocator, files, path);
-    files.deinit();
-    if call_error.found {
-        try write_function_call_error(allocator, io, file_text, call_error);
-        return false;
-    }
-    return true;
 }
 
 fn ast_prints_hello(
@@ -716,16 +535,16 @@ pub fn cli_contract_gate() -> !void {
     let io = std::io::blocking();
     let llvm = try check_and_stage_selfhost(allocator, io);
 
-    try write_cli_line(allocator, io, "check: ok");
+    try output::line(allocator, io, "check: ok");
     print("exit-code");
     print(std::process::exit_code(0));
-    try write_cli_line(allocator, io, "stage: ok");
-    try write_cli_line(allocator, io, llvm.ll_path);
-    try write_cli_line(allocator, io, llvm.metadata_path);
-    try write_cli_line(allocator, io, llvm.storage_path);
-    try write_cli_line(allocator, io, llvm.storage_metadata_path);
-    try write_cli_line(allocator, io, llvm.host_path);
-    try write_cli_line(allocator, io, llvm.host_metadata_path);
+    try output::line(allocator, io, "stage: ok");
+    try output::line(allocator, io, llvm.ll_path);
+    try output::line(allocator, io, llvm.metadata_path);
+    try output::line(allocator, io, llvm.storage_path);
+    try output::line(allocator, io, llvm.storage_metadata_path);
+    try output::line(allocator, io, llvm.host_path);
+    try output::line(allocator, io, llvm.host_metadata_path);
     print("exit-code");
     print(std::process::exit_code(0));
     return;
@@ -744,12 +563,12 @@ fn check_selfhost(allocator: Allocator, io: Io) -> !void {
     return;
 }
 
-fn stage_selfhost(allocator: Allocator, io: Io) -> !backend::LlvmArtifact {
+fn stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
     let llvm = try check_and_stage_selfhost(allocator, io);
     return llvm;
 }
 
-fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !backend::LlvmArtifact {
+fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !data::LlvmArtifact {
     var files = try source::load_selfhost_sources(allocator, io, "selfhost");
     let resolved = try resolver::resolve_sources(allocator, files);
     let typed = try types::check_sources(allocator, files, resolved);
@@ -767,255 +586,4 @@ fn check_and_stage_selfhost(allocator: Allocator, io: Io) -> !backend::LlvmArtif
         artifact.manifest_path
     );
     return llvm;
-}
-
-fn write_cli_usage(allocator: Allocator, io: Io) -> !void {
-    try write_cli_error_line(allocator, io, "usage: selfhost <check|stage|parse|run|test> <target>");
-    return;
-}
-
-fn write_cli_line(allocator: Allocator, io: Io, text: []u8) -> !void {
-    try std::io::write_stdout(io, text);
-    try write_cli_stdout_newline(allocator, io);
-    return;
-}
-
-fn write_cli_error_line(allocator: Allocator, io: Io, text: []u8) -> !void {
-    try std::io::write_stderr(io, text);
-    try write_cli_stderr_newline(allocator, io);
-    return;
-}
-
-fn write_parse_validation_error(
-    allocator: Allocator,
-    io: Io,
-    validation: validation::ParseValidation
-) -> !void {
-    var line = std::string::String(allocator);
-    try line.append_bytes("error: ");
-    try line.append_bytes(validation.message);
-    if !std::mem::equal_bytes(validation.got, "") {
-        try line.append_bytes(", got ");
-        try line.append_bytes(validation.got);
-    }
-    try line.append_bytes(" at ");
-    try std::fmt::append_i64(line, validation.line);
-    try line.append_byte(cast<u8>(58));
-    try std::fmt::append_i64(line, validation.column);
-    let bytes = line.as_bytes();
-    try std::io::write_stderr(io, bytes);
-    try write_cli_stderr_newline(allocator, io);
-    line.deinit();
-    try write_cli_error_line(allocator, io, "error: parse failed");
-    return;
-}
-
-fn write_move_error(
-    allocator: Allocator,
-    io: Io,
-    name: []u8
-) -> !void {
-    try std::io::write_stderr(io, "error: move error: moved value `");
-    try std::io::write_stderr(io, name);
-    try write_cli_error_line(allocator, io, "` was used");
-    return;
-}
-
-fn write_duplicate_symbol_error(
-    allocator: Allocator,
-    io: Io,
-    name: []u8
-) -> !void {
-    try std::io::write_stderr(io, "error: duplicate symbol `");
-    try std::io::write_stderr(io, name);
-    try write_cli_error_line(allocator, io, "`");
-    return;
-}
-
-fn write_unknown_function_error(
-    allocator: Allocator,
-    io: Io,
-    name: []u8
-) -> !void {
-    try std::io::write_stderr(io, "error: unknown function `");
-    try std::io::write_stderr(io, name);
-    try write_cli_error_line(allocator, io, "`");
-    return;
-}
-
-fn write_function_call_error(
-    allocator: Allocator,
-    io: Io,
-    text: []u8,
-    call_error: types::FunctionCallSummary
-) -> !void {
-    let name = text[call_error.start..call_error.end];
-    if call_error.kind == 1 {
-        try write_unknown_function_error(allocator, io, name);
-        return;
-    }
-    if call_error.kind == 2 {
-        try write_function_arity_error(
-            allocator,
-            io,
-            name,
-            call_error.expected,
-            call_error.observed
-        );
-        return;
-    }
-    try write_cli_error_line(allocator, io, "error: check failed");
-    return;
-}
-
-fn write_match_error(
-    allocator: Allocator,
-    io: Io,
-    diagnostic: types::MatchDiagnosticSummary
-) -> !void {
-    if diagnostic.kind == 1 {
-        try std::io::write_stderr(io, "error: type error: match expects enum or union, got ");
-        try write_cli_error_line(allocator, io, diagnostic.name);
-        return;
-    }
-    if diagnostic.kind == 2 {
-        try write_match_tag_error(
-            allocator,
-            io,
-            "error: type error: unknown match tag `",
-            diagnostic.name,
-            diagnostic.tag
-        );
-        return;
-    }
-    if diagnostic.kind == 3 {
-        try write_match_tag_error(
-            allocator,
-            io,
-            "error: type error: duplicate match tag `",
-            diagnostic.name,
-            diagnostic.tag
-        );
-        return;
-    }
-    if diagnostic.kind == 4 {
-        try std::io::write_stderr(io, "error: type error: match on `");
-        try std::io::write_stderr(io, diagnostic.name);
-        try write_cli_error_line(allocator, io, "` is not exhaustive");
-        return;
-    }
-    if diagnostic.kind == 5 {
-        try write_cli_error_line(allocator, io, "error: type error: wildcard match arm must be last");
-        return;
-    }
-    if diagnostic.kind == 6 {
-        try write_cli_error_line(
-            allocator,
-            io,
-            "error: type error: wildcard match arm cannot bind payload"
-        );
-        return;
-    }
-    if diagnostic.kind == 7 {
-        try write_cli_error_line(allocator, io, "error: type error: duplicate wildcard match arm");
-        return;
-    }
-    if diagnostic.kind == 8 {
-        try write_match_tag_error(
-            allocator,
-            io,
-            "error: type error: enum tag has no payload `",
-            diagnostic.name,
-            diagnostic.tag
-        );
-        return;
-    }
-    try write_cli_error_line(allocator, io, "error: check failed");
-    return;
-}
-
-fn write_match_tag_error(
-    allocator: Allocator,
-    io: Io,
-    prefix: []u8,
-    name: []u8,
-    tag: []u8
-) -> !void {
-    try std::io::write_stderr(io, prefix);
-    try std::io::write_stderr(io, name);
-    try std::io::write_stderr(io, "::");
-    try std::io::write_stderr(io, tag);
-    try write_cli_error_line(allocator, io, "`");
-    return;
-}
-
-fn write_unknown_type_error(
-    allocator: Allocator,
-    io: Io,
-    name: []u8
-) -> !void {
-    try std::io::write_stderr(io, "error: unknown type `");
-    try std::io::write_stderr(io, name);
-    try write_cli_error_line(allocator, io, "`");
-    return;
-}
-
-fn write_function_arity_error(
-    allocator: Allocator,
-    io: Io,
-    name: []u8,
-    expected: i64,
-    observed: i64
-) -> !void {
-    try std::io::write_stderr(io, "error: function `");
-    try std::io::write_stderr(io, name);
-    try std::io::write_stderr(io, "` expects ");
-    var line = std::string::String(allocator);
-    try std::fmt::append_i64(line, expected);
-    try line.append_bytes(" argument, got ");
-    try std::fmt::append_i64(line, observed);
-    let bytes = line.as_bytes();
-    try std::io::write_stderr(io, bytes);
-    try write_cli_stderr_newline(allocator, io);
-    line.deinit();
-    return;
-}
-
-fn write_type_arity_error(
-    allocator: Allocator,
-    io: Io,
-    name: []u8,
-    expected: i64,
-    observed: i64
-) -> !void {
-    try std::io::write_stderr(io, "error: type `");
-    try std::io::write_stderr(io, name);
-    try std::io::write_stderr(io, "` expects ");
-    var line = std::string::String(allocator);
-    try std::fmt::append_i64(line, expected);
-    try line.append_bytes(" type arguments, got ");
-    try std::fmt::append_i64(line, observed);
-    let bytes = line.as_bytes();
-    try std::io::write_stderr(io, bytes);
-    try write_cli_stderr_newline(allocator, io);
-    line.deinit();
-    return;
-}
-
-fn write_cli_stdout_newline(allocator: Allocator, io: Io) -> !void {
-    var line = std::string::String(allocator);
-    try line.append_byte(cast<u8>(10));
-    let bytes = line.as_bytes();
-    try std::io::write_stdout(io, bytes);
-    line.deinit();
-    return;
-}
-
-fn write_cli_stderr_newline(allocator: Allocator, io: Io) -> !void {
-    var line = std::string::String(allocator);
-    try line.append_byte(cast<u8>(10));
-    let bytes = line.as_bytes();
-    try std::io::write_stderr(io, bytes);
-    line.deinit();
-    return;
 }

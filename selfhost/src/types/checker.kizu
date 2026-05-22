@@ -1,0 +1,5989 @@
+import selfhost::lexer;
+import selfhost::parser;
+import selfhost::resolver;
+import selfhost::source;
+import selfhost::types::body_scan;
+import selfhost::types::function_calls;
+import selfhost::types::model;
+import selfhost::types::type_refs;
+
+struct TypeScanSummary {
+    next: i64,
+    typed_nodes: i64,
+    diagnostics: i64,
+}
+
+struct MatchArmScanSummary {
+    explicit_count: i64,
+    wildcard: bool,
+    diagnostic_found: bool,
+    diagnostic_kind: i64,
+    diagnostic_name: []u8,
+    diagnostic_tag: []u8,
+}
+
+struct FunctionParamType {
+    function_name: []u8,
+    index: i64,
+    type_name: []u8,
+}
+
+struct FunctionParamLookup {
+    found: bool,
+    type_name: []u8,
+}
+
+pub fn check(resolved: resolver::ResolveSummary) -> model::TypeSummary {
+    return model::TypeSummary {
+        modules: resolved.modules,
+        symbols: resolved.symbols,
+        functions: 0,
+        typed_nodes: resolved.symbols,
+        diagnostics: resolved.diagnostics
+    };
+}
+
+pub fn check_sources(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    resolved: resolver::ResolveSummary
+) -> !model::TypeSummary {
+    var kinds = std::map::Map<[]u8, model::TypeKind>(allocator);
+    var arities = std::map::Map<[]u8, i64>(allocator);
+    var copyable = std::map::Map<[]u8, bool>(allocator);
+    var function_arities = std::map::Map<[]u8, i64>(allocator);
+    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
+    var function_returns = std::map::Map<[]u8, []u8>(allocator);
+    var function_visibility = std::map::Map<[]u8, bool>(allocator);
+    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
+    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
+    try type_refs::seed_builtin_types(kinds, arities, copyable);
+
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_source_code(file.kind) {
+            var tokens = try lexer::tokenize(allocator, file.text);
+            try type_refs::collect_declared_types(allocator, file, tokens, kinds, arities, copyable);
+            try function_calls::collect_function_signatures(
+                allocator,
+                file,
+                tokens,
+                function_arities,
+                function_param_sources,
+                function_returns,
+                function_visibility,
+                function_span_starts,
+                function_span_ends
+            );
+            tokens.deinit();
+        }
+        index = index + 1;
+    }
+
+    var typed_nodes = 0;
+    var diagnostics = resolved.diagnostics;
+    index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) {
+            var tokens = try lexer::tokenize(allocator, file.text);
+            let scan = try type_refs::check_file_type_references(allocator, file, tokens, kinds, arities);
+            typed_nodes = typed_nodes + scan.typed_nodes;
+            diagnostics = diagnostics + scan.diagnostics;
+            let call_scan = try function_calls::check_file_function_references(
+                allocator,
+                file,
+                tokens,
+                function_arities
+            );
+            let body_scan = try check_file_body_ast(allocator, file, function_returns);
+            typed_nodes = typed_nodes + call_scan.typed_nodes;
+            diagnostics = diagnostics + call_scan.diagnostics;
+            typed_nodes = typed_nodes + body_scan.typed_nodes;
+            diagnostics = diagnostics + body_scan.diagnostics;
+            tokens.deinit();
+        }
+        index = index + 1;
+    }
+
+    let summary = model::TypeSummary {
+        modules: resolved.modules,
+        symbols: kinds.len(),
+        functions: function_arities.len(),
+        typed_nodes: typed_nodes,
+        diagnostics: diagnostics
+    };
+    kinds.deinit();
+    arities.deinit();
+    copyable.deinit();
+    function_arities.deinit();
+    function_param_sources.deinit();
+    function_returns.deinit();
+    function_visibility.deinit();
+    function_span_starts.deinit();
+    function_span_ends.deinit();
+    return summary;
+}
+
+pub fn first_function_call_error(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    target_path: []u8
+) -> !model::FunctionCallSummary {
+    return function_calls::first_function_call_error(allocator, files, target_path);
+}
+
+pub fn source_has_package_function_call(
+    allocator: Allocator,
+    path: []u8,
+    text: []u8
+) -> !bool {
+    return function_calls::source_has_package_function_call(allocator, path, text);
+}
+
+pub fn first_pre_move_check_diagnostic(
+    allocator: Allocator,
+    path: []u8,
+    text: []u8
+) -> !model::CheckDiagnosticSummary {
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: text
+    };
+    var kinds = std::map::Map<[]u8, model::TypeKind>(allocator);
+    var arities = std::map::Map<[]u8, i64>(allocator);
+    var copyable = std::map::Map<[]u8, bool>(allocator);
+    try type_refs::seed_builtin_types(kinds, arities, copyable);
+    var tokens = try lexer::tokenize(allocator, text);
+    try type_refs::collect_declared_types(allocator, &file, tokens, kinds, arities, copyable);
+    try type_refs::collect_type_parameters(&file, tokens, kinds, arities, copyable);
+    let type_ref = try type_refs::first_type_error_in_file(allocator, &file, tokens, kinds, arities);
+    tokens.deinit();
+    kinds.deinit();
+    arities.deinit();
+    copyable.deinit();
+    if type_ref.found {
+        return check_diagnostic_from_type_reference(type_ref);
+    }
+
+    var function_returns = std::map::Map<[]u8, []u8>(allocator);
+    var enum_counts = std::map::Map<[]u8, i64>(allocator);
+    var enum_tags = std::map::Map<[]u8, bool>(allocator);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
+    try collect_match_enum_types(allocator, &file, result.ast, result.root, enum_counts, enum_tags);
+    var diagnostic = check_diagnostic_none();
+    let match_diagnostic = try first_match_diagnostic_node(
+        allocator,
+        &file,
+        result.ast,
+        result.root,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+    if match_diagnostic.found {
+        diagnostic = check_diagnostic_from_match(match_diagnostic);
+    } else {
+        let return_type = try first_return_type_mismatch_node(
+            allocator,
+            &file,
+            result.ast,
+            result.root,
+            function_returns
+        );
+        if return_type.found {
+            diagnostic = check_diagnostic_from_return_type(return_type);
+        }
+    }
+    result.deinit();
+    enum_counts.deinit();
+    enum_tags.deinit();
+    function_returns.deinit();
+    return diagnostic;
+}
+
+pub fn first_post_move_check_diagnostic(
+    allocator: Allocator,
+    path: []u8,
+    text: []u8
+) -> !model::CheckDiagnosticSummary {
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: text
+    };
+    var function_returns = std::map::Map<[]u8, []u8>(allocator);
+    var function_arities = std::map::Map<[]u8, i64>(allocator);
+    var local_function_param_types = std::array::Array<FunctionParamType>(allocator);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
+    try function_calls::collect_function_arities_from_ast(allocator, &file, &result.ast, result.root, function_arities);
+    try collect_local_function_param_types(
+        allocator,
+        &file,
+        result.ast,
+        result.root,
+        local_function_param_types
+    );
+
+    var diagnostic = check_diagnostic_none();
+    let local_call = try function_calls::first_function_call_error_ast_node(
+        allocator,
+        &file,
+        &result.ast,
+        result.root,
+        function_arities,
+        true
+    );
+    if local_call.found {
+        diagnostic = check_diagnostic_from_function_call(local_call);
+    } else {
+        let undefined = try first_undefined_variable_node(
+            allocator,
+            &file,
+            result.ast,
+            result.root,
+            function_returns
+        );
+        if undefined.found {
+            diagnostic = check_diagnostic_from_undefined_variable(undefined);
+        } else {
+            let argument = try first_argument_type_mismatch_node(
+                allocator,
+                &file,
+                result.ast,
+                result.root,
+                local_function_param_types,
+                function_returns
+            );
+            if argument.found {
+                diagnostic = check_diagnostic_from_argument_type(argument);
+            } else {
+                let immutable = try first_immutable_assignment_node(
+                    allocator,
+                    &file,
+                    result.ast,
+                    result.root,
+                    function_returns
+                );
+                if immutable.found {
+                    diagnostic = check_diagnostic_from_immutable_assignment(immutable);
+                } else {
+                    let invalid = try first_invalid_assignment_target_node(
+                        &file,
+                        result.ast,
+                        result.root
+                    );
+                    if invalid.found {
+                        diagnostic = check_diagnostic_from_invalid_assignment_target(invalid);
+                    } else {
+                        let assignment = try first_assignment_type_mismatch_node(
+                            allocator,
+                            &file,
+                            result.ast,
+                            result.root,
+                            function_returns
+                        );
+                        if assignment.found {
+                            diagnostic = check_diagnostic_from_assignment_type(assignment);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result.deinit();
+    local_function_param_types.deinit();
+    function_arities.deinit();
+    function_returns.deinit();
+    return diagnostic;
+}
+
+fn collect_local_function_param_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_local_function_param_types_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            param_types
+        );,
+        FnDecl(fn_decl) => return collect_function_param_types(
+            allocator,
+            file,
+            ast,
+            ast_node_text(file, ast, fn_decl.name),
+            fn_decl.params,
+            param_types
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_local_function_param_types_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_local_function_param_types(allocator, file, ast, child, param_types);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_param_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    params: std::kizu::ast::ChildRange,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        try collect_function_param_type(file, ast, function_name, child, index, param_types);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_param_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    node_id: std::kizu::ast::NodeId,
+    param_index: i64,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return collect_function_param_node_type(
+            file,
+            ast,
+            function_name,
+            param_node.type_node,
+            param_index,
+            param_types
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_function_param_node_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    type_node: std::kizu::ast::NodeId,
+    param_index: i64,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    try param_types.append(function_param_type(
+        function_name,
+        param_index,
+        ast_return_type_text(file, ast, type_node)
+    ));
+    return;
+}
+
+fn function_param_type(
+    function_name: []u8,
+    index: i64,
+    type_name: []u8
+) -> FunctionParamType {
+    return FunctionParamType {
+        function_name: function_name,
+        index: index,
+        type_name: type_name
+    };
+}
+
+fn function_param_lookup(found: bool, type_name: []u8) -> FunctionParamLookup {
+    return FunctionParamLookup {
+        found: found,
+        type_name: type_name
+    };
+}
+
+fn lookup_function_param_type(
+    param_types: &std::array::Array<FunctionParamType>,
+    function_name: []u8,
+    param_index: i64
+) -> !FunctionParamLookup {
+    var index = 0;
+    while index < param_types.len() {
+        let param_type = try param_types.at(index);
+        if std::mem::equal_bytes(param_type.function_name, function_name) and
+            param_type.index == param_index {
+            return function_param_lookup(true, param_type.type_name);
+        }
+        index = index + 1;
+    }
+    return function_param_lookup(false, "");
+}
+
+fn collect_function_returns_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_function_returns_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            returns
+        );,
+        FnDecl(fn_decl) => return collect_function_return(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.return_type,
+            returns
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_function_returns_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_function_returns_from_ast(allocator, file, ast, child, returns);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_return(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    var qualified = std::string::String(allocator);
+    try append_module_name(qualified, file);
+    try qualified.append_bytes("::");
+    try qualified.append_bytes(ast_node_text(file, ast, name));
+    let key = qualified.as_bytes();
+    if returns.contains(key) {
+        return error("duplicate function");
+    }
+    try returns.insert(key, ast_return_type_text(file, ast, return_type));
+    qualified.deinit();
+    return;
+}
+
+fn check_file_body_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let result = try parser::parse_checked_file(allocator, file.path, file.text);
+    let traversal = try body_scan::scan_body_ast_node(result.ast, result.root);
+    let statements = try check_ast_statements(
+        allocator,
+        file,
+        result.ast,
+        result.root,
+        function_returns
+    );
+    let traversal_summary = type_scan_summary(
+        traversal.next,
+        traversal.typed_nodes,
+        traversal.diagnostics
+    );
+    let summary = merge_type_summaries(traversal_summary, statements);
+    result.deinit();
+    return summary;
+}
+
+fn check_ast_statements(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return check_statement_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_returns
+        );,
+        Empty => return type_scan_summary(0, 0, 0);,
+        ImportDecl(import_decl) => return type_scan_summary(0, 0, 0);,
+        StructDecl(struct_decl) => return type_scan_summary(0, 0, 0);,
+        EnumDecl(enum_decl) => return type_scan_summary(0, 0, 0);,
+        UnionDecl(union_decl) => return type_scan_summary(0, 0, 0);,
+        FnDecl(fn_decl) => return check_function_statements(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.params,
+            fn_decl.return_type,
+            fn_decl.body,
+            function_returns
+        );,
+        Int(int_node) => return type_scan_summary(0, 0, 0);,
+        String(string_node) => return type_scan_summary(0, 0, 0);,
+        TypeName(type_name) => return type_scan_summary(0, 0, 0);,
+        Var(var_node) => return type_scan_summary(0, 0, 0);,
+        Bool(bool_node) => return type_scan_summary(0, 0, 0);,
+        Prefix(prefix_node) => return type_scan_summary(0, 0, 0);,
+        Binary(binary) => return type_scan_summary(0, 0, 0);,
+        FieldExpr(field_expr_node) => return type_scan_summary(0, 0, 0);,
+        DerefExpr(deref_expr_node) => return type_scan_summary(0, 0, 0);,
+        Call(call_node) => return type_scan_summary(0, 0, 0);,
+        TypeApplyExpr(type_apply) => return type_scan_summary(0, 0, 0);,
+        CastExpr(cast_expr) => return type_scan_summary(0, 0, 0);,
+        IndexExpr(index_expr) => return type_scan_summary(0, 0, 0);,
+        StructLiteralExpr(struct_literal) => return type_scan_summary(0, 0, 0);,
+        StructFieldInit(struct_field_init) => return type_scan_summary(0, 0, 0);,
+        ArenaNewExpr(arena_new) => return type_scan_summary(0, 0, 0);,
+        TryExpr(try_expr_node) => return type_scan_summary(0, 0, 0);,
+        ComptimeExpr(comptime_expr_node) => return type_scan_summary(0, 0, 0);,
+        Block(block) => return type_scan_summary(0, 0, 0);,
+        If(if_node) => return type_scan_summary(0, 0, 0);,
+        Let(let_node) => return type_scan_summary(0, 0, 0);,
+        Assign(assign_node) => return type_scan_summary(0, 0, 0);,
+        Return(return_node) => return type_scan_summary(0, 0, 0);,
+        Defer(defer_node) => return type_scan_summary(0, 0, 0);,
+        ExprStmt(expr_stmt) => return type_scan_summary(0, 0, 0);,
+        While(while_node) => return type_scan_summary(0, 0, 0);,
+        For(for_node) => return type_scan_summary(0, 0, 0);,
+        Break(break_node) => return type_scan_summary(0, 0, 0);,
+        Continue(continue_node) => return type_scan_summary(0, 0, 0);,
+        Param(param_node) => return type_scan_summary(0, 0, 0);,
+        Field(field_node) => return type_scan_summary(0, 0, 0);,
+        UnionVariant(union_variant) => return type_scan_summary(0, 0, 0);,
+        Match(match_node) => return type_scan_summary(0, 0, 0);,
+        MatchArm(match_arm) => return type_scan_summary(0, 0, 0);,
+        Unsafe(unsafe_node) => return type_scan_summary(0, 0, 0);,
+        ComptimeIf(comptime_if_node) => return type_scan_summary(0, 0, 0);,
+    }
+}
+
+fn check_statement_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    var summary = type_scan_summary(0, 0, 0);
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        summary = merge_type_summaries(
+            summary,
+            try check_ast_statements(allocator, file, ast, child, function_returns)
+        );
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn check_function_statements(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    var summary = try collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let expected_return = try function_statement_return_type(
+        allocator,
+        file,
+        ast,
+        name,
+        return_type,
+        function_returns
+    );
+    summary = merge_type_summaries(
+        summary,
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return summary;
+}
+
+fn first_return_type_mismatch_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ReturnTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_return_type_mismatch_in_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_return_type_mismatch_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.params,
+            fn_decl.return_type,
+            fn_decl.body,
+            function_returns
+        );,
+        _ => return no_return_type_mismatch();,
+    }
+}
+
+fn first_return_type_mismatch_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ReturnTypeSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_return_type_mismatch_node(
+            allocator,
+            file,
+            ast,
+            child,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_return_type_mismatch();
+}
+
+fn first_return_type_mismatch_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ReturnTypeSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let expected_return = try function_statement_return_type(
+        allocator,
+        file,
+        ast,
+        name,
+        return_type,
+        function_returns
+    );
+    let found = try first_return_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        local_mutability,
+        expected_return,
+        function_returns
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_return_type_mismatch_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ReturnTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_return_type_mismatch_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        Return(return_node) => return return_statement_type_mismatch(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            local_types,
+            expected_return,
+            function_returns
+        );,
+        If(if_node) => return first_return_type_mismatch_in_two_statements(
+            allocator,
+            file,
+            ast,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        While(while_node) => return first_return_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            while_node.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        For(for_node) => return first_return_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            for_node.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        Match(match_node) => return first_return_type_mismatch_in_statement_range(
+            allocator,
+            file,
+            ast,
+            match_node.arms,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        MatchArm(match_arm) => return first_return_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return first_return_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return first_return_type_mismatch_in_two_statements(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        _ => return no_return_type_mismatch();,
+    }
+}
+
+fn first_return_type_mismatch_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ReturnTypeSummary {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try first_return_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_return_type_mismatch();
+}
+
+fn first_return_type_mismatch_in_two_statements(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ReturnTypeSummary {
+    let first_found = try first_return_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        local_mutability,
+        expected_return,
+        function_returns
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_return_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        local_mutability,
+        expected_return,
+        function_returns
+    );
+}
+
+fn return_statement_type_mismatch(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ReturnTypeSummary {
+    let actual = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    if known_type_mismatch(expected_return, actual) {
+        let value_node = ast.get(value);
+        return return_type_summary(
+            true,
+            value_node.span.start,
+            value_node.span.end,
+            expected_return,
+            actual
+        );
+    }
+    return no_return_type_mismatch();
+}
+
+fn first_argument_type_mismatch_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_argument_type_mismatch_in_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_param_types,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_argument_type_mismatch_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body,
+            function_param_types,
+            function_returns
+        );,
+        _ => return no_argument_type_mismatch();,
+    }
+}
+
+fn first_argument_type_mismatch_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_argument_type_mismatch_node(
+            allocator,
+            file,
+            ast,
+            child,
+            function_param_types,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_argument_type_mismatch();
+}
+
+fn first_argument_type_mismatch_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let found = try first_argument_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_argument_type_mismatch_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_argument_type_mismatch_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Let(let_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            let_node.value,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Assign(assign_node) => return first_argument_type_mismatch_in_two_expressions(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Return(return_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Defer(defer_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        ExprStmt(expr_stmt) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        If(if_node) => return first_argument_type_mismatch_in_if(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        While(while_node) => return first_argument_type_mismatch_in_loop(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        For(for_node) => return first_argument_type_mismatch_in_for(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Match(match_node) => return first_argument_type_mismatch_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        MatchArm(match_arm) => return first_argument_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return first_argument_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return first_argument_type_mismatch_in_if(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        _ => return no_argument_type_mismatch();,
+    }
+}
+
+fn first_argument_type_mismatch_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try first_argument_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            function_param_types,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_argument_type_mismatch();
+}
+
+fn first_argument_type_mismatch_in_expression_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expressions: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var index = 0;
+    while index < expressions.len {
+        let child = try ast.child_at(expressions, index);
+        let found = try first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            function_param_types,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_argument_type_mismatch();
+}
+
+fn first_argument_type_mismatch_in_expression(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Call(call_node) => return first_argument_type_mismatch_in_call(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Prefix(prefix_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            prefix_node.right,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Binary(binary) => return first_argument_type_mismatch_in_two_expressions(
+            allocator,
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        FieldExpr(field_expr_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        DerefExpr(deref_expr_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        TypeApplyExpr(type_apply) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        CastExpr(cast_expr) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            cast_expr.value,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        IndexExpr(index_expr) => return first_argument_type_mismatch_in_two_expressions(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        StructLiteralExpr(struct_literal) => return first_argument_type_mismatch_in_expression_range(
+            allocator,
+            file,
+            ast,
+            struct_literal.fields,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        StructFieldInit(struct_field_init) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        ArenaNewExpr(arena_new) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        TryExpr(try_expr_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_argument_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        Match(match_node) => return first_argument_type_mismatch_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            function_param_types,
+            function_returns
+        );,
+        _ => return no_argument_type_mismatch();,
+    }
+}
+
+fn first_argument_type_mismatch_in_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let call_found = try argument_type_mismatch_for_call(
+        allocator,
+        file,
+        ast,
+        callee,
+        args,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if call_found.found {
+        return call_found;
+    }
+    let callee_found = try first_argument_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        callee,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if callee_found.found {
+        return callee_found;
+    }
+    return first_argument_type_mismatch_in_expression_range(
+        allocator,
+        file,
+        ast,
+        args,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+}
+
+fn argument_type_mismatch_for_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let callee_text = ast_node_text(file, ast, callee);
+    if should_skip_function_reference(callee_text) or
+        last_segment_starts_with_uppercase(callee_text) or
+        is_generic_constructor_text(callee_text) or
+        is_qualified_name(callee_text) {
+        return no_argument_type_mismatch();
+    }
+    var index = 0;
+    while index < args.len {
+        let arg = try ast.child_at(args, index);
+        let expected = try lookup_function_param_type(function_param_types, callee_text, index);
+        if !expected.found {
+            return no_argument_type_mismatch();
+        }
+        let actual = try infer_expression_type(
+            allocator,
+            file,
+            ast,
+            arg,
+            local_types,
+            function_returns
+        );
+        if known_type_mismatch(expected.type_name, actual) {
+            let arg_node = ast.get(arg);
+            return argument_type_summary(
+                true,
+                arg_node.span.start,
+                arg_node.span.end,
+                expected.type_name,
+                actual
+            );
+        }
+        index = index + 1;
+    }
+    return no_argument_type_mismatch();
+}
+
+fn first_argument_type_mismatch_in_two_expressions(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let first_found = try first_argument_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_argument_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+}
+
+fn first_argument_type_mismatch_in_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let condition_found = try first_argument_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if condition_found.found {
+        return condition_found;
+    }
+    let then_found = try first_argument_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        then_block,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if then_found.found {
+        return then_found;
+    }
+    return first_argument_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        else_block,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+}
+
+fn first_argument_type_mismatch_in_loop(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let condition_found = try first_argument_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if condition_found.found {
+        return condition_found;
+    }
+    return first_argument_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+}
+
+fn first_argument_type_mismatch_in_for(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let range_found = try first_argument_type_mismatch_in_two_expressions(
+        allocator,
+        file,
+        ast,
+        start,
+        end,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if range_found.found {
+        return range_found;
+    }
+    return first_argument_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+}
+
+fn first_argument_type_mismatch_in_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let value_found = try first_argument_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+    if value_found.found {
+        return value_found;
+    }
+    return first_argument_type_mismatch_in_statement_range(
+        allocator,
+        file,
+        ast,
+        arms,
+        local_types,
+        function_param_types,
+        function_returns
+    );
+}
+
+fn first_assignment_type_mismatch_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_assignment_type_mismatch_in_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_assignment_type_mismatch_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body,
+            function_returns
+        );,
+        _ => return no_assignment_type_mismatch();,
+    }
+}
+
+fn first_assignment_type_mismatch_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_assignment_type_mismatch_node(
+            allocator,
+            file,
+            ast,
+            child,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_assignment_type_mismatch();
+}
+
+fn first_assignment_type_mismatch_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let found = try first_assignment_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_returns
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_assignment_type_mismatch_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_assignment_type_mismatch_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            function_returns
+        );,
+        Assign(assign_node) => return assignment_type_mismatch_for_assign(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            local_types,
+            function_returns
+        );,
+        If(if_node) => return first_assignment_type_mismatch_in_two_statements(
+            allocator,
+            file,
+            ast,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            function_returns
+        );,
+        While(while_node) => return first_assignment_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            while_node.body,
+            local_types,
+            function_returns
+        );,
+        For(for_node) => return first_assignment_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            for_node.body,
+            local_types,
+            function_returns
+        );,
+        Match(match_node) => return first_assignment_type_mismatch_in_statement_range(
+            allocator,
+            file,
+            ast,
+            match_node.arms,
+            local_types,
+            function_returns
+        );,
+        MatchArm(match_arm) => return first_assignment_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return first_assignment_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return first_assignment_type_mismatch_in_two_statements(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            function_returns
+        );,
+        _ => return no_assignment_type_mismatch();,
+    }
+}
+
+fn first_assignment_type_mismatch_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try first_assignment_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_assignment_type_mismatch();
+}
+
+fn first_assignment_type_mismatch_in_two_statements(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    let first_found = try first_assignment_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        function_returns
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_assignment_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        function_returns
+    );
+}
+
+fn assignment_type_mismatch_for_assign(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    let target_node = ast.get(target);
+    match target_node.data {
+        Var(var_node) => return assignment_type_mismatch_for_var_assign(
+            allocator,
+            file,
+            ast,
+            target,
+            value,
+            local_types,
+            function_returns
+        );,
+        _ => return no_assignment_type_mismatch();,
+    }
+}
+
+fn assignment_type_mismatch_for_var_assign(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::AssignmentTypeSummary {
+    let name = ast_node_text(file, ast, target);
+    if !local_types.contains(name) {
+        return no_assignment_type_mismatch();
+    }
+    let expected = try local_types.get(name);
+    let actual = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    if known_type_mismatch(expected, actual) {
+        let value_node = ast.get(value);
+        return assignment_type_summary(
+            true,
+            value_node.span.start,
+            value_node.span.end,
+            expected,
+            actual
+        );
+    }
+    return no_assignment_type_mismatch();
+}
+
+fn first_immutable_assignment_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ImmutableAssignmentSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_immutable_assignment_in_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_immutable_assignment_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body,
+            function_returns
+        );,
+        _ => return no_immutable_assignment();,
+    }
+}
+
+fn first_immutable_assignment_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ImmutableAssignmentSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_immutable_assignment_node(
+            allocator,
+            file,
+            ast,
+            child,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_immutable_assignment();
+}
+
+fn first_immutable_assignment_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ImmutableAssignmentSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let found = try first_immutable_assignment_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        local_mutability
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_immutable_assignment_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>
+) -> !model::ImmutableAssignmentSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_immutable_assignment_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            local_mutability
+        );,
+        Assign(assign_node) => return immutable_assignment_for_assign(
+            file,
+            ast,
+            assign_node.target,
+            local_types,
+            local_mutability
+        );,
+        If(if_node) => return first_immutable_assignment_in_two_statements(
+            allocator,
+            file,
+            ast,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            local_mutability
+        );,
+        While(while_node) => return first_immutable_assignment_in_statement(
+            allocator,
+            file,
+            ast,
+            while_node.body,
+            local_types,
+            local_mutability
+        );,
+        For(for_node) => return first_immutable_assignment_in_statement(
+            allocator,
+            file,
+            ast,
+            for_node.body,
+            local_types,
+            local_mutability
+        );,
+        Match(match_node) => return first_immutable_assignment_in_statement_range(
+            allocator,
+            file,
+            ast,
+            match_node.arms,
+            local_types,
+            local_mutability
+        );,
+        MatchArm(match_arm) => return first_immutable_assignment_in_statement(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            local_mutability
+        );,
+        Unsafe(unsafe_node) => return first_immutable_assignment_in_statement(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            local_mutability
+        );,
+        ComptimeIf(comptime_if_node) => return first_immutable_assignment_in_two_statements(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            local_mutability
+        );,
+        _ => return no_immutable_assignment();,
+    }
+}
+
+fn first_immutable_assignment_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>
+) -> !model::ImmutableAssignmentSummary {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try first_immutable_assignment_in_statement(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            local_mutability
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_immutable_assignment();
+}
+
+fn first_immutable_assignment_in_two_statements(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>
+) -> !model::ImmutableAssignmentSummary {
+    let first_found = try first_immutable_assignment_in_statement(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        local_mutability
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_immutable_assignment_in_statement(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        local_mutability
+    );
+}
+
+fn immutable_assignment_for_assign(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>
+) -> !model::ImmutableAssignmentSummary {
+    let target_node = ast.get(target);
+    match target_node.data {
+        Var(var_node) => return immutable_assignment_for_var_assign(
+            file,
+            ast,
+            target,
+            local_types,
+            local_mutability
+        );,
+        _ => return no_immutable_assignment();,
+    }
+}
+
+fn immutable_assignment_for_var_assign(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>
+) -> !model::ImmutableAssignmentSummary {
+    let name = ast_node_text(file, ast, target);
+    if !local_types.contains(name) {
+        return no_immutable_assignment();
+    }
+    let mutable = try local_mutability.get(name);
+    if !mutable {
+        let target_node = ast.get(target);
+        return immutable_assignment_summary(
+            true,
+            target_node.span.start,
+            target_node.span.end,
+            name
+        );
+    }
+    return no_immutable_assignment();
+}
+
+fn first_invalid_assignment_target_node(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !model::InvalidAssignmentTargetSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_invalid_assignment_target_in_range(
+            file,
+            ast,
+            program.declarations
+        );,
+        FnDecl(fn_decl) => return first_invalid_assignment_target_node(
+            file,
+            ast,
+            fn_decl.body
+        );,
+        Block(block) => return first_invalid_assignment_target_in_range(
+            file,
+            ast,
+            block.statements
+        );,
+        Assign(assign_node) => return invalid_assignment_target_for_assign(
+            ast,
+            assign_node.target
+        );,
+        If(if_node) => return first_invalid_assignment_target_in_two_nodes(
+            file,
+            ast,
+            if_node.then_block,
+            if_node.else_block
+        );,
+        While(while_node) => return first_invalid_assignment_target_node(file, ast, while_node.body);,
+        For(for_node) => return first_invalid_assignment_target_node(file, ast, for_node.body);,
+        Match(match_node) => return first_invalid_assignment_target_in_range(
+            file,
+            ast,
+            match_node.arms
+        );,
+        MatchArm(match_arm) => return first_invalid_assignment_target_node(
+            file,
+            ast,
+            match_arm.body
+        );,
+        Unsafe(unsafe_node) => return first_invalid_assignment_target_node(
+            file,
+            ast,
+            unsafe_node.body
+        );,
+        ComptimeIf(comptime_if_node) => return first_invalid_assignment_target_in_two_nodes(
+            file,
+            ast,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block
+        );,
+        _ => return no_invalid_assignment_target();,
+    }
+}
+
+fn first_invalid_assignment_target_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !model::InvalidAssignmentTargetSummary {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let found = try first_invalid_assignment_target_node(file, ast, child);
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_invalid_assignment_target();
+}
+
+fn first_invalid_assignment_target_in_two_nodes(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId
+) -> !model::InvalidAssignmentTargetSummary {
+    let first_found = try first_invalid_assignment_target_node(file, ast, first);
+    if first_found.found {
+        return first_found;
+    }
+    return first_invalid_assignment_target_node(file, ast, second);
+}
+
+fn invalid_assignment_target_for_assign(
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId
+) -> model::InvalidAssignmentTargetSummary {
+    let target_node = ast.get(target);
+    match target_node.data {
+        Var(var_node) => return no_invalid_assignment_target();,
+        FieldExpr(field_expr_node) => return no_invalid_assignment_target();,
+        DerefExpr(deref_expr_node) => return no_invalid_assignment_target();,
+        IndexExpr(index_expr) => return no_invalid_assignment_target();,
+        _ => return invalid_assignment_target_result(
+            true,
+            target_node.span.start,
+            target_node.span.end
+        );,
+    }
+}
+
+fn first_undefined_variable_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_undefined_variable_in_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_undefined_variable_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body,
+            function_returns
+        );,
+        _ => return no_undefined_variable();,
+    }
+}
+
+fn first_undefined_variable_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_undefined_variable_node(
+            allocator,
+            file,
+            ast,
+            child,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_undefined_variable();
+}
+
+fn first_undefined_variable_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let found = try first_undefined_variable_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_undefined_variable_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_undefined_variable_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types
+        );,
+        Let(let_node) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            let_node.value,
+            local_types
+        );,
+        Assign(assign_node) => return first_undefined_variable_in_two_expressions(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            local_types
+        );,
+        Return(return_node) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            local_types
+        );,
+        Defer(defer_node) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            local_types
+        );,
+        ExprStmt(expr_stmt) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            local_types
+        );,
+        If(if_node) => return first_undefined_variable_in_if(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            local_types
+        );,
+        While(while_node) => return first_undefined_variable_in_loop(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            local_types
+        );,
+        For(for_node) => return first_undefined_variable_in_for(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            local_types
+        );,
+        Match(match_node) => return first_undefined_variable_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types
+        );,
+        MatchArm(match_arm) => return first_undefined_variable_in_statement(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types
+        );,
+        Unsafe(unsafe_node) => return first_undefined_variable_in_statement(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types
+        );,
+        ComptimeIf(comptime_if_node) => return first_undefined_variable_in_if(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types
+        );,
+        _ => return no_undefined_variable();,
+    }
+}
+
+fn first_undefined_variable_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try first_undefined_variable_in_statement(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_undefined_variable();
+}
+
+fn first_undefined_variable_in_expression(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Var(var_node) => return undefined_variable_for_var(file, ast, node_id, local_types);,
+        Prefix(prefix_node) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            prefix_node.right,
+            local_types
+        );,
+        Binary(binary) => return first_undefined_variable_in_two_expressions(
+            allocator,
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            local_types
+        );,
+        FieldExpr(field_expr_node) => return first_undefined_variable_in_field_expr(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            field_expr_node.namespace,
+            local_types
+        );,
+        DerefExpr(deref_expr_node) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            local_types
+        );,
+        Call(call_node) => return first_undefined_variable_in_expression_range(
+            allocator,
+            file,
+            ast,
+            call_node.args,
+            local_types
+        );,
+        TypeApplyExpr(type_apply) => return no_undefined_variable();,
+        CastExpr(cast_expr) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            cast_expr.value,
+            local_types
+        );,
+        IndexExpr(index_expr) => return first_undefined_variable_in_index(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end,
+            local_types
+        );,
+        StructLiteralExpr(struct_literal) => return first_undefined_variable_in_expression_range(
+            allocator,
+            file,
+            ast,
+            struct_literal.fields,
+            local_types
+        );,
+        StructFieldInit(struct_field_init) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value,
+            local_types
+        );,
+        ArenaNewExpr(arena_new) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator,
+            local_types
+        );,
+        TryExpr(try_expr_node) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            local_types
+        );,
+        Match(match_node) => return first_undefined_variable_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types
+        );,
+        _ => return no_undefined_variable();,
+    }
+}
+
+fn first_undefined_variable_in_expression_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expressions: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    var index = 0;
+    while index < expressions.len {
+        let child = try ast.child_at(expressions, index);
+        let found = try first_undefined_variable_in_expression(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_undefined_variable();
+}
+
+fn first_undefined_variable_in_two_expressions(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let first_found = try first_undefined_variable_in_expression(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_undefined_variable_in_expression(allocator, file, ast, second, local_types);
+}
+
+fn first_undefined_variable_in_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let condition_found = try first_undefined_variable_in_expression(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types
+    );
+    if condition_found.found {
+        return condition_found;
+    }
+    let then_found = try first_undefined_variable_in_statement(
+        allocator,
+        file,
+        ast,
+        then_block,
+        local_types
+    );
+    if then_found.found {
+        return then_found;
+    }
+    return first_undefined_variable_in_statement(allocator, file, ast, else_block, local_types);
+}
+
+fn first_undefined_variable_in_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let value_found = try first_undefined_variable_in_expression(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types
+    );
+    if value_found.found {
+        return value_found;
+    }
+    return first_undefined_variable_in_statement_range(
+        allocator,
+        file,
+        ast,
+        arms,
+        local_types
+    );
+}
+
+fn first_undefined_variable_in_loop(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let condition_found = try first_undefined_variable_in_expression(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types
+    );
+    if condition_found.found {
+        return condition_found;
+    }
+    return first_undefined_variable_in_statement(allocator, file, ast, body, local_types);
+}
+
+fn first_undefined_variable_in_for(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    return first_undefined_variable_in_two_expressions(
+        allocator,
+        file,
+        ast,
+        start,
+        end,
+        local_types
+    );
+}
+
+fn first_undefined_variable_in_index(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let target_found = try first_undefined_variable_in_expression(
+        allocator,
+        file,
+        ast,
+        target,
+        local_types
+    );
+    if target_found.found {
+        return target_found;
+    }
+    return first_undefined_variable_in_two_expressions(
+        allocator,
+        file,
+        ast,
+        start,
+        end,
+        local_types
+    );
+}
+
+fn first_undefined_variable_in_field_expr(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    namespace: bool,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    if namespace {
+        return no_undefined_variable();
+    }
+    return first_undefined_variable_in_expression(allocator, file, ast, receiver, local_types);
+}
+
+fn undefined_variable_for_var(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> !model::UndefinedVariableSummary {
+    let name = ast_node_text(file, ast, node_id);
+    if local_types.contains(name) {
+        return no_undefined_variable();
+    }
+    let node = ast.get(node_id);
+    return undefined_variable_summary(true, node.span.start, node.span.end, name);
+}
+
+fn collect_function_statement_locals(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    var diagnostics = 0;
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        try collect_param_local(file, ast, child, local_types, local_mutability);
+        index = index + 1;
+    }
+    let local_count = try collect_statement_locals_from_node(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    return type_scan_summary(0, params.len + local_count, diagnostics);
+}
+
+fn collect_param_local(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return collect_param_node_local(
+            file,
+            ast,
+            param_node.name,
+            param_node.type_node,
+            local_types,
+            local_mutability
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_param_node_local(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_id: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>
+) -> !void {
+    let name = ast_node_text(file, ast, name_id);
+    if !local_types.contains(name) {
+        try local_types.insert(name, ast_return_type_text(file, ast, type_node));
+        try local_mutability.insert(name, false);
+    }
+    return;
+}
+
+fn collect_statement_locals_from_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    var count = 0;
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        count = count + try collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            local_mutability,
+            function_returns
+        );
+        index = index + 1;
+    }
+    return count;
+}
+
+fn collect_statement_locals_from_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return collect_statement_locals_from_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Let(let_node) => return collect_let_statement_local(
+            allocator,
+            file,
+            ast,
+            let_node.mutable,
+            let_node.name,
+            let_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        If(if_node) => return collect_statement_locals_from_two_nodes(
+            allocator,
+            file,
+            ast,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        While(while_node) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            while_node.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        For(for_node) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            for_node.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Match(match_node) => return collect_statement_locals_from_range(
+            allocator,
+            file,
+            ast,
+            match_node.arms,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        MatchArm(match_arm) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return collect_statement_locals_from_two_nodes(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        _ => return 0;,
+    }
+}
+
+fn collect_statement_locals_from_two_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let first_count = try collect_statement_locals_from_node(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let second_count = try collect_statement_locals_from_node(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    return first_count + second_count;
+}
+
+fn collect_let_statement_local(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    mutable: bool,
+    name_id: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let name = ast_node_text(file, ast, name_id);
+    if local_types.contains(name) {
+        return 0;
+    }
+    let type_name = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    try local_types.insert(name, type_name);
+    try local_mutability.insert(name, mutable);
+    return 1;
+}
+
+fn function_statement_return_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    var qualified = std::string::String(allocator);
+    try append_module_name(qualified, file);
+    try qualified.append_bytes("::");
+    try qualified.append_bytes(ast_node_text(file, ast, name));
+    let key = qualified.as_bytes();
+    var expected = ast_return_type_text(file, ast, return_type);
+    if function_returns.contains(key) {
+        expected = try function_returns.get(key);
+    }
+    qualified.deinit();
+    return expected;
+}
+
+fn check_statement_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return check_statement_block(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        Let(let_node) => return check_let_statement(
+            allocator,
+            file,
+            ast,
+            let_node.mutable,
+            let_node.name,
+            let_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Assign(assign_node) => return check_assign_statement(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Return(return_node) => return check_return_statement(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            local_types,
+            expected_return,
+            function_returns
+        );,
+        Defer(defer_node) => return check_expr_statement(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            local_types,
+            function_returns
+        );,
+        ExprStmt(expr_stmt) => return check_expr_statement(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            local_types,
+            function_returns
+        );,
+        If(if_node) => return check_if_statement(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        While(while_node) => return check_while_statement(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        For(for_node) => return check_for_statement(
+            allocator,
+            file,
+            ast,
+            for_node.name,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        Match(match_node) => return check_match_statement(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        MatchArm(match_arm) => return check_statement_node(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return check_statement_node(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return check_if_statement(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        );,
+        Break(break_node) => return type_scan_summary(0, 1, 0);,
+        Continue(continue_node) => return type_scan_summary(0, 1, 0);,
+        Empty => return type_scan_summary(0, 0, 0);,
+        Program(program) => return type_scan_summary(0, 0, 0);,
+        ImportDecl(import_decl) => return type_scan_summary(0, 0, 0);,
+        Param(param_node) => return type_scan_summary(0, 0, 0);,
+        Field(field_node) => return type_scan_summary(0, 0, 0);,
+        StructDecl(struct_decl) => return type_scan_summary(0, 0, 0);,
+        EnumDecl(enum_decl) => return type_scan_summary(0, 0, 0);,
+        UnionDecl(union_decl) => return type_scan_summary(0, 0, 0);,
+        UnionVariant(union_variant) => return type_scan_summary(0, 0, 0);,
+        FnDecl(fn_decl) => return type_scan_summary(0, 0, 0);,
+        Int(int_node) => return type_scan_summary(0, 1, 0);,
+        String(string_node) => return type_scan_summary(0, 1, 0);,
+        TypeName(type_name) => return type_scan_summary(0, 1, 0);,
+        Var(var_node) => return type_scan_summary(0, 1, 0);,
+        Bool(bool_node) => return type_scan_summary(0, 1, 0);,
+        Prefix(prefix_node) => return type_scan_summary(0, 1, 0);,
+        Binary(binary) => return type_scan_summary(0, 1, 0);,
+        FieldExpr(field_expr_node) => return type_scan_summary(0, 1, 0);,
+        DerefExpr(deref_expr_node) => return type_scan_summary(0, 1, 0);,
+        Call(call_node) => return type_scan_summary(0, 1, 0);,
+        TypeApplyExpr(type_apply) => return type_scan_summary(0, 1, 0);,
+        CastExpr(cast_expr) => return type_scan_summary(0, 1, 0);,
+        IndexExpr(index_expr) => return type_scan_summary(0, 1, 0);,
+        StructLiteralExpr(struct_literal) => return type_scan_summary(0, 1, 0);,
+        StructFieldInit(struct_field_init) => return type_scan_summary(0, 1, 0);,
+        ArenaNewExpr(arena_new) => return type_scan_summary(0, 1, 0);,
+        TryExpr(try_expr_node) => return type_scan_summary(0, 1, 0);,
+        ComptimeExpr(comptime_expr_node) => return type_scan_summary(0, 1, 0);,
+    }
+}
+
+fn check_statement_block(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    var summary = type_scan_summary(0, 1, 0);
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        summary = merge_type_summaries(
+            summary,
+            try check_statement_node(
+                allocator,
+                file,
+                ast,
+                child,
+                local_types,
+                local_mutability,
+                expected_return,
+                function_returns
+            )
+        );
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn check_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    var summary = type_scan_summary(0, 1, 0);
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        summary = merge_type_summaries(
+            summary,
+            try check_statement_node(
+                allocator,
+                file,
+                ast,
+                child,
+                local_types,
+                local_mutability,
+                expected_return,
+                function_returns
+            )
+        );
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn check_let_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    mutable: bool,
+    name_id: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let name = ast_node_text(file, ast, name_id);
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    var diagnostics = 0;
+    if !local_types.contains(name) {
+        diagnostics = diagnostics + 1;
+    }
+    return type_scan_summary(0, 1, diagnostics);
+}
+
+fn check_assign_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let target_node = ast.get(target);
+    match target_node.data {
+        Var(var_node) => return check_assign_var_statement(
+            allocator,
+            file,
+            ast,
+            target,
+            value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        FieldExpr(field_expr_node) => return type_scan_summary(0, 1, 0);,
+        DerefExpr(deref_expr_node) => return type_scan_summary(0, 1, 0);,
+        IndexExpr(index_expr) => return type_scan_summary(0, 1, 0);,
+        Empty => return invalid_assignment_target_summary();,
+        Int(int_node) => return invalid_assignment_target_summary();,
+        String(string_node) => return invalid_assignment_target_summary();,
+        TypeName(type_name) => return invalid_assignment_target_summary();,
+        Bool(bool_node) => return invalid_assignment_target_summary();,
+        Prefix(prefix_node) => return invalid_assignment_target_summary();,
+        Binary(binary) => return invalid_assignment_target_summary();,
+        Call(call_node) => return invalid_assignment_target_summary();,
+        TypeApplyExpr(type_apply) => return invalid_assignment_target_summary();,
+        CastExpr(cast_expr) => return invalid_assignment_target_summary();,
+        StructLiteralExpr(struct_literal) => return invalid_assignment_target_summary();,
+        StructFieldInit(struct_field_init) => return invalid_assignment_target_summary();,
+        ArenaNewExpr(arena_new) => return invalid_assignment_target_summary();,
+        TryExpr(try_expr_node) => return invalid_assignment_target_summary();,
+        ComptimeExpr(comptime_expr_node) => return invalid_assignment_target_summary();,
+        Block(block) => return invalid_assignment_target_summary();,
+        If(if_node) => return invalid_assignment_target_summary();,
+        Let(let_node) => return invalid_assignment_target_summary();,
+        Assign(assign_node) => return invalid_assignment_target_summary();,
+        Return(return_node) => return invalid_assignment_target_summary();,
+        Defer(defer_node) => return invalid_assignment_target_summary();,
+        ExprStmt(expr_stmt) => return invalid_assignment_target_summary();,
+        While(while_node) => return invalid_assignment_target_summary();,
+        For(for_node) => return invalid_assignment_target_summary();,
+        Break(break_node) => return invalid_assignment_target_summary();,
+        Continue(continue_node) => return invalid_assignment_target_summary();,
+        ImportDecl(import_decl) => return invalid_assignment_target_summary();,
+        Param(param_node) => return invalid_assignment_target_summary();,
+        Field(field_node) => return invalid_assignment_target_summary();,
+        StructDecl(struct_decl) => return invalid_assignment_target_summary();,
+        EnumDecl(enum_decl) => return invalid_assignment_target_summary();,
+        UnionDecl(union_decl) => return invalid_assignment_target_summary();,
+        UnionVariant(union_variant) => return invalid_assignment_target_summary();,
+        Match(match_node) => return invalid_assignment_target_summary();,
+        MatchArm(match_arm) => return invalid_assignment_target_summary();,
+        Unsafe(unsafe_node) => return invalid_assignment_target_summary();,
+        ComptimeIf(comptime_if_node) => return invalid_assignment_target_summary();,
+        FnDecl(fn_decl) => return invalid_assignment_target_summary();,
+        Program(program) => return invalid_assignment_target_summary();,
+    }
+}
+
+fn check_assign_var_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let name = ast_node_text(file, ast, target);
+    if !local_types.contains(name) {
+        return type_scan_summary(0, 1, 1);
+    }
+    var diagnostics = 0;
+    let mutable = try local_mutability.get(name);
+    if !mutable {
+        diagnostics = diagnostics + 1;
+    }
+    let target_type = try local_types.get(name);
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    if known_type_mismatch(target_type, value_type) {
+        diagnostics = diagnostics + 1;
+    }
+    return type_scan_summary(0, 1, diagnostics);
+}
+
+fn invalid_assignment_target_summary() -> TypeScanSummary {
+    return type_scan_summary(0, 1, 1);
+}
+
+fn check_return_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    var diagnostics = 0;
+    if known_type_mismatch(expected_return, value_type) {
+        diagnostics = 1;
+    }
+    return type_scan_summary(0, 1, diagnostics);
+}
+
+fn check_expr_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        expr,
+        local_types,
+        function_returns
+    );
+    if std::mem::equal_bytes(value_type, "unknown") {
+        return type_scan_summary(0, 1, 0);
+    }
+    return type_scan_summary(0, 1, 0);
+}
+
+fn check_if_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    var summary = try check_condition_statement(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
+    );
+    summary = merge_type_summaries(
+        summary,
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            then_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
+    );
+    summary = merge_type_summaries(
+        summary,
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            else_block,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
+    );
+    return summary;
+}
+
+fn check_while_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    var summary = try check_condition_statement(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
+    );
+    summary = merge_type_summaries(
+        summary,
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
+    );
+    return summary;
+}
+
+fn check_for_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_id: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let name = ast_node_text(file, ast, name_id);
+    var diagnostics = 0;
+    if local_types.contains(name) {
+        diagnostics = diagnostics + 1;
+    }
+    let start_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        start,
+        local_types,
+        function_returns
+    );
+    let end_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        end,
+        local_types,
+        function_returns
+    );
+    if known_type_mismatch("i64", start_type) {
+        diagnostics = diagnostics + 1;
+    }
+    if known_type_mismatch("i64", end_type) {
+        diagnostics = diagnostics + 1;
+    }
+    var summary = type_scan_summary(0, 1, diagnostics);
+    summary = merge_type_summaries(
+        summary,
+        try check_statement_node(
+            allocator,
+            file,
+            ast,
+            body,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
+    );
+    return summary;
+}
+
+fn check_match_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    local_mutability: &std::map::Map<[]u8, bool>,
+    expected_return: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    var diagnostics = 0;
+    if unsupported_match_value_type(value_type) {
+        diagnostics = diagnostics + 1;
+    }
+    var summary = type_scan_summary(0, 1, diagnostics);
+    summary = merge_type_summaries(
+        summary,
+        try check_statement_range(
+            allocator,
+            file,
+            ast,
+            arms,
+            local_types,
+            local_mutability,
+            expected_return,
+            function_returns
+        )
+    );
+    return summary;
+}
+
+fn collect_match_enum_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    enum_counts: &var std::map::Map<[]u8, i64>,
+    enum_tags: &var std::map::Map<[]u8, bool>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_match_enum_type_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            enum_counts,
+            enum_tags
+        );,
+        EnumDecl(enum_decl) => return collect_match_enum_type_decl(
+            allocator,
+            file,
+            ast,
+            enum_decl.name,
+            enum_decl.tags,
+            enum_counts,
+            enum_tags
+        );,
+        ImportDecl(import_decl) => return;,
+        StructDecl(struct_decl) => return;,
+        UnionDecl(union_decl) => return;,
+        FnDecl(fn_decl) => return;,
+        Empty => return;,
+        Int(int_node) => return;,
+        String(string_node) => return;,
+        TypeName(type_name) => return;,
+        Var(var_node) => return;,
+        Bool(bool_node) => return;,
+        Prefix(prefix_node) => return;,
+        Binary(binary) => return;,
+        FieldExpr(field_expr_node) => return;,
+        DerefExpr(deref_expr_node) => return;,
+        Call(call_node) => return;,
+        TypeApplyExpr(type_apply) => return;,
+        CastExpr(cast_expr) => return;,
+        IndexExpr(index_expr) => return;,
+        StructLiteralExpr(struct_literal) => return;,
+        StructFieldInit(struct_field_init) => return;,
+        ArenaNewExpr(arena_new) => return;,
+        TryExpr(try_expr_node) => return;,
+        ComptimeExpr(comptime_expr_node) => return;,
+        Block(block) => return;,
+        If(if_node) => return;,
+        Let(let_node) => return;,
+        Assign(assign_node) => return;,
+        Return(return_node) => return;,
+        Defer(defer_node) => return;,
+        ExprStmt(expr_stmt) => return;,
+        While(while_node) => return;,
+        For(for_node) => return;,
+        Break(break_node) => return;,
+        Continue(continue_node) => return;,
+        Param(param_node) => return;,
+        Field(field_node) => return;,
+        UnionVariant(union_variant) => return;,
+        Match(match_node) => return;,
+        MatchArm(match_arm) => return;,
+        Unsafe(unsafe_node) => return;,
+        ComptimeIf(comptime_if_node) => return;,
+    }
+}
+
+fn collect_match_enum_type_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    enum_counts: &var std::map::Map<[]u8, i64>,
+    enum_tags: &var std::map::Map<[]u8, bool>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_match_enum_types(allocator, file, ast, child, enum_counts, enum_tags);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_match_enum_type_decl(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    tags: std::kizu::ast::ChildRange,
+    enum_counts: &var std::map::Map<[]u8, i64>,
+    enum_tags: &var std::map::Map<[]u8, bool>
+) -> !void {
+    let type_name = ast_node_text(file, ast, name);
+    try insert_match_enum_type(allocator, file, ast, type_name, tags, enum_counts, enum_tags);
+    return;
+}
+
+fn insert_match_enum_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_name: []u8,
+    tags: std::kizu::ast::ChildRange,
+    enum_counts: &var std::map::Map<[]u8, i64>,
+    enum_tags: &var std::map::Map<[]u8, bool>
+) -> !void {
+    if !enum_counts.contains(type_name) {
+        try enum_counts.insert(type_name, tags.len);
+    }
+    var index = 0;
+    while index < tags.len {
+        let tag = try ast.child_at(tags, index);
+        let tag_name = ast_node_text(file, ast, tag);
+        var key = std::string::String(allocator);
+        try append_match_tag_key(key, type_name, tag_name);
+        let key_bytes = key.as_bytes();
+        if !enum_tags.contains(key_bytes) {
+            try enum_tags.insert(key_bytes, true);
+        }
+        key.deinit();
+        index = index + 1;
+    }
+    return;
+}
+
+fn first_match_diagnostic_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_match_diagnostic_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_match_diagnostic_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Empty => return no_match_diagnostic();,
+        ImportDecl(import_decl) => return no_match_diagnostic();,
+        StructDecl(struct_decl) => return no_match_diagnostic();,
+        EnumDecl(enum_decl) => return no_match_diagnostic();,
+        UnionDecl(union_decl) => return no_match_diagnostic();,
+        Int(int_node) => return no_match_diagnostic();,
+        String(string_node) => return no_match_diagnostic();,
+        TypeName(type_name) => return no_match_diagnostic();,
+        Var(var_node) => return no_match_diagnostic();,
+        Bool(bool_node) => return no_match_diagnostic();,
+        Prefix(prefix_node) => return no_match_diagnostic();,
+        Binary(binary) => return no_match_diagnostic();,
+        FieldExpr(field_expr_node) => return no_match_diagnostic();,
+        DerefExpr(deref_expr_node) => return no_match_diagnostic();,
+        Call(call_node) => return no_match_diagnostic();,
+        TypeApplyExpr(type_apply) => return no_match_diagnostic();,
+        CastExpr(cast_expr) => return no_match_diagnostic();,
+        IndexExpr(index_expr) => return no_match_diagnostic();,
+        StructLiteralExpr(struct_literal) => return no_match_diagnostic();,
+        StructFieldInit(struct_field_init) => return no_match_diagnostic();,
+        ArenaNewExpr(arena_new) => return no_match_diagnostic();,
+        TryExpr(try_expr_node) => return no_match_diagnostic();,
+        ComptimeExpr(comptime_expr_node) => return no_match_diagnostic();,
+        Block(block) => return no_match_diagnostic();,
+        If(if_node) => return no_match_diagnostic();,
+        Let(let_node) => return no_match_diagnostic();,
+        Assign(assign_node) => return no_match_diagnostic();,
+        Return(return_node) => return no_match_diagnostic();,
+        Defer(defer_node) => return no_match_diagnostic();,
+        ExprStmt(expr_stmt) => return no_match_diagnostic();,
+        While(while_node) => return no_match_diagnostic();,
+        For(for_node) => return no_match_diagnostic();,
+        Break(break_node) => return no_match_diagnostic();,
+        Continue(continue_node) => return no_match_diagnostic();,
+        Param(param_node) => return no_match_diagnostic();,
+        Field(field_node) => return no_match_diagnostic();,
+        UnionVariant(union_variant) => return no_match_diagnostic();,
+        Match(match_node) => return no_match_diagnostic();,
+        MatchArm(match_arm) => return no_match_diagnostic();,
+        Unsafe(unsafe_node) => return no_match_diagnostic();,
+        ComptimeIf(comptime_if_node) => return no_match_diagnostic();,
+    }
+}
+
+fn first_match_diagnostic_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let found = try first_match_diagnostic_node(
+            allocator,
+            file,
+            ast,
+            child,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_match_diagnostic();
+}
+
+fn first_match_diagnostic_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let found = try first_match_diagnostic_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_match_diagnostic_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_match_diagnostic_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Return(return_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        ExprStmt(expr_stmt) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Let(let_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            let_node.value,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Assign(assign_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            assign_node.value,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        If(if_node) => return first_match_diagnostic_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        While(while_node) => return first_match_diagnostic_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        For(for_node) => return first_match_diagnostic_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Match(match_node) => return first_match_diagnostic_for_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        MatchArm(match_arm) => return first_match_diagnostic_in_statement(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return first_match_diagnostic_in_statement(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return first_match_diagnostic_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Defer(defer_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Empty => return no_match_diagnostic();,
+        Break(break_node) => return no_match_diagnostic();,
+        Continue(continue_node) => return no_match_diagnostic();,
+        Program(program) => return no_match_diagnostic();,
+        ImportDecl(import_decl) => return no_match_diagnostic();,
+        Param(param_node) => return no_match_diagnostic();,
+        Field(field_node) => return no_match_diagnostic();,
+        StructDecl(struct_decl) => return no_match_diagnostic();,
+        EnumDecl(enum_decl) => return no_match_diagnostic();,
+        UnionDecl(union_decl) => return no_match_diagnostic();,
+        UnionVariant(union_variant) => return no_match_diagnostic();,
+        FnDecl(fn_decl) => return no_match_diagnostic();,
+        Int(int_node) => return no_match_diagnostic();,
+        String(string_node) => return no_match_diagnostic();,
+        TypeName(type_name) => return no_match_diagnostic();,
+        Var(var_node) => return no_match_diagnostic();,
+        Bool(bool_node) => return no_match_diagnostic();,
+        Prefix(prefix_node) => return no_match_diagnostic();,
+        Binary(binary) => return no_match_diagnostic();,
+        FieldExpr(field_expr_node) => return no_match_diagnostic();,
+        DerefExpr(deref_expr_node) => return no_match_diagnostic();,
+        Call(call_node) => return no_match_diagnostic();,
+        TypeApplyExpr(type_apply) => return no_match_diagnostic();,
+        CastExpr(cast_expr) => return no_match_diagnostic();,
+        IndexExpr(index_expr) => return no_match_diagnostic();,
+        StructLiteralExpr(struct_literal) => return no_match_diagnostic();,
+        StructFieldInit(struct_field_init) => return no_match_diagnostic();,
+        ArenaNewExpr(arena_new) => return no_match_diagnostic();,
+        TryExpr(try_expr_node) => return no_match_diagnostic();,
+        ComptimeExpr(comptime_expr_node) => return no_match_diagnostic();,
+    }
+}
+
+fn first_match_diagnostic_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let found = try first_match_diagnostic_in_statement(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_match_diagnostic();
+}
+
+fn first_match_diagnostic_in_expression(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Match(match_node) => return first_match_diagnostic_for_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Prefix(prefix_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            prefix_node.right,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Binary(binary) => return first_match_diagnostic_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        FieldExpr(field_expr_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        DerefExpr(deref_expr_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Call(call_node) => return first_match_diagnostic_in_expression_range(
+            allocator,
+            file,
+            ast,
+            call_node.args,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        TypeApplyExpr(type_apply) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        CastExpr(cast_expr) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            cast_expr.value,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        IndexExpr(index_expr) => return first_match_diagnostic_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        StructLiteralExpr(struct_literal) => return first_match_diagnostic_in_expression_range(
+            allocator,
+            file,
+            ast,
+            struct_literal.fields,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        StructFieldInit(struct_field_init) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        ArenaNewExpr(arena_new) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        TryExpr(try_expr_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Block(block) => return first_match_diagnostic_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        If(if_node) => return first_match_diagnostic_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );,
+        Int(int_node) => return no_match_diagnostic();,
+        String(string_node) => return no_match_diagnostic();,
+        TypeName(type_name) => return no_match_diagnostic();,
+        Var(var_node) => return no_match_diagnostic();,
+        Bool(bool_node) => return no_match_diagnostic();,
+        Empty => return no_match_diagnostic();,
+        Let(let_node) => return no_match_diagnostic();,
+        Assign(assign_node) => return no_match_diagnostic();,
+        Return(return_node) => return no_match_diagnostic();,
+        Defer(defer_node) => return no_match_diagnostic();,
+        ExprStmt(expr_stmt) => return no_match_diagnostic();,
+        While(while_node) => return no_match_diagnostic();,
+        For(for_node) => return no_match_diagnostic();,
+        Break(break_node) => return no_match_diagnostic();,
+        Continue(continue_node) => return no_match_diagnostic();,
+        Program(program) => return no_match_diagnostic();,
+        ImportDecl(import_decl) => return no_match_diagnostic();,
+        Param(param_node) => return no_match_diagnostic();,
+        Field(field_node) => return no_match_diagnostic();,
+        StructDecl(struct_decl) => return no_match_diagnostic();,
+        EnumDecl(enum_decl) => return no_match_diagnostic();,
+        UnionDecl(union_decl) => return no_match_diagnostic();,
+        UnionVariant(union_variant) => return no_match_diagnostic();,
+        MatchArm(match_arm) => return no_match_diagnostic();,
+        Unsafe(unsafe_node) => return no_match_diagnostic();,
+        ComptimeIf(comptime_if_node) => return no_match_diagnostic();,
+        FnDecl(fn_decl) => return no_match_diagnostic();,
+    }
+}
+
+fn first_match_diagnostic_in_expression_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let found = try first_match_diagnostic_in_expression(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return no_match_diagnostic();
+}
+
+fn first_match_diagnostic_in_two_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    let first_found = try first_match_diagnostic_in_expression(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_match_diagnostic_in_expression(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+}
+
+fn first_match_diagnostic_in_three_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    let first_found = try first_match_diagnostic_in_expression(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+    if first_found.found {
+        return first_found;
+    }
+    let second_found = try first_match_diagnostic_in_statement(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+    if second_found.found {
+        return second_found;
+    }
+    return first_match_diagnostic_in_statement(
+        allocator,
+        file,
+        ast,
+        third,
+        local_types,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+}
+
+fn first_match_diagnostic_for_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::MatchDiagnosticSummary {
+    let value_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    if std::mem::equal_bytes(value_type, "unknown") {
+        return first_match_diagnostic_in_statement_range(
+            allocator,
+            file,
+            ast,
+            arms,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );
+    }
+    if !enum_counts.contains(value_type) {
+        if unsupported_match_value_type(value_type) {
+            return match_diagnostic_summary(true, 1, value_type, "");
+        }
+        return first_match_diagnostic_in_statement_range(
+            allocator,
+            file,
+            ast,
+            arms,
+            local_types,
+            enum_counts,
+            enum_tags,
+            function_returns
+        );
+    }
+    let current = try first_current_enum_match_diagnostic(
+        allocator,
+        file,
+        ast,
+        value_type,
+        arms,
+        enum_counts,
+        enum_tags
+    );
+    if current.found {
+        return current;
+    }
+    return first_match_diagnostic_in_statement_range(
+        allocator,
+        file,
+        ast,
+        arms,
+        local_types,
+        enum_counts,
+        enum_tags,
+        function_returns
+    );
+}
+
+fn first_current_enum_match_diagnostic(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value_type: []u8,
+    arms: std::kizu::ast::ChildRange,
+    enum_counts: &std::map::Map<[]u8, i64>,
+    enum_tags: &std::map::Map<[]u8, bool>
+) -> !model::MatchDiagnosticSummary {
+    var explicit_count = 0;
+    var wildcard = false;
+    var index = 0;
+    while index < arms.len {
+        let child = try ast.child_at(arms, index);
+        let scan = try current_enum_match_arm_scan(
+            allocator,
+            file,
+            ast,
+            child,
+            value_type,
+            arms,
+            index,
+            arms.len,
+            wildcard,
+            enum_tags
+        );
+        if scan.diagnostic_found {
+            return match_diagnostic_summary(
+                true,
+                scan.diagnostic_kind,
+                scan.diagnostic_name,
+                scan.diagnostic_tag
+            );
+        }
+        wildcard = scan.wildcard;
+        explicit_count = explicit_count + scan.explicit_count;
+        index = index + 1;
+    }
+    let expected = try enum_counts.get(value_type);
+    if !wildcard and explicit_count != expected {
+        return match_diagnostic_summary(true, 4, value_type, "");
+    }
+    return no_match_diagnostic();
+}
+
+fn current_enum_match_arm_scan(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    value_type: []u8,
+    arms: std::kizu::ast::ChildRange,
+    index: i64,
+    count: i64,
+    wildcard: bool,
+    enum_tags: &std::map::Map<[]u8, bool>
+) -> !MatchArmScanSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        MatchArm(match_arm) => return current_enum_match_arm_node_scan(
+            allocator,
+            file,
+            ast,
+            match_arm.pattern,
+            match_arm.binding,
+            value_type,
+            arms,
+            index,
+            count,
+            wildcard,
+            enum_tags
+        );,
+        Program(program) => return no_match_arm_scan(wildcard);,
+        Empty => return no_match_arm_scan(wildcard);,
+        ImportDecl(import_decl) => return no_match_arm_scan(wildcard);,
+        StructDecl(struct_decl) => return no_match_arm_scan(wildcard);,
+        EnumDecl(enum_decl) => return no_match_arm_scan(wildcard);,
+        UnionDecl(union_decl) => return no_match_arm_scan(wildcard);,
+        FnDecl(fn_decl) => return no_match_arm_scan(wildcard);,
+        Int(int_node) => return no_match_arm_scan(wildcard);,
+        String(string_node) => return no_match_arm_scan(wildcard);,
+        TypeName(type_name) => return no_match_arm_scan(wildcard);,
+        Var(var_node) => return no_match_arm_scan(wildcard);,
+        Bool(bool_node) => return no_match_arm_scan(wildcard);,
+        Prefix(prefix_node) => return no_match_arm_scan(wildcard);,
+        Binary(binary) => return no_match_arm_scan(wildcard);,
+        FieldExpr(field_expr_node) => return no_match_arm_scan(wildcard);,
+        DerefExpr(deref_expr_node) => return no_match_arm_scan(wildcard);,
+        Call(call_node) => return no_match_arm_scan(wildcard);,
+        TypeApplyExpr(type_apply) => return no_match_arm_scan(wildcard);,
+        CastExpr(cast_expr) => return no_match_arm_scan(wildcard);,
+        IndexExpr(index_expr) => return no_match_arm_scan(wildcard);,
+        StructLiteralExpr(struct_literal) => return no_match_arm_scan(wildcard);,
+        StructFieldInit(struct_field_init) => return no_match_arm_scan(wildcard);,
+        ArenaNewExpr(arena_new) => return no_match_arm_scan(wildcard);,
+        TryExpr(try_expr_node) => return no_match_arm_scan(wildcard);,
+        ComptimeExpr(comptime_expr_node) => return no_match_arm_scan(wildcard);,
+        Block(block) => return no_match_arm_scan(wildcard);,
+        If(if_node) => return no_match_arm_scan(wildcard);,
+        Let(let_node) => return no_match_arm_scan(wildcard);,
+        Assign(assign_node) => return no_match_arm_scan(wildcard);,
+        Return(return_node) => return no_match_arm_scan(wildcard);,
+        Defer(defer_node) => return no_match_arm_scan(wildcard);,
+        ExprStmt(expr_stmt) => return no_match_arm_scan(wildcard);,
+        While(while_node) => return no_match_arm_scan(wildcard);,
+        For(for_node) => return no_match_arm_scan(wildcard);,
+        Break(break_node) => return no_match_arm_scan(wildcard);,
+        Continue(continue_node) => return no_match_arm_scan(wildcard);,
+        Param(param_node) => return no_match_arm_scan(wildcard);,
+        Field(field_node) => return no_match_arm_scan(wildcard);,
+        UnionVariant(union_variant) => return no_match_arm_scan(wildcard);,
+        Match(match_node) => return no_match_arm_scan(wildcard);,
+        Unsafe(unsafe_node) => return no_match_arm_scan(wildcard);,
+        ComptimeIf(comptime_if_node) => return no_match_arm_scan(wildcard);,
+    }
+}
+
+fn current_enum_match_arm_node_scan(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    pattern_id: std::kizu::ast::NodeId,
+    binding_id: std::kizu::ast::NodeId,
+    value_type: []u8,
+    arms: std::kizu::ast::ChildRange,
+    index: i64,
+    count: i64,
+    wildcard: bool,
+    enum_tags: &std::map::Map<[]u8, bool>
+) -> !MatchArmScanSummary {
+    let pattern = ast_node_text(file, ast, pattern_id);
+    let binding = ast_node_text(file, ast, binding_id);
+    if std::mem::equal_bytes(pattern, "_") {
+        if !std::mem::equal_bytes(binding, "") {
+            return match_arm_scan_summary(0, wildcard, true, 6, value_type, "");
+        }
+        if index + 1 != count {
+            return match_arm_scan_summary(0, wildcard, true, 5, value_type, "");
+        }
+        if wildcard {
+            return match_arm_scan_summary(0, wildcard, true, 7, value_type, "");
+        }
+        return match_arm_scan_summary(0, true, false, 0, "", "");
+    }
+    if !(try enum_match_tag_exists(allocator, enum_tags, value_type, pattern)) {
+        return match_arm_scan_summary(0, wildcard, true, 2, value_type, pattern);
+    }
+    if try match_tag_seen_before(file, ast, arms, index, pattern) {
+        return match_arm_scan_summary(0, wildcard, true, 3, value_type, pattern);
+    }
+    if !std::mem::equal_bytes(binding, "") {
+        return match_arm_scan_summary(0, wildcard, true, 8, value_type, pattern);
+    }
+    return match_arm_scan_summary(1, wildcard, false, 0, "", "");
+}
+
+fn match_tag_seen_before(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    arms: std::kizu::ast::ChildRange,
+    index: i64,
+    pattern: []u8
+) -> !bool {
+    var cursor = 0;
+    while cursor < index {
+        let child = try ast.child_at(arms, cursor);
+        if match_arm_pattern_equals(file, ast, child, pattern) {
+            return true;
+        }
+        cursor = cursor + 1;
+    }
+    return false;
+}
+
+fn match_arm_pattern_equals(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    pattern: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    match node.data {
+        MatchArm(match_arm) => return std::mem::equal_bytes(
+            ast_node_text(file, ast, match_arm.pattern),
+            pattern
+        );,
+        Program(program) => return false;,
+        Empty => return false;,
+        ImportDecl(import_decl) => return false;,
+        StructDecl(struct_decl) => return false;,
+        EnumDecl(enum_decl) => return false;,
+        UnionDecl(union_decl) => return false;,
+        FnDecl(fn_decl) => return false;,
+        Int(int_node) => return false;,
+        String(string_node) => return false;,
+        TypeName(type_name) => return false;,
+        Var(var_node) => return false;,
+        Bool(bool_node) => return false;,
+        Prefix(prefix_node) => return false;,
+        Binary(binary) => return false;,
+        FieldExpr(field_expr_node) => return false;,
+        DerefExpr(deref_expr_node) => return false;,
+        Call(call_node) => return false;,
+        TypeApplyExpr(type_apply) => return false;,
+        CastExpr(cast_expr) => return false;,
+        IndexExpr(index_expr) => return false;,
+        StructLiteralExpr(struct_literal) => return false;,
+        StructFieldInit(struct_field_init) => return false;,
+        ArenaNewExpr(arena_new) => return false;,
+        TryExpr(try_expr_node) => return false;,
+        ComptimeExpr(comptime_expr_node) => return false;,
+        Block(block) => return false;,
+        If(if_node) => return false;,
+        Let(let_node) => return false;,
+        Assign(assign_node) => return false;,
+        Return(return_node) => return false;,
+        Defer(defer_node) => return false;,
+        ExprStmt(expr_stmt) => return false;,
+        While(while_node) => return false;,
+        For(for_node) => return false;,
+        Break(break_node) => return false;,
+        Continue(continue_node) => return false;,
+        Param(param_node) => return false;,
+        Field(field_node) => return false;,
+        UnionVariant(union_variant) => return false;,
+        Match(match_node) => return false;,
+        Unsafe(unsafe_node) => return false;,
+        ComptimeIf(comptime_if_node) => return false;,
+    }
+}
+
+fn match_arm_scan_summary(
+    explicit_count: i64,
+    wildcard: bool,
+    diagnostic_found: bool,
+    diagnostic_kind: i64,
+    diagnostic_name: []u8,
+    diagnostic_tag: []u8
+) -> MatchArmScanSummary {
+    return MatchArmScanSummary {
+        explicit_count: explicit_count,
+        wildcard: wildcard,
+        diagnostic_found: diagnostic_found,
+        diagnostic_kind: diagnostic_kind,
+        diagnostic_name: diagnostic_name,
+        diagnostic_tag: diagnostic_tag
+    };
+}
+
+fn no_match_arm_scan(wildcard: bool) -> MatchArmScanSummary {
+    return match_arm_scan_summary(0, wildcard, false, 0, "", "");
+}
+
+fn enum_match_tag_exists(
+    allocator: Allocator,
+    enum_tags: &std::map::Map<[]u8, bool>,
+    type_name: []u8,
+    tag: []u8
+) -> !bool {
+    var key = std::string::String(allocator);
+    try append_match_tag_key(key, type_name, tag);
+    let key_bytes = key.as_bytes();
+    let exists = enum_tags.contains(key_bytes);
+    key.deinit();
+    return exists;
+}
+
+fn append_match_tag_key(
+    key: &var std::string::String,
+    type_name: []u8,
+    tag: []u8
+) -> !void {
+    try key.append_bytes(type_name);
+    try key.append_bytes("::");
+    try key.append_bytes(tag);
+    return;
+}
+
+fn unsupported_match_value_type(value_type: []u8) -> bool {
+    if std::mem::equal_bytes(value_type, "unknown") {
+        return false;
+    }
+    if std::mem::starts_with(value_type, "?") or
+        std::mem::starts_with(value_type, "!") or
+        bytes_contains(value_type, "!") {
+        return false;
+    }
+    return is_scalar_comparable_type(value_type);
+}
+
+fn check_condition_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !TypeScanSummary {
+    let condition_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
+    );
+    var diagnostics = 0;
+    if known_type_mismatch("bool", condition_type) {
+        diagnostics = 1;
+    }
+    return type_scan_summary(0, 1, diagnostics);
+}
+
+fn infer_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        Int(int_node) => return "i64";,
+        String(string_node) => return "[]u8";,
+        Bool(bool_node) => return "bool";,
+        Empty => return "void";,
+        Var(var_node) => return infer_var_expression_type(file, ast, node_id, local_types);,
+        Binary(binary) => return binary_expression_type(binary.op);,
+        Prefix(prefix_node) => return prefix_expression_type(prefix_node.op);,
+        CastExpr(cast_expr) => return ast_return_type_text(file, ast, cast_expr.type_node);,
+        ComptimeExpr(comptime_expr_node) => return infer_expression_type(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            local_types,
+            function_returns
+        );,
+        TryExpr(try_expr_node) => return success_type_of(try infer_expression_type(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types,
+            function_returns
+        ));,
+        FieldExpr(field_expr_node) => return field_expression_type(
+            file,
+            ast,
+            field_expr_node.receiver,
+            field_expr_node.namespace,
+            field_expr_node.name
+        );,
+        DerefExpr(deref_expr_node) => return "unknown";,
+        Call(call_node) => return call_expression_type(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            local_types,
+            function_returns
+        );,
+        TypeApplyExpr(type_apply) => return ast_node_text(file, ast, node_id);,
+        IndexExpr(index_expr) => return index_expression_type(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.slice,
+            local_types,
+            function_returns
+        );,
+        StructLiteralExpr(struct_literal) => return ast_node_text(file, ast, struct_literal.type_name);,
+        StructFieldInit(struct_field_init) => return "unknown";,
+        ArenaNewExpr(arena_new) => return arena_expression_type(file, ast, arena_new.type_node);,
+        Block(block) => return "unknown";,
+        If(if_node) => return "unknown";,
+        Let(let_node) => return "unknown";,
+        Assign(assign_node) => return "unknown";,
+        Return(return_node) => return "unknown";,
+        Defer(defer_node) => return "unknown";,
+        ExprStmt(expr_stmt) => return "unknown";,
+        While(while_node) => return "unknown";,
+        For(for_node) => return "unknown";,
+        Break(break_node) => return "void";,
+        Continue(continue_node) => return "void";,
+        Program(program) => return "unknown";,
+        ImportDecl(import_decl) => return "unknown";,
+        Param(param_node) => return "unknown";,
+        Field(field_node) => return "unknown";,
+        StructDecl(struct_decl) => return "unknown";,
+        EnumDecl(enum_decl) => return "unknown";,
+        UnionDecl(union_decl) => return "unknown";,
+        UnionVariant(union_variant) => return "unknown";,
+        Match(match_node) => return infer_match_expression_type(
+            allocator,
+            file,
+            ast,
+            match_node.arms,
+            local_types,
+            function_returns
+        );,
+        MatchArm(match_arm) => return "unknown";,
+        Unsafe(unsafe_node) => return "unknown";,
+        ComptimeIf(comptime_if_node) => return "unknown";,
+        FnDecl(fn_decl) => return "unknown";,
+        TypeName(type_name) => return ast_node_text(file, ast, node_id);,
+    }
+}
+
+fn infer_match_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    var result = "unknown";
+    var index = 0;
+    while index < arms.len {
+        let child = try ast.child_at(arms, index);
+        let arm_type = try infer_match_arm_expression_type(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            function_returns
+        );
+        if std::mem::equal_bytes(result, "unknown") {
+            result = arm_type;
+        } else {
+            if known_type_mismatch(result, arm_type) {
+                return "unknown";
+            }
+        }
+        index = index + 1;
+    }
+    return result;
+}
+
+fn infer_match_arm_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        MatchArm(match_arm) => return infer_match_arm_body_expression_type(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            function_returns
+        );,
+        _ => return "unknown";,
+    }
+}
+
+fn infer_match_arm_body_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        ExprStmt(expr_stmt) => return infer_expression_type(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            local_types,
+            function_returns
+        );,
+        Empty => return "void";,
+        _ => return "unknown";,
+    }
+}
+
+fn success_type_of(value_type: []u8) -> []u8 {
+    if std::mem::starts_with(value_type, "!") {
+        return value_type[1..std::mem::len(value_type)];
+    }
+    var index = 0;
+    while index < std::mem::len(value_type) {
+        if value_type[index] == cast<u8>(33) {
+            return value_type[index + 1..std::mem::len(value_type)];
+        }
+        index = index + 1;
+    }
+    return value_type;
+}
+
+fn field_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    namespace: bool,
+    name: std::kizu::ast::NodeId
+) -> []u8 {
+    if namespace {
+        let receiver_text = ast_node_text(file, ast, receiver);
+        if last_segment_starts_with_uppercase(receiver_text) {
+            return receiver_text;
+        }
+    }
+    return field_name_type(ast_node_text(file, ast, name));
+}
+
+fn call_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let callee_text = ast_node_text(file, ast, callee);
+    if is_generic_constructor_text(callee_text) {
+        return callee_text;
+    }
+    let method_type = try method_call_text_type(callee_text, local_types);
+    if !std::mem::equal_bytes(method_type, "unknown") {
+        return method_type;
+    }
+    return resolved_function_return_type(allocator, file, callee_text, function_returns);
+}
+
+fn index_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    slice: bool,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let target_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        target,
+        local_types,
+        function_returns
+    );
+    if slice {
+        if is_u8_slice(target_type) {
+            return "[]u8";
+        }
+        if std::mem::starts_with(target_type, "[]") {
+            return target_type;
+        }
+        return "unknown";
+    }
+    if is_u8_slice(target_type) {
+        return "u8";
+    }
+    return "unknown";
+}
+
+fn arena_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> []u8 {
+    let type_name = ast_node_text(file, ast, type_node);
+    if std::mem::equal_bytes(type_name, "") {
+        return "unknown";
+    }
+    return "unknown";
+}
+
+fn field_name_type(field: []u8) -> []u8 {
+    if std::mem::equal_bytes(field, "start") or
+        std::mem::equal_bytes(field, "end") or
+        std::mem::equal_bytes(field, "line") or
+        std::mem::equal_bytes(field, "column") or
+        std::mem::equal_bytes(field, "raw") or
+        std::mem::equal_bytes(field, "len") or
+        std::mem::equal_bytes(field, "source_id") or
+        std::mem::equal_bytes(field, "byte_start") or
+        std::mem::equal_bytes(field, "byte_end") or
+        std::mem::equal_bytes(field, "span_start") or
+        std::mem::equal_bytes(field, "span_end") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(field, "modules") or
+        std::mem::equal_bytes(field, "symbols") or
+        std::mem::equal_bytes(field, "functions") or
+        std::mem::equal_bytes(field, "typed_nodes") or
+        std::mem::equal_bytes(field, "diagnostics") or
+        std::mem::equal_bytes(field, "params") or
+        std::mem::equal_bytes(field, "tokens") or
+        std::mem::equal_bytes(field, "bytes") or
+        std::mem::equal_bytes(field, "declarations") or
+        std::mem::equal_bytes(field, "nodes") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(field, "public") or
+        std::mem::equal_bytes(field, "unsafe_decl") or
+        std::mem::equal_bytes(field, "comptime_param") or
+        std::mem::equal_bytes(field, "mutable") or
+        std::mem::equal_bytes(field, "slice") or
+        std::mem::equal_bytes(field, "namespace") or
+        std::mem::equal_bytes(field, "value") or
+        std::mem::equal_bytes(field, "diagnostic") or
+        std::mem::equal_bytes(field, "is_dir") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(field, "path") or
+        std::mem::equal_bytes(field, "text") or
+        std::mem::equal_bytes(field, "module") or
+        std::mem::equal_bytes(field, "message") or
+        std::mem::equal_bytes(field, "name") or
+        std::mem::equal_bytes(field, "return_type") or
+        std::mem::equal_bytes(field, "param_source") {
+        return "[]u8";
+    }
+    return "unknown";
+}
+
+fn method_call_text_type(
+    callee: []u8,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let method = last_field_segment(callee);
+    var receiver_type = "unknown";
+    var last_dot = -1;
+    var index = 0;
+    while index < std::mem::len(callee) {
+        if callee[index] == cast<u8>(46) {
+            last_dot = index;
+        }
+        index = index + 1;
+    }
+    if last_dot > 0 {
+        let receiver = callee[0..last_dot];
+        if local_types.contains(receiver) {
+            receiver_type = try local_types.get(receiver);
+        }
+    }
+    return method_return_type(method, receiver_type);
+}
+
+fn last_field_segment(text: []u8) -> []u8 {
+    var start = 0;
+    var index = 0;
+    while index < std::mem::len(text) {
+        if text[index] == cast<u8>(46) {
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return text[start..std::mem::len(text)];
+}
+
+fn method_return_type(method: []u8, receiver_type: []u8) -> []u8 {
+    if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "capacity") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(method, "contains") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(method, "as_bytes") {
+        return "[]u8";
+    }
+    if std::mem::equal_bytes(method, "append") or
+        std::mem::equal_bytes(method, "append_bytes") or
+        std::mem::equal_bytes(method, "append_byte") or
+        std::mem::equal_bytes(method, "reserve") or
+        std::mem::equal_bytes(method, "set") or
+        std::mem::equal_bytes(method, "clear") or
+        std::mem::equal_bytes(method, "truncate") or
+        std::mem::equal_bytes(method, "deinit") {
+        return "void";
+    }
+    if std::mem::equal_bytes(method, "get") or
+        std::mem::equal_bytes(method, "at") or
+        std::mem::equal_bytes(method, "at_mut") {
+        return container_element_type(receiver_type);
+    }
+    return "unknown";
+}
+
+fn container_element_type(type_name: []u8) -> []u8 {
+    if std::mem::starts_with(type_name, "std::array::Array<") {
+        return first_generic_argument(type_name);
+    }
+    if std::mem::starts_with(type_name, "std::map::Map<") {
+        return second_generic_argument(type_name);
+    }
+    return "unknown";
+}
+
+fn first_generic_argument(type_name: []u8) -> []u8 {
+    var index = 0;
+    while index < std::mem::len(type_name) and type_name[index] != cast<u8>(60) {
+        index = index + 1;
+    }
+    if index >= std::mem::len(type_name) {
+        return "unknown";
+    }
+    let start = index + 1;
+    index = start;
+    var depth = 1;
+    while index < std::mem::len(type_name) and depth > 0 {
+        let byte = type_name[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                depth = depth - 1;
+                if depth == 0 {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+            } else {
+                if depth == 1 and byte == cast<u8>(44) {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+fn second_generic_argument(type_name: []u8) -> []u8 {
+    var index = 0;
+    var depth = 0;
+    var start = -1;
+    while index < std::mem::len(type_name) {
+        let byte = type_name[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                if depth == 1 and start >= 0 {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+                depth = depth - 1;
+            } else {
+                if byte == cast<u8>(44) and depth == 1 {
+                    start = index + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+fn is_generic_constructor_text(text: []u8) -> bool {
+    return std::mem::starts_with(text, "std::array::Array<") or
+        std::mem::starts_with(text, "std::map::Map<") or
+        std::mem::starts_with(text, "std::mem::Box<") or
+        std::mem::starts_with(text, "std::arena::Arena<") or
+        std::mem::starts_with(text, "std::arena::Handle<");
+}
+
+fn should_skip_function_reference(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "print") or
+        std::mem::equal_bytes(name, "error") or
+        std::mem::equal_bytes(name, "cast") or
+        std::mem::equal_bytes(name, "return") or
+        std::mem::equal_bytes(name, "or") or
+        std::mem::equal_bytes(name, "and") or
+        std::mem::equal_bytes(name, "if") or
+        std::mem::equal_bytes(name, "while") or
+        std::mem::equal_bytes(name, "for") or
+        std::mem::equal_bytes(name, "match");
+}
+
+fn append_resolved_function_name(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    name: []u8
+) -> !void {
+    if std::mem::starts_with(name, "std::") or std::mem::starts_with(name, "selfhost::") {
+        try out.append_bytes(name);
+        return;
+    }
+    if is_qualified_name(name) {
+        try out.append_bytes("selfhost::");
+        try out.append_bytes(name);
+        return;
+    }
+    if file.kind == source::SourceKind::Std {
+        try out.append_bytes("std::");
+    } else {
+        try out.append_bytes("selfhost::");
+    }
+    try source::append_module_path(out, file);
+    try out.append_bytes("::");
+    try out.append_bytes(name);
+    return;
+}
+
+fn last_segment_starts_with_uppercase(name: []u8) -> bool {
+    var start = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            start = index + 2;
+        }
+        index = index + 1;
+    }
+    if start >= std::mem::len(name) {
+        return false;
+    }
+    let byte = name[start];
+    return byte >= cast<u8>(65) and byte <= cast<u8>(90);
+}
+
+fn resolved_function_return_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    name: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    if should_skip_function_reference(name) {
+        return "unknown";
+    }
+    var resolved = std::string::String(allocator);
+    try append_resolved_function_name(resolved, file, name);
+    let key = resolved.as_bytes();
+    var result = "unknown";
+    if function_returns.contains(key) {
+        result = try function_returns.get(key);
+    }
+    resolved.deinit();
+    return result;
+}
+
+fn infer_var_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let name = ast_node_text(file, ast, node_id);
+    if local_types.contains(name) {
+        return local_types.get(name);
+    }
+    return "unknown";
+}
+
+fn binary_expression_type(op: std::kizu::ast::BinaryOp) -> []u8 {
+    match op {
+        Add => return "i64";,
+        Sub => return "i64";,
+        Mul => return "i64";,
+        Div => return "i64";,
+        Mod => return "i64";,
+        Eq => return "bool";,
+        NotEq => return "bool";,
+        LT => return "bool";,
+        LTE => return "bool";,
+        GT => return "bool";,
+        GTE => return "bool";,
+        And => return "bool";,
+        Or => return "bool";,
+    }
+}
+
+fn prefix_expression_type(op: std::kizu::ast::PrefixOp) -> []u8 {
+    match op {
+        Not => return "bool";,
+        Neg => return "i64";,
+        Borrow => return "unknown";,
+        MutBorrow => return "unknown";,
+    }
+}
+
+fn known_type_mismatch(expected: []u8, actual: []u8) -> bool {
+    if std::mem::equal_bytes(expected, "unknown") or std::mem::equal_bytes(actual, "unknown") {
+        return false;
+    }
+    if std::mem::starts_with(expected, "!") {
+        return false;
+    }
+    if std::mem::starts_with(actual, "!") or bytes_contains(actual, "!") {
+        return false;
+    }
+    if is_u8_slice(expected) or is_u8_slice(actual) {
+        return !(is_u8_slice(expected) and is_u8_slice(actual));
+    }
+    if !is_scalar_comparable_type(expected) or !is_scalar_comparable_type(actual) {
+        return false;
+    }
+    return !std::mem::equal_bytes(expected, actual);
+}
+
+fn is_scalar_comparable_type(type_name: []u8) -> bool {
+    return std::mem::equal_bytes(type_name, "void") or
+        std::mem::equal_bytes(type_name, "bool") or
+        std::mem::equal_bytes(type_name, "i64") or
+        std::mem::equal_bytes(type_name, "u8") or
+        std::mem::equal_bytes(type_name, "Allocator") or
+        std::mem::equal_bytes(type_name, "Io");
+}
+
+fn is_u8_slice(type_name: []u8) -> bool {
+    return std::mem::equal_bytes(type_name, "[]u8");
+}
+
+fn bytes_contains(haystack: []u8, needle: []u8) -> bool {
+    let needle_len = std::mem::len(needle);
+    if needle_len < 1 {
+        return true;
+    }
+    if needle_len > std::mem::len(haystack) {
+        return false;
+    }
+    var index = 0;
+    while index + needle_len <= std::mem::len(haystack) {
+        if std::mem::equal_bytes(haystack[index..index + needle_len], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn append_module_name(
+    name: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    if file.kind == source::SourceKind::Std {
+        try name.append_bytes("std::");
+    } else {
+        try name.append_bytes("selfhost::");
+    }
+    try source::append_module_path(name, file);
+    return;
+}
+
+fn token_text(
+    source_text: []u8,
+    token: std::kizu::lexer::Token
+) -> []u8 {
+    return source_text[token.start..token.end];
+}
+
+fn ast_return_type_text(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        Empty => return "void";,
+        Int(int_node) => return ast_node_text(file, ast, node_id);,
+        String(string_node) => return ast_node_text(file, ast, node_id);,
+        TypeName(type_name) => return ast_node_text(file, ast, node_id);,
+        Var(var_node) => return ast_node_text(file, ast, node_id);,
+        Bool(bool_node) => return ast_node_text(file, ast, node_id);,
+        Prefix(prefix_node) => return ast_node_text(file, ast, node_id);,
+        Binary(binary) => return ast_node_text(file, ast, node_id);,
+        FieldExpr(field_expr_node) => return ast_node_text(file, ast, node_id);,
+        DerefExpr(deref_expr_node) => return ast_node_text(file, ast, node_id);,
+        Call(call_node) => return ast_node_text(file, ast, node_id);,
+        TypeApplyExpr(type_apply) => return ast_node_text(file, ast, node_id);,
+        CastExpr(cast_expr) => return ast_node_text(file, ast, node_id);,
+        IndexExpr(index_expr) => return ast_node_text(file, ast, node_id);,
+        StructLiteralExpr(struct_literal) => return ast_node_text(file, ast, node_id);,
+        StructFieldInit(struct_field_init) => return ast_node_text(file, ast, node_id);,
+        ArenaNewExpr(arena_new) => return ast_node_text(file, ast, node_id);,
+        TryExpr(try_expr_node) => return ast_node_text(file, ast, node_id);,
+        ComptimeExpr(comptime_expr_node) => return ast_node_text(file, ast, node_id);,
+        Block(block) => return ast_node_text(file, ast, node_id);,
+        If(if_node) => return ast_node_text(file, ast, node_id);,
+        Let(let_node) => return ast_node_text(file, ast, node_id);,
+        Assign(assign_node) => return ast_node_text(file, ast, node_id);,
+        Return(return_node) => return ast_node_text(file, ast, node_id);,
+        Defer(defer_node) => return ast_node_text(file, ast, node_id);,
+        ExprStmt(expr_stmt) => return ast_node_text(file, ast, node_id);,
+        While(while_node) => return ast_node_text(file, ast, node_id);,
+        For(for_node) => return ast_node_text(file, ast, node_id);,
+        Break(break_node) => return ast_node_text(file, ast, node_id);,
+        Continue(continue_node) => return ast_node_text(file, ast, node_id);,
+        ImportDecl(import_decl) => return ast_node_text(file, ast, node_id);,
+        Param(param_node) => return ast_node_text(file, ast, node_id);,
+        Field(field_node) => return ast_node_text(file, ast, node_id);,
+        StructDecl(struct_decl) => return ast_node_text(file, ast, node_id);,
+        EnumDecl(enum_decl) => return ast_node_text(file, ast, node_id);,
+        UnionDecl(union_decl) => return ast_node_text(file, ast, node_id);,
+        UnionVariant(union_variant) => return ast_node_text(file, ast, node_id);,
+        Match(match_node) => return ast_node_text(file, ast, node_id);,
+        MatchArm(match_arm) => return ast_node_text(file, ast, node_id);,
+        Unsafe(unsafe_node) => return ast_node_text(file, ast, node_id);,
+        ComptimeIf(comptime_if_node) => return ast_node_text(file, ast, node_id);,
+        FnDecl(fn_decl) => return ast_node_text(file, ast, node_id);,
+        Program(program) => return ast_node_text(file, ast, node_id);,
+    }
+}
+
+fn ast_node_text(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(file.text[span.start..span.end]);
+}
+
+fn ast_ref_node_text(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(file.text[span.start..span.end]);
+}
+
+fn check_diagnostic_none() -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: false,
+        kind: 0,
+        detail_kind: 0,
+        start: 0,
+        end: 0,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_type_reference(summary: model::TypeReferenceSummary) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 1,
+        detail_kind: summary.kind,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: summary.expected,
+        observed: summary.observed
+    };
+}
+
+fn check_diagnostic_from_match(summary: model::MatchDiagnosticSummary) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 2,
+        detail_kind: summary.kind,
+        start: 0,
+        end: 0,
+        name: summary.name,
+        tag: summary.tag,
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_return_type(summary: model::ReturnTypeSummary) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 3,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: summary.expected,
+        actual_text: summary.actual,
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_function_call(summary: model::FunctionCallSummary) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 4,
+        detail_kind: summary.kind,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: summary.expected,
+        observed: summary.observed
+    };
+}
+
+fn check_diagnostic_from_undefined_variable(
+    summary: model::UndefinedVariableSummary
+) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 5,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: summary.name,
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_argument_type(summary: model::ArgumentTypeSummary) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 6,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: summary.expected,
+        actual_text: summary.actual,
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_immutable_assignment(
+    summary: model::ImmutableAssignmentSummary
+) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 7,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: summary.name,
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_invalid_assignment_target(
+    summary: model::InvalidAssignmentTargetSummary
+) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 8,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_assignment_type(summary: model::AssignmentTypeSummary) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 9,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: summary.expected,
+        actual_text: summary.actual,
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn return_type_summary(
+    found: bool,
+    start: i64,
+    end: i64,
+    expected: []u8,
+    actual: []u8
+) -> model::ReturnTypeSummary {
+    return model::ReturnTypeSummary {
+        found: found,
+        start: start,
+        end: end,
+        expected: expected,
+        actual: actual
+    };
+}
+
+fn no_return_type_mismatch() -> model::ReturnTypeSummary {
+    return return_type_summary(false, 0, 0, "", "");
+}
+
+fn argument_type_summary(
+    found: bool,
+    start: i64,
+    end: i64,
+    expected: []u8,
+    actual: []u8
+) -> model::ArgumentTypeSummary {
+    return model::ArgumentTypeSummary {
+        found: found,
+        start: start,
+        end: end,
+        expected: expected,
+        actual: actual
+    };
+}
+
+fn no_argument_type_mismatch() -> model::ArgumentTypeSummary {
+    return argument_type_summary(false, 0, 0, "", "");
+}
+
+fn assignment_type_summary(
+    found: bool,
+    start: i64,
+    end: i64,
+    expected: []u8,
+    actual: []u8
+) -> model::AssignmentTypeSummary {
+    return model::AssignmentTypeSummary {
+        found: found,
+        start: start,
+        end: end,
+        expected: expected,
+        actual: actual
+    };
+}
+
+fn no_assignment_type_mismatch() -> model::AssignmentTypeSummary {
+    return assignment_type_summary(false, 0, 0, "", "");
+}
+
+fn immutable_assignment_summary(
+    found: bool,
+    start: i64,
+    end: i64,
+    name: []u8
+) -> model::ImmutableAssignmentSummary {
+    return model::ImmutableAssignmentSummary {
+        found: found,
+        start: start,
+        end: end,
+        name: name
+    };
+}
+
+fn no_immutable_assignment() -> model::ImmutableAssignmentSummary {
+    return immutable_assignment_summary(false, 0, 0, "");
+}
+
+fn invalid_assignment_target_result(
+    found: bool,
+    start: i64,
+    end: i64
+) -> model::InvalidAssignmentTargetSummary {
+    return model::InvalidAssignmentTargetSummary {
+        found: found,
+        start: start,
+        end: end
+    };
+}
+
+fn no_invalid_assignment_target() -> model::InvalidAssignmentTargetSummary {
+    return invalid_assignment_target_result(false, 0, 0);
+}
+
+fn undefined_variable_summary(
+    found: bool,
+    start: i64,
+    end: i64,
+    name: []u8
+) -> model::UndefinedVariableSummary {
+    return model::UndefinedVariableSummary {
+        found: found,
+        start: start,
+        end: end,
+        name: name
+    };
+}
+
+fn no_undefined_variable() -> model::UndefinedVariableSummary {
+    return undefined_variable_summary(false, 0, 0, "");
+}
+
+fn match_diagnostic_summary(
+    found: bool,
+    kind: i64,
+    name: []u8,
+    tag: []u8
+) -> model::MatchDiagnosticSummary {
+    return model::MatchDiagnosticSummary {
+        found: found,
+        kind: kind,
+        name: name,
+        tag: tag
+    };
+}
+
+fn no_match_diagnostic() -> model::MatchDiagnosticSummary {
+    return match_diagnostic_summary(false, 0, "", "");
+}
+
+fn type_scan_summary(next: i64, typed_nodes: i64, diagnostics: i64) -> TypeScanSummary {
+    return TypeScanSummary {
+        next: next,
+        typed_nodes: typed_nodes,
+        diagnostics: diagnostics
+    };
+}
+
+fn merge_type_summaries(left: TypeScanSummary, right: TypeScanSummary) -> TypeScanSummary {
+    return TypeScanSummary {
+        next: right.next,
+        typed_nodes: left.typed_nodes + right.typed_nodes,
+        diagnostics: left.diagnostics + right.diagnostics
+    };
+}
+
+fn is_qualified_name(name: []u8) -> bool {
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
