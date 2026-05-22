@@ -50,7 +50,7 @@ impl Writer for File {
         return 1;
     }
 }
-fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
+fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
     let n = try writer.write(bytes);
     print(n);
     return;
@@ -63,6 +63,169 @@ fn main() -> !void {
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsOwnedDynParam keeps dynamic dispatch behind a borrow.
+func TestCheckRejectsOwnedDynParam(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "owned",
+			source: `struct File { name: []u8 }
+contract Writer {
+    fn write(self: &Self) -> !i64;
+}
+fn save(writer: dyn Writer) -> !void {
+    return;
+}
+fn main() {}`,
+			want: "dyn parameter `writer` must be borrowed",
+		},
+		{
+			name: "mutable borrow",
+			source: `contract Writer {
+    fn write(self: &Self) -> !i64;
+}
+fn save(writer: &var dyn Writer) -> !void {
+    return;
+}
+fn main() {}`,
+			want: "dyn parameter `writer` must use immutable borrow in v0",
+		},
+		{
+			name: "nullable",
+			source: `contract Writer {
+    fn write(self: &Self) -> !i64;
+}
+fn save(writer: ?dyn Writer) -> !void {
+    return;
+}
+fn main() {}`,
+			want: "nullable type `?dyn Writer` must wrap ptr<T>",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkSource(tc.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestCheckRejectsLegacyDynWrapper keeps the dyn keyword as the only spelling.
+func TestCheckRejectsLegacyDynWrapper(t *testing.T) {
+	source := `struct File { name: []u8 }
+contract Writer {
+    fn write(self: &Self) -> !i64;
+}
+fn save(writer: &Dyn<Writer>) -> !void {
+    return;
+}
+fn main() {}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "unknown generic type `Dyn`") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestCheckRejectsStoredTypeValue keeps type<T> comptime-only.
+func TestCheckRejectsStoredTypeValue(t *testing.T) {
+	for _, tc := range storedTypeValueCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkSource(tc.source)
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %q, want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+type errorCase struct {
+	name   string
+	source string
+	want   string
+}
+
+// storedTypeValueCases returns negative cases for comptime-only type values.
+func storedTypeValueCases() []errorCase {
+	return []errorCase{
+		{
+			name: "local",
+			source: `fn main() -> !void {
+    let t = type<i64>;
+    return;
+}`,
+			want: "type value cannot be stored in local `t`",
+		},
+		{
+			name: "return",
+			source: `fn type_name() -> type {
+    return type<i64>;
+}`,
+			want: "function `type_name` cannot return type",
+		},
+		{
+			name: "wrapped return",
+			source: `fn type_name() -> !type {
+    return type<i64>;
+}`,
+			want: "function `type_name` cannot return type",
+		},
+		{
+			name: "parameter",
+			source: `fn type_name(value: !type) -> !void {
+    return;
+}
+fn main() {}`,
+			want: "parameter `value` cannot have type",
+		},
+		{
+			name: "struct field",
+			source: `struct Holder {
+    value: type,
+}
+fn main() {}`,
+			want: "struct field `Holder.value` cannot store type value",
+		},
+		{
+			name: "wrapped struct field",
+			source: `struct Holder {
+    value: !type,
+}
+fn main() {}`,
+			want: "struct field `Holder.value` cannot store type value",
+		},
+		{
+			name: "union payload",
+			source: `union Holder {
+    Value(type),
+}
+fn main() {}`,
+			want: "union variant `Holder::Value` cannot store type value",
+		},
+		{
+			name: "wrapped union payload",
+			source: `union Holder {
+    Value(!type),
+}
+fn main() {}`,
+			want: "union variant `Holder::Value` cannot store type value",
+		},
 	}
 }
 
@@ -1402,6 +1565,28 @@ fn main() {
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsBareTypeNameAsComptimeValue keeps type<T> canonical.
+func TestCheckRejectsBareTypeNameAsComptimeValue(t *testing.T) {
+	source := `fn IsI64<T>(value: T) -> bool {
+    comptime if T == i64 {
+        return true;
+    } else {
+        return false;
+    }
+}
+fn main() {
+    print(IsI64<i64>(1));
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "runtime value cannot be used") &&
+		!strings.Contains(err.Error(), "undefined variable `i64`") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 

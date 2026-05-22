@@ -111,7 +111,7 @@ copy primitive、enum、safe field だけを持つ owned struct / union は boun
 `Channel<T>` は `T` が boundary-safe な場合だけ boundary を越えられる。
 local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない。
 raw pointer を field / payload に含む struct / union も boundary を越えられない。
-`std::arena::Arena<T>` / `std::arena::Handle<T>` / `Dyn<Contract>` / `Mutex<T>` / `Task<T>` は
+`std::arena::Arena<T>` / `std::arena::Handle<T>` / `dyn Contract` / `Mutex<T>` / `Task<T>` は
 v0.1 では boundary を越えられない。
 arena / handle の thread-safe sharing は v0.1 では扱わない。
 

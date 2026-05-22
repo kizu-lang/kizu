@@ -53,7 +53,7 @@ runtime implementation を切り替えても、safe Kizu の境界ルールは�
 - task / future / thread / channel boundary に mutable borrow を渡せない
 - task / future / thread / channel boundary に raw pointer を渡せない
 - raw pointer を field / payload に含む struct / union は boundary を越えられない
-- `std::arena::Arena<T>` / `std::arena::Handle<T>` / `Dyn<Contract>` / `Mutex<T>` / `Task<T>` は
+- `std::arena::Arena<T>` / `std::arena::Handle<T>` / `dyn Contract` / `Mutex<T>` / `Task<T>` は
   v0.1 では boundary を越えられない
 - non-copy value を boundary に渡す場合は move する
 - shared mutable state は `std::sync` / `std::atomic` の明示型だけで扱う

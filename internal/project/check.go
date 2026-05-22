@@ -991,6 +991,8 @@ func (r typeResolver) resolve(name string) (string, error) {
 		return r.resolvePrefixed(name, "[]")
 	case strings.HasPrefix(name, "const "):
 		return r.resolvePrefixed(name, "const ")
+	case strings.HasPrefix(name, "dyn "):
+		return r.resolvePrefixed(name, "dyn ")
 	}
 	if errorType, successType, ok := splitTypedErrorUnion(name); ok {
 		return r.resolveTypedErrorUnion(errorType, successType)

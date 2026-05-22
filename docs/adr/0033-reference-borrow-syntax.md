@@ -44,5 +44,5 @@ ADR-0060 により、関数境界を越える borrowed return では `borrows <s
 
 - parser / formatter / examples / conformance manifest は `&T` / `&var T` を使う
 - local borrow checker は shared / mutable borrow conflict を検査する
-- `Dyn<Contract>` の dynamic dispatch は `&Dyn<Contract>` に限定する
+- `dyn Contract` の dynamic dispatch は `&dyn Contract` に限定する
 - raw pointer は引き続き `ptr<T>` / `ptr<const T>` で扱い、`&T` とは別物にする

@@ -179,7 +179,7 @@ policy.
   concurrency boundaries.
 - Structs and unions containing raw pointer fields or payloads may not cross
   concurrency boundaries.
-- `std::arena::Arena<T>`, `std::arena::Handle<T>`, `Dyn<Contract>`, `Mutex<T>`, and `Task<T>` may not
+- `std::arena::Arena<T>`, `std::arena::Handle<T>`, `dyn Contract`, `Mutex<T>`, and `Task<T>` may not
   cross concurrency boundaries in v0.1.
 - Arena / handle thread-safe sharing is not part of v0.1.
 - `std::task::partition_mut(init, count)` creates checked disjoint output slots.

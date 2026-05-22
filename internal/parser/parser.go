@@ -1081,24 +1081,37 @@ func (p *Parser) parseCastExpr() ast.Expression {
 
 // parseTypeName parses a plain, borrow, pointer, or generic type name.
 func (p *Parser) parseTypeName() string {
-	if p.cur.Type == token.Bang {
+	switch p.cur.Type {
+	case token.Bang:
 		return p.parseErrorUnionTypeName()
-	}
-	if p.cur.Type == token.Amp {
+	case token.Amp:
 		return p.parseBorrowTypeName()
-	}
-	if p.cur.Type == token.LBracket {
+	case token.Dyn:
+		return p.parseDynTypeName()
+	case token.LBracket:
 		return p.parseSliceTypeName()
-	}
-	nullable := false
-	if p.cur.Type == token.Question {
-		nullable = true
-		p.nextToken()
-	}
-	if p.cur.Type != token.Ident {
+	case token.Question:
+		return p.parseNullableTypeName()
+	case token.Ident:
+		return p.parseNamedTypeName()
+	default:
 		p.errorf("expected type, got %s", p.cur.Type)
 		return ""
 	}
+}
+
+// parseNullableTypeName parses ?T type spellings.
+func (p *Parser) parseNullableTypeName() string {
+	p.nextToken()
+	inner := p.parseTypeName()
+	if inner == "" {
+		return ""
+	}
+	return "?" + inner
+}
+
+// parseNamedTypeName parses named, typed-error-union, and generic type spellings.
+func (p *Parser) parseNamedTypeName() string {
 	name := p.parseTypeBaseName()
 	if p.peek.Type == token.Bang {
 		p.nextToken()
@@ -1110,9 +1123,6 @@ func (p *Parser) parseTypeName() string {
 		return name + "!" + success
 	}
 	if p.peek.Type != token.LT {
-		if nullable {
-			return "?" + name
-		}
 		return name
 	}
 	p.nextToken()
@@ -1121,11 +1131,22 @@ func (p *Parser) parseTypeName() string {
 	if args == "" || !p.expectTypeClose() {
 		return ""
 	}
-	out := fmt.Sprintf("%s<%s>", name, args)
-	if nullable {
-		return "?" + out
+	return fmt.Sprintf("%s<%s>", name, args)
+}
+
+// parseDynTypeName parses dyn Contract type spellings.
+func (p *Parser) parseDynTypeName() string {
+	p.nextToken()
+	if p.cur.Type != token.Ident {
+		p.errorf("expected contract after dyn, got %s", p.cur.Type)
+		return ""
 	}
-	return out
+	name := p.parseTypeBaseName()
+	if p.peek.Type == token.LT {
+		p.errorf("dyn expects a contract name")
+		return ""
+	}
+	return "dyn " + name
 }
 
 // parseErrorUnionTypeName parses !T type spellings.
@@ -1247,7 +1268,7 @@ func (p *Parser) expectTypeClose() bool {
 // parseStaticTypeArg parses a v0.2 static argument whose value must be a type.
 func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 	switch p.cur.Type {
-	case token.Ident, token.Bang, token.Amp, token.LBracket, token.Question:
+	case token.Ident, token.Bang, token.Amp, token.Dyn, token.LBracket, token.Question:
 		return p.parseTypeArg(allowConst)
 	default:
 		p.errorf("expected static type argument, got %s", p.cur.Type)
