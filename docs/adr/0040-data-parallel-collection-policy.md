@@ -17,7 +17,7 @@ v0.1 の data parallelism は collection API に直接つながない。
 ```text
 std::task::parallel_for(io, start, end, worker)
 std::task::partition_mut(init, count)
-std::task::parallel_map(io, partition: &mut Partition, start, end, worker)
+std::task::parallel_map(io, partition: &var Partition, start, end, worker)
 std::task::LocalBuffer(count, init)
 ```
 

@@ -556,7 +556,7 @@ func (c *Checker) checkStringViewLetStmt(stmt *ast.LetStmt, target *binding, env
 		return err
 	}
 	c.activateBorrow(target, "", false)
-	value := c.newBinding(stmt.Name, "[]const u8")
+	value := c.newBinding(stmt.Name, "[]u8")
 	value.borrowedParam = true
 	value.localBorrow = true
 	value.borrowTarget = target
@@ -779,7 +779,7 @@ func (c *Checker) checkBorrowLetStmt(
 	if err != nil {
 		return err
 	}
-	mutable := borrow.Operator == "&mut"
+	mutable := borrow.Operator == "&var"
 	if err := checkBorrowConflictForField(target, field, mutable); err != nil {
 		return err
 	}
@@ -1092,8 +1092,8 @@ func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if !sameOwnershipType(target, "[]const u8") {
-		return "", fmt.Errorf("move error: index/slice target expects []const u8, got %s", target)
+	if !sameOwnershipType(target, "[]u8") {
+		return "", fmt.Errorf("move error: index/slice target expects []u8, got %s", target)
 	}
 	if !expr.Slice {
 		if _, err := c.readExpr(expr.Index, env); err != nil {
@@ -1120,7 +1120,7 @@ func readLiteralType(expr ast.Expression) (string, error) {
 	case *ast.IntExpr:
 		return "i64", nil
 	case *ast.StringExpr:
-		return "[]const u8", nil
+		return "[]u8", nil
 	case *ast.BoolExpr:
 		return "bool", nil
 	default:
@@ -1887,11 +1887,11 @@ func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bo
 	if err != nil {
 		return "", true, err
 	}
-	if !sameOwnershipType(path, "[]const u8") {
-		return "", true, fmt.Errorf("move error: `std::fs::read_file` expects []const u8 path, got %s",
+	if !sameOwnershipType(path, "[]u8") {
+		return "", true, fmt.Errorf("move error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
-	return "![]const u8", true, nil
+	return "![]u8", true, nil
 }
 
 // checkFsWriteFile validates ownership effects for std::fs::write_file.
@@ -1907,9 +1907,9 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 		if err != nil {
 			return "", true, err
 		}
-		if !sameOwnershipType(got, "[]const u8") {
+		if !sameOwnershipType(got, "[]u8") {
 			return "", true, fmt.Errorf(
-				"move error: `std::fs::write_file` expects []const u8 %s, got %s", label, got)
+				"move error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
 	return "!void", true, nil
@@ -1932,8 +1932,8 @@ func (c *Checker) checkFsPathOnly(
 	if err != nil {
 		return "", true, err
 	}
-	if !sameOwnershipType(path, "[]const u8") {
-		return "", true, fmt.Errorf("move error: `%s` expects []const u8 path, got %s", name, path)
+	if !sameOwnershipType(path, "[]u8") {
+		return "", true, fmt.Errorf("move error: `%s` expects []u8 path, got %s", name, path)
 	}
 	return result, true, nil
 }
@@ -2352,7 +2352,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 		case "borrow":
 			return "&" + typeArg, nil
 		case "borrow_mut":
-			return "&mut " + typeArg, nil
+			return "&var " + typeArg, nil
 		case "deinit":
 			return "void", nil
 		default:
@@ -2459,7 +2459,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		if _, err := c.checkOneI64Arg("Array.at_mut", args, env); err != nil {
 			return "", err
 		}
-		return "!&mut " + elem, nil
+		return "!&var " + elem, nil
 	case "get", "get_or_panic":
 		if len(args) != 1 {
 			return "", fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d",
@@ -2983,7 +2983,7 @@ func readFsMetadataFieldType(field string) (string, bool) {
 func readFsDirEntryFieldType(field string) (string, bool) {
 	switch field {
 	case "name", "path":
-		return "[]const u8", true
+		return "[]u8", true
 	case "is_dir":
 		return "bool", true
 	default:
@@ -4042,8 +4042,8 @@ func (c *Checker) checkStringBytesArg(
 	if err != nil {
 		return "", err
 	}
-	if !sameOwnershipType(got, "[]const u8") {
-		return "", fmt.Errorf("string error: `String.%s` expects []const u8, got %s", name, got)
+	if !sameOwnershipType(got, "[]u8") {
+		return "", fmt.Errorf("string error: `String.%s` expects []u8, got %s", name, got)
 	}
 	return "!void", nil
 }
@@ -4512,7 +4512,7 @@ func (c *Checker) checkArrayGet(
 	return elem, nil
 }
 
-// checkMapMethod validates ownership effects for owned Map<[]const u8, V> methods.
+// checkMapMethod validates ownership effects for owned Map<[]u8, V> methods.
 func (c *Checker) checkMapMethod(
 	mapValue *binding,
 	argsText string,
@@ -4562,8 +4562,8 @@ func (c *Checker) checkMapInsert(
 	}
 	if got, err := c.readExpr(args[0], env); err != nil {
 		return "", err
-	} else if !sameOwnershipType(got, "[]const u8") {
-		return "", fmt.Errorf("map error: `Map.insert` expects []const u8 key, got %s", got)
+	} else if !sameOwnershipType(got, "[]u8") {
+		return "", fmt.Errorf("map error: `Map.insert` expects []u8 key, got %s", got)
 	}
 	got, err := c.readContextualExpr(args[1], valueType, env)
 	if err != nil {
@@ -4575,7 +4575,7 @@ func (c *Checker) checkMapInsert(
 	return "!void", nil
 }
 
-// checkMapKeyArg validates one []const u8 lookup key.
+// checkMapKeyArg validates one []u8 lookup key.
 func (c *Checker) checkMapKeyArg(name string, args []ast.Expression, env *scope) error {
 	if len(args) != 1 {
 		return fmt.Errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
@@ -4584,8 +4584,8 @@ func (c *Checker) checkMapKeyArg(name string, args []ast.Expression, env *scope)
 	if err != nil {
 		return err
 	}
-	if !sameOwnershipType(got, "[]const u8") {
-		return fmt.Errorf("map error: `Map.%s` expects []const u8 key, got %s", name, got)
+	if !sameOwnershipType(got, "[]u8") {
+		return fmt.Errorf("map error: `Map.%s` expects []u8 key, got %s", name, got)
 	}
 	return nil
 }
@@ -5433,12 +5433,12 @@ func substituteOwnershipType(typeName string, subst map[string]string) string {
 	}
 	out := typeName
 	for name, replacement := range subst {
-		out = strings.ReplaceAll(out, "[]const "+name, "[]const "+replacement)
-		out = strings.ReplaceAll(out, "[]mut "+name, "[]mut "+replacement)
 		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
-		out = strings.ReplaceAll(out, "!&mut "+name, "!&mut "+replacement)
+		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
+		out = strings.ReplaceAll(out, "[]"+name, "[]"+replacement)
+		out = strings.ReplaceAll(out, "!&var "+name, "!&var "+replacement)
 		out = strings.ReplaceAll(out, "!&"+name, "!&"+replacement)
-		out = strings.ReplaceAll(out, "&mut "+name, "&mut "+replacement)
+		out = strings.ReplaceAll(out, "&var "+name, "&var "+replacement)
 		out = strings.ReplaceAll(out, "&"+name, "&"+replacement)
 		out = strings.ReplaceAll(out, "<"+name+">", "<"+replacement+">")
 		out = strings.ReplaceAll(out, "<"+name+",", "<"+replacement+",")
@@ -5471,7 +5471,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 	if isDiagnosticScalarType(typeName) {
 		return true
 	}
-	if eraseOwnershipLifetimes(typeName) == "[]const u8" {
+	if eraseOwnershipLifetimes(typeName) == "[]u8" {
 		return true
 	}
 	if typeName == "ParseNode" || typeName == "std::kizu::parser::ParseNode" {
@@ -5486,7 +5486,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 	switch typeName {
 	case "bool", "void", "Io", "Allocator", "std::fs::Metadata", "std::fs::DirEntry",
 		"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-		"usize", "isize", "f32", "f64", "[]const u8":
+		"usize", "isize", "f32", "f64", "[]u8":
 		return true
 	default:
 		return false
@@ -5518,26 +5518,26 @@ func fieldOwnershipType(field ast.Field) string {
 	}
 	if field.BorrowLifetime == "" {
 		if field.MutBorrow {
-			return "&mut " + field.TypeName
+			return "&var " + field.TypeName
 		}
 		return "&" + field.TypeName
 	}
 	if field.MutBorrow {
-		return "&" + field.BorrowLifetime + " mut " + field.TypeName
+		return "&" + field.BorrowLifetime + " var " + field.TypeName
 	}
 	return "&" + field.BorrowLifetime + " " + field.TypeName
 }
 
-// explicitOwnershipBorrowType extracts &T and &mut T spellings.
+// explicitOwnershipBorrowType extracts &T and &var T spellings.
 func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
 	if !strings.HasPrefix(typeName, "&") {
 		return "", false, "", false
 	}
 	rest := strings.TrimPrefix(typeName, "&")
 	mutable := false
-	if strings.HasPrefix(rest, "mut ") {
+	if strings.HasPrefix(rest, "var ") {
 		mutable = true
-		rest = strings.TrimPrefix(rest, "mut ")
+		rest = strings.TrimPrefix(rest, "var ")
 	}
 	if rest == "" {
 		return "", false, "", false
@@ -6068,8 +6068,8 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	if !ok || len(args) != 2 {
 		return nil, fmt.Errorf("map error: std::map::Map expects 2 static arguments")
 	}
-	if !sameOwnershipType(args[0], "[]const u8") {
-		return nil, fmt.Errorf("map error: std::map::Map key type must be []const u8 in v0.2")
+	if !sameOwnershipType(args[0], "[]u8") {
+		return nil, fmt.Errorf("map error: std::map::Map key type must be []u8 in v0.2")
 	}
 	if isGenericParamName(args[1]) {
 		return args, nil
@@ -6358,10 +6358,10 @@ func exprIdentUses(expr ast.Expression) []string {
 	}
 }
 
-// borrowPrefix reports whether an expression is &T or &mut T syntax.
+// borrowPrefix reports whether an expression is &T or &var T syntax.
 func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
 	prefix, ok := expr.(*ast.PrefixExpr)
-	if !ok || (prefix.Operator != "&" && prefix.Operator != "&mut") {
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&var") {
 		return nil, false
 	}
 	return prefix, true

@@ -359,7 +359,7 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 			field.BorrowLifetime = p.cur.Literal
 			p.nextToken()
 		}
-		if p.cur.Type == token.Mut {
+		if p.cur.Type == token.Var {
 			field.MutBorrow = true
 			p.nextToken()
 		}
@@ -491,7 +491,7 @@ func (p *Parser) parseParams() []ast.Param {
 				param.BorrowLifetime = p.cur.Literal
 				p.nextToken()
 			}
-			if p.cur.Type == token.Mut {
+			if p.cur.Type == token.Var {
 				param.MutBorrow = true
 				p.nextToken()
 			}
@@ -1019,8 +1019,8 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 	case token.Amp:
 		p.nextToken()
 		op := "&"
-		if p.cur.Type == token.Mut {
-			op = "&mut"
+		if p.cur.Type == token.Var {
+			op = "&var"
 			p.nextToken()
 		}
 		return &ast.PrefixExpr{Operator: op, Right: p.parseExpression(prefix)}
@@ -1060,7 +1060,7 @@ func (p *Parser) parseTypeExpr() ast.Expression {
 		return expr
 	}
 	p.nextToken()
-	expr.TypeName = p.parseStaticTypeArg()
+	expr.TypeName = p.parseStaticTypeArg(false)
 	if expr.TypeName == "" || !p.expectTypeClose() {
 		return expr
 	}
@@ -1125,7 +1125,7 @@ func (p *Parser) parseTypeName() string {
 	}
 	p.nextToken()
 	p.nextToken()
-	args := p.parseTypeArgList()
+	args := p.parseTypeArgList(name == "ptr")
 	if args == "" || !p.expectTypeClose() {
 		return ""
 	}
@@ -1146,20 +1146,20 @@ func (p *Parser) parseErrorUnionTypeName() string {
 	return "!" + inner
 }
 
-// parseBorrowTypeName parses &T and &mut T type spellings.
+// parseBorrowTypeName parses &T and &var T type spellings.
 func (p *Parser) parseBorrowTypeName() string {
 	p.nextToken()
 	if p.cur.Type == token.Lifetime {
 		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
 		return ""
 	}
-	if p.cur.Type == token.Mut {
+	if p.cur.Type == token.Var {
 		p.nextToken()
 		inner := p.parseTypeName()
 		if inner == "" {
 			return ""
 		}
-		return "&mut " + inner
+		return "&var " + inner
 	}
 	inner := p.parseTypeName()
 	if inner == "" {
@@ -1168,7 +1168,7 @@ func (p *Parser) parseBorrowTypeName() string {
 	return "&" + inner
 }
 
-// parseSliceTypeName parses []T and qualified slice type spellings.
+// parseSliceTypeName parses []T type spellings.
 func (p *Parser) parseSliceTypeName() string {
 	if !p.expectPeek(token.RBracket) {
 		return ""
@@ -1178,27 +1178,11 @@ func (p *Parser) parseSliceTypeName() string {
 		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
 		return ""
 	}
-	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
-		return p.parseQualifiedSliceType("const")
-	}
-	if p.cur.Type == token.Mut {
-		return p.parseQualifiedSliceType("mut")
-	}
-	arg := p.parseTypeArg()
+	arg := p.parseTypeArg(false)
 	if arg == "" {
 		return ""
 	}
 	return "[]" + arg
-}
-
-// parseQualifiedSliceType parses []const T and mutable variants.
-func (p *Parser) parseQualifiedSliceType(qualifier string) string {
-	p.nextToken()
-	inner := p.parseTypeName()
-	if inner == "" {
-		return ""
-	}
-	return "[]" + qualifier + " " + inner
 }
 
 // parseTypeBaseName parses an identifier or namespace-qualified type base.
@@ -1215,10 +1199,10 @@ func (p *Parser) parseTypeBaseName() string {
 }
 
 // parseTypeArgList parses one or more comma-separated v0.2 static type arguments.
-func (p *Parser) parseTypeArgList() string {
+func (p *Parser) parseTypeArgList(allowConst bool) string {
 	args := []string{}
 	for {
-		arg := p.parseStaticTypeArg()
+		arg := p.parseStaticTypeArg(allowConst)
 		if arg == "" {
 			return ""
 		}
@@ -1281,10 +1265,10 @@ func (p *Parser) expectTypeClose() bool {
 }
 
 // parseStaticTypeArg parses a v0.2 static argument whose value must be a type.
-func (p *Parser) parseStaticTypeArg() string {
+func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 	switch p.cur.Type {
 	case token.Ident, token.Bang, token.Amp, token.LBracket, token.Question:
-		return p.parseTypeArg()
+		return p.parseTypeArg(allowConst)
 	case token.Lifetime:
 		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
 		return ""
@@ -1295,12 +1279,16 @@ func (p *Parser) parseStaticTypeArg() string {
 }
 
 // parseTypeArg parses a type embedded inside a generic-like type spelling.
-func (p *Parser) parseTypeArg() string {
+func (p *Parser) parseTypeArg(allowConst bool) string {
 	if p.cur.Type == token.Lifetime {
 		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
 		return ""
 	}
 	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
+		if !allowConst {
+			p.errorf("expected static type argument, got const")
+			return ""
+		}
 		p.nextToken()
 		inner := p.parseTypeName()
 		if inner == "" {
@@ -1345,7 +1333,7 @@ func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 func (p *Parser) parseTypeApplyExpr(callee ast.Expression) ast.Expression {
 	expr := &ast.TypeApplyExpr{Callee: callee}
 	p.nextToken()
-	expr.TypeArg = p.parseTypeArgList()
+	expr.TypeArg = p.parseTypeArgList(false)
 	if expr.TypeArg == "" || !p.expectTypeClose() {
 		return expr
 	}

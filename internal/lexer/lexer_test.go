@@ -11,7 +11,7 @@ func TestNextToken(t *testing.T) {
 	input := `fn main() {
     let name = "alice";
     var age = 30;
-    update(&mut user);
+    update(&var user);
     age = age + 1;
     match Color::Red { Red => return age >= 20 ;,}
 }`
@@ -38,7 +38,7 @@ func TestNextToken(t *testing.T) {
 		{token.Ident, "update"},
 		{token.LParen, "("},
 		{token.Amp, "&"},
-		{token.Mut, "mut"},
+		{token.Var, "var"},
 		{token.Ident, "user"},
 		{token.RParen, ")"},
 		{token.Semicolon, ";"},

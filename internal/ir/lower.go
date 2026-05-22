@@ -214,7 +214,7 @@ func (l *lowerer) lowerLiteralExpr(expr ast.Expression) (Value, error) {
 	case *ast.IntExpr:
 		return l.emitConst("i64", e.Value), nil
 	case *ast.StringExpr:
-		return l.emitConst("[]const u8", fmt.Sprintf("%q", e.Value)), nil
+		return l.emitConst("[]u8", fmt.Sprintf("%q", e.Value)), nil
 	case *ast.BoolExpr:
 		return l.emitConst("bool", e.String()), nil
 	default:

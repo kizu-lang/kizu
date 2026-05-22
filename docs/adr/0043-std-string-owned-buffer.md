@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-Kizu string literals are `[]const u8`. They are read-only byte slices, not owned
+Kizu string literals are `[]u8`. They are read-only byte slices, not owned
 strings. The self-host compiler still needs an owned byte buffer for diagnostics
 and generated messages without reintroducing a primitive `string` type or hidden
 allocation.
@@ -17,13 +17,13 @@ allocation.
 
 ```text
 std::string::String(allocator: Allocator) -> std::string::String
-string.append_bytes(bytes: []const u8) -> !void
+string.append_bytes(bytes: []u8) -> !void
 string.append_byte(byte: u8) -> !void
 string.reserve(additional: i64) -> !void
 string.truncate(length: i64) -> !void
 string.len() -> i64
 string.capacity() -> i64
-string.as_bytes() -> []const u8
+string.as_bytes() -> []u8
 string.clear() -> void
 string.deinit() -> void
 ```
@@ -55,7 +55,7 @@ rejected. While the local view is alive, `append_bytes`, `append_byte`,
 mutation after the view's final use.
 
 `append_bytes`, `append_byte`, `reserve`, `truncate`, and `clear` may be called
-on an owned local `String` or through `&mut std::string::String`. `clear` sets
+on an owned local `String` or through `&var std::string::String`. `clear` sets
 length to zero while keeping capacity for reuse. `capacity` exposes current
 capacity for allocation planning. `deinit` requires an owned local receiver
 because a borrowed callee cannot invalidate the caller's binding. After

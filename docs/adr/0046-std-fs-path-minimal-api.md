@@ -13,29 +13,29 @@ standard-library APIs.
 `std::path` is pure and does not touch the filesystem.
 
 ```text
-std::path::join(allocator: Allocator, left: []const u8, right: []const u8)
+std::path::join(allocator: Allocator, left: []u8, right: []u8)
   -> !std::string::String
-std::path::clean(allocator: Allocator, path: []const u8) -> !std::string::String
-std::path::basename(path: []const u8) -> []const u8 borrows path
-std::path::dirname(path: []const u8) -> []const u8 borrows path
-std::path::extension(path: []const u8) -> []const u8 borrows path
+std::path::clean(allocator: Allocator, path: []u8) -> !std::string::String
+std::path::basename(path: []u8) -> []u8 borrows path
+std::path::dirname(path: []u8) -> []u8 borrows path
+std::path::extension(path: []u8) -> []u8 borrows path
 ```
 
 `join` and `clean` construct owned bytes, so allocation is explicit through the
 caller-provided allocator. Callers pass `result.as_bytes()` to APIs that need
-`[]const u8` and deinitialize the returned `String` after the final view use.
+`[]u8` and deinitialize the returned `String` after the final view use.
 
 `std::fs` always requires explicit `Io`.
 
 ```text
-std::fs::read_file(io: Io, path: &[]const u8) -> ![]const u8
-std::fs::write_file(io: Io, path: &[]const u8, bytes: &[]const u8) -> !void
-std::fs::exists(io: Io, path: &[]const u8) -> !bool
-std::fs::metadata(io: Io, path: &[]const u8) -> !std::fs::Metadata
-std::fs::read_dir(io: Io, path: &[]const u8) -> !std::array::Array<std::fs::DirEntry>
-std::fs::create_dir(io: Io, path: &[]const u8) -> !void
-std::fs::remove_dir(io: Io, path: &[]const u8) -> !void
-std::fs::remove_file(io: Io, path: &[]const u8) -> !void
+std::fs::read_file(io: Io, path: &[]u8) -> ![]u8
+std::fs::write_file(io: Io, path: &[]u8, bytes: &[]u8) -> !void
+std::fs::exists(io: Io, path: &[]u8) -> !bool
+std::fs::metadata(io: Io, path: &[]u8) -> !std::fs::Metadata
+std::fs::read_dir(io: Io, path: &[]u8) -> !std::array::Array<std::fs::DirEntry>
+std::fs::create_dir(io: Io, path: &[]u8) -> !void
+std::fs::remove_dir(io: Io, path: &[]u8) -> !void
+std::fs::remove_file(io: Io, path: &[]u8) -> !void
 ```
 
 The byte-slice parameters are read-only borrows. `std::fs` does not retain them,
@@ -52,8 +52,8 @@ is_dir: bool
 `std::fs::DirEntry` is also narrow in v0.2:
 
 ```text
-name: []const u8
-path: []const u8
+name: []u8
+path: []u8
 is_dir: bool
 ```
 

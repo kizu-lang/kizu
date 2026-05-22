@@ -41,7 +41,7 @@ Go/Kizu oracle を比較する
 | diagnostics | file/span/related span を stable oracle にする | self-host の error 表示を比較できる |
 | `!T` | recoverable failure と diagnostic が必要な処理に使う | lex/parse/fs/allocation failure に必要 |
 | `?T` | absence だけに使う | lookup miss と failure を混ぜない |
-| `[]const u8` | source text と literal view の基本型にする | primitive `string` を復活させない |
+| `[]u8` | source text と literal view の基本型にする | primitive `string` を復活させない |
 | `std::array::Array<T>` | token/AST list の基本 container にする | allocator/deinit と borrow rule の検証が必要 |
 | `std::map::Map<K, V>` | resolver/symbol table までに固める | lexer では blocker ではない |
 | `std::testing` | component test で使う | Kizu 側 test を Go test 依存だけにしない |

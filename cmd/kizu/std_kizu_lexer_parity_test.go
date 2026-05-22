@@ -22,7 +22,7 @@ const (
 )
 
 const stdKizuLexerParityHarness = `
-fn run_lexer_case(name: []const u8, text: []const u8) -> !void {
+fn run_lexer_case(name: []u8, text: []u8) -> !void {
     print("@@KIZU_LEXER_PARITY_CASE@@");
     print(name);
     var token = std::kizu::lexer::first_token(text);
@@ -36,7 +36,7 @@ fn run_lexer_case(name: []const u8, text: []const u8) -> !void {
     }
 }
 
-fn run_tokenize_case(name: []const u8, text: []const u8) -> !void {
+fn run_tokenize_case(name: []u8, text: []u8) -> !void {
     print("@@KIZU_LEXER_PARITY_CASE@@");
     print(name);
     let allocator = std::mem::page_allocator();
@@ -53,72 +53,72 @@ fn run_tokenize_case(name: []const u8, text: []const u8) -> !void {
 }
 
 fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
-    match token.kind {
-        Eof => return true;,
-        Fn => return false;,
-        Import => return false;,
-        Pub => return false;,
-        Struct => return false;,
-        Enum => return false;,
-        Union => return false;,
-        Extern => return false;,
-        Let => return false;,
-        Var => return false;,
-        Return => return false;,
-        Defer => return false;,
-        If => return false;,
-        Else => return false;,
-        While => return false;,
-        For => return false;,
-        Break => return false;,
-        Continue => return false;,
-        Match => return false;,
-        Unsafe => return false;,
-        Comptime => return false;,
-        Try => return false;,
-        True => return false;,
-        False => return false;,
-        And => return false;,
-        Or => return false;,
-        Ident => return false;,
-        Lifetime => return false;,
-        Number => return false;,
-        String => return false;,
-        LBrace => return false;,
-        RBrace => return false;,
-        LParen => return false;,
-        RParen => return false;,
-        Semicolon => return false;,
-        Comma => return false;,
-        Colon => return false;,
-        DoubleColon => return false;,
-        Assign => return false;,
-        Arrow => return false;,
-        FatArrow => return false;,
-        Bang => return false;,
-        Eq => return false;,
-        NotEq => return false;,
-        Amp => return false;,
-        LBracket => return false;,
-        RBracket => return false;,
-        LT => return false;,
-        LTE => return false;,
-        GT => return false;,
-        GTE => return false;,
-        Question => return false;,
-        Plus => return false;,
-        Minus => return false;,
-        Asterisk => return false;,
-        Slash => return false;,
-        Percent => return false;,
-        Dot => return false;,
-        Range => return false;,
-        Pipe => return false;,
-        Mut => return false;,
-    }
+    return match token.kind {
+        Eof => true,
+        Fn => false,
+        Import => false,
+        Pub => false,
+        Struct => false,
+        Enum => false,
+        Union => false,
+        Extern => false,
+        Let => false,
+        Var => false,
+        Return => false,
+        Defer => false,
+        If => false,
+        Else => false,
+        While => false,
+        For => false,
+        Break => false,
+        Continue => false,
+        Match => false,
+        Unsafe => false,
+        Comptime => false,
+        Try => false,
+        True => false,
+        False => false,
+        And => false,
+        Or => false,
+        Ident => false,
+        Lifetime => false,
+        Number => false,
+        String => false,
+        LBrace => false,
+        RBrace => false,
+        LParen => false,
+        RParen => false,
+        Semicolon => false,
+        Comma => false,
+        Colon => false,
+        DoubleColon => false,
+        Assign => false,
+        Arrow => false,
+        FatArrow => false,
+        Bang => false,
+        Eq => false,
+        NotEq => false,
+        Amp => false,
+        LBracket => false,
+        RBracket => false,
+        LT => false,
+        LTE => false,
+        GT => false,
+        GTE => false,
+        Question => false,
+        Plus => false,
+        Minus => false,
+        Asterisk => false,
+        Slash => false,
+        Percent => false,
+        Dot => false,
+        Range => false,
+        Pipe => false,
+        Mut => false,
+    };
 }
 
-fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
+fn dump_token(source: []u8, token: std::kizu::lexer::Token) -> !void {
     match token.kind {
         Fn => print("Fn");,
         Import => print("Import");,
@@ -385,7 +385,7 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/fn_signature", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
 		{
 			name:   "seed/type_tokens",
-			source: "fn f<'a>(a: &'a mut []'a const std::array::Array<i64>) -> !void {}",
+			source: "fn f<'a>(a: &'a var []'a std::array::Array<i64>) -> !void {}",
 		},
 		{name: "seed/string_call", source: `fn main() { print("hello"); }`},
 		{name: "seed/binary_precedence", source: "fn main() { print(1 + 2 * 3); }"},
@@ -400,7 +400,7 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/operator_tokens", source: "a = b - c / d % e != f <= g > h >= i.x .. j | k => l"},
 		{
 			name: "seed/declaration_tokens",
-			source: "import app::lexer; pub struct User { pub name: []const u8, } " +
+			source: "import app::lexer; pub struct User { pub name: []u8, } " +
 				"enum Color { Red, Blue, } union Shape { Point, Circle(i64), } " +
 				"extern \"c\" fn puts(s: ptr<const u8>) -> i32",
 		},

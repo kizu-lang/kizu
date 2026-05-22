@@ -35,13 +35,13 @@ std::builtin::string_new(allocator: Allocator) -> std::string::String
 std::builtin::string_append_byte(self: std::string::String, byte: u8) -> !void
 std::builtin::string_append_bytes(
     self: std::string::String,
-    bytes: []const u8,
+    bytes: []u8,
 ) -> !void
 std::builtin::string_reserve(self: std::string::String, additional: i64) -> !void
 std::builtin::string_truncate(self: std::string::String, length: i64) -> !void
 std::builtin::string_len(self: std::string::String) -> i64
 std::builtin::string_capacity(self: std::string::String) -> i64
-std::builtin::string_as_bytes(self: std::string::String) -> []const u8
+std::builtin::string_as_bytes(self: std::string::String) -> []u8
 std::builtin::string_clear(self: std::string::String) -> void
 std::builtin::string_deinit(self: std::string::String) -> void
 ```

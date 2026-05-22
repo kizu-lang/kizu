@@ -55,7 +55,7 @@ func (e *emitter) collectStrings() {
 	for _, fn := range e.module.Functions {
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if instr.Op == "const" && instr.Result.Type == "[]const u8" {
+				if instr.Op == "const" && instr.Result.Type == "[]u8" {
 					if _, ok := e.strings[instr.Immediate]; !ok {
 						e.strings[instr.Immediate] = fmt.Sprintf("@.str.%d", next)
 						next++
@@ -162,14 +162,14 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 		e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: instr.Immediate}
 	case "bool":
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: llvmBool(instr.Immediate)}
-	case "[]const u8":
+	case "[]u8":
 		unquoted, _ := strconv.Unquote(instr.Immediate)
 		global := e.strings[instr.Immediate]
 		name := localName(instr.Result.Name)
 		fmt.Fprintf(&e.out, "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0\n",
 			name, len(unquoted)+1, global)
 		e.values[instr.Result.Name] = valueInfo{
-			typ: "[]const u8", operand: name, length: len(unquoted),
+			typ: "[]u8", operand: name, length: len(unquoted),
 		}
 	default:
 		return fmt.Errorf("llvm error: unsupported const type `%s`", instr.Result.Type)
@@ -238,7 +238,7 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	}
 	value := e.value(args[0])
 	switch args[0].Type {
-	case "[]const u8":
+	case "[]u8":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n",
 			value.operand, value.length)
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":

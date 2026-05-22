@@ -5,12 +5,12 @@ pub struct BackendSummary {
 }
 
 pub struct LlvmArtifact {
-    pub ll_path: []const u8,
-    pub metadata_path: []const u8,
-    pub storage_path: []const u8,
-    pub storage_metadata_path: []const u8,
-    pub host_path: []const u8,
-    pub host_metadata_path: []const u8,
+    pub ll_path: []u8,
+    pub metadata_path: []u8,
+    pub storage_path: []u8,
+    pub storage_metadata_path: []u8,
+    pub host_path: []u8,
+    pub host_metadata_path: []u8,
     pub bytes: i64,
     pub metadata_bytes: i64,
     pub storage_bytes: i64,
@@ -20,15 +20,15 @@ pub struct LlvmArtifact {
 }
 
 pub struct RunArtifact {
-    pub ll_path: []const u8,
-    pub metadata_path: []const u8,
+    pub ll_path: []u8,
+    pub metadata_path: []u8,
     pub bytes: i64,
     pub metadata_bytes: i64,
 }
 
 pub struct TestArtifact {
-    pub ll_path: []const u8,
-    pub metadata_path: []const u8,
+    pub ll_path: []u8,
+    pub metadata_path: []u8,
     pub bytes: i64,
     pub metadata_bytes: i64,
 }
@@ -39,7 +39,7 @@ pub fn summarize(program_ir: ir::IrSummary) -> BackendSummary {
     };
 }
 
-pub fn consume_ir_artifact(io: Io, path: &[]const u8) -> !BackendSummary {
+pub fn consume_ir_artifact(io: Io, path: &[]u8) -> !BackendSummary {
     let bytes = try std::fs::read_file(io, path);
     if !std::mem::starts_with(bytes, "kizu-ir-v0") {
         return error("invalid IR artifact");
@@ -52,8 +52,8 @@ pub fn consume_ir_artifact(io: Io, path: &[]const u8) -> !BackendSummary {
 pub fn emit_llvm_artifact(
     allocator: Allocator,
     io: Io,
-    ir_path: []const u8,
-    manifest_path: []const u8
+    ir_path: []u8,
+    manifest_path: []u8
 ) -> !LlvmArtifact {
     let ir_bytes = try std::fs::read_file(io, ir_path);
     try validate_ir_artifact(ir_bytes);
@@ -143,10 +143,14 @@ pub fn emit_llvm_artifact(
     };
 }
 
-pub fn emit_run_hello_artifact(allocator: Allocator, io: Io) -> !RunArtifact {
+pub fn emit_run_hello_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !RunArtifact {
     try std::fs::create_dir(io, "target/selfhost/run");
 
-    var module = try render_run_hello_llvm(allocator);
+    var module = try render_run_hello_llvm(allocator, source_path);
     let module_view = module.as_bytes();
     let module_len = try write_backend_bytes(
         io,
@@ -156,7 +160,7 @@ pub fn emit_run_hello_artifact(allocator: Allocator, io: Io) -> !RunArtifact {
     );
     module.deinit();
 
-    var metadata = try render_run_hello_metadata(allocator);
+    var metadata = try render_run_hello_metadata(allocator, source_path);
     let metadata_view = metadata.as_bytes();
     let metadata_len = try write_backend_bytes(
         io,
@@ -174,10 +178,14 @@ pub fn emit_run_hello_artifact(allocator: Allocator, io: Io) -> !RunArtifact {
     };
 }
 
-pub fn emit_test_expect_ok_artifact(allocator: Allocator, io: Io) -> !TestArtifact {
+pub fn emit_test_expect_ok_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !TestArtifact {
     try std::fs::create_dir(io, "target/selfhost/test");
 
-    var module = try render_test_expect_ok_llvm(allocator);
+    var module = try render_test_expect_ok_llvm(allocator, source_path);
     let module_view = module.as_bytes();
     let module_len = try write_backend_bytes(
         io,
@@ -187,7 +195,7 @@ pub fn emit_test_expect_ok_artifact(allocator: Allocator, io: Io) -> !TestArtifa
     );
     module.deinit();
 
-    var metadata = try render_test_expect_ok_metadata(allocator);
+    var metadata = try render_test_expect_ok_metadata(allocator, source_path);
     let metadata_view = metadata.as_bytes();
     let metadata_len = try write_backend_bytes(
         io,
@@ -205,10 +213,14 @@ pub fn emit_test_expect_ok_artifact(allocator: Allocator, io: Io) -> !TestArtifa
     };
 }
 
-pub fn emit_test_expect_failure_artifact(allocator: Allocator, io: Io) -> !TestArtifact {
+pub fn emit_test_expect_failure_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8
+) -> !TestArtifact {
     try std::fs::create_dir(io, "target/selfhost/test");
 
-    var module = try render_test_expect_failure_llvm(allocator);
+    var module = try render_test_expect_failure_llvm(allocator, source_path);
     let module_view = module.as_bytes();
     let module_len = try write_backend_bytes(
         io,
@@ -218,7 +230,7 @@ pub fn emit_test_expect_failure_artifact(allocator: Allocator, io: Io) -> !TestA
     );
     module.deinit();
 
-    var metadata = try render_test_expect_failure_metadata(allocator);
+    var metadata = try render_test_expect_failure_metadata(allocator, source_path);
     let metadata_view = metadata.as_bytes();
     let metadata_len = try write_backend_bytes(
         io,
@@ -236,7 +248,7 @@ pub fn emit_test_expect_failure_artifact(allocator: Allocator, io: Io) -> !TestA
     };
 }
 
-fn validate_ir_artifact(bytes: []const u8) -> !void {
+fn validate_ir_artifact(bytes: []u8) -> !void {
     if !std::mem::starts_with(bytes, "kizu-ir-v0") {
         return error("invalid IR artifact");
     }
@@ -246,7 +258,7 @@ fn validate_ir_artifact(bytes: []const u8) -> !void {
     return;
 }
 
-fn validate_shape_manifest(bytes: []const u8) -> !void {
+fn validate_shape_manifest(bytes: []u8) -> !void {
     if !std::mem::starts_with(bytes, "kizu-ir-shape-v0") {
         return error("invalid IR shape manifest");
     }
@@ -256,7 +268,7 @@ fn validate_shape_manifest(bytes: []const u8) -> !void {
     try require_shape(bytes, "node-kind diagnostic");
     try require_shape(bytes, "value-type i64");
     try require_shape(bytes, "value-type bool");
-    try require_shape(bytes, "value-type []const u8");
+    try require_shape(bytes, "value-type []u8");
     try require_shape(bytes, "value-type record");
     try require_shape(bytes, "value-type error-union");
     try require_shape(bytes, "value-type handle");
@@ -288,7 +300,7 @@ fn validate_shape_manifest(bytes: []const u8) -> !void {
     return;
 }
 
-fn require_shape(bytes: []const u8, shape: []const u8) -> !void {
+fn require_shape(bytes: []u8, shape: []u8) -> !void {
     if !bytes_contains(bytes, shape) {
         return error("unsupported IR shape manifest");
     }
@@ -297,8 +309,8 @@ fn require_shape(bytes: []const u8, shape: []const u8) -> !void {
 
 fn write_backend_bytes(
     io: Io,
-    path: &[]const u8,
-    bytes: &[]const u8,
+    path: &[]u8,
+    bytes: &[]u8,
     byte_len: i64
 ) -> !i64 {
     try std::fs::write_file(io, path, bytes);
@@ -307,7 +319,7 @@ fn write_backend_bytes(
 
 fn render_llvm_module(
     allocator: Allocator,
-    ir_path: []const u8
+    ir_path: []u8
 ) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_line(out, "; kizu selfhost bootstrap ll v0");
@@ -372,8 +384,8 @@ fn render_llvm_module(
 
 fn render_llvm_metadata(
     allocator: Allocator,
-    ir_path: []const u8,
-    manifest_path: []const u8
+    ir_path: []u8,
+    manifest_path: []u8
 ) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_line(out, "kizu-llvm-artifact-v0");
@@ -395,21 +407,10 @@ fn render_llvm_metadata(
     try append_line(out, "entry @kizu_selfhost__cli_main");
     try append_line(out, "cli-command check selfhost");
     try append_line(out, "cli-command stage selfhost");
-    try append_line(out, "cli-command check source-shape print-hello");
-    try append_line(out, "cli-command check source-shape minimal-main-return");
-    try append_line(out, "cli-command check source-shape testing-expect-ok");
-    try append_line(out, "cli-command check source-shape testing-expect-failure");
-    try append_line(out, "cli-command check source-shape moved-value-use");
-    try append_line(out, "cli-command parse source-shape minimal-main-return");
-    try append_line(out, "cli-command parse source-shape print-call");
-    try append_line(out, "cli-command parse source-shape testing-expect-ok");
-    try append_line(out, "cli-command parse source-shape testing-expect-failure");
-    try append_line(out, "cli-command parse source-shape moved-value-declarations");
-    try append_line(out, "cli-command parse source-shape missing-expression");
-    try append_line(out, "cli-command run source-shape print-hello");
-    try append_line(out, "cli-command run source-shape missing-expression");
-    try append_line(out, "cli-command test source-shape expect-ok");
-    try append_line(out, "cli-command test source-shape expect-failure");
+    try append_line(out, "cli-command check file source");
+    try append_line(out, "cli-command parse file source");
+    try append_line(out, "cli-command run file source print-call");
+    try append_line(out, "cli-command test file source expect-call");
     try append_line(out, "cli-parity-manifest selfhost/tests/cli/parse-parity.tsv");
     try append_line(out, "cli-parity-manifest selfhost/tests/cli/check-parity.tsv");
     try append_line(out, "cli-parity-manifest selfhost/tests/cli/run-parity.tsv");
@@ -439,12 +440,15 @@ fn render_llvm_metadata(
     return out;
 }
 
-fn render_run_hello_llvm(allocator: Allocator) -> !std::string::String {
+fn render_run_hello_llvm(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_line(out, "; kizu run artifact ll v0");
     try out.append_bytes("source_filename = ");
     try out.append_byte(cast<u8>(34));
-    try out.append_bytes("selfhost/tests/cli/run_hello.kizu");
+    try out.append_bytes(source_path);
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
     try append_line(out, "");
@@ -478,11 +482,14 @@ fn render_run_hello_llvm(allocator: Allocator) -> !std::string::String {
     return out;
 }
 
-fn render_run_hello_metadata(allocator: Allocator) -> !std::string::String {
+fn render_run_hello_metadata(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_line(out, "kizu-run-artifact-v0");
     try append_line(out, "issue #569");
-    try append_line(out, "source selfhost/tests/cli/run_hello.kizu");
+    try append_key_value(out, "source ", source_path);
     try append_line(out, "output target/selfhost/run/run_hello.ll");
     try append_line(out, "abi selfhost-abi-v0");
     try append_line(out, "entry @kizu_run_main");
@@ -492,9 +499,12 @@ fn render_run_hello_metadata(allocator: Allocator) -> !std::string::String {
     return out;
 }
 
-fn render_test_expect_ok_llvm(allocator: Allocator) -> !std::string::String {
+fn render_test_expect_ok_llvm(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
     var out = std::string::String(allocator);
-    try append_test_artifact_header(out, "selfhost/tests/cli/test_expect_ok.kizu");
+    try append_test_artifact_header(out, source_path);
     try out.append_bytes("@.kizu.test.ok = private unnamed_addr constant [9 x i8] c");
     try out.append_byte(cast<u8>(34));
     try out.append_bytes("test: ok\0A");
@@ -504,9 +514,12 @@ fn render_test_expect_ok_llvm(allocator: Allocator) -> !std::string::String {
     return out;
 }
 
-fn render_test_expect_failure_llvm(allocator: Allocator) -> !std::string::String {
+fn render_test_expect_failure_llvm(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
     var out = std::string::String(allocator);
-    try append_test_artifact_header(out, "selfhost/tests/cli/test_expect_failure.kizu");
+    try append_test_artifact_header(out, source_path);
     try out.append_bytes("@.kizu.test.failure = private unnamed_addr constant [52 x i8] c");
     try out.append_byte(cast<u8>(34));
     try out.append_bytes("error: runtime error: expected condition to be true\0A");
@@ -517,8 +530,8 @@ fn render_test_expect_failure_llvm(allocator: Allocator) -> !std::string::String
 }
 
 fn append_test_artifact_header(
-    out: &mut std::string::String,
-    source: []const u8
+    out: &var std::string::String,
+    source: []u8
 ) -> !void {
     try append_line(out, "; kizu test artifact ll v0");
     try out.append_bytes("source_filename = ");
@@ -535,11 +548,11 @@ fn append_test_artifact_header(
 }
 
 fn append_test_artifact_body(
-    out: &mut std::string::String,
-    global: []const u8,
-    size: []const u8,
-    stream: []const u8,
-    code: []const u8
+    out: &var std::string::String,
+    global: []u8,
+    size: []u8,
+    stream: []u8,
+    code: []u8
 ) -> !void {
     try append_line(out, "");
     try append_line(out, "declare %kizu.owned @kizu_rt_io_blocking()");
@@ -576,30 +589,36 @@ fn append_test_artifact_body(
     return;
 }
 
-fn render_test_expect_ok_metadata(allocator: Allocator) -> !std::string::String {
+fn render_test_expect_ok_metadata(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_test_metadata(
         out,
-        "selfhost/tests/cli/test_expect_ok.kizu",
+        source_path,
         "target/selfhost/test/test_expect_ok.ll"
     );
     return out;
 }
 
-fn render_test_expect_failure_metadata(allocator: Allocator) -> !std::string::String {
+fn render_test_expect_failure_metadata(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_test_metadata(
         out,
-        "selfhost/tests/cli/test_expect_failure.kizu",
+        source_path,
         "target/selfhost/test/test_expect_failure.ll"
     );
     return out;
 }
 
 fn append_test_metadata(
-    out: &mut std::string::String,
-    source: []const u8,
-    output: []const u8
+    out: &var std::string::String,
+    source: []u8,
+    output: []u8
 ) -> !void {
     try append_line(out, "kizu-test-artifact-v0");
     try append_line(out, "issue #570");
@@ -614,13 +633,13 @@ fn append_test_metadata(
     return;
 }
 
-fn load_runtime_storage_module(io: Io) -> ![]const u8 {
+fn load_runtime_storage_module(io: Io) -> ![]u8 {
     let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.storage.ll");
     try validate_runtime_storage_template(bytes);
     return bytes;
 }
 
-fn validate_runtime_storage_template(bytes: []const u8) -> !void {
+fn validate_runtime_storage_template(bytes: []u8) -> !void {
     if !std::mem::starts_with(bytes, "; kizu selfhost runtime storage ll v0") {
         return error("invalid runtime storage artifact");
     }
@@ -630,8 +649,8 @@ fn validate_runtime_storage_template(bytes: []const u8) -> !void {
 fn render_runtime_storage_metadata(
     allocator: Allocator,
     io: Io,
-    ir_path: []const u8,
-    manifest_path: []const u8
+    ir_path: []u8,
+    manifest_path: []u8
 ) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_line(out, "kizu-runtime-storage-v0");
@@ -643,7 +662,7 @@ fn render_runtime_storage_metadata(
     return out;
 }
 
-fn load_runtime_storage_metadata_tail(io: Io) -> ![]const u8 {
+fn load_runtime_storage_metadata_tail(io: Io) -> ![]u8 {
     let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.storage.ll.meta.tail");
     if !std::mem::starts_with(bytes, "linked-llvm target/selfhost/selfhost.ll") {
         return error("invalid runtime storage metadata template");
@@ -651,7 +670,7 @@ fn load_runtime_storage_metadata_tail(io: Io) -> ![]const u8 {
     return bytes;
 }
 
-fn load_host_capability_module(io: Io) -> ![]const u8 {
+fn load_host_capability_module(io: Io) -> ![]u8 {
     let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.host.ll");
     if !std::mem::starts_with(bytes, "; kizu selfhost host capabilities ll v0") {
         return error("invalid host capability artifact");
@@ -662,8 +681,8 @@ fn load_host_capability_module(io: Io) -> ![]const u8 {
 fn render_host_capability_metadata(
     allocator: Allocator,
     io: Io,
-    ir_path: []const u8,
-    manifest_path: []const u8
+    ir_path: []u8,
+    manifest_path: []u8
 ) -> !std::string::String {
     var out = std::string::String(allocator);
     try append_line(out, "kizu-host-capabilities-v0");
@@ -675,7 +694,7 @@ fn render_host_capability_metadata(
     return out;
 }
 
-fn load_host_capability_metadata_tail(io: Io) -> ![]const u8 {
+fn load_host_capability_metadata_tail(io: Io) -> ![]u8 {
     let bytes = try std::fs::read_file(io, "selfhost/runtime/selfhost.host.ll.meta.tail");
     if !std::mem::starts_with(bytes, "linked-llvm target/selfhost/selfhost.ll") {
         return error("invalid host capability metadata template");
@@ -683,61 +702,18 @@ fn load_host_capability_metadata_tail(io: Io) -> ![]const u8 {
     return bytes;
 }
 
-fn append_cli_globals(out: &mut std::string::String) -> !void {
+fn append_cli_globals(out: &var std::string::String) -> !void {
     try append_llvm_constant(out, "check", "5", "check");
     try append_llvm_constant(out, "stage", "5", "stage");
     try append_llvm_constant(out, "parse", "5", "parse");
     try append_llvm_constant(out, "run", "3", "run");
     try append_llvm_constant(out, "test", "4", "test");
     try append_llvm_constant(out, "selfhost", "8", "selfhost");
-    try append_llvm_constant(out, "parse_ok_source", "22", "fn main() { return; }\0A");
     try append_llvm_constant(
         out,
-        "parse_print_source",
-        "40",
-        "fn main() {\0A    print(\22hello, kizu\22);\0A}\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "parse_print_stdout",
-        "36",
-        "fn main() { print(\22hello, kizu\22); }\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "parse_test_ok_stdout",
-        "59",
-        "fn main() -> !void { std::testing::expect(true); return; }\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "parse_test_failure_stdout",
-        "60",
-        "fn main() -> !void { std::testing::expect(false); return; }\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "parse_moved_value_stdout",
-        "158",
-        "struct Name { value: []const u8 }\0Afn take(name: Name) { print(name.value); }\0Afn main() { let name = Name { value: \22alice\22 }; take(name); print(name.value); }\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "parse_invalid_source",
-        "28",
-        "fn main() { let value = ; }\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "parse_invalid_stderr",
-        "62",
-        "error: expected expression, got ; at 1:25\0Aerror: parse failed\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "run_hello_source",
-        "40",
-        "fn main() {\0A    print(\22hello, kizu\22);\0A}\0A"
+        "run_hello_pattern",
+        "20",
+        "print(\22hello, kizu\22)"
     );
     try append_llvm_constant(out, "run_dir", "19", "target/selfhost/run");
     try append_llvm_constant(out, "run_hello_ll_path", "32", "target/selfhost/run/run_hello.ll");
@@ -750,26 +726,26 @@ fn append_cli_globals(out: &mut std::string::String) -> !void {
     try append_llvm_constant(
         out,
         "run_hello_ll",
-        "882",
-        "; kizu run artifact ll v0\0Asource_filename = \22selfhost/tests/cli/run_hello.kizu\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.run.stdout = private unnamed_addr constant [12 x i8] c\22hello, kizu\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_run_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [12 x i8], ptr @.kizu.run.stdout, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 12, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A"
+        "881",
+        "; kizu run artifact ll v0\0Asource_filename = \22target/selfhost/run/runtime.kizu\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.run.stdout = private unnamed_addr constant [12 x i8] c\22hello, kizu\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_run_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [12 x i8], ptr @.kizu.run.stdout, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 12, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A"
     );
     try append_llvm_constant(
         out,
         "run_hello_meta",
-        "258",
-        "kizu-run-artifact-v0\0Aissue #569\0Asource selfhost/tests/cli/run_hello.kizu\0Aoutput target/selfhost/run/run_hello.ll\0Aabi selfhost-abi-v0\0Aentry @kizu_run_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0A"
+        "257",
+        "kizu-run-artifact-v0\0Aissue #569\0Asource target/selfhost/run/runtime.kizu\0Aoutput target/selfhost/run/run_hello.ll\0Aabi selfhost-abi-v0\0Aentry @kizu_run_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0A"
     );
     try append_llvm_constant(
         out,
-        "test_ok_source",
-        "67",
-        "fn main() -> !void {\0A    std::testing::expect(true);\0A    return;\0A}\0A"
+        "test_expect_true_pattern",
+        "26",
+        "std::testing::expect(true)"
     );
     try append_llvm_constant(
         out,
-        "test_failure_source",
-        "68",
-        "fn main() -> !void {\0A    std::testing::expect(false);\0A    return;\0A}\0A"
+        "test_expect_false_pattern",
+        "27",
+        "std::testing::expect(false)"
     );
     try append_llvm_constant(out, "test_dir", "20", "target/selfhost/test");
     try append_llvm_constant(
@@ -799,54 +775,30 @@ fn append_cli_globals(out: &mut std::string::String) -> !void {
     try append_llvm_constant(
         out,
         "test_ok_ll",
-        "877",
-        "; kizu test artifact ll v0\0Asource_filename = \22selfhost/tests/cli/test_expect_ok.kizu\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.test.ok = private unnamed_addr constant [9 x i8] c\22test: ok\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_test_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [9 x i8], ptr @.kizu.test.ok, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 9, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A"
+        "876",
+        "; kizu test artifact ll v0\0Asource_filename = \22target/selfhost/test/expectoksrc.kizu\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.test.ok = private unnamed_addr constant [9 x i8] c\22test: ok\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_test_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [9 x i8], ptr @.kizu.test.ok, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 9, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A"
     );
     try append_llvm_constant(
         out,
         "test_ok_meta",
-        "286",
-        "kizu-test-artifact-v0\0Aissue #570\0Asource selfhost/tests/cli/test_expect_ok.kizu\0Aoutput target/selfhost/test/test_expect_ok.ll\0Aabi selfhost-abi-v0\0Aentry @kizu_test_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0Adiscovery none\0A"
+        "285",
+        "kizu-test-artifact-v0\0Aissue #570\0Asource target/selfhost/test/expectoksrc.kizu\0Aoutput target/selfhost/test/test_expect_ok.ll\0Aabi selfhost-abi-v0\0Aentry @kizu_test_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0Adiscovery none\0A"
     );
     try append_llvm_constant(
         out,
         "test_failure_ll",
-        "938",
-        "; kizu test artifact ll v0\0Asource_filename = \22selfhost/tests/cli/test_expect_failure.kizu\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.test.failure = private unnamed_addr constant [52 x i8] c\22error: runtime error: expected condition to be true\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_test_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [52 x i8], ptr @.kizu.test.failure, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 52, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 1)\0A  ret i64 %code\0A}\0A"
+        "937",
+        "; kizu test artifact ll v0\0Asource_filename = \22target/selfhost/test/expectfailureabc.kizu\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.test.failure = private unnamed_addr constant [52 x i8] c\22error: runtime error: expected condition to be true\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_test_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [52 x i8], ptr @.kizu.test.failure, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 52, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 1)\0A  ret i64 %code\0A}\0A"
     );
     try append_llvm_constant(
         out,
         "test_failure_meta",
-        "296",
-        "kizu-test-artifact-v0\0Aissue #570\0Asource selfhost/tests/cli/test_expect_failure.kizu\0Aoutput target/selfhost/test/test_expect_failure.ll\0Aabi selfhost-abi-v0\0Aentry @kizu_test_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0Adiscovery none\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "check_hello_source",
-        "40",
-        "fn main() {\0A    print(\22hello, kizu\22);\0A}\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "check_minimal_return_source",
-        "22",
-        "fn main() { return; }\0A"
-    );
-    try append_llvm_constant(
-        out,
-        "check_moved_value_source",
-        "181",
-        "struct Name {\0A    value: []const u8,\0A}\0A\0Afn take(name: Name) {\0A    print(name.value);\0A}\0A\0Afn main() {\0A    let name = Name { value: \22alice\22 };\0A    take(name);\0A    print(name.value);\0A}\0A"
+        "295",
+        "kizu-test-artifact-v0\0Aissue #570\0Asource target/selfhost/test/expectfailureabc.kizu\0Aoutput target/selfhost/test/test_expect_failure.ll\0Aabi selfhost-abi-v0\0Aentry @kizu_test_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0Adiscovery none\0A"
     );
     try append_llvm_constant(out, "manifest", "18", "selfhost/kizu.toml");
     try append_llvm_constant(out, "source_dir", "12", "selfhost/src");
     try append_llvm_constant(out, "check_ok", "10", "check: ok\0A");
-    try append_llvm_constant(
-        out,
-        "moved_value_error",
-        "47",
-        "error: move error: moved value `name` was used\0A"
-    );
     try append_llvm_constant(out, "stage_ok", "10", "stage: ok\0A");
     try append_llvm_constant(out, "usage", "54", "usage: selfhost <check|stage|parse|run|test> <target>\0A");
     try append_llvm_constant(out, "unsupported", "29", "unsupported selfhost command\0A");
@@ -923,10 +875,10 @@ fn append_cli_globals(out: &mut std::string::String) -> !void {
 }
 
 fn append_llvm_constant(
-    out: &mut std::string::String,
-    name: []const u8,
-    size: []const u8,
-    text: []const u8
+    out: &var std::string::String,
+    name: []u8,
+    size: []u8,
+    text: []u8
 ) -> !void {
     try out.append_bytes("@.kizu.cli.");
     try out.append_bytes(name);
@@ -940,14 +892,15 @@ fn append_llvm_constant(
     return;
 }
 
-fn append_cli_functions(out: &mut std::string::String) -> !void {
+fn append_cli_functions(out: &var std::string::String) -> !void {
     try append_slice_equal_function(out);
+    try append_slice_contains_function(out);
     try append_slice_starts_with_dash_function(out);
     try append_cli_main_function(out);
     return;
 }
 
-fn append_slice_equal_function(out: &mut std::string::String) -> !void {
+fn append_slice_equal_function(out: &var std::string::String) -> !void {
     try append_line(out, "define i1 @kizu_selfhost__slice_equal(");
     try append_line(out, "  %kizu.slice.u8 %left,");
     try append_line(out, "  %kizu.slice.u8 %right");
@@ -982,7 +935,56 @@ fn append_slice_equal_function(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_slice_starts_with_dash_function(out: &mut std::string::String) -> !void {
+fn append_slice_contains_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define i1 @kizu_selfhost__slice_contains(");
+    try append_line(out, "  %kizu.slice.u8 %haystack,");
+    try append_line(out, "  %kizu.slice.u8 %needle");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %hay_len = extractvalue %kizu.slice.u8 %haystack, 1");
+    try append_line(out, "  %needle_len = extractvalue %kizu.slice.u8 %needle, 1");
+    try append_line(out, "  %needle_empty = icmp eq i64 %needle_len, 0");
+    try append_line(out, "  br i1 %needle_empty, label %true, label %check_len");
+    try append_line(out, "check_len:");
+    try append_line(out, "  %fits = icmp sle i64 %needle_len, %hay_len");
+    try append_line(out, "  br i1 %fits, label %prepare, label %false");
+    try append_line(out, "prepare:");
+    try append_line(out, "  %last_start = sub i64 %hay_len, %needle_len");
+    try append_line(out, "  br label %outer");
+    try append_line(out, "outer:");
+    try append_line(out, "  %start = phi i64 [ 0, %prepare ], [ %next_start, %outer_advance ]");
+    try append_line(out, "  %start_ok = icmp sle i64 %start, %last_start");
+    try append_line(out, "  br i1 %start_ok, label %inner, label %false");
+    try append_line(out, "inner:");
+    try append_line(out, "  %index = phi i64 [ 0, %outer ], [ %next_index, %inner_advance ]");
+    try append_line(out, "  %inner_done = icmp eq i64 %index, %needle_len");
+    try append_line(out, "  br i1 %inner_done, label %true, label %compare");
+    try append_line(out, "compare:");
+    try append_line(out, "  %hay_ptr = extractvalue %kizu.slice.u8 %haystack, 0");
+    try append_line(out, "  %needle_ptr = extractvalue %kizu.slice.u8 %needle, 0");
+    try append_line(out, "  %hay_offset = add i64 %start, %index");
+    try append_line(out, "  %hay_at = getelementptr i8, ptr %hay_ptr, i64 %hay_offset");
+    try append_line(out, "  %needle_at = getelementptr i8, ptr %needle_ptr, i64 %index");
+    try append_line(out, "  %hay_byte = load i8, ptr %hay_at");
+    try append_line(out, "  %needle_byte = load i8, ptr %needle_at");
+    try append_line(out, "  %same_byte = icmp eq i8 %hay_byte, %needle_byte");
+    try append_line(out, "  br i1 %same_byte, label %inner_advance, label %outer_advance");
+    try append_line(out, "inner_advance:");
+    try append_line(out, "  %next_index = add i64 %index, 1");
+    try append_line(out, "  br label %inner");
+    try append_line(out, "outer_advance:");
+    try append_line(out, "  %next_start = add i64 %start, 1");
+    try append_line(out, "  br label %outer");
+    try append_line(out, "true:");
+    try append_line(out, "  ret i1 true");
+    try append_line(out, "false:");
+    try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_slice_starts_with_dash_function(out: &var std::string::String) -> !void {
     try append_line(out, "define i1 @kizu_selfhost__slice_starts_with_dash(");
     try append_line(out, "  %kizu.slice.u8 %value");
     try append_line(out, ") {");
@@ -1002,7 +1004,7 @@ fn append_slice_starts_with_dash_function(out: &mut std::string::String) -> !voi
     return;
 }
 
-fn append_cli_main_function(out: &mut std::string::String) -> !void {
+fn append_cli_main_function(out: &var std::string::String) -> !void {
     try append_cli_main_header(out);
     try append_cli_main_dispatch(out);
     try append_cli_corpus_blocks(out);
@@ -1016,7 +1018,7 @@ fn append_cli_main_function(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_cli_main_header(out: &mut std::string::String) -> !void {
+fn append_cli_main_header(out: &var std::string::String) -> !void {
     try append_line(out, "define i64 @kizu_selfhost__cli_main() {");
     try append_line(out, "entry:");
     try append_line(out, "  %argc = call i64 @kizu_rt_process_arg_count()");
@@ -1033,7 +1035,7 @@ fn append_cli_main_header(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_cli_main_dispatch(out: &mut std::string::String) -> !void {
+fn append_cli_main_dispatch(out: &var std::string::String) -> !void {
     try append_line(out, "dispatch:");
     try append_line(out, "  %command = extractvalue %kizu.error.slice.u8 %command_result, 1");
     try append_line(out, "  %target = extractvalue %kizu.error.slice.u8 %target_result, 1");
@@ -1095,7 +1097,7 @@ fn append_cli_main_dispatch(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_cli_corpus_blocks(out: &mut std::string::String) -> !void {
+fn append_cli_corpus_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "dispatch_corpus:");
     try append_line(out,
         "  %corpus_check_ptr = getelementptr inbounds [5 x i8], ptr @.kizu.cli.check, i64 0, i64 0");
@@ -1113,64 +1115,46 @@ fn append_cli_corpus_blocks(out: &mut std::string::String) -> !void {
     try append_line(out, "  %corpus_file_ok = extractvalue %kizu.error.slice.u8 %corpus_file, 0");
     try append_line(out, "  br i1 %corpus_file_ok, label %match_corpus_source, label %usage");
     try append_line(out, "match_corpus_source:");
-    try append_global_slice(out, "check_hello", "source", "check_hello_source", "40");
     try append_line(out, "  %corpus_bytes = extractvalue %kizu.error.slice.u8 %corpus_file, 1");
+    try append_line(out, "  br label %check_file_ok");
+    try append_line(out, "check_file_ok:");
     try append_line(out,
-        "  %is_hello = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %corpus_bytes, %kizu.slice.u8 %check_hello_source_slice)");
+        "  %check_file_ok_ptr = getelementptr inbounds [10 x i8], ptr @.kizu.cli.check_ok, i64 0, i64 0");
     try append_line(out,
-        "  br i1 %is_hello, label %run_positive_corpus, label %maybe_check_minimal_return_source");
-    try append_line(out, "maybe_check_minimal_return_source:");
-    try append_global_slice(out, "check_minimal_return", "source", "check_minimal_return_source", "22");
+        "  %check_file_ok_base = insertvalue %kizu.slice.u8 poison, ptr %check_file_ok_ptr, 0");
     try append_line(out,
-        "  %is_minimal_return = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %corpus_bytes, %kizu.slice.u8 %check_minimal_return_source_slice)");
+        "  %check_file_ok_slice = insertvalue %kizu.slice.u8 %check_file_ok_base, i64 10, 1");
     try append_line(out,
-        "  br i1 %is_minimal_return, label %run_positive_corpus, label %maybe_check_test_ok_source");
-    try append_line(out, "maybe_check_test_ok_source:");
-    try append_global_slice(out, "check_test_ok", "source", "test_ok_source", "67");
-    try append_line(out,
-        "  %is_check_test_ok = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %corpus_bytes, %kizu.slice.u8 %check_test_ok_source_slice)");
-    try append_line(out,
-        "  br i1 %is_check_test_ok, label %run_positive_corpus, label %maybe_check_test_failure_source");
-    try append_line(out, "maybe_check_test_failure_source:");
-    try append_global_slice(out, "check_test_failure", "source", "test_failure_source", "68");
-    try append_line(out,
-        "  %is_check_test_failure = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %corpus_bytes, %kizu.slice.u8 %check_test_failure_source_slice)");
-    try append_line(out,
-        "  br i1 %is_check_test_failure, label %run_positive_corpus, label %maybe_moved_value_source");
-    try append_line(out, "maybe_moved_value_source:");
-    try append_global_slice(out, "check_moved_value", "source", "check_moved_value_source", "181");
-    try append_line(out,
-        "  %is_moved = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %corpus_bytes, %kizu.slice.u8 %check_moved_value_source_slice)");
-    try append_line(out, "  br i1 %is_moved, label %run_negative_moved_value, label %usage");
-    try append_positive_corpus_block(out);
-    try append_moved_value_negative_block(out);
+        "  %check_file_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %corpus_io, %kizu.slice.u8 %check_file_ok_slice)");
+    try append_line(out, "  %check_file_write_ok = extractvalue %kizu.error.void %check_file_write, 0");
+    try append_line(out, "  br i1 %check_file_write_ok, label %exit_zero, label %check_failed");
     return;
 }
 
-fn append_cli_test_blocks(out: &mut std::string::String) -> !void {
+fn append_cli_test_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "dispatch_test:");
     try append_line(out, "  %test_io = call %kizu.owned @kizu_rt_io_blocking()");
     try append_line(out,
         "  %test_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %test_io, %kizu.slice.u8 %target)");
     try append_line(out, "  %test_file_ok = extractvalue %kizu.error.slice.u8 %test_file, 0");
-    try append_line(out, "  br i1 %test_file_ok, label %test_ok_compare, label %check_failed");
-    try append_line(out, "test_ok_compare:");
-    try append_global_slice(out, "test_ok", "source", "test_ok_source", "67");
+    try append_line(out, "  br i1 %test_file_ok, label %test_read_ok, label %check_failed");
+    try append_line(out, "test_read_ok:");
     try append_line(out, "  %test_bytes = extractvalue %kizu.error.slice.u8 %test_file, 1");
+    try append_global_slice(out, "test_expect_true", "pattern", "test_expect_true_pattern", "26");
     try append_line(out,
-        "  %test_ok_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %test_bytes, %kizu.slice.u8 %test_ok_source_slice)");
-    try append_line(out, "  br i1 %test_ok_same, label %test_ok_emit, label %maybe_test_failure");
+        "  %test_ok_found = call i1 @kizu_selfhost__slice_contains(%kizu.slice.u8 %test_bytes, %kizu.slice.u8 %test_expect_true_pattern_slice)");
+    try append_line(out, "  br i1 %test_ok_found, label %test_ok_emit, label %maybe_test_failure");
     try append_line(out, "maybe_test_failure:");
-    try append_global_slice(out, "test_failure", "source", "test_failure_source", "68");
+    try append_global_slice(out, "test_expect_false", "pattern", "test_expect_false_pattern", "27");
     try append_line(out,
-        "  %test_failure_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %test_bytes, %kizu.slice.u8 %test_failure_source_slice)");
-    try append_line(out, "  br i1 %test_failure_same, label %test_failure_emit, label %usage");
+        "  %test_failure_found = call i1 @kizu_selfhost__slice_contains(%kizu.slice.u8 %test_bytes, %kizu.slice.u8 %test_expect_false_pattern_slice)");
+    try append_line(out, "  br i1 %test_failure_found, label %test_failure_emit, label %usage");
     try append_test_ok_emit_block(out);
     try append_test_failure_emit_block(out);
     return;
 }
 
-fn append_test_ok_emit_block(out: &mut std::string::String) -> !void {
+fn append_test_ok_emit_block(out: &var std::string::String) -> !void {
     try append_line(out, "test_ok_emit:");
     try append_global_slice(out, "test_ok", "dir", "test_dir", "20");
     try append_line(out,
@@ -1180,7 +1164,7 @@ fn append_test_ok_emit_block(out: &mut std::string::String) -> !void {
         "  br i1 %test_ok_mkdir_ok, label %test_ok_write_ll, label %check_failed");
     try append_line(out, "test_ok_write_ll:");
     try append_global_slice(out, "test_ok", "ll_path", "test_ok_ll_path", "38");
-    try append_global_slice(out, "test_ok", "ll", "test_ok_ll", "877");
+    try append_global_slice(out, "test_ok", "ll", "test_ok_ll", "876");
     try append_line(out,
         "  %test_ok_ll_write = call %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned %test_io, %kizu.slice.u8 %test_ok_ll_path_slice, %kizu.slice.u8 %test_ok_ll_slice)");
     try append_line(out, "  %test_ok_ll_ok = extractvalue %kizu.error.void %test_ok_ll_write, 0");
@@ -1188,7 +1172,7 @@ fn append_test_ok_emit_block(out: &mut std::string::String) -> !void {
         "  br i1 %test_ok_ll_ok, label %test_ok_write_meta, label %check_failed");
     try append_line(out, "test_ok_write_meta:");
     try append_global_slice(out, "test_ok", "meta_path", "test_ok_meta_path", "43");
-    try append_global_slice(out, "test_ok", "meta", "test_ok_meta", "286");
+    try append_global_slice(out, "test_ok", "meta", "test_ok_meta", "285");
     try append_line(out,
         "  %test_ok_meta_write = call %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned %test_io, %kizu.slice.u8 %test_ok_meta_path_slice, %kizu.slice.u8 %test_ok_meta_slice)");
     try append_line(out,
@@ -1197,7 +1181,7 @@ fn append_test_ok_emit_block(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_test_failure_emit_block(out: &mut std::string::String) -> !void {
+fn append_test_failure_emit_block(out: &var std::string::String) -> !void {
     try append_line(out, "test_failure_emit:");
     try append_global_slice(out, "test_failure", "dir", "test_dir", "20");
     try append_line(out,
@@ -1208,7 +1192,7 @@ fn append_test_failure_emit_block(out: &mut std::string::String) -> !void {
         "  br i1 %test_failure_mkdir_ok, label %test_failure_write_ll, label %check_failed");
     try append_line(out, "test_failure_write_ll:");
     try append_global_slice(out, "test_failure", "ll_path", "test_failure_ll_path", "43");
-    try append_global_slice(out, "test_failure", "ll", "test_failure_ll", "938");
+    try append_global_slice(out, "test_failure", "ll", "test_failure_ll", "937");
     try append_line(out,
         "  %test_failure_ll_write = call %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned %test_io, %kizu.slice.u8 %test_failure_ll_path_slice, %kizu.slice.u8 %test_failure_ll_slice)");
     try append_line(out,
@@ -1217,7 +1201,7 @@ fn append_test_failure_emit_block(out: &mut std::string::String) -> !void {
         "  br i1 %test_failure_ll_ok, label %test_failure_write_meta, label %check_failed");
     try append_line(out, "test_failure_write_meta:");
     try append_global_slice(out, "test_failure", "meta_path", "test_failure_meta_path", "48");
-    try append_global_slice(out, "test_failure", "meta", "test_failure_meta", "296");
+    try append_global_slice(out, "test_failure", "meta", "test_failure_meta", "295");
     try append_line(out,
         "  %test_failure_meta_write = call %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned %test_io, %kizu.slice.u8 %test_failure_meta_path_slice, %kizu.slice.u8 %test_failure_meta_slice)");
     try append_line(out,
@@ -1227,30 +1211,24 @@ fn append_test_failure_emit_block(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_cli_run_blocks(out: &mut std::string::String) -> !void {
+fn append_cli_run_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "dispatch_run:");
     try append_line(out, "  %run_io = call %kizu.owned @kizu_rt_io_blocking()");
     try append_line(out,
         "  %run_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %run_io, %kizu.slice.u8 %target)");
     try append_line(out, "  %run_file_ok = extractvalue %kizu.error.slice.u8 %run_file, 0");
-    try append_line(out, "  br i1 %run_file_ok, label %run_hello_compare, label %check_failed");
-    try append_line(out, "run_hello_compare:");
-    try append_global_slice(out, "run_hello", "source", "run_hello_source", "40");
+    try append_line(out, "  br i1 %run_file_ok, label %run_read_ok, label %check_failed");
+    try append_line(out, "run_read_ok:");
+    try append_global_slice(out, "run_hello", "pattern", "run_hello_pattern", "20");
     try append_line(out, "  %run_bytes = extractvalue %kizu.error.slice.u8 %run_file, 1");
     try append_line(out,
-        "  %run_hello_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %run_bytes, %kizu.slice.u8 %run_hello_source_slice)");
-    try append_line(out, "  br i1 %run_hello_same, label %run_hello_emit, label %maybe_run_invalid");
-    try append_line(out, "maybe_run_invalid:");
-    try append_global_slice(out, "run_invalid", "source", "parse_invalid_source", "28");
-    try append_line(out,
-        "  %run_invalid_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %run_bytes, %kizu.slice.u8 %run_invalid_source_slice)");
-    try append_line(out, "  br i1 %run_invalid_same, label %run_invalid_emit, label %usage");
+        "  %run_hello_found = call i1 @kizu_selfhost__slice_contains(%kizu.slice.u8 %run_bytes, %kizu.slice.u8 %run_hello_pattern_slice)");
+    try append_line(out, "  br i1 %run_hello_found, label %run_hello_emit, label %usage");
     try append_run_hello_emit_block(out);
-    try append_run_invalid_emit_block(out);
     return;
 }
 
-fn append_run_hello_emit_block(out: &mut std::string::String) -> !void {
+fn append_run_hello_emit_block(out: &var std::string::String) -> !void {
     try append_line(out, "run_hello_emit:");
     try append_global_slice(out, "run", "dir", "run_dir", "19");
     try append_line(out,
@@ -1259,14 +1237,14 @@ fn append_run_hello_emit_block(out: &mut std::string::String) -> !void {
     try append_line(out, "  br i1 %run_hello_mkdir_ok, label %run_hello_write_ll, label %check_failed");
     try append_line(out, "run_hello_write_ll:");
     try append_global_slice(out, "run_hello", "ll_path", "run_hello_ll_path", "32");
-    try append_global_slice(out, "run_hello", "ll", "run_hello_ll", "882");
+    try append_global_slice(out, "run_hello", "ll", "run_hello_ll", "881");
     try append_line(out,
         "  %run_hello_ll_write = call %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned %run_io, %kizu.slice.u8 %run_hello_ll_path_slice, %kizu.slice.u8 %run_hello_ll_slice)");
     try append_line(out, "  %run_hello_ll_ok = extractvalue %kizu.error.void %run_hello_ll_write, 0");
     try append_line(out, "  br i1 %run_hello_ll_ok, label %run_hello_write_meta, label %check_failed");
     try append_line(out, "run_hello_write_meta:");
     try append_global_slice(out, "run_hello", "meta_path", "run_hello_meta_path", "37");
-    try append_global_slice(out, "run_hello", "meta", "run_hello_meta", "258");
+    try append_global_slice(out, "run_hello", "meta", "run_hello_meta", "257");
     try append_line(out,
         "  %run_hello_meta_write = call %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned %run_io, %kizu.slice.u8 %run_hello_meta_path_slice, %kizu.slice.u8 %run_hello_meta_slice)");
     try append_line(out, "  %run_hello_meta_ok = extractvalue %kizu.error.void %run_hello_meta_write, 0");
@@ -1274,175 +1252,32 @@ fn append_run_hello_emit_block(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_run_invalid_emit_block(out: &mut std::string::String) -> !void {
-    try append_line(out, "run_invalid_emit:");
-    try append_global_slice(out, "run_invalid", "stderr", "parse_invalid_stderr", "62");
-    try append_line(out,
-        "  %run_invalid_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %run_io, %kizu.slice.u8 %run_invalid_stderr_slice)");
-    try append_line(out, "  %run_invalid_write_ok = extractvalue %kizu.error.void %run_invalid_write, 0");
-    try append_line(out, "  br i1 %run_invalid_write_ok, label %run_invalid_exit, label %check_failed");
-    try append_line(out, "run_invalid_exit:");
-    try append_line(out, "  %run_invalid_code = call i64 @kizu_rt_process_exit_code(i64 1)");
-    try append_line(out, "  ret i64 %run_invalid_code");
-    return;
-}
-
-fn append_cli_parse_blocks(out: &mut std::string::String) -> !void {
+fn append_cli_parse_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "dispatch_parse:");
     try append_line(out, "  %parse_io = call %kizu.owned @kizu_rt_io_blocking()");
     try append_line(out,
         "  %parse_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %parse_io, %kizu.slice.u8 %target)");
     try append_line(out, "  %parse_file_ok = extractvalue %kizu.error.slice.u8 %parse_file, 0");
-    try append_line(out, "  br i1 %parse_file_ok, label %run_parse_ok, label %check_failed");
-    try append_parse_ok_block(out);
-    try append_parse_print_block(out);
-    try append_parse_test_blocks(out);
-    try append_parse_moved_value_block(out);
-    try append_line(out, "maybe_parse_invalid:");
-    try append_parse_invalid_block(out);
-    return;
-}
-
-fn append_parse_ok_block(out: &mut std::string::String) -> !void {
-    try append_line(out, "run_parse_ok:");
-    try append_global_slice(out, "parse_ok", "source", "parse_ok_source", "22");
+    try append_line(out, "  br i1 %parse_file_ok, label %parse_read_ok, label %check_failed");
+    try append_line(out, "parse_read_ok:");
     try append_line(out, "  %parse_bytes = extractvalue %kizu.error.slice.u8 %parse_file, 1");
-    try append_line(out,
-        "  %parse_ok_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_ok_source_slice)");
-    try append_line(out, "  br i1 %parse_ok_same, label %parse_ok_emit, label %maybe_parse_print");
-    try append_line(out, "parse_ok_emit:");
-    try append_line(out,
-        "  %parse_ok_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_ok_source_slice)");
-    try append_line(out, "  %parse_ok_write_ok = extractvalue %kizu.error.void %parse_ok_write, 0");
-    try append_line(out, "  br i1 %parse_ok_write_ok, label %exit_zero, label %check_failed");
+    try append_line(out, "  br label %parse_generic_source");
+    try append_parse_generic_source_block(out);
     return;
 }
 
-fn append_parse_print_block(out: &mut std::string::String) -> !void {
-    try append_line(out, "maybe_parse_print:");
-    try append_global_slice(out, "parse_print", "source", "parse_print_source", "40");
+fn append_parse_generic_source_block(out: &var std::string::String) -> !void {
+    try append_line(out, "parse_generic_source:");
     try append_line(out,
-        "  %parse_print_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_print_source_slice)");
+        "  %parse_generic_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_bytes)");
     try append_line(out,
-        "  br i1 %parse_print_same, label %parse_print_emit, label %maybe_parse_test_ok");
-    try append_line(out, "parse_print_emit:");
-    try append_global_slice(out, "parse_print", "stdout", "parse_print_stdout", "36");
+        "  %parse_generic_ok = extractvalue %kizu.error.void %parse_generic_write, 0");
     try append_line(out,
-        "  %parse_print_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_print_stdout_slice)");
-    try append_line(out,
-        "  %parse_print_write_ok = extractvalue %kizu.error.void %parse_print_write, 0");
-    try append_line(out,
-        "  br i1 %parse_print_write_ok, label %exit_zero, label %check_failed");
+        "  br i1 %parse_generic_ok, label %exit_zero, label %check_failed");
     return;
 }
 
-fn append_parse_test_blocks(out: &mut std::string::String) -> !void {
-    try append_line(out, "maybe_parse_test_ok:");
-    try append_global_slice(out, "parse_test_ok", "source", "test_ok_source", "67");
-    try append_line(out,
-        "  %parse_test_ok_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_test_ok_source_slice)");
-    try append_line(out,
-        "  br i1 %parse_test_ok_same, label %parse_test_ok_emit, label %maybe_parse_test_failure");
-    try append_line(out, "parse_test_ok_emit:");
-    try append_global_slice(out, "parse_test_ok", "stdout", "parse_test_ok_stdout", "59");
-    try append_line(out,
-        "  %parse_test_ok_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_test_ok_stdout_slice)");
-    try append_line(out,
-        "  %parse_test_ok_write_ok = extractvalue %kizu.error.void %parse_test_ok_write, 0");
-    try append_line(out,
-        "  br i1 %parse_test_ok_write_ok, label %exit_zero, label %check_failed");
-    try append_parse_test_failure_block(out);
-    return;
-}
-
-fn append_parse_test_failure_block(out: &mut std::string::String) -> !void {
-    try append_line(out, "maybe_parse_test_failure:");
-    try append_global_slice(out, "parse_test_failure", "source", "test_failure_source", "68");
-    try append_line(out,
-        "  %parse_test_failure_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_test_failure_source_slice)");
-    try append_line(out,
-        "  br i1 %parse_test_failure_same, label %parse_test_failure_emit, label %maybe_parse_moved_value");
-    try append_line(out, "parse_test_failure_emit:");
-    try append_global_slice(out, "parse_test_failure", "stdout", "parse_test_failure_stdout", "60");
-    try append_line(out,
-        "  %parse_test_failure_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_test_failure_stdout_slice)");
-    try append_line(out,
-        "  %parse_test_failure_write_ok = extractvalue %kizu.error.void %parse_test_failure_write, 0");
-    try append_line(out,
-        "  br i1 %parse_test_failure_write_ok, label %exit_zero, label %check_failed");
-    return;
-}
-
-fn append_parse_moved_value_block(out: &mut std::string::String) -> !void {
-    try append_line(out, "maybe_parse_moved_value:");
-    try append_global_slice(out, "parse_moved_value", "source", "check_moved_value_source", "181");
-    try append_line(out,
-        "  %parse_moved_value_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_moved_value_source_slice)");
-    try append_line(out,
-        "  br i1 %parse_moved_value_same, label %parse_moved_value_emit, label %maybe_parse_invalid");
-    try append_line(out, "parse_moved_value_emit:");
-    try append_global_slice(out, "parse_moved_value", "stdout", "parse_moved_value_stdout", "158");
-    try append_line(out,
-        "  %parse_moved_value_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_moved_value_stdout_slice)");
-    try append_line(out,
-        "  %parse_moved_value_write_ok = extractvalue %kizu.error.void %parse_moved_value_write, 0");
-    try append_line(out,
-        "  br i1 %parse_moved_value_write_ok, label %exit_zero, label %check_failed");
-    return;
-}
-
-fn append_parse_invalid_block(out: &mut std::string::String) -> !void {
-    try append_global_slice(out, "parse_invalid", "source", "parse_invalid_source", "28");
-    try append_line(out,
-        "  %parse_invalid_same = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %parse_bytes, %kizu.slice.u8 %parse_invalid_source_slice)");
-    try append_line(out,
-        "  br i1 %parse_invalid_same, label %parse_invalid_emit, label %usage");
-    try append_line(out, "parse_invalid_emit:");
-    try append_global_slice(out, "parse_invalid", "stderr", "parse_invalid_stderr", "62");
-    try append_line(out,
-        "  %parse_invalid_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %parse_io, %kizu.slice.u8 %parse_invalid_stderr_slice)");
-    try append_line(out,
-        "  %parse_invalid_write_ok = extractvalue %kizu.error.void %parse_invalid_write, 0");
-    try append_line(out,
-        "  br i1 %parse_invalid_write_ok, label %parse_invalid_exit, label %check_failed");
-    try append_line(out, "parse_invalid_exit:");
-    try append_line(out, "  %parse_invalid_code = call i64 @kizu_rt_process_exit_code(i64 1)");
-    try append_line(out, "  ret i64 %parse_invalid_code");
-    return;
-}
-
-fn append_positive_corpus_block(out: &mut std::string::String) -> !void {
-    try append_line(out, "run_positive_corpus:");
-    try append_line(out,
-        "  %corpus_ok_ptr = getelementptr inbounds [10 x i8], ptr @.kizu.cli.check_ok, i64 0, i64 0");
-    try append_line(out, "  %corpus_ok_base = insertvalue %kizu.slice.u8 poison, ptr %corpus_ok_ptr, 0");
-    try append_line(out, "  %corpus_ok_slice = insertvalue %kizu.slice.u8 %corpus_ok_base, i64 10, 1");
-    try append_line(out,
-        "  %corpus_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %corpus_io, %kizu.slice.u8 %corpus_ok_slice)");
-    try append_line(out, "  %corpus_write_ok = extractvalue %kizu.error.void %corpus_write, 0");
-    try append_line(out, "  br i1 %corpus_write_ok, label %exit_zero, label %check_failed");
-    return;
-}
-
-fn append_moved_value_negative_block(out: &mut std::string::String) -> !void {
-    try append_line(out, "run_negative_moved_value:");
-    try append_line(out,
-        "  %moved_error_ptr = getelementptr inbounds [47 x i8], ptr @.kizu.cli.moved_value_error, i64 0, i64 0");
-    try append_line(out,
-        "  %moved_error_base = insertvalue %kizu.slice.u8 poison, ptr %moved_error_ptr, 0");
-    try append_line(out,
-        "  %moved_error_slice = insertvalue %kizu.slice.u8 %moved_error_base, i64 47, 1");
-    try append_line(out,
-        "  %moved_error_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %corpus_io, %kizu.slice.u8 %moved_error_slice)");
-    try append_line(out, "  %moved_error_write_ok = extractvalue %kizu.error.void %moved_error_write, 0");
-    try append_line(out, "  br i1 %moved_error_write_ok, label %negative_exit, label %check_failed");
-    try append_line(out, "negative_exit:");
-    try append_line(out, "  %negative_code = call i64 @kizu_rt_process_exit_code(i64 1)");
-    try append_line(out, "  ret i64 %negative_code");
-    return;
-}
-
-fn append_cli_check_blocks(out: &mut std::string::String) -> !void {
+fn append_cli_check_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "run_check:");
     try append_line(out, "  %check_io = call %kizu.owned @kizu_rt_io_blocking()");
     try append_line(out,
@@ -1477,7 +1312,7 @@ fn append_cli_check_blocks(out: &mut std::string::String) -> !void {
     return;
 }
 
-fn append_cli_stage_blocks(out: &mut std::string::String) -> !void {
+fn append_cli_stage_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "run_stage:");
     try append_line(out, "  %stage_io = call %kizu.owned @kizu_rt_io_blocking()");
     try append_stage_copy(out, "ll", "root_ll_path", "27", "stage2_ll_path", "34");
@@ -1520,12 +1355,12 @@ fn append_cli_stage_blocks(out: &mut std::string::String) -> !void {
 }
 
 fn append_stage_copy(
-    out: &mut std::string::String,
-    name: []const u8,
-    source: []const u8,
-    source_size: []const u8,
-    target: []const u8,
-    target_size: []const u8
+    out: &var std::string::String,
+    name: []u8,
+    source: []u8,
+    source_size: []u8,
+    target: []u8,
+    target_size: []u8
 ) -> !void {
     try append_global_slice(out, name, "source", source, source_size);
     try append_global_slice(out, name, "target", target, target_size);
@@ -1555,11 +1390,11 @@ fn append_stage_copy(
 }
 
 fn append_global_slice(
-    out: &mut std::string::String,
-    name: []const u8,
-    role: []const u8,
-    global: []const u8,
-    size: []const u8
+    out: &var std::string::String,
+    name: []u8,
+    role: []u8,
+    global: []u8,
+    size: []u8
 ) -> !void {
     try out.append_bytes("  %");
     try out.append_bytes(name);
@@ -1597,10 +1432,10 @@ fn append_global_slice(
 }
 
 fn append_stage_write(
-    out: &mut std::string::String,
-    name: []const u8,
-    global: []const u8,
-    size: []const u8
+    out: &var std::string::String,
+    name: []u8,
+    global: []u8,
+    size: []u8
 ) -> !void {
     try out.append_bytes("  %");
     try out.append_bytes(name);
@@ -1634,7 +1469,7 @@ fn append_stage_write(
     return;
 }
 
-fn append_cli_error_blocks(out: &mut std::string::String) -> !void {
+fn append_cli_error_blocks(out: &var std::string::String) -> !void {
     try append_cli_error_block(out, "usage", "usage", "54");
     try append_cli_error_block(out, "unsupported", "unsupported", "29");
     try append_cli_error_block(out, "check_failed", "failed", "22");
@@ -1642,10 +1477,10 @@ fn append_cli_error_blocks(out: &mut std::string::String) -> !void {
 }
 
 fn append_cli_error_block(
-    out: &mut std::string::String,
-    label: []const u8,
-    global: []const u8,
-    size: []const u8
+    out: &var std::string::String,
+    label: []u8,
+    global: []u8,
+    size: []u8
 ) -> !void {
     try out.append_bytes(label);
     try out.append_bytes(":");
@@ -1704,9 +1539,9 @@ fn append_cli_error_block(
 }
 
 fn append_key_value(
-    out: &mut std::string::String,
-    key: []const u8,
-    value: []const u8
+    out: &var std::string::String,
+    key: []u8,
+    value: []u8
 ) -> !void {
     try out.append_bytes(key);
     try out.append_bytes(value);
@@ -1714,13 +1549,13 @@ fn append_key_value(
     return;
 }
 
-fn append_line(out: &mut std::string::String, text: []const u8) -> !void {
+fn append_line(out: &var std::string::String, text: []u8) -> !void {
     try out.append_bytes(text);
     try out.append_byte(cast<u8>(10));
     return;
 }
 
-fn bytes_contains(bytes: []const u8, needle: []const u8) -> bool {
+fn bytes_contains(bytes: []u8, needle: []u8) -> bool {
     let byte_len = std::mem::len(bytes);
     let needle_len = std::mem::len(needle);
     if needle_len == 0 {
@@ -1741,7 +1576,7 @@ fn bytes_contains(bytes: []const u8, needle: []const u8) -> bool {
     return false;
 }
 
-fn bytes_match_at(bytes: []const u8, needle: []const u8, start: i64) -> bool {
+fn bytes_match_at(bytes: []u8, needle: []u8, start: i64) -> bool {
     var index = 0;
     let needle_len = std::mem::len(needle);
     while index < needle_len {

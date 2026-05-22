@@ -30,7 +30,7 @@ array.capacity() -> i64
 array.get(index: i64) -> !T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
-array.at_mut(index: i64) -> !&mut T borrows self
+array.at_mut(index: i64) -> !&var T borrows self
 array.set(index: i64, value: T) -> !void
 array.deinit() -> void
 ```

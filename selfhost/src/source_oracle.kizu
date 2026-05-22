@@ -5,7 +5,7 @@ pub fn gate() -> !void {
     let io = std::io::blocking();
 
     var files = try source::load_selfhost_sources(allocator, io, "selfhost");
-    let manifest_sources = try source::count_kind(files, source::SourceKind::User);
+    let manifest_sources = try source::count_kind(files, source::SourceKind::Manifest);
     let selfhost_sources = try source::count_kind(files, source::SourceKind::Selfhost);
     let std_sources = try source::count_kind(files, source::SourceKind::Std);
     let summary = source::summarize(
@@ -16,11 +16,12 @@ pub fn gate() -> !void {
         0,
         0
     );
-    std::testing::expect_equal<i64>(33, summary.sources);
+    std::testing::expect_equal<i64>(34, summary.sources);
     std::testing::expect_equal<i64>(1, summary.manifest_sources);
     std::testing::expect_equal<i64>(19, summary.selfhost_sources);
-    std::testing::expect_equal<i64>(13, summary.std_sources);
+    std::testing::expect_equal<i64>(14, summary.std_sources);
     try expect_source_files(files);
+    try expect_user_file_sources(allocator, io);
 
     try expect_diagnostics(allocator);
 
@@ -38,20 +39,40 @@ pub fn gate() -> !void {
     return;
 }
 
+fn expect_user_file_sources(allocator: Allocator, io: Io) -> !void {
+    let path = "examples/hello.kizu";
+    let text = try std::fs::read_file(io, path);
+    var files = try source::load_file_sources(allocator, io, path, text);
+    let user_sources = try source::count_kind(files, source::SourceKind::User);
+    let selfhost_sources = try source::count_kind(files, source::SourceKind::Selfhost);
+    let std_sources = try source::count_kind(files, source::SourceKind::Std);
+    std::testing::expect_equal<i64>(15, files.len());
+    std::testing::expect_equal<i64>(1, user_sources);
+    std::testing::expect_equal<i64>(0, selfhost_sources);
+    std::testing::expect_equal<i64>(14, std_sources);
+
+    let file = try files.at(0);
+    std::testing::expect_equal<i64>(0, file.id);
+    std::testing::expect_equal<[]u8>("hello", file.module);
+    std::testing::expect_equal<[]u8>(path, file.path);
+    files.deinit();
+    return;
+}
+
 fn expect_source_files(files: &std::array::Array<source::SourceFile>) -> !void {
     let manifest = try files.at(0);
     std::testing::expect_equal<i64>(0, manifest.id);
-    std::testing::expect_equal<[]const u8>("manifest", manifest.module);
-    std::testing::expect_equal<[]const u8>("selfhost/kizu.toml", manifest.path);
+    std::testing::expect_equal<[]u8>("manifest", manifest.module);
+    std::testing::expect_equal<[]u8>("selfhost/kizu.toml", manifest.path);
 
     let first_source = try files.at(1);
     std::testing::expect_equal<i64>(1, first_source.id);
-    std::testing::expect_equal<[]const u8>("ast", first_source.module);
-    std::testing::expect_equal<[]const u8>("selfhost/src/ast.kizu", first_source.path);
+    std::testing::expect_equal<[]u8>("ast", first_source.module);
+    std::testing::expect_equal<[]u8>("selfhost/src/ast.kizu", first_source.path);
 
     let first_std = try files.at(20);
-    std::testing::expect_equal<[]const u8>("mem", first_std.module);
-    std::testing::expect_equal<[]const u8>("std/src/mem.kizu", first_std.path);
+    std::testing::expect_equal<[]u8>("mem", first_std.module);
+    std::testing::expect_equal<[]u8>("std/src/mem.kizu", first_std.path);
     return;
 }
 
@@ -88,12 +109,12 @@ fn expect_diagnostics(allocator: Allocator) -> !void {
 
 fn expect_diagnostic(
     diagnostic: std::kizu::diagnostic::Diagnostic,
-    message: []const u8,
+    message: []u8,
     byte_start: i64,
     byte_end: i64,
     related: i64
 ) -> !void {
-    std::testing::expect_equal<[]const u8>(message, diagnostic.message);
+    std::testing::expect_equal<[]u8>(message, diagnostic.message);
     std::testing::expect_equal<i64>(byte_start, diagnostic.primary.byte_start);
     std::testing::expect_equal<i64>(byte_end, diagnostic.primary.byte_end);
     std::testing::expect_equal<i64>(related, diagnostic.related_len());

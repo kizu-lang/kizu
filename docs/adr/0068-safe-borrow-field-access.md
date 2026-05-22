@@ -10,7 +10,7 @@ Kizu originally required explicit postfix dereference for field mutation through
 safe borrows:
 
 ```kizu
-fn rename(user: &mut User) -> void {
+fn rename(user: &var User) -> void {
     user.*.name = "bob";
 }
 ```
@@ -18,7 +18,7 @@ fn rename(user: &mut User) -> void {
 That made borrow boundaries visible, but it also made ordinary safe code noisy.
 Kizu safe borrows can have a pointer-like implementation, but they are checked
 borrow capabilities rather than raw pointers: the checker already knows whether
-a binding is `&T` or `&mut T`, enforces aliasing rules, and rejects moves through
+a binding is `&T` or `&var T`, enforces aliasing rules, and rejects moves through
 borrowed storage.
 
 ## Decision
@@ -30,15 +30,15 @@ fn show(user: &User) -> void {
     print(user.name);
 }
 
-fn rename(user: &mut User) -> void {
+fn rename(user: &var User) -> void {
     user.name = "bob";
 }
 ```
 
 The rules are:
 
-- `&T` and `&mut T` may read fields with `borrow.field`
-- only `&mut T` may assign fields with `borrow.field = value`
+- `&T` and `&var T` may read fields with `borrow.field`
+- only `&var T` may assign fields with `borrow.field = value`
 - assigning through `&T` is rejected
 - raw pointers remain outside this shortcut and require explicit unsafe
   operations or explicit `.*` dereference

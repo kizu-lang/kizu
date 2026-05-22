@@ -30,7 +30,7 @@ v0.1 では低レベル thread API を直接中心にせず、safe structured co
 I/O する関数は `Io` を受け取る。
 
 ```kizu
-fn read_config(io: Io, path: []const u8) -> ![]const u8 {
+fn read_config(io: Io, path: []u8) -> ![]u8 {
     return std::fs::read_to_string(io, path);
 }
 ```
@@ -68,7 +68,7 @@ std::thread::scoped<T>    scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
 std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
-std::fs::read_file        explicit-Io file read returning ![]const u8
+std::fs::read_file        explicit-Io file read returning ![]u8
 std::fs::write_file       explicit-Io file write returning !void
 ```
 
@@ -88,7 +88,7 @@ blocking / threaded の違いは呼び出し側が選んだ `Io` と `TaskGroup`
 
 `std::task::parallel_for` は data-parallel API とする。disjoint output は
 `std::task::partition_mut(init: i64, count: i64)` と
-`std::task::parallel_map(io, partition: &mut Partition, start, end, worker)` に閉じ込める。
+`std::task::parallel_map(io, partition: &var Partition, start, end, worker)` に閉じ込める。
 worker-local scratch は `std::task::LocalBuffer` のような trusted std API に閉じ込める。
 collection / mutable slice への直接接続は v0.1 では行わず、ADR-0040 に従って
 `std::mem` と `std::array::Array<T>` の仕様後に設計する。

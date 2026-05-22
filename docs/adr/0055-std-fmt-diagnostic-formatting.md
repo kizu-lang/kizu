@@ -19,11 +19,11 @@ Add a minimal `std::fmt` module for deterministic diagnostic formatting into an
 existing `std::string::String` buffer.
 
 ```text
-std::fmt::append_i64(out: &mut std::string::String, value: i64) -> !void
-std::fmt::append_bool(out: &mut std::string::String, value: bool) -> !void
+std::fmt::append_i64(out: &var std::string::String, value: i64) -> !void
+std::fmt::append_bool(out: &var std::string::String, value: bool) -> !void
 std::fmt::append_bytes_literal(
-    out: &mut std::string::String,
-    bytes: []const u8,
+    out: &var std::string::String,
+    bytes: []u8,
 ) -> !void
 ```
 

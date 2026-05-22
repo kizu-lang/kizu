@@ -41,8 +41,8 @@ pub fn accept_token(token: &std::kizu::lexer::Token) -> void {
 pub fn expect_fn_decl(
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId,
-    source: []const u8,
-    name: []const u8,
+    source: []u8,
+    name: []u8,
     start: i64,
     end: i64
 ) -> !void {

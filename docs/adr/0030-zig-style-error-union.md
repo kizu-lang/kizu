@@ -31,10 +31,10 @@ fn main() -> !i64 {
 
 ```kizu
 union ConfigError {
-    NotFound([]const u8);
+    NotFound([]u8);
 }
 
-fn read_config() -> ConfigError![]const u8 {
+fn read_config() -> ConfigError![]u8 {
     return ConfigError::NotFound("config.kizu");
 }
 ```
@@ -50,7 +50,7 @@ borrow view を保持しない。
 - `try` は `!T` のみを unwrap / propagate する
 - `try` は `ErrorType!T` も unwrap / propagate する
 - typed error は同じ `ErrorType` の関数にだけ伝播できる
-- error payload は v0.1 では owned copy of `[]const u8` message に固定する
+- error payload は v0.1 では owned copy of `[]u8` message に固定する
 - custom typed error payload は `union` で定義する
 - full generics なしでエラー処理を実装できる
 - 将来、error set や stdlib error 型を追加する余地は残す

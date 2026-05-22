@@ -1,4 +1,4 @@
-# ADR-0015: string は std 管理にして literal は []const u8 にする
+# ADR-0015: string は std 管理にして literal は []u8 にする
 
 Status: 採用
 
@@ -8,28 +8,33 @@ Kizu は低レベル寄りのシステムプログラミング言語を目指す
 高級な owned string を primitive として強く組み込むと、allocator、ownership、
 ABI、slice 表現が曖昧になる。
 
-Zig では文字列は主に `[]const u8` として扱われる。
+Zig は slice の要素型側に const 修飾を持つが、Kizu はその形を採用しない。
+Kizu は slice 要素型に `const` / `mut` を埋め込まず、plain slice value を
+`[]T`、borrowed slice を `&[]T` / `&var []T` として扱う。
 
 ## 決定
 
 文字列 literal は言語が扱う。
 v0.1 の source-level type として `string` は採用しない。
-文字列 literal は read-only byte slice である `[]const u8` として扱う。
+文字列 literal は read-only storage を指す byte slice value である `[]u8` として扱う。
 
 想定:
 
 ```text
-"hello"     []const u8 literal
-[]const u8  read-only byte slice
+"hello"     []u8 literal
+[]u8        byte slice value
+&[]u8       shared borrowed byte slice
+&var []u8   mutable borrowed byte slice
 std::string::String  将来の owned string
 ```
 
 Phase 19 では stdlib 基盤を次のように整理する。
 
 ```text
-[]const u8       v0.1 の string literal type
-slice<T>         contiguous mutable view, future
-slice<const T>   contiguous read-only view, future
+[]u8       v0.1 の string literal type
+[]T        contiguous slice value
+&[]T       shared borrowed slice
+&var []T   mutable borrowed slice
 std::array::Array<T>  owned contiguous collection, future
 std::map::Map<K, V>   hash map, later
 std::set::Set<T>      hash set, later
@@ -61,8 +66,8 @@ trusted std prototype とする。
 
 ## 影響
 
-- Phase 2 interpreter では string literal を `[]const u8` value として扱う
-- Phase 3 type checker は `[]const u8` を v0 型として検査する
+- Phase 2 interpreter では string literal を `[]u8` value として扱う
+- Phase 3 type checker は `[]u8` を v0 型として検査する
 - allocator を必要とする string 操作は標準ライブラリ側に寄せる
 - C ABI では `std::string::String` を暗黙に `ptr<const u8>` へ変換しない
 - collection は `std::array::Array<T>` を先に検討し、`std::map::Map<K, V>` /

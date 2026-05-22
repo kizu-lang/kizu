@@ -56,7 +56,7 @@ let / var
 assignment
 i64
 bool
-[]const u8
+[]u8
 void
 arithmetic / comparison
 if / else
@@ -70,7 +70,7 @@ match over simple enum values
 tagged union
 match payload binding
 function call
-&T / &mut T borrow parameter
+&T / &var T borrow parameter
 move semantics
 std::arena::Arena<T> / std::arena::Handle<T>
 !T / error / try
@@ -108,7 +108,7 @@ std::mem read-only byte helpers
 std::array::Array<T>
 std::string::String
 std::fmt
-std::map::Map<[]const u8, V>
+std::map::Map<[]u8, V>
 std::testing
 std::fs
 std::path
@@ -265,7 +265,7 @@ Kizu の値は、基本的に1つの所有者を持ちます。
 所有されている値を関数に渡すと、その値は move されます。
 move された値を再利用するとコンパイルエラーになります。
 
-Kizu には borrow があります。ローカル borrow は `&T` / `&mut T` で表します。
+Kizu には borrow があります。ローカル borrow は `&T` / `&var T` で表します。
 関数境界を越えて borrowed view を返す場合は `borrows <source>` で由来を明示します。
 
 borrow は次のことができません。
@@ -351,7 +351,7 @@ fn bad_add(a: i64, b: i64) -> i64 {
 `void` は値ではないため、`return void;` は使いません。
 
 ```kizu
-fn log(message: []const u8) -> void {
+fn log(message: []u8) -> void {
     print(message);
 }
 ```
@@ -396,7 +396,7 @@ receiver が move 済み、deinit 済み、borrow 中なら拒否します。
 
 ```kizu
 struct User {
-    name: []const u8;
+    name: []u8;
     age: i64;
 }
 ```
@@ -504,11 +504,11 @@ enum TokenKind {
     Eof,
 }
 
-pub fn lex(source: []const u8) -> !std::array::Array<Token> {
+pub fn lex(source: []u8) -> !std::array::Array<Token> {
     return lex_source(source);
 }
 
-fn lex_source(source: []const u8) -> !std::array::Array<Token> {
+fn lex_source(source: []u8) -> !std::array::Array<Token> {
     ...
 }
 ```
@@ -558,7 +558,7 @@ tag だけの値が必要な場合は `enum` を使います。
 union Shape {
     Point,
     Circle(i64),
-    Label([]const u8),
+    Label([]u8),
 }
 ```
 
@@ -715,7 +715,7 @@ void
 `i64` は整数 literal のデフォルト型です。
 Kizu は `int` のような幅が曖昧な整数型を導入しません。
 
-文字列 literal の型は `[]const u8` です。
+文字列 literal の型は `[]u8` です。
 `string` primitive は導入しません。
 
 `void` は値を返さない関数の戻り値です。
@@ -761,7 +761,7 @@ v0.1 では `std::arena::Arena<T>` / `std::arena::Handle<T>` だけを実装対�
 ```text
 std::mem::Box<T>
 shared<T>
-slice<T>
+[]T
 ```
 
 v0.1 では full generics を実装しません。
@@ -781,11 +781,11 @@ let tail = bytes[start..];
 let head = bytes[..end];
 ```
 
-v0.2 の最初の対象は `[]const u8` です。
+v0.2 の最初の対象は `[]u8` です。
 
 ```text
-[]const u8 [ i64 ] -> u8
-[]const u8 [ i64 .. i64 ] -> []const u8
+[]u8 [ i64 ] -> u8
+[]u8 [ i64 .. i64 ] -> []u8
 ```
 
 index / slice syntax は 1 次元 contiguous sequence に限定します。
@@ -840,7 +840,7 @@ numeric type -> numeric type
 safe code で許可しない cast:
 
 ```text
-[]const u8 -> numeric
+[]u8 -> numeric
 bool -> numeric
 numeric -> pointer
 pointer -> numeric
@@ -905,15 +905,15 @@ non-copy field を含む struct
 borrow は一時的に値を参照するための仕組みです。
 
 ```kizu
-fn show(s: &[]const u8) {
+fn show(s: &[]u8) {
     print(s);
 }
 ```
 
-mutable borrow には `&mut T` を使います。
+mutable borrow には `&var T` を使います。
 
 ```kizu
-fn update(user: &mut User) -> void {
+fn update(user: &var User) -> void {
     user.name = "bob";
 }
 ```
@@ -926,9 +926,9 @@ borrow のルール:
 * borrow field は v0.2 では struct / union に保存できない
 * borrow return は `borrows <source>` を必須にする
 * borrow 中の値は move できない
-* `&T` と `&mut T` は重複できない
-* `&mut T` 同士は同じ値に対して重複できない
-* `&mut T` argument は mutable local binding に限定する
+* `&T` と `&var T` は重複できない
+* `&var T` 同士は同じ値に対して重複できない
+* `&var T` argument は mutable local binding に限定する
 * v0.1 は `&user.name` のような one-level direct field borrow を許可する
 * field borrow 中でも disjoint field assignment は許可する
 * field borrow 中の owner 全体の move と同一 field assignment は禁止する
@@ -940,17 +940,17 @@ borrow のルール:
 境界に現れる borrowed-return provenance syntax:
 
 ```kizu
-fn first(bytes: []const u8) -> []const u8 borrows bytes
+fn first(bytes: []u8) -> []u8 borrows bytes
 fn show(value: &i64) -> &i64 borrows value
 ```
 
 `borrows source` は戻り値が `source` 引数または `self` receiver 由来の view であり、
 その source より長生きできないことを表します。名前付き lifetime parameter、
-`&'a T`、`[]'a const T`、lifetime bounds、anonymous lifetime は採用しません。
+`&'a T`、`[]'a T`、lifetime bounds、anonymous lifetime は採用しません。
 borrow field や複数 source 由来の戻り値は、後続の bounded issue で必要性を確認します。
 
 safe borrow binding は通常の field access 構文で field を読めます。
-`&mut T` binding は通常の field assignment 構文で field を更新できます。
+`&var T` binding は通常の field assignment 構文で field を更新できます。
 safe borrow は実装上 pointer-like な表現を持ち得ますが、言語上は
 checker が lifetime、aliasing、move を検査する borrow capability です。
 raw pointer はこの省略対象ではなく、unsafe 境界で明示的に扱います。
@@ -960,7 +960,7 @@ fn show(user: &User) -> void {
     print(user.name);
 }
 
-fn rename(user: &mut User) -> void {
+fn rename(user: &var User) -> void {
     user.name = "bob";
 }
 ```
@@ -989,7 +989,7 @@ field borrow:
 
 ```kizu
 struct User {
-    name: []const u8;
+    name: []u8;
     age: i64;
 }
 
@@ -1007,9 +1007,9 @@ assignment のルール:
 * `let` binding の field assignment は禁止
 * `var` binding の field assignment は許可
 * `&T` 経由の dereference assignment は禁止
-* `&mut T` 経由の dereference assignment は許可
+* `&var T` 経由の dereference assignment は許可
 * `&T` 経由の field assignment は禁止
-* `&mut T` 経由の field assignment は許可
+* `&var T` 経由の field assignment は許可
 
 ```kizu
 fn main() -> void {
@@ -1057,7 +1057,7 @@ error は値として扱います。
 
 v0.1 では Zig に近い `!T` を導入します。
 `!T` は「成功時は `T`、失敗時は error」を表します。
-error payload は標準の `[]const u8` message として扱います。
+error payload は標準の `[]u8` message として扱います。
 domain 固有の custom error を型として扱いたい場合は、v0.1 では `union` と
 `match` を使います。
 typed error として伝播したい場合は `ErrorType!T` を使います。
@@ -1089,7 +1089,7 @@ custom error type を明示的に扱う例:
 
 ```kizu
 union ConfigError {
-    NotFound([]const u8),
+    NotFound([]u8),
     InvalidPort(i64),
 }
 
@@ -1115,7 +1115,7 @@ typed error を `try` で伝播する例:
 
 ```kizu
 union ConfigError {
-    NotFound([]const u8);
+    NotFound([]u8);
     InvalidPort(i64);
 }
 
@@ -1142,12 +1142,12 @@ fn main() -> ConfigError!void {
 * `ErrorType!T` では `ErrorType` または `T` を返せる
 * `try` は同じ `ErrorType` の error union だけを伝播できる
 * `cast<ErrorType!T>(expr)` は `expr: !T` を明示的に typed error union へ変換できる
-* typed error cast は `ErrorType::Message([]const u8)` variant がある場合だけ有効で、
+* typed error cast は `ErrorType::Message([]u8)` variant がある場合だけ有効で、
   untyped error message をその variant に包む
 * `!T` 関数では `T` を返すと成功値として扱う
 * `error(message)` は `!T` を返す関数内でだけ使える
 * `error(message)` は typed error union では使えない
-* `error(message)` の message は `[]const u8`
+* `error(message)` の message は `[]u8`
 * `error(message)` は message bytes を error payload に copy して所有する
 * `error(message)` は borrow view を保持しないため、local `String.as_bytes()` view から
   diagnostic を作れる
@@ -1473,7 +1473,7 @@ std::array
 std::map
 ```
 
-文字列 literal は v0.1 では `[]const u8` として扱います。
+文字列 literal は v0.1 では `[]u8` として扱います。
 owned string は primitive ではなく、将来 `std::string::String` で扱います。
 
 C ABI へ `std::string::String` を暗黙に渡してはいけません。
@@ -1508,13 +1508,13 @@ owned byte buffer です。
 
 ```text
 std::string::String(allocator: Allocator) -> std::string::String
-string.append_bytes(bytes: []const u8) -> !void
+string.append_bytes(bytes: []u8) -> !void
 string.append_byte(byte: u8) -> !void
 string.reserve(additional: i64) -> !void
 string.truncate(length: i64) -> !void
 string.len() -> i64
 string.capacity() -> i64
-string.as_bytes() -> []const u8
+string.as_bytes() -> []u8
 string.clear() -> void
 string.deinit() -> void
 ```
@@ -1522,7 +1522,7 @@ string.deinit() -> void
 `string` primitive は追加しません。
 `std::string::String()` のような hidden default allocator は使いません。
 `std::string::String` は non-copy / move-only です。
-`append_bytes` は source の `[]const u8` を move せず、owned buffer に copy します。
+`append_bytes` は source の `[]u8` を move せず、owned buffer に copy します。
 `append_byte` は 1 byte を追加します。
 `reserve` は少なくとも `additional` byte 分の追加 capacity を確保し、失敗時は `!void` を返します。
 `truncate` は length を短くし、capacity は保持します。範囲外の length は `!void` error です。
@@ -1531,7 +1531,7 @@ string.deinit() -> void
 `as_bytes` の戻り値は local binding に束縛する必要があります。
 view が生きている間は `append_bytes`、`append_byte`、`truncate`、`clear`、`deinit` を禁止します。
 `append_bytes`、`append_byte`、`reserve`、`truncate`、`clear` は owned local `String` または
-`&mut std::string::String` から呼べます。
+`&var std::string::String` から呼べます。
 `clear` は length を 0 にしますが、capacity は保持します。
 `deinit` は caller 側の binding を無効化する必要があるため、owned local receiver 限定です。
 例外として、owner 型自身の `deinit(self: Owner) -> void` method 内では
@@ -1550,11 +1550,11 @@ caller が明示 allocator 付きの `std::string::String` を用意し、
 formatting API はその buffer に bytes を append します。
 
 ```text
-std::fmt::append_i64(out: &mut std::string::String, value: i64) -> !void
-std::fmt::append_bool(out: &mut std::string::String, value: bool) -> !void
+std::fmt::append_i64(out: &var std::string::String, value: i64) -> !void
+std::fmt::append_bool(out: &var std::string::String, value: bool) -> !void
 std::fmt::append_bytes_literal(
-    out: &mut std::string::String,
-    bytes: []const u8,
+    out: &var std::string::String,
+    bytes: []u8,
 ) -> !void
 ```
 
@@ -1573,8 +1573,9 @@ collection は次の順で実装します。
 
 ```text
 std::array::Array<T>  先に検討する owned contiguous collection
-slice<T>              contiguous mutable view
-slice<const T>        contiguous read-only view
+[]T                   contiguous slice value
+&[]T                  shared borrowed slice
+&var []T              mutable borrowed slice
 std::map::Map<K, V>   self-host compiler 向け symbol table
 std::set::Set<T>      後続 phase
 ```
@@ -1586,14 +1587,14 @@ allocation-free な read-only byte helper から始めます。
 std::mem::page_allocator() -> Allocator
 std::mem::Box<T>(allocator: Allocator, value: T) -> !std::mem::Box<T>
 box.borrow() -> &T borrows self
-box.borrow_mut() -> &mut T borrows self
+box.borrow_mut() -> &var T borrows self
 box.deinit() -> void
-std::mem::len(bytes: []const u8) -> i64
-std::mem::byte_at(bytes: []const u8, index: i64) -> !u8
-std::mem::equal_bytes(left: []const u8, right: []const u8) -> bool
-std::mem::starts_with(bytes: []const u8, prefix: []const u8) -> bool
-std::mem::slice(bytes: []const u8, start: i64, end: i64) -> ![]const u8 borrows bytes
-std::mem::trim_ascii(bytes: []const u8) -> []const u8 borrows bytes
+std::mem::len(bytes: []u8) -> i64
+std::mem::byte_at(bytes: []u8, index: i64) -> !u8
+std::mem::equal_bytes(left: []u8, right: []u8) -> bool
+std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool
+std::mem::slice(bytes: []u8, start: i64, end: i64) -> ![]u8 borrows bytes
+std::mem::trim_ascii(bytes: []u8) -> []u8 borrows bytes
 ```
 
 `std::mem::page_allocator()` は v0.2 の安定 allocator capability factory です。
@@ -1630,7 +1631,7 @@ array.capacity() -> i64
 array.get(index: i64) -> !T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
-array.at_mut(index: i64) -> !&mut T borrows self
+array.at_mut(index: i64) -> !&var T borrows self
 array.set(index: i64, value: T) -> !void
 array.deinit() -> void
 ```
@@ -1656,15 +1657,15 @@ v0.2 の `std::map::Map<K, V>` は、self-host compiler の symbol table と
 scope lookup に必要な最小 owned map です。
 
 ```text
-std::map::Map<[]const u8, V>(allocator: Allocator) -> std::map::Map<[]const u8, V>
-map.insert(key: []const u8, value: V) -> !void
-map.get(key: []const u8) -> !V
-map.contains(key: []const u8) -> bool
+std::map::Map<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
+map.insert(key: []u8, value: V) -> !void
+map.get(key: []u8) -> !V
+map.contains(key: []u8) -> bool
 map.len() -> i64
 map.deinit() -> void
 ```
 
-v0.2 では key type は `[]const u8` 限定です。
+v0.2 では key type は `[]u8` 限定です。
 `insert` は key bytes を owned map 内に copy するため、source key を move しません。
 `get` は missing key を `!V` の error として返します。
 v0.2 の value type は copy type 限定です。
@@ -1679,13 +1680,13 @@ v0.2 の `std::testing` は、self-host compiler component test 用の
 ```text
 std::testing::expect(condition: bool) -> void
 std::testing::expect_equal<T>(expected: T, actual: T) -> void
-std::testing::fail(message: []const u8) -> !void
+std::testing::fail(message: []u8) -> !void
 ```
 
 `expect` は test assertion 用の void helper です。
 condition failure は `std::builtin::test_fail` 経由で runtime error として停止し、
 test source は assertion ごとの `try` を書きません。
-`fail` は caller-provided `[]const u8` を通常の `!void` error として返します。
+`fail` は caller-provided `[]u8` を通常の `!void` error として返します。
 unreachable branch など、呼び出し側の error-union 経路へ明示的に戻したい場合に使います。
 `expect_equal<T>` は明示 static 引数付きの generic assertion です。
 failure は `expected ... got ...` 形式の diagnostic を出し、assertion ごとの `try` は不要です。
@@ -1713,7 +1714,7 @@ interpreter は同期実行でもよいですが、将来の実並行 runtime �
 ownership / borrow rule を維持できる必要があります。
 
 ```kizu
-fn read_config(io: Io, path: []const u8) -> ![]const u8 {
+fn read_config(io: Io, path: []u8) -> ![]u8 {
     return std::fs::read_file(io, path);
 }
 ```
@@ -1753,7 +1754,7 @@ std::thread::scoped<T>    scoped thread boundary
 std::sync::Mutex<T>       explicit shared mutable state wrapper
 std::atomic::Atomic<T>   seq_cst-only atomic primitive
 Io                        explicit I/O capability
-std::fs::read_file        explicit-Io file read returning ![]const u8
+std::fs::read_file        explicit-Io file read returning ![]u8
 std::fs::write_file       explicit-Io file write returning !void
 std::path                 pure path helpers with no hidden I/O
 std::process              explicit process argv/env helpers
@@ -1813,7 +1814,7 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 `std::fs`:
 
-* `std::fs::read_file(io, path)` は `![]const u8` を返す
+* `std::fs::read_file(io, path)` は `![]u8` を返す
 * `std::fs::write_file(io, path, bytes)` は `!void` を返す
 * `std::fs::exists(io, path)` は `!bool` を返す
 * `std::fs::metadata(io, path)` は `!std::fs::Metadata` を返す
@@ -1822,8 +1823,8 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `std::fs::remove_dir(io, path)` は `!void` を返す
 * `std::fs::remove_file(io, path)` は `!void` を返す
 * `std::fs::Metadata` は v0.2 では `size: i64` と `is_dir: bool` だけを持つ
-* `std::fs::DirEntry` は v0.2 では `name: []const u8`、`path: []const u8`、`is_dir: bool` だけを持つ
-* `path` と `bytes` は caller 側の `[]const u8` を保持しない read-only borrow
+* `std::fs::DirEntry` は v0.2 では `name: []u8`、`path: []u8`、`is_dir: bool` だけを持つ
+* `path` と `bytes` は caller 側の `[]u8` を保持しない read-only borrow
 * I/O failure は `!T` error として返す
 * hidden global runtime や暗黙 blocking I/O は使わない
 * `std::io::failing()` は deterministic failing I/O として、テストで I/O error path を確認する
@@ -1832,9 +1833,9 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 * `std::path::join(allocator, left, right)` は `!std::string::String` を返す
 * `std::path::clean(allocator, path)` は `!std::string::String` を返す
-* `std::path::basename(path: []const u8) -> []const u8 borrows path`
-* `std::path::dirname(path: []const u8) -> []const u8 borrows path`
-* `std::path::extension(path: []const u8) -> []const u8 borrows path`
+* `std::path::basename(path: []u8) -> []u8 borrows path`
+* `std::path::dirname(path: []u8) -> []u8 borrows path`
+* `std::path::extension(path: []u8) -> []u8 borrows path`
 * path helper は pure helper であり、filesystem を読まない
 * `join` と `clean` は owned buffer を構築するため、allocator を明示し、allocation
   failure を `!T` error として返す
@@ -1843,11 +1844,11 @@ let atomic = std::atomic::Atomic<i64>(0);
 
 * `std::io::write_stdout(io, bytes)` は `!void` を返す
 * `std::io::write_stderr(io, bytes)` は `!void` を返す
-* `std::io::read_stdin(io)` は `![]const u8` を返す
+* `std::io::read_stdin(io)` は `![]u8` を返す
 * stdio helper は `Io` capability を必ず要求する
 * `std::process::arg_count()` は `i64` を返す
-* `std::process::arg(index)` は `![]const u8` を返す
-* `std::process::env(name)` は `![]const u8` を返す
+* `std::process::arg(index)` は `![]u8` を返す
+* `std::process::env(name)` は `![]u8` を返す
 * `std::process::exit_code(code)` は `i64` を返す
 * `std::process` helper は hidden I/O を持たない
 
@@ -1867,7 +1868,7 @@ let atomic = std::atomic::Atomic<i64>(0);
 * `std::task::partition_mut(init: i64, count: i64)` creates disjoint `i64` output slots
 * `partition.at(i)` reads or writes one checked slot
 * `std::task::parallel_map(io, partition, start, end, worker)` takes `partition`
-  as `&mut Partition` and writes `worker(i)` to slot `i`
+  as `&var Partition` and writes `worker(i)` to slot `i`
 * `std::task::LocalBuffer` is the trusted boundary for worker-local scratch
 * first error propagation uses the existing `!void` / `try` model
 * the interpreter may execute workers sequentially while preserving the API contract
@@ -2048,7 +2049,7 @@ kizu/
 ```text
 identifier
 integer literal
-[]const u8 literal
+[]u8 literal
 keyword
 operator
 punctuation

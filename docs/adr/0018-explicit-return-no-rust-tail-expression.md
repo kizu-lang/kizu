@@ -35,7 +35,7 @@ fn add(a: i64, b: i64) -> i64 {
 早期 return が必要な場合は `return` を書く。
 
 ```kizu
-fn log(message: []const u8) -> void {
+fn log(message: []u8) -> void {
     print(message);
 }
 ```

@@ -38,8 +38,8 @@ fn main() { print(add(1, 2)); }`,
 
 // TestCheckAcceptsContractImpl checks explicit contract implementation syntax.
 func TestCheckAcceptsContractImpl(t *testing.T) {
-	source := `struct Bytes { text: []const u8 }
-struct File { name: []const u8 }
+	source := `struct Bytes { text: []u8 }
+struct File { name: []u8 }
 contract Writer {
     fn write(self: &Self, bytes: &Bytes) -> !i64;
 }
@@ -68,8 +68,8 @@ fn main() -> !void {
 
 // TestCheckRejectsIncompleteContractImpl checks contract method validation.
 func TestCheckRejectsIncompleteContractImpl(t *testing.T) {
-	source := `struct Bytes { text: []const u8 }
-struct File { name: []const u8 }
+	source := `struct Bytes { text: []u8 }
+struct File { name: []u8 }
 contract Writer {
     fn write(self: &Self, bytes: &Bytes) -> !i64;
 }
@@ -109,14 +109,14 @@ fn main() { print(add(1)); }`,
 			name: "arg type",
 			source: `fn take(a: i64) -> i64 { return a ;}
 fn main() { print(take("no")); }`,
-			want: "arg 1 of `take` expects i64, got []const u8",
+			want: "arg 1 of `take` expects i64, got []u8",
 		},
 		{
 			name: "return type",
 			source: `fn bad() -> i64 {
     return "no";
 }`,
-			want: "return expects i64, got []const u8",
+			want: "return expects i64, got []u8",
 		},
 	}
 	runErrorCases(t, cases)
@@ -233,7 +233,7 @@ fn main() {}`
 
 // TestCheckAcceptsMapTypeDecl checks v0.2 two-argument Map type spelling.
 func TestCheckAcceptsMapTypeDecl(t *testing.T) {
-	source := `fn use_table(table: std::map::Map<[]const u8, i64>) -> void {
+	source := `fn use_table(table: std::map::Map<[]u8, i64>) -> void {
     return;
 }
 fn main() {}`
@@ -263,7 +263,7 @@ fn main() {}`,
     return;
 }
 fn main() {}`,
-			want: "std::map::Map key type must be []const u8 in v0.2",
+			want: "std::map::Map key type must be []u8 in v0.2",
 		},
 	}
 	runErrorCases(t, cases)
@@ -272,7 +272,7 @@ fn main() {}`,
 // TestCheckAcceptsStructDeclarations checks Phase 5 struct declarations.
 func TestCheckAcceptsStructDeclarations(t *testing.T) {
 	source := `struct User {
-    name: []const u8,
+    name: []u8,
     age: i64,
 }
 fn take(user: User) {}
@@ -284,7 +284,7 @@ fn main() {}`
 
 // TestCheckAcceptsBorrowReturnProvenance checks borrowed slice return syntax.
 func TestCheckAcceptsBorrowReturnProvenance(t *testing.T) {
-	source := `fn first(bytes: []const u8) -> []const u8 borrows bytes {
+	source := `fn first(bytes: []u8) -> []u8 borrows bytes {
     return bytes[0..1];
 }
 fn main() {}`
@@ -298,7 +298,7 @@ func TestCheckAcceptsBorrowProvenanceReturns(t *testing.T) {
 	source := `fn shared(value: &i64) -> &i64 borrows value {
     return value;
 }
-fn mutable(value: &mut i64) -> &mut i64 borrows value {
+fn mutable(value: &var i64) -> &var i64 borrows value {
     return value;
 }
 fn main() {}`
@@ -321,7 +321,7 @@ func TestCheckRejectsBorrowProvenanceDeclarationErrors(t *testing.T) {
 		},
 		{
 			name:   "borrow field rejected",
-			source: `struct View { bytes: &[]const u8 } fn main() {}`,
+			source: `struct View { bytes: &[]u8 } fn main() {}`,
 			want:   "borrow field `View.bytes` cannot store borrow",
 		},
 		{
@@ -342,14 +342,14 @@ func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
 	}{
 		{
 			name: "return source mismatch",
-			source: `fn bad(left: []const u8, right: []const u8) -> []const u8 borrows left {
+			source: `fn bad(left: []u8, right: []u8) -> []u8 borrows left {
     return right;
 }`,
 			want: "return borrows `left` but returned value is not tied to that source",
 		},
 		{
 			name:   "explicit lifetime type rejected",
-			source: `fn bad(bytes: []'a const u8) -> void { return; }`,
+			source: `fn bad(bytes: []'a u8) -> void { return; }`,
 			want:   "explicit lifetime syntax is not supported",
 		},
 	}
@@ -487,7 +487,7 @@ fn main() {
 // TestCheckAcceptsMatchWildcard checks fallback arms preserve exhaustiveness.
 func TestCheckAcceptsMatchWildcard(t *testing.T) {
 	source := `enum Color { Red, Green, Blue }
-union Shape { Point, Circle(i64), Label([]const u8), }
+union Shape { Point, Circle(i64), Label([]u8), }
 fn describe(shape: &Shape) -> void {
     match shape {
         Circle(radius) => print(radius);,
@@ -540,7 +540,7 @@ func TestCheckAcceptsTaggedUnionMatch(t *testing.T) {
 	source := `union Shape {
     Point,
     Circle(i64),
-    Label([]const u8),
+    Label([]u8),
 }
 fn describe(shape: &Shape) -> void {
     match shape {
@@ -557,10 +557,10 @@ fn main() {
 	}
 }
 
-// TestCheckRejectsMutableBorrowTypeErrors checks &mut requires mutable locals.
+// TestCheckRejectsMutableBorrowTypeErrors checks &var requires mutable locals.
 func TestCheckRejectsMutableBorrowTypeErrors(t *testing.T) {
-	source := `struct User { name: []const u8 }
-fn update(user: &mut User) -> void { print(user.name); }
+	source := `struct User { name: []u8 }
+fn update(user: &var User) -> void { print(user.name); }
 fn main() {
     let user = User { name: "alice" };
     update(user);
@@ -569,16 +569,16 @@ fn main() {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "&mut argument `user` must be mutable") {
+	if !strings.Contains(err.Error(), "&var argument `user` must be mutable") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
 
-// TestCheckAcceptsMutableBorrowForwarding checks call-scoped &mut reborrows.
+// TestCheckAcceptsMutableBorrowForwarding checks call-scoped &var reborrows.
 func TestCheckAcceptsMutableBorrowForwarding(t *testing.T) {
-	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) -> void { user.name = "bob" ;}
-fn outer(user: &mut User) -> void {
+	source := `struct User { name: []u8 }
+fn rename(user: &var User) -> void { user.name = "bob" ;}
+fn outer(user: &var User) -> void {
     rename(user);
     user.name = "carol";
 }
@@ -593,8 +593,8 @@ fn main() -> void {
 
 // TestCheckRejectsSharedBorrowForwarding rejects shared-to-mutable reborrows.
 func TestCheckRejectsSharedBorrowForwarding(t *testing.T) {
-	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) -> void { user.name = "bob" ;}
+	source := `struct User { name: []u8 }
+fn rename(user: &var User) -> void { user.name = "bob" ;}
 fn outer(user: &User) -> void {
     rename(user);
 }`
@@ -602,15 +602,15 @@ fn outer(user: &User) -> void {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "&mut argument `user` must be mutable") {
+	if !strings.Contains(err.Error(), "&var argument `user` must be mutable") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
 
 // TestCheckFieldAndDerefAssignment validates mutable assignment targets.
 func TestCheckFieldAndDerefAssignment(t *testing.T) {
-	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) -> void { user.name = "bob" ;}
+	source := `struct User { name: []u8 }
+fn rename(user: &var User) -> void { user.name = "bob" ;}
 fn main() -> void {
     var user = User { name: "alice" };
     user.name = "carol";
@@ -630,7 +630,7 @@ func TestCheckRejectsInvalidFieldAssignment(t *testing.T) {
 	}{
 		{
 			name: "immutable field",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() -> void {
     let user = User { name: "alice" };
     user.name = "bob";
@@ -639,7 +639,7 @@ fn main() -> void {
 		},
 		{
 			name: "shared borrow field",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn rename(user: &User) -> void { user.name = "bob" ;}`,
 			want: "cannot assign field through shared borrow `user`",
 		},
@@ -661,7 +661,7 @@ fn main() {
     let shape = Shape::Circle("large");
     print(shape);
 }`,
-			want: "union variant `Shape::Circle` expects i64, got []const u8",
+			want: "union variant `Shape::Circle` expects i64, got []u8",
 		},
 		{
 			name: "exhaustiveness",
@@ -790,7 +790,7 @@ fn main() {
 // TestCheckAcceptsArenaHandle checks Phase 6 arena and handle types.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -807,7 +807,7 @@ fn main() {
 // TestCheckAcceptsDeferredArenaCleanup checks block-exit cleanup registration.
 func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 	source := `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -844,7 +844,7 @@ func TestCheckRejectsArenaDeinitErrors(t *testing.T) {
 	}{
 		{
 			name: "arg",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -854,7 +854,7 @@ fn main() {
 		},
 		{
 			name: "field receiver",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -870,7 +870,7 @@ fn main() {
 
 // TestCheckAcceptsOwnerFieldCleanup allows direct field cleanup inside owner deinit.
 func TestCheckAcceptsOwnerFieldCleanup(t *testing.T) {
-	source := `struct User { name: []const u8 }
+	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 impl Registry {
     fn deinit(self: Registry) -> void {
@@ -906,7 +906,7 @@ fn main() {
 
 // TestCheckAcceptsRawPointerDerefSyntax checks explicit unsafe pointer dereference.
 func TestCheckAcceptsRawPointerDerefSyntax(t *testing.T) {
-	source := `struct Node { tag: i64, name: []const u8 }
+	source := `struct Node { tag: i64, name: []u8 }
 fn read_tag(node: ptr<const Node>) -> i64 {
     unsafe {
         return node.*.tag;
@@ -1117,7 +1117,7 @@ func TestCheckRejectsCastErrors(t *testing.T) {
     let x = cast<i32>("no");
     print(x);
 }`,
-			want: "cannot cast []const u8 to i32",
+			want: "cannot cast []u8 to i32",
 		},
 		{
 			name: "bool is not numeric",
@@ -1129,7 +1129,7 @@ func TestCheckRejectsCastErrors(t *testing.T) {
 		},
 		{
 			name: "handle is not pointer",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -1141,7 +1141,7 @@ fn main() {
 		},
 		{
 			name: "arena non allocator",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let users = std::arena::Arena<User>(1);
     print(users);
@@ -1208,7 +1208,7 @@ func TestCheckAcceptsErrorFromStringView(t *testing.T) {
 // TestCheckAcceptsTypedErrorCast checks explicit untyped-to-typed error mapping.
 func TestCheckAcceptsTypedErrorCast(t *testing.T) {
 	source := `union CompileError {
-    Message([]const u8),
+    Message([]u8),
 }
 fn lower(ok: bool) -> !i64 {
     if ok {
@@ -1254,7 +1254,7 @@ fn main() {
 			source: `fn main() -> !i64 {
     return error(1);
 }`,
-			want: "`error` expects []const u8",
+			want: "`error` expects []u8",
 		},
 		{
 			name: "typed cast requires message variant",
@@ -1267,7 +1267,7 @@ fn lower() -> !i64 {
 fn parse() -> CompileError!i64 {
     return try cast<CompileError!i64>(lower());
 }`,
-			want: "typed error cast requires CompileError::Message([]const u8)",
+			want: "typed error cast requires CompileError::Message([]u8)",
 		},
 	}
 	runErrorCases(t, cases)

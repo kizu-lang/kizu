@@ -981,8 +981,8 @@ func (r typeResolver) resolve(name string) (string, error) {
 	switch {
 	case strings.HasPrefix(name, "!"):
 		return r.resolvePrefixed(name, "!")
-	case strings.HasPrefix(name, "&mut "):
-		return r.resolvePrefixed(name, "&mut ")
+	case strings.HasPrefix(name, "&var "):
+		return r.resolvePrefixed(name, "&var ")
 	case strings.HasPrefix(name, "&"):
 		return r.resolvePrefixed(name, "&")
 	case strings.HasPrefix(name, "?"):

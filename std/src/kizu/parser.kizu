@@ -93,9 +93,9 @@ pub fn parse_program(
 
 fn parse_program_with_declarations(
     allocator: Allocator,
-    declarations: &mut std::array::Array<std::kizu::ast::NodeId>,
+    declarations: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     first: std::kizu::lexer::Token
 ) -> !std::kizu::ast::ParseResult {
     var token = first;
@@ -118,7 +118,7 @@ fn parse_program_with_declarations(
 fn parse_top_level_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     return std::kizu::parser::parse_decl_with_visibility(allocator, ast, text, token, false);
@@ -127,7 +127,7 @@ fn parse_top_level_decl(
 fn parse_decl_with_visibility(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     public: bool
 ) -> !ParseNode {
@@ -149,10 +149,10 @@ fn parse_decl_with_visibility(
         Struct => return std::kizu::parser::parse_struct_decl(allocator, ast, text, token, public);,
         Enum => return std::kizu::parser::parse_enum_decl(allocator, ast, text, token, public);,
         Union => return std::kizu::parser::parse_union_decl(allocator, ast, text, token, public);,
+        Ident => return std::kizu::parser::parse_ident_top_level_decl(ast, text, token);,
         Eof => return error("expected declaration");,
         Return => return error("expected declaration");,
         Defer => return error("expected declaration");,
-        Ident => return error("expected declaration");,
         Lifetime => return error("expected declaration");,
         Number => return error("expected declaration");,
         String => return error("expected declaration");,
@@ -205,10 +205,70 @@ fn parse_decl_with_visibility(
 }
 }
 
+fn parse_ident_top_level_decl(
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    if try std::kizu::parser::is_token_text(text, token, "impl") {
+        return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
+    }
+    if try std::kizu::parser::is_token_text(text, token, "contract") {
+        return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
+    }
+    return error("expected declaration");
+}
+
+fn parse_skipped_top_level_block(
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    var current = std::kizu::lexer::next_token(text, token);
+    while !std::kizu::parser::is_left_brace_token(current) {
+        if std::kizu::parser::is_eof_token(current) {
+            return error("expected left brace");
+        }
+        current = std::kizu::lexer::next_token(text, current);
+    }
+    let close = try std::kizu::parser::skip_balanced_block(text, current);
+    return std::kizu::parser::parse_node(
+        ast.add_empty(token.start),
+        std::kizu::lexer::next_token(text, close)
+    );
+}
+
+fn skip_balanced_block(
+    text: []u8,
+    open: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    var depth = 1;
+    var token = std::kizu::lexer::next_token(text, open);
+    while depth > 0 {
+        var handled = false;
+        if std::kizu::parser::is_left_brace_token(token) {
+            depth = depth + 1;
+            handled = true;
+        }
+        if !handled and std::kizu::parser::is_right_brace_token(token) {
+            depth = depth - 1;
+            if depth == 0 {
+                return token;
+            }
+            handled = true;
+        }
+        if !handled and std::kizu::parser::is_eof_token(token) {
+            return error("expected right brace");
+        }
+        token = std::kizu::lexer::next_token(text, token);
+    }
+    return error("expected right brace");
+}
+
 fn parse_public_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     pub_token: std::kizu::lexer::Token
 ) -> !ParseNode {
     return std::kizu::parser::parse_decl_with_visibility(
@@ -245,7 +305,7 @@ fn parse_fn_decl_result(
 fn parse_fn_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     fn_token: std::kizu::lexer::Token,
     public: bool,
     unsafe_decl: bool,
@@ -356,7 +416,7 @@ fn parse_empty_result(
 fn parse_fn_body_node(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     fn_token: std::kizu::lexer::Token,
     public: bool,
     unsafe_decl: bool,
@@ -407,7 +467,7 @@ fn parse_fn_body_node(
 fn parse_unsafe_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     unsafe_token: std::kizu::lexer::Token,
     public: bool
 ) -> !ParseNode {
@@ -496,7 +556,7 @@ fn parse_unsafe_decl(
 fn parse_extern_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     extern_token: std::kizu::lexer::Token,
     public: bool,
     unsafe_decl: bool
@@ -523,7 +583,7 @@ fn parse_extern_decl(
 
 fn parse_import_decl(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     import_token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let start = ast.begin_children();
@@ -537,7 +597,7 @@ fn parse_import_decl(
 
 fn parse_import_segments(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     first: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     var token = first;
@@ -552,7 +612,7 @@ fn parse_import_segments(
 fn parse_struct_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     struct_token: std::kizu::lexer::Token,
     public: bool
 ) -> !ParseNode {
@@ -578,7 +638,7 @@ fn parse_struct_decl(
 fn parse_struct_fields(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     var fields = std::array::Array<std::kizu::ast::NodeId>(allocator);
@@ -588,9 +648,9 @@ fn parse_struct_fields(
 }
 
 fn parse_struct_fields_with_array(
-    fields: &mut std::array::Array<std::kizu::ast::NodeId>,
+    fields: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     var token = std::kizu::lexer::next_token(text, open);
@@ -614,7 +674,7 @@ fn parse_struct_fields_with_array(
 
 fn parse_struct_field(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     var public = false;
@@ -642,7 +702,7 @@ fn parse_struct_field(
 fn parse_enum_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     enum_token: std::kizu::lexer::Token,
     public: bool
 ) -> !ParseNode {
@@ -662,7 +722,7 @@ fn parse_enum_decl(
 fn parse_enum_tags(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     var tags = std::array::Array<std::kizu::ast::NodeId>(allocator);
@@ -672,9 +732,9 @@ fn parse_enum_tags(
 }
 
 fn parse_enum_tags_with_array(
-    tags: &mut std::array::Array<std::kizu::ast::NodeId>,
+    tags: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     var token = std::kizu::lexer::next_token(text, open);
@@ -702,7 +762,7 @@ fn parse_enum_tags_with_array(
 fn parse_union_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     union_token: std::kizu::lexer::Token,
     public: bool
 ) -> !ParseNode {
@@ -728,7 +788,7 @@ fn parse_union_decl(
 fn parse_union_variants(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     var variants = std::array::Array<std::kizu::ast::NodeId>(allocator);
@@ -738,9 +798,9 @@ fn parse_union_variants(
 }
 
 fn parse_union_variants_with_array(
-    variants: &mut std::array::Array<std::kizu::ast::NodeId>,
+    variants: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     var token = std::kizu::lexer::next_token(text, open);
@@ -764,7 +824,7 @@ fn parse_union_variants_with_array(
 
 fn parse_union_variant(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(token);
@@ -784,7 +844,7 @@ fn parse_union_variant(
 
 fn parse_optional_variant_payload(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     if !std::kizu::parser::is_left_paren_token(token) {
@@ -812,7 +872,7 @@ fn name_node(ast: std::kizu::ast::Ast, token: std::kizu::lexer::Token) -> std::k
 }
 
 fn next_decl_item_token(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     if std::kizu::parser::is_block_close_token(token) {
@@ -826,7 +886,7 @@ fn next_decl_item_token(
 
 fn parse_optional_type_params(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseRange {
     if std::kizu::parser::is_lt_token(token) {
@@ -837,7 +897,7 @@ fn parse_optional_type_params(
 
 fn parse_type_params(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     let start = ast.begin_children();
@@ -864,7 +924,7 @@ fn parse_type_params(
 
 fn parse_required_params(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseRange {
     let open = try std::kizu::parser::expect_left_paren(token);
@@ -873,7 +933,7 @@ fn parse_required_params(
 
 fn parse_signature_return_type(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     if std::kizu::parser::is_arrow_token(token) {
@@ -888,7 +948,7 @@ fn parse_signature_return_type(
 
 fn parse_signature_return_borrow(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     has_return_type: bool
 ) -> !ParseNode {
@@ -911,7 +971,7 @@ fn parse_signature_return_borrow(
 fn parse_signature_body(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     require_body: bool
 ) -> !ParseNode {
@@ -924,7 +984,7 @@ fn parse_signature_body(
 
 fn parse_optional_params(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseRange {
     match token.kind {
@@ -994,7 +1054,7 @@ fn parse_optional_params(
 
 fn parse_params(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseRange {
     let first = std::kizu::lexer::next_token(text, open);
@@ -1065,7 +1125,7 @@ fn parse_params(
 
 fn parse_non_empty_params(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     first: std::kizu::lexer::Token
 ) -> !ParseRange {
     let child_start = ast.begin_children();
@@ -1079,7 +1139,7 @@ fn parse_non_empty_params(
 
 fn parse_param_list(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let param = try std::kizu::parser::parse_param(ast, text, token);
@@ -1155,7 +1215,7 @@ fn parse_param_list(
 
 fn parse_param_after_comma(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
@@ -1225,7 +1285,7 @@ fn parse_param_after_comma(
 
 fn parse_param(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     var is_comptime = false;
@@ -1253,7 +1313,7 @@ fn parse_param(
 }
 
 fn expect_colon(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
@@ -1323,7 +1383,7 @@ fn expect_colon(
 
 fn parse_optional_return_type(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
@@ -1397,7 +1457,7 @@ fn parse_optional_return_type(
 
 fn parse_type_name(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let end = try std::kizu::parser::parse_type_end(text, token);
@@ -1409,7 +1469,7 @@ fn parse_type_name(
 }
 
 fn parse_type_end(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
@@ -1484,7 +1544,7 @@ fn parse_type_end(
 }
 
 fn parse_named_type_end(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let base = try std::kizu::parser::parse_type_base_end(text, token);
@@ -1558,7 +1618,7 @@ fn parse_named_type_end(
 }
 
 fn parse_type_base_end(
-    text: []const u8,
+    text: []u8,
     first: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     var end = first;
@@ -1706,7 +1766,7 @@ fn expect_type_segment(
 }
 
 fn parse_borrow_type_end(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, token);
@@ -1718,7 +1778,7 @@ fn parse_borrow_type_end(
         Union => return error("expected borrowed type");,
         Extern => return error("expected borrowed type");,
         Lifetime => return error("explicit lifetime syntax is not supported");,
-        Mut => return std::kizu::parser::parse_type_end(
+        Var => return std::kizu::parser::parse_type_end(
             text,
             std::kizu::lexer::next_token(text, next)
         );,
@@ -1748,7 +1808,7 @@ fn parse_borrow_type_end(
         Asterisk => return error("expected borrowed type");,
         Eof => return error("expected borrowed type");,
             Let => return error("expected borrowed type");,
-        Var => return error("expected borrowed type");,
+        Mut => return error("expected borrowed type");,
         If => return error("expected borrowed type");,
         Else => return error("expected borrowed type");,
         While => return error("expected borrowed type");,
@@ -1779,12 +1839,12 @@ fn parse_borrow_type_end(
 }
 
 fn parse_lifetime_borrow_type_end(
-    text: []const u8,
+    text: []u8,
     lifetime: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, lifetime);
     match next.kind {
-        Mut => return std::kizu::parser::parse_type_end(
+        Var => return std::kizu::parser::parse_type_end(
             text,
             std::kizu::lexer::next_token(text, next)
         );,
@@ -1818,7 +1878,7 @@ fn parse_lifetime_borrow_type_end(
         GT => return error("expected borrowed type");,
         DoubleColon => return error("expected borrowed type");,
         Let => return error("expected borrowed type");,
-        Var => return error("expected borrowed type");,
+        Mut => return error("expected borrowed type");,
         If => return error("expected borrowed type");,
         Else => return error("expected borrowed type");,
         While => return error("expected borrowed type");,
@@ -1852,7 +1912,7 @@ fn parse_lifetime_borrow_type_end(
 }
 
 fn parse_slice_type_end(
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let close = std::kizu::lexer::next_token(text, open);
@@ -1925,7 +1985,7 @@ fn parse_slice_type_end(
 }
 
 fn parse_type_arg_end(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {
@@ -1994,7 +2054,7 @@ fn parse_type_arg_end(
 }
 
 fn parse_lifetime_type_arg_end(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, token);
@@ -2064,26 +2124,60 @@ fn parse_lifetime_type_arg_end(
 }
 
 fn parse_ident_type_arg_end(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
-    let is_const = try std::kizu::parser::is_token_text(text, token, "const");
-    if is_const {
-        return std::kizu::parser::parse_type_end(
+    return std::kizu::parser::parse_type_end(text, token);
+}
+
+fn parse_generic_type_arg_end(
+    text: []u8,
+    open: std::kizu::lexer::Token,
+    token: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    if std::kizu::parser::is_ident_kind(token) and
+        try std::kizu::parser::is_token_text(text, token, "const") {
+        if !try std::kizu::parser::generic_type_allows_const_arg(text, open) {
+            return error("expected static type argument");
+        }
+        return std::kizu::parser::parse_type_arg_end(
             text,
             std::kizu::lexer::next_token(text, token)
         );
     }
-    return std::kizu::parser::parse_type_end(text, token);
+    return std::kizu::parser::parse_type_arg_end(text, token);
+}
+
+fn generic_type_allows_const_arg(
+    text: []u8,
+    open: std::kizu::lexer::Token
+) -> !bool {
+    var current = std::kizu::lexer::first_token(text);
+    var previous = current;
+    while current.start < open.start and !std::kizu::parser::is_eof_token(current) {
+        previous = current;
+        current = std::kizu::lexer::next_token(text, current);
+    }
+    if !std::kizu::parser::is_ident_kind(previous) {
+        return false;
+    }
+    return std::kizu::parser::is_token_text(text, previous, "ptr");
+}
+
+fn is_ident_kind(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Ident => true,
+        _ => false,
+    };
 }
 
 fn parse_generic_type_end(
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     var current = std::kizu::lexer::next_token(text, open);
     while true {
-        let arg_end = try std::kizu::parser::parse_type_arg_end(text, current);
+        let arg_end = try std::kizu::parser::parse_generic_type_arg_end(text, open, current);
         let next = std::kizu::lexer::next_token(text, arg_end);
         match next.kind {
             Import => return error("expected comma or greater than");,
@@ -2153,7 +2247,7 @@ fn parse_generic_type_end(
 }
 
 fn next_generic_type_arg(
-    text: []const u8,
+    text: []u8,
     comma: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, comma);
@@ -2223,9 +2317,9 @@ fn next_generic_type_arg(
 }
 
 fn is_token_text(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
-    expected: []const u8
+    expected: []u8
 ) -> !bool {
     let value = try std::mem::slice(text, token.start, token.end);
     return std::mem::equal_bytes(value, expected);
@@ -2234,7 +2328,7 @@ fn is_token_text(
 fn parse_optional_block(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
@@ -2305,7 +2399,7 @@ fn parse_optional_block(
 fn parse_block(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseNode {
     var statements = std::array::Array<std::kizu::ast::NodeId>(allocator);
@@ -2322,9 +2416,9 @@ fn parse_block(
 
 fn parse_block_with_statements(
     allocator: Allocator,
-    statements: &mut std::array::Array<std::kizu::ast::NodeId>,
+    statements: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseNode {
     var token = std::kizu::lexer::next_token(text, open);
@@ -2411,6 +2505,20 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
     }
 }
 
+fn is_left_brace_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        LBrace => true,
+        _ => false,
+    };
+}
+
+fn is_right_brace_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        RBrace => true,
+        _ => false,
+    };
+}
+
 fn is_block_close_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
         Import => return false;,
@@ -2481,7 +2589,7 @@ fn is_block_close_token(token: std::kizu::lexer::Token) -> bool {
 fn parse_statement(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
@@ -2552,7 +2660,7 @@ fn parse_statement(
 fn parse_ident_statement(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
@@ -2624,7 +2732,7 @@ fn parse_ident_statement(
 fn parse_labeled_statement(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     label_token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let label = ast.add_var(
@@ -2703,7 +2811,7 @@ fn parse_labeled_statement(
 fn parse_comptime_statement(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
@@ -2775,7 +2883,7 @@ fn parse_comptime_statement(
 fn parse_let(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     mutable: bool
 ) -> !ParseNode {
@@ -2804,7 +2912,7 @@ fn parse_let(
 fn parse_return(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
@@ -2876,7 +2984,7 @@ fn parse_return(
 fn parse_return_value(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     value_token: std::kizu::lexer::Token
 ) -> !ParseNode {
@@ -2888,7 +2996,7 @@ fn parse_return_value(
 
 fn finish_empty_return(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     semicolon: std::kizu::lexer::Token
 ) -> ParseNode {
@@ -2902,7 +3010,7 @@ fn finish_empty_return(
 fn parse_defer(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let expr = try std::kizu::parser::parse_expr(
@@ -2919,7 +3027,7 @@ fn parse_defer(
 fn parse_expr_or_assign_statement(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let expr = try std::kizu::parser::parse_expr(allocator, ast, text, token);
@@ -2991,7 +3099,7 @@ fn parse_expr_or_assign_statement(
 fn parse_assign(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     target: ParseNode
 ) -> !ParseNode {
     let value = try std::kizu::parser::parse_expr(
@@ -3012,7 +3120,7 @@ fn parse_assign(
 
 fn finish_expr_statement(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     expr: ParseNode,
     semicolon: std::kizu::lexer::Token
 ) -> ParseNode {
@@ -3036,7 +3144,7 @@ fn finish_expr_statement_before_separator(
 fn parse_if(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let condition = try std::kizu::parser::parse_expr(
@@ -3061,7 +3169,7 @@ fn parse_if(
 fn parse_else_block(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, token));
@@ -3071,7 +3179,7 @@ fn parse_else_block(
 fn parse_while(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     label: std::kizu::ast::NodeId
 ) -> !ParseNode {
@@ -3097,7 +3205,7 @@ fn parse_while(
 fn parse_for(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     label: std::kizu::ast::NodeId
 ) -> !ParseNode {
@@ -3138,7 +3246,7 @@ fn parse_for(
 
 fn parse_break(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let label = try std::kizu::parser::parse_optional_branch_label(ast, text, token);
@@ -3149,7 +3257,7 @@ fn parse_break(
 
 fn parse_continue(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let label = try std::kizu::parser::parse_optional_branch_label(ast, text, token);
@@ -3160,7 +3268,7 @@ fn parse_continue(
 
 fn parse_branch_label(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     colon: std::kizu::lexer::Token
 ) -> !ParseNode {
     let label_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, colon));
@@ -3174,7 +3282,7 @@ fn parse_branch_label(
 fn parse_unsafe(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, token));
@@ -3187,7 +3295,7 @@ fn parse_unsafe(
 fn parse_comptime_if(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     comptime_token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let if_token = std::kizu::lexer::next_token(text, comptime_token);
@@ -3213,7 +3321,7 @@ fn parse_comptime_if(
 fn parse_match(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let value = try std::kizu::parser::parse_expr(
@@ -3231,9 +3339,9 @@ fn parse_match(
 
 fn parse_match_with_arms(
     allocator: Allocator,
-    arms: &mut std::array::Array<std::kizu::ast::NodeId>,
+    arms: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     match_token: std::kizu::lexer::Token,
     value: ParseNode,
     open: std::kizu::lexer::Token
@@ -3259,7 +3367,7 @@ fn parse_match_with_arms(
 fn parse_match_arm(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     pattern_token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let pattern = ast.add_var(
@@ -3287,7 +3395,7 @@ fn parse_match_arm(
 
 fn parse_match_binding(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     open: std::kizu::lexer::Token
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, open));
@@ -3302,7 +3410,7 @@ fn parse_match_binding(
 fn parse_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     return std::kizu::parser::parse_binary_expr(allocator, ast, text, token, 0);
@@ -3311,7 +3419,7 @@ fn parse_expr(
 fn parse_binary_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     min_precedence: i64
 ) -> !ParseNode {
@@ -3353,7 +3461,7 @@ fn finish_binary(
 fn parse_primary(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
@@ -3396,7 +3504,7 @@ fn parse_primary(
         For => return error("expected expression");,
         Break => return error("expected expression");,
         Continue => return error("expected expression");,
-        Match => return error("expected expression");,
+        Match => return std::kizu::parser::parse_match(allocator, ast, text, token);,
         Unsafe => return error("expected expression");,
         And => return error("expected expression");,
         Or => return error("expected expression");,
@@ -3433,7 +3541,7 @@ fn parse_primary(
 
 fn parse_int(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> ParseNode {
     let node = ast.add_int(
@@ -3445,7 +3553,7 @@ fn parse_int(
 
 fn parse_string(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> ParseNode {
     let node = ast.add_string(
@@ -3457,7 +3565,7 @@ fn parse_string(
 
 fn parse_bool(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     value: bool
 ) -> ParseNode {
@@ -3467,7 +3575,7 @@ fn parse_bool(
 
 fn parse_ident(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> ParseNode {
     let node = ast.add_var(
@@ -3480,7 +3588,7 @@ fn parse_ident(
 fn parse_ident_primary(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
@@ -3501,7 +3609,7 @@ fn parse_ident_primary(
 fn parse_cast_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let open = std::kizu::lexer::next_token(text, token);
@@ -3537,7 +3645,7 @@ fn parse_cast_expr(
 fn parse_grouped_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let expr = try std::kizu::parser::parse_expr(
@@ -3558,7 +3666,7 @@ fn parse_grouped_expr(
 fn parse_try_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let value = try std::kizu::parser::parse_binary_expr(
@@ -3576,7 +3684,7 @@ fn parse_try_expr(
 fn parse_comptime_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let value = try std::kizu::parser::parse_expr(
@@ -3593,7 +3701,7 @@ fn parse_comptime_expr(
 fn parse_prefix_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let op = try std::kizu::parser::prefix_op(text, token);
@@ -3605,7 +3713,7 @@ fn parse_prefix_expr(
 }
 
 fn prefix_right_start(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     let next = std::kizu::lexer::next_token(text, token);
@@ -3675,7 +3783,7 @@ fn prefix_right_start(
 }
 
 fn prefix_borrow_right_start(
-    text: []const u8,
+    text: []u8,
     next: std::kizu::lexer::Token
 ) -> std::kizu::lexer::Token {
     match next.kind {
@@ -3685,10 +3793,10 @@ fn prefix_borrow_right_start(
         Enum => return next;,
         Union => return next;,
         Extern => return next;,
-        Mut => return std::kizu::lexer::next_token(text, next);,
+        Mut => return next;,
         Fn => return next;,
         Let => return next;,
-        Var => return next;,
+        Var => return std::kizu::lexer::next_token(text, next);,
         Return => return next;,
         Defer => return next;,
         If => return next;,
@@ -3744,7 +3852,7 @@ fn prefix_borrow_right_start(
 }
 
 fn prefix_op(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::ast::PrefixOp {
     match token.kind {
@@ -3813,7 +3921,7 @@ fn prefix_op(
 }
 
 fn borrow_prefix_op(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> std::kizu::ast::PrefixOp {
     let next = std::kizu::lexer::next_token(text, token);
@@ -3824,10 +3932,10 @@ fn borrow_prefix_op(
         Enum => return std::kizu::ast::prefix_borrow();,
         Union => return std::kizu::ast::prefix_borrow();,
         Extern => return std::kizu::ast::prefix_borrow();,
-        Mut => return std::kizu::ast::prefix_mut_borrow();,
+        Mut => return std::kizu::ast::prefix_borrow();,
         Fn => return std::kizu::ast::prefix_borrow();,
         Let => return std::kizu::ast::prefix_borrow();,
-        Var => return std::kizu::ast::prefix_borrow();,
+        Var => return std::kizu::ast::prefix_mut_borrow();,
         Return => return std::kizu::ast::prefix_borrow();,
         Defer => return std::kizu::ast::prefix_borrow();,
         If => return std::kizu::ast::prefix_borrow();,
@@ -3885,7 +3993,7 @@ fn borrow_prefix_op(
 fn parse_postfix_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     first: ParseNode
 ) -> !ParseNode {
     var left = first;
@@ -3910,7 +4018,7 @@ fn parse_postfix_expr(
 fn parse_one_postfix(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> !ParseNode {
     match left.next.kind {
@@ -3981,7 +4089,7 @@ fn parse_one_postfix(
 fn parse_type_apply_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> !ParseNode {
     var type_args = std::array::Array<std::kizu::ast::NodeId>(allocator);
@@ -3996,9 +4104,9 @@ fn parse_type_apply_expr(
 }
 
 fn parse_type_apply_expr_with_args(
-    type_args: &mut std::array::Array<std::kizu::ast::NodeId>,
+    type_args: &var std::array::Array<std::kizu::ast::NodeId>,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> !ParseNode {
     var current = std::kizu::lexer::next_token(text, left.next);
@@ -4032,7 +4140,7 @@ fn parse_type_apply_expr_with_args(
 fn parse_index_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> !ParseNode {
     let first = std::kizu::lexer::next_token(text, left.next);
@@ -4066,7 +4174,7 @@ fn parse_index_expr(
 fn parse_open_start_slice(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode,
     range_token: std::kizu::lexer::Token
 ) -> !ParseNode {
@@ -4083,7 +4191,7 @@ fn parse_open_start_slice(
 fn parse_closed_start_slice(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode,
     start: ParseNode,
     range_token: std::kizu::lexer::Token
@@ -4100,7 +4208,7 @@ fn parse_closed_start_slice(
 
 fn finish_slice_expr(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode,
     start: std::kizu::ast::NodeId,
     end: std::kizu::ast::NodeId,
@@ -4120,7 +4228,7 @@ fn finish_slice_expr(
 fn parse_struct_literal_expr(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> !ParseNode {
     var fields = std::array::Array<std::kizu::ast::NodeId>(allocator);
@@ -4136,10 +4244,10 @@ fn parse_struct_literal_expr(
 }
 
 fn parse_struct_literal_expr_with_fields(
-    fields: &mut std::array::Array<std::kizu::ast::NodeId>,
+    fields: &var std::array::Array<std::kizu::ast::NodeId>,
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> !ParseNode {
     var current = std::kizu::lexer::next_token(text, left.next);
@@ -4172,7 +4280,7 @@ fn parse_struct_literal_expr_with_fields(
 fn parse_struct_field_init(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(token);
@@ -4195,7 +4303,7 @@ fn parse_struct_field_init(
 }
 
 fn next_struct_literal_field_token(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     if std::kizu::parser::is_single_token_byte(text, token, cast<u8>(125)) {
@@ -4209,7 +4317,7 @@ fn next_struct_literal_field_token(
 
 fn parse_field_expr(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     receiver: ParseNode,
     namespace: bool
 ) -> !ParseNode {
@@ -4230,7 +4338,7 @@ fn parse_field_expr(
 
 fn parse_dot_expr(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     receiver: ParseNode
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, receiver.next);
@@ -4242,7 +4350,7 @@ fn parse_dot_expr(
 
 fn parse_deref_expr(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     receiver: ParseNode,
     asterisk: std::kizu::lexer::Token
 ) -> ParseNode {
@@ -4257,7 +4365,7 @@ fn parse_deref_expr(
 fn parse_call(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     callee: std::kizu::ast::NodeId,
     open: std::kizu::lexer::Token
 ) -> !ParseNode {
@@ -4268,10 +4376,10 @@ fn parse_call(
 }
 
 fn parse_call_with_args(
-    args: &mut std::array::Array<std::kizu::ast::NodeId>,
+    args: &var std::array::Array<std::kizu::ast::NodeId>,
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     callee: std::kizu::ast::NodeId,
     open: std::kizu::lexer::Token
 ) -> !ParseNode {
@@ -4319,7 +4427,7 @@ fn empty_range(ast: std::kizu::ast::Ast, next: std::kizu::lexer::Token) -> Parse
 }
 
 fn is_single_token_byte(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     byte: u8
 ) -> bool {
@@ -4330,7 +4438,7 @@ fn is_single_token_byte(
 }
 
 fn is_double_token_byte(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token,
     first: u8,
     second: u8
@@ -4345,7 +4453,7 @@ fn is_double_token_byte(
 }
 
 fn expect_right_bracket_token(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     if std::kizu::parser::is_single_token_byte(text, token, cast<u8>(93)) {
@@ -4356,7 +4464,7 @@ fn expect_right_bracket_token(
 
 fn is_type_apply_start(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> bool {
     if !std::kizu::parser::is_lt_token(left.next) {
@@ -4368,7 +4476,7 @@ fn is_type_apply_start(
 
 fn is_struct_literal_start(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     left: ParseNode
 ) -> bool {
     if !std::kizu::parser::is_single_token_byte(text, left.next, cast<u8>(123)) {
@@ -4378,7 +4486,7 @@ fn is_struct_literal_start(
     return std::kizu::parser::is_struct_literal_type_span(text, &node.span);
 }
 
-fn is_namespace_path_span(source: []const u8, span: &std::kizu::ast::Span) -> bool {
+fn is_namespace_path_span(source: []u8, span: &std::kizu::ast::Span) -> bool {
     var index = span.start;
     var need_segment = true;
     var saw_namespace = false;
@@ -4405,7 +4513,7 @@ fn is_namespace_path_span(source: []const u8, span: &std::kizu::ast::Span) -> bo
     return saw_namespace;
 }
 
-fn is_struct_literal_type_span(source: []const u8, span: &std::kizu::ast::Span) -> bool {
+fn is_struct_literal_type_span(source: []u8, span: &std::kizu::ast::Span) -> bool {
     var index = span.start;
     var segment_start = span.start;
     var previous_segment_start = span.start;
@@ -4446,7 +4554,7 @@ fn is_struct_literal_type_span(source: []const u8, span: &std::kizu::ast::Span) 
     return true;
 }
 
-fn is_double_colon_at(source: []const u8, end: i64, index: i64) -> bool {
+fn is_double_colon_at(source: []u8, end: i64, index: i64) -> bool {
     if index + 1 >= end {
         return false;
     }
@@ -4668,7 +4776,7 @@ fn is_call_close_token(token: std::kizu::lexer::Token) -> bool {
 fn parse_optional_else(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
@@ -4738,7 +4846,7 @@ fn parse_optional_else(
 
 fn parse_optional_branch_label(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, token);
@@ -4809,7 +4917,7 @@ fn parse_optional_branch_label(
 
 fn parse_optional_match_binding(
     ast: std::kizu::ast::Ast,
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     match token.kind {
@@ -4878,7 +4986,7 @@ fn parse_optional_match_binding(
 }
 
 fn next_match_arm_token(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     if std::kizu::parser::is_block_close_token(token) {
@@ -5089,7 +5197,7 @@ fn expect_call_arg_start(token: std::kizu::lexer::Token) -> !std::kizu::lexer::T
 }
 
 fn next_call_arg_token(
-    text: []const u8,
+    text: []u8,
     token: std::kizu::lexer::Token
 ) -> !std::kizu::lexer::Token {
     match token.kind {

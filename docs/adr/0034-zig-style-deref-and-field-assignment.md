@@ -6,7 +6,7 @@ raw pointer dereference.
 
 ## Context
 
-Kizu v0.1 needs enough mutation semantics to make `var`, `&mut T`, and struct fields useful.
+Kizu v0.1 needs enough mutation semantics to make `var`, `&var T`, and struct fields useful.
 The language is intentionally Zig-leaning for low-level syntax, while keeping memory-safety
 checks explicit.
 
@@ -15,7 +15,7 @@ checks explicit.
 Kizu uses postfix `.*` for explicit dereference.
 
 ```kizu
-fn rename(user: &mut User) -> void {
+fn rename(user: &var User) -> void {
     user.*.name = "bob";
 }
 ```
@@ -35,7 +35,7 @@ The original v0.1 rules were:
 - Field assignment through a `let` binding is rejected.
 - Field assignment through a `var` binding is allowed.
 - Assignment through `&T` is rejected.
-- Assignment through `&mut T` is allowed with explicit `.*`.
+- Assignment through `&var T` is allowed with explicit `.*`.
 - v0.1 did not add automatic safe-borrow field access.
 
 ## Consequences

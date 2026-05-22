@@ -69,7 +69,7 @@ Kizu は低レベル制御を残しつつ、safe code の memory safety を優�
 std::io::blocking()  simple blocking I/O
 std::io::threaded()  thread-backed I/O and task execution
 std::io::failing()   test implementation that supports no external I/O
-std::fs::read_file   explicit-Io file read returning ![]const u8
+std::fs::read_file   explicit-Io file read returning ![]u8
 std::fs::write_file  explicit-Io file write returning !void
 ```
 

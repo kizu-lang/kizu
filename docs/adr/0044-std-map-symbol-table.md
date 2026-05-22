@@ -16,15 +16,15 @@ that can outlive their source buffer.
 `std::map::Map<K, V>` is introduced as a conservative owned map prototype.
 
 ```text
-std::map::Map<[]const u8, V>(allocator: Allocator) -> std::map::Map<[]const u8, V>
-map.insert(key: []const u8, value: V) -> !void
-map.get(key: []const u8) -> !V
-map.contains(key: []const u8) -> bool
+std::map::Map<[]u8, V>(allocator: Allocator) -> std::map::Map<[]u8, V>
+map.insert(key: []u8, value: V) -> !void
+map.get(key: []u8) -> !V
+map.contains(key: []u8) -> bool
 map.len() -> i64
 map.deinit() -> void
 ```
 
-The v0.2 implementation supports only `[]const u8` keys. `insert` copies the
+The v0.2 implementation supports only `[]u8` keys. `insert` copies the
 key bytes into owned map storage, so borrowed lookup keys never become stored
 references. Values are restricted to copy types in v0.2, which lets `get`
 return `!V` by value without moving out of the map or exposing long-lived

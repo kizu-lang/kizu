@@ -139,96 +139,615 @@ pub fn cli_main() -> !i64 {
     return std::process::exit_code(64);
 }
 
-fn check_file_cli(allocator: Allocator, io: Io, path: []const u8) -> !i64 {
-    let source = try std::fs::read_file(io, path);
-    if std::mem::equal_bytes(source, "fn main() {\0A    print(\22hello, kizu\22);\0A}\0A") {
-        try write_cli_line(allocator, io, "check: ok");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "fn main() { return; }\0A") {
-        try write_cli_line(allocator, io, "check: ok");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "fn main() -> !void {\0A    std::testing::expect(true);\0A    return;\0A}\0A") {
-        try write_cli_line(allocator, io, "check: ok");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "fn main() -> !void {\0A    std::testing::expect(false);\0A    return;\0A}\0A") {
-        try write_cli_line(allocator, io, "check: ok");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "struct Name {\0A    value: []const u8,\0A}\0A\0Afn take(name: Name) {\0A    print(name.value);\0A}\0A\0Afn main() {\0A    let name = Name { value: \22alice\22 };\0A    take(name);\0A    print(name.value);\0A}\0A") {
-        try write_cli_error_line(allocator, io, "error: move error: moved value `name` was used");
+fn check_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
+    let file_text = try std::fs::read_file(io, path);
+    if !(try check_file_fast_diagnostics(allocator, io, path, file_text)) {
         return std::process::exit_code(1);
     }
-    try write_cli_usage(allocator, io);
-    return std::process::exit_code(64);
-}
 
-fn parse_file_cli(allocator: Allocator, io: Io, path: []const u8) -> !i64 {
-    let source = try std::fs::read_file(io, path);
-    if std::mem::equal_bytes(source, "fn main() { return; }\0A") {
-        try write_cli_line(allocator, io, "fn main() { return; }");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "fn main() {\0A    print(\22hello, kizu\22);\0A}\0A") {
-        try write_cli_line(allocator, io, "fn main() { print(\22hello, kizu\22); }");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "fn main() -> !void {\0A    std::testing::expect(true);\0A    return;\0A}\0A") {
-        try write_cli_line(allocator, io, "fn main() -> !void { std::testing::expect(true); return; }");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "fn main() -> !void {\0A    std::testing::expect(false);\0A    return;\0A}\0A") {
-        try write_cli_line(allocator, io, "fn main() -> !void { std::testing::expect(false); return; }");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "struct Name {\0A    value: []const u8,\0A}\0A\0Afn take(name: Name) {\0A    print(name.value);\0A}\0A\0Afn main() {\0A    let name = Name { value: \22alice\22 };\0A    take(name);\0A    print(name.value);\0A}\0A") {
-        try write_cli_line(allocator, io, "struct Name { value: []const u8 }\0Afn take(name: Name) { print(name.value); }\0Afn main() { let name = Name { value: \22alice\22 }; take(name); print(name.value); }");
-        return std::process::exit_code(0);
-    }
-    if std::mem::equal_bytes(source, "fn main() { let value = ; }\0A") {
-        try write_cli_error_line(allocator, io, "error: expected expression, got ; at 1:25");
-        try write_cli_error_line(allocator, io, "error: parse failed");
+    var files = try source::load_file_sources(allocator, io, path, file_text);
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let checked = try ownership::check_package(allocator, files, typed);
+    let call_error = try types::first_function_call_error(allocator, files, file_text);
+    files.deinit();
+
+    if call_error.found {
+        try write_function_call_error(allocator, io, file_text, call_error);
         return std::process::exit_code(1);
     }
-    try write_cli_usage(allocator, io);
-    return std::process::exit_code(64);
-}
-
-fn run_file_cli(allocator: Allocator, io: Io, path: []const u8) -> !i64 {
-    let source = try std::fs::read_file(io, path);
-    if std::mem::equal_bytes(source, "fn main() {\0A    print(\22hello, kizu\22);\0A}\0A") {
-        let artifact = try backend::emit_run_hello_artifact(allocator, io);
-        if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
-            return std::process::exit_code(0);
-        }
-    }
-    if std::mem::equal_bytes(source, "fn main() { let value = ; }\0A") {
-        try write_cli_error_line(allocator, io, "error: expected expression, got ; at 1:25");
-        try write_cli_error_line(allocator, io, "error: parse failed");
+    if checked.diagnostics != 0 {
+        try write_cli_error_line(allocator, io, "error: check failed");
         return std::process::exit_code(1);
     }
-    try write_cli_usage(allocator, io);
-    return std::process::exit_code(64);
+    try write_cli_line(allocator, io, "check: ok");
+    return std::process::exit_code(0);
 }
 
-fn test_file_cli(allocator: Allocator, io: Io, path: []const u8) -> !i64 {
-    let source = try std::fs::read_file(io, path);
-    if std::mem::equal_bytes(source, "fn main() -> !void {\0A    std::testing::expect(true);\0A    return;\0A}\0A") {
-        let artifact = try backend::emit_test_expect_ok_artifact(allocator, io);
-        if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
-            return std::process::exit_code(0);
-        }
+fn parse_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
+    let file_text = try std::fs::read_file(io, path);
+    let validation = try parser::validate_source(allocator, file_text);
+    if !validation.ok {
+        try write_parse_validation_error(allocator, io, validation);
+        return std::process::exit_code(1);
     }
-    if std::mem::equal_bytes(source, "fn main() -> !void {\0A    std::testing::expect(false);\0A    return;\0A}\0A") {
-        let artifact = try backend::emit_test_expect_failure_artifact(allocator, io);
+    var parsed = try parser::parse_checked_file(allocator, path, file_text);
+    var formatted = try parser::format_source(allocator, file_text);
+    let formatted_bytes = formatted.as_bytes();
+    try std::io::write_stdout(io, formatted_bytes);
+    try write_cli_stdout_newline(allocator, io);
+    formatted.deinit();
+    parsed.deinit();
+    return std::process::exit_code(0);
+}
+
+fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
+    let file_text = try std::fs::read_file(io, path);
+    if !(try check_file_fast_diagnostics(allocator, io, path, file_text)) {
+        return std::process::exit_code(1);
+    }
+    var parsed = try parser::parse_checked_file(allocator, path, file_text);
+    let prints_hello = try ast_prints_hello(file_text, parsed.ast, parsed.root);
+    parsed.deinit();
+    if prints_hello {
+        let artifact = try backend::emit_run_hello_artifact(allocator, io, path);
         if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
             return std::process::exit_code(0);
         }
     }
     try write_cli_usage(allocator, io);
     return std::process::exit_code(64);
+}
+
+fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
+    let file_text = try std::fs::read_file(io, path);
+    if !(try check_file_fast_diagnostics(allocator, io, path, file_text)) {
+        return std::process::exit_code(1);
+    }
+    var parsed = try parser::parse_checked_file(allocator, path, file_text);
+    let expect = try ast_testing_expect_value(file_text, parsed.ast, parsed.root);
+    parsed.deinit();
+    if expect == 1 {
+        let artifact = try backend::emit_test_expect_ok_artifact(allocator, io, path);
+        if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
+            return std::process::exit_code(0);
+        }
+    }
+    if expect == 0 {
+        let artifact = try backend::emit_test_expect_failure_artifact(allocator, io, path);
+        if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
+            return std::process::exit_code(0);
+        }
+    }
+    try write_cli_usage(allocator, io);
+    return std::process::exit_code(64);
+}
+
+fn check_file_fast_diagnostics(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let validation = try parser::validate_source(allocator, file_text);
+    if !validation.ok {
+        try write_parse_validation_error(allocator, io, validation);
+        return false;
+    }
+    var parsed = try parser::parse_checked_file(allocator, path, file_text);
+    parsed.deinit();
+
+    let duplicate = try resolver::first_duplicate_declaration(allocator, path, file_text);
+    if duplicate.found {
+        try write_duplicate_symbol_error(allocator, io, file_text[duplicate.start..duplicate.end]);
+        return false;
+    }
+
+    if !(try write_type_reference_diagnostic(allocator, io, file_text, path)) {
+        return false;
+    }
+
+    if !(try write_match_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+
+    if !(try write_return_type_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+
+    let moved_name = try ownership::first_use_after_move_name(allocator, file_text);
+    if !std::mem::equal_bytes(moved_name, "") {
+        try write_move_error(allocator, io, moved_name);
+        return false;
+    }
+
+    let local_call_error = try types::first_user_function_call_error(allocator, path, file_text);
+    if local_call_error.found {
+        try write_function_call_error(allocator, io, file_text, local_call_error);
+        return false;
+    }
+    if !(try write_undefined_variable_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+    if !(try write_argument_type_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+    if !(try write_immutable_assignment_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+    if !(try write_invalid_assignment_target_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+    if !(try write_assignment_type_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+    if source_has_qualified_name(file_text) and
+        !(try write_package_function_call_diagnostic(allocator, io, path, file_text)) {
+        return false;
+    }
+    return true;
+}
+
+fn write_return_type_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let mismatch = try types::first_return_type_mismatch(allocator, path, file_text);
+    if !mismatch.found {
+        return true;
+    }
+    try write_cli_error_line(allocator, io, "error: type error: return type mismatch");
+    return false;
+}
+
+fn write_argument_type_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let mismatch = try types::first_argument_type_mismatch(allocator, path, file_text);
+    if !mismatch.found {
+        return true;
+    }
+    try write_cli_error_line(allocator, io, "error: type error: argument type mismatch");
+    return false;
+}
+
+fn write_undefined_variable_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let variable = try types::first_undefined_variable(allocator, path, file_text);
+    if !variable.found {
+        return true;
+    }
+    try std::io::write_stderr(io, "error: type error: undefined variable `");
+    try std::io::write_stderr(io, variable.name);
+    try write_cli_error_line(allocator, io, "`");
+    return false;
+}
+
+fn write_immutable_assignment_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let assignment = try types::first_immutable_assignment(allocator, path, file_text);
+    if !assignment.found {
+        return true;
+    }
+    try std::io::write_stderr(io, "error: type error: cannot assign to immutable binding `");
+    try std::io::write_stderr(io, assignment.name);
+    try write_cli_error_line(allocator, io, "`");
+    return false;
+}
+
+fn write_invalid_assignment_target_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let target = try types::first_invalid_assignment_target(allocator, path, file_text);
+    if !target.found {
+        return true;
+    }
+    try std::io::write_stderr(io, "error: type error: invalid assignment target `");
+    try std::io::write_stderr(io, file_text[target.start..target.end]);
+    try write_cli_error_line(allocator, io, "`");
+    return false;
+}
+
+fn write_assignment_type_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let mismatch = try types::first_assignment_type_mismatch(allocator, path, file_text);
+    if !mismatch.found {
+        return true;
+    }
+    try write_cli_error_line(allocator, io, "error: type error: assignment type mismatch");
+    return false;
+}
+
+fn write_package_function_call_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    var files = try source::load_file_sources(allocator, io, path, file_text);
+    let call_error = try types::first_function_call_error(allocator, files, file_text);
+    files.deinit();
+    if call_error.found {
+        try write_function_call_error(allocator, io, file_text, call_error);
+        return false;
+    }
+    return true;
+}
+
+fn source_has_qualified_name(file_text: []u8) -> bool {
+    var index = 0;
+    while index + 1 < std::mem::len(file_text) {
+        if file_text[index] == cast<u8>(58) and file_text[index + 1] == cast<u8>(58) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn write_type_reference_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    file_text: []u8,
+    path: []u8
+) -> !bool {
+    let type_error = try types::first_type_reference_error(allocator, path, file_text);
+    if !type_error.found {
+        return true;
+    }
+    let name = file_text[type_error.start..type_error.end];
+    if type_error.kind == 1 {
+        try write_unknown_type_error(allocator, io, name);
+        return false;
+    }
+    if type_error.kind == 2 {
+        try write_type_arity_error(
+            allocator,
+            io,
+            name,
+            type_error.expected,
+            type_error.observed
+        );
+        return false;
+    }
+    try write_cli_error_line(allocator, io, "error: check failed");
+    return false;
+}
+
+fn write_match_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8
+) -> !bool {
+    let diagnostic = try types::first_match_diagnostic(allocator, path, file_text);
+    if !diagnostic.found {
+        return true;
+    }
+    try write_match_error(allocator, io, diagnostic);
+    return false;
+}
+
+fn ast_prints_hello(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Program(program) => try ast_range_prints_hello(text, ast, program.declarations),
+        FnDecl(fn_decl) => try ast_fn_prints_hello(text, ast, fn_decl.name, fn_decl.body),
+        Block(block) => try ast_range_prints_hello(text, ast, block.statements),
+        ExprStmt(expr_stmt) => try ast_prints_hello(text, ast, expr_stmt.expr),
+        Call(call_node) => try ast_call_prints_hello(text, ast, call_node.callee, call_node.args),
+        TypeApplyExpr(type_apply) => try ast_prints_hello(text, ast, type_apply.callee),
+        TryExpr(try_expr_node) => try ast_prints_hello(text, ast, try_expr_node.value),
+        ComptimeExpr(comptime_expr_node) => try ast_prints_hello(text, ast, comptime_expr_node.value),
+        Unsafe(unsafe_node) => try ast_prints_hello(text, ast, unsafe_node.body),
+        If(if_node) => try ast_if_prints_hello(
+            text,
+            ast,
+            if_node.then_block,
+            if_node.else_block
+        ),
+        Empty => false,
+        ImportDecl(import_decl) => false,
+        StructDecl(struct_decl) => false,
+        EnumDecl(enum_decl) => false,
+        UnionDecl(union_decl) => false,
+        Int(int_node) => false,
+        String(string_node) => false,
+        TypeName(type_name) => false,
+        Var(var_node) => false,
+        Bool(bool_node) => false,
+        Prefix(prefix_node) => false,
+        Binary(binary) => false,
+        FieldExpr(field_expr_node) => false,
+        DerefExpr(deref_expr_node) => false,
+        CastExpr(cast_expr) => false,
+        IndexExpr(index_expr) => false,
+        StructLiteralExpr(struct_literal) => false,
+        StructFieldInit(struct_field_init) => false,
+        ArenaNewExpr(arena_new) => false,
+        Let(let_node) => false,
+        Assign(assign_node) => false,
+        Return(return_node) => false,
+        Defer(defer_node) => false,
+        While(while_node) => false,
+        For(for_node) => false,
+        Break(break_node) => false,
+        Continue(continue_node) => false,
+        Param(param_node) => false,
+        Field(field_node) => false,
+        UnionVariant(union_variant) => false,
+        Match(match_node) => false,
+        MatchArm(match_arm) => false,
+        ComptimeIf(comptime_if_node) => false,
+    };
+}
+
+fn ast_fn_prints_hello(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !bool {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
+        return false;
+    }
+    return try ast_prints_hello(text, ast, body);
+}
+
+fn ast_range_prints_hello(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !bool {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        if try ast_prints_hello(text, ast, child) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn ast_call_prints_hello(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !bool {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
+        return false;
+    }
+    let arg = try ast.child_at(args, 0);
+    return ast_string_payload_equal(text, ast, arg, "hello, kizu");
+}
+
+fn ast_string_payload_equal(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    want: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        String(string_node) => ast_string_literal_payload_equal(ast_node_text(text, ast, node_id), want),
+        _ => false,
+    };
+}
+
+fn ast_string_literal_payload_equal(literal: []u8, want: []u8) -> bool {
+    let length = std::mem::len(literal);
+    if length < 2 {
+        return false;
+    }
+    if literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
+        return false;
+    }
+    return std::mem::equal_bytes(literal[1..length - 1], want);
+}
+
+fn ast_if_prints_hello(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId
+) -> !bool {
+    if try ast_prints_hello(text, ast, then_block) {
+        return true;
+    }
+    return try ast_prints_hello(text, ast, else_block);
+}
+
+fn ast_testing_expect_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(node_id);
+    return match node.data {
+        Program(program) => try ast_expect_value_in_range(text, ast, program.declarations),
+        FnDecl(fn_decl) => try ast_testing_expect_value(text, ast, fn_decl.body),
+        Block(block) => try ast_expect_value_in_range(text, ast, block.statements),
+        ExprStmt(expr_stmt) => try ast_testing_expect_value(text, ast, expr_stmt.expr),
+        Call(call_node) => try ast_call_expect_value(text, ast, call_node.callee, call_node.args),
+        TypeApplyExpr(type_apply) => try ast_testing_expect_value(text, ast, type_apply.callee),
+        TryExpr(try_expr_node) => try ast_testing_expect_value(text, ast, try_expr_node.value),
+        ComptimeExpr(comptime_expr_node) => try ast_testing_expect_value(text, ast, comptime_expr_node.value),
+        Unsafe(unsafe_node) => try ast_testing_expect_value(text, ast, unsafe_node.body),
+        If(if_node) => try ast_expect_value_in_two_nodes(
+            text,
+            ast,
+            if_node.then_block,
+            if_node.else_block
+        ),
+        Empty => -1,
+        ImportDecl(import_decl) => -1,
+        StructDecl(struct_decl) => -1,
+        EnumDecl(enum_decl) => -1,
+        UnionDecl(union_decl) => -1,
+        Int(int_node) => -1,
+        String(string_node) => -1,
+        TypeName(type_name) => -1,
+        Var(var_node) => -1,
+        Bool(bool_node) => -1,
+        Prefix(prefix_node) => -1,
+        Binary(binary) => -1,
+        FieldExpr(field_expr_node) => -1,
+        DerefExpr(deref_expr_node) => -1,
+        CastExpr(cast_expr) => -1,
+        IndexExpr(index_expr) => -1,
+        StructLiteralExpr(struct_literal) => -1,
+        StructFieldInit(struct_field_init) => -1,
+        ArenaNewExpr(arena_new) => -1,
+        Let(let_node) => -1,
+        Assign(assign_node) => -1,
+        Return(return_node) => -1,
+        Defer(defer_node) => -1,
+        While(while_node) => -1,
+        For(for_node) => -1,
+        Break(break_node) => -1,
+        Continue(continue_node) => -1,
+        Param(param_node) => -1,
+        Field(field_node) => -1,
+        UnionVariant(union_variant) => -1,
+        Match(match_node) => -1,
+        MatchArm(match_arm) => -1,
+        ComptimeIf(comptime_if_node) => -1,
+    };
+}
+
+fn ast_expect_value_in_range(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !i64 {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let value = try ast_testing_expect_value(text, ast, child);
+        if value != -1 {
+            return value;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+fn ast_call_expect_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !i64 {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "std::testing::expect") or args.len != 1 {
+        return -1;
+    }
+    let arg = try ast.child_at(args, 0);
+    return ast_bool_value(ast, arg);
+}
+
+fn ast_expect_value_in_two_nodes(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId
+) -> !i64 {
+    let first_value = try ast_testing_expect_value(text, ast, first);
+    if first_value != -1 {
+        return first_value;
+    }
+    return try ast_testing_expect_value(text, ast, second);
+}
+
+fn ast_bool_value(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> i64 {
+    let node = ast.get(node_id);
+    return match node.data {
+        Bool(bool_node) => bool_value_as_i64(bool_node.value),
+        Program(program) => -1,
+        Empty => -1,
+        ImportDecl(import_decl) => -1,
+        StructDecl(struct_decl) => -1,
+        EnumDecl(enum_decl) => -1,
+        UnionDecl(union_decl) => -1,
+        FnDecl(fn_decl) => -1,
+        Int(int_node) => -1,
+        String(string_node) => -1,
+        TypeName(type_name) => -1,
+        Var(var_node) => -1,
+        Prefix(prefix_node) => -1,
+        Binary(binary) => -1,
+        FieldExpr(field_expr_node) => -1,
+        DerefExpr(deref_expr_node) => -1,
+        Call(call_node) => -1,
+        TypeApplyExpr(type_apply) => -1,
+        CastExpr(cast_expr) => -1,
+        IndexExpr(index_expr) => -1,
+        StructLiteralExpr(struct_literal) => -1,
+        StructFieldInit(struct_field_init) => -1,
+        ArenaNewExpr(arena_new) => -1,
+        TryExpr(try_expr_node) => -1,
+        ComptimeExpr(comptime_expr_node) => -1,
+        Block(block) => -1,
+        If(if_node) => -1,
+        Let(let_node) => -1,
+        Assign(assign_node) => -1,
+        Return(return_node) => -1,
+        Defer(defer_node) => -1,
+        ExprStmt(expr_stmt) => -1,
+        While(while_node) => -1,
+        For(for_node) => -1,
+        Break(break_node) => -1,
+        Continue(continue_node) => -1,
+        Param(param_node) => -1,
+        Field(field_node) => -1,
+        UnionVariant(union_variant) => -1,
+        Match(match_node) => -1,
+        MatchArm(match_arm) => -1,
+        Unsafe(unsafe_node) => -1,
+        ComptimeIf(comptime_if_node) => -1,
+    };
+}
+
+fn bool_value_as_i64(value: bool) -> i64 {
+    if value {
+        return 1;
+    }
+    return 0;
+}
+
+fn ast_node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
 }
 
 pub fn cli_gate() -> !void {
@@ -301,15 +820,231 @@ fn write_cli_usage(allocator: Allocator, io: Io) -> !void {
     return;
 }
 
-fn write_cli_line(allocator: Allocator, io: Io, text: []const u8) -> !void {
+fn write_cli_line(allocator: Allocator, io: Io, text: []u8) -> !void {
     try std::io::write_stdout(io, text);
     try write_cli_stdout_newline(allocator, io);
     return;
 }
 
-fn write_cli_error_line(allocator: Allocator, io: Io, text: []const u8) -> !void {
+fn write_cli_error_line(allocator: Allocator, io: Io, text: []u8) -> !void {
     try std::io::write_stderr(io, text);
     try write_cli_stderr_newline(allocator, io);
+    return;
+}
+
+fn write_parse_validation_error(
+    allocator: Allocator,
+    io: Io,
+    validation: parser::ParseValidation
+) -> !void {
+    var line = std::string::String(allocator);
+    try line.append_bytes("error: ");
+    try line.append_bytes(validation.message);
+    if !std::mem::equal_bytes(validation.got, "") {
+        try line.append_bytes(", got ");
+        try line.append_bytes(validation.got);
+    }
+    try line.append_bytes(" at ");
+    try std::fmt::append_i64(line, validation.line);
+    try line.append_byte(cast<u8>(58));
+    try std::fmt::append_i64(line, validation.column);
+    let bytes = line.as_bytes();
+    try std::io::write_stderr(io, bytes);
+    try write_cli_stderr_newline(allocator, io);
+    line.deinit();
+    try write_cli_error_line(allocator, io, "error: parse failed");
+    return;
+}
+
+fn write_move_error(
+    allocator: Allocator,
+    io: Io,
+    name: []u8
+) -> !void {
+    try std::io::write_stderr(io, "error: move error: moved value `");
+    try std::io::write_stderr(io, name);
+    try write_cli_error_line(allocator, io, "` was used");
+    return;
+}
+
+fn write_duplicate_symbol_error(
+    allocator: Allocator,
+    io: Io,
+    name: []u8
+) -> !void {
+    try std::io::write_stderr(io, "error: duplicate symbol `");
+    try std::io::write_stderr(io, name);
+    try write_cli_error_line(allocator, io, "`");
+    return;
+}
+
+fn write_unknown_function_error(
+    allocator: Allocator,
+    io: Io,
+    name: []u8
+) -> !void {
+    try std::io::write_stderr(io, "error: unknown function `");
+    try std::io::write_stderr(io, name);
+    try write_cli_error_line(allocator, io, "`");
+    return;
+}
+
+fn write_function_call_error(
+    allocator: Allocator,
+    io: Io,
+    text: []u8,
+    call_error: types::FunctionCallSummary
+) -> !void {
+    let name = text[call_error.start..call_error.end];
+    if call_error.kind == 1 {
+        try write_unknown_function_error(allocator, io, name);
+        return;
+    }
+    if call_error.kind == 2 {
+        try write_function_arity_error(
+            allocator,
+            io,
+            name,
+            call_error.expected,
+            call_error.observed
+        );
+        return;
+    }
+    try write_cli_error_line(allocator, io, "error: check failed");
+    return;
+}
+
+fn write_match_error(
+    allocator: Allocator,
+    io: Io,
+    diagnostic: types::MatchDiagnosticSummary
+) -> !void {
+    if diagnostic.kind == 1 {
+        try std::io::write_stderr(io, "error: type error: match expects enum or union, got ");
+        try write_cli_error_line(allocator, io, diagnostic.name);
+        return;
+    }
+    if diagnostic.kind == 2 {
+        try write_match_tag_error(
+            allocator,
+            io,
+            "error: type error: unknown match tag `",
+            diagnostic.name,
+            diagnostic.tag
+        );
+        return;
+    }
+    if diagnostic.kind == 3 {
+        try write_match_tag_error(
+            allocator,
+            io,
+            "error: type error: duplicate match tag `",
+            diagnostic.name,
+            diagnostic.tag
+        );
+        return;
+    }
+    if diagnostic.kind == 4 {
+        try std::io::write_stderr(io, "error: type error: match on `");
+        try std::io::write_stderr(io, diagnostic.name);
+        try write_cli_error_line(allocator, io, "` is not exhaustive");
+        return;
+    }
+    if diagnostic.kind == 5 {
+        try write_cli_error_line(allocator, io, "error: type error: wildcard match arm must be last");
+        return;
+    }
+    if diagnostic.kind == 6 {
+        try write_cli_error_line(
+            allocator,
+            io,
+            "error: type error: wildcard match arm cannot bind payload"
+        );
+        return;
+    }
+    if diagnostic.kind == 7 {
+        try write_cli_error_line(allocator, io, "error: type error: duplicate wildcard match arm");
+        return;
+    }
+    if diagnostic.kind == 8 {
+        try write_match_tag_error(
+            allocator,
+            io,
+            "error: type error: enum tag has no payload `",
+            diagnostic.name,
+            diagnostic.tag
+        );
+        return;
+    }
+    try write_cli_error_line(allocator, io, "error: check failed");
+    return;
+}
+
+fn write_match_tag_error(
+    allocator: Allocator,
+    io: Io,
+    prefix: []u8,
+    name: []u8,
+    tag: []u8
+) -> !void {
+    try std::io::write_stderr(io, prefix);
+    try std::io::write_stderr(io, name);
+    try std::io::write_stderr(io, "::");
+    try std::io::write_stderr(io, tag);
+    try write_cli_error_line(allocator, io, "`");
+    return;
+}
+
+fn write_unknown_type_error(
+    allocator: Allocator,
+    io: Io,
+    name: []u8
+) -> !void {
+    try std::io::write_stderr(io, "error: unknown type `");
+    try std::io::write_stderr(io, name);
+    try write_cli_error_line(allocator, io, "`");
+    return;
+}
+
+fn write_function_arity_error(
+    allocator: Allocator,
+    io: Io,
+    name: []u8,
+    expected: i64,
+    observed: i64
+) -> !void {
+    try std::io::write_stderr(io, "error: function `");
+    try std::io::write_stderr(io, name);
+    try std::io::write_stderr(io, "` expects ");
+    var line = std::string::String(allocator);
+    try std::fmt::append_i64(line, expected);
+    try line.append_bytes(" argument, got ");
+    try std::fmt::append_i64(line, observed);
+    let bytes = line.as_bytes();
+    try std::io::write_stderr(io, bytes);
+    try write_cli_stderr_newline(allocator, io);
+    line.deinit();
+    return;
+}
+
+fn write_type_arity_error(
+    allocator: Allocator,
+    io: Io,
+    name: []u8,
+    expected: i64,
+    observed: i64
+) -> !void {
+    try std::io::write_stderr(io, "error: type `");
+    try std::io::write_stderr(io, name);
+    try std::io::write_stderr(io, "` expects ");
+    var line = std::string::String(allocator);
+    try std::fmt::append_i64(line, expected);
+    try line.append_bytes(" type arguments, got ");
+    try std::fmt::append_i64(line, observed);
+    let bytes = line.as_bytes();
+    try std::io::write_stderr(io, bytes);
+    try write_cli_stderr_newline(allocator, io);
+    line.deinit();
     return;
 }
 

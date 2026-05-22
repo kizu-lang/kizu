@@ -53,7 +53,7 @@ i8 i16 i32 i64
 u8 u16 u32 u64
 usize isize
 f32 f64
-[]const u8
+[]u8
 raw pointer types
 tag enum values
 ```
@@ -64,7 +64,7 @@ policy.
 ### Borrowing
 
 - `&T` is a shared local borrow.
-- `&mut T` is a mutable local borrow.
+- `&var T` is a mutable local borrow.
 - Borrowing does not move ownership.
 - A borrowed non-copy value cannot be moved while the borrow is active.
 - A local borrow binding is active until its last use in straight-line code.
@@ -77,8 +77,8 @@ policy.
 - A non-copy value cannot be moved out through `value.*`.
 - Copy values may be copied through `value.*`.
 - `&T` cannot be used for mutation.
-- `&mut T` requires a mutable local binding.
-- `&T` and `&mut T` cannot overlap in a way that creates mutable aliasing.
+- `&var T` requires a mutable local binding.
+- `&T` and `&var T` cannot overlap in a way that creates mutable aliasing.
 - v0.1 supports one-level direct field borrow such as `&user.name`.
 - A field borrow allows disjoint field assignment, such as assigning `user.age`
   while `user.name` is borrowed.
@@ -185,7 +185,7 @@ policy.
 - `std::task::partition_mut(init, count)` creates checked disjoint output slots.
 - `partition.at(i)` bounds-checks slot access.
 - `std::task::parallel_map(io, partition, start, end, worker)` takes `partition`
-  as `&mut Partition` and writes only into the
+  as `&var Partition` and writes only into the
   checked slot range.
 - v0.1 data parallelism is range and `Partition` based; it does not write
   directly into user collections or mutable slices.
