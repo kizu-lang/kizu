@@ -11,6 +11,8 @@ const selfhostParserOracleOutput = `parser-tokens
 23
 parser-declarations
 2
+parser-nodes
+19
 parser-diagnostics
 0
 parser-typed-diagnostics

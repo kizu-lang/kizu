@@ -10,10 +10,13 @@ import selfhost::source;
 import selfhost::types;
 
 pub fn smoke() -> parser::ParseError!i64 {
+    let allocator = std::mem::page_allocator();
+    let path = "selfhost/smoke.kizu";
     let source = "fn main() -> void { return; }";
     let lexed = lexer::summarize(source);
-    let parsed = try parser::parse_source(source);
-    let tree = parser::summarize(parsed, lexed.tokens, 1);
+    let parsed = try parser::parse_file(allocator, path, source);
+    let tree = try parser::summarize(&parsed, lexed.tokens);
+    parsed.deinit();
     let resolved = resolver::resolve(tree);
     let typed = types::check(resolved);
     let owned = ownership::checked_package_from_summary(ownership::check(typed));
@@ -151,7 +154,7 @@ fn check_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let resolved = try resolver::resolve_sources(allocator, files);
     let typed = try types::check_sources(allocator, files, resolved);
     let checked = try ownership::check_package(allocator, files, typed);
-    let call_error = try types::first_function_call_error(allocator, files, file_text);
+    let call_error = try types::first_function_call_error(allocator, files, path);
     files.deinit();
 
     if call_error.found {
@@ -168,19 +171,33 @@ fn check_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
 
 fn parse_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
-    let parsed_validation = try validation::validate_source(allocator, file_text);
+    let parsed_validation = try parser::parse_diagnostic_file(allocator, path, file_text);
     if !parsed_validation.ok {
-        try write_parse_validation_error(allocator, io, parsed_validation);
-        return std::process::exit_code(1);
+        return try write_parse_failure(allocator, io, parsed_validation);
     }
-    var parsed = try parser::parse_checked_file(allocator, path, file_text);
+    return try write_parse_success(allocator, io, file_text);
+}
+
+fn write_parse_success(
+    allocator: Allocator,
+    io: Io,
+    file_text: []u8
+) -> !i64 {
     var formatted = try format::format_source(allocator, file_text);
     let formatted_bytes = formatted.as_bytes();
     try std::io::write_stdout(io, formatted_bytes);
     try write_cli_stdout_newline(allocator, io);
     formatted.deinit();
-    parsed.deinit();
     return std::process::exit_code(0);
+}
+
+fn write_parse_failure(
+    allocator: Allocator,
+    io: Io,
+    parsed_validation: validation::ParseValidation
+) -> !i64 {
+    try write_parse_validation_error(allocator, io, parsed_validation);
+    return std::process::exit_code(1);
 }
 
 fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
@@ -231,13 +248,10 @@ fn check_file_fast_diagnostics(
     path: []u8,
     file_text: []u8
 ) -> !bool {
-    let parsed_validation = try validation::validate_source(allocator, file_text);
+    let parsed_validation = try parser::parse_diagnostic_file(allocator, path, file_text);
     if !parsed_validation.ok {
-        try write_parse_validation_error(allocator, io, parsed_validation);
-        return false;
+        return try write_check_parse_failure(allocator, io, parsed_validation);
     }
-    var parsed = try parser::parse_checked_file(allocator, path, file_text);
-    parsed.deinit();
 
     let duplicate = try resolver::first_duplicate_declaration(allocator, path, file_text);
     if duplicate.found {
@@ -257,7 +271,7 @@ fn check_file_fast_diagnostics(
         return false;
     }
 
-    let moved_name = try ownership::first_use_after_move_name(allocator, file_text);
+    let moved_name = try ownership::first_use_after_move_name(allocator, path, file_text);
     if !std::mem::equal_bytes(moved_name, "") {
         try write_move_error(allocator, io, moved_name);
         return false;
@@ -283,11 +297,19 @@ fn check_file_fast_diagnostics(
     if !(try write_assignment_type_diagnostic(allocator, io, path, file_text)) {
         return false;
     }
-    if source_has_qualified_name(file_text) and
-        !(try write_package_function_call_diagnostic(allocator, io, path, file_text)) {
+    if !(try write_package_function_call_diagnostic(allocator, io, path, file_text)) {
         return false;
     }
     return true;
+}
+
+fn write_check_parse_failure(
+    allocator: Allocator,
+    io: Io,
+    parsed_validation: validation::ParseValidation
+) -> !bool {
+    try write_parse_validation_error(allocator, io, parsed_validation);
+    return false;
 }
 
 fn write_return_type_diagnostic(
@@ -387,24 +409,13 @@ fn write_package_function_call_diagnostic(
     file_text: []u8
 ) -> !bool {
     var files = try source::load_file_sources(allocator, io, path, file_text);
-    let call_error = try types::first_function_call_error(allocator, files, file_text);
+    let call_error = try types::first_function_call_error(allocator, files, path);
     files.deinit();
     if call_error.found {
         try write_function_call_error(allocator, io, file_text, call_error);
         return false;
     }
     return true;
-}
-
-fn source_has_qualified_name(file_text: []u8) -> bool {
-    var index = 0;
-    while index + 1 < std::mem::len(file_text) {
-        if file_text[index] == cast<u8>(58) and file_text[index + 1] == cast<u8>(58) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
 }
 
 fn write_type_reference_diagnostic(

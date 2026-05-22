@@ -6,17 +6,264 @@ pub struct AstSummary {
     pub diagnostics: i64,
 }
 
-pub fn summarize(
-    root: std::kizu::ast::NodeId,
+pub fn summarize_parse_result(
+    result: &std::kizu::ast::ParseResult,
     tokens: i64,
-    declarations: i64,
     diagnostics: i64
-) -> AstSummary {
+) -> !AstSummary {
+    let declarations = declaration_count(result.ast, result.root);
+    let nodes = try node_count(result.ast, result.root);
     return AstSummary {
-        root: root,
-        nodes: declarations,
+        root: result.root,
+        nodes: nodes,
         tokens: tokens,
         declarations: declarations,
         diagnostics: diagnostics
     };
+}
+
+fn declaration_count(
+    tree: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> i64 {
+    let node = tree.get(root);
+    return match node.data {
+        Program(program) => program.declarations.len,
+        _ => 0,
+    };
+}
+
+fn node_count(
+    tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = tree.get(node_id);
+    return match node.data {
+        Program(program) => try count_with_range(tree, program.declarations),
+        FnDecl(fn_decl) => try count_fn_decl_parts(
+            tree,
+            fn_decl.extern_abi,
+            fn_decl.name,
+            fn_decl.type_params,
+            fn_decl.params,
+            fn_decl.return_type,
+            fn_decl.return_borrow,
+            fn_decl.body
+        ),
+        ImportDecl(import_decl) => try count_with_range(tree, import_decl.path),
+        StructDecl(struct_decl) => try count_named_ranges(
+            tree,
+            struct_decl.name,
+            struct_decl.type_params,
+            struct_decl.fields
+        ),
+        EnumDecl(enum_decl) => try count_named_range(tree, enum_decl.name, enum_decl.tags),
+        UnionDecl(union_decl) => try count_named_ranges(
+            tree,
+            union_decl.name,
+            union_decl.type_params,
+            union_decl.variants
+        ),
+        UnionVariant(union_variant) => try count_two(tree, union_variant.name, union_variant.payload),
+        Param(param_node) => try count_two(tree, param_node.name, param_node.type_node),
+        Field(field_node) => try count_two(tree, field_node.name, field_node.type_node),
+        Block(block) => try count_with_range(tree, block.statements),
+        Let(let_node) => try count_two(tree, let_node.name, let_node.value),
+        Assign(assign_node) => try count_two(tree, assign_node.target, assign_node.value),
+        Return(return_node) => try count_one(tree, return_node.value),
+        Defer(defer_node) => try count_one(tree, defer_node.expr),
+        ExprStmt(expr_stmt) => try count_one(tree, expr_stmt.expr),
+        If(if_node) => try count_three(
+            tree,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block
+        ),
+        While(while_node) => try count_three(
+            tree,
+            while_node.label,
+            while_node.condition,
+            while_node.body
+        ),
+        For(for_node) => try count_five(
+            tree,
+            for_node.label,
+            for_node.name,
+            for_node.start,
+            for_node.end,
+            for_node.body
+        ),
+        Break(break_node) => try count_one(tree, break_node.label),
+        Continue(continue_node) => try count_one(tree, continue_node.label),
+        Unsafe(unsafe_node) => try count_one(tree, unsafe_node.body),
+        ComptimeIf(comptime_if_node) => try count_three(
+            tree,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block
+        ),
+        Match(match_node) => try count_node_with_range(tree, match_node.value, match_node.arms),
+        MatchArm(match_arm) => try count_three(
+            tree,
+            match_arm.pattern,
+            match_arm.binding,
+            match_arm.body
+        ),
+        Prefix(prefix_node) => try count_one(tree, prefix_node.right),
+        Binary(binary) => try count_two(tree, binary.left, binary.right),
+        FieldExpr(field_expr_node) => try count_two(
+            tree,
+            field_expr_node.receiver,
+            field_expr_node.name
+        ),
+        DerefExpr(deref_expr_node) => try count_one(tree, deref_expr_node.receiver),
+        Call(call_node) => try count_node_with_range(tree, call_node.callee, call_node.args),
+        TypeApplyExpr(type_apply) => try count_node_with_range(
+            tree,
+            type_apply.callee,
+            type_apply.type_args
+        ),
+        CastExpr(cast_expr) => try count_two(tree, cast_expr.type_node, cast_expr.value),
+        IndexExpr(index_expr) => try count_three(
+            tree,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end
+        ),
+        StructLiteralExpr(struct_literal) => try count_node_with_range(
+            tree,
+            struct_literal.type_name,
+            struct_literal.fields
+        ),
+        StructFieldInit(struct_field_init) => try count_two(
+            tree,
+            struct_field_init.name,
+            struct_field_init.value
+        ),
+        ArenaNewExpr(arena_new) => try count_two(tree, arena_new.type_node, arena_new.allocator),
+        TryExpr(try_expr_node) => try count_one(tree, try_expr_node.value),
+        ComptimeExpr(comptime_expr_node) => try count_one(tree, comptime_expr_node.value),
+        Int(int_node) => 1,
+        String(string_node) => 1,
+        TypeName(type_name) => 1,
+        Var(var_node) => 1,
+        Bool(bool_node) => 1,
+        Empty => 1,
+    };
+}
+
+fn count_fn_decl_parts(
+    tree: std::kizu::ast::Ast,
+    extern_abi: std::kizu::ast::NodeId,
+    name: std::kizu::ast::NodeId,
+    type_params: std::kizu::ast::ChildRange,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId,
+    return_borrow: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !i64 {
+    let named = try count_two(tree, extern_abi, name);
+    let type_param_count = try count_range(tree, type_params);
+    let param_count = try count_range(tree, params);
+    let return_count = try count_two(tree, return_type, return_borrow);
+    let body_count = try node_count(tree, body);
+    return 1 + named + type_param_count + param_count + return_count + body_count;
+}
+
+fn count_named_range(
+    tree: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange
+) -> !i64 {
+    let name_count = try node_count(tree, name);
+    let range_count = try count_range(tree, range);
+    return 1 + name_count + range_count;
+}
+
+fn count_named_ranges(
+    tree: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    first: std::kizu::ast::ChildRange,
+    second: std::kizu::ast::ChildRange
+) -> !i64 {
+    let name_count = try node_count(tree, name);
+    let first_count = try count_range(tree, first);
+    let second_count = try count_range(tree, second);
+    return 1 + name_count + first_count + second_count;
+}
+
+fn count_with_range(
+    tree: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !i64 {
+    return 1 + try count_range(tree, range);
+}
+
+fn count_node_with_range(
+    tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange
+) -> !i64 {
+    let node_total = try node_count(tree, node_id);
+    let range_total = try count_range(tree, range);
+    return 1 + node_total + range_total;
+}
+
+fn count_one(
+    tree: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId
+) -> !i64 {
+    return 1 + try node_count(tree, first);
+}
+
+fn count_two(
+    tree: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId
+) -> !i64 {
+    let first_count = try node_count(tree, first);
+    let second_count = try node_count(tree, second);
+    return 1 + first_count + second_count;
+}
+
+fn count_three(
+    tree: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId
+) -> !i64 {
+    let first_count = try node_count(tree, first);
+    let second_count = try node_count(tree, second);
+    let third_count = try node_count(tree, third);
+    return 1 + first_count + second_count + third_count;
+}
+
+fn count_five(
+    tree: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    fourth: std::kizu::ast::NodeId,
+    fifth: std::kizu::ast::NodeId
+) -> !i64 {
+    let first_count = try node_count(tree, first);
+    let second_count = try node_count(tree, second);
+    let third_count = try node_count(tree, third);
+    let fourth_count = try node_count(tree, fourth);
+    let fifth_count = try node_count(tree, fifth);
+    return 1 + first_count + second_count + third_count + fourth_count + fifth_count;
+}
+
+fn count_range(
+    tree: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !i64 {
+    var count = 0;
+    var index = 0;
+    while index < range.len {
+        let child = try tree.child_at(range, index);
+        count = count + try node_count(tree, child);
+        index = index + 1;
+    }
+    return count;
 }
