@@ -30,13 +30,16 @@ fn at<T>(self: std::array::Array<T>, index: i64) -> !&T borrows self
 Rules:
 
 - `borrows <source>` names one function parameter or `self` parameter.
+- `borrows <source>` names exactly one source. Multiple-source alternatives are
+  not part of v0.
 - The returned view may not outlive that source.
 - Borrow returns such as `-> &T` require `borrows <source>`.
 - Slice view returns may use `borrows <source>` when they return input-backed
   storage.
-- Named lifetime parameters such as `<'a>`, `&'a T`, and `[]'a T` are not
-  source syntax.
+- Named lifetime annotations are not source syntax.
 - Borrow fields in structs and union payloads are not part of v0.2.
+- View-struct syntax is not part of v0. Values that need to be stored should
+  keep spans, ids, handles, or owned data instead of embedded borrows.
 
 ## Consequences
 
@@ -44,9 +47,10 @@ Kizu keeps the visible safety boundary needed for zero-copy system code without
 adding lifetime variables, lifetime bounds, or anonymous lifetime syntax.
 
 APIs that need longer-lived relationships should use owned containers,
-`std::arena::Arena<T>` / `std::arena::Handle<T>`, stable IDs, copied keys, or explicit unsafe wrappers
-with safe-side invariants. If a future API needs a return tied to multiple
-sources, it must be added as a bounded follow-up with examples and checker
-coverage instead of reintroducing general lifetime programming.
+`std::arena::Arena<T>` / `std::arena::Handle<T>`, stable IDs, spans, copied
+keys, or explicit unsafe wrappers with safe-side invariants. If a future API
+needs a return tied to multiple sources or a first-class view aggregate, it must
+be added as a bounded follow-up with examples and checker coverage instead of
+reintroducing general lifetime programming.
 
 ADR-0059 is superseded by this decision.

@@ -10,6 +10,8 @@ The package currently defines these source-owned modules:
 - `selfhost::lexer_oracle`
 - `selfhost::ast`
 - `selfhost::parser`
+- `selfhost::parser::format`
+- `selfhost::parser::validation`
 - `selfhost::parser_oracle`
 - `selfhost::source`
 - `selfhost::source_oracle`
@@ -34,21 +36,24 @@ Array-backed `tokenize` path, and the selfhost lexer component gate against the
 Go lexer.
 
 The parser and AST boundary is currently `std::kizu::{ast, parser}` through
-`selfhost::{ast, parser}`. The selfhost parser consumes Kizu lexer token arrays,
-returns structured Arena + NodeId `ParseResult` values, and exposes typed
-diagnostic summaries for parser-owned errors. Lower-level untyped lexer, parser,
-and container failures are explicitly adapted through typed error casts. Parser
-success gates compare the Arena + NodeId AST summary for every `selfhost/src`
-source file, and parser error gates keep recoverable `!T` failures readable.
-`std::kizu::ast::ParseResult` exposes helper methods for root/node/child access
-so later compiler phases can traverse parsed ASTs without moving the owned
-arena out of the parse result.
+`selfhost::{ast, parser}`. The selfhost parser module is the parse facade:
+it consumes Kizu lexer token arrays, returns structured Arena + NodeId
+`ParseResult` values, and exposes typed diagnostic summaries for parser-owned
+errors. Parse validation and formatting live under `selfhost::parser::*` so the
+facade does not accumulate CLI-adjacent checks. Lower-level untyped lexer,
+parser, and container failures are explicitly adapted through typed error
+casts. Parser success gates compare the Arena + NodeId AST summary for every
+`selfhost/src` source file, and parser error gates keep recoverable `!T`
+failures readable. `std::kizu::ast::ParseResult` exposes helper methods for
+root/node/child access so later compiler phases can traverse parsed ASTs
+without moving the owned arena out of the parse result.
 
 The source manager boundary uses explicit `std::fs`, `std::path`, and `std::io`
 capabilities to load `kizu.toml`, `selfhost/src`, and the std sources required by
-the selfhost frontend. The source table preserves source ids, source kind, module
-name, file path, and loaded text. Source diagnostics use stable source ids,
-paths, byte spans, line/column data, and related spans.
+the selfhost frontend. The source table preserves source ids, source kind, file
+path, and loaded text. Module paths are derived from file paths when needed so
+the table does not store borrowed path slices. Source diagnostics use stable
+source ids, paths, byte spans, line/column data, and related spans.
 
 The resolver boundary consumes the source table, registers selfhost/std modules,
 and scans top-level declarations into qualified symbol and visibility maps using

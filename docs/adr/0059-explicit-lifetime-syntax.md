@@ -1,4 +1,4 @@
-# ADR-0059: explicit lifetime syntax for borrowed views
+# ADR-0059: removed lifetime annotation proposal for borrowed views
 
 ## Status
 
@@ -17,38 +17,16 @@ lifetime syntax, public signatures cannot say which input owns a returned view.
 
 ## Decision
 
-Kizu adopts named lifetime parameters for borrowed views:
-
-```kizu
-struct Row<'a, T> {
-    data: []'a T
-}
-
-fn row<'a, T>(matrix: &'a Matrix<T>, index: i64) -> !Row<'a, T>
-```
-
-Rules for the first implementation:
-
-- Lifetime parameters share the `<...>` list with type parameters, and
-  lifetimes come first: `<'a, T>`.
-- Borrow types use `&'a T` and `&'a var T`.
-- Slice view types use `[]'a T`; slice mutability is expressed by the outer
-  borrow, such as `&'a []T` or `&'a var []T`.
-- `[]T` remains an elided local spelling where no boundary lifetime is
-  needed.
-- Borrow-returning functions must spell the returned lifetime explicitly.
-- Struct and union fields may store borrowed views only when the declaration
-  has an explicit lifetime parameter.
-- `'static` is reserved for string literals and compile-time immutable data.
-- Lifetimes are compile-time checker information and are erased from runtime
-  representation.
+This decision is no longer active. Kizu does not keep explicit lifetime
+annotation syntax in source. Borrowed returns use `borrows <source>` instead,
+and slice mutability is expressed by the outer borrow spelling.
 
 ## Deferred
 
-The first implementation intentionally does not include:
+The superseding design intentionally does not include:
 
-- lifetime bounds such as `where 'b: 'a`
-- anonymous lifetime `'_`
+- lifetime bounds
+- anonymous lifetime markers
 - lifetime parameters on `impl` or `contract`
 - type aliases with lifetime parameters
 - full dangling/escape enforcement
@@ -58,9 +36,8 @@ Those are tracked as follow-up work instead of hidden compatibility behavior.
 
 ## Consequences
 
-`ADR-0016` is superseded. Kizu is still not trying to become Rust-compatible:
-the language adopts explicit lifetimes only where borrowed views cross function
-or type boundaries.
+`ADR-0016` remains aligned with the current design. Kizu is still not trying to
+become Rust-compatible: source-visible lifetime annotations are not part of v0.
 
 `std::arena::Arena<T>` / `std::arena::Handle<T>` remain opaque IDs, not references. They continue to
 model long-lived graph identity separately from slice/view borrowing.

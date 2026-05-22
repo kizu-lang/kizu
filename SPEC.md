@@ -946,8 +946,9 @@ fn show(value: &i64) -> &i64 borrows value
 
 `borrows source` は戻り値が `source` 引数または `self` receiver 由来の view であり、
 その source より長生きできないことを表します。名前付き lifetime parameter、
-`&'a T`、`[]'a T`、lifetime bounds、anonymous lifetime は採用しません。
-borrow field や複数 source 由来の戻り値は、後続の bounded issue で必要性を確認します。
+lifetime bounds、anonymous lifetime は採用しません。
+`borrows` は v0 では単一 source だけを受け取ります。borrow field、view struct、
+複数 source 由来の戻り値は、後続の bounded issue で必要性を確認します。
 
 safe borrow binding は通常の field access 構文で field を読めます。
 `&var T` binding は通常の field assignment 構文で field を更新できます。

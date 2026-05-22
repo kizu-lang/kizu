@@ -1,0 +1,152 @@
+import selfhost::lexer;
+
+pub fn format_source(
+    allocator: Allocator,
+    source: []u8
+) -> !std::string::String {
+    var format_tokens = try lexer::tokenize(allocator, source);
+    var out = std::string::String(allocator);
+    var index = 0;
+    var depth = 0;
+    var previous = "";
+    var last = cast<u8>(0);
+    while index < format_tokens.len() {
+        let token = try format_tokens.get(index);
+        if lexer::is_eof(token) {
+            index = format_tokens.len();
+        } else {
+            let text = token_text(source, token);
+            let trailing_comma = try is_trailing_comma(source, &format_tokens, index, text);
+            if !trailing_comma {
+                if depth == 0 and out.len() > 0 and is_top_level_decl_start(text) {
+                    if last != cast<u8>(10) {
+                        try out.append_byte(cast<u8>(10));
+                        last = cast<u8>(10);
+                    }
+                }
+                if std::mem::equal_bytes(text, "}") {
+                    depth = depth - 1;
+                }
+                if should_insert_space(previous, text, last) {
+                    try out.append_byte(cast<u8>(32));
+                    last = cast<u8>(32);
+                }
+                try out.append_bytes(text);
+                last = last_byte(text);
+                if std::mem::equal_bytes(text, "{") {
+                    depth = depth + 1;
+                }
+                previous = text;
+            }
+            index = index + 1;
+        }
+    }
+    format_tokens.deinit();
+    return out;
+}
+
+fn token_text(
+    source: []u8,
+    token: std::kizu::lexer::Token
+) -> []u8 {
+    return source[token.start..token.end];
+}
+
+fn next_token_text_equals(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    expected: []u8
+) -> !bool {
+    if index + 1 >= tokens.len() {
+        return false;
+    }
+    let next = try tokens.get(index + 1);
+    if lexer::is_eof(next) {
+        return false;
+    }
+    return std::mem::equal_bytes(token_text(source, next), expected);
+}
+
+fn is_trailing_comma(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    text: []u8
+) -> !bool {
+    if !std::mem::equal_bytes(text, ",") {
+        return false;
+    }
+    return try next_token_text_equals(source, tokens, index, "}");
+}
+
+fn should_insert_space(
+    previous: []u8,
+    current: []u8,
+    last: u8
+) -> bool {
+    if last == cast<u8>(0) or last == cast<u8>(10) or last == cast<u8>(32) {
+        return false;
+    }
+    if no_space_before(current) {
+        return false;
+    }
+    if std::mem::equal_bytes(previous, "]") and can_follow_slice_marker(current) {
+        return false;
+    }
+    if no_space_after(previous) {
+        return false;
+    }
+    return true;
+}
+
+fn no_space_before(text: []u8) -> bool {
+    return std::mem::equal_bytes(text, ")") or
+        std::mem::equal_bytes(text, "]") or
+        std::mem::equal_bytes(text, ";") or
+        std::mem::equal_bytes(text, ",") or
+        std::mem::equal_bytes(text, ".") or
+        std::mem::equal_bytes(text, "::") or
+        std::mem::equal_bytes(text, ">") or
+        std::mem::equal_bytes(text, ":") or
+        std::mem::equal_bytes(text, "(");
+}
+
+fn no_space_after(text: []u8) -> bool {
+    return std::mem::equal_bytes(text, "(") or
+        std::mem::equal_bytes(text, "[") or
+        std::mem::equal_bytes(text, ".") or
+        std::mem::equal_bytes(text, "::") or
+        std::mem::equal_bytes(text, "!") or
+        std::mem::equal_bytes(text, "&") or
+        std::mem::equal_bytes(text, "<");
+}
+
+fn can_follow_slice_marker(text: []u8) -> bool {
+    if std::mem::len(text) == 0 {
+        return false;
+    }
+    let first = text[0];
+    return (first >= cast<u8>(65) and first <= cast<u8>(90)) or
+        (first >= cast<u8>(97) and first <= cast<u8>(122)) or
+        first == cast<u8>(95) or
+        std::mem::equal_bytes(text, "&") or
+        std::mem::equal_bytes(text, "!") or
+        std::mem::equal_bytes(text, "?") or
+        std::mem::equal_bytes(text, "[");
+}
+
+fn is_top_level_decl_start(text: []u8) -> bool {
+    return std::mem::equal_bytes(text, "import") or
+        std::mem::equal_bytes(text, "pub") or
+        std::mem::equal_bytes(text, "unsafe") or
+        std::mem::equal_bytes(text, "extern") or
+        std::mem::equal_bytes(text, "fn") or
+        std::mem::equal_bytes(text, "struct") or
+        std::mem::equal_bytes(text, "enum") or
+        std::mem::equal_bytes(text, "union");
+}
+
+fn last_byte(text: []u8) -> u8 {
+    return text[std::mem::len(text) - 1];
+}

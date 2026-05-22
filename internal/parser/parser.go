@@ -183,8 +183,8 @@ func (p *Parser) parseFunctionSignature(fn *ast.FunctionDecl, requireBody bool) 
 	fn.Name = p.cur.Literal
 	if p.peek.Type == token.LT {
 		p.nextToken()
-		fn.LifetimeParams, fn.TypeParams = p.parseGenericParamList()
-		if len(fn.LifetimeParams) == 0 && len(fn.TypeParams) == 0 || !p.expectTypeClose() {
+		fn.TypeParams = p.parseGenericParamList()
+		if len(fn.TypeParams) == 0 || !p.expectTypeClose() {
 			return fn
 		}
 	}
@@ -306,8 +306,8 @@ func (p *Parser) parseStructDecl() ast.Decl {
 	decl.Name = p.cur.Literal
 	if p.peek.Type == token.LT {
 		p.nextToken()
-		decl.LifetimeParams, decl.TypeParams = p.parseGenericParamList()
-		if len(decl.LifetimeParams) == 0 && len(decl.TypeParams) == 0 || !p.expectTypeClose() {
+		decl.TypeParams = p.parseGenericParamList()
+		if len(decl.TypeParams) == 0 || !p.expectTypeClose() {
 			return decl
 		}
 	}
@@ -355,10 +355,6 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 	if p.cur.Type == token.Amp {
 		field.Borrow = true
 		p.nextToken()
-		if p.cur.Type == token.Lifetime {
-			field.BorrowLifetime = p.cur.Literal
-			p.nextToken()
-		}
 		if p.cur.Type == token.Var {
 			field.MutBorrow = true
 			p.nextToken()
@@ -412,8 +408,8 @@ func (p *Parser) parseUnionDecl() ast.Decl {
 	decl.Name = p.cur.Literal
 	if p.peek.Type == token.LT {
 		p.nextToken()
-		decl.LifetimeParams, decl.TypeParams = p.parseGenericParamList()
-		if len(decl.LifetimeParams) == 0 && len(decl.TypeParams) == 0 || !p.expectTypeClose() {
+		decl.TypeParams = p.parseGenericParamList()
+		if len(decl.TypeParams) == 0 || !p.expectTypeClose() {
 			return decl
 		}
 	}
@@ -487,10 +483,6 @@ func (p *Parser) parseParams() []ast.Param {
 		if p.cur.Type == token.Amp {
 			param.Borrow = true
 			p.nextToken()
-			if p.cur.Type == token.Lifetime {
-				param.BorrowLifetime = p.cur.Literal
-				p.nextToken()
-			}
 			if p.cur.Type == token.Var {
 				param.MutBorrow = true
 				p.nextToken()
@@ -1149,10 +1141,6 @@ func (p *Parser) parseErrorUnionTypeName() string {
 // parseBorrowTypeName parses &T and &var T type spellings.
 func (p *Parser) parseBorrowTypeName() string {
 	p.nextToken()
-	if p.cur.Type == token.Lifetime {
-		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
-		return ""
-	}
 	if p.cur.Type == token.Var {
 		p.nextToken()
 		inner := p.parseTypeName()
@@ -1174,10 +1162,6 @@ func (p *Parser) parseSliceTypeName() string {
 		return ""
 	}
 	p.nextToken()
-	if p.cur.Type == token.Lifetime {
-		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
-		return ""
-	}
 	arg := p.parseTypeArg(false)
 	if arg == "" {
 		return ""
@@ -1219,27 +1203,23 @@ func (p *Parser) parseTypeArgList(allowConst bool) string {
 	return strings.Join(args, ", ")
 }
 
-// parseGenericParamList parses type parameters and rejects named lifetimes.
-func (p *Parser) parseGenericParamList() ([]string, []string) {
-	lifetimes := []string{}
+// parseGenericParamList parses type parameters.
+func (p *Parser) parseGenericParamList() []string {
 	types := []string{}
 	seen := map[string]bool{}
 	p.nextToken()
 	for {
 		switch p.cur.Type {
-		case token.Lifetime:
-			p.errorf("explicit lifetime parameters are not supported; use `borrows` return provenance")
-			return nil, nil
 		case token.Ident:
 			if seen[p.cur.Literal] {
 				p.errorf("duplicate type parameter %s", p.cur.Literal)
-				return nil, nil
+				return nil
 			}
 			seen[p.cur.Literal] = true
 			types = append(types, p.cur.Literal)
 		default:
-			p.errorf("expected lifetime or type parameter, got %s", p.cur.Type)
-			return nil, nil
+			p.errorf("expected type parameter, got %s", p.cur.Type)
+			return nil
 		}
 		if p.peek.Type != token.Comma {
 			break
@@ -1250,7 +1230,7 @@ func (p *Parser) parseGenericParamList() ([]string, []string) {
 		}
 		p.nextToken()
 	}
-	return lifetimes, types
+	return types
 }
 
 // expectTypeClose consumes or accepts the closing generic angle bracket.
@@ -1269,9 +1249,6 @@ func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 	switch p.cur.Type {
 	case token.Ident, token.Bang, token.Amp, token.LBracket, token.Question:
 		return p.parseTypeArg(allowConst)
-	case token.Lifetime:
-		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
-		return ""
 	default:
 		p.errorf("expected static type argument, got %s", p.cur.Type)
 		return ""
@@ -1280,10 +1257,6 @@ func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 
 // parseTypeArg parses a type embedded inside a generic-like type spelling.
 func (p *Parser) parseTypeArg(allowConst bool) string {
-	if p.cur.Type == token.Lifetime {
-		p.errorf("explicit lifetime syntax is not supported; use `borrows` return provenance")
-		return ""
-	}
 	if p.cur.Type == token.Ident && p.cur.Literal == "const" {
 		if !allowConst {
 			p.errorf("expected static type argument, got const")

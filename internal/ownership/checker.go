@@ -152,7 +152,7 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 		}
 		fields := map[string]string{}
 		for _, field := range st.Fields {
-			if field.Borrow && (len(st.LifetimeParams) == 0 || field.BorrowLifetime == "") {
+			if field.Borrow {
 				return fmt.Errorf("borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
@@ -1994,15 +1994,12 @@ func (c *Checker) rejectArrayElementType(elem string) error {
 	return nil
 }
 
-// rejectArrayStorageType rejects values whose lifetime rules are not Array-safe yet.
+// rejectArrayStorageType rejects values that are not Array-safe yet.
 func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) error {
 	if seen[typeName] {
 		return nil
 	}
 	seen[typeName] = true
-	if hasOwnershipExplicitNonStaticLifetime(typeName) {
-		return fmt.Errorf("array error: Array element cannot store lifetime view in v0.2")
-	}
 	if isAstNodeIDType(typeName) {
 		return nil
 	}
@@ -2700,9 +2697,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionInfo, subst map[string]s
 func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) error {
 	switch name {
 	case "std.channel.Channel":
-		if hasOwnershipExplicitNonStaticLifetime(typeArgs[0]) {
-			return fmt.Errorf("thread error: lifetime view cannot cross concurrency boundary")
-		}
+		return nil
 	case "std.array.Array":
 		return c.rejectArrayElementType(typeArgs[0])
 	case "std.atomic.Atomic":
@@ -5471,7 +5466,7 @@ func (c *Checker) isCopyType(typeName string) bool {
 	if isDiagnosticScalarType(typeName) {
 		return true
 	}
-	if eraseOwnershipLifetimes(typeName) == "[]u8" {
+	if typeName == "[]u8" {
 		return true
 	}
 	if typeName == "ParseNode" || typeName == "std::kizu::parser::ParseNode" {
@@ -5503,12 +5498,9 @@ func isDiagnosticScalarType(typeName string) bool {
 	}
 }
 
-// sameOwnershipType compares type spellings after erasing lifetime annotations.
+// sameOwnershipType compares exact type spellings.
 func sameOwnershipType(left string, right string) bool {
-	if left == right {
-		return true
-	}
-	return eraseOwnershipLifetimes(left) == eraseOwnershipLifetimes(right)
+	return left == right
 }
 
 // fieldOwnershipType returns the full field type, including borrow prefixes.
@@ -5516,16 +5508,10 @@ func fieldOwnershipType(field ast.Field) string {
 	if !field.Borrow {
 		return field.TypeName
 	}
-	if field.BorrowLifetime == "" {
-		if field.MutBorrow {
-			return "&var " + field.TypeName
-		}
-		return "&" + field.TypeName
-	}
 	if field.MutBorrow {
-		return "&" + field.BorrowLifetime + " var " + field.TypeName
+		return "&var " + field.TypeName
 	}
-	return "&" + field.BorrowLifetime + " " + field.TypeName
+	return "&" + field.TypeName
 }
 
 // explicitOwnershipBorrowType extracts &T and &var T spellings.
@@ -5543,92 +5529,6 @@ func explicitOwnershipBorrowType(typeName string) (string, bool, string, bool) {
 		return "", false, "", false
 	}
 	return "", mutable, rest, true
-}
-
-// hasOwnershipExplicitNonStaticLifetime reports whether typeName carries a scoped lifetime.
-func hasOwnershipExplicitNonStaticLifetime(typeName string) bool {
-	for lifetime := range explicitOwnershipLifetimes(typeName) {
-		if lifetime != "'static" {
-			return true
-		}
-	}
-	return false
-}
-
-// explicitOwnershipLifetimes extracts lifetime tokens from a type spelling.
-func explicitOwnershipLifetimes(typeName string) map[string]bool {
-	out := map[string]bool{}
-	for idx := 0; idx < len(typeName); {
-		if typeName[idx] != '\'' {
-			idx++
-			continue
-		}
-		end := skipOwnershipLifetimeName(typeName, idx)
-		lifetime := typeName[idx:end]
-		if isOwnershipLifetimeName(lifetime) {
-			out[lifetime] = true
-		}
-		idx = end
-	}
-	return out
-}
-
-// isOwnershipLifetimeName reports whether name is an apostrophe-prefixed lifetime.
-func isOwnershipLifetimeName(name string) bool {
-	if len(name) < 2 || name[0] != '\'' || name == "'_" {
-		return false
-	}
-	for idx, ch := range name[1:] {
-		if !(ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' ||
-			idx > 0 && ch >= '0' && ch <= '9') {
-			return false
-		}
-	}
-	return true
-}
-
-// eraseOwnershipLifetimes removes explicit lifetimes from ownership type strings.
-func eraseOwnershipLifetimes(name string) string {
-	var out strings.Builder
-	for idx := 0; idx < len(name); {
-		if strings.HasPrefix(name[idx:], "&'") {
-			out.WriteByte('&')
-			idx = skipOwnershipLifetimeName(name, idx+1)
-			idx = skipOwnershipLifetimeSpace(name, idx)
-			continue
-		}
-		if strings.HasPrefix(name[idx:], "[]'") {
-			out.WriteString("[]")
-			idx = skipOwnershipLifetimeName(name, idx+2)
-			idx = skipOwnershipLifetimeSpace(name, idx)
-			continue
-		}
-		out.WriteByte(name[idx])
-		idx++
-	}
-	return out.String()
-}
-
-// skipOwnershipLifetimeName skips a lifetime name starting at apostrophe.
-func skipOwnershipLifetimeName(name string, start int) int {
-	idx := start + 1
-	for idx < len(name) {
-		ch := name[idx]
-		if ch != '_' && (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
-			(ch < '0' || ch > '9') {
-			break
-		}
-		idx++
-	}
-	return idx
-}
-
-// skipOwnershipLifetimeSpace skips one separator after a lifetime.
-func skipOwnershipLifetimeSpace(name string, idx int) int {
-	if idx < len(name) && name[idx] == ' ' {
-		return idx + 1
-	}
-	return idx
 }
 
 // isAtomicSupportedType reports whether Atomic<T> is available in v0.1.
@@ -5951,9 +5851,6 @@ func (c *Checker) rejectConcurrencyBoundaryArg(arg ast.Expression, env *scope) e
 func (c *Checker) rejectConcurrencyBoundaryType(typeName string, seen map[string]bool) error {
 	if isRawPointerType(typeName) {
 		return fmt.Errorf("thread error: raw pointer cannot cross concurrency boundary")
-	}
-	if hasOwnershipExplicitNonStaticLifetime(typeName) {
-		return fmt.Errorf("thread error: lifetime view cannot cross concurrency boundary")
 	}
 	if seen[typeName] {
 		return nil
