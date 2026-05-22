@@ -33,6 +33,7 @@ type selfhostCLIFrontendFixtures struct {
 	unknownSource       string
 	unknownStd          string
 	undefinedVariable   string
+	undefinedMatch      string
 	aritySource         string
 	duplicate           string
 	typeArity           string
@@ -389,6 +390,12 @@ func selfhostCLIFrontendCheckOnlySemanticFailureCases(
 			wantErr: "error: type error: undefined variable `name`\n",
 		},
 		{
+			name:    "check_temp_undefined_match_arm_variable",
+			args:    []string{"check", fixtures.undefinedMatch},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: type error: undefined variable `name`\n",
+		},
+		{
 			name:    "check_temp_arity_mismatch",
 			args:    []string{"check", fixtures.aritySource},
 			wantOut: "exit-code\n1\n",
@@ -625,7 +632,7 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 	tempRunSource := writeTempKizuSource(t, "frontend_run_hello.kizu", runSource)
 
 	tempMovedSource, tempMovedValue, tempUnknownSource, tempUnknownStd, tempAritySource,
-		tempDuplicate, tempTypeArity, tempUnknownType, tempUndefinedVariable :=
+		tempDuplicate, tempTypeArity, tempUnknownType, tempUndefinedVariable, tempUndefinedMatch :=
 		writeSelfhostCLISemanticFrontendFixtures(t)
 	tempArgumentMismatch := writeSelfhostCLIArgumentFrontendFixtures(t)
 	tempAssignmentMismatch, tempImmutableAssignment, tempInvalidAssignment :=
@@ -646,6 +653,7 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 		unknownSource:       tempUnknownSource,
 		unknownStd:          tempUnknownStd,
 		undefinedVariable:   tempUndefinedVariable,
+		undefinedMatch:      tempUndefinedMatch,
 		aritySource:         tempAritySource,
 		duplicate:           tempDuplicate,
 		typeArity:           tempTypeArity,
@@ -678,27 +686,52 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 // writeSelfhostCLISemanticFrontendFixtures writes semantic-check inputs.
 func writeSelfhostCLISemanticFrontendFixtures(
 	t *testing.T,
-) (string, string, string, string, string, string, string, string, string) {
+) (string, string, string, string, string, string, string, string, string, string) {
 	t.Helper()
 
 	tempMovedSource, tempMovedValue := writeSelfhostCLIMoveFrontendFixtures(t)
 	tempUnknownSource, tempUnknownStd, tempAritySource, tempDuplicate, tempTypeArity,
 		tempUnknownType := writeSelfhostCLISymbolFrontendFixtures(t)
-	tempUndefinedVariable := writeSelfhostCLIUndefinedVariableFrontendFixture(t)
+	tempUndefinedVariable, tempUndefinedMatch := writeSelfhostCLIUndefinedVariableFrontendFixtures(t)
 
 	return tempMovedSource, tempMovedValue, tempUnknownSource, tempUnknownStd, tempAritySource,
-		tempDuplicate, tempTypeArity, tempUnknownType, tempUndefinedVariable
+		tempDuplicate, tempTypeArity, tempUnknownType, tempUndefinedVariable, tempUndefinedMatch
 }
 
-// writeSelfhostCLIUndefinedVariableFrontendFixture writes variable semantic input.
-func writeSelfhostCLIUndefinedVariableFrontendFixture(t *testing.T) string {
+// writeSelfhostCLIUndefinedVariableFrontendFixtures writes variable semantic inputs.
+func writeSelfhostCLIUndefinedVariableFrontendFixtures(t *testing.T) (string, string) {
 	t.Helper()
 
 	const undefinedVariable = `fn main() {
     print(name);
 }
 `
-	return writeTempKizuSource(t, "frontend_undefined_variable.kizu", undefinedVariable)
+	tempUndefinedVariable := writeTempKizuSource(
+		t,
+		"frontend_undefined_variable.kizu",
+		undefinedVariable,
+	)
+
+	const undefinedMatch = `enum Color {
+    Red,
+    Green,
+}
+
+fn main() {
+    let color = Color::Red;
+    match color {
+        Red => print(name);,
+        Green => print("green");,
+    }
+}
+`
+	tempUndefinedMatch := writeTempKizuSource(
+		t,
+		"frontend_undefined_match_variable.kizu",
+		undefinedMatch,
+	)
+
+	return tempUndefinedVariable, tempUndefinedMatch
 }
 
 // writeSelfhostCLIArgumentFrontendFixtures writes argument-check semantic inputs.
