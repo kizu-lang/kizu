@@ -76,6 +76,13 @@ func (l *Lexer) NextToken() token.Token {
 		tok.Type = token.String
 		tok.Literal = l.readString()
 		return tok
+	case '\\':
+		if l.peekChar() == '\\' {
+			tok.Type = token.String
+			tok.Literal = l.readMultilineString()
+			return tok
+		}
+		tok = l.oneCharToken(token.Illegal)
 	case 0:
 		tok.Type = token.EOF
 		tok.Literal = ""
@@ -196,6 +203,53 @@ func (l *Lexer) readString() string {
 		l.readChar()
 	}
 	return out
+}
+
+// readMultilineString reads one or more `\\`-prefixed lines and joins them with newlines.
+//
+// Each segment consists of `\\` followed by the rest of the line. Consecutive segments
+// separated only by whitespace and a single newline are concatenated with `\n`.
+func (l *Lexer) readMultilineString() string {
+	var out []rune
+	for {
+		l.readChar() // consume first '\\'
+		l.readChar() // consume second '\\'
+		start := l.position
+		for l.ch != '\n' && l.ch != 0 {
+			l.readChar()
+		}
+		if len(out) > 0 {
+			out = append(out, '\n')
+		}
+		out = append(out, l.input[start:l.position]...)
+		if !l.peekMultilineContinuation() {
+			break
+		}
+	}
+	return string(out)
+}
+
+// peekMultilineContinuation reports whether the next non-blank line continues a `\\` string.
+func (l *Lexer) peekMultilineContinuation() bool {
+	if l.ch != '\n' {
+		return false
+	}
+	pos := l.readPosition
+	for pos < len(l.input) {
+		ch := l.input[pos]
+		if ch == ' ' || ch == '\t' || ch == '\r' {
+			pos++
+			continue
+		}
+		if ch == '\\' && pos+1 < len(l.input) && l.input[pos+1] == '\\' {
+			for l.readPosition <= pos {
+				l.readChar()
+			}
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // isLetter reports whether ch can appear in an identifier.

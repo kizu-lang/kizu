@@ -185,6 +185,67 @@ func TestLoopIsIdentifier(t *testing.T) {
 	}
 }
 
+// TestMultilineString verifies `\\`-prefixed multi-line string literals.
+func TestMultilineString(t *testing.T) {
+	input := "let help =\n" +
+		"    \\\\Usage: kizu <command>\n" +
+		"    \\\\\n" +
+		"    \\\\Commands:\n" +
+		"    \\\\  build    Build the project\n"
+	want := "Usage: kizu <command>\n\nCommands:\n  build    Build the project"
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.Let, "let"},
+		{token.Ident, "help"},
+		{token.Assign, "="},
+		{token.String, want},
+		{token.EOF, ""},
+	}
+	l := New(input)
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)",
+				i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
+// TestMultilineStringFollowedByStatement verifies the lexer resumes after multi-line strings.
+func TestMultilineStringFollowedByStatement(t *testing.T) {
+	input := "let text =\n" +
+		"    \\\\hello\n" +
+		"    \\\\world\n" +
+		";\n" +
+		"print(text);"
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.Let, "let"},
+		{token.Ident, "text"},
+		{token.Assign, "="},
+		{token.String, "hello\nworld"},
+		{token.Semicolon, ";"},
+		{token.Ident, "print"},
+		{token.LParen, "("},
+		{token.Ident, "text"},
+		{token.RParen, ")"},
+		{token.Semicolon, ";"},
+		{token.EOF, ""},
+	}
+	l := New(input)
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)",
+				i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
 // TestModuleVisibilityTokens checks import and public visibility keywords.
 func TestModuleVisibilityTokens(t *testing.T) {
 	input := `import app::lexer;
