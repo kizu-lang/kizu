@@ -433,6 +433,30 @@ func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeCheckerNormalizesBorrowProvenance keeps borrowed returns type-owned.
+func TestSelfhostTypeCheckerNormalizesBorrowProvenance(t *testing.T) {
+	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
+	required := []string{
+		"fn value_type_text(type_name: []u8) -> []u8",
+		"let marker = \" borrows \";",
+		"let expected_type = value_type_text(expected);",
+		"let actual_type = value_type_text(actual);",
+		"std::mem::equal_bytes(value_type_text(type_name), \"[]u8\")",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(checker, fragment) {
+			t.Fatalf("selfhost type checker borrow provenance normalization missing %q", fragment)
+		}
+	}
+	if strings.Contains(checker, "debug-") {
+		t.Fatal("selfhost type checker keeps temporary debug output")
+	}
+	body := selfhostKizuFunctionBody(t, checker, "fn known_type_mismatch(")
+	if !strings.Contains(body, "return !std::mem::equal_bytes(expected_type, actual_type);") {
+		t.Fatal("selfhost type mismatch comparison does not use normalized type text")
+	}
+}
+
 // TestSelfhostFrontendResponsibilitiesStaySplit keeps frontend boundaries split.
 func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
 	assertSelfhostSplitFiles(t)
