@@ -1,0 +1,954 @@
+import selfhost::parser;
+import selfhost::source;
+import selfhost::ownership::data;
+import selfhost::ownership::diagnostic;
+import selfhost::ownership::kind;
+import selfhost::ownership::state;
+import selfhost::types::model;
+
+pub fn check(typed: model::TypeSummary) -> data::OwnershipSummary {
+    return data::OwnershipSummary {
+        resources: typed.symbols,
+        checked_nodes: typed.typed_nodes,
+        borrows: 0,
+        errors: typed.diagnostics
+    };
+}
+
+pub fn check_sources(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    typed: model::TypeSummary
+) -> !data::OwnershipSummary {
+    let checked = try check_package(allocator, files, typed);
+    return summary_of(checked);
+}
+
+
+pub fn check_package(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    typed: model::TypeSummary
+) -> !data::CheckedPackage {
+    let summary = try check_source_summary(allocator, files, typed);
+    let module = try first_checked_module(files);
+    return checked_package_from_refs(
+        summary,
+        module,
+        entry_function_ref(),
+        package_root_fact()
+    );
+}
+
+pub fn checked_package_from_summary(summary: data::OwnershipSummary) -> data::CheckedPackage {
+    return checked_package_from_refs(
+        summary,
+        data::CheckedModuleRef {
+            source_id: 0,
+            kind: source::SourceKind::User,
+            path: "selfhost/smoke.kizu"
+        },
+        entry_function_ref(),
+        package_root_fact()
+    );
+}
+
+pub fn summary_of(checked: &data::CheckedPackage) -> data::OwnershipSummary {
+    return ownership_summary(
+        checked.resources,
+        checked.checked_nodes,
+        checked.borrows,
+        checked.diagnostics
+    );
+}
+
+fn check_source_summary(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    typed: model::TypeSummary
+) -> !data::OwnershipSummary {
+    var summary = ownership_summary(typed.symbols, typed.typed_nodes, 0, typed.diagnostics);
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) {
+            summary = merge_ownership_summaries(
+                summary,
+                try check_file_ownership_ast(allocator, file)
+            );
+        }
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn checked_package_from_refs(
+    summary: data::OwnershipSummary,
+    module: data::CheckedModuleRef,
+    entry_function: data::CheckedFunctionRef,
+    root_fact: data::OwnershipFact
+) -> data::CheckedPackage {
+    return data::CheckedPackage {
+        diagnostics: summary.errors,
+        resources: summary.resources,
+        checked_nodes: summary.checked_nodes,
+        borrows: summary.borrows,
+        module: module,
+        entry_function: entry_function,
+        root_fact: root_fact,
+        summary: summary
+    };
+}
+
+fn first_checked_module(files: &std::array::Array<source::SourceFile>) -> !data::CheckedModuleRef {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) {
+            return data::CheckedModuleRef {
+                source_id: file.id,
+                kind: file.kind,
+                path: file.path
+            };
+        }
+        index = index + 1;
+    }
+    return error("ownership handoff requires selfhost module");
+}
+
+fn entry_function_ref() -> data::CheckedFunctionRef {
+    return data::CheckedFunctionRef {
+        module: "main",
+        name: "smoke",
+        span_start: 0,
+        span_end: 0
+    };
+}
+
+fn package_root_fact() -> data::OwnershipFact {
+    return data::OwnershipFact {
+        name: "selfhost package",
+        kind: data::ResourceKind::Value,
+        state: data::OwnershipState::Available
+    };
+}
+
+fn check_file_ownership_ast(
+    allocator: Allocator,
+    file: &source::SourceFile
+) -> !data::OwnershipSummary {
+    let result = try parser::parse_checked_file(allocator, file.path, file.text);
+    let summary = try check_ownership_ast_node(
+        allocator,
+        file,
+        result.ast,
+        result.root
+    );
+    result.deinit();
+    return summary;
+}
+
+fn check_ownership_ast_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return check_ownership_range(allocator, file, ast, program.declarations);,
+        FnDecl(fn_decl) => return check_function_ownership(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body
+        );,
+        ImportDecl(import_decl) => return ownership_summary(0, 1, 0, 0);,
+        StructDecl(struct_decl) => return ownership_summary(0, 1, 0, 0);,
+        EnumDecl(enum_decl) => return ownership_summary(0, 1, 0, 0);,
+        UnionDecl(union_decl) => return ownership_summary(0, 1, 0, 0);,
+        Empty => return ownership_summary(0, 0, 0, 0);,
+        Int(int_node) => return ownership_summary(0, 1, 0, 0);,
+        String(string_node) => return ownership_summary(0, 1, 0, 0);,
+        TypeName(type_name) => return ownership_summary(0, 1, 0, 0);,
+        Var(var_node) => return ownership_summary(0, 1, 0, 0);,
+        Bool(bool_node) => return ownership_summary(0, 1, 0, 0);,
+        Prefix(prefix_node) => return check_ownership_ast_node(allocator, file, ast, prefix_node.right);,
+        Binary(binary) => return merge_ownership_summaries(
+            try check_ownership_ast_node(allocator, file, ast, binary.left),
+            try check_ownership_ast_node(allocator, file, ast, binary.right)
+        );,
+        FieldExpr(field_expr_node) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver
+        );,
+        DerefExpr(deref_expr_node) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver
+        );,
+        Call(call_node) => return check_ownership_call(allocator, file, ast, call_node.callee, call_node.args);,
+        TypeApplyExpr(type_apply) => return check_ownership_range_with_head(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            type_apply.type_args
+        );,
+        CastExpr(cast_expr) => return check_ownership_ast_node(allocator, file, ast, cast_expr.value);,
+        IndexExpr(index_expr) => return check_ownership_index(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end
+        );,
+        StructLiteralExpr(struct_literal) => return check_ownership_range_with_head(
+            allocator,
+            file,
+            ast,
+            struct_literal.type_name,
+            struct_literal.fields
+        );,
+        StructFieldInit(struct_field_init) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value
+        );,
+        ArenaNewExpr(arena_new) => return check_ownership_arena_new(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator
+        );,
+        TryExpr(try_expr_node) => return check_ownership_ast_node(allocator, file, ast, try_expr_node.value);,
+        ComptimeExpr(comptime_expr_node) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value
+        );,
+        Block(block) => return check_ownership_range(allocator, file, ast, block.statements);,
+        If(if_node) => return check_ownership_if(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block
+        );,
+        Let(let_node) => return check_let_ownership(
+            allocator,
+            file,
+            ast,
+            let_node.name,
+            let_node.value
+        );,
+        Assign(assign_node) => return merge_ownership_summaries(
+            try check_ownership_ast_node(allocator, file, ast, assign_node.target),
+            try check_ownership_ast_node(allocator, file, ast, assign_node.value)
+        );,
+        Return(return_node) => return check_ownership_ast_node(allocator, file, ast, return_node.value);,
+        Defer(defer_node) => return check_ownership_defer(allocator, file, ast, defer_node.expr);,
+        ExprStmt(expr_stmt) => return check_ownership_ast_node(allocator, file, ast, expr_stmt.expr);,
+        While(while_node) => return check_ownership_loop(allocator, file, ast, while_node.condition, while_node.body);,
+        For(for_node) => return check_ownership_for_node(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body
+        );,
+        Break(break_node) => return ownership_summary(0, 1, 0, 0);,
+        Continue(continue_node) => return ownership_summary(0, 1, 0, 0);,
+        Param(param_node) => return ownership_summary(0, 1, 0, 0);,
+        Field(field_node) => return ownership_summary(0, 1, 0, 0);,
+        UnionVariant(union_variant) => return ownership_summary(0, 1, 0, 0);,
+        Match(match_node) => return check_ownership_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms
+        );,
+        MatchArm(match_arm) => return check_ownership_ast_node(allocator, file, ast, match_arm.body);,
+        Unsafe(unsafe_node) => return check_ownership_ast_node(allocator, file, ast, unsafe_node.body);,
+        ComptimeIf(comptime_if_node) => return check_ownership_comptime_if(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block
+        );,
+    }
+}
+
+fn check_function_ownership(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var states = std::map::Map<[]u8, data::OwnershipState>(allocator);
+    var kinds = std::map::Map<[]u8, data::ResourceKind>(allocator);
+    var summary = ownership_summary(0, 1, 0, 0);
+    var param_index = 0;
+    while param_index < params.len {
+        let param_child = try ast.child_at(params, param_index);
+        let param_name = kind::param_binding_name(file, ast, param_child);
+        if !std::mem::equal_bytes(param_name, "") {
+            let kind = kind::param_resource_kind(file, ast, param_child);
+            try state::declare_resource(states, kinds, param_name, kind);
+            summary = merge_ownership_summaries(summary, ownership_summary(1, 1, 0, 0));
+            if kind == data::ResourceKind::BorrowedView {
+                try state::shared_borrow(states, param_name);
+                summary = merge_ownership_summaries(summary, ownership_summary(0, 0, 1, 0));
+            }
+        }
+        param_index = param_index + 1;
+    }
+    var statement_index = 0;
+    let statements = kind::function_body_statements(ast, body);
+    while statement_index < statements.len {
+        let statement = try ast.child_at(statements, statement_index);
+        if kind::statement_is_let(ast, statement) {
+            let name = kind::statement_let_name(ast, statement);
+            let value = kind::statement_let_value(ast, statement);
+            let kind = try kind::initializer_state_resource_kind(file, ast, value, kinds);
+            let borrow_name = kind::initializer_borrow_name(file, ast, value);
+            if !std::mem::equal_bytes(borrow_name, "") {
+                if states.contains(borrow_name) {
+                    if kind::initializer_borrow_mutable(ast, value) {
+                        try state::record_borrow(states, borrow_name, true);
+                    } else {
+                        try state::shared_borrow(states, borrow_name);
+                    }
+                }
+                summary = merge_ownership_summaries(summary, ownership_summary(0, 0, 1, 0));
+            }
+            let move_name = kind::initializer_move_name(file, ast, value);
+            if !std::mem::equal_bytes(move_name, "") and states.contains(move_name) {
+                let state = try states.get(move_name);
+                if state == data::OwnershipState::Moved {
+                    summary = merge_ownership_summaries(
+                        summary,
+                        record_use_after_move(allocator, file, ast, value)
+                    );
+                } else {
+                    let moved_kind = try kinds.get(move_name);
+                    if kind::resource_kind_moves(moved_kind) {
+                        try state::move_value(states, move_name);
+                    }
+                }
+            }
+            summary = merge_ownership_summaries(
+                summary,
+                try declare_named_resource(file, ast, name, kind, states, kinds)
+            );
+        }
+        statement_index = statement_index + 1;
+    }
+    summary = merge_ownership_summaries(
+        summary,
+        try check_function_body(allocator, file, ast, body)
+    );
+    states.deinit();
+    kinds.deinit();
+    return summary;
+}
+
+fn check_function_params(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange
+) -> !data::OwnershipSummary {
+    var summary = ownership_summary(0, 0, 0, 0);
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        let node = ast.get(child);
+        match node.data {
+            Program(program) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Param(param_node) => summary = merge_ownership_summaries(
+                summary,
+                try declare_param_resource(file, ast, param_node.name, param_node.type_node)
+            );,
+            Empty => summary = merge_ownership_summaries(summary, ownership_summary(0, 0, 0, 0));,
+            ImportDecl(import_decl) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            StructDecl(struct_decl) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            EnumDecl(enum_decl) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            UnionDecl(union_decl) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            FnDecl(fn_decl) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Int(int_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            String(string_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            TypeName(type_name) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Var(var_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Bool(bool_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Prefix(prefix_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Binary(binary) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            FieldExpr(field_expr_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            DerefExpr(deref_expr_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Call(call_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            TypeApplyExpr(type_apply) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            CastExpr(cast_expr) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            IndexExpr(index_expr) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            StructLiteralExpr(struct_literal) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            StructFieldInit(struct_field_init) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            ArenaNewExpr(arena_new) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            TryExpr(try_expr_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            ComptimeExpr(comptime_expr_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Block(block) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            If(if_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Let(let_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Assign(assign_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Return(return_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Defer(defer_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 1, 0));,
+            ExprStmt(expr_stmt) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            While(while_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            For(for_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Break(break_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Continue(continue_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Field(field_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            UnionVariant(union_variant) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Match(match_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            MatchArm(match_arm) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            Unsafe(unsafe_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+            ComptimeIf(comptime_if_node) => summary = merge_ownership_summaries(summary, ownership_summary(0, 1, 0, 0));,
+        }
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn check_function_body(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    let node = ast.get(body);
+    match node.data {
+        Program(program) => return ownership_summary(0, 1, 0, 0);,
+        Block(block) => return check_ownership_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements
+        );,
+        Empty => return ownership_summary(0, 0, 0, 0);,
+        ImportDecl(import_decl) => return ownership_summary(0, 1, 0, 0);,
+        StructDecl(struct_decl) => return ownership_summary(0, 1, 0, 0);,
+        EnumDecl(enum_decl) => return ownership_summary(0, 1, 0, 0);,
+        UnionDecl(union_decl) => return ownership_summary(0, 1, 0, 0);,
+        FnDecl(fn_decl) => return ownership_summary(0, 1, 0, 0);,
+        Int(int_node) => return ownership_summary(0, 1, 0, 0);,
+        String(string_node) => return ownership_summary(0, 1, 0, 0);,
+        TypeName(type_name) => return ownership_summary(0, 1, 0, 0);,
+        Var(var_node) => return ownership_summary(0, 1, 0, 0);,
+        Bool(bool_node) => return ownership_summary(0, 1, 0, 0);,
+        Prefix(prefix_node) => return check_ownership_ast_node(allocator, file, ast, prefix_node.right);,
+        Binary(binary) => return merge_ownership_summaries(
+            try check_ownership_ast_node(allocator, file, ast, binary.left),
+            try check_ownership_ast_node(allocator, file, ast, binary.right)
+        );,
+        FieldExpr(field_expr_node) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver
+        );,
+        DerefExpr(deref_expr_node) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver
+        );,
+        Call(call_node) => return check_ownership_call(allocator, file, ast, call_node.callee, call_node.args);,
+        TypeApplyExpr(type_apply) => return check_ownership_range_with_head(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            type_apply.type_args
+        );,
+        CastExpr(cast_expr) => return check_ownership_ast_node(allocator, file, ast, cast_expr.value);,
+        IndexExpr(index_expr) => return check_ownership_index(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end
+        );,
+        StructLiteralExpr(struct_literal) => return check_ownership_range_with_head(
+            allocator,
+            file,
+            ast,
+            struct_literal.type_name,
+            struct_literal.fields
+        );,
+        StructFieldInit(struct_field_init) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value
+        );,
+        ArenaNewExpr(arena_new) => return check_ownership_arena_new(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator
+        );,
+        TryExpr(try_expr_node) => return check_ownership_ast_node(allocator, file, ast, try_expr_node.value);,
+        ComptimeExpr(comptime_expr_node) => return check_ownership_ast_node(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value
+        );,
+        If(if_node) => return check_ownership_if(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block
+        );,
+        Let(let_node) => return check_let_ownership(
+            allocator,
+            file,
+            ast,
+            let_node.name,
+            let_node.value
+        );,
+        Assign(assign_node) => return merge_ownership_summaries(
+            try check_ownership_ast_node(allocator, file, ast, assign_node.target),
+            try check_ownership_ast_node(allocator, file, ast, assign_node.value)
+        );,
+        Return(return_node) => return check_ownership_ast_node(allocator, file, ast, return_node.value);,
+        Defer(defer_node) => return check_ownership_defer(allocator, file, ast, defer_node.expr);,
+        ExprStmt(expr_stmt) => return check_ownership_ast_node(allocator, file, ast, expr_stmt.expr);,
+        While(while_node) => return check_ownership_loop(allocator, file, ast, while_node.condition, while_node.body);,
+        For(for_node) => return check_ownership_for_node(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body
+        );,
+        Break(break_node) => return ownership_summary(0, 1, 0, 0);,
+        Continue(continue_node) => return ownership_summary(0, 1, 0, 0);,
+        Param(param_node) => return ownership_summary(0, 1, 0, 0);,
+        Field(field_node) => return ownership_summary(0, 1, 0, 0);,
+        UnionVariant(union_variant) => return ownership_summary(0, 1, 0, 0);,
+        Match(match_node) => return check_ownership_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms
+        );,
+        MatchArm(match_arm) => return check_function_body(allocator, file, ast, match_arm.body);,
+        Unsafe(unsafe_node) => return check_function_body(allocator, file, ast, unsafe_node.body);,
+        ComptimeIf(comptime_if_node) => return check_ownership_comptime_if(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block
+        );,
+    }
+}
+
+fn check_ownership_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !data::OwnershipSummary {
+    var summary = ownership_summary(0, 1, 0, 0);
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        summary = merge_ownership_summaries(
+            summary,
+            try check_function_body(allocator, file, ast, child)
+        );
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn check_let_ownership(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    let kind = try kind::initializer_resource_kind(file, ast, value);
+    var borrows = 0;
+    if kind == data::ResourceKind::BorrowedView {
+        borrows = 1;
+    }
+    var summary = ownership_summary(1, 1, borrows, 0);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, value));
+    return summary;
+}
+
+fn check_ownership_defer(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = ownership_summary(0, 1, 1, 0);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, expr));
+    return summary;
+}
+
+fn check_for_ownership(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = ownership_summary(1, 1, 0, 0);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, start));
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, end));
+    summary = merge_ownership_summaries(summary, try check_function_body(allocator, file, ast, body));
+    return summary;
+}
+
+fn check_match_ownership(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, value);
+    var index = 0;
+    while index < arms.len {
+        let child = try ast.child_at(arms, index);
+        summary = merge_ownership_summaries(
+            summary,
+            try check_match_arm_ownership(allocator, file, ast, child)
+        );
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn check_match_arm_ownership(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    arm_id: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    let node = ast.get(arm_id);
+    match node.data {
+        Program(program) => return ownership_summary(0, 1, 0, 0);,
+        MatchArm(match_arm) => return check_match_arm_body_ownership(
+            allocator,
+            file,
+            ast,
+            match_arm.binding,
+            match_arm.body
+        );,
+        Empty => return ownership_summary(0, 0, 0, 0);,
+        ImportDecl(import_decl) => return ownership_summary(0, 1, 0, 0);,
+        StructDecl(struct_decl) => return ownership_summary(0, 1, 0, 0);,
+        EnumDecl(enum_decl) => return ownership_summary(0, 1, 0, 0);,
+        UnionDecl(union_decl) => return ownership_summary(0, 1, 0, 0);,
+        FnDecl(fn_decl) => return ownership_summary(0, 1, 0, 0);,
+        Int(int_node) => return ownership_summary(0, 1, 0, 0);,
+        String(string_node) => return ownership_summary(0, 1, 0, 0);,
+        TypeName(type_name) => return ownership_summary(0, 1, 0, 0);,
+        Var(var_node) => return ownership_summary(0, 1, 0, 0);,
+        Bool(bool_node) => return ownership_summary(0, 1, 0, 0);,
+        Prefix(prefix_node) => return ownership_summary(0, 1, 0, 0);,
+        Binary(binary) => return ownership_summary(0, 1, 0, 0);,
+        FieldExpr(field_expr_node) => return ownership_summary(0, 1, 0, 0);,
+        DerefExpr(deref_expr_node) => return ownership_summary(0, 1, 0, 0);,
+        Call(call_node) => return ownership_summary(0, 1, 0, 0);,
+        TypeApplyExpr(type_apply) => return ownership_summary(0, 1, 0, 0);,
+        CastExpr(cast_expr) => return ownership_summary(0, 1, 0, 0);,
+        IndexExpr(index_expr) => return ownership_summary(0, 1, 0, 0);,
+        StructLiteralExpr(struct_literal) => return ownership_summary(0, 1, 0, 0);,
+        StructFieldInit(struct_field_init) => return ownership_summary(0, 1, 0, 0);,
+        ArenaNewExpr(arena_new) => return ownership_summary(0, 1, 0, 0);,
+        TryExpr(try_expr_node) => return ownership_summary(0, 1, 0, 0);,
+        ComptimeExpr(comptime_expr_node) => return ownership_summary(0, 1, 0, 0);,
+        Block(block) => return ownership_summary(0, 1, 0, 0);,
+        If(if_node) => return ownership_summary(0, 1, 0, 0);,
+        Let(let_node) => return ownership_summary(0, 1, 0, 0);,
+        Assign(assign_node) => return ownership_summary(0, 1, 0, 0);,
+        Return(return_node) => return ownership_summary(0, 1, 0, 0);,
+        Defer(defer_node) => return ownership_summary(0, 1, 1, 0);,
+        ExprStmt(expr_stmt) => return ownership_summary(0, 1, 0, 0);,
+        While(while_node) => return ownership_summary(0, 1, 0, 0);,
+        For(for_node) => return ownership_summary(0, 1, 0, 0);,
+        Break(break_node) => return ownership_summary(0, 1, 0, 0);,
+        Continue(continue_node) => return ownership_summary(0, 1, 0, 0);,
+        Param(param_node) => return ownership_summary(0, 1, 0, 0);,
+        Field(field_node) => return ownership_summary(0, 1, 0, 0);,
+        UnionVariant(union_variant) => return ownership_summary(0, 1, 0, 0);,
+        Match(match_node) => return ownership_summary(0, 1, 0, 0);,
+        Unsafe(unsafe_node) => return ownership_summary(0, 1, 0, 0);,
+        ComptimeIf(comptime_if_node) => return ownership_summary(0, 1, 0, 0);,
+    }
+}
+
+fn check_match_arm_body_ownership(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    binding: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = try declare_optional_binding(file, ast, binding);
+    summary = merge_ownership_summaries(
+        summary,
+        try check_function_body(allocator, file, ast, body)
+    );
+    return summary;
+}
+
+fn declare_param_resource(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    let text = kind::ast_node_text(file, ast, name);
+    if std::mem::equal_bytes(text, "") {
+        return ownership_summary(0, 0, 0, 0);
+    }
+    let type_text = kind::ast_node_text(file, ast, type_node);
+    var borrows = 0;
+    if kind::resource_kind_for_type(type_text) == data::ResourceKind::BorrowedView {
+        borrows = 1;
+    }
+    return ownership_summary(1, 1, borrows, 0);
+}
+
+fn declare_optional_binding(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    binding: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    let text = kind::ast_node_text(file, ast, binding);
+    if std::mem::equal_bytes(text, "") {
+        return ownership_summary(0, 0, 0, 0);
+    }
+    return ownership_summary(1, 1, 0, 0);
+}
+
+fn declare_named_resource(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    kind: data::ResourceKind,
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    kinds: &var std::map::Map<[]u8, data::ResourceKind>
+) -> !data::OwnershipSummary {
+    let text = kind::ast_node_text(file, ast, name);
+    if std::mem::equal_bytes(text, "") {
+        return ownership_summary(0, 0, 0, 0);
+    }
+    if !states.contains(text) {
+        try state::declare_resource(states, kinds, text, kind);
+    }
+    return ownership_summary(1, 1, 0, 0);
+}
+
+fn record_use_after_move(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> data::OwnershipSummary {
+    let node = ast.get(node_id);
+    var diagnostic = diagnostic::use_after_move(allocator, file.path, node.span.start, node.span.end);
+    diagnostic.deinit();
+    return ownership_summary(0, 1, 0, 1);
+}
+
+fn check_ownership_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !data::OwnershipSummary {
+    var summary = ownership_summary(0, 1, 0, 0);
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        summary = merge_ownership_summaries(
+            summary,
+            try check_ownership_ast_node(allocator, file, ast, child)
+        );
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn check_ownership_range_with_head(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    head: std::kizu::ast::NodeId,
+    range: std::kizu::ast::ChildRange
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, head);
+    summary = merge_ownership_summaries(
+        summary,
+        try check_ownership_range(allocator, file, ast, range)
+    );
+    return summary;
+}
+
+fn check_ownership_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !data::OwnershipSummary {
+    return check_ownership_range_with_head(allocator, file, ast, callee, args);
+}
+
+fn check_ownership_index(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, target);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, start));
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, end));
+    return summary;
+}
+
+fn check_ownership_arena_new(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    allocator_arg: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = ownership_summary(0, 1, 0, 0);
+    summary = merge_ownership_summaries(
+        summary,
+        try check_ownership_ast_node(allocator, file, ast, allocator_arg)
+    );
+    return summary;
+}
+
+fn check_ownership_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, condition);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, then_block));
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, else_block));
+    return summary;
+}
+
+fn check_ownership_comptime_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, condition);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, then_block));
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, else_block));
+    return summary;
+}
+
+fn check_ownership_loop(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, condition);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, body));
+    return summary;
+}
+
+fn check_ownership_for_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, start);
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, end));
+    summary = merge_ownership_summaries(summary, try check_ownership_ast_node(allocator, file, ast, body));
+    return summary;
+}
+
+fn check_ownership_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange
+) -> !data::OwnershipSummary {
+    var summary = try check_ownership_ast_node(allocator, file, ast, value);
+    summary = merge_ownership_summaries(
+        summary,
+        try check_ownership_range(allocator, file, ast, arms)
+    );
+    return summary;
+}
+
+fn merge_ownership_summaries(left: data::OwnershipSummary, right: data::OwnershipSummary) -> data::OwnershipSummary {
+    return ownership_summary(
+        left.resources + right.resources,
+        left.checked_nodes + right.checked_nodes,
+        left.borrows + right.borrows,
+        left.errors + right.errors
+    );
+}
+
+fn ownership_summary(
+    resources: i64,
+    checked_nodes: i64,
+    borrows: i64,
+    errors: i64
+) -> data::OwnershipSummary {
+    return data::OwnershipSummary {
+        resources: resources,
+        checked_nodes: checked_nodes,
+        borrows: borrows,
+        errors: errors
+    };
+}

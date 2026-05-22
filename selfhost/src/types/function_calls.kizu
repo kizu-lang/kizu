@@ -1,0 +1,1386 @@
+import selfhost::lexer;
+import selfhost::parser;
+import selfhost::source;
+import selfhost::types::model;
+
+pub struct FunctionReferenceScan {
+    pub next: i64,
+    pub typed_nodes: i64,
+    pub diagnostics: i64,
+}
+
+pub struct PackageModuleRef {
+    pub start: i64,
+    pub end: i64,
+    pub absolute: bool,
+}
+pub fn first_function_call_error(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    target_path: []u8
+) -> !model::FunctionCallSummary {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) and std::mem::equal_bytes(file.path, target_path) {
+            let result = try parser::parse_checked_file(allocator, file.path, file.text);
+            let has_package_call = try has_package_function_call(
+                allocator,
+                file,
+                &result.ast,
+                result.root
+            );
+            var found = function_call_summary(false, 0, 0, 0, 0, 0);
+            if has_package_call {
+                var function_arities = std::map::Map<[]u8, i64>(allocator);
+                try collect_function_arities_from_ast(
+                    allocator,
+                    file,
+                    &result.ast,
+                    result.root,
+                    function_arities
+                );
+                var referenced_modules = std::array::Array<PackageModuleRef>(allocator);
+                var target_tokens = try lexer::tokenize(allocator, file.text);
+                try collect_referenced_package_call_modules(
+                    file,
+                    target_tokens,
+                    referenced_modules
+                );
+                target_tokens.deinit();
+                try collect_other_package_function_arities_for_modules_from_ast(
+                    allocator,
+                    files,
+                    file,
+                    referenced_modules,
+                    function_arities
+                );
+                found = try first_function_call_error_ast_node(
+                    allocator,
+                    file,
+                    &result.ast,
+                    result.root,
+                    function_arities,
+                    false
+                );
+                referenced_modules.deinit();
+                function_arities.deinit();
+            }
+            result.deinit();
+            return found;
+        }
+        index = index + 1;
+    }
+    return function_call_summary(false, 0, 0, 0, 0, 0);
+}
+
+pub fn source_has_package_function_call(
+    allocator: Allocator,
+    path: []u8,
+    text: []u8
+) -> !bool {
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: text
+    };
+    let result = try parser::parse_checked_file(allocator, path, text);
+    let found = try has_package_function_call(allocator, &file, &result.ast, result.root);
+    result.deinit();
+    return found;
+}
+
+fn has_package_function_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !bool {
+    var empty_arities = std::map::Map<[]u8, i64>(allocator);
+    defer empty_arities.deinit();
+    let found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        root,
+        empty_arities,
+        false
+    );
+    return found.found;
+}
+
+fn collect_package_function_signatures(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    function_arities: &var std::map::Map<[]u8, i64>,
+    function_param_sources: &var std::map::Map<[]u8, []u8>,
+    function_returns: &var std::map::Map<[]u8, []u8>,
+    function_visibility: &var std::map::Map<[]u8, bool>,
+    function_span_starts: &var std::map::Map<[]u8, i64>,
+    function_span_ends: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_source_code(file.kind) {
+            var tokens = try lexer::tokenize(allocator, file.text);
+            try collect_function_signatures(
+                allocator,
+                file,
+                tokens,
+                function_arities,
+                function_param_sources,
+                function_returns,
+                function_visibility,
+                function_span_starts,
+                function_span_ends
+            );
+            tokens.deinit();
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_other_package_function_arities_for_modules_from_ast(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    target_file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
+    function_arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_source_code(file.kind) and !std::mem::equal_bytes(file.path, target_file.path) {
+            if try package_module_list_contains_file(target_file, modules, file) {
+                let result = try parser::parse_checked_file(allocator, file.path, file.text);
+                try collect_function_arities_from_ast(
+                    allocator,
+                    file,
+                    &result.ast,
+                    result.root,
+                    function_arities
+                );
+                result.deinit();
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_referenced_package_call_modules(
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    var index = 0;
+    while index < tokens.len() {
+        let path_end = try qualified_path_end(file.text, tokens, index);
+        if path_end >= index and try is_function_call_at(file.text, tokens, index, path_end) {
+            let first = try tokens.get(index);
+            let last = try tokens.get(path_end);
+            let name = file.text[first.start..last.end];
+            if is_referenced_package_function_call(name) {
+                try append_package_function_module(file, first.start, name, modules);
+            }
+            index = path_end + 1;
+        } else {
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+fn is_referenced_package_function_call(name: []u8) -> bool {
+    if should_skip_function_reference(name) or
+        last_segment_starts_with_uppercase(name) or
+        is_generic_constructor_text(name) {
+        return false;
+    }
+    return is_qualified_name(name);
+}
+
+fn append_package_function_module(
+    file: &source::SourceFile,
+    source_start: i64,
+    name: []u8,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    let end = package_function_module_end(name);
+    if end < 1 {
+        return;
+    }
+    let absolute = std::mem::starts_with(name, "std::") or
+        std::mem::starts_with(name, "selfhost::");
+    let module = PackageModuleRef {
+        start: source_start,
+        end: source_start + end,
+        absolute: absolute
+    };
+    if !(try package_module_list_contains(file, modules, &module)) {
+        try modules.append(module);
+    }
+    return;
+}
+
+fn package_function_module_end(name: []u8) -> i64 {
+    var end = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            end = index;
+        }
+        index = index + 1;
+    }
+    return end;
+}
+
+fn package_module_list_contains(
+    file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
+    module: &PackageModuleRef
+) -> !bool {
+    var index = 0;
+    while index < modules.len() {
+        let current = try modules.at(index);
+        if package_module_refs_equal(file, current, module) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn package_module_refs_equal(
+    file: &source::SourceFile,
+    left: &PackageModuleRef,
+    right: &PackageModuleRef
+) -> bool {
+    if left.absolute != right.absolute {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        file.text[left.start..left.end],
+        file.text[right.start..right.end]
+    );
+}
+
+fn package_module_list_contains_file(
+    target_file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
+    file: &source::SourceFile
+) -> !bool {
+    var index = 0;
+    while index < modules.len() {
+        let module = try modules.at(index);
+        if package_module_matches_file(target_file, module, file) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn package_module_matches_file(
+    target_file: &source::SourceFile,
+    module: &PackageModuleRef,
+    file: &source::SourceFile
+) -> bool {
+    let text = target_file.text[module.start..module.end];
+    if file.kind == source::SourceKind::Std {
+        if !std::mem::starts_with(text, "std::") {
+            return false;
+        }
+        return package_module_matches_path(text[5..std::mem::len(text)], source::module_path(file));
+    }
+    if file.kind == source::SourceKind::Selfhost {
+        if module.absolute {
+            if !std::mem::starts_with(text, "selfhost::") {
+                return false;
+            }
+            return package_module_matches_path(text[10..std::mem::len(text)], source::module_path(file));
+        }
+        return package_module_matches_path(text, source::module_path(file));
+    }
+    return false;
+}
+
+fn package_module_matches_path(module: []u8, path: []u8) -> bool {
+    var module_index = 0;
+    var path_index = 0;
+    while module_index < std::mem::len(module) and path_index < std::mem::len(path) {
+        if module_index + 1 < std::mem::len(module) and
+            module[module_index] == cast<u8>(58) and
+            module[module_index + 1] == cast<u8>(58) {
+            if path[path_index] != cast<u8>(47) {
+                return false;
+            }
+            module_index = module_index + 2;
+            path_index = path_index + 1;
+        } else {
+            if module[module_index] != path[path_index] {
+                return false;
+            }
+            module_index = module_index + 1;
+            path_index = path_index + 1;
+        }
+    }
+    return module_index == std::mem::len(module) and path_index == std::mem::len(path);
+}
+
+pub fn collect_function_signatures(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    arities: &var std::map::Map<[]u8, i64>,
+    param_sources: &var std::map::Map<[]u8, []u8>,
+    returns: &var std::map::Map<[]u8, []u8>,
+    visibility: &var std::map::Map<[]u8, bool>,
+    span_starts: &var std::map::Map<[]u8, i64>,
+    span_ends: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    var depth = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(file.text, token);
+        var handled = false;
+        if std::mem::equal_bytes(text, "{") {
+            depth = depth + 1;
+            handled = true;
+        }
+        if !handled and std::mem::equal_bytes(text, "}") {
+            depth = depth - 1;
+            handled = true;
+        }
+        if !handled and depth == 0 and std::mem::equal_bytes(text, "fn") {
+            if index + 1 < tokens.len() {
+                let name = try tokens.get(index + 1);
+                let name_text = token_text(file.text, name);
+                let open = try function_param_open(file.text, tokens, index);
+                let close = try function_param_close(file.text, tokens, open);
+                let params = try count_function_params(file.text, tokens, open, close);
+                let param_source = try function_param_source(file.text, tokens, open, close);
+                let return_type = try function_return_type(file.text, tokens, close + 1);
+                var qualified = std::string::String(allocator);
+                try append_module_name(qualified, file);
+                try qualified.append_bytes("::");
+                try qualified.append_bytes(name_text);
+                let function_name = qualified.as_bytes();
+                if arities.contains(function_name) {
+                    return error("duplicate function");
+                }
+                try arities.insert(function_name, params);
+                try param_sources.insert(function_name, param_source);
+                try returns.insert(function_name, return_type);
+                try visibility.insert(function_name, try function_public_at(file.text, tokens, index));
+                try span_starts.insert(function_name, name.start);
+                try span_ends.insert(function_name, name.end);
+                qualified.deinit();
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+pub fn collect_function_arities_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_function_arities_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            arities
+        );,
+        FnDecl(fn_decl) => return collect_function_arity(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.params.len,
+            arities
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_function_arities_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_function_arities_from_ast(allocator, file, ast, child, arities);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_arity(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    params: i64,
+    arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var qualified = std::string::String(allocator);
+    try append_module_name(qualified, file);
+    try qualified.append_bytes("::");
+    try qualified.append_bytes(ast_ref_node_text(file, ast, name));
+    let key = qualified.as_bytes();
+    if arities.contains(key) {
+        return error("duplicate function");
+    }
+    try arities.insert(key, params);
+    qualified.deinit();
+    return;
+}
+
+fn function_param_open(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    fn_index: i64
+) -> !i64 {
+    var cursor = fn_index + 2;
+    if cursor >= tokens.len() {
+        return cursor;
+    }
+    let token = try tokens.get(cursor);
+    if std::mem::equal_bytes(token_text(source_text, token), "<") {
+        return skip_balanced_angle(source_text, tokens, cursor);
+    }
+    return cursor;
+}
+
+fn skip_balanced_angle(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64
+) -> !i64 {
+    var depth = 0;
+    var cursor = open_index;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        let text = token_text(source_text, token);
+        if std::mem::equal_bytes(text, "<") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                depth = depth - 1;
+                if depth == 0 {
+                    return cursor + 1;
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn function_param_close(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64
+) -> !i64 {
+    var depth = 0;
+    var cursor = open_index;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        let text = token_text(source_text, token);
+        if std::mem::equal_bytes(text, "(") {
+            depth = depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ")") {
+                depth = depth - 1;
+                if depth == 0 {
+                    return cursor;
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn function_param_source(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64,
+    close_index: i64
+) -> ![]u8 {
+    if open_index + 1 >= close_index {
+        return "";
+    }
+    let start = try tokens.get(open_index + 1);
+    let end = try tokens.get(close_index - 1);
+    return std::mem::trim_ascii(source_text[start.start..end.end]);
+}
+
+fn count_function_params(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64,
+    close_index: i64
+) -> !i64 {
+    if open_index + 1 >= close_index {
+        return 0;
+    }
+    var count = 1;
+    var angle_depth = 0;
+    var paren_depth = 0;
+    var bracket_depth = 0;
+    var brace_depth = 0;
+    var cursor = open_index + 1;
+    while cursor < close_index {
+        let token = try tokens.get(cursor);
+        let text = token_text(source_text, token);
+        if std::mem::equal_bytes(text, "<") {
+            angle_depth = angle_depth + 1;
+        } else {
+            if std::mem::equal_bytes(text, ">") {
+                angle_depth = angle_depth - 1;
+            } else {
+                if std::mem::equal_bytes(text, "(") {
+                    paren_depth = paren_depth + 1;
+                } else {
+                    if std::mem::equal_bytes(text, ")") {
+                        paren_depth = paren_depth - 1;
+                    } else {
+                        if std::mem::equal_bytes(text, "[") {
+                            bracket_depth = bracket_depth + 1;
+                        } else {
+                            if std::mem::equal_bytes(text, "]") {
+                                bracket_depth = bracket_depth - 1;
+                            } else {
+                                if std::mem::equal_bytes(text, "{") {
+                                    brace_depth = brace_depth + 1;
+                                } else {
+                                    if std::mem::equal_bytes(text, "}") {
+                                        brace_depth = brace_depth - 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if angle_depth == 0 and
+                    paren_depth == 0 and
+                    bracket_depth == 0 and
+                    brace_depth == 0 and
+                    std::mem::equal_bytes(text, ",") {
+                    count = count + 1;
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return count;
+}
+
+fn function_return_type(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> ![]u8 {
+    if index >= tokens.len() {
+        return "void";
+    }
+    let token = try tokens.get(index);
+    if !std::mem::equal_bytes(token_text(source_text, token), "->") {
+        return "void";
+    }
+    let start_token = try tokens.get(index + 1);
+    let end = try function_return_type_end(source_text, tokens, index + 1);
+    if end <= index {
+        return "void";
+    }
+    let end_token = try tokens.get(end);
+    return std::mem::trim_ascii(source_text[start_token.start..end_token.end]);
+}
+
+fn function_return_type_end(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    start: i64
+) -> !i64 {
+    var cursor = start;
+    var end = start;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        let text = token_text(source_text, token);
+        if std::mem::equal_bytes(text, "{") or std::mem::equal_bytes(text, ";") {
+            return end;
+        }
+        end = cursor;
+        cursor = cursor + 1;
+    }
+    return end;
+}
+
+fn function_public_at(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !bool {
+    if index > 0 and try token_at_equals(source_text, tokens, index - 1, "pub") {
+        return true;
+    }
+    if index > 1 and try token_at_equals(source_text, tokens, index - 2, "pub") {
+        return true;
+    }
+    if index > 2 and try token_at_equals(source_text, tokens, index - 3, "pub") {
+        return true;
+    }
+    return false;
+}
+
+fn token_at_equals(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    expected: []u8
+) -> !bool {
+    let token = try tokens.get(index);
+    return std::mem::equal_bytes(token_text(source_text, token), expected);
+}
+
+pub fn first_function_call_error_ast_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_function_call_error_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            functions,
+            local_only
+        );,
+        FnDecl(fn_decl) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            fn_decl.body,
+            functions,
+            local_only
+        );,
+        Block(block) => return first_function_call_error_in_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            functions,
+            local_only
+        );,
+        Let(let_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            let_node.value,
+            functions,
+            local_only
+        );,
+        Assign(assign_node) => return first_function_call_error_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            functions,
+            local_only
+        );,
+        Return(return_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            functions,
+            local_only
+        );,
+        Defer(defer_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            functions,
+            local_only
+        );,
+        ExprStmt(expr_stmt) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            functions,
+            local_only
+        );,
+        If(if_node) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            functions,
+            local_only
+        );,
+        While(while_node) => return first_function_call_error_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            functions,
+            local_only
+        );,
+        For(for_node) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            functions,
+            local_only
+        );,
+        Match(match_node) => return first_function_call_error_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            functions,
+            local_only
+        );,
+        MatchArm(match_arm) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            functions,
+            local_only
+        );,
+        Unsafe(unsafe_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            functions,
+            local_only
+        );,
+        ComptimeIf(comptime_if_node) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            functions,
+            local_only
+        );,
+        Prefix(prefix_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            prefix_node.right,
+            functions,
+            local_only
+        );,
+        Binary(binary) => return first_function_call_error_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            functions,
+            local_only
+        );,
+        FieldExpr(field_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            functions,
+            local_only
+        );,
+        DerefExpr(deref_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            functions,
+            local_only
+        );,
+        Call(call_node) => return first_function_call_error_in_call(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            functions,
+            local_only
+        );,
+        TypeApplyExpr(type_apply) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            functions,
+            local_only
+        );,
+        CastExpr(cast_expr) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            cast_expr.value,
+            functions,
+            local_only
+        );,
+        IndexExpr(index_expr) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end,
+            functions,
+            local_only
+        );,
+        StructLiteralExpr(struct_literal) => return first_function_call_error_in_range(
+            allocator,
+            file,
+            ast,
+            struct_literal.fields,
+            functions,
+            local_only
+        );,
+        StructFieldInit(struct_field_init) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value,
+            functions,
+            local_only
+        );,
+        ArenaNewExpr(arena_new) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator,
+            functions,
+            local_only
+        );,
+        TryExpr(try_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            functions,
+            local_only
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            functions,
+            local_only
+        );,
+        _ => return function_call_summary(false, 0, 0, 0, 0, 0);,
+    }
+}
+
+pub fn check_file_function_references(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    functions: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    var index = 0;
+    var typed_nodes = 0;
+    var diagnostics = 0;
+    while index < tokens.len() {
+        let path_end = try qualified_path_end(file.text, tokens, index);
+        if path_end >= index and try is_function_call_at(file.text, tokens, index, path_end) {
+            let checked = try check_function_call_at(allocator, file, tokens, functions, index, path_end);
+            typed_nodes = typed_nodes + checked.typed_nodes;
+            diagnostics = diagnostics + checked.diagnostics;
+            index = checked.next;
+        } else {
+            index = index + 1;
+        }
+    }
+    return function_reference_scan(index, typed_nodes, diagnostics);
+}
+
+fn first_function_call_error_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let found = try first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            child,
+            functions,
+            local_only
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return function_call_summary(false, 0, 0, 0, 0, 0);
+}
+
+fn first_function_call_error_in_two_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    let first_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        first,
+        functions,
+        local_only
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_function_call_error_ast_node(allocator, file, ast, second, functions, local_only);
+}
+
+fn first_function_call_error_in_three_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    let first_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        first,
+        functions,
+        local_only
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_function_call_error_in_two_nodes(
+        allocator,
+        file,
+        ast,
+        second,
+        third,
+        functions,
+        local_only
+    );
+}
+
+fn first_function_call_error_in_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    let value_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        value,
+        functions,
+        local_only
+    );
+    if value_found.found {
+        return value_found;
+    }
+    return first_function_call_error_in_range(allocator, file, ast, arms, functions, local_only);
+}
+
+fn first_function_call_error_in_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    let call_found = try function_call_error_for_ast_call(
+        allocator,
+        file,
+        ast,
+        callee,
+        args,
+        functions,
+        local_only
+    );
+    if call_found.found {
+        return call_found;
+    }
+    let callee_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        callee,
+        functions,
+        local_only
+    );
+    if callee_found.found {
+        return callee_found;
+    }
+    return first_function_call_error_in_range(allocator, file, ast, args, functions, local_only);
+}
+
+fn function_call_error_for_ast_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
+    if function_call_callee_is_member(ast, callee) {
+        return function_call_summary(false, 0, 0, 0, 0, 0);
+    }
+    let name = ast_ref_node_text(file, ast, callee);
+    if should_skip_function_reference(name) or
+        last_segment_starts_with_uppercase(name) or
+        is_generic_constructor_text(name) or
+        (local_only and is_qualified_name(name)) or
+        (!local_only and !is_qualified_name(name)) {
+        return function_call_summary(false, 0, 0, 0, 0, 0);
+    }
+    var resolved = std::string::String(allocator);
+    try append_resolved_function_name(resolved, file, name);
+    let key = resolved.as_bytes();
+    let found = functions.contains(key);
+    var expected = 0;
+    if found {
+        expected = try functions.get(key);
+    }
+    resolved.deinit();
+    let callee_node = ast.get(callee);
+    if !found {
+        return function_call_summary(true, 1, callee_node.span.start, callee_node.span.end, 0, 0);
+    }
+    if expected != args.len {
+        return function_call_summary(
+            true,
+            2,
+            callee_node.span.start,
+            callee_node.span.end,
+            expected,
+            args.len
+        );
+    }
+    return function_call_summary(false, 0, 0, 0, 0, 0);
+}
+
+fn function_call_callee_is_member(
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(callee);
+    match node.data {
+        FieldExpr(field_expr_node) => return !field_expr_node.namespace;,
+        TypeApplyExpr(type_apply) => return function_call_callee_is_member(ast, type_apply.callee);,
+        _ => return false;,
+    }
+}
+
+fn function_call_summary(
+    found: bool,
+    kind: i64,
+    start: i64,
+    end: i64,
+    expected: i64,
+    observed: i64
+) -> model::FunctionCallSummary {
+    return model::FunctionCallSummary {
+        found: found,
+        kind: kind,
+        start: start,
+        end: end,
+        expected: expected,
+        observed: observed
+    };
+}
+
+fn check_function_call_at(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    functions: &std::map::Map<[]u8, i64>,
+    start: i64,
+    end: i64
+) -> !FunctionReferenceScan {
+    let first = try tokens.get(start);
+    let last = try tokens.get(end);
+    let name = file.text[first.start..last.end];
+    let close = try function_param_close(file.text, tokens, end + 1);
+    if should_skip_function_reference(name) {
+        return function_reference_scan(close + 1, 0, 0);
+    }
+    var resolved = std::string::String(allocator);
+    try append_resolved_function_name(resolved, file, name);
+    let key = resolved.as_bytes();
+    var diagnostics = 0;
+    if functions.contains(key) {
+        let expected = try functions.get(key);
+        let observed = try count_function_params(file.text, tokens, end + 1, close);
+        if expected != observed {
+            diagnostics = 1;
+        }
+    } else {
+        if !last_segment_starts_with_uppercase(name) {
+            diagnostics = 1;
+        }
+    }
+    resolved.deinit();
+    return function_reference_scan(close + 1, 1, diagnostics);
+}
+
+fn is_function_call_at(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    start: i64,
+    end: i64
+) -> !bool {
+    if start > 0 and try token_at_equals(source_text, tokens, start - 1, ".") {
+        return false;
+    }
+    if start > 0 and try token_at_equals(source_text, tokens, start - 1, "::") {
+        return false;
+    }
+    if end + 1 >= tokens.len() {
+        return false;
+    }
+    return try token_at_equals(source_text, tokens, end + 1, "(");
+}
+
+fn should_skip_function_reference(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "print") or
+        std::mem::equal_bytes(name, "error") or
+        std::mem::equal_bytes(name, "cast") or
+        std::mem::equal_bytes(name, "return") or
+        std::mem::equal_bytes(name, "or") or
+        std::mem::equal_bytes(name, "and") or
+        std::mem::equal_bytes(name, "if") or
+        std::mem::equal_bytes(name, "while") or
+        std::mem::equal_bytes(name, "for") or
+        std::mem::equal_bytes(name, "match");
+}
+
+fn append_resolved_function_name(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    name: []u8
+) -> !void {
+    if std::mem::starts_with(name, "std::") or std::mem::starts_with(name, "selfhost::") {
+        try out.append_bytes(name);
+        return;
+    }
+    if is_qualified_name(name) {
+        try out.append_bytes("selfhost::");
+        try out.append_bytes(name);
+        return;
+    }
+    if file.kind == source::SourceKind::Std {
+        try out.append_bytes("std::");
+    } else {
+        try out.append_bytes("selfhost::");
+    }
+    try source::append_module_path(out, file);
+    try out.append_bytes("::");
+    try out.append_bytes(name);
+    return;
+}
+
+fn last_segment_starts_with_uppercase(name: []u8) -> bool {
+    var start = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            start = index + 2;
+        }
+        index = index + 1;
+    }
+    if start >= std::mem::len(name) {
+        return false;
+    }
+    let byte = name[start];
+    return byte >= cast<u8>(65) and byte <= cast<u8>(90);
+}
+
+fn function_reference_scan(
+    next: i64,
+    typed_nodes: i64,
+    diagnostics: i64
+) -> FunctionReferenceScan {
+    return FunctionReferenceScan {
+        next: next,
+        typed_nodes: typed_nodes,
+        diagnostics: diagnostics
+    };
+}
+
+fn append_module_name(
+    name: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    if file.kind == source::SourceKind::Std {
+        try name.append_bytes("std::");
+    } else {
+        try name.append_bytes("selfhost::");
+    }
+    try source::append_module_path(name, file);
+    return;
+}
+
+fn ast_ref_node_text(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(file.text[span.start..span.end]);
+}
+
+fn token_text(
+    source_text: []u8,
+    token: std::kizu::lexer::Token
+) -> []u8 {
+    return source_text[token.start..token.end];
+}
+
+fn qualified_path_end(
+    source_text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    if index >= tokens.len() {
+        return -1;
+    }
+    let first = try tokens.get(index);
+    if !is_type_name_segment(token_text(source_text, first)) {
+        return -1;
+    }
+    var end = index;
+    var cursor = index + 1;
+    while cursor + 1 < tokens.len() {
+        let separator = try tokens.get(cursor);
+        let next = try tokens.get(cursor + 1);
+        if std::mem::equal_bytes(token_text(source_text, separator), "::") and
+            is_type_name_segment(token_text(source_text, next)) {
+            end = cursor + 1;
+            cursor = cursor + 2;
+        } else {
+            return end;
+        }
+    }
+    return end;
+}
+
+fn is_type_name_segment(text: []u8) -> bool {
+    if should_ignore_type_name(text) {
+        return false;
+    }
+    if std::mem::equal_bytes(text, "") {
+        return false;
+    }
+    let byte = text[0];
+    return (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
+        (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
+        byte == cast<u8>(95);
+}
+
+fn is_generic_constructor_text(text: []u8) -> bool {
+    return std::mem::starts_with(text, "std::array::Array<") or
+        std::mem::starts_with(text, "std::map::Map<") or
+        std::mem::starts_with(text, "std::mem::Box<") or
+        std::mem::starts_with(text, "std::arena::Arena<") or
+        std::mem::starts_with(text, "std::arena::Handle<");
+}
+
+fn should_ignore_type_name(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "pub") or
+        std::mem::equal_bytes(name, "fn") or
+        std::mem::equal_bytes(name, "let") or
+        std::mem::equal_bytes(name, "var") or
+        std::mem::equal_bytes(name, "return") or
+        std::mem::equal_bytes(name, "if") or
+        std::mem::equal_bytes(name, "else") or
+        std::mem::equal_bytes(name, "while") or
+        std::mem::equal_bytes(name, "for") or
+        std::mem::equal_bytes(name, "in") or
+        std::mem::equal_bytes(name, "match") or
+        std::mem::equal_bytes(name, "true") or
+        std::mem::equal_bytes(name, "false");
+}
+
+fn is_qualified_name(name: []u8) -> bool {
+    return bytes_contains(name, "::");
+}
+
+fn bytes_contains(haystack: []u8, needle: []u8) -> bool {
+    let needle_len = std::mem::len(needle);
+    if needle_len < 1 {
+        return true;
+    }
+    if needle_len > std::mem::len(haystack) {
+        return false;
+    }
+    var index = 0;
+    while index + needle_len <= std::mem::len(haystack) {
+        if std::mem::equal_bytes(haystack[index..index + needle_len], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
