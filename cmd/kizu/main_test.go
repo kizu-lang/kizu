@@ -74,6 +74,38 @@ func TestFmtCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestFmtCommandRejectsInvalidSyntax checks fmt does not rewrite parser failures.
+func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.kizu")
+	if err := os.WriteFile(path, []byte("fn main( { return; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := fmtCommand([]string{path})
+	if err == nil || err.Error() != "format failed" {
+		t.Fatalf("got error %v, want format failed", err)
+	}
+}
+
+// TestFmtWriteRejectsLineComments checks --write does not drop comment trivia.
+func TestFmtWriteRejectsLineComments(t *testing.T) {
+	src := "// keep this comment\nfn main() {}\n"
+	path := filepath.Join(t.TempDir(), "commented.kizu")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := fmtCommand([]string{"--write", path})
+	if err == nil || !strings.Contains(err.Error(), "line comments") {
+		t.Fatalf("got error %v, want line comments rejection", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != src {
+		t.Fatalf("file changed:\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
 // TestCheckPackageCommandSmoke checks package roots can be statically checked.
 func TestCheckPackageCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "check", "../../examples/modules/cross_module_types")

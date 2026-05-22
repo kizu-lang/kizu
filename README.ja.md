@@ -153,7 +153,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 
 - `kizu parse <file>` は `.kizu` source file を parse します。
 - `kizu check <file>` は type / ownership / move / borrow / arena check を実行します。
-- `kizu fmt <file>` は現在の compact AST formatter output を出力します。
+- `kizu fmt [--write|-w] <file>` は canonical token formatter output を出力、または書き込みます。comment trivia preservation までは `--write` は line comment を含む file を拒否します。
 - `kizu run <file>` は interpreter で実行します。
 - `kizu test <file>` は check 済みの Kizu source を単一 test file として実行します。
 - `kizu ir [--opt] <file>` は typed SSA IR を表示します。

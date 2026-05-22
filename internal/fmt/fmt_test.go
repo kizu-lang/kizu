@@ -68,6 +68,15 @@ func TestFormatGenericBracketsTight(t *testing.T) {
 	}
 }
 
+// TestFormatNullableTypeTight checks nullable `?T` keeps no internal space.
+func TestFormatNullableTypeTight(t *testing.T) {
+	src := `extern "c" fn source() -> ?ptr<const u8>`
+	want := "extern \"c\" fn source() -> ?ptr<const u8>\n"
+	if got := Format(src); got != want {
+		t.Fatalf("nullable type:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatComparisonKeepsSpaces checks comparison `>=` keeps surrounding spaces.
 func TestFormatComparisonKeepsSpaces(t *testing.T) {
 	src := "fn main() {\n    if age >= 18 {\n        x = 1;\n    }\n}\n"

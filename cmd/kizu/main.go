@@ -327,12 +327,60 @@ func fmtCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	out := kfmt.Format(string(src))
+	source := string(src)
+	if err := validateFormatSource(source); err != nil {
+		return err
+	}
+	if write && containsLineComment(source) {
+		return fmt.Errorf("fmt --write does not support line comments yet")
+	}
+	out := kfmt.Format(source)
 	if write {
 		return os.WriteFile(path, []byte(out), 0o644)
 	}
 	_, _ = fmt.Print(out)
 	return nil
+}
+
+// validateFormatSource keeps fmt from silently accepting parser errors.
+func validateFormatSource(source string) error {
+	p := parser.New(lexer.New(source))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		return nil
+	}
+	for _, msg := range p.Errors() {
+		_, _ = fmt.Fprintln(os.Stderr, msg)
+	}
+	return fmt.Errorf("format failed")
+}
+
+// containsLineComment reports whether source has a `//` comment outside string literals.
+func containsLineComment(source string) bool {
+	inString := false
+	for i := 0; i < len(source); i++ {
+		ch := source[i]
+		if inString {
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		if ch == '\\' && i+1 < len(source) && source[i+1] == '\\' {
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if ch == '/' && i+1 < len(source) && source[i+1] == '/' {
+			return true
+		}
+	}
+	return false
 }
 
 // irCommand parses options and dumps typed SSA IR.

@@ -1986,8 +1986,11 @@ kizu fmt
 kizu test
 ```
 
-`kizu fmt` は現時点では compact AST formatter output です。
-完全な source-preserving formatter ではありません。
+`kizu fmt` は現時点では token-based canonical formatter output です。
+`--write` / `-w` は file を in-place rewrite します。
+完全な source-preserving formatter ではなく、comment trivia preservation と
+import order normalization は後続で扱います。
+comment trivia preservation までは、`--write` は line comment を含む file を拒否します。
 `kizu test` は v0.2 では discovery なしの single-file runner です。
 
 experimental tooling:
