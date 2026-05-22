@@ -49,7 +49,11 @@ type selfhostCLIFrontendFixtures struct {
 	missingAssign       string
 	topLevelStmt        string
 	invalidToken        string
+	invalidExpr         string
 	invalidFnName       string
+	invalidParam        string
+	invalidTypeParam    string
+	invalidReturn       string
 	missingFnBody       string
 	invalidImport       string
 	invalidStruct       string
@@ -260,6 +264,15 @@ func selfhostCLIFrontendParseFailureCases(
 func selfhostCLIFrontendParseGeneralFailureCases(
 	fixtures selfhostCLIFrontendFixtures,
 ) []selfhostCLIFrontendCase {
+	cases := selfhostCLIFrontendParseSyntaxFailureCases(fixtures)
+	cases = append(cases, selfhostCLIFrontendParseFunctionFailureCases(fixtures)...)
+	return cases
+}
+
+// selfhostCLIFrontendParseSyntaxFailureCases returns statement/token failures.
+func selfhostCLIFrontendParseSyntaxFailureCases(
+	fixtures selfhostCLIFrontendFixtures,
+) []selfhostCLIFrontendCase {
 	return []selfhostCLIFrontendCase{
 		{
 			name:    "parse_invalid",
@@ -289,13 +302,45 @@ func selfhostCLIFrontendParseGeneralFailureCases(
 			name:    "parse_temp_invalid_token",
 			args:    []string{"parse", fixtures.invalidToken},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: expected declaration, got @ at 1:1\nerror: parse failed\n",
+			wantErr: "error: expected declaration, got ILLEGAL at 1:1\nerror: parse failed\n",
 		},
+		{
+			name:    "parse_temp_invalid_expr_token",
+			args:    []string{"parse", fixtures.invalidExpr},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected expression, got ILLEGAL at 2:11\nerror: parse failed\n",
+		},
+	}
+}
+
+// selfhostCLIFrontendParseFunctionFailureCases returns function header failures.
+func selfhostCLIFrontendParseFunctionFailureCases(
+	fixtures selfhostCLIFrontendFixtures,
+) []selfhostCLIFrontendCase {
+	return []selfhostCLIFrontendCase{
 		{
 			name:    "parse_temp_invalid_fn_name",
 			args:    []string{"parse", fixtures.invalidFnName},
 			wantOut: "exit-code\n1\n",
 			wantErr: "error: expected function name, got { at 1:4\nerror: parse failed\n",
+		},
+		{
+			name:    "parse_temp_invalid_fn_param",
+			args:    []string{"parse", fixtures.invalidParam},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected colon, got ) at 1:14\nerror: parse failed\n",
+		},
+		{
+			name:    "parse_temp_invalid_fn_type_param",
+			args:    []string{"parse", fixtures.invalidTypeParam},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected type parameter, got > at 1:9\nerror: parse failed\n",
+		},
+		{
+			name:    "parse_temp_invalid_fn_return_type",
+			args:    []string{"parse", fixtures.invalidReturn},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected type name, got { at 1:14\nerror: parse failed\n",
 		},
 		{
 			name:    "parse_temp_missing_fn_body",
@@ -556,13 +601,37 @@ func selfhostCLIFrontendCheckGeneralParseFailureCases(
 			name:    "check_temp_invalid_token",
 			args:    []string{"check", fixtures.invalidToken},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: expected declaration, got @ at 1:1\nerror: parse failed\n",
+			wantErr: "error: expected declaration, got ILLEGAL at 1:1\nerror: parse failed\n",
+		},
+		{
+			name:    "check_temp_invalid_expr_token",
+			args:    []string{"check", fixtures.invalidExpr},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected expression, got ILLEGAL at 2:11\nerror: parse failed\n",
 		},
 		{
 			name:    "check_temp_invalid_fn_name",
 			args:    []string{"check", fixtures.invalidFnName},
 			wantOut: "exit-code\n1\n",
 			wantErr: "error: expected function name, got { at 1:4\nerror: parse failed\n",
+		},
+		{
+			name:    "check_temp_invalid_fn_param",
+			args:    []string{"check", fixtures.invalidParam},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected colon, got ) at 1:14\nerror: parse failed\n",
+		},
+		{
+			name:    "check_temp_invalid_fn_type_param",
+			args:    []string{"check", fixtures.invalidTypeParam},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected type parameter, got > at 1:9\nerror: parse failed\n",
+		},
+		{
+			name:    "check_temp_invalid_fn_return_type",
+			args:    []string{"check", fixtures.invalidReturn},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected type name, got { at 1:14\nerror: parse failed\n",
 		},
 		{
 			name:    "check_temp_missing_fn_body",
@@ -615,22 +684,7 @@ func selfhostCLIFrontendCheckAggregateParseFailureCases(
 func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures {
 	t.Helper()
 
-	tempSource := writeTempKizuSource(
-		t,
-		"frontend_source.kizu",
-		`enum Flag{Yes,No}
-struct Name{value:[]u8,}
-fn choose(flag:Flag)->bool{return match flag{Yes=>true,No=>false};}
-fn main(values:std::array::Array<Name>){let count=values.len();print(count);values.deinit();}
-`,
-	)
-
-	const runSource = `fn main() {
-    print("hello, kizu");
-}
-`
-	tempRunSource := writeTempKizuSource(t, "frontend_run_hello.kizu", runSource)
-
+	tempSource, tempRunSource := writeSelfhostCLIHappyFrontendFixtures(t)
 	tempMovedSource, tempMovedValue, tempUnknownSource, tempUnknownStd, tempAritySource,
 		tempDuplicate, tempTypeArity, tempUnknownType, tempUndefinedVariable, tempUndefinedMatch :=
 		writeSelfhostCLISemanticFrontendFixtures(t)
@@ -641,8 +695,10 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 	tempMatchMissing := writeSelfhostCLIMatchFrontendFixtures(t)
 
 	tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
-		tempInvalidFnName, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
-		tempMissingColon, tempMissingType :=
+		tempInvalidExpr,
+		tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam, tempInvalidReturn,
+		tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField, tempMissingColon,
+		tempMissingType :=
 		writeSelfhostCLIInvalidFrontendFixtures(t)
 	tempExpectOK, tempExpectFail := writeSelfhostCLIExpectFrontendFixtures(t)
 
@@ -669,7 +725,11 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 		missingAssign:       tempMissingAssign,
 		topLevelStmt:        tempTopLevelStmt,
 		invalidToken:        tempInvalidToken,
+		invalidExpr:         tempInvalidExpr,
 		invalidFnName:       tempInvalidFnName,
+		invalidParam:        tempInvalidParam,
+		invalidTypeParam:    tempInvalidTypeParam,
+		invalidReturn:       tempInvalidReturn,
 		missingFnBody:       tempMissingFnBody,
 		invalidImport:       tempInvalidImport,
 		invalidStruct:       tempInvalidStruct,
@@ -681,6 +741,28 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 		missingExpr:         tempMissingExpr,
 		movedValue:          tempMovedValue,
 	}
+}
+
+// writeSelfhostCLIHappyFrontendFixtures writes successful frontend inputs.
+func writeSelfhostCLIHappyFrontendFixtures(t *testing.T) (string, string) {
+	t.Helper()
+
+	tempSource := writeTempKizuSource(
+		t,
+		"frontend_source.kizu",
+		`enum Flag{Yes,No}
+struct Name{value:[]u8,}
+fn choose(flag:Flag)->bool{return match flag{Yes=>true,No=>false};}
+fn main(values:std::array::Array<Name>){let count=values.len();print(count);values.deinit();}
+`,
+	)
+
+	const runSource = `fn main() {
+    print("hello, kizu");
+}
+`
+	tempRunSource := writeTempKizuSource(t, "frontend_run_hello.kizu", runSource)
+	return tempSource, tempRunSource
 }
 
 // writeSelfhostCLISemanticFrontendFixtures writes semantic-check inputs.
@@ -937,7 +1019,49 @@ fn main() {
 // writeSelfhostCLIInvalidFrontendFixtures writes invalid frontend inputs.
 func writeSelfhostCLIInvalidFrontendFixtures(
 	t *testing.T,
-) (string, string, string, string, string, string, string, string, string, string, string, string) {
+) (
+	string, string, string, string, string,
+	string, string, string, string, string,
+	string, string, string, string, string, string,
+) {
+	t.Helper()
+
+	tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
+		tempInvalidExpr, tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
+		writeSelfhostCLIInvalidGeneralFrontendFixtures(t)
+	tempInvalidStruct, tempInvalidField, tempMissingColon, tempMissingType :=
+		writeSelfhostCLIInvalidAggregateFrontendFixtures(t)
+
+	return tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
+		tempInvalidExpr, tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
+		tempMissingColon, tempMissingType
+}
+
+// writeSelfhostCLIInvalidGeneralFrontendFixtures writes common parse failures.
+func writeSelfhostCLIInvalidGeneralFrontendFixtures(
+	t *testing.T,
+) (
+	string, string, string, string, string,
+	string, string, string, string, string, string, string,
+) {
+	t.Helper()
+
+	tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
+		tempInvalidExpr := writeSelfhostCLIInvalidSyntaxFrontendFixtures(t)
+	tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam, tempInvalidReturn, tempMissingFnBody,
+		tempInvalidImport := writeSelfhostCLIInvalidFunctionFrontendFixtures(t)
+
+	return tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
+		tempInvalidExpr, tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport
+}
+
+// writeSelfhostCLIInvalidSyntaxFrontendFixtures writes syntax parse failures.
+func writeSelfhostCLIInvalidSyntaxFrontendFixtures(
+	t *testing.T,
+) (string, string, string, string, string, string) {
 	t.Helper()
 
 	const missingExprSource = `fn main() { let value = ; }
@@ -963,9 +1087,51 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 `
 	tempInvalidToken := writeTempKizuSource(t, "frontend_invalid_token.kizu", invalidTokenSource)
 
+	const invalidExprSource = `fn main() {
+    print(@);
+}
+`
+	tempInvalidExpr := writeTempKizuSource(t, "frontend_invalid_expr_token.kizu", invalidExprSource)
+
+	return tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
+		tempInvalidExpr
+}
+
+// writeSelfhostCLIInvalidFunctionFrontendFixtures writes function parse failures.
+func writeSelfhostCLIInvalidFunctionFrontendFixtures(
+	t *testing.T,
+) (string, string, string, string, string, string) {
+	t.Helper()
+
 	const invalidFnNameSource = `fn {}
 `
 	tempInvalidFnName := writeTempKizuSource(t, "frontend_invalid_fn_name.kizu", invalidFnNameSource)
+
+	const invalidParamSource = `fn main(value) {
+    return;
+}
+`
+	tempInvalidParam := writeTempKizuSource(t, "frontend_invalid_fn_param.kizu", invalidParamSource)
+
+	const invalidTypeParamSource = `fn main<>() {
+    return;
+}
+`
+	tempInvalidTypeParam := writeTempKizuSource(
+		t,
+		"frontend_invalid_fn_type_param.kizu",
+		invalidTypeParamSource,
+	)
+
+	const invalidReturnSource = `fn main() -> {
+    return;
+}
+`
+	tempInvalidReturn := writeTempKizuSource(
+		t,
+		"frontend_invalid_fn_return_type.kizu",
+		invalidReturnSource,
+	)
 
 	const missingFnBodySource = `fn main() ;
 `
@@ -974,6 +1140,16 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 	const invalidImportSource = `import ;
 `
 	tempInvalidImport := writeTempKizuSource(t, "frontend_invalid_import.kizu", invalidImportSource)
+
+	return tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam, tempInvalidReturn,
+		tempMissingFnBody, tempInvalidImport
+}
+
+// writeSelfhostCLIInvalidAggregateFrontendFixtures writes aggregate parse failures.
+func writeSelfhostCLIInvalidAggregateFrontendFixtures(
+	t *testing.T,
+) (string, string, string, string) {
+	t.Helper()
 
 	const invalidStructSource = `struct {}
 `
@@ -991,9 +1167,7 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 `
 	tempMissingType := writeTempKizuSource(t, "frontend_missing_field_type.kizu", missingTypeSource)
 
-	return tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
-		tempInvalidFnName, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
-		tempMissingColon, tempMissingType
+	return tempInvalidStruct, tempInvalidField, tempMissingColon, tempMissingType
 }
 
 // writeSelfhostCLIExpectFrontendFixtures writes std::testing frontend inputs.

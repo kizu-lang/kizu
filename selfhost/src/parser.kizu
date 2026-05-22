@@ -1,6 +1,7 @@
 import selfhost::ast;
 import selfhost::diagnostic;
 import selfhost::lexer;
+import selfhost::parser::validation;
 
 pub union ParseError {
     Diagnostic(diagnostic::Diagnostic),
@@ -13,11 +14,6 @@ pub struct ParseDiagnosticSummary {
     pub end: i64,
 }
 
-pub fn parse_source(source: []u8) -> ParseError!std::kizu::ast::ParseResult {
-    let allocator = std::mem::page_allocator();
-    return parse_file(allocator, "<memory>", source);
-}
-
 pub fn parse_file(
     allocator: Allocator,
     path: []u8,
@@ -26,12 +22,60 @@ pub fn parse_file(
     var tokens = try cast<ParseError!std::array::Array<std::kizu::lexer::Token>>(
         lexer::tokenize(allocator, source)
     );
-    let result = try parse_tokens(allocator, path, source, &tokens);
-    tokens.deinit();
-    return result;
+    defer tokens.deinit();
+    let validation_result = try cast<ParseError!validation::ParseValidation>(
+        validation::validate_tokens(allocator, source, &tokens)
+    );
+    if !validation_result.ok {
+        return parse_error(path);
+    }
+    try require_tokens(path, &tokens);
+    return try cast<ParseError!std::kizu::ast::ParseResult>(
+        parse_program_file(allocator, path, source)
+    );
 }
 
 pub fn parse_checked_file(
+    allocator: Allocator,
+    path: []u8,
+    source: []u8
+) -> !std::kizu::ast::ParseResult {
+    var tokens = try lexer::tokenize(allocator, source);
+    defer tokens.deinit();
+    let validation_ok = try validation::validate_tokens_ok(allocator, source, &tokens);
+    if !validation_ok {
+        return error("parse failed");
+    }
+    let token_check = require_checked_tokens(&tokens);
+    try token_check;
+    return parse_program_file(allocator, path, source);
+}
+
+pub fn parse_diagnostic_file(
+    allocator: Allocator,
+    path: []u8,
+    source: []u8
+) -> !validation::ParseValidation {
+    var tokens = try lexer::tokenize(allocator, source);
+    defer tokens.deinit();
+    let validation_result = try validation::validate_tokens(allocator, source, &tokens);
+    if !validation_result.ok {
+        return validation_result;
+    }
+    let token_check = require_checked_tokens(&tokens);
+    try token_check;
+    var parsed = try parse_program_file(allocator, path, source);
+    parsed.deinit();
+    return validation::ParseValidation {
+        ok: true,
+        message: "",
+        line: 0,
+        column: 0,
+        got: ""
+    };
+}
+
+fn parse_program_file(
     allocator: Allocator,
     path: []u8,
     source: []u8
@@ -40,25 +84,13 @@ pub fn parse_checked_file(
     return std::kizu::parser::parse_program(allocator, file);
 }
 
-pub fn parse_tokens(
-    allocator: Allocator,
-    path: []u8,
-    source: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>
-) -> ParseError!std::kizu::ast::ParseResult {
-    try require_tokens(path, tokens);
-    let file = std::kizu::ast::source_file(path, source);
-    return try cast<ParseError!std::kizu::ast::ParseResult>(
-        std::kizu::parser::parse_program(allocator, file)
-    );
-}
-
 pub fn summarize(
-    result: std::kizu::ast::ParseResult,
-    tokens: i64,
-    declarations: i64
-) -> ast::AstSummary {
-    return ast::summarize(result.root, tokens, declarations, 0);
+    result: &std::kizu::ast::ParseResult,
+    tokens: i64
+) -> ParseError!ast::AstSummary {
+    return try cast<ParseError!ast::AstSummary>(
+        ast::summarize_parse_result(result, tokens, 0)
+    );
 }
 
 pub fn parse_error(path: []u8) -> ParseError {
@@ -102,6 +134,18 @@ fn require_tokens(
     let eof = try cast<ParseError!std::kizu::lexer::Token>(tokens.get(token_count - 1));
     if !lexer::is_eof(eof) {
         return diagnostic_error(path, eof.start, eof.end, "parser requires EOF token");
+    }
+    return;
+}
+
+fn require_checked_tokens(tokens: &std::array::Array<std::kizu::lexer::Token>) -> !void {
+    let token_count = tokens.len();
+    if token_count < 1 {
+        return error("parser requires token array");
+    }
+    let eof = try tokens.get(token_count - 1);
+    if !lexer::is_eof(eof) {
+        return error("parser requires EOF token");
     }
     return;
 }

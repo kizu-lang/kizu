@@ -1,4 +1,5 @@
 import selfhost::lexer;
+import selfhost::parser;
 import selfhost::resolver;
 import selfhost::source;
 
@@ -114,6 +115,24 @@ pub struct FunctionSignature {
     pub span_end: i64,
 }
 
+struct FunctionParamType {
+    function_name: []u8,
+    index: i64,
+    type_name: []u8,
+}
+
+struct FunctionParamLookup {
+    found: bool,
+    type_name: []u8,
+}
+
+struct FunctionCallCandidate {
+    name: []u8,
+    start: i64,
+    end: i64,
+    observed: i64,
+}
+
 pub fn check(resolved: resolver::ResolveSummary) -> TypeSummary {
     return TypeSummary {
         modules: resolved.modules,
@@ -212,32 +231,34 @@ pub fn check_sources(
 pub fn first_function_call_error(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
-    source_text: []u8
+    target_path: []u8
 ) -> !FunctionCallSummary {
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
-    var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
-    try collect_package_function_signatures(
-        allocator,
-        files,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
-    );
-    let found = try first_function_call_error_reference(allocator, files, source_text, function_arities);
-    function_arities.deinit();
-    function_param_sources.deinit();
-    function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
-    return found;
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) and std::mem::equal_bytes(file.path, target_path) {
+            var candidates = std::array::Array<FunctionCallCandidate>(allocator);
+            defer candidates.deinit();
+            let result = try parser::parse_checked_file(allocator, file.path, file.text);
+            try collect_package_function_call_candidates(file, result.ast, result.root, candidates);
+            result.deinit();
+            if candidates.len() == 0 {
+                return function_call_summary(false, 0, 0, 0, 0, 0);
+            }
+            var function_arities = std::map::Map<[]u8, i64>(allocator);
+            defer function_arities.deinit();
+            try collect_package_function_arities_from_ast(allocator, files, function_arities);
+            let found = try first_function_call_error_in_candidates(
+                allocator,
+                file,
+                candidates,
+                function_arities
+            );
+            return found;
+        }
+        index = index + 1;
+    }
+    return function_call_summary(false, 0, 0, 0, 0, 0);
 }
 
 pub fn first_user_function_call_error(
@@ -252,31 +273,24 @@ pub fn first_user_function_call_error(
         text: text
     };
     var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
-    var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
-    var tokens = try lexer::tokenize(allocator, text);
-    try collect_function_signatures(
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_arities_from_ast(
         allocator,
         &file,
-        tokens,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
+        result.ast,
+        result.root,
+        function_arities
     );
-    let found = try source_local_function_call_error(allocator, &file, text, tokens, function_arities);
-    tokens.deinit();
+    let found = try first_function_call_error_ast_node(
+        allocator,
+        &file,
+        result.ast,
+        result.root,
+        function_arities,
+        true
+    );
+    result.deinit();
     function_arities.deinit();
-    function_param_sources.deinit();
-    function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return found;
 }
 
@@ -317,46 +331,29 @@ pub fn first_argument_type_mismatch(
         path: path,
         text: text
     };
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
-    var local_function_param_sources = std::map::Map<[]u8, []u8>(allocator);
+    var local_function_param_types = std::array::Array<FunctionParamType>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
-    var tokens = try lexer::tokenize(allocator, text);
-    try collect_function_signatures(
+
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
+    try collect_local_function_param_types(
         allocator,
         &file,
-        tokens,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
+        result.ast,
+        result.root,
+        local_function_param_types
     );
-    try collect_local_function_param_sources(&file, tokens, local_function_param_sources);
-    tokens.deinit();
-
-    let ast_source = std::kizu::ast::source_file(path, text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
     let found = try first_argument_type_mismatch_node(
         allocator,
         &file,
         result.ast,
         result.root,
-        local_function_param_sources,
+        local_function_param_types,
         function_returns
     );
     result.deinit();
-    function_arities.deinit();
-    function_param_sources.deinit();
-    local_function_param_sources.deinit();
+    local_function_param_types.deinit();
     function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return found;
 }
 
@@ -371,28 +368,10 @@ pub fn first_assignment_type_mismatch(
         path: path,
         text: text
     };
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
-    var tokens = try lexer::tokenize(allocator, text);
-    try collect_function_signatures(
-        allocator,
-        &file,
-        tokens,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
-    );
-    tokens.deinit();
 
-    let ast_source = std::kizu::ast::source_file(path, text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
     let found = try first_assignment_type_mismatch_node(
         allocator,
         &file,
@@ -401,12 +380,7 @@ pub fn first_assignment_type_mismatch(
         function_returns
     );
     result.deinit();
-    function_arities.deinit();
-    function_param_sources.deinit();
     function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return found;
 }
 
@@ -421,28 +395,10 @@ pub fn first_immutable_assignment(
         path: path,
         text: text
     };
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
-    var tokens = try lexer::tokenize(allocator, text);
-    try collect_function_signatures(
-        allocator,
-        &file,
-        tokens,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
-    );
-    tokens.deinit();
 
-    let ast_source = std::kizu::ast::source_file(path, text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
     let found = try first_immutable_assignment_node(
         allocator,
         &file,
@@ -451,12 +407,7 @@ pub fn first_immutable_assignment(
         function_returns
     );
     result.deinit();
-    function_arities.deinit();
-    function_param_sources.deinit();
     function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return found;
 }
 
@@ -471,8 +422,7 @@ pub fn first_invalid_assignment_target(
         path: path,
         text: text
     };
-    let ast_source = std::kizu::ast::source_file(path, text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let result = try parser::parse_checked_file(allocator, path, text);
     let found = try first_invalid_assignment_target_node(&file, result.ast, result.root);
     result.deinit();
     return found;
@@ -489,28 +439,10 @@ pub fn first_undefined_variable(
         path: path,
         text: text
     };
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
-    var tokens = try lexer::tokenize(allocator, text);
-    try collect_function_signatures(
-        allocator,
-        &file,
-        tokens,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
-    );
-    tokens.deinit();
 
-    let ast_source = std::kizu::ast::source_file(path, text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
     let found = try first_undefined_variable_node(
         allocator,
         &file,
@@ -519,12 +451,7 @@ pub fn first_undefined_variable(
         function_returns
     );
     result.deinit();
-    function_arities.deinit();
-    function_param_sources.deinit();
     function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return found;
 }
 
@@ -539,28 +466,10 @@ pub fn first_return_type_mismatch(
         path: path,
         text: text
     };
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
-    var tokens = try lexer::tokenize(allocator, text);
-    try collect_function_signatures(
-        allocator,
-        &file,
-        tokens,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
-    );
-    tokens.deinit();
 
-    let ast_source = std::kizu::ast::source_file(path, text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
     let found = try first_return_type_mismatch_node(
         allocator,
         &file,
@@ -569,12 +478,7 @@ pub fn first_return_type_mismatch(
         function_returns
     );
     result.deinit();
-    function_arities.deinit();
-    function_param_sources.deinit();
     function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return found;
 }
 
@@ -589,30 +493,12 @@ pub fn first_match_diagnostic(
         path: path,
         text: text
     };
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
     var enum_counts = std::map::Map<[]u8, i64>(allocator);
     var enum_tags = std::map::Map<[]u8, bool>(allocator);
-    var tokens = try lexer::tokenize(allocator, text);
-    try collect_function_signatures(
-        allocator,
-        &file,
-        tokens,
-        function_arities,
-        function_param_sources,
-        function_returns,
-        function_visibility,
-        function_span_starts,
-        function_span_ends
-    );
-    tokens.deinit();
 
-    let ast_source = std::kizu::ast::source_file(path, text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
     try collect_match_enum_types(allocator, &file, result.ast, result.root, enum_counts, enum_tags);
     let found = try first_match_diagnostic_node(
         allocator,
@@ -626,12 +512,7 @@ pub fn first_match_diagnostic(
     result.deinit();
     enum_counts.deinit();
     enum_tags.deinit();
-    function_arities.deinit();
-    function_param_sources.deinit();
     function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return found;
 }
 
@@ -662,6 +543,30 @@ fn collect_package_function_signatures(
                 function_span_ends
             );
             tokens.deinit();
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_package_function_arities_from_ast(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    function_arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_source_code(file.kind) {
+            let result = try parser::parse_checked_file(allocator, file.path, file.text);
+            try collect_function_arities_from_ast(
+                allocator,
+                file,
+                result.ast,
+                result.root,
+                function_arities
+            );
+            result.deinit();
         }
         index = index + 1;
     }
@@ -968,39 +873,268 @@ fn collect_function_signatures(
     return;
 }
 
-fn collect_local_function_param_sources(
+fn collect_local_function_param_types(
+    allocator: Allocator,
     file: &source::SourceFile,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    param_sources: &var std::map::Map<[]u8, []u8>
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_local_function_param_types_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            param_types
+        );,
+        FnDecl(fn_decl) => return collect_function_param_types(
+            allocator,
+            file,
+            ast,
+            ast_node_text(file, ast, fn_decl.name),
+            fn_decl.params,
+            param_types
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_local_function_param_types_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    param_types: &var std::array::Array<FunctionParamType>
 ) -> !void {
     var index = 0;
-    var depth = 0;
-    while index < tokens.len() {
-        let token = try tokens.get(index);
-        let text = token_text(file.text, token);
-        var handled = false;
-        if std::mem::equal_bytes(text, "{") {
-            depth = depth + 1;
-            handled = true;
-        }
-        if !handled and std::mem::equal_bytes(text, "}") {
-            depth = depth - 1;
-            handled = true;
-        }
-        if !handled and depth == 0 and std::mem::equal_bytes(text, "fn") {
-            if index + 1 < tokens.len() {
-                let name = try tokens.get(index + 1);
-                let name_text = token_text(file.text, name);
-                let open = try function_param_open(file.text, tokens, index);
-                let close = try function_param_close(file.text, tokens, open);
-                let param_source = try function_param_source(file.text, tokens, open, close);
-                if !param_sources.contains(name_text) {
-                    try param_sources.insert(name_text, param_source);
-                }
-            }
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_local_function_param_types(allocator, file, ast, child, param_types);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_param_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    params: std::kizu::ast::ChildRange,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        try collect_function_param_type(file, ast, function_name, child, index, param_types);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_param_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    node_id: std::kizu::ast::NodeId,
+    param_index: i64,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return collect_function_param_node_type(
+            file,
+            ast,
+            function_name,
+            param_node.type_node,
+            param_index,
+            param_types
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_function_param_node_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    type_node: std::kizu::ast::NodeId,
+    param_index: i64,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    try param_types.append(function_param_type(
+        function_name,
+        param_index,
+        ast_return_type_text(file, ast, type_node)
+    ));
+    return;
+}
+
+fn function_param_type(
+    function_name: []u8,
+    index: i64,
+    type_name: []u8
+) -> FunctionParamType {
+    return FunctionParamType {
+        function_name: function_name,
+        index: index,
+        type_name: type_name
+    };
+}
+
+fn function_param_lookup(found: bool, type_name: []u8) -> FunctionParamLookup {
+    return FunctionParamLookup {
+        found: found,
+        type_name: type_name
+    };
+}
+
+fn lookup_function_param_type(
+    param_types: &std::array::Array<FunctionParamType>,
+    function_name: []u8,
+    param_index: i64
+) -> !FunctionParamLookup {
+    var index = 0;
+    while index < param_types.len() {
+        let param_type = try param_types.at(index);
+        if std::mem::equal_bytes(param_type.function_name, function_name) and
+            param_type.index == param_index {
+            return function_param_lookup(true, param_type.type_name);
         }
         index = index + 1;
     }
+    return function_param_lookup(false, "");
+}
+
+fn collect_function_arities_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_function_arities_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            arities
+        );,
+        FnDecl(fn_decl) => return collect_function_arity(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.params.len,
+            arities
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_function_arities_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_function_arities_from_ast(allocator, file, ast, child, arities);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_arity(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    params: i64,
+    arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var qualified = std::string::String(allocator);
+    try append_module_name(qualified, file);
+    try qualified.append_bytes("::");
+    try qualified.append_bytes(ast_node_text(file, ast, name));
+    let key = qualified.as_bytes();
+    if arities.contains(key) {
+        return error("duplicate function");
+    }
+    try arities.insert(key, params);
+    qualified.deinit();
+    return;
+}
+
+fn collect_function_returns_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_function_returns_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            returns
+        );,
+        FnDecl(fn_decl) => return collect_function_return(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.return_type,
+            returns
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_function_returns_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_function_returns_from_ast(allocator, file, ast, child, returns);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_return(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    var qualified = std::string::String(allocator);
+    try append_module_name(qualified, file);
+    try qualified.append_bytes("::");
+    try qualified.append_bytes(ast_node_text(file, ast, name));
+    let key = qualified.as_bytes();
+    if returns.contains(key) {
+        return error("duplicate function");
+    }
+    try returns.insert(key, ast_return_type_text(file, ast, return_type));
+    qualified.deinit();
     return;
 }
 
@@ -1363,114 +1497,747 @@ fn check_file_function_references(
     return type_scan_summary(index, typed_nodes, diagnostics);
 }
 
-fn first_function_call_error_reference(
+fn collect_package_function_call_candidates(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    candidates: &var std::array::Array<FunctionCallCandidate>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_package_function_call_candidates_in_range(
+            file,
+            ast,
+            program.declarations,
+            candidates
+        );,
+        FnDecl(fn_decl) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            fn_decl.body,
+            candidates
+        );,
+        Block(block) => return collect_package_function_call_candidates_in_range(
+            file,
+            ast,
+            block.statements,
+            candidates
+        );,
+        Let(let_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            let_node.value,
+            candidates
+        );,
+        Assign(assign_node) => return collect_package_function_call_candidates_in_two_nodes(
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            candidates
+        );,
+        Return(return_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            return_node.value,
+            candidates
+        );,
+        Defer(defer_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            defer_node.expr,
+            candidates
+        );,
+        ExprStmt(expr_stmt) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            expr_stmt.expr,
+            candidates
+        );,
+        If(if_node) => return collect_package_function_call_candidates_in_three_nodes(
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            candidates
+        );,
+        While(while_node) => return collect_package_function_call_candidates_in_two_nodes(
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            candidates
+        );,
+        For(for_node) => return collect_package_function_call_candidates_in_three_nodes(
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            candidates
+        );,
+        Match(match_node) => return collect_package_function_call_candidates_in_match(
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            candidates
+        );,
+        MatchArm(match_arm) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            match_arm.body,
+            candidates
+        );,
+        Unsafe(unsafe_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            unsafe_node.body,
+            candidates
+        );,
+        ComptimeIf(comptime_if_node) => return collect_package_function_call_candidates_in_three_nodes(
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            candidates
+        );,
+        Prefix(prefix_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            prefix_node.right,
+            candidates
+        );,
+        Binary(binary) => return collect_package_function_call_candidates_in_two_nodes(
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            candidates
+        );,
+        FieldExpr(field_expr_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            field_expr_node.receiver,
+            candidates
+        );,
+        DerefExpr(deref_expr_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            deref_expr_node.receiver,
+            candidates
+        );,
+        Call(call_node) => return collect_package_function_call_candidates_in_call(
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            candidates
+        );,
+        TypeApplyExpr(type_apply) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            type_apply.callee,
+            candidates
+        );,
+        CastExpr(cast_expr) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            cast_expr.value,
+            candidates
+        );,
+        IndexExpr(index_expr) => return collect_package_function_call_candidates_in_three_nodes(
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end,
+            candidates
+        );,
+        StructLiteralExpr(struct_literal) => return collect_package_function_call_candidates_in_range(
+            file,
+            ast,
+            struct_literal.fields,
+            candidates
+        );,
+        StructFieldInit(struct_field_init) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            struct_field_init.value,
+            candidates
+        );,
+        ArenaNewExpr(arena_new) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            arena_new.allocator,
+            candidates
+        );,
+        TryExpr(try_expr_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            try_expr_node.value,
+            candidates
+        );,
+        ComptimeExpr(comptime_expr_node) => return collect_package_function_call_candidates(
+            file,
+            ast,
+            comptime_expr_node.value,
+            candidates
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_package_function_call_candidates_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    candidates: &var std::array::Array<FunctionCallCandidate>
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        try collect_package_function_call_candidates(file, ast, child, candidates);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_package_function_call_candidates_in_two_nodes(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    candidates: &var std::array::Array<FunctionCallCandidate>
+) -> !void {
+    try collect_package_function_call_candidates(file, ast, first, candidates);
+    try collect_package_function_call_candidates(file, ast, second, candidates);
+    return;
+}
+
+fn collect_package_function_call_candidates_in_three_nodes(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    candidates: &var std::array::Array<FunctionCallCandidate>
+) -> !void {
+    try collect_package_function_call_candidates(file, ast, first, candidates);
+    try collect_package_function_call_candidates(file, ast, second, candidates);
+    try collect_package_function_call_candidates(file, ast, third, candidates);
+    return;
+}
+
+fn collect_package_function_call_candidates_in_match(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    candidates: &var std::array::Array<FunctionCallCandidate>
+) -> !void {
+    try collect_package_function_call_candidates(file, ast, value, candidates);
+    try collect_package_function_call_candidates_in_range(file, ast, arms, candidates);
+    return;
+}
+
+fn collect_package_function_call_candidates_in_call(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    candidates: &var std::array::Array<FunctionCallCandidate>
+) -> !void {
+    try collect_package_function_call_candidate_for_callee(file, ast, callee, args.len, candidates);
+    try collect_package_function_call_candidates(file, ast, callee, candidates);
+    try collect_package_function_call_candidates_in_range(file, ast, args, candidates);
+    return;
+}
+
+fn collect_package_function_call_candidate_for_callee(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    observed: i64,
+    candidates: &var std::array::Array<FunctionCallCandidate>
+) -> !void {
+    if function_call_callee_is_member(ast, callee) {
+        return;
+    }
+    let name = ast_node_text(file, ast, callee);
+    if should_skip_function_reference(name) or
+        last_segment_starts_with_uppercase(name) or
+        is_generic_constructor_text(name) {
+        return;
+    }
+    if !is_qualified_name(name) {
+        return;
+    }
+    let node = ast.get(callee);
+    try candidates.append(function_call_candidate(name, node.span.start, node.span.end, observed));
+    return;
+}
+
+fn function_call_candidate(
+    name: []u8,
+    start: i64,
+    end: i64,
+    observed: i64
+) -> FunctionCallCandidate {
+    return FunctionCallCandidate {
+        name: name,
+        start: start,
+        end: end,
+        observed: observed
+    };
+}
+
+fn first_function_call_error_in_candidates(
     allocator: Allocator,
-    files: &std::array::Array<source::SourceFile>,
-    source_text: []u8,
+    file: &source::SourceFile,
+    candidates: &std::array::Array<FunctionCallCandidate>,
     functions: &std::map::Map<[]u8, i64>
 ) -> !FunctionCallSummary {
     var index = 0;
-    while index < files.len() {
-        let file = try files.at(index);
-        if source::is_frontend_source(file.kind) and std::mem::equal_bytes(file.text, source_text) {
-            var tokens = try lexer::tokenize(allocator, source_text);
-            let found = try source_function_call_error(
-                allocator,
-                file,
-                source_text,
-                tokens,
-                functions
+    while index < candidates.len() {
+        let candidate = try candidates.at(index);
+        var resolved = std::string::String(allocator);
+        try append_resolved_function_name(resolved, file, candidate.name);
+        let key = resolved.as_bytes();
+        let found = functions.contains(key);
+        var expected = 0;
+        if found {
+            expected = try functions.get(key);
+        }
+        resolved.deinit();
+        if !found {
+            return function_call_summary(true, 1, candidate.start, candidate.end, 0, 0);
+        }
+        if expected != candidate.observed {
+            return function_call_summary(
+                true,
+                2,
+                candidate.start,
+                candidate.end,
+                expected,
+                candidate.observed
             );
-            tokens.deinit();
-            if found.found {
-                return found;
-            }
         }
         index = index + 1;
     }
     return function_call_summary(false, 0, 0, 0, 0, 0);
 }
 
-fn source_function_call_error(
+fn first_function_call_error_ast_node(
     allocator: Allocator,
     file: &source::SourceFile,
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    functions: &std::map::Map<[]u8, i64>
-) -> !FunctionCallSummary {
-    var index = 0;
-    while index < tokens.len() {
-        let path_end = try qualified_path_end(source_text, tokens, index);
-        if path_end >= index and try is_function_call_at(source_text, tokens, index, path_end) {
-            let close = try function_param_close(source_text, tokens, path_end + 1);
-            let found = try function_call_error_at(
-                allocator,
-                file,
-                source_text,
-                tokens,
-                functions,
-                index,
-                path_end,
-                close
-            );
-            if found.found {
-                return found;
-            }
-            index = close + 1;
-        } else {
-            index = index + 1;
-        }
-    }
-    return function_call_summary(false, 0, 0, 0, 0, 0);
-}
-
-fn source_local_function_call_error(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    functions: &std::map::Map<[]u8, i64>
-) -> !FunctionCallSummary {
-    var index = 0;
-    while index < tokens.len() {
-        let path_end = try qualified_path_end(source_text, tokens, index);
-        if path_end >= index and try is_function_call_at(source_text, tokens, index, path_end) {
-            let close = try function_param_close(source_text, tokens, path_end + 1);
-            let found = try local_function_call_error_at(
-                allocator,
-                file,
-                source_text,
-                tokens,
-                functions,
-                index,
-                path_end,
-                close
-            );
-            if found.found {
-                return found;
-            }
-            index = close + 1;
-        } else {
-            index = index + 1;
-        }
-    }
-    return function_call_summary(false, 0, 0, 0, 0, 0);
-}
-
-fn function_call_error_at(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
     functions: &std::map::Map<[]u8, i64>,
-    start: i64,
-    end: i64,
-    close: i64
+    local_only: bool
 ) -> !FunctionCallSummary {
-    let first = try tokens.get(start);
-    let last = try tokens.get(end);
-    let name = source_text[first.start..last.end];
-    if should_skip_function_reference(name) or last_segment_starts_with_uppercase(name) {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_function_call_error_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            functions,
+            local_only
+        );,
+        FnDecl(fn_decl) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            fn_decl.body,
+            functions,
+            local_only
+        );,
+        Block(block) => return first_function_call_error_in_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            functions,
+            local_only
+        );,
+        Let(let_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            let_node.value,
+            functions,
+            local_only
+        );,
+        Assign(assign_node) => return first_function_call_error_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            functions,
+            local_only
+        );,
+        Return(return_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            functions,
+            local_only
+        );,
+        Defer(defer_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            functions,
+            local_only
+        );,
+        ExprStmt(expr_stmt) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            functions,
+            local_only
+        );,
+        If(if_node) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            functions,
+            local_only
+        );,
+        While(while_node) => return first_function_call_error_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            functions,
+            local_only
+        );,
+        For(for_node) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            functions,
+            local_only
+        );,
+        Match(match_node) => return first_function_call_error_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            functions,
+            local_only
+        );,
+        MatchArm(match_arm) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            functions,
+            local_only
+        );,
+        Unsafe(unsafe_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            functions,
+            local_only
+        );,
+        ComptimeIf(comptime_if_node) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            functions,
+            local_only
+        );,
+        Prefix(prefix_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            prefix_node.right,
+            functions,
+            local_only
+        );,
+        Binary(binary) => return first_function_call_error_in_two_nodes(
+            allocator,
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            functions,
+            local_only
+        );,
+        FieldExpr(field_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            functions,
+            local_only
+        );,
+        DerefExpr(deref_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            functions,
+            local_only
+        );,
+        Call(call_node) => return first_function_call_error_in_call(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            functions,
+            local_only
+        );,
+        TypeApplyExpr(type_apply) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            functions,
+            local_only
+        );,
+        CastExpr(cast_expr) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            cast_expr.value,
+            functions,
+            local_only
+        );,
+        IndexExpr(index_expr) => return first_function_call_error_in_three_nodes(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end,
+            functions,
+            local_only
+        );,
+        StructLiteralExpr(struct_literal) => return first_function_call_error_in_range(
+            allocator,
+            file,
+            ast,
+            struct_literal.fields,
+            functions,
+            local_only
+        );,
+        StructFieldInit(struct_field_init) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value,
+            functions,
+            local_only
+        );,
+        ArenaNewExpr(arena_new) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator,
+            functions,
+            local_only
+        );,
+        TryExpr(try_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            functions,
+            local_only
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            functions,
+            local_only
+        );,
+        _ => return function_call_summary(false, 0, 0, 0, 0, 0);,
+    }
+}
+
+fn first_function_call_error_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !FunctionCallSummary {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let found = try first_function_call_error_ast_node(
+            allocator,
+            file,
+            ast,
+            child,
+            functions,
+            local_only
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return function_call_summary(false, 0, 0, 0, 0, 0);
+}
+
+fn first_function_call_error_in_two_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !FunctionCallSummary {
+    let first_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        first,
+        functions,
+        local_only
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_function_call_error_ast_node(allocator, file, ast, second, functions, local_only);
+}
+
+fn first_function_call_error_in_three_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !FunctionCallSummary {
+    let first_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        first,
+        functions,
+        local_only
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_function_call_error_in_two_nodes(
+        allocator,
+        file,
+        ast,
+        second,
+        third,
+        functions,
+        local_only
+    );
+}
+
+fn first_function_call_error_in_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !FunctionCallSummary {
+    let value_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        value,
+        functions,
+        local_only
+    );
+    if value_found.found {
+        return value_found;
+    }
+    return first_function_call_error_in_range(allocator, file, ast, arms, functions, local_only);
+}
+
+fn first_function_call_error_in_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !FunctionCallSummary {
+    let call_found = try function_call_error_for_ast_call(
+        allocator,
+        file,
+        ast,
+        callee,
+        args,
+        functions,
+        local_only
+    );
+    if call_found.found {
+        return call_found;
+    }
+    let callee_found = try first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        callee,
+        functions,
+        local_only
+    );
+    if callee_found.found {
+        return callee_found;
+    }
+    return first_function_call_error_in_range(allocator, file, ast, args, functions, local_only);
+}
+
+fn function_call_error_for_ast_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !FunctionCallSummary {
+    if function_call_callee_is_member(ast, callee) {
+        return function_call_summary(false, 0, 0, 0, 0, 0);
+    }
+    let name = ast_node_text(file, ast, callee);
+    if should_skip_function_reference(name) or
+        last_segment_starts_with_uppercase(name) or
+        is_generic_constructor_text(name) or
+        (local_only and is_qualified_name(name)) {
         return function_call_summary(false, 0, 0, 0, 0, 0);
     }
     var resolved = std::string::String(allocator);
@@ -1482,35 +2249,30 @@ fn function_call_error_at(
         expected = try functions.get(key);
     }
     resolved.deinit();
+    let callee_node = ast.get(callee);
     if !found {
-        return function_call_summary(true, 1, first.start, last.end, 0, 0);
+        return function_call_summary(true, 1, callee_node.span.start, callee_node.span.end, 0, 0);
     }
-    let observed = try count_function_params(source_text, tokens, end + 1, close);
-    if expected != observed {
-        return function_call_summary(true, 2, first.start, last.end, expected, observed);
+    if expected != args.len {
+        return function_call_summary(
+            true,
+            2,
+            callee_node.span.start,
+            callee_node.span.end,
+            expected,
+            args.len
+        );
     }
     return function_call_summary(false, 0, 0, 0, 0, 0);
 }
 
-fn local_function_call_error_at(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    functions: &std::map::Map<[]u8, i64>,
-    start: i64,
-    end: i64,
-    close: i64
-) -> !FunctionCallSummary {
-    let first = try tokens.get(start);
-    let last = try tokens.get(end);
-    let name = source_text[first.start..last.end];
-    if should_skip_function_reference(name) or
-        last_segment_starts_with_uppercase(name) or
-        is_qualified_name(name) {
-        return function_call_summary(false, 0, 0, 0, 0, 0);
+fn function_call_callee_is_member(ast: std::kizu::ast::Ast, callee: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(callee);
+    match node.data {
+        FieldExpr(field_expr_node) => return !field_expr_node.namespace;,
+        TypeApplyExpr(type_apply) => return function_call_callee_is_member(ast, type_apply.callee);,
+        _ => return false;,
     }
-    return try function_call_error_at(allocator, file, source_text, tokens, functions, start, end, close);
 }
 
 fn function_call_summary(
@@ -1642,8 +2404,7 @@ fn check_file_body_ast(
     file: &source::SourceFile,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !TypeScanSummary {
-    let ast_source = std::kizu::ast::source_file(file.path, file.text);
-    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let result = try parser::parse_checked_file(allocator, file.path, file.text);
     let traversal = try scan_body_ast_node(result.ast, result.root);
     let statements = try check_ast_statements(
         allocator,
@@ -2381,7 +3142,7 @@ fn first_argument_type_mismatch_node(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let node = ast.get(node_id);
@@ -2391,7 +3152,7 @@ fn first_argument_type_mismatch_node(
             file,
             ast,
             program.declarations,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         FnDecl(fn_decl) => return first_argument_type_mismatch_in_function(
@@ -2400,7 +3161,7 @@ fn first_argument_type_mismatch_node(
             ast,
             fn_decl.params,
             fn_decl.body,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         _ => return no_argument_type_mismatch();,
@@ -2412,7 +3173,7 @@ fn first_argument_type_mismatch_in_declarations(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     var index = 0;
@@ -2423,7 +3184,7 @@ fn first_argument_type_mismatch_in_declarations(
             file,
             ast,
             child,
-            function_param_sources,
+            function_param_types,
             function_returns
         );
         if found.found {
@@ -2440,7 +3201,7 @@ fn first_argument_type_mismatch_in_function(
     ast: std::kizu::ast::Ast,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     var local_types = std::map::Map<[]u8, []u8>(allocator);
@@ -2461,7 +3222,7 @@ fn first_argument_type_mismatch_in_function(
         ast,
         body,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     local_types.deinit();
@@ -2475,7 +3236,7 @@ fn first_argument_type_mismatch_in_statement(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let node = ast.get(node_id);
@@ -2486,7 +3247,7 @@ fn first_argument_type_mismatch_in_statement(
             ast,
             block.statements,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Let(let_node) => return first_argument_type_mismatch_in_expression(
@@ -2495,7 +3256,7 @@ fn first_argument_type_mismatch_in_statement(
             ast,
             let_node.value,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Assign(assign_node) => return first_argument_type_mismatch_in_two_expressions(
@@ -2505,7 +3266,7 @@ fn first_argument_type_mismatch_in_statement(
             assign_node.target,
             assign_node.value,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Return(return_node) => return first_argument_type_mismatch_in_expression(
@@ -2514,7 +3275,7 @@ fn first_argument_type_mismatch_in_statement(
             ast,
             return_node.value,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Defer(defer_node) => return first_argument_type_mismatch_in_expression(
@@ -2523,7 +3284,7 @@ fn first_argument_type_mismatch_in_statement(
             ast,
             defer_node.expr,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         ExprStmt(expr_stmt) => return first_argument_type_mismatch_in_expression(
@@ -2532,7 +3293,7 @@ fn first_argument_type_mismatch_in_statement(
             ast,
             expr_stmt.expr,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         If(if_node) => return first_argument_type_mismatch_in_if(
@@ -2543,7 +3304,7 @@ fn first_argument_type_mismatch_in_statement(
             if_node.then_block,
             if_node.else_block,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         While(while_node) => return first_argument_type_mismatch_in_loop(
@@ -2553,7 +3314,7 @@ fn first_argument_type_mismatch_in_statement(
             while_node.condition,
             while_node.body,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         For(for_node) => return first_argument_type_mismatch_in_for(
@@ -2564,7 +3325,7 @@ fn first_argument_type_mismatch_in_statement(
             for_node.end,
             for_node.body,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Match(match_node) => return first_argument_type_mismatch_in_match(
@@ -2574,7 +3335,7 @@ fn first_argument_type_mismatch_in_statement(
             match_node.value,
             match_node.arms,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         MatchArm(match_arm) => return first_argument_type_mismatch_in_statement(
@@ -2583,7 +3344,7 @@ fn first_argument_type_mismatch_in_statement(
             ast,
             match_arm.body,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Unsafe(unsafe_node) => return first_argument_type_mismatch_in_statement(
@@ -2592,7 +3353,7 @@ fn first_argument_type_mismatch_in_statement(
             ast,
             unsafe_node.body,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         ComptimeIf(comptime_if_node) => return first_argument_type_mismatch_in_if(
@@ -2603,7 +3364,7 @@ fn first_argument_type_mismatch_in_statement(
             comptime_if_node.then_block,
             comptime_if_node.else_block,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         _ => return no_argument_type_mismatch();,
@@ -2616,7 +3377,7 @@ fn first_argument_type_mismatch_in_statement_range(
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     var index = 0;
@@ -2628,7 +3389,7 @@ fn first_argument_type_mismatch_in_statement_range(
             ast,
             child,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );
         if found.found {
@@ -2645,7 +3406,7 @@ fn first_argument_type_mismatch_in_expression_range(
     ast: std::kizu::ast::Ast,
     expressions: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     var index = 0;
@@ -2657,7 +3418,7 @@ fn first_argument_type_mismatch_in_expression_range(
             ast,
             child,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );
         if found.found {
@@ -2674,7 +3435,7 @@ fn first_argument_type_mismatch_in_expression(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let node = ast.get(node_id);
@@ -2686,7 +3447,7 @@ fn first_argument_type_mismatch_in_expression(
             call_node.callee,
             call_node.args,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Prefix(prefix_node) => return first_argument_type_mismatch_in_expression(
@@ -2695,7 +3456,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             prefix_node.right,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Binary(binary) => return first_argument_type_mismatch_in_two_expressions(
@@ -2705,7 +3466,7 @@ fn first_argument_type_mismatch_in_expression(
             binary.left,
             binary.right,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         FieldExpr(field_expr_node) => return first_argument_type_mismatch_in_expression(
@@ -2714,7 +3475,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             field_expr_node.receiver,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         DerefExpr(deref_expr_node) => return first_argument_type_mismatch_in_expression(
@@ -2723,7 +3484,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             deref_expr_node.receiver,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         TypeApplyExpr(type_apply) => return first_argument_type_mismatch_in_expression(
@@ -2732,7 +3493,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             type_apply.callee,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         CastExpr(cast_expr) => return first_argument_type_mismatch_in_expression(
@@ -2741,7 +3502,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             cast_expr.value,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         IndexExpr(index_expr) => return first_argument_type_mismatch_in_two_expressions(
@@ -2751,7 +3512,7 @@ fn first_argument_type_mismatch_in_expression(
             index_expr.target,
             index_expr.start,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         StructLiteralExpr(struct_literal) => return first_argument_type_mismatch_in_expression_range(
@@ -2760,7 +3521,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             struct_literal.fields,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         StructFieldInit(struct_field_init) => return first_argument_type_mismatch_in_expression(
@@ -2769,7 +3530,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             struct_field_init.value,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         ArenaNewExpr(arena_new) => return first_argument_type_mismatch_in_expression(
@@ -2778,7 +3539,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             arena_new.allocator,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         TryExpr(try_expr_node) => return first_argument_type_mismatch_in_expression(
@@ -2787,7 +3548,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             try_expr_node.value,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         ComptimeExpr(comptime_expr_node) => return first_argument_type_mismatch_in_expression(
@@ -2796,7 +3557,7 @@ fn first_argument_type_mismatch_in_expression(
             ast,
             comptime_expr_node.value,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         Match(match_node) => return first_argument_type_mismatch_in_match(
@@ -2806,7 +3567,7 @@ fn first_argument_type_mismatch_in_expression(
             match_node.value,
             match_node.arms,
             local_types,
-            function_param_sources,
+            function_param_types,
             function_returns
         );,
         _ => return no_argument_type_mismatch();,
@@ -2820,7 +3581,7 @@ fn first_argument_type_mismatch_in_call(
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let call_found = try argument_type_mismatch_for_call(
@@ -2830,7 +3591,7 @@ fn first_argument_type_mismatch_in_call(
         callee,
         args,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if call_found.found {
@@ -2842,7 +3603,7 @@ fn first_argument_type_mismatch_in_call(
         ast,
         callee,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if callee_found.found {
@@ -2854,7 +3615,7 @@ fn first_argument_type_mismatch_in_call(
         ast,
         args,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
 }
@@ -2866,7 +3627,7 @@ fn argument_type_mismatch_for_call(
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let callee_text = ast_node_text(file, ast, callee);
@@ -2876,14 +3637,13 @@ fn argument_type_mismatch_for_call(
         is_qualified_name(callee_text) {
         return no_argument_type_mismatch();
     }
-    if !function_param_sources.contains(callee_text) {
-        return no_argument_type_mismatch();
-    }
-    let param_source = try function_param_sources.get(callee_text);
     var index = 0;
     while index < args.len {
         let arg = try ast.child_at(args, index);
-        let expected = function_param_type_at(param_source, index);
+        let expected = try lookup_function_param_type(function_param_types, callee_text, index);
+        if !expected.found {
+            return no_argument_type_mismatch();
+        }
         let actual = try infer_expression_type(
             allocator,
             file,
@@ -2892,13 +3652,13 @@ fn argument_type_mismatch_for_call(
             local_types,
             function_returns
         );
-        if known_type_mismatch(expected, actual) {
+        if known_type_mismatch(expected.type_name, actual) {
             let arg_node = ast.get(arg);
             return argument_type_summary(
                 true,
                 arg_node.span.start,
                 arg_node.span.end,
-                expected,
+                expected.type_name,
                 actual
             );
         }
@@ -2914,7 +3674,7 @@ fn first_argument_type_mismatch_in_two_expressions(
     first: std::kizu::ast::NodeId,
     second: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let first_found = try first_argument_type_mismatch_in_expression(
@@ -2923,7 +3683,7 @@ fn first_argument_type_mismatch_in_two_expressions(
         ast,
         first,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if first_found.found {
@@ -2935,7 +3695,7 @@ fn first_argument_type_mismatch_in_two_expressions(
         ast,
         second,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
 }
@@ -2948,7 +3708,7 @@ fn first_argument_type_mismatch_in_if(
     then_block: std::kizu::ast::NodeId,
     else_block: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let condition_found = try first_argument_type_mismatch_in_expression(
@@ -2957,7 +3717,7 @@ fn first_argument_type_mismatch_in_if(
         ast,
         condition,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if condition_found.found {
@@ -2969,7 +3729,7 @@ fn first_argument_type_mismatch_in_if(
         ast,
         then_block,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if then_found.found {
@@ -2981,7 +3741,7 @@ fn first_argument_type_mismatch_in_if(
         ast,
         else_block,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
 }
@@ -2993,7 +3753,7 @@ fn first_argument_type_mismatch_in_loop(
     condition: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let condition_found = try first_argument_type_mismatch_in_expression(
@@ -3002,7 +3762,7 @@ fn first_argument_type_mismatch_in_loop(
         ast,
         condition,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if condition_found.found {
@@ -3014,7 +3774,7 @@ fn first_argument_type_mismatch_in_loop(
         ast,
         body,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
 }
@@ -3027,7 +3787,7 @@ fn first_argument_type_mismatch_in_for(
     end: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let range_found = try first_argument_type_mismatch_in_two_expressions(
@@ -3037,7 +3797,7 @@ fn first_argument_type_mismatch_in_for(
         start,
         end,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if range_found.found {
@@ -3049,7 +3809,7 @@ fn first_argument_type_mismatch_in_for(
         ast,
         body,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
 }
@@ -3061,7 +3821,7 @@ fn first_argument_type_mismatch_in_match(
     value: std::kizu::ast::NodeId,
     arms: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_sources: &std::map::Map<[]u8, []u8>,
+    function_param_types: &std::array::Array<FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !ArgumentTypeSummary {
     let value_found = try first_argument_type_mismatch_in_expression(
@@ -3070,7 +3830,7 @@ fn first_argument_type_mismatch_in_match(
         ast,
         value,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
     if value_found.found {
@@ -3082,7 +3842,7 @@ fn first_argument_type_mismatch_in_match(
         ast,
         arms,
         local_types,
-        function_param_sources,
+        function_param_types,
         function_returns
     );
 }
@@ -4293,72 +5053,6 @@ fn undefined_variable_for_var(
     return undefined_variable_summary(true, node.span.start, node.span.end, name);
 }
 
-fn function_param_type_at(param_source: []u8, param_index: i64) -> []u8 {
-    var cursor = std::kizu::lexer::first_token(param_source);
-    var current = 0;
-    var start = 0;
-    var angle_depth = 0;
-    var paren_depth = 0;
-    var bracket_depth = 0;
-    while !std::mem::equal_bytes(token_text(param_source, cursor), "") {
-        let text = token_text(param_source, cursor);
-        if angle_depth == 0 and
-            paren_depth == 0 and
-            bracket_depth == 0 and
-            std::mem::equal_bytes(text, ",") {
-            if current == param_index {
-                return function_param_range_type(param_source, start, cursor.start);
-            }
-            current = current + 1;
-            start = cursor.end;
-        } else {
-            if std::mem::equal_bytes(text, "<") {
-                angle_depth = angle_depth + 1;
-            } else {
-                if std::mem::equal_bytes(text, ">") {
-                    angle_depth = angle_depth - 1;
-                } else {
-                    if std::mem::equal_bytes(text, "(") {
-                        paren_depth = paren_depth + 1;
-                    } else {
-                        if std::mem::equal_bytes(text, ")") {
-                            paren_depth = paren_depth - 1;
-                        } else {
-                            if std::mem::equal_bytes(text, "[") {
-                                bracket_depth = bracket_depth + 1;
-                            } else {
-                                if std::mem::equal_bytes(text, "]") {
-                                    bracket_depth = bracket_depth - 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        cursor = std::kizu::lexer::next_token(param_source, cursor);
-    }
-    if current == param_index {
-        return function_param_range_type(param_source, start, std::mem::len(param_source));
-    }
-    return "unknown";
-}
-
-fn function_param_range_type(param_source: []u8, start: i64, end: i64) -> []u8 {
-    if end <= start {
-        return "unknown";
-    }
-    let param = std::mem::trim_ascii(param_source[start..end]);
-    var cursor = std::kizu::lexer::first_token(param);
-    while !std::mem::equal_bytes(token_text(param, cursor), "") {
-        if std::mem::equal_bytes(token_text(param, cursor), ":") {
-            return std::mem::trim_ascii(param[cursor.end..std::mem::len(param)]);
-        }
-        cursor = std::kizu::lexer::next_token(param, cursor);
-    }
-    return "unknown";
-}
-
 fn collect_function_statement_locals(
     allocator: Allocator,
     file: &source::SourceFile,
@@ -4373,63 +5067,242 @@ fn collect_function_statement_locals(
     var index = 0;
     while index < params.len {
         let child = try ast.child_at(params, index);
-        let param_text = ast_node_text(file, ast, child);
-        var token = std::kizu::lexer::first_token(param_text);
-        if std::mem::equal_bytes(token_text(param_text, token), "comptime") {
-            token = std::kizu::lexer::next_token(param_text, token);
-        }
-        let name = token_text(param_text, token);
-        var cursor = std::kizu::lexer::next_token(param_text, token);
-        while !std::mem::equal_bytes(token_text(param_text, cursor), ":") and
-            !std::mem::equal_bytes(token_text(param_text, cursor), "") {
-            cursor = std::kizu::lexer::next_token(param_text, cursor);
-        }
-        var type_name = "unknown";
-        if std::mem::equal_bytes(token_text(param_text, cursor), ":") {
-            let first_type = std::kizu::lexer::next_token(param_text, cursor);
-            if !std::mem::equal_bytes(token_text(param_text, first_type), "") {
-                var type_end = first_type.end;
-                var type_cursor = first_type;
-                while !std::mem::equal_bytes(token_text(param_text, type_cursor), "") {
-                    type_end = type_cursor.end;
-                    type_cursor = std::kizu::lexer::next_token(param_text, type_cursor);
-                }
-                type_name = std::mem::trim_ascii(param_text[first_type.start..type_end]);
-            }
-        }
-        if !local_types.contains(name) {
-            try local_types.insert(name, type_name);
-            try local_mutability.insert(name, false);
-        }
+        try collect_param_local(file, ast, child, local_types, local_mutability);
         index = index + 1;
     }
-    let body_text = ast_node_text(file, ast, body);
-    var body_token = std::kizu::lexer::first_token(body_text);
-    while !std::mem::equal_bytes(token_text(body_text, body_token), "") {
-        let text = token_text(body_text, body_token);
-        if std::mem::equal_bytes(text, "let") or std::mem::equal_bytes(text, "var") {
-            let name_token = std::kizu::lexer::next_token(body_text, body_token);
-            let name = token_text(body_text, name_token);
-            if !local_types.contains(name) {
-                let assign = std::kizu::lexer::next_token(body_text, name_token);
-                let first_value = std::kizu::lexer::next_token(body_text, assign);
-                let value_end = local_initializer_end(body_text, first_value);
-                let type_name = try infer_initializer_text_type(
-                    allocator,
-                    file,
-                    body_text,
-                    first_value,
-                    value_end,
-                    local_types,
-                    function_returns
-                );
-                try local_types.insert(name, type_name);
-                try local_mutability.insert(name, std::mem::equal_bytes(text, "var"));
-            }
-        }
-        body_token = std::kizu::lexer::next_token(body_text, body_token);
+    let local_count = try collect_statement_locals_from_node(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    return type_scan_summary(0, params.len + local_count, diagnostics);
+}
+
+fn collect_param_local(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return collect_param_node_local(
+            file,
+            ast,
+            param_node.name,
+            param_node.type_node,
+            local_types,
+            local_mutability
+        );,
+        _ => return;,
     }
-    return type_scan_summary(0, params.len, diagnostics);
+}
+
+fn collect_param_node_local(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name_id: std::kizu::ast::NodeId,
+    type_node: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>
+) -> !void {
+    let name = ast_node_text(file, ast, name_id);
+    if !local_types.contains(name) {
+        try local_types.insert(name, ast_return_type_text(file, ast, type_node));
+        try local_mutability.insert(name, false);
+    }
+    return;
+}
+
+fn collect_statement_locals_from_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    var count = 0;
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        count = count + try collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            local_mutability,
+            function_returns
+        );
+        index = index + 1;
+    }
+    return count;
+}
+
+fn collect_statement_locals_from_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return collect_statement_locals_from_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Let(let_node) => return collect_let_statement_local(
+            allocator,
+            file,
+            ast,
+            let_node.mutable,
+            let_node.name,
+            let_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        If(if_node) => return collect_statement_locals_from_two_nodes(
+            allocator,
+            file,
+            ast,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        While(while_node) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            while_node.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        For(for_node) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            for_node.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Match(match_node) => return collect_statement_locals_from_range(
+            allocator,
+            file,
+            ast,
+            match_node.arms,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        MatchArm(match_arm) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return collect_statement_locals_from_node(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return collect_statement_locals_from_two_nodes(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        _ => return 0;,
+    }
+}
+
+fn collect_statement_locals_from_two_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let first_count = try collect_statement_locals_from_node(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let second_count = try collect_statement_locals_from_node(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    return first_count + second_count;
+}
+
+fn collect_let_statement_local(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    mutable: bool,
+    name_id: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let name = ast_node_text(file, ast, name_id);
+    if local_types.contains(name) {
+        return 0;
+    }
+    let type_name = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    try local_types.insert(name, type_name);
+    try local_mutability.insert(name, mutable);
+    return 1;
 }
 
 fn function_statement_return_type(
@@ -6422,207 +7295,6 @@ fn infer_match_arm_body_expression_type(
     }
 }
 
-fn local_initializer_end(
-    source_text: []u8,
-    start: std::kizu::lexer::Token
-) -> std::kizu::lexer::Token {
-    var cursor = start;
-    var end = start;
-    var angle_depth = 0;
-    var paren_depth = 0;
-    var bracket_depth = 0;
-    var brace_depth = 0;
-    while !std::mem::equal_bytes(token_text(source_text, cursor), "") {
-        let text = token_text(source_text, cursor);
-        if angle_depth == 0 and
-            paren_depth == 0 and
-            bracket_depth == 0 and
-            brace_depth == 0 and
-            std::mem::equal_bytes(text, ";") {
-            return end;
-        }
-        if std::mem::equal_bytes(text, "<") {
-            angle_depth = angle_depth + 1;
-        } else {
-            if std::mem::equal_bytes(text, ">") {
-                angle_depth = angle_depth - 1;
-            } else {
-                if std::mem::equal_bytes(text, "(") {
-                    paren_depth = paren_depth + 1;
-                } else {
-                    if std::mem::equal_bytes(text, ")") {
-                        paren_depth = paren_depth - 1;
-                    } else {
-                        if std::mem::equal_bytes(text, "[") {
-                            bracket_depth = bracket_depth + 1;
-                        } else {
-                            if std::mem::equal_bytes(text, "]") {
-                                bracket_depth = bracket_depth - 1;
-                            } else {
-                                if std::mem::equal_bytes(text, "{") {
-                                    brace_depth = brace_depth + 1;
-                                } else {
-                                    if std::mem::equal_bytes(text, "}") {
-                                        brace_depth = brace_depth - 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        end = cursor;
-        cursor = std::kizu::lexer::next_token(source_text, cursor);
-    }
-    return end;
-}
-
-fn infer_initializer_text_type(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    source_text: []u8,
-    start: std::kizu::lexer::Token,
-    end: std::kizu::lexer::Token,
-    local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
-) -> ![]u8 {
-    if end.end < start.start {
-        return "unknown";
-    }
-    let expression = std::mem::trim_ascii(source_text[start.start..end.end]);
-    return infer_expression_text_type(allocator, file, expression, local_types, function_returns);
-}
-
-fn infer_expression_text_type(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    expression: []u8,
-    local_types: &std::map::Map<[]u8, []u8>,
-    function_returns: &std::map::Map<[]u8, []u8>
-) -> ![]u8 {
-    let text = std::mem::trim_ascii(expression);
-    if std::mem::len(text) < 1 {
-        return "unknown";
-    }
-    let first = std::kizu::lexer::first_token(text);
-    let first_text = token_text(text, first);
-    if std::mem::equal_bytes(first_text, "try") {
-        return success_type_of(try infer_expression_text_type(
-            allocator,
-            file,
-            text[first.end..std::mem::len(text)],
-            local_types,
-            function_returns
-        ));
-    }
-    if std::mem::equal_bytes(first_text, "true") or std::mem::equal_bytes(first_text, "false") {
-        return "bool";
-    }
-    if text[0] == cast<u8>(34) {
-        return "[]u8";
-    }
-    if text[0] >= cast<u8>(48) and text[0] <= cast<u8>(57) {
-        return "i64";
-    }
-    if std::mem::equal_bytes(first_text, "cast") {
-        return cast_expression_text_type(text);
-    }
-    if local_types.contains(text) {
-        return local_types.get(text);
-    }
-    let namespace_type = namespace_value_type_text(text);
-    if !std::mem::equal_bytes(namespace_type, "unknown") {
-        return namespace_type;
-    }
-    let callee = expression_callee_text(text);
-    if !std::mem::equal_bytes(callee, "") {
-        if is_generic_constructor_text(callee) {
-            return callee;
-        }
-        let method_type = try method_call_text_type(callee, local_types);
-        if !std::mem::equal_bytes(method_type, "unknown") {
-            return method_type;
-        }
-        return resolved_function_return_type(allocator, file, callee, function_returns);
-    }
-    return field_text_type(text);
-}
-
-fn namespace_value_type_text(expression: []u8) -> []u8 {
-    var last_colon = -1;
-    var index = 0;
-    while index + 1 < std::mem::len(expression) {
-        if expression[index] == cast<u8>(58) and expression[index + 1] == cast<u8>(58) {
-            last_colon = index;
-            index = index + 2;
-        } else {
-            index = index + 1;
-        }
-    }
-    if last_colon <= 0 {
-        return "unknown";
-    }
-    let type_name = std::mem::trim_ascii(expression[0..last_colon]);
-    if last_segment_starts_with_uppercase(type_name) {
-        return type_name;
-    }
-    return "unknown";
-}
-
-fn expression_callee_text(expression: []u8) -> []u8 {
-    var cursor = std::kizu::lexer::first_token(expression);
-    var end = cursor;
-    var angle_depth = 0;
-    while !std::mem::equal_bytes(token_text(expression, cursor), "") {
-        let text = token_text(expression, cursor);
-        if angle_depth == 0 and std::mem::equal_bytes(text, "(") {
-            return std::mem::trim_ascii(expression[0..end.end]);
-        }
-        if std::mem::equal_bytes(text, "<") {
-            angle_depth = angle_depth + 1;
-        } else {
-            if std::mem::equal_bytes(text, ">") {
-                angle_depth = angle_depth - 1;
-            }
-        }
-        end = cursor;
-        cursor = std::kizu::lexer::next_token(expression, cursor);
-    }
-    return "";
-}
-
-fn cast_expression_text_type(expression: []u8) -> []u8 {
-    var cursor = std::kizu::lexer::first_token(expression);
-    while !std::mem::equal_bytes(token_text(expression, cursor), "") and
-        !std::mem::equal_bytes(token_text(expression, cursor), "<") {
-        cursor = std::kizu::lexer::next_token(expression, cursor);
-    }
-    if !std::mem::equal_bytes(token_text(expression, cursor), "<") {
-        return "unknown";
-    }
-    let first_type = std::kizu::lexer::next_token(expression, cursor);
-    var type_end = first_type;
-    var depth = 1;
-    cursor = first_type;
-    while !std::mem::equal_bytes(token_text(expression, cursor), "") and depth > 0 {
-        let text = token_text(expression, cursor);
-        if std::mem::equal_bytes(text, "<") {
-            depth = depth + 1;
-        } else {
-            if std::mem::equal_bytes(text, ">") {
-                depth = depth - 1;
-                if depth == 0 {
-                    return std::mem::trim_ascii(expression[first_type.start..type_end.end]);
-                }
-            }
-        }
-        type_end = cursor;
-        cursor = std::kizu::lexer::next_token(expression, cursor);
-    }
-    return "unknown";
-}
-
 fn success_type_of(value_type: []u8) -> []u8 {
     if std::mem::starts_with(value_type, "!") {
         return value_type[1..std::mem::len(value_type)];
@@ -6714,18 +7386,6 @@ fn arena_expression_type(
         return "unknown";
     }
     return "unknown";
-}
-
-fn field_text_type(expression: []u8) -> []u8 {
-    var start = 0;
-    var index = 0;
-    while index < std::mem::len(expression) {
-        if expression[index] == cast<u8>(46) {
-            start = index + 1;
-        }
-        index = index + 1;
-    }
-    return field_name_type(expression[start..std::mem::len(expression)]);
 }
 
 fn field_name_type(field: []u8) -> []u8 {
