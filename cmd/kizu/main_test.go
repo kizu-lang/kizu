@@ -68,7 +68,7 @@ func TestFmtCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "fn main() { print(\"hello, kizu\"); }\n"
+	want := "fn main() {\n    print(\"hello, kizu\");\n}\n"
 	if string(out) != want {
 		t.Fatalf("got %q, want %q", out, want)
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/cimport"
+	kfmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/interp"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -58,7 +59,7 @@ func dispatch(cmd string, args []string) error {
 		path, programArgs := splitProgramArgs(args)
 		return testFile(path, programArgs)
 	case "fmt":
-		return fmtFile(args[0])
+		return fmtCommand(args)
 	case "ir":
 		return irCommand(args)
 	case "build":
@@ -77,7 +78,8 @@ func dispatch(cmd string, args []string) error {
 
 // usage prints the supported command line shape.
 func usage() {
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test> <file> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu fmt [--write] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [native-options] <file>")
@@ -299,19 +301,37 @@ func splitProgramArgs(args []string) (string, []string) {
 	return args[0], nil
 }
 
-// fmtFile prints the stable formatter output for a Kizu source file.
-func fmtFile(path string) error {
-	program, errs, err := parsePath(path)
+// fmtCommand prints or rewrites a Kizu source file in canonical form.
+//
+// usage: kizu fmt [--write] <file>
+//
+//	--write: rewrite the file in-place.
+func fmtCommand(args []string) error {
+	write := false
+	var path string
+	for _, a := range args {
+		switch a {
+		case "--write", "-w":
+			write = true
+		default:
+			if path != "" {
+				return fmt.Errorf("invalid command arguments")
+			}
+			path = a
+		}
+	}
+	if path == "" {
+		return fmt.Errorf("invalid command arguments")
+	}
+	src, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
-		return fmt.Errorf("format failed")
+	out := kfmt.Format(string(src))
+	if write {
+		return os.WriteFile(path, []byte(out), 0o644)
 	}
-	_, _ = fmt.Println(program.String())
+	_, _ = fmt.Print(out)
 	return nil
 }
 
