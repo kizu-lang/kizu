@@ -44,6 +44,9 @@ type selfhostCLIFrontendFixtures struct {
 	invalidAssignment   string
 	returnMismatch      string
 	returnMatchMismatch string
+	returningIf         string
+	missingReturn       string
+	ifMissingReturn     string
 	matchMissing        string
 	invalidSource       string
 	missingAssign       string
@@ -170,6 +173,11 @@ func selfhostCLIFrontendHappyCases(fixtures selfhostCLIFrontendFixtures) []selfh
 		{
 			name:    "check_temp_source",
 			args:    []string{"check", fixtures.source},
+			wantOut: "check: ok\nexit-code\n0\n",
+		},
+		{
+			name:    "check_temp_returning_if",
+			args:    []string{"check", fixtures.returningIf},
 			wantOut: "check: ok\nexit-code\n0\n",
 		},
 		{
@@ -511,6 +519,18 @@ func selfhostCLIFrontendTypeSemanticFailureCases(
 			wantErr: "error: type error: return type mismatch\n",
 		},
 		{
+			name:    "check_temp_missing_return",
+			args:    []string{"check", fixtures.missingReturn},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: type error: function `bad` must return i64\n",
+		},
+		{
+			name:    "check_temp_if_missing_return",
+			args:    []string{"check", fixtures.ifMissingReturn},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: type error: function `bad` must return i64\n",
+		},
+		{
 			name:    "check_temp_match_non_exhaustive",
 			args:    []string{"check", fixtures.matchMissing},
 			wantOut: "exit-code\n1\n",
@@ -691,7 +711,9 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 	tempArgumentMismatch := writeSelfhostCLIArgumentFrontendFixtures(t)
 	tempAssignmentMismatch, tempImmutableAssignment, tempInvalidAssignment :=
 		writeSelfhostCLIAssignmentFrontendFixtures(t)
-	tempReturnMismatch, tempReturnMatchMismatch := writeSelfhostCLIReturnFrontendFixtures(t)
+	tempReturnMismatch, tempReturnMatchMismatch, tempReturningIf,
+		tempMissingReturn, tempIfMissingReturn :=
+		writeSelfhostCLIReturnFrontendFixtures(t)
 	tempMatchMissing := writeSelfhostCLIMatchFrontendFixtures(t)
 
 	tempMissingExpr, tempInvalidSource, tempMissingAssign, tempTopLevelStmt, tempInvalidToken,
@@ -720,6 +742,9 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		invalidAssignment:   tempInvalidAssignment,
 		returnMismatch:      tempReturnMismatch,
 		returnMatchMismatch: tempReturnMatchMismatch,
+		returningIf:         tempReturningIf,
+		missingReturn:       tempMissingReturn,
+		ifMissingReturn:     tempIfMissingReturn,
 		matchMissing:        tempMatchMissing,
 		invalidSource:       tempInvalidSource,
 		missingAssign:       tempMissingAssign,
@@ -871,7 +896,7 @@ func writeSelfhostCLIAssignmentFrontendFixtures(t *testing.T) (string, string, s
 }
 
 // writeSelfhostCLIReturnFrontendFixtures writes return-check semantic inputs.
-func writeSelfhostCLIReturnFrontendFixtures(t *testing.T) (string, string) {
+func writeSelfhostCLIReturnFrontendFixtures(t *testing.T) (string, string, string, string, string) {
 	t.Helper()
 
 	const returnMismatch = `fn bad() -> i64 {
@@ -902,7 +927,36 @@ fn choose(flag: Flag) -> i64 {
 		returnMatchMismatch,
 	)
 
-	return tempReturnMismatch, tempReturnMatchMismatch
+	const returningIf = `fn choose(ok: bool) -> i64 {
+    if ok {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+`
+	tempReturningIf := writeTempKizuSource(t, "frontend_returning_if.kizu", returningIf)
+
+	const missingReturn = `fn bad() -> i64 {
+    1;
+}
+`
+	tempMissingReturn := writeTempKizuSource(t, "frontend_missing_return.kizu", missingReturn)
+
+	const ifMissingReturn = `fn bad(ok: bool) -> i64 {
+    if ok {
+        return 1;
+    }
+}
+`
+	tempIfMissingReturn := writeTempKizuSource(
+		t,
+		"frontend_if_missing_return.kizu",
+		ifMissingReturn,
+	)
+
+	return tempReturnMismatch, tempReturnMatchMismatch, tempReturningIf,
+		tempMissingReturn, tempIfMissingReturn
 }
 
 // writeSelfhostCLIMatchFrontendFixtures writes match-check semantic inputs.
