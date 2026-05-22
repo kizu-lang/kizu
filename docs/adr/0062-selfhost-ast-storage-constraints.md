@@ -36,7 +36,8 @@ For the selfhost AST arena, `AstNode` payloads may contain only:
 - scalar copy values such as `bool`, `i64`, `u8`, enum tags, and small id
   wrappers
 - span, token, symbol, child-range, and `NodeId` values
-- borrowed source views whose owner is `SourceFile` inside the owning `Ast`
+- source spans or symbol ids that can be resolved against `SourceFile` inside
+  the owning `Ast`
 - other AST payload records that recursively obey this same rule
 
 `AstNode` payloads must not contain owned containers or runtime capabilities:

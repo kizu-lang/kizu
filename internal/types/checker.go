@@ -127,7 +127,6 @@ type Checker struct {
 	currentStd      bool
 	typeParams      map[string]bool
 	typeArgValues   map[string]Type
-	lifetimeParams  map[string]bool
 	loopLabels      []string
 }
 
@@ -138,11 +137,10 @@ type enumType struct {
 }
 
 type unionType struct {
-	name           string
-	lifetimeParams []string
-	typeParams     []string
-	variants       map[string]string
-	public         bool
+	name       string
+	typeParams []string
+	variants   map[string]string
+	public     bool
 }
 
 type functionType struct {
@@ -152,7 +150,6 @@ type functionType struct {
 	mutBorrowParams []bool
 	comptimeParams  []bool
 	typeParams      []string
-	lifetimeParams  []string
 	returnBorrow    string
 	returnType      Type
 	decl            *ast.FunctionDecl
@@ -530,15 +527,12 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	previousTypeParams := c.typeParams
-	previousLifetimeParams := c.lifetimeParams
 	c.typeParams = typeParamSet(decl.TypeParams)
-	c.lifetimeParams = lifetimeParamSet(decl.LifetimeParams)
 	defer func() {
 		c.typeParams = previousTypeParams
-		c.lifetimeParams = previousLifetimeParams
 	}()
 	union := &unionType{
-		name: decl.Name, lifetimeParams: decl.LifetimeParams, typeParams: decl.TypeParams,
+		name: decl.Name, typeParams: decl.TypeParams,
 		variants: map[string]string{}, public: decl.Public,
 	}
 	for _, variant := range decl.Variants {
@@ -550,19 +544,11 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 			if _, err := c.parseType(variant.Payload); err != nil {
 				return err
 			}
-			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, variant.Payload,
-				decl.LifetimeParams); err != nil {
+			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, variant.Payload); err != nil {
 				return err
 			}
 		}
 		union.variants[variant.Name] = variant.Payload
-	}
-	if err := checkUnusedLifetimes(
-		decl.Name,
-		decl.LifetimeParams,
-		unionVariantTypes(decl),
-	); err != nil {
-		return err
 	}
 	c.unions[decl.Name] = union
 	return nil
@@ -581,12 +567,9 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 	}
 	c.structs[decl.Name] = decl
 	previousTypeParams := c.typeParams
-	previousLifetimeParams := c.lifetimeParams
 	c.typeParams = typeParamSet(decl.TypeParams)
-	c.lifetimeParams = lifetimeParamSet(decl.LifetimeParams)
 	defer func() {
 		c.typeParams = previousTypeParams
-		c.lifetimeParams = previousLifetimeParams
 	}()
 	for _, field := range decl.Fields {
 		typ, err := c.parseType(field.TypeName)
@@ -601,13 +584,6 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 				decl.Name, field.Name)
 		}
 	}
-	if err := checkUnusedLifetimes(
-		decl.Name,
-		decl.LifetimeParams,
-		structFieldTypes(decl),
-	); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -621,17 +597,10 @@ type functionParamInfo struct {
 
 // newFunctionType converts a parsed function declaration into its static type.
 func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
-	if len(fn.LifetimeParams) > 0 {
-		return nil, fmt.Errorf(
-			"type error: explicit lifetime parameters are not supported; use `borrows`")
-	}
 	previousTypeParams := c.typeParams
-	previousLifetimeParams := c.lifetimeParams
 	c.typeParams = typeParamSet(fn.TypeParams)
-	c.lifetimeParams = lifetimeParamSet(fn.LifetimeParams)
 	defer func() {
 		c.typeParams = previousTypeParams
-		c.lifetimeParams = previousLifetimeParams
 	}()
 
 	paramInfo, err := c.collectFunctionParams(fn)
@@ -652,17 +621,10 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	if err := checkReturnBorrowPolicy(fn); err != nil {
 		return nil, err
 	}
-	if err := checkUnusedLifetimes(
-		fn.Name,
-		fn.LifetimeParams,
-		functionSignatureTypes(fn),
-	); err != nil {
-		return nil, err
-	}
 	return &functionType{
 		name: fn.Name, params: paramInfo.params, borrowParams: paramInfo.borrowParams,
 		mutBorrowParams: paramInfo.mutBorrowParams, comptimeParams: paramInfo.comptimeParams,
-		typeParams: fn.TypeParams, lifetimeParams: fn.LifetimeParams,
+		typeParams:   fn.TypeParams,
 		returnBorrow: fn.ReturnBorrow,
 		returnType:   ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
 	}, nil
@@ -765,13 +727,8 @@ func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
 		decl.Name, field.Name)
 }
 
-// checkBorrowFieldPolicy validates borrowed payloads in lifetime-bearing unions.
-func checkBorrowFieldPolicy(
-	typeName string,
-	fieldName string,
-	payload string,
-	_ []string,
-) error {
+// checkBorrowFieldPolicy rejects borrowed payloads.
+func checkBorrowFieldPolicy(typeName string, fieldName string, payload string) error {
 	if !strings.HasPrefix(payload, "&") {
 		return nil
 	}
@@ -803,72 +760,15 @@ func unwrapReturnSuccessType(typ Type) Type {
 	return typ
 }
 
-// checkUnusedLifetimes rejects lifetime parameters that do not appear in a signature.
-func checkUnusedLifetimes(name string, lifetimes []string, types []string) error {
-	for _, lifetime := range lifetimes {
-		used := false
-		for _, typ := range types {
-			if strings.Contains(typ, lifetime) {
-				used = true
-				break
-			}
-		}
-		if !used {
-			return fmt.Errorf("type error: lifetime %s on `%s` is unused", lifetime, name)
-		}
-	}
-	return nil
-}
-
-// functionSignatureTypes returns all type spellings in a function signature.
-func functionSignatureTypes(fn *ast.FunctionDecl) []string {
-	types := make([]string, 0, len(fn.Params)+1)
-	for _, param := range fn.Params {
-		types = append(types, borrowWrappedType(param.Borrow, param.BorrowLifetime,
-			param.MutBorrow, param.TypeName))
-	}
-	if fn.ReturnType != "" {
-		types = append(types, fn.ReturnType)
-	}
-	return types
-}
-
-// structFieldTypes returns all type spellings in a struct declaration.
-func structFieldTypes(decl *ast.StructDecl) []string {
-	types := make([]string, 0, len(decl.Fields))
-	for _, field := range decl.Fields {
-		types = append(types, borrowWrappedType(field.Borrow, field.BorrowLifetime,
-			field.MutBorrow, field.TypeName))
-	}
-	return types
-}
-
-// unionVariantTypes returns all payload type spellings in a union declaration.
-func unionVariantTypes(decl *ast.UnionDecl) []string {
-	types := make([]string, 0, len(decl.Variants))
-	for _, variant := range decl.Variants {
-		if variant.Payload != "" {
-			types = append(types, variant.Payload)
-		}
-	}
-	return types
-}
-
 // borrowWrappedType returns the full spelling for a borrow-bearing field or parameter.
-func borrowWrappedType(borrow bool, lifetime string, mutable bool, typ string) string {
+func borrowWrappedType(borrow bool, mutable bool, typ string) string {
 	if !borrow {
 		return typ
 	}
-	if lifetime == "" {
-		if mutable {
-			return "&var " + typ
-		}
-		return "&" + typ
-	}
 	if mutable {
-		return "&" + lifetime + " var " + typ
+		return "&var " + typ
 	}
-	return "&" + lifetime + " " + typ
+	return "&" + typ
 }
 
 // typeParamSet returns a lookup for function-level type parameters.
@@ -883,87 +783,9 @@ func typeParamSet(params []string) map[string]bool {
 	return out
 }
 
-// lifetimeParamSet returns a lookup for function or type-level lifetime parameters.
-func lifetimeParamSet(params []string) map[string]bool {
-	out := map[string]bool{"'static": true}
-	for _, param := range params {
-		out[param] = true
-	}
-	return out
-}
-
-// isKnownLifetime reports whether name is in scope as a lifetime parameter.
-func (c *Checker) isKnownLifetime(name string) bool {
-	return name == "'static" || c.lifetimeParams[name]
-}
-
-// isLifetimeName reports whether name is an apostrophe-prefixed lifetime.
-func isLifetimeName(name string) bool {
-	if len(name) < 2 || name[0] != '\'' {
-		return false
-	}
-	if name == "'_" {
-		return false
-	}
-	for idx, ch := range name[1:] {
-		if !(ch == '_' || 'a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z' ||
-			idx > 0 && '0' <= ch && ch <= '9') {
-			return false
-		}
-	}
-	return true
-}
-
-// sameType reports type equality after erasing lifetime annotations.
+// sameType reports exact type equality.
 func sameType(left Type, right Type) bool {
-	if left == right {
-		return true
-	}
-	return eraseLifetimes(string(left)) == eraseLifetimes(string(right))
-}
-
-// eraseLifetimes removes explicit lifetime annotations from type spellings.
-func eraseLifetimes(name string) string {
-	var out strings.Builder
-	for idx := 0; idx < len(name); {
-		if strings.HasPrefix(name[idx:], "&'") {
-			out.WriteByte('&')
-			idx = skipLifetimeName(name, idx+1)
-			idx = skipOneSpace(name, idx)
-			continue
-		}
-		if strings.HasPrefix(name[idx:], "[]'") {
-			out.WriteString("[]")
-			idx = skipLifetimeName(name, idx+2)
-			idx = skipOneSpace(name, idx)
-			continue
-		}
-		out.WriteByte(name[idx])
-		idx++
-	}
-	return out.String()
-}
-
-// skipLifetimeName skips a lifetime name starting at an apostrophe.
-func skipLifetimeName(name string, start int) int {
-	idx := start + 1
-	for idx < len(name) {
-		ch := name[idx]
-		if ch != '_' && (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
-			(ch < '0' || ch > '9') {
-			break
-		}
-		idx++
-	}
-	return idx
-}
-
-// skipOneSpace skips a single separator after a lifetime name.
-func skipOneSpace(name string, idx int) int {
-	if idx < len(name) && name[idx] == ' ' {
-		return idx + 1
-	}
-	return idx
+	return left == right
 }
 
 // substituteTypeParams instantiates the simple generic wrapper type spellings.
@@ -1050,10 +872,6 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 // parseBorrowType validates local borrow type spellings used by std wrappers.
 func (c *Checker) parseBorrowType(name string) (Type, error) {
 	inner := strings.TrimPrefix(name, "&")
-	if strings.HasPrefix(inner, "'") {
-		return "", fmt.Errorf(
-			"type error: explicit lifetime syntax is not supported; use `borrows`")
-	}
 	inner = strings.TrimPrefix(inner, "var ")
 	if inner == "" {
 		return "", fmt.Errorf("type error: & must wrap a type")
@@ -1067,10 +885,6 @@ func (c *Checker) parseBorrowType(name string) (Type, error) {
 // parseSliceType validates slice view type spellings.
 func (c *Checker) parseSliceType(name string) (Type, error) {
 	rest := strings.TrimPrefix(name, "[]")
-	if strings.HasPrefix(rest, "'") {
-		return "", fmt.Errorf(
-			"type error: explicit lifetime syntax is not supported; use `borrows`")
-	}
 	if rest == "" {
 		return "", fmt.Errorf("type error: [] must wrap a type")
 	}
@@ -1121,11 +935,10 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 	}
 
 	if c.structs[base] != nil {
-		return c.parseUserGenericType(name, base, args, c.structs[base].LifetimeParams,
-			c.structs[base].TypeParams)
+		return c.parseUserGenericType(name, base, args, c.structs[base].TypeParams)
 	}
 	if union := c.unions[base]; union != nil {
-		return c.parseUserGenericType(name, base, args, union.lifetimeParams, union.typeParams)
+		return c.parseUserGenericType(name, base, args, union.typeParams)
 	}
 
 	if !isKnownSingleArgGeneric(base) {
@@ -1141,28 +954,18 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 	return Type(name), nil
 }
 
-// parseUserGenericType validates lifetime and static type arguments for user declarations.
+// parseUserGenericType validates static type arguments for user declarations.
 func (c *Checker) parseUserGenericType(
 	name string,
 	base string,
 	args []string,
-	lifetimes []string,
 	types []string,
 ) (Type, error) {
-	want := len(lifetimes) + len(types)
+	want := len(types)
 	if len(args) != want {
 		return "", fmt.Errorf("type error: `%s` expects %d static arguments", base, want)
 	}
-	for idx := range lifetimes {
-		if !isLifetimeName(args[idx]) {
-			return "", fmt.Errorf("type error: `%s` argument %d must be a lifetime",
-				base, idx+1)
-		}
-		if !c.isKnownLifetime(args[idx]) {
-			return "", fmt.Errorf("type error: unknown lifetime %s", args[idx])
-		}
-	}
-	for _, arg := range args[len(lifetimes):] {
+	for _, arg := range args {
 		if _, err := c.parseType(arg); err != nil {
 			return "", err
 		}
@@ -1325,20 +1128,17 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	previousFunction := c.currentFunction
 	previousStd := c.currentStd
 	previousTypeParams := c.typeParams
-	previousLifetimeParams := c.lifetimeParams
 	previousLoops := c.loopLabels
 	c.currentReturn = fn.returnType
 	c.currentFunction = fn
 	c.currentStd = fn.decl.Std
 	c.typeParams = typeParamSet(fn.typeParams)
-	c.lifetimeParams = lifetimeParamSet(fn.lifetimeParams)
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
 		c.currentFunction = previousFunction
 		c.currentStd = previousStd
 		c.typeParams = previousTypeParams
-		c.lifetimeParams = previousLifetimeParams
 		c.loopLabels = previousLoops
 	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
@@ -2010,19 +1810,6 @@ func (c *Checker) structLiteralBorrowSources(
 	return out, nil
 }
 
-// checkExprSuppliesLifetimes validates an initializer for a lifetime-bearing target.
-func (c *Checker) checkExprSuppliesLifetimes(
-	expr ast.Expression,
-	env *scope,
-	want Type,
-	unsafe bool,
-	context string,
-) error {
-	_, _, _, _ = expr, env, want, unsafe
-	_ = context
-	return nil
-}
-
 // calledFunction resolves direct and namespace-qualified source function calls.
 func (c *Checker) calledFunction(callee ast.Expression) *functionType {
 	switch e := callee.(type) {
@@ -2106,39 +1893,7 @@ func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 
 // fieldDeclaredType returns the full field type, including borrow prefixes.
 func fieldDeclaredType(field ast.Field) Type {
-	return Type(borrowWrappedType(field.Borrow, field.BorrowLifetime,
-		field.MutBorrow, field.TypeName))
-}
-
-// explicitNonStaticLifetimes returns lifetimes that cannot escape implicitly.
-func explicitNonStaticLifetimes(typ Type) map[string]bool {
-	out := explicitLifetimes(typ)
-	delete(out, "'static")
-	return out
-}
-
-// hasExplicitNonStaticLifetime reports whether typ carries a scoped lifetime.
-func hasExplicitNonStaticLifetime(typ Type) bool {
-	return len(explicitNonStaticLifetimes(typ)) > 0
-}
-
-// explicitLifetimes extracts lifetime tokens from a type spelling.
-func explicitLifetimes(typ Type) map[string]bool {
-	text := string(typ)
-	out := map[string]bool{}
-	for idx := 0; idx < len(text); {
-		if text[idx] != '\'' {
-			idx++
-			continue
-		}
-		end := skipLifetimeName(text, idx)
-		lifetime := text[idx:end]
-		if isLifetimeName(lifetime) {
-			out[lifetime] = true
-		}
-		idx = end
-	}
-	return out
+	return Type(borrowWrappedType(field.Borrow, field.MutBorrow, field.TypeName))
 }
 
 // addBorrowSources unions src into dst.
@@ -3395,15 +3150,12 @@ func (c *Checker) rejectArrayElementType(elem Type) error {
 	return nil
 }
 
-// rejectArrayStorageType rejects values whose lifetime rules are not Array-safe yet.
+// rejectArrayStorageType rejects values that are not Array-safe yet.
 func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	if seen[typ] {
 		return nil
 	}
 	seen[typ] = true
-	if hasExplicitNonStaticLifetime(typ) {
-		return fmt.Errorf("type error: Array element cannot store lifetime view in v0.2")
-	}
 	if isAstNodeIDType(typ) {
 		return nil
 	}
@@ -4176,14 +3928,12 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 	previousStd := c.currentStd
 	previousTypeParams := c.typeParams
 	previousTypeArgValues := c.typeArgValues
-	previousLifetimeParams := c.lifetimeParams
 	previousLoops := c.loopLabels
 	c.currentReturn = returnType
 	c.currentFunction = fn
 	c.currentStd = fn.decl.Std
 	c.typeParams = typeParamSet(fn.typeParams)
 	c.typeArgValues = subst
-	c.lifetimeParams = lifetimeParamSet(fn.lifetimeParams)
 	c.loopLabels = nil
 	defer func() {
 		c.currentReturn = previousReturn
@@ -4191,7 +3941,6 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		c.currentStd = previousStd
 		c.typeParams = previousTypeParams
 		c.typeArgValues = previousTypeArgValues
-		c.lifetimeParams = previousLifetimeParams
 		c.loopLabels = previousLoops
 	}()
 	returns, err := c.checkBlock(fn.decl.Body, env, returnType, fn.unsafe)
@@ -4221,9 +3970,7 @@ func (c *Checker) parseGenericWrapperTypeArgs(args []string) ([]Type, error) {
 func (c *Checker) checkGenericWrapperTypeArgs(name string, args []Type) error {
 	switch name {
 	case "std.channel.Channel":
-		if hasExplicitNonStaticLifetime(args[0]) {
-			return fmt.Errorf("type error: lifetime view cannot cross concurrency boundary")
-		}
+		return nil
 	case "std.array.Array":
 		return c.rejectArrayElementType(args[0])
 	case "std.atomic.Atomic":
@@ -4534,12 +4281,6 @@ func (c *Checker) checkUnionConstructorCall(
 		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects %s, got %s",
 			unionType.name, field.Name, payload, got)
 	}
-	if err := c.checkExprSuppliesLifetimes(
-		args[0], env, Type(payload), unsafe,
-		fmt.Sprintf("union variant `%s::%s`", unionType.name, field.Name),
-	); err != nil {
-		return "", true, err
-	}
 	return Type(unionType.name), true, nil
 }
 
@@ -4605,12 +4346,6 @@ func (c *Checker) checkStructLiteralExpr(
 			!c.returnValueMatchesBorrowParam(exprs[field.Name], env, want, got) {
 			return "", fmt.Errorf("type error: field `%s.%s` expects %s, got %s",
 				expr.TypeName, field.Name, want, got)
-		}
-		if err := c.checkExprSuppliesLifetimes(
-			exprs[field.Name], env, want, unsafe,
-			fmt.Sprintf("field `%s.%s`", expr.TypeName, field.Name),
-		); err != nil {
-			return "", err
 		}
 		delete(values, field.Name)
 	}
@@ -6302,7 +6037,7 @@ func (c *Checker) isCopyType(typ Type) bool {
 	if typ == "ParseNode" || typ == "std::kizu::parser::ParseNode" {
 		return true
 	}
-	if eraseLifetimes(string(typ)) == string(typeByteString) {
+	if typ == typeByteString {
 		return true
 	}
 	if c.enums[string(typ)] != nil {
@@ -6514,9 +6249,6 @@ func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe
 func (c *Checker) rejectThreadBoundaryType(typ Type, seen map[Type]bool) error {
 	if isPointerType(typ) {
 		return fmt.Errorf("type error: raw pointer cannot cross concurrency boundary")
-	}
-	if hasExplicitNonStaticLifetime(typ) {
-		return fmt.Errorf("type error: lifetime view cannot cross concurrency boundary")
 	}
 	if seen[typ] {
 		return nil

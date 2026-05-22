@@ -61,17 +61,16 @@ func (p *Program) String() string {
 
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
-	Name           string
-	LifetimeParams []string
-	TypeParams     []string
-	Params         []Param
-	ReturnType     string
-	ReturnBorrow   string
-	Body           *BlockStmt
-	Unsafe         bool
-	ExternABI      string
-	Public         bool
-	Std            bool
+	Name         string
+	TypeParams   []string
+	Params       []Param
+	ReturnType   string
+	ReturnBorrow string
+	Body         *BlockStmt
+	Unsafe       bool
+	ExternABI    string
+	Public       bool
+	Std          bool
 }
 
 // declNode marks FunctionDecl as a declaration node.
@@ -90,7 +89,7 @@ func (d *FunctionDecl) String() string {
 			ret += " borrows " + d.ReturnBorrow
 		}
 	}
-	typeParams := typeParamText(d.LifetimeParams, d.TypeParams)
+	typeParams := typeParamText(d.TypeParams)
 	if typeParams != "" {
 		typeParams = "<" + typeParams + ">"
 	}
@@ -115,11 +114,10 @@ func (d *FunctionDecl) String() string {
 
 // StructDecl represents a top-level struct declaration.
 type StructDecl struct {
-	Name           string
-	LifetimeParams []string
-	TypeParams     []string
-	Fields         []Field
-	Public         bool
+	Name       string
+	TypeParams []string
+	Fields     []Field
+	Public     bool
 }
 
 // declNode marks StructDecl as a declaration node.
@@ -135,7 +133,7 @@ func (d *StructDecl) String() string {
 	if d.Public {
 		prefix = "pub "
 	}
-	typeParams := typeParamText(d.LifetimeParams, d.TypeParams)
+	typeParams := typeParamText(d.TypeParams)
 	if typeParams != "" {
 		typeParams = "<" + typeParams + ">"
 	}
@@ -164,11 +162,10 @@ func (d *EnumDecl) String() string {
 
 // UnionDecl represents a tagged union declaration.
 type UnionDecl struct {
-	Name           string
-	LifetimeParams []string
-	TypeParams     []string
-	Variants       []UnionVariant
-	Public         bool
+	Name       string
+	TypeParams []string
+	Variants   []UnionVariant
+	Public     bool
 }
 
 // declNode marks UnionDecl as a declaration node.
@@ -184,7 +181,7 @@ func (d *UnionDecl) String() string {
 	if d.Public {
 		prefix = "pub "
 	}
-	typeParams := typeParamText(d.LifetimeParams, d.TypeParams)
+	typeParams := typeParamText(d.TypeParams)
 	if typeParams != "" {
 		typeParams = "<" + typeParams + ">"
 	}
@@ -254,21 +251,20 @@ func (d *ImplDecl) String() string {
 
 // Field represents a named struct field.
 type Field struct {
-	Name           string
-	TypeName       string
-	Borrow         bool
-	BorrowLifetime string
-	MutBorrow      bool
-	Public         bool
+	Name      string
+	TypeName  string
+	Borrow    bool
+	MutBorrow bool
+	Public    bool
 }
 
 // String returns a compact debug representation of the field.
 func (f Field) String() string {
 	prefix := ""
 	if f.MutBorrow {
-		prefix = borrowPrefix(f.BorrowLifetime, true)
+		prefix = borrowPrefix(true)
 	} else if f.Borrow {
-		prefix = borrowPrefix(f.BorrowLifetime, false)
+		prefix = borrowPrefix(false)
 	}
 	visibility := ""
 	if f.Public {
@@ -279,21 +275,20 @@ func (f Field) String() string {
 
 // Param represents a function parameter.
 type Param struct {
-	Name           string
-	TypeName       string
-	Borrow         bool
-	BorrowLifetime string
-	MutBorrow      bool
-	Comptime       bool
+	Name      string
+	TypeName  string
+	Borrow    bool
+	MutBorrow bool
+	Comptime  bool
 }
 
 // String returns a compact debug representation of the parameter.
 func (p Param) String() string {
 	prefix := ""
 	if p.MutBorrow {
-		prefix = borrowPrefix(p.BorrowLifetime, true)
+		prefix = borrowPrefix(true)
 	} else if p.Borrow {
-		prefix = borrowPrefix(p.BorrowLifetime, false)
+		prefix = borrowPrefix(false)
 	}
 	if !p.Comptime {
 		return fmt.Sprintf("%s: %s%s", p.Name, prefix, p.TypeName)
@@ -301,26 +296,17 @@ func (p Param) String() string {
 	return fmt.Sprintf("comptime %s: %s%s", p.Name, prefix, p.TypeName)
 }
 
-// typeParamText renders lifetime and type parameters in declaration order.
-func typeParamText(lifetimes []string, types []string) string {
-	params := make([]string, 0, len(lifetimes)+len(types))
-	params = append(params, lifetimes...)
-	params = append(params, types...)
-	return strings.Join(params, ", ")
+// typeParamText renders static type parameters.
+func typeParamText(types []string) string {
+	return strings.Join(types, ", ")
 }
 
-// borrowPrefix renders a borrow marker with an optional lifetime.
-func borrowPrefix(lifetime string, mutable bool) string {
-	if lifetime == "" {
-		if mutable {
-			return "&var "
-		}
-		return "&"
-	}
+// borrowPrefix renders a borrow marker.
+func borrowPrefix(mutable bool) string {
 	if mutable {
-		return "&" + lifetime + " var "
+		return "&var "
 	}
-	return "&" + lifetime + " "
+	return "&"
 }
 
 // BlockStmt represents a sequence of statements.

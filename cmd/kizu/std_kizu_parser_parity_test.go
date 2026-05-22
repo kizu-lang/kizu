@@ -1098,7 +1098,7 @@ func summarizeImportDeclSubset(decl *kizuast.ImportDecl) ([]string, string) {
 
 // summarizeFunctionSubset summarizes a function declaration in the shared subset.
 func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
-	typeParams, reason := summarizeGenericParamsSubset(fn.LifetimeParams, fn.TypeParams)
+	typeParams, reason := summarizeGenericParamsSubset(fn.TypeParams)
 	if reason != "" {
 		return nil, reason
 	}
@@ -1154,15 +1154,9 @@ func summarizeFunctionBodySubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	return summarizeBlockSubset(fn.Body)
 }
 
-// summarizeGenericParamsSubset summarizes lifetime and type parameter names.
-func summarizeGenericParamsSubset(lifetimes []string, params []string) ([]string, string) {
-	lines := []string{"Range", strconv.Itoa(len(lifetimes) + len(params))}
-	for _, name := range lifetimes {
-		if !isStdParserLifetime(name) {
-			return nil, "lifetime outside std parser subset"
-		}
-		lines = append(lines, "Var", name)
-	}
+// summarizeGenericParamsSubset summarizes type parameter names.
+func summarizeGenericParamsSubset(params []string) ([]string, string) {
+	lines := []string{"Range", strconv.Itoa(len(params))}
 	for _, name := range params {
 		if !isStdParserIdent(name) {
 			return nil, "identifier outside std parser subset"
@@ -1231,7 +1225,7 @@ func summarizeStructDeclSubset(decl *kizuast.StructDecl) ([]string, string) {
 	if !isStdParserIdent(decl.Name) {
 		return nil, "identifier outside std parser subset"
 	}
-	typeParams, reason := summarizeGenericParamsSubset(decl.LifetimeParams, decl.TypeParams)
+	typeParams, reason := summarizeGenericParamsSubset(decl.TypeParams)
 	if reason != "" {
 		return nil, reason
 	}
@@ -1265,14 +1259,8 @@ func summarizeFieldSubset(field kizuast.Field) ([]string, string) {
 func parserParityFieldTypeName(field kizuast.Field) string {
 	switch {
 	case field.MutBorrow:
-		if field.BorrowLifetime != "" {
-			return "&" + field.BorrowLifetime + " var " + field.TypeName
-		}
 		return "&var " + field.TypeName
 	case field.Borrow:
-		if field.BorrowLifetime != "" {
-			return "&" + field.BorrowLifetime + " " + field.TypeName
-		}
 		return "&" + field.TypeName
 	default:
 		return field.TypeName
@@ -1300,7 +1288,7 @@ func summarizeUnionDeclSubset(decl *kizuast.UnionDecl) ([]string, string) {
 	if !isStdParserIdent(decl.Name) {
 		return nil, "identifier outside std parser subset"
 	}
-	typeParams, reason := summarizeGenericParamsSubset(decl.LifetimeParams, decl.TypeParams)
+	typeParams, reason := summarizeGenericParamsSubset(decl.TypeParams)
 	if reason != "" {
 		return nil, reason
 	}
@@ -1353,14 +1341,8 @@ func summarizeTypeNameSubset(typeName string) ([]string, string) {
 func parserParityParamTypeName(param kizuast.Param) string {
 	switch {
 	case param.MutBorrow:
-		if param.BorrowLifetime != "" {
-			return "&" + param.BorrowLifetime + " var " + param.TypeName
-		}
 		return "&var " + param.TypeName
 	case param.Borrow:
-		if param.BorrowLifetime != "" {
-			return "&" + param.BorrowLifetime + " " + param.TypeName
-		}
 		return "&" + param.TypeName
 	default:
 		return param.TypeName
@@ -1991,11 +1973,6 @@ func isStdParserIdent(name string) bool {
 		}
 	}
 	return name != "fn" && name != "return"
-}
-
-// isStdParserLifetime reports whether name is a plain lifetime token.
-func isStdParserLifetime(name string) bool {
-	return strings.HasPrefix(name, "'") && isStdParserIdent(strings.TrimPrefix(name, "'"))
 }
 
 // isStdParserIdentStart reports whether r can start a std lexer identifier.

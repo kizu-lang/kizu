@@ -324,11 +324,6 @@ func TestCheckRejectsBorrowProvenanceDeclarationErrors(t *testing.T) {
 			source: `struct View { bytes: &[]u8 } fn main() {}`,
 			want:   "borrow field `View.bytes` cannot store borrow",
 		},
-		{
-			name:   "explicit lifetime parameter rejected",
-			source: `fn unused<'a>() -> void { return; }`,
-			want:   "explicit lifetime parameters are not supported",
-		},
 	}
 	runErrorCases(t, cases)
 }
@@ -346,11 +341,6 @@ func TestCheckRejectsBorrowProvenanceEscapeErrors(t *testing.T) {
     return right;
 }`,
 			want: "return borrows `left` but returned value is not tied to that source",
-		},
-		{
-			name:   "explicit lifetime type rejected",
-			source: `fn bad(bytes: []'a u8) -> void { return; }`,
-			want:   "explicit lifetime syntax is not supported",
 		},
 	}
 	runErrorCases(t, cases)
