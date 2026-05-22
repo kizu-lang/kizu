@@ -59,7 +59,7 @@ go test ./...
 | raw pointer spelling and unsafe pointer ops | `pointer_policy.kizu` | check-only pointer policy example |
 | raw pointer explicit dereference | `raw_pointer_deref.kizu` | check-only `unsafe { p.*.field }` pointer access |
 | combined v0.1 application | `user_registry.kizu` | exercises multiple v0.1 features together |
-| `contract`, `impl Contract for Type`, `&Dyn<Contract>` | `contract_writer.kizu` | dynamic dispatch through explicit contract implementation |
+| `contract`, `impl Contract for Type`, `&dyn Contract` | `contract_writer.kizu` | dynamic dispatch through explicit contract implementation |
 | `Io` capability and `TaskGroup` | `task_group.kizu` | spawns and awaits a structured task |
 | selectable `Io` implementations | `io_runtime.kizu` | uses blocking, threaded, and failing Io constructors |
 | task cancellation cleanup | `task_cancel.kizu` | waits for a threaded task and discards its result |
@@ -180,8 +180,8 @@ single source file. Run them with `kizu check <package-root>`.
 | unsafe does not permit moved safe values | `negative/unsafe_moved_value.kizu` | `moved value` |
 | unsafe does not permit borrow escape | `negative/unsafe_borrow_escape.kizu` | `borrowed value` |
 | contract impl requires every contract method | `negative/missing_contract_method.kizu` | `missing method` |
-| `Dyn<Contract>` requires explicit contract impl | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
-| owned `Dyn<Contract>` is not v0.1 | `negative/owned_dyn.kizu` | `must be borrowed` |
+| `dyn Contract` requires explicit contract impl | `negative/unsatisfied_dyn.kizu` | `does not satisfy` |
+| owned `dyn Contract` is not v0.1 | `negative/owned_dyn.kizu` | `must be borrowed` |
 | tasks must be awaited or canceled | `negative/unawaited_task.kizu` | `must be awaited or canceled` |
 | task args move non-copy values | `negative/task_move.kizu` | `moved value` |
 | tasks cannot capture borrow params | `negative/task_borrow_capture.kizu` | `cannot capture borrow` |

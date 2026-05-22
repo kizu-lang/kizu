@@ -541,11 +541,20 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 				decl.Name, variant.Name)
 		}
 		if variant.Payload != "" {
-			if _, err := c.parseType(variant.Payload); err != nil {
+			typ, err := c.parseType(variant.Payload)
+			if err != nil {
 				return err
 			}
 			if err := checkBorrowFieldPolicy(decl.Name, variant.Name, variant.Payload); err != nil {
 				return err
+			}
+			if containsTypeValue(typ) {
+				return fmt.Errorf("type error: union variant `%s::%s` cannot store type value",
+					decl.Name, variant.Name)
+			}
+			if containsDynType(typ) {
+				return fmt.Errorf("type error: union variant `%s::%s` cannot store dyn value",
+					decl.Name, variant.Name)
 			}
 		}
 		union.variants[variant.Name] = variant.Payload
@@ -583,6 +592,14 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 			return fmt.Errorf("type error: struct field `%s.%s` cannot store Function",
 				decl.Name, field.Name)
 		}
+		if containsTypeValue(typ) {
+			return fmt.Errorf("type error: struct field `%s.%s` cannot store type value",
+				decl.Name, field.Name)
+		}
+		if containsDynType(typ) {
+			return fmt.Errorf("type error: struct field `%s.%s` cannot store dyn value",
+				decl.Name, field.Name)
+		}
 	}
 	return nil
 }
@@ -617,6 +634,12 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 	}
 	if ret == typeFunction {
 		return nil, fmt.Errorf("type error: function `%s` cannot return Function", fn.Name)
+	}
+	if containsTypeValue(ret) {
+		return nil, fmt.Errorf("type error: function `%s` cannot return type", fn.Name)
+	}
+	if containsDynType(ret) {
+		return nil, fmt.Errorf("type error: function `%s` cannot return dyn", fn.Name)
 	}
 	if err := checkReturnBorrowPolicy(fn); err != nil {
 		return nil, err
@@ -663,11 +686,21 @@ func (c *Checker) checkFunctionParam(
 	if paramType == typeVoid {
 		return fmt.Errorf("type error: parameter `%s` cannot have type void", param.Name)
 	}
+	if containsTypeValue(paramType) {
+		return fmt.Errorf("type error: parameter `%s` cannot have type", param.Name)
+	}
 	if err := checkFunctionParamPolicy(fn, param, paramType); err != nil {
 		return err
 	}
-	if _, ok := dynContract(paramType); ok && !param.Borrow {
-		return fmt.Errorf("type error: Dyn parameter `%s` must be borrowed", param.Name)
+	if _, ok := dynContract(paramType); ok {
+		if !param.Borrow {
+			return fmt.Errorf("type error: dyn parameter `%s` must be borrowed", param.Name)
+		}
+		if param.MutBorrow {
+			return fmt.Errorf("type error: dyn parameter `%s` must use immutable borrow in v0", param.Name)
+		}
+	} else if containsDynType(paramType) {
+		return fmt.Errorf("type error: dyn parameter `%s` must use &dyn Contract", param.Name)
 	}
 	return nil
 }
@@ -847,6 +880,9 @@ func (c *Checker) parseType(name string) (Type, error) {
 	if strings.HasPrefix(name, "?") {
 		return c.parseNullableType(name)
 	}
+	if strings.HasPrefix(name, "dyn ") {
+		return c.parseDynType(name)
+	}
 	if base, arg, ok := splitGenericType(name); ok {
 		return c.parseGenericType(name, base, arg)
 	}
@@ -930,8 +966,6 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 			return "", err
 		}
 		return c.parsePointerType(name, arg)
-	case "Dyn":
-		return c.parseDynType(name, base, args)
 	}
 
 	if c.structs[base] != nil {
@@ -973,14 +1007,14 @@ func (c *Checker) parseUserGenericType(
 	return Type(name), nil
 }
 
-// parseDynType validates contract object type spellings.
-func (c *Checker) parseDynType(name string, base string, args []string) (Type, error) {
-	arg, err := singleGenericArg(base, args)
-	if err != nil {
-		return "", err
+// parseDynType validates dynamic contract object type spellings.
+func (c *Checker) parseDynType(name string) (Type, error) {
+	contractName := strings.TrimPrefix(name, "dyn ")
+	if contractName == "" {
+		return "", fmt.Errorf("type error: dyn must name a contract")
 	}
-	if c.contracts[arg] == nil {
-		return "", fmt.Errorf("type error: unknown contract `%s`", arg)
+	if c.contracts[contractName] == nil {
+		return "", fmt.Errorf("type error: unknown contract `%s`", contractName)
 	}
 	return Type(name), nil
 }
@@ -1060,6 +1094,9 @@ func referencedTypeNames(typeName string) []string {
 	typeName = strings.TrimPrefix(typeName, "?")
 	typeName = strings.TrimPrefix(typeName, "[]")
 	typeName = strings.TrimPrefix(typeName, "const ")
+	typeName = strings.TrimPrefix(typeName, "&var ")
+	typeName = strings.TrimPrefix(typeName, "&")
+	typeName = strings.TrimPrefix(typeName, "dyn ")
 	if base, arg, ok := splitGenericType(typeName); ok {
 		names := []string{base}
 		for _, part := range splitPublicTypeArgs(arg) {
@@ -1258,6 +1295,9 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool
 	typ, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return false, err
+	}
+	if containsTypeValue(typ) {
+		return false, fmt.Errorf("type error: type value cannot be stored in local `%s`", stmt.Name)
 	}
 	if _, mutable, inner, ok := explicitBorrowType(typ); ok {
 		source := c.singleBorrowSource(stmt.Value, env, unsafe)
@@ -3162,6 +3202,9 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 	if isPointerType(typ) {
 		return fmt.Errorf("type error: Array element cannot be raw pointer in v0.2")
 	}
+	if _, ok := dynContract(typ); ok {
+		return fmt.Errorf("type error: Array element cannot be dyn in v0.2")
+	}
 	if err := c.rejectArrayStorageGeneric(typ, seen); err != nil {
 		return err
 	}
@@ -3186,7 +3229,7 @@ func (c *Checker) rejectArrayStorageGeneric(typ Type, seen map[Type]bool) error 
 		return fmt.Errorf("type error: Array element cannot be nested array in v0.2")
 	case "std::map::Map":
 		return fmt.Errorf("type error: Array element cannot be std::map::Map in v0.2")
-	case "Task", "Channel", "Mutex", "Atomic", "Dyn":
+	case "Task", "Channel", "Mutex", "Atomic":
 		return fmt.Errorf("type error: Array element cannot be %s in v0.2", base)
 	case "option":
 		argType, err := c.parseType(arg)
@@ -5772,7 +5815,7 @@ func (c *Checker) checkMutex(
 	return Type(fmt.Sprintf("Mutex<%s>", elem)), true, nil
 }
 
-// checkDynMethodCall validates a method call through &Dyn<Contract>.
+// checkDynMethodCall validates a method call through &dyn Contract.
 func (c *Checker) checkDynMethodCall(
 	contractName string,
 	name string,
@@ -5782,7 +5825,7 @@ func (c *Checker) checkDynMethodCall(
 ) (Type, error) {
 	contract := c.contracts[contractName]
 	if contract == nil || contract.methods[name] == nil {
-		return "", fmt.Errorf("type error: `Dyn<%s>` has no method `%s`", contractName, name)
+		return "", fmt.Errorf("type error: `dyn %s` has no method `%s`", contractName, name)
 	}
 	return c.checkMethodArgs(contract.methods[name], typeSelf, args, env, unsafe)
 }
@@ -6250,6 +6293,9 @@ func (c *Checker) rejectThreadBoundaryType(typ Type, seen map[Type]bool) error {
 	if isPointerType(typ) {
 		return fmt.Errorf("type error: raw pointer cannot cross concurrency boundary")
 	}
+	if _, ok := dynContract(typ); ok {
+		return fmt.Errorf("type error: dyn cannot cross concurrency boundary")
+	}
 	if seen[typ] {
 		return nil
 	}
@@ -6278,8 +6324,6 @@ func (c *Checker) rejectThreadBoundaryGeneric(typ Type, seen map[Type]bool) erro
 		return fmt.Errorf("type error: Map cannot cross concurrency boundary in v0.2")
 	case "std::arena::Handle":
 		return fmt.Errorf("type error: handle cannot cross concurrency boundary")
-	case "Dyn":
-		return fmt.Errorf("type error: Dyn cannot cross concurrency boundary")
 	case "Mutex":
 		return fmt.Errorf("type error: Mutex cannot cross concurrency boundary in v0.1")
 	case "Task":
@@ -6374,10 +6418,74 @@ func qualifiedName(expr ast.Expression) (string, bool) {
 	}
 }
 
-// dynContract extracts C from Dyn<C>.
+// dynContract extracts C from dyn C.
 func dynContract(typ Type) (string, bool) {
-	base, arg, ok := splitGenericType(string(typ))
-	return arg, ok && base == "Dyn"
+	text := string(typ)
+	if !strings.HasPrefix(text, "dyn ") {
+		return "", false
+	}
+	contractName := strings.TrimPrefix(text, "dyn ")
+	return contractName, contractName != ""
+}
+
+// containsDynType reports whether a type spelling contains a dynamic object.
+func containsDynType(typ Type) bool {
+	return containsWrappedType(typ, dynTypeMatch)
+}
+
+// containsTypeValue reports whether a type spelling contains comptime-only type.
+func containsTypeValue(typ Type) bool {
+	return containsWrappedType(typ, func(typ Type) bool {
+		return typ == typeType
+	})
+}
+
+// dynTypeMatch reports whether typ is a direct dynamic contract object spelling.
+func dynTypeMatch(typ Type) bool {
+	_, ok := dynContract(typ)
+	return ok
+}
+
+// containsWrappedType recursively checks prefixes and static type arguments.
+func containsWrappedType(typ Type, match func(Type) bool) bool {
+	text := string(typ)
+	for {
+		switch {
+		case strings.HasPrefix(text, "!"):
+			text = strings.TrimPrefix(text, "!")
+		case strings.HasPrefix(text, "&var "):
+			text = strings.TrimPrefix(text, "&var ")
+		case strings.HasPrefix(text, "&"):
+			text = strings.TrimPrefix(text, "&")
+		case strings.HasPrefix(text, "?"):
+			text = strings.TrimPrefix(text, "?")
+		case strings.HasPrefix(text, "[]"):
+			text = strings.TrimPrefix(text, "[]")
+		case strings.HasPrefix(text, "const "):
+			text = strings.TrimPrefix(text, "const ")
+		default:
+			if match(Type(text)) {
+				return true
+			}
+			base, arg, ok := splitGenericType(text)
+			if !ok {
+				return false
+			}
+			if match(Type(base)) {
+				return true
+			}
+			args, ok := splitGenericArgs(arg)
+			if !ok {
+				return false
+			}
+			for _, item := range args {
+				if containsWrappedType(Type(item), match) {
+					return true
+				}
+			}
+			return false
+		}
+	}
 }
 
 // implMethod returns a concrete method implementation.

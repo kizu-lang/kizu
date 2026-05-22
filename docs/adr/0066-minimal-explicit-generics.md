@@ -38,6 +38,12 @@ Kizu adopts a minimal explicit static argument subset for function generics.
 - Type parameters are compile-time type values inside the instantiated body.
 - `type<T>` is a compile-time type literal. `comptime if T == type<i64>` checks
   only the selected branch after instantiation.
+- Bare type names are not expression-level type values in v0.2. Kizu keeps
+  `type<T>` as the canonical spelling so value names and type names do not
+  share an implicit expression namespace, and so compound types use the same
+  form as primitive types.
+- `type` values are comptime-only and cannot be stored in runtime locals,
+  fields, union payloads, collection elements, or return values.
 - The Zig-style spelling `fn f(comptime T: type, value: T)` is not the
   canonical Kizu generic syntax. Kizu keeps type/static arguments in `<...>` so
   runtime arguments remain ordinary move/borrow checked values.

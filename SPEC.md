@@ -80,7 +80,7 @@ Task / TaskGroup
 std::task structured API
 contract
 impl Contract for Type
-&Dyn<Contract>
+&dyn Contract
 ```
 
 v0.1 に含める static / policy 機能:
@@ -1443,6 +1443,12 @@ v0.2 の `comptime` expression は、整数、真偽値、文字列、compile-ti
 instantiated generic body 内の static type parameter identifier は `type` 値です。
 runtime local value は `comptime` expression から参照できません。
 
+Kizu v0.2 の canonical spelling は `type<T>` です。`T == i64` のように bare
+type name を expression として解決する規則は採用しません。これは value namespace と
+type namespace の衝突を避け、`type<[]u8>` や `type<std::map::Map<[]u8, i64>>`
+のような複合型でも同じ規則を使うためです。`type` 値は comptime-only であり、
+runtime local、field、union payload、collection element、return value として保持できません。
+
 ```kizu
 fn IsI64<T>(value: T) -> bool {
     comptime if T == type<i64> {
@@ -1916,7 +1922,7 @@ Send 相当ルール:
 * `Channel<T>` は `T` が boundary-safe な場合だけ boundary を越えられる
 * local borrow、mutable borrow、raw pointer は safe Kizu では boundary を越えられない
 * raw pointer を field / payload に含む struct / union も boundary を越えられない
-* `std::arena::Arena<T>` / `std::arena::Handle<T>` / `Dyn<Contract>` / `Mutex<T>` / `Task<T>` は
+* `std::arena::Arena<T>` / `std::arena::Handle<T>` / `dyn Contract` / `Mutex<T>` / `Task<T>` は
   v0.1 では boundary を越えられない
 * arena / handle の thread-safe sharing は v0.1 では扱わない
 
@@ -1925,15 +1931,15 @@ safe structured API の後に追加します。
 実並行 runtime を導入する場合も、上記の ownership / borrow / structured scope の制約を維持します。
 詳細な runtime selection 方針は ADR-0039 に従います。
 
-## 16. contract / impl / Dyn 方針
+## 16. contract / impl / dyn 方針
 
 Kizu v0.1 では、Rust trait clone ではない明示的な抽象化として、
-`contract`、`impl Contract for Type`、`Dyn` を実装対象にします。
+`contract`、`impl Contract for Type`、`dyn` を実装対象にします。
 
 ```text
 contract                型が満たすべき要求
 impl Contract for Type  型が contract を満たすことの明示宣言と method body
-Dyn                     runtime dynamic dispatch を見せる型
+dyn                     runtime dynamic dispatch を見せる型
 ```
 
 `contract` は required method signatures だけを書きます。
@@ -1960,16 +1966,16 @@ impl Writer for File {
 `impl Writer for File { ... }` に置きます。旧 `satisfy Writer for File` 構文は
 採用しません。
 
-`Dyn<Contract>` は dynamic dispatch を型に見せます。
+`dyn Contract` は dynamic dispatch を型に見せます。
 
 ```kizu
-fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
+fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
     let n = writer.write(bytes);
     return;
 }
 ```
 
-v0.1 の `Dyn` は `&Dyn<Contract>` の動的 dispatch に限定します。
+v0.1 の `dyn` は `&dyn Contract` の動的 dispatch に限定します。
 owned dynamic object、generic bounds、最適化された vtable layout は後続 phase で扱います。
 
 ## 17. ビルドとキャッシュ

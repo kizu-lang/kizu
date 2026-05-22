@@ -2006,6 +2006,9 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 	if isRawPointerType(typeName) {
 		return fmt.Errorf("array error: Array element cannot be raw pointer in v0.2")
 	}
+	if isDynType(typeName) {
+		return fmt.Errorf("array error: Array element cannot be dyn in v0.2")
+	}
 	if err := c.rejectArrayStorageGeneric(typeName, seen); err != nil {
 		return err
 	}
@@ -2030,7 +2033,7 @@ func (c *Checker) rejectArrayStorageGeneric(typeName string, seen map[string]boo
 		return fmt.Errorf("array error: Array element cannot be nested array in v0.2")
 	case "std::map::Map":
 		return fmt.Errorf("array error: Array element cannot be std::map::Map in v0.2")
-	case "Task", "Channel", "Mutex", "Atomic", "Dyn":
+	case "Task", "Channel", "Mutex", "Atomic":
 		return fmt.Errorf("array error: Array element cannot be %s in v0.2", base)
 	case "option":
 		return c.rejectArrayStorageType(arg, seen)
@@ -5624,6 +5627,11 @@ func isRawPointerType(typeName string) bool {
 	return ok
 }
 
+// isDynType reports whether typeName is a dynamic contract object spelling.
+func isDynType(typeName string) bool {
+	return strings.HasPrefix(typeName, "dyn ")
+}
+
 // rawPointerElement extracts the element spelling from ptr<T> or ?ptr<T>.
 func rawPointerElement(typeName string) (string, bool) {
 	name := typeName
@@ -5852,6 +5860,9 @@ func (c *Checker) rejectConcurrencyBoundaryType(typeName string, seen map[string
 	if isRawPointerType(typeName) {
 		return fmt.Errorf("thread error: raw pointer cannot cross concurrency boundary")
 	}
+	if isDynType(typeName) {
+		return fmt.Errorf("thread error: dyn cannot cross concurrency boundary")
+	}
 	if seen[typeName] {
 		return nil
 	}
@@ -5880,8 +5891,6 @@ func (c *Checker) rejectConcurrencyBoundaryGeneric(typeName string, seen map[str
 		return fmt.Errorf("thread error: Map cannot cross concurrency boundary in v0.2")
 	case "std::arena::Handle":
 		return fmt.Errorf("thread error: handle cannot cross concurrency boundary")
-	case "Dyn":
-		return fmt.Errorf("thread error: Dyn cannot cross concurrency boundary")
 	case "Mutex":
 		return fmt.Errorf("thread error: Mutex cannot cross concurrency boundary in v0.1")
 	case "Task":

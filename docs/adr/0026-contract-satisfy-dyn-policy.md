@@ -1,4 +1,4 @@
-# ADR-0026: contract / impl / Dyn は明示的な抽象化として扱う
+# ADR-0026: contract / impl / dyn は明示的な抽象化として扱う
 
 Status: 採用
 
@@ -19,7 +19,7 @@ Kizu の抽象化は次の3つに分ける。
 ```text
 contract                型が満たすべき要求
 impl Contract for Type  型が contract を満たすことの明示宣言と method body
-Dyn                     runtime dynamic dispatch を見せる型
+dyn                     runtime dynamic dispatch を見せる型
 ```
 
 ## contract
@@ -49,18 +49,18 @@ impl Writer for File {
 `impl Type { ... }` は inherent method 用として残す。contract method body は
 `impl Contract for Type { ... }` に置く。旧 `satisfy Contract for Type` 構文は採用しない。
 
-## Dyn
+## dyn
 
-`Dyn<Contract>` は dynamic dispatch を型に見せる。
+`dyn Contract` は dynamic dispatch を型に見せる。
 
 ```kizu
-fn save(writer: &Dyn<Writer>, bytes: &Bytes) -> !void {
+fn save(writer: &dyn Writer, bytes: &Bytes) -> !void {
     let n = writer.write(bytes);
-    return void;
+    return;
 }
 ```
 
-`Dyn<Writer>` と書かれている場所では runtime vtable dispatch が発生してよい。
+`dyn Writer` と書かれている場所では runtime vtable dispatch が発生してよい。
 
 ## 他言語との差分
 
@@ -68,7 +68,7 @@ Rust trait との差分:
 
 - trait system の完全再現をしない
 - blanket impl、generic impl、associated type、default method、specialization は持たない
-- dynamic dispatch は `Dyn` で明示する
+- dynamic dispatch は `dyn` で明示する
 
 Go interface との差分:
 
@@ -78,11 +78,11 @@ Go interface との差分:
 Zig 手書き vtable との差分:
 
 - vtable pattern を手作業だけにしない
-- `Dyn<Contract>` で動的ディスパッチの型境界を表す
+- `dyn Contract` で動的ディスパッチの型境界を表す
 
 ## 影響
 
 - 抽象化の意図がコード上に残る
 - dynamic dispatch が隠れない
-- v0.1 は `contract` / `impl Contract for Type` / `&Dyn<Contract>` を実装対象にする
+- v0.1 は `contract` / `impl Contract for Type` / `&dyn Contract` を実装対象にする
 - generic bounds、owned dynamic object、最適化された vtable layout は後続 phase に分離する
