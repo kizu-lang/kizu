@@ -143,7 +143,9 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	content := string(bytes)
 	required := []string{
 		"has_package_function_call(",
-		"collect_other_package_function_arities_from_ast(",
+		"collect_referenced_package_call_modules(",
+		"collect_other_package_function_arities_for_modules_from_ast(",
+		"PackageModuleRef",
 		"ast: &std::kizu::ast::Ast,",
 		"ast_ref_node_text(",
 		"&result.ast",
@@ -161,6 +163,7 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 		"FunctionCallCandidate",
 		"collect_package_function_call_candidates(",
 		"first_function_call_error_in_candidates(",
+		"collect_other_package_function_arities_from_ast(",
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(content, fragment) {
@@ -174,14 +177,6 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	}
 	if !strings.Contains(body, "collect_function_arities_from_ast(") {
 		t.Fatal("first_function_call_error does not collect target arity from the parsed target AST")
-	}
-	otherBody := selfhostKizuFunctionBody(
-		t,
-		content,
-		"fn collect_other_package_function_arities_from_ast(",
-	)
-	if !strings.Contains(otherBody, "!std::mem::equal_bytes(file.path, target_path)") {
-		t.Fatal("package arity collection does not skip the already parsed target file")
 	}
 }
 
@@ -271,30 +266,30 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 			t.Fatalf("selfhost semantic diagnostics missing %q", fragment)
 		}
 	}
-	entries := []string{
-		"first_argument_type_mismatch",
-		"first_assignment_type_mismatch",
-		"first_immutable_assignment",
-		"first_undefined_variable",
-		"first_return_type_mismatch",
-		"first_match_diagnostic",
+	preBody := selfhostKizuFunctionBody(t, content, "pub fn first_pre_move_check_diagnostic(")
+	postBody := selfhostKizuFunctionBody(t, content, "pub fn first_post_move_check_diagnostic(")
+	if !strings.Contains(preBody, "parser::parse_checked_file(allocator, path, text)") {
+		t.Fatal("pre-move diagnostic pass does not parse checked AST")
 	}
-	for _, name := range entries {
-		body := selfhostKizuFunctionBody(t, content, "pub fn "+name+"(")
-		forbidden := []string{
-			"lexer::tokenize(allocator, text)",
-			"collect_function_signatures(",
-		}
-		for _, fragment := range forbidden {
-			if strings.Contains(body, fragment) {
-				t.Fatalf("%s keeps signature token scan %q", name, fragment)
-			}
-		}
-		if !strings.Contains(body, "parser::parse_checked_file(allocator, path, text)") {
-			t.Fatalf("%s does not parse checked AST", name)
-		}
-		if !strings.Contains(body, "collect_function_returns_from_ast(") {
-			t.Fatalf("%s does not collect function returns from AST", name)
+	if !strings.Contains(postBody, "parser::parse_checked_file(allocator, path, text)") {
+		t.Fatal("post-move diagnostic pass does not parse checked AST")
+	}
+	if !strings.Contains(preBody+postBody, "collect_function_returns_from_ast(") {
+		t.Fatal("shared diagnostic passes do not collect function returns from AST")
+	}
+	oldEntries := []string{
+		"pub fn first_argument_type_mismatch(",
+		"pub fn first_assignment_type_mismatch(",
+		"pub fn first_immutable_assignment(",
+		"pub fn first_undefined_variable(",
+		"pub fn first_return_type_mismatch(",
+		"pub fn first_match_diagnostic(",
+		"pub fn first_type_reference_error(",
+		"pub fn first_user_function_call_error(",
+	}
+	for _, fragment := range oldEntries {
+		if strings.Contains(content, fragment) {
+			t.Fatalf("selfhost types keeps per-diagnostic public entry %q", fragment)
 		}
 	}
 }
@@ -309,9 +304,108 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 	if strings.Contains(content, "source_has_qualified_name") {
 		t.Fatal("check entry gates package call diagnostics on raw source content")
 	}
+	if !strings.Contains(content, "types::source_has_package_function_call(") {
+		t.Fatal("check entry does not probe package calls before loading package sources")
+	}
 	call := "write_package_function_call_diagnostic(allocator, io, path, file_text)"
 	if !strings.Contains(content, call) {
 		t.Fatal("check entry does not run package call diagnostics")
+	}
+}
+
+// TestSelfhostCheckEntrySharesDiagnosticPasses keeps per-file checks grouped by phase.
+func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
+	bytes, err := os.ReadFile("../../selfhost/src/main.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost main: %v", err)
+	}
+	content := string(bytes)
+	body := selfhostKizuFunctionBody(t, content, "fn check_file_fast_diagnostics(")
+	required := []string{
+		"types::first_pre_move_check_diagnostic(allocator, path, file_text)",
+		"types::first_post_move_check_diagnostic(allocator, path, file_text)",
+		"ownership::first_use_after_move_name(allocator, path, file_text)",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("check_file_fast_diagnostics missing shared phase %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"write_type_reference_diagnostic(",
+		"write_match_diagnostic(",
+		"write_return_type_diagnostic(",
+		"types::first_user_function_call_error(",
+		"write_undefined_variable_diagnostic(",
+		"write_argument_type_diagnostic(",
+		"write_immutable_assignment_diagnostic(",
+		"write_invalid_assignment_target_diagnostic(",
+		"write_assignment_type_diagnostic(",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(body, fragment) {
+			t.Fatalf("check_file_fast_diagnostics keeps per-diagnostic call %q", fragment)
+		}
+	}
+	oldWrappers := []string{
+		"fn write_return_type_diagnostic(",
+		"fn write_argument_type_diagnostic(",
+		"fn write_undefined_variable_diagnostic(",
+		"fn write_immutable_assignment_diagnostic(",
+		"fn write_invalid_assignment_target_diagnostic(",
+		"fn write_assignment_type_diagnostic(",
+		"fn write_type_reference_diagnostic(",
+		"fn write_match_diagnostic(",
+	}
+	for _, fragment := range oldWrappers {
+		if strings.Contains(content, fragment) {
+			t.Fatalf("selfhost main keeps unused diagnostic wrapper %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostTypeCheckSkipsStdDiagnosticPass keeps std as declarations-only for user checks.
+func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
+	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost types: %v", err)
+	}
+	content := string(bytes)
+	body := selfhostKizuFunctionBody(t, content, "pub fn check_sources(")
+	if !strings.Contains(body, "if source::is_frontend_source(file.kind) {") {
+		t.Fatal("type checker second pass does not limit diagnostics to frontend sources")
+	}
+	if count := strings.Count(body, "if source::is_source_code(file.kind) {"); count != 1 {
+		t.Fatalf("type checker has %d source-code passes, want declarations-only pass", count)
+	}
+}
+
+// TestSelfhostPackageAritySelectionUsesModulePaths rejects hardcoded std module IDs.
+func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
+	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost types: %v", err)
+	}
+	content := string(bytes)
+	forbidden := []string{
+		"std_package_module_id(",
+		"std_package_module_matches_file(",
+		"module == 1000",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(content, fragment) {
+			t.Fatalf("package arity selection keeps hardcoded module path %q", fragment)
+		}
+	}
+	required := []string{
+		"struct PackageModuleRef",
+		"package_module_matches_path(",
+		"source::module_path(file)",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("package arity selection missing %q", fragment)
+		}
 	}
 }
 

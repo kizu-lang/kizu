@@ -259,15 +259,8 @@ fn check_file_fast_diagnostics(
         return false;
     }
 
-    if !(try write_type_reference_diagnostic(allocator, io, file_text, path)) {
-        return false;
-    }
-
-    if !(try write_match_diagnostic(allocator, io, path, file_text)) {
-        return false;
-    }
-
-    if !(try write_return_type_diagnostic(allocator, io, path, file_text)) {
+    let pre_move = try types::first_pre_move_check_diagnostic(allocator, path, file_text);
+    if !(try write_check_diagnostic(allocator, io, file_text, &pre_move)) {
         return false;
     }
 
@@ -277,24 +270,8 @@ fn check_file_fast_diagnostics(
         return false;
     }
 
-    let local_call_error = try types::first_user_function_call_error(allocator, path, file_text);
-    if local_call_error.found {
-        try write_function_call_error(allocator, io, file_text, local_call_error);
-        return false;
-    }
-    if !(try write_undefined_variable_diagnostic(allocator, io, path, file_text)) {
-        return false;
-    }
-    if !(try write_argument_type_diagnostic(allocator, io, path, file_text)) {
-        return false;
-    }
-    if !(try write_immutable_assignment_diagnostic(allocator, io, path, file_text)) {
-        return false;
-    }
-    if !(try write_invalid_assignment_target_diagnostic(allocator, io, path, file_text)) {
-        return false;
-    }
-    if !(try write_assignment_type_diagnostic(allocator, io, path, file_text)) {
+    let post_move = try types::first_post_move_check_diagnostic(allocator, path, file_text);
+    if !(try write_check_diagnostic(allocator, io, file_text, &post_move)) {
         return false;
     }
     if !(try write_package_function_call_diagnostic(allocator, io, path, file_text)) {
@@ -312,93 +289,96 @@ fn write_check_parse_failure(
     return false;
 }
 
-fn write_return_type_diagnostic(
+fn write_check_diagnostic(
     allocator: Allocator,
     io: Io,
-    path: []u8,
-    file_text: []u8
+    file_text: []u8,
+    diagnostic: &types::CheckDiagnosticSummary
 ) -> !bool {
-    let mismatch = try types::first_return_type_mismatch(allocator, path, file_text);
-    if !mismatch.found {
+    if !diagnostic.found {
         return true;
     }
-    try write_cli_error_line(allocator, io, "error: type error: return type mismatch");
+    if diagnostic.kind == 1 {
+        return try write_check_type_reference_diagnostic(allocator, io, file_text, diagnostic);
+    }
+    if diagnostic.kind == 2 {
+        let match_summary = types::MatchDiagnosticSummary {
+            found: true,
+            kind: diagnostic.detail_kind,
+            name: diagnostic.name,
+            tag: diagnostic.tag
+        };
+        try write_match_error(allocator, io, match_summary);
+        return false;
+    }
+    if diagnostic.kind == 3 {
+        try write_cli_error_line(allocator, io, "error: type error: return type mismatch");
+        return false;
+    }
+    if diagnostic.kind == 4 {
+        let call_summary = types::FunctionCallSummary {
+            found: true,
+            kind: diagnostic.detail_kind,
+            start: diagnostic.start,
+            end: diagnostic.end,
+            expected: diagnostic.expected,
+            observed: diagnostic.observed
+        };
+        try write_function_call_error(allocator, io, file_text, call_summary);
+        return false;
+    }
+    if diagnostic.kind == 5 {
+        try std::io::write_stderr(io, "error: type error: undefined variable `");
+        try std::io::write_stderr(io, diagnostic.name);
+        try write_cli_error_line(allocator, io, "`");
+        return false;
+    }
+    if diagnostic.kind == 6 {
+        try write_cli_error_line(allocator, io, "error: type error: argument type mismatch");
+        return false;
+    }
+    if diagnostic.kind == 7 {
+        try std::io::write_stderr(io, "error: type error: cannot assign to immutable binding `");
+        try std::io::write_stderr(io, diagnostic.name);
+        try write_cli_error_line(allocator, io, "`");
+        return false;
+    }
+    if diagnostic.kind == 8 {
+        try std::io::write_stderr(io, "error: type error: invalid assignment target `");
+        try std::io::write_stderr(io, file_text[diagnostic.start..diagnostic.end]);
+        try write_cli_error_line(allocator, io, "`");
+        return false;
+    }
+    if diagnostic.kind == 9 {
+        try write_cli_error_line(allocator, io, "error: type error: assignment type mismatch");
+        return false;
+    }
+    try write_cli_error_line(allocator, io, "error: check failed");
     return false;
 }
 
-fn write_argument_type_diagnostic(
+fn write_check_type_reference_diagnostic(
     allocator: Allocator,
     io: Io,
-    path: []u8,
-    file_text: []u8
+    file_text: []u8,
+    diagnostic: &types::CheckDiagnosticSummary
 ) -> !bool {
-    let mismatch = try types::first_argument_type_mismatch(allocator, path, file_text);
-    if !mismatch.found {
-        return true;
+    let name = file_text[diagnostic.start..diagnostic.end];
+    if diagnostic.detail_kind == 1 {
+        try write_unknown_type_error(allocator, io, name);
+        return false;
     }
-    try write_cli_error_line(allocator, io, "error: type error: argument type mismatch");
-    return false;
-}
-
-fn write_undefined_variable_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    path: []u8,
-    file_text: []u8
-) -> !bool {
-    let variable = try types::first_undefined_variable(allocator, path, file_text);
-    if !variable.found {
-        return true;
+    if diagnostic.detail_kind == 2 {
+        try write_type_arity_error(
+            allocator,
+            io,
+            name,
+            diagnostic.expected,
+            diagnostic.observed
+        );
+        return false;
     }
-    try std::io::write_stderr(io, "error: type error: undefined variable `");
-    try std::io::write_stderr(io, variable.name);
-    try write_cli_error_line(allocator, io, "`");
-    return false;
-}
-
-fn write_immutable_assignment_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    path: []u8,
-    file_text: []u8
-) -> !bool {
-    let assignment = try types::first_immutable_assignment(allocator, path, file_text);
-    if !assignment.found {
-        return true;
-    }
-    try std::io::write_stderr(io, "error: type error: cannot assign to immutable binding `");
-    try std::io::write_stderr(io, assignment.name);
-    try write_cli_error_line(allocator, io, "`");
-    return false;
-}
-
-fn write_invalid_assignment_target_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    path: []u8,
-    file_text: []u8
-) -> !bool {
-    let target = try types::first_invalid_assignment_target(allocator, path, file_text);
-    if !target.found {
-        return true;
-    }
-    try std::io::write_stderr(io, "error: type error: invalid assignment target `");
-    try std::io::write_stderr(io, file_text[target.start..target.end]);
-    try write_cli_error_line(allocator, io, "`");
-    return false;
-}
-
-fn write_assignment_type_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    path: []u8,
-    file_text: []u8
-) -> !bool {
-    let mismatch = try types::first_assignment_type_mismatch(allocator, path, file_text);
-    if !mismatch.found {
-        return true;
-    }
-    try write_cli_error_line(allocator, io, "error: type error: assignment type mismatch");
+    try write_cli_error_line(allocator, io, "error: check failed");
     return false;
 }
 
@@ -408,6 +388,10 @@ fn write_package_function_call_diagnostic(
     path: []u8,
     file_text: []u8
 ) -> !bool {
+    let has_package_call = try types::source_has_package_function_call(allocator, path, file_text);
+    if !has_package_call {
+        return true;
+    }
     var files = try source::load_file_sources(allocator, io, path, file_text);
     let call_error = try types::first_function_call_error(allocator, files, path);
     files.deinit();
@@ -416,49 +400,6 @@ fn write_package_function_call_diagnostic(
         return false;
     }
     return true;
-}
-
-fn write_type_reference_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    file_text: []u8,
-    path: []u8
-) -> !bool {
-    let type_error = try types::first_type_reference_error(allocator, path, file_text);
-    if !type_error.found {
-        return true;
-    }
-    let name = file_text[type_error.start..type_error.end];
-    if type_error.kind == 1 {
-        try write_unknown_type_error(allocator, io, name);
-        return false;
-    }
-    if type_error.kind == 2 {
-        try write_type_arity_error(
-            allocator,
-            io,
-            name,
-            type_error.expected,
-            type_error.observed
-        );
-        return false;
-    }
-    try write_cli_error_line(allocator, io, "error: check failed");
-    return false;
-}
-
-fn write_match_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    path: []u8,
-    file_text: []u8
-) -> !bool {
-    let diagnostic = try types::first_match_diagnostic(allocator, path, file_text);
-    if !diagnostic.found {
-        return true;
-    }
-    try write_match_error(allocator, io, diagnostic);
-    return false;
 }
 
 fn ast_prints_hello(
