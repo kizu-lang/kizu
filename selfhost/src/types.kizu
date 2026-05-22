@@ -106,6 +106,20 @@ pub struct MatchDiagnosticSummary {
     pub tag: []u8,
 }
 
+pub struct CheckDiagnosticSummary {
+    pub found: bool,
+    pub kind: i64,
+    pub detail_kind: i64,
+    pub start: i64,
+    pub end: i64,
+    pub name: []u8,
+    pub tag: []u8,
+    pub expected_text: []u8,
+    pub actual_text: []u8,
+    pub expected: i64,
+    pub observed: i64,
+}
+
 pub struct FunctionSignature {
     pub params: i64,
     pub param_source: []u8,
@@ -124,6 +138,12 @@ struct FunctionParamType {
 struct FunctionParamLookup {
     found: bool,
     type_name: []u8,
+}
+
+struct PackageModuleRef {
+    start: i64,
+    end: i64,
+    absolute: bool,
 }
 
 pub fn check(resolved: resolver::ResolveSummary) -> TypeSummary {
@@ -179,24 +199,22 @@ pub fn check_sources(
     index = 0;
     while index < files.len() {
         let file = try files.at(index);
-        if source::is_source_code(file.kind) {
+        if source::is_frontend_source(file.kind) {
             var tokens = try lexer::tokenize(allocator, file.text);
             let scan = try check_file_type_references(allocator, file, tokens, kinds, arities);
             typed_nodes = typed_nodes + scan.typed_nodes;
             diagnostics = diagnostics + scan.diagnostics;
-            if source::is_frontend_source(file.kind) {
-                let call_scan = try check_file_function_references(
-                    allocator,
-                    file,
-                    tokens,
-                    function_arities
-                );
-                let body_scan = try check_file_body_ast(allocator, file, function_returns);
-                typed_nodes = typed_nodes + call_scan.typed_nodes;
-                diagnostics = diagnostics + call_scan.diagnostics;
-                typed_nodes = typed_nodes + body_scan.typed_nodes;
-                diagnostics = diagnostics + body_scan.diagnostics;
-            }
+            let call_scan = try check_file_function_references(
+                allocator,
+                file,
+                tokens,
+                function_arities
+            );
+            let body_scan = try check_file_body_ast(allocator, file, function_returns);
+            typed_nodes = typed_nodes + call_scan.typed_nodes;
+            diagnostics = diagnostics + call_scan.diagnostics;
+            typed_nodes = typed_nodes + body_scan.typed_nodes;
+            diagnostics = diagnostics + body_scan.diagnostics;
             tokens.deinit();
         }
         index = index + 1;
@@ -240,7 +258,6 @@ pub fn first_function_call_error(
             var found = function_call_summary(false, 0, 0, 0, 0, 0);
             if has_package_call {
                 var function_arities = std::map::Map<[]u8, i64>(allocator);
-                defer function_arities.deinit();
                 try collect_function_arities_from_ast(
                     allocator,
                     file,
@@ -248,10 +265,19 @@ pub fn first_function_call_error(
                     result.root,
                     function_arities
                 );
-                try collect_other_package_function_arities_from_ast(
+                var referenced_modules = std::array::Array<PackageModuleRef>(allocator);
+                var target_tokens = try lexer::tokenize(allocator, file.text);
+                try collect_referenced_package_call_modules(
+                    file,
+                    target_tokens,
+                    referenced_modules
+                );
+                target_tokens.deinit();
+                try collect_other_package_function_arities_for_modules_from_ast(
                     allocator,
                     files,
-                    file.path,
+                    file,
+                    referenced_modules,
                     function_arities
                 );
                 found = try first_function_call_error_ast_node(
@@ -262,6 +288,8 @@ pub fn first_function_call_error(
                     function_arities,
                     false
                 );
+                referenced_modules.deinit();
+                function_arities.deinit();
             }
             result.deinit();
             return found;
@@ -269,6 +297,23 @@ pub fn first_function_call_error(
         index = index + 1;
     }
     return function_call_summary(false, 0, 0, 0, 0, 0);
+}
+
+pub fn source_has_package_function_call(
+    allocator: Allocator,
+    path: []u8,
+    text: []u8
+) -> !bool {
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: text
+    };
+    let result = try parser::parse_checked_file(allocator, path, text);
+    let found = try has_package_function_call(allocator, &file, &result.ast, result.root);
+    result.deinit();
+    return found;
 }
 
 fn has_package_function_call(
@@ -290,44 +335,11 @@ fn has_package_function_call(
     return found.found;
 }
 
-pub fn first_user_function_call_error(
+pub fn first_pre_move_check_diagnostic(
     allocator: Allocator,
     path: []u8,
     text: []u8
-) -> !FunctionCallSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_arities_from_ast(
-        allocator,
-        &file,
-        &result.ast,
-        result.root,
-        function_arities
-    );
-    let found = try first_function_call_error_ast_node(
-        allocator,
-        &file,
-        &result.ast,
-        result.root,
-        function_arities,
-        true
-    );
-    result.deinit();
-    function_arities.deinit();
-    return found;
-}
-
-pub fn first_type_reference_error(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !TypeReferenceSummary {
+) -> !CheckDiagnosticSummary {
     let file = source::SourceFile {
         id: 0,
         kind: source::SourceKind::User,
@@ -341,195 +353,23 @@ pub fn first_type_reference_error(
     var tokens = try lexer::tokenize(allocator, text);
     try collect_declared_types(allocator, &file, tokens, kinds, arities, copyable);
     try collect_type_parameters(&file, tokens, kinds, arities, copyable);
-    let found = try first_type_error_in_file(allocator, &file, tokens, kinds, arities);
+    let type_ref = try first_type_error_in_file(allocator, &file, tokens, kinds, arities);
     tokens.deinit();
     kinds.deinit();
     arities.deinit();
     copyable.deinit();
-    return found;
-}
+    if type_ref.found {
+        return check_diagnostic_from_type_reference(type_ref);
+    }
 
-pub fn first_argument_type_mismatch(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !ArgumentTypeSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
-    var local_function_param_types = std::array::Array<FunctionParamType>(allocator);
-    var function_returns = std::map::Map<[]u8, []u8>(allocator);
-
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
-    try collect_local_function_param_types(
-        allocator,
-        &file,
-        result.ast,
-        result.root,
-        local_function_param_types
-    );
-    let found = try first_argument_type_mismatch_node(
-        allocator,
-        &file,
-        result.ast,
-        result.root,
-        local_function_param_types,
-        function_returns
-    );
-    result.deinit();
-    local_function_param_types.deinit();
-    function_returns.deinit();
-    return found;
-}
-
-pub fn first_assignment_type_mismatch(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !AssignmentTypeSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
-    var function_returns = std::map::Map<[]u8, []u8>(allocator);
-
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
-    let found = try first_assignment_type_mismatch_node(
-        allocator,
-        &file,
-        result.ast,
-        result.root,
-        function_returns
-    );
-    result.deinit();
-    function_returns.deinit();
-    return found;
-}
-
-pub fn first_immutable_assignment(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !ImmutableAssignmentSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
-    var function_returns = std::map::Map<[]u8, []u8>(allocator);
-
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
-    let found = try first_immutable_assignment_node(
-        allocator,
-        &file,
-        result.ast,
-        result.root,
-        function_returns
-    );
-    result.deinit();
-    function_returns.deinit();
-    return found;
-}
-
-pub fn first_invalid_assignment_target(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !InvalidAssignmentTargetSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
-    let result = try parser::parse_checked_file(allocator, path, text);
-    let found = try first_invalid_assignment_target_node(&file, result.ast, result.root);
-    result.deinit();
-    return found;
-}
-
-pub fn first_undefined_variable(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !UndefinedVariableSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
-    var function_returns = std::map::Map<[]u8, []u8>(allocator);
-
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
-    let found = try first_undefined_variable_node(
-        allocator,
-        &file,
-        result.ast,
-        result.root,
-        function_returns
-    );
-    result.deinit();
-    function_returns.deinit();
-    return found;
-}
-
-pub fn first_return_type_mismatch(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !ReturnTypeSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
-    var function_returns = std::map::Map<[]u8, []u8>(allocator);
-
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
-    let found = try first_return_type_mismatch_node(
-        allocator,
-        &file,
-        result.ast,
-        result.root,
-        function_returns
-    );
-    result.deinit();
-    function_returns.deinit();
-    return found;
-}
-
-pub fn first_match_diagnostic(
-    allocator: Allocator,
-    path: []u8,
-    text: []u8
-) -> !MatchDiagnosticSummary {
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: text
-    };
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
     var enum_counts = std::map::Map<[]u8, i64>(allocator);
     var enum_tags = std::map::Map<[]u8, bool>(allocator);
-
     let result = try parser::parse_checked_file(allocator, path, text);
     try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
     try collect_match_enum_types(allocator, &file, result.ast, result.root, enum_counts, enum_tags);
-    let found = try first_match_diagnostic_node(
+    var diagnostic = check_diagnostic_none();
+    let match_diagnostic = try first_match_diagnostic_node(
         allocator,
         &file,
         result.ast,
@@ -538,11 +378,123 @@ pub fn first_match_diagnostic(
         enum_tags,
         function_returns
     );
+    if match_diagnostic.found {
+        diagnostic = check_diagnostic_from_match(match_diagnostic);
+    } else {
+        let return_type = try first_return_type_mismatch_node(
+            allocator,
+            &file,
+            result.ast,
+            result.root,
+            function_returns
+        );
+        if return_type.found {
+            diagnostic = check_diagnostic_from_return_type(return_type);
+        }
+    }
     result.deinit();
     enum_counts.deinit();
     enum_tags.deinit();
     function_returns.deinit();
-    return found;
+    return diagnostic;
+}
+
+pub fn first_post_move_check_diagnostic(
+    allocator: Allocator,
+    path: []u8,
+    text: []u8
+) -> !CheckDiagnosticSummary {
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: text
+    };
+    var function_returns = std::map::Map<[]u8, []u8>(allocator);
+    var function_arities = std::map::Map<[]u8, i64>(allocator);
+    var local_function_param_types = std::array::Array<FunctionParamType>(allocator);
+    let result = try parser::parse_checked_file(allocator, path, text);
+    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
+    try collect_function_arities_from_ast(allocator, &file, &result.ast, result.root, function_arities);
+    try collect_local_function_param_types(
+        allocator,
+        &file,
+        result.ast,
+        result.root,
+        local_function_param_types
+    );
+
+    var diagnostic = check_diagnostic_none();
+    let local_call = try first_function_call_error_ast_node(
+        allocator,
+        &file,
+        &result.ast,
+        result.root,
+        function_arities,
+        true
+    );
+    if local_call.found {
+        diagnostic = check_diagnostic_from_function_call(local_call);
+    } else {
+        let undefined = try first_undefined_variable_node(
+            allocator,
+            &file,
+            result.ast,
+            result.root,
+            function_returns
+        );
+        if undefined.found {
+            diagnostic = check_diagnostic_from_undefined_variable(undefined);
+        } else {
+            let argument = try first_argument_type_mismatch_node(
+                allocator,
+                &file,
+                result.ast,
+                result.root,
+                local_function_param_types,
+                function_returns
+            );
+            if argument.found {
+                diagnostic = check_diagnostic_from_argument_type(argument);
+            } else {
+                let immutable = try first_immutable_assignment_node(
+                    allocator,
+                    &file,
+                    result.ast,
+                    result.root,
+                    function_returns
+                );
+                if immutable.found {
+                    diagnostic = check_diagnostic_from_immutable_assignment(immutable);
+                } else {
+                    let invalid = try first_invalid_assignment_target_node(
+                        &file,
+                        result.ast,
+                        result.root
+                    );
+                    if invalid.found {
+                        diagnostic = check_diagnostic_from_invalid_assignment_target(invalid);
+                    } else {
+                        let assignment = try first_assignment_type_mismatch_node(
+                            allocator,
+                            &file,
+                            result.ast,
+                            result.root,
+                            function_returns
+                        );
+                        if assignment.found {
+                            diagnostic = check_diagnostic_from_assignment_type(assignment);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result.deinit();
+    local_function_param_types.deinit();
+    function_arities.deinit();
+    function_returns.deinit();
+    return diagnostic;
 }
 
 fn collect_package_function_signatures(
@@ -578,29 +530,192 @@ fn collect_package_function_signatures(
     return;
 }
 
-fn collect_other_package_function_arities_from_ast(
+fn collect_other_package_function_arities_for_modules_from_ast(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
-    target_path: []u8,
+    target_file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
     function_arities: &var std::map::Map<[]u8, i64>
 ) -> !void {
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
-        if source::is_source_code(file.kind) and !std::mem::equal_bytes(file.path, target_path) {
-            let result = try parser::parse_checked_file(allocator, file.path, file.text);
-            try collect_function_arities_from_ast(
-                allocator,
-                file,
-                &result.ast,
-                result.root,
-                function_arities
-            );
-            result.deinit();
+        if source::is_source_code(file.kind) and !std::mem::equal_bytes(file.path, target_file.path) {
+            if try package_module_list_contains_file(target_file, modules, file) {
+                let result = try parser::parse_checked_file(allocator, file.path, file.text);
+                try collect_function_arities_from_ast(
+                    allocator,
+                    file,
+                    &result.ast,
+                    result.root,
+                    function_arities
+                );
+                result.deinit();
+            }
         }
         index = index + 1;
     }
     return;
+}
+
+fn collect_referenced_package_call_modules(
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    var index = 0;
+    while index < tokens.len() {
+        let path_end = try qualified_path_end(file.text, tokens, index);
+        if path_end >= index and try is_function_call_at(file.text, tokens, index, path_end) {
+            let first = try tokens.get(index);
+            let last = try tokens.get(path_end);
+            let name = file.text[first.start..last.end];
+            if is_referenced_package_function_call(name) {
+                try append_package_function_module(file, first.start, name, modules);
+            }
+            index = path_end + 1;
+        } else {
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+fn is_referenced_package_function_call(name: []u8) -> bool {
+    if should_skip_function_reference(name) or
+        last_segment_starts_with_uppercase(name) or
+        is_generic_constructor_text(name) {
+        return false;
+    }
+    return is_qualified_name(name);
+}
+
+fn append_package_function_module(
+    file: &source::SourceFile,
+    source_start: i64,
+    name: []u8,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    let end = package_function_module_end(name);
+    if end < 1 {
+        return;
+    }
+    let absolute = std::mem::starts_with(name, "std::") or
+        std::mem::starts_with(name, "selfhost::");
+    let module = PackageModuleRef {
+        start: source_start,
+        end: source_start + end,
+        absolute: absolute
+    };
+    if !(try package_module_list_contains(file, modules, &module)) {
+        try modules.append(module);
+    }
+    return;
+}
+
+fn package_function_module_end(name: []u8) -> i64 {
+    var end = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            end = index;
+        }
+        index = index + 1;
+    }
+    return end;
+}
+
+fn package_module_list_contains(
+    file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
+    module: &PackageModuleRef
+) -> !bool {
+    var index = 0;
+    while index < modules.len() {
+        let current = try modules.at(index);
+        if package_module_refs_equal(file, current, module) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn package_module_refs_equal(
+    file: &source::SourceFile,
+    left: &PackageModuleRef,
+    right: &PackageModuleRef
+) -> bool {
+    if left.absolute != right.absolute {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        file.text[left.start..left.end],
+        file.text[right.start..right.end]
+    );
+}
+
+fn package_module_list_contains_file(
+    target_file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
+    file: &source::SourceFile
+) -> !bool {
+    var index = 0;
+    while index < modules.len() {
+        let module = try modules.at(index);
+        if package_module_matches_file(target_file, module, file) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn package_module_matches_file(
+    target_file: &source::SourceFile,
+    module: &PackageModuleRef,
+    file: &source::SourceFile
+) -> bool {
+    let text = target_file.text[module.start..module.end];
+    if file.kind == source::SourceKind::Std {
+        if !std::mem::starts_with(text, "std::") {
+            return false;
+        }
+        return package_module_matches_path(text[5..std::mem::len(text)], source::module_path(file));
+    }
+    if file.kind == source::SourceKind::Selfhost {
+        if module.absolute {
+            if !std::mem::starts_with(text, "selfhost::") {
+                return false;
+            }
+            return package_module_matches_path(text[10..std::mem::len(text)], source::module_path(file));
+        }
+        return package_module_matches_path(text, source::module_path(file));
+    }
+    return false;
+}
+
+fn package_module_matches_path(module: []u8, path: []u8) -> bool {
+    var module_index = 0;
+    var path_index = 0;
+    while module_index < std::mem::len(module) and path_index < std::mem::len(path) {
+        if module_index + 1 < std::mem::len(module) and
+            module[module_index] == cast<u8>(58) and
+            module[module_index + 1] == cast<u8>(58) {
+            if path[path_index] != cast<u8>(47) {
+                return false;
+            }
+            module_index = module_index + 2;
+            path_index = path_index + 1;
+        } else {
+            if module[module_index] != path[path_index] {
+                return false;
+            }
+            module_index = module_index + 1;
+            path_index = path_index + 1;
+        }
+    }
+    return module_index == std::mem::len(module) and path_index == std::mem::len(path);
 }
 
 pub fn declare_type(
@@ -7810,6 +7925,172 @@ fn type_reference_summary(
         end: end,
         expected: expected,
         observed: observed
+    };
+}
+
+fn check_diagnostic_none() -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: false,
+        kind: 0,
+        detail_kind: 0,
+        start: 0,
+        end: 0,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_type_reference(summary: TypeReferenceSummary) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 1,
+        detail_kind: summary.kind,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: summary.expected,
+        observed: summary.observed
+    };
+}
+
+fn check_diagnostic_from_match(summary: MatchDiagnosticSummary) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 2,
+        detail_kind: summary.kind,
+        start: 0,
+        end: 0,
+        name: summary.name,
+        tag: summary.tag,
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_return_type(summary: ReturnTypeSummary) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 3,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: summary.expected,
+        actual_text: summary.actual,
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_function_call(summary: FunctionCallSummary) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 4,
+        detail_kind: summary.kind,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: summary.expected,
+        observed: summary.observed
+    };
+}
+
+fn check_diagnostic_from_undefined_variable(
+    summary: UndefinedVariableSummary
+) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 5,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: summary.name,
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_argument_type(summary: ArgumentTypeSummary) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 6,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: summary.expected,
+        actual_text: summary.actual,
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_immutable_assignment(
+    summary: ImmutableAssignmentSummary
+) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 7,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: summary.name,
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_invalid_assignment_target(
+    summary: InvalidAssignmentTargetSummary
+) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 8,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: "",
+        actual_text: "",
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_assignment_type(summary: AssignmentTypeSummary) -> CheckDiagnosticSummary {
+    return CheckDiagnosticSummary {
+        found: summary.found,
+        kind: 9,
+        detail_kind: 0,
+        start: summary.start,
+        end: summary.end,
+        name: "",
+        tag: "",
+        expected_text: summary.expected,
+        actual_text: summary.actual,
+        expected: 0,
+        observed: 0
     };
 }
 
