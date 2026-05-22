@@ -197,6 +197,17 @@ pub fn first_pre_move_check_diagnostic(
         );
         if return_type.found {
             diagnostic = check_diagnostic_from_return_type(return_type);
+        } else {
+            let missing_return = try first_missing_return_node(
+                allocator,
+                &file,
+                result.ast,
+                result.root,
+                function_returns
+            );
+            if missing_return.found {
+                diagnostic = missing_return;
+            }
         }
     }
     result.deinit();
@@ -968,6 +979,146 @@ fn return_statement_type_mismatch(
         );
     }
     return no_return_type_mismatch();
+}
+
+fn first_missing_return_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::CheckDiagnosticSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_missing_return_in_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_missing_return_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.return_type,
+            fn_decl.body,
+            function_returns
+        );,
+        _ => return check_diagnostic_none();,
+    }
+}
+
+fn first_missing_return_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::CheckDiagnosticSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_missing_return_node(
+            allocator,
+            file,
+            ast,
+            child,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return check_diagnostic_none();
+}
+
+fn first_missing_return_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::CheckDiagnosticSummary {
+    let expected_return = try function_statement_return_type(
+        allocator,
+        file,
+        ast,
+        name,
+        return_type,
+        function_returns
+    );
+    if !function_requires_return(expected_return) {
+        return check_diagnostic_none();
+    }
+    if try statement_always_returns(ast, body) {
+        return check_diagnostic_none();
+    }
+    return check_diagnostic_from_missing_return(
+        ast_node_text(file, ast, name),
+        expected_return
+    );
+}
+
+fn function_requires_return(expected_return: []u8) -> bool {
+    return !std::mem::equal_bytes(expected_return, "void");
+}
+
+fn statement_always_returns(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Block(block) => try statement_range_has_return(ast, block.statements),
+        Return(return_node) => true,
+        If(if_node) => (try statement_always_returns(ast, if_node.then_block)) and
+            (try statement_always_returns(ast, if_node.else_block)),
+        Match(match_node) => try statement_range_all_return(ast, match_node.arms),
+        MatchArm(match_arm) => try statement_always_returns(ast, match_arm.body),
+        Unsafe(unsafe_node) => try statement_always_returns(ast, unsafe_node.body),
+        ComptimeIf(comptime_if_node) =>
+            (try statement_always_returns(ast, comptime_if_node.then_block)) and
+            (try statement_always_returns(ast, comptime_if_node.else_block)),
+        _ => false,
+    };
+}
+
+fn statement_range_has_return(
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !bool {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        if try statement_always_returns(ast, child) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn statement_range_all_return(
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !bool {
+    if statements.len < 1 {
+        return false;
+    }
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        if !(try statement_always_returns(ast, child)) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
 }
 
 fn first_argument_type_mismatch_node(
@@ -5826,6 +5977,25 @@ fn check_diagnostic_from_assignment_type(summary: model::AssignmentTypeSummary) 
         tag: "",
         expected_text: summary.expected,
         actual_text: summary.actual,
+        expected: 0,
+        observed: 0
+    };
+}
+
+fn check_diagnostic_from_missing_return(
+    name: []u8,
+    expected_return: []u8
+) -> model::CheckDiagnosticSummary {
+    return model::CheckDiagnosticSummary {
+        found: true,
+        kind: 10,
+        detail_kind: 0,
+        start: 0,
+        end: 0,
+        name: name,
+        tag: "",
+        expected_text: expected_return,
+        actual_text: "",
         expected: 0,
         observed: 0
     };
