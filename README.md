@@ -157,7 +157,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 
 - `kizu parse <file>` parses a `.kizu` source file.
 - `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
-- `kizu fmt <file>` prints the current compact AST formatter output.
+- `kizu fmt [--write|-w] <file>` prints or writes canonical token formatter output. `--write` currently rejects files with line comments until comment trivia is preserved.
 - `kizu run <file>` executes the file with the interpreter.
 - `kizu test <file>` runs one checked Kizu source as a test file.
 - `kizu ir [--opt] <file>` prints typed SSA IR.

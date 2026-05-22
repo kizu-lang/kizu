@@ -68,9 +68,41 @@ func TestFmtCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "fn main() { print(\"hello, kizu\"); }\n"
+	want := "fn main() {\n    print(\"hello, kizu\");\n}\n"
 	if string(out) != want {
 		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestFmtCommandRejectsInvalidSyntax checks fmt does not rewrite parser failures.
+func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.kizu")
+	if err := os.WriteFile(path, []byte("fn main( { return; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := fmtCommand([]string{path})
+	if err == nil || err.Error() != "format failed" {
+		t.Fatalf("got error %v, want format failed", err)
+	}
+}
+
+// TestFmtWriteRejectsLineComments checks --write does not drop comment trivia.
+func TestFmtWriteRejectsLineComments(t *testing.T) {
+	src := "// keep this comment\nfn main() {}\n"
+	path := filepath.Join(t.TempDir(), "commented.kizu")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := fmtCommand([]string{"--write", path})
+	if err == nil || !strings.Contains(err.Error(), "line comments") {
+		t.Fatalf("got error %v, want line comments rejection", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != src {
+		t.Fatalf("file changed:\n--- got ---\n%s\n--- want ---\n%s", got, src)
 	}
 }
 

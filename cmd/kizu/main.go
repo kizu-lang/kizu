@@ -9,6 +9,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/cimport"
+	kfmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/interp"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -58,7 +59,7 @@ func dispatch(cmd string, args []string) error {
 		path, programArgs := splitProgramArgs(args)
 		return testFile(path, programArgs)
 	case "fmt":
-		return fmtFile(args[0])
+		return fmtCommand(args)
 	case "ir":
 		return irCommand(args)
 	case "build":
@@ -77,7 +78,8 @@ func dispatch(cmd string, args []string) error {
 
 // usage prints the supported command line shape.
 func usage() {
-	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test|fmt> <file> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test> <file> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu fmt [--write] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --target native [native-options] <file>")
@@ -299,20 +301,86 @@ func splitProgramArgs(args []string) (string, []string) {
 	return args[0], nil
 }
 
-// fmtFile prints the stable formatter output for a Kizu source file.
-func fmtFile(path string) error {
-	program, errs, err := parsePath(path)
+// fmtCommand prints or rewrites a Kizu source file in canonical form.
+//
+// usage: kizu fmt [--write] <file>
+//
+//	--write: rewrite the file in-place.
+func fmtCommand(args []string) error {
+	write := false
+	var path string
+	for _, a := range args {
+		switch a {
+		case "--write", "-w":
+			write = true
+		default:
+			if path != "" {
+				return fmt.Errorf("invalid command arguments")
+			}
+			path = a
+		}
+	}
+	if path == "" {
+		return fmt.Errorf("invalid command arguments")
+	}
+	src, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
-		return fmt.Errorf("format failed")
+	source := string(src)
+	if err := validateFormatSource(source); err != nil {
+		return err
 	}
-	_, _ = fmt.Println(program.String())
+	if write && containsLineComment(source) {
+		return fmt.Errorf("fmt --write does not support line comments yet")
+	}
+	out := kfmt.Format(source)
+	if write {
+		return os.WriteFile(path, []byte(out), 0o644)
+	}
+	_, _ = fmt.Print(out)
 	return nil
+}
+
+// validateFormatSource keeps fmt from silently accepting parser errors.
+func validateFormatSource(source string) error {
+	p := parser.New(lexer.New(source))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		return nil
+	}
+	for _, msg := range p.Errors() {
+		_, _ = fmt.Fprintln(os.Stderr, msg)
+	}
+	return fmt.Errorf("format failed")
+}
+
+// containsLineComment reports whether source has a `//` comment outside string literals.
+func containsLineComment(source string) bool {
+	inString := false
+	for i := 0; i < len(source); i++ {
+		ch := source[i]
+		if inString {
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		if ch == '\\' && i+1 < len(source) && source[i+1] == '\\' {
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if ch == '/' && i+1 < len(source) && source[i+1] == '/' {
+			return true
+		}
+	}
+	return false
 }
 
 // irCommand parses options and dumps typed SSA IR.
