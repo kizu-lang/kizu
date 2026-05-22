@@ -1,5 +1,4 @@
 import selfhost::ast;
-import selfhost::lexer;
 import selfhost::source;
 
 pub enum BindingKind {
@@ -13,6 +12,12 @@ pub struct ResolveSummary {
     pub modules: i64,
     pub symbols: i64,
     pub diagnostics: i64,
+}
+
+pub struct DuplicateDeclarationSummary {
+    pub found: bool,
+    pub start: i64,
+    pub end: i64,
 }
 
 pub fn resolve(tree: ast::AstSummary) -> ResolveSummary {
@@ -33,51 +38,13 @@ pub fn resolve_sources(
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
-        if file.kind != source::SourceKind::User {
+        if source::is_source_code(file.kind) {
             var module = try qualified_module_name(allocator, file);
             let module_key = module.as_bytes();
             try symbols.insert(module_key, BindingKind::Module);
             try visibility.insert(module_key, true);
             module.deinit();
-            var tokens = try lexer::tokenize(allocator, file.text);
-            var token_index = 0;
-            var depth = 0;
-            var public = false;
-            while token_index < tokens.len() {
-                let token = try tokens.get(token_index);
-                let text = token_text(file.text, token);
-                var handled = false;
-                if std::mem::equal_bytes(text, "{") {
-                    depth = depth + 1;
-                    handled = true;
-                }
-                if !handled and std::mem::equal_bytes(text, "}") {
-                    depth = depth - 1;
-                    handled = true;
-                }
-                if !handled and depth == 0 and std::mem::equal_bytes(text, "pub") {
-                    public = true;
-                    handled = true;
-                }
-                if !handled and depth == 0 and is_top_level_declaration(text) {
-                    if token_index + 1 < tokens.len() {
-                        let name = try tokens.get(token_index + 1);
-                        let name_text = token_text(file.text, name);
-                        if !std::mem::equal_bytes(name_text, "") {
-                            var qualified = try qualified_module_name(allocator, file);
-                            try qualified.append_bytes("::");
-                            try qualified.append_bytes(name_text);
-                            let key = qualified.as_bytes();
-                            try symbols.insert(key, binding_kind(text));
-                            try visibility.insert(key, public);
-                            qualified.deinit();
-                        }
-                    }
-                    public = false;
-                }
-                token_index = token_index + 1;
-            }
-            tokens.deinit();
+            try resolve_source_declarations(allocator, file, symbols, visibility);
             modules = modules + 1;
         }
         index = index + 1;
@@ -89,6 +56,18 @@ pub fn resolve_sources(
     };
     symbols.deinit();
     visibility.deinit();
+    return summary;
+}
+
+pub fn first_duplicate_declaration(
+    allocator: Allocator,
+    path: []const u8,
+    text: []const u8
+) -> !DuplicateDeclarationSummary {
+    let ast_source = std::kizu::ast::source_file(path, text);
+    let parsed = try std::kizu::parser::parse_program(allocator, ast_source);
+    let summary = try first_duplicate_declaration_node(allocator, text, parsed.ast, parsed.root);
+    parsed.deinit();
     return summary;
 }
 
@@ -216,23 +195,214 @@ fn qualified_module_name(
     return name;
 }
 
-fn token_text(
-    source_text: []const u8,
-    token: std::kizu::lexer::Token
-) -> []const u8 {
-    return source_text[token.start..token.end];
+fn resolve_source_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    symbols: &mut std::map::Map<[]const u8, BindingKind>,
+    visibility: &mut std::map::Map<[]const u8, bool>
+) -> !void {
+    let ast_source = std::kizu::ast::source_file(file.path, file.text);
+    let parsed = try std::kizu::parser::parse_program(allocator, ast_source);
+    try resolve_ast_root_declarations(allocator, file, parsed.ast, parsed.root, symbols, visibility);
+    parsed.deinit();
+    return;
 }
 
-fn is_top_level_declaration(text: []const u8) -> bool {
-    return std::mem::equal_bytes(text, "fn") or
-        std::mem::equal_bytes(text, "struct") or
-        std::mem::equal_bytes(text, "enum") or
-        std::mem::equal_bytes(text, "union");
-}
-
-fn binding_kind(text: []const u8) -> BindingKind {
-    if std::mem::equal_bytes(text, "fn") {
-        return BindingKind::Function;
+fn resolve_ast_root_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast_tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    symbols: &mut std::map::Map<[]const u8, BindingKind>,
+    visibility: &mut std::map::Map<[]const u8, bool>
+) -> !void {
+    let node = ast_tree.get(node_id);
+    match node.data {
+        Program(program) => try resolve_ast_declaration_range(
+            allocator,
+            file,
+            ast_tree,
+            program.declarations,
+            symbols,
+            visibility
+        ),
+        _ => return;,
     }
-    return BindingKind::TypeName;
+    return;
+}
+
+fn first_duplicate_declaration_node(
+    allocator: Allocator,
+    text: []const u8,
+    ast_tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !DuplicateDeclarationSummary {
+    let node = ast_tree.get(node_id);
+    return match node.data {
+        Program(program) => try first_duplicate_declaration_range(
+            allocator,
+            text,
+            ast_tree,
+            program.declarations
+        ),
+        _ => duplicate_declaration_summary(false, 0, 0),
+    };
+}
+
+fn first_duplicate_declaration_range(
+    allocator: Allocator,
+    text: []const u8,
+    ast_tree: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !DuplicateDeclarationSummary {
+    var names = std::map::Map<[]const u8, bool>(allocator);
+    var result = duplicate_declaration_summary(false, 0, 0);
+    var index = 0;
+    while index < declarations.len and !result.found {
+        let child = try ast_tree.child_at(declarations, index);
+        let span = declaration_name_span(ast_tree, child);
+        if span.found {
+            let name = text[span.start..span.end];
+            if names.contains(name) {
+                result = span;
+            } else {
+                try names.insert(name, true);
+            }
+        }
+        index = index + 1;
+    }
+    names.deinit();
+    return result;
+}
+
+fn declaration_name_span(
+    ast_tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> DuplicateDeclarationSummary {
+    let node = ast_tree.get(node_id);
+    return match node.data {
+        FnDecl(fn_decl) => node_name_span(ast_tree, fn_decl.name),
+        StructDecl(struct_decl) => node_name_span(ast_tree, struct_decl.name),
+        EnumDecl(enum_decl) => node_name_span(ast_tree, enum_decl.name),
+        UnionDecl(union_decl) => node_name_span(ast_tree, union_decl.name),
+        _ => duplicate_declaration_summary(false, 0, 0),
+    };
+}
+
+fn node_name_span(
+    ast_tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> DuplicateDeclarationSummary {
+    let node = ast_tree.get(node_id);
+    return duplicate_declaration_summary(true, node.span.start, node.span.end);
+}
+
+fn duplicate_declaration_summary(found: bool, start: i64, end: i64) -> DuplicateDeclarationSummary {
+    return DuplicateDeclarationSummary {
+        found: found,
+        start: start,
+        end: end
+    };
+}
+
+fn resolve_ast_declaration_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast_tree: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    symbols: &mut std::map::Map<[]const u8, BindingKind>,
+    visibility: &mut std::map::Map<[]const u8, bool>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast_tree.child_at(declarations, index);
+        try resolve_ast_declaration(allocator, file, ast_tree, child, symbols, visibility);
+        index = index + 1;
+    }
+    return;
+}
+
+fn resolve_ast_declaration(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast_tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    symbols: &mut std::map::Map<[]const u8, BindingKind>,
+    visibility: &mut std::map::Map<[]const u8, bool>
+) -> !void {
+    let node = ast_tree.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => try declare_ast_symbol(
+            allocator,
+            file,
+            ast_tree,
+            fn_decl.name,
+            BindingKind::Function,
+            fn_decl.public,
+            symbols,
+            visibility
+        ),
+        StructDecl(struct_decl) => try declare_ast_symbol(
+            allocator,
+            file,
+            ast_tree,
+            struct_decl.name,
+            BindingKind::TypeName,
+            struct_decl.public,
+            symbols,
+            visibility
+        ),
+        EnumDecl(enum_decl) => try declare_ast_symbol(
+            allocator,
+            file,
+            ast_tree,
+            enum_decl.name,
+            BindingKind::TypeName,
+            enum_decl.public,
+            symbols,
+            visibility
+        ),
+        UnionDecl(union_decl) => try declare_ast_symbol(
+            allocator,
+            file,
+            ast_tree,
+            union_decl.name,
+            BindingKind::TypeName,
+            union_decl.public,
+            symbols,
+            visibility
+        ),
+        _ => return;,
+    }
+    return;
+}
+
+fn declare_ast_symbol(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast_tree: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    kind: BindingKind,
+    public: bool,
+    symbols: &mut std::map::Map<[]const u8, BindingKind>,
+    visibility: &mut std::map::Map<[]const u8, bool>
+) -> !void {
+    var qualified = try qualified_module_name(allocator, file);
+    try qualified.append_bytes("::");
+    try qualified.append_bytes(ast_node_text(file, ast_tree, name));
+    let key = qualified.as_bytes();
+    try symbols.insert(key, kind);
+    try visibility.insert(key, public);
+    qualified.deinit();
+    return;
+}
+
+fn ast_node_text(
+    file: &source::SourceFile,
+    ast_tree: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []const u8 {
+    let node = ast_tree.get(node_id);
+    let span = &node.span;
+    return file.text[span.start..span.end];
 }

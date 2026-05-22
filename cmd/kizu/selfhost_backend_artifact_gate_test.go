@@ -210,6 +210,7 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
 		"declare i64 @kizu_selfhost__host_capability_smoke()\n",
 		"define i1 @kizu_selfhost__slice_equal",
+		"define i1 @kizu_selfhost__slice_contains",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
@@ -217,6 +218,16 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 	for _, fragment := range requiredLL {
 		if !strings.Contains(llContent, fragment) {
 			t.Errorf("LLVM artifact missing %q:\n%s", fragment, llContent)
+			return 1
+		}
+	}
+	for _, fragment := range []string{
+		"selfhost/tests/cli/run_hello.kizu",
+		"selfhost/tests/cli/test_expect_ok.kizu",
+		"selfhost/tests/cli/test_expect_failure.kizu",
+	} {
+		if strings.Contains(llContent, fragment) {
+			t.Errorf("LLVM artifact keeps fixed CLI fixture path %q:\n%s", fragment, llContent)
 			return 1
 		}
 	}
@@ -246,21 +257,10 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"entry @kizu_selfhost__cli_main\n",
 		"cli-command check selfhost\n",
 		"cli-command stage selfhost\n",
-		"cli-command check source-shape print-hello\n",
-		"cli-command check source-shape minimal-main-return\n",
-		"cli-command check source-shape testing-expect-ok\n",
-		"cli-command check source-shape testing-expect-failure\n",
-		"cli-command check source-shape moved-value-use\n",
-		"cli-command parse source-shape minimal-main-return\n",
-		"cli-command parse source-shape print-call\n",
-		"cli-command parse source-shape testing-expect-ok\n",
-		"cli-command parse source-shape testing-expect-failure\n",
-		"cli-command parse source-shape moved-value-declarations\n",
-		"cli-command parse source-shape missing-expression\n",
-		"cli-command run source-shape print-hello\n",
-		"cli-command run source-shape missing-expression\n",
-		"cli-command test source-shape expect-ok\n",
-		"cli-command test source-shape expect-failure\n",
+		"cli-command check file source\n",
+		"cli-command parse file source\n",
+		"cli-command run file source print-call\n",
+		"cli-command test file source expect-call\n",
 		"cli-parity-manifest selfhost/tests/cli/parse-parity.tsv\n",
 		"cli-parity-manifest selfhost/tests/cli/check-parity.tsv\n",
 		"cli-parity-manifest selfhost/tests/cli/run-parity.tsv\n",
@@ -303,7 +303,17 @@ func countForbiddenCLIMetadataFailures(t *testing.T, metaContent string) int {
 	for _, fragment := range []string{
 		"cli-command check examples/hello.kizu\n",
 		"cli-command check examples/negative/moved_value.kizu\n",
+		"cli-command check source-shape",
 		"cli-command parse selfhost/tests/cli/parse_ok_minimal.kizu\n",
+		"cli-command parse single-line source",
+		"cli-command parse source-shape print-call",
+		"cli-command parse source-shape testing-expect-ok",
+		"cli-command parse source-shape testing-expect-failure",
+		"cli-command parse source-shape moved-value-declarations",
+		"cli-command parse source-shape missing-expression",
+		"cli-command parse source-shape minimal-main-return\n",
+		"cli-command run source-shape",
+		"cli-command test source-shape",
 	} {
 		if strings.Contains(metaContent, fragment) {
 			t.Errorf("LLVM artifact metadata keeps fixed CLI path %q:\n%s", fragment, metaContent)
@@ -825,11 +835,14 @@ func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 	}
 	failures := countHostedCompilerCLICheckFailures(t, exePath)
 	failures += countHostedCompilerCLIStageFailures(t, exePath)
+	failures += countHostedCompilerCLIParseFailures(t, exePath)
+	failures += countHostedCompilerCLIRunFailures(t, exePath)
+	failures += countHostedCompilerCLITestFailures(t, exePath)
 	failures += countHostedCompilerCLIUnsupportedFailures(t, exePath)
 	return failures
 }
 
-// countHostedCompilerCLICheckFailures runs `check selfhost` through the artifact.
+// countHostedCompilerCLICheckFailures runs check commands through the artifact.
 func countHostedCompilerCLICheckFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "check", "selfhost")
@@ -843,6 +856,128 @@ func countHostedCompilerCLICheckFailures(t *testing.T, exePath string) int {
 	}
 	if stderr != "" {
 		t.Errorf("hosted compiler check stderr mismatch: %q", stderr)
+		return 1
+	}
+	return countHostedCompilerCLIFileCheckFailures(t, exePath)
+}
+
+// countHostedCompilerCLIFileCheckFailures checks an arbitrary readable source.
+func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), "hosted_check_generic.kizu")
+	source := "fn main() { print(\"checked from temp\"); }\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted check smoke source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "check", sourcePath)
+	if code != 0 {
+		t.Errorf("hosted compiler file check exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	if stdout != "check: ok\n" {
+		t.Errorf("hosted compiler file check stdout mismatch: %q", stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler file check stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
+// countHostedCompilerCLIParseFailures runs generic parse source through the artifact.
+func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), "hosted_parse_generic.kizu")
+	source := "fn main() {\n    print(\"from temp\");\n}\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted parse smoke source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "parse", sourcePath)
+	if code != 0 {
+		t.Errorf("hosted compiler parse exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	if stdout != source {
+		t.Errorf("hosted compiler parse stdout mismatch:\nwant:\n%s\ngot:\n%s", source, stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler parse stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
+// countHostedCompilerCLIRunFailures runs a non-fixture source through `run`.
+func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), "hosted_run_generic.kizu")
+	source := "fn main(){print(\"hello, kizu\");}\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted run smoke source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "run", sourcePath)
+	if code != 0 {
+		t.Errorf("hosted compiler run exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	if stdout != "" {
+		t.Errorf("hosted compiler run stdout mismatch: %q", stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler run stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
+// countHostedCompilerCLITestFailures runs non-fixture sources through `test`.
+func countHostedCompilerCLITestFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	failures := countHostedCompilerCLITestSourceFailures(
+		t,
+		exePath,
+		"hosted_test_ok_generic.kizu",
+		"fn main()->!void{std::testing::expect(true);return;}\n",
+	)
+	failures += countHostedCompilerCLITestSourceFailures(
+		t,
+		exePath,
+		"hosted_test_failure_generic.kizu",
+		"fn main()->!void{std::testing::expect(false);return;}\n",
+	)
+	return failures
+}
+
+// countHostedCompilerCLITestSourceFailures checks one hosted `test` source.
+func countHostedCompilerCLITestSourceFailures(
+	t *testing.T,
+	exePath string,
+	name string,
+	source string,
+) int {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted test smoke source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "test", sourcePath)
+	if code != 0 {
+		t.Errorf("hosted compiler test exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	if stdout != "" {
+		t.Errorf("hosted compiler test stdout mismatch: %q", stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler test stderr mismatch: %q", stderr)
 		return 1
 	}
 	return 0

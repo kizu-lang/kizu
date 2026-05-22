@@ -825,6 +825,19 @@ fn main() {
 	}
 }
 
+// TestCheckArrayLenDoesNotMoveNonCopyArray keeps read-only Array methods non-consuming.
+func TestCheckArrayLenDoesNotMoveNonCopyArray(t *testing.T) {
+	source := `struct Name { value: []const u8 }
+fn main(values: std::array::Array<Name>) {
+    let count = values.len();
+    print(count);
+    values.deinit();
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckImplMethodReturnTypeFeedsGenericCall keeps method result types precise.
 func TestCheckImplMethodReturnTypeFeedsGenericCall(t *testing.T) {
 	source := `struct Counter { value: i64 }

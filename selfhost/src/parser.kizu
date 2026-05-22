@@ -13,6 +13,14 @@ pub struct ParseDiagnosticSummary {
     pub end: i64,
 }
 
+pub struct ParseValidation {
+    pub ok: bool,
+    pub message: []const u8,
+    pub line: i64,
+    pub column: i64,
+    pub got: []const u8,
+}
+
 pub fn parse_source(source: []const u8) -> ParseError!std::kizu::ast::ParseResult {
     let allocator = std::mem::page_allocator();
     return parse_file(allocator, "<memory>", source);
@@ -29,6 +37,15 @@ pub fn parse_file(
     let result = try parse_tokens(allocator, path, source, &tokens);
     tokens.deinit();
     return result;
+}
+
+pub fn parse_checked_file(
+    allocator: Allocator,
+    path: []const u8,
+    source: []const u8
+) -> !std::kizu::ast::ParseResult {
+    let file = std::kizu::ast::source_file(path, source);
+    return std::kizu::parser::parse_program(allocator, file);
 }
 
 pub fn parse_tokens(
@@ -68,18 +85,155 @@ pub fn diagnostic_error(
 }
 
 pub fn summarize_error(err: ParseError) -> ParseDiagnosticSummary {
-    match err {
-        Diagnostic(report) => return ParseDiagnosticSummary {
+    return match err {
+        Diagnostic(report) => ParseDiagnosticSummary {
             diagnostic: true,
             start: report.primary.start,
             end: report.primary.end
-        };,
-        Message(text) => return ParseDiagnosticSummary {
+        },
+        Message(text) => ParseDiagnosticSummary {
             diagnostic: false,
             start: 0,
             end: 0
-        };,
+        },
+    };
+}
+
+pub fn validate_source(
+    allocator: Allocator,
+    source: []const u8
+) -> !ParseValidation {
+    var validation_tokens = try lexer::tokenize(allocator, source);
+    var delimiters = std::array::Array<i64>(allocator);
+    var delimiter_len = 0;
+    var index = 0;
+    while index + 1 < validation_tokens.len() {
+        let token = try validation_tokens.get(index);
+        let text = token_text(source, token);
+        if is_binding_keyword(text) {
+            let name = try validation_tokens.get(index + 1);
+            if !is_ident_token(name) {
+                return invalid_parse_validation(
+                    "expected identifier",
+                    name.line,
+                    name.column,
+                    token_text(source, name)
+                );
+            }
+            var assign_index = index + 2;
+            if assign_index >= validation_tokens.len() {
+                assign_index = validation_tokens.len() - 1;
+            }
+            let assign = try validation_tokens.get(assign_index);
+            if !std::mem::equal_bytes(token_text(source, assign), "=") {
+                return invalid_parse_validation(
+                    "expected assign",
+                    assign.line,
+                    assign.column,
+                    token_text(source, assign)
+                );
+            }
+        }
+        if is_open_delimiter(text) {
+            let delimiter = closing_delimiter_code(text);
+            if delimiter_len < delimiters.len() {
+                try delimiters.set(delimiter_len, delimiter);
+            } else {
+                try delimiters.append(delimiter);
+            }
+            delimiter_len = delimiter_len + 1;
+        }
+        if is_close_delimiter(text) {
+            if delimiter_len < 1 {
+                return invalid_parse_validation("unexpected token", token.line, token.column, text);
+            }
+            let delimiter = try delimiters.get(delimiter_len - 1);
+            if !delimiter_matches(delimiter, text) {
+                return invalid_parse_validation(
+                    expected_delimiter_message(delimiter),
+                    token.line,
+                    token.column,
+                    text
+                );
+            }
+            delimiter_len = delimiter_len - 1;
+        }
+        if std::mem::equal_bytes(text, "=") {
+            let next = try validation_tokens.get(index + 1);
+            let next_text = token_text(source, next);
+            if expression_missing_before(next_text) {
+                return invalid_parse_validation(
+                    "expected expression",
+                    next.line,
+                    next.column,
+                    missing_expression_got_text(next_text)
+                );
+            }
+        }
+        index = index + 1;
     }
+    if delimiter_len > 0 {
+        let delimiter = try delimiters.get(delimiter_len - 1);
+        let eof = try validation_tokens.get(validation_tokens.len() - 1);
+        return invalid_parse_validation(
+            expected_delimiter_message(delimiter),
+            eof.line,
+            eof.column,
+            ""
+        );
+    }
+    let top_level = try validate_top_level_declarations(source, &validation_tokens);
+    if !top_level.ok {
+        return top_level;
+    }
+    delimiters.deinit();
+    validation_tokens.deinit();
+    return valid_parse_validation();
+}
+
+pub fn format_source(
+    allocator: Allocator,
+    source: []const u8
+) -> !std::string::String {
+    var format_tokens = try lexer::tokenize(allocator, source);
+    var out = std::string::String(allocator);
+    var index = 0;
+    var depth = 0;
+    var previous = "";
+    var last = cast<u8>(0);
+    while index < format_tokens.len() {
+        let token = try format_tokens.get(index);
+        if lexer::is_eof(token) {
+            index = format_tokens.len();
+        } else {
+            let text = token_text(source, token);
+            let trailing_comma = try is_trailing_comma(source, &format_tokens, index, text);
+            if !trailing_comma {
+                if depth == 0 and out.len() > 0 and is_top_level_decl_start(text) {
+                    if last != cast<u8>(10) {
+                        try out.append_byte(cast<u8>(10));
+                        last = cast<u8>(10);
+                    }
+                }
+                if std::mem::equal_bytes(text, "}") {
+                    depth = depth - 1;
+                }
+                if should_insert_space(previous, text, last) {
+                    try out.append_byte(cast<u8>(32));
+                    last = cast<u8>(32);
+                }
+                try out.append_bytes(text);
+                last = last_byte(text);
+                if std::mem::equal_bytes(text, "{") {
+                    depth = depth + 1;
+                }
+                previous = text;
+            }
+            index = index + 1;
+        }
+    }
+    format_tokens.deinit();
+    return out;
 }
 
 fn require_tokens(
@@ -95,4 +249,785 @@ fn require_tokens(
         return diagnostic_error(path, eof.start, eof.end, "parser requires EOF token");
     }
     return;
+}
+
+fn token_text(
+    source: []const u8,
+    token: std::kizu::lexer::Token
+) -> []const u8 {
+    return source[token.start..token.end];
+}
+
+fn invalid_parse_validation(
+    message: []const u8,
+    line: i64,
+    column: i64,
+    got: []const u8
+) -> ParseValidation {
+    return ParseValidation {
+        ok: false,
+        message: message,
+        line: line,
+        column: column,
+        got: got
+    };
+}
+
+fn valid_parse_validation() -> ParseValidation {
+    return ParseValidation {
+        ok: true,
+        message: "",
+        line: 0,
+        column: 0,
+        got: ""
+    };
+}
+
+fn validate_top_level_declarations(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !ParseValidation {
+    var index = 0;
+    while index + 1 < tokens.len() {
+        let token = try tokens.get(index);
+        let start = try validate_top_level_decl_start(source, tokens, index, token);
+        if !start.ok {
+            return start;
+        }
+        index = try skip_top_level_declaration(tokens, index);
+    }
+    return valid_parse_validation();
+}
+
+fn validate_top_level_decl_start(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    token: std::kizu::lexer::Token
+) -> !ParseValidation {
+    return match token.kind {
+        Import => try validate_import_decl_header(source, tokens, index),
+        Pub => try validate_public_top_level_decl_start(source, tokens, index),
+        Fn => try validate_fn_decl_header(source, tokens, index, true),
+        Unsafe => try validate_unsafe_top_level_decl_start(source, tokens, index),
+        Extern => try validate_extern_decl_header(source, tokens, index),
+        Struct => try validate_aggregate_decl_header(source, tokens, index, true, true),
+        Enum => try validate_aggregate_decl_header(source, tokens, index, false, false),
+        Union => try validate_aggregate_decl_header(source, tokens, index, true, false),
+        Ident => validate_ident_top_level_decl_start(source, token),
+        Eof => valid_parse_validation(),
+        _ => invalid_parse_validation(
+            "expected declaration",
+            token.line,
+            token.column,
+            token_text(source, token)
+        ),
+    };
+}
+
+fn validate_public_top_level_decl_start(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !ParseValidation {
+    let next = try tokens.get(index + 1);
+    if lexer::is_eof(next) {
+        return invalid_parse_validation("expected declaration", next.line, next.column, "");
+    }
+    if is_unsafe_modifier_token(next) {
+        return try validate_unsafe_top_level_decl_start(source, tokens, index + 1);
+    }
+    if is_fn_token(next) {
+        return try validate_fn_decl_header(source, tokens, index + 1, true);
+    }
+    if is_extern_token(next) {
+        return try validate_extern_decl_header(source, tokens, index + 1);
+    }
+    if is_struct_token(next) {
+        return try validate_aggregate_decl_header(source, tokens, index + 1, true, true);
+    }
+    if is_union_token(next) {
+        return try validate_aggregate_decl_header(source, tokens, index + 1, true, false);
+    }
+    if is_enum_token(next) {
+        return try validate_aggregate_decl_header(source, tokens, index + 1, false, false);
+    }
+    if is_public_top_level_decl_start(source, next) {
+        return valid_parse_validation();
+    }
+    return invalid_parse_validation(
+        "expected declaration",
+        next.line,
+        next.column,
+        token_text(source, next)
+    );
+}
+
+fn validate_unsafe_top_level_decl_start(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !ParseValidation {
+    let next = try tokens.get(index + 1);
+    if lexer::is_eof(next) {
+        return invalid_parse_validation("expected fn or extern after unsafe", next.line, next.column, "");
+    }
+    if is_fn_token(next) {
+        return try validate_fn_decl_header(source, tokens, index + 1, true);
+    }
+    if is_extern_token(next) {
+        return try validate_extern_decl_header(source, tokens, index + 1);
+    }
+    return invalid_parse_validation(
+        "expected fn or extern after unsafe",
+        next.line,
+        next.column,
+        token_text(source, next)
+    );
+}
+
+fn validate_import_decl_header(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !ParseValidation {
+    let name = try tokens.get(index + 1);
+    if !is_ident_token(name) {
+        return invalid_parse_validation(
+            "expected identifier",
+            name.line,
+            name.column,
+            token_text(source, name)
+        );
+    }
+    return valid_parse_validation();
+}
+
+fn validate_extern_decl_header(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !ParseValidation {
+    let abi = try tokens.get(index + 1);
+    if !is_string_token(abi) {
+        return invalid_parse_validation(
+            "expected string",
+            abi.line,
+            abi.column,
+            token_text(source, abi)
+        );
+    }
+    let fn_token = try tokens.get(index + 2);
+    if !is_fn_token(fn_token) {
+        return invalid_parse_validation(
+            "expected fn",
+            fn_token.line,
+            fn_token.column,
+            token_text(source, fn_token)
+        );
+    }
+    return try validate_fn_decl_header(source, tokens, index + 2, false);
+}
+
+fn validate_aggregate_decl_header(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    allow_type_params: bool,
+    require_field_type: bool
+) -> !ParseValidation {
+    let name = try tokens.get(index + 1);
+    if !is_ident_token(name) {
+        return invalid_parse_validation(
+            "expected identifier",
+            name.line,
+            name.column,
+            token_text(source, name)
+        );
+    }
+    var open_index = index + 2;
+    if allow_type_params {
+        open_index = try skip_optional_type_params(tokens, open_index);
+    }
+    let open = try tokens.get(open_index);
+    if !is_left_brace_token(open) {
+        return invalid_parse_validation(
+            "expected left brace",
+            open.line,
+            open.column,
+            token_text(source, open)
+        );
+    }
+    return try validate_aggregate_body_start(source, tokens, open_index, require_field_type);
+}
+
+fn validate_aggregate_body_start(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64,
+    require_field_type: bool
+) -> !ParseValidation {
+    let first = try tokens.get(open_index + 1);
+    if is_right_brace_token(first) {
+        return valid_parse_validation();
+    }
+    var after_name_index = open_index + 2;
+    if is_pub_token(first) {
+        let name = try tokens.get(open_index + 2);
+        if is_ident_token(name) {
+            after_name_index = open_index + 3;
+            return try validate_optional_field_type(
+                source,
+                tokens,
+                after_name_index,
+                require_field_type
+            );
+        }
+        return invalid_parse_validation(
+            "expected identifier",
+            name.line,
+            name.column,
+            token_text(source, name)
+        );
+    }
+    if is_ident_token(first) {
+        return try validate_optional_field_type(
+            source,
+            tokens,
+            after_name_index,
+            require_field_type
+        );
+    }
+    return invalid_parse_validation(
+        "expected identifier",
+        first.line,
+        first.column,
+        token_text(source, first)
+    );
+}
+
+fn validate_optional_field_type(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    colon_index: i64,
+    require_field_type: bool
+) -> !ParseValidation {
+    if !require_field_type {
+        return valid_parse_validation();
+    }
+    let colon = try tokens.get(colon_index);
+    if !is_colon_token(colon) {
+        return invalid_parse_validation(
+            "expected colon",
+            colon.line,
+            colon.column,
+            token_text(source, colon)
+        );
+    }
+    let type_start = try tokens.get(colon_index + 1);
+    if is_type_start_token(type_start) {
+        return valid_parse_validation();
+    }
+    return invalid_parse_validation(
+        "expected type name",
+        type_start.line,
+        type_start.column,
+        token_text(source, type_start)
+    );
+}
+
+fn validate_fn_decl_header(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    require_body: bool
+) -> !ParseValidation {
+    let name = try tokens.get(index + 1);
+    if !is_ident_token(name) {
+        return invalid_parse_validation(
+            "expected function name",
+            name.line,
+            name.column,
+            token_text(source, name)
+        );
+    }
+    let params_index = try skip_optional_type_params(tokens, index + 2);
+    let params = try tokens.get(params_index);
+    if !is_left_paren_token(params) {
+        return invalid_parse_validation(
+            "expected left paren",
+            params.line,
+            params.column,
+            token_text(source, params)
+        );
+    }
+    let after_params = try skip_balanced_parens(tokens, params_index);
+    if !require_body {
+        return valid_parse_validation();
+    }
+    return try validate_required_fn_body(source, tokens, after_params);
+}
+
+fn validate_required_fn_body(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !ParseValidation {
+    var cursor = index;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if is_left_brace_token(token) {
+            return valid_parse_validation();
+        }
+        if is_semicolon_token(token) or lexer::is_eof(token) {
+            return invalid_parse_validation(
+                "expected left brace",
+                token.line,
+                token.column,
+                token_text(source, token)
+            );
+        }
+        cursor = cursor + 1;
+    }
+    let eof = try tokens.get(tokens.len() - 1);
+    return invalid_parse_validation("expected left brace", eof.line, eof.column, "");
+}
+
+fn skip_optional_type_params(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    let token = try tokens.get(index);
+    if !is_lt_token(token) {
+        return index;
+    }
+    return try skip_balanced_angles(tokens, index);
+}
+
+fn skip_balanced_angles(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    var cursor = index;
+    var depth = 0;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if is_lt_token(token) {
+            depth = depth + 1;
+        }
+        if is_gt_token(token) {
+            depth = depth - 1;
+            if depth == 0 {
+                return cursor + 1;
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn skip_balanced_parens(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    var cursor = index;
+    var depth = 0;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if is_left_paren_token(token) {
+            depth = depth + 1;
+        }
+        if is_right_paren_token(token) {
+            depth = depth - 1;
+            if depth == 0 {
+                return cursor + 1;
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn validate_ident_top_level_decl_start(
+    source: []const u8,
+    token: std::kizu::lexer::Token
+) -> ParseValidation {
+    if is_skipped_top_level_decl_ident(source, token) {
+        return valid_parse_validation();
+    }
+    return invalid_parse_validation(
+        "expected declaration",
+        token.line,
+        token.column,
+        token_text(source, token)
+    );
+}
+
+fn is_public_top_level_decl_start(
+    source: []const u8,
+    token: std::kizu::lexer::Token
+) -> bool {
+    return match token.kind {
+        Fn => true,
+        Unsafe => true,
+        Extern => true,
+        Struct => true,
+        Enum => true,
+        Union => true,
+        Ident => is_skipped_top_level_decl_ident(source, token),
+        _ => false,
+    };
+}
+
+fn is_unsafe_top_level_decl_start(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Fn => true,
+        Extern => true,
+        _ => false,
+    };
+}
+
+fn is_fn_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Fn => true,
+        _ => false,
+    };
+}
+
+fn is_extern_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Extern => true,
+        _ => false,
+    };
+}
+
+fn is_struct_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Struct => true,
+        _ => false,
+    };
+}
+
+fn is_enum_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Enum => true,
+        _ => false,
+    };
+}
+
+fn is_union_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Union => true,
+        _ => false,
+    };
+}
+
+fn is_unsafe_modifier_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Unsafe => true,
+        _ => false,
+    };
+}
+
+fn is_pub_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Pub => true,
+        _ => false,
+    };
+}
+
+fn is_string_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        String => true,
+        _ => false,
+    };
+}
+
+fn is_colon_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Colon => true,
+        _ => false,
+    };
+}
+
+fn is_type_start_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Ident => true,
+        Bang => true,
+        Amp => true,
+        LBracket => true,
+        Question => true,
+        _ => false,
+    };
+}
+
+fn is_skipped_top_level_decl_ident(
+    source: []const u8,
+    token: std::kizu::lexer::Token
+) -> bool {
+    let text = token_text(source, token);
+    return std::mem::equal_bytes(text, "impl") or std::mem::equal_bytes(text, "contract");
+}
+
+fn skip_top_level_declaration(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    var cursor = index;
+    var paren_depth = 0;
+    var bracket_depth = 0;
+    var brace_depth = 0;
+    var seen_body = false;
+    while cursor + 1 < tokens.len() {
+        let token = try tokens.get(cursor);
+        if is_left_paren_token(token) {
+            paren_depth = paren_depth + 1;
+        }
+        if is_right_paren_token(token) and paren_depth > 0 {
+            paren_depth = paren_depth - 1;
+        }
+        if is_left_bracket_token(token) {
+            bracket_depth = bracket_depth + 1;
+        }
+        if is_right_bracket_token(token) and bracket_depth > 0 {
+            bracket_depth = bracket_depth - 1;
+        }
+        if is_left_brace_token(token) {
+            brace_depth = brace_depth + 1;
+            seen_body = true;
+        }
+        if is_right_brace_token(token) and brace_depth > 0 {
+            brace_depth = brace_depth - 1;
+            if seen_body and brace_depth == 0 {
+                return cursor + 1;
+            }
+        }
+        if is_semicolon_token(token) and paren_depth == 0 and
+            bracket_depth == 0 and brace_depth == 0 {
+            return cursor + 1;
+        }
+        cursor = cursor + 1;
+    }
+    return cursor;
+}
+
+fn is_left_paren_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        LParen => true,
+        _ => false,
+    };
+}
+
+fn is_right_paren_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        RParen => true,
+        _ => false,
+    };
+}
+
+fn is_lt_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        LT => true,
+        _ => false,
+    };
+}
+
+fn is_gt_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        GT => true,
+        _ => false,
+    };
+}
+
+fn is_left_bracket_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        LBracket => true,
+        _ => false,
+    };
+}
+
+fn is_right_bracket_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        RBracket => true,
+        _ => false,
+    };
+}
+
+fn is_left_brace_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        LBrace => true,
+        _ => false,
+    };
+}
+
+fn is_right_brace_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        RBrace => true,
+        _ => false,
+    };
+}
+
+fn is_semicolon_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Semicolon => true,
+        _ => false,
+    };
+}
+
+fn is_open_delimiter(text: []const u8) -> bool {
+    return std::mem::equal_bytes(text, "(") or
+        std::mem::equal_bytes(text, "{") or
+        std::mem::equal_bytes(text, "[");
+}
+
+fn is_binding_keyword(text: []const u8) -> bool {
+    return std::mem::equal_bytes(text, "let") or std::mem::equal_bytes(text, "var");
+}
+
+fn is_ident_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Ident => true,
+        _ => false,
+    };
+}
+
+fn is_close_delimiter(text: []const u8) -> bool {
+    return std::mem::equal_bytes(text, ")") or
+        std::mem::equal_bytes(text, "}") or
+        std::mem::equal_bytes(text, "]");
+}
+
+fn closing_delimiter_code(text: []const u8) -> i64 {
+    if std::mem::equal_bytes(text, "(") {
+        return 1;
+    }
+    if std::mem::equal_bytes(text, "{") {
+        return 2;
+    }
+    return 3;
+}
+
+fn delimiter_matches(expected: i64, text: []const u8) -> bool {
+    if expected == 1 {
+        return std::mem::equal_bytes(text, ")");
+    }
+    if expected == 2 {
+        return std::mem::equal_bytes(text, "}");
+    }
+    return std::mem::equal_bytes(text, "]");
+}
+
+fn expected_delimiter_message(expected: i64) -> []const u8 {
+    if expected == 1 {
+        return "expected right paren";
+    }
+    if expected == 2 {
+        return "expected right brace";
+    }
+    return "expected right bracket";
+}
+
+fn expression_missing_before(text: []const u8) -> bool {
+    return std::mem::equal_bytes(text, ";") or
+        std::mem::equal_bytes(text, ")") or
+        std::mem::equal_bytes(text, "}") or
+        std::mem::equal_bytes(text, ",");
+}
+
+fn missing_expression_got_text(text: []const u8) -> []const u8 {
+    if std::mem::equal_bytes(text, ";") {
+        return ";";
+    }
+    if std::mem::equal_bytes(text, ")") {
+        return ")";
+    }
+    if std::mem::equal_bytes(text, "}") {
+        return "}";
+    }
+    return ",";
+}
+
+fn next_token_text_equals(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    expected: []const u8
+) -> !bool {
+    if index + 1 >= tokens.len() {
+        return false;
+    }
+    let next = try tokens.get(index + 1);
+    if lexer::is_eof(next) {
+        return false;
+    }
+    return std::mem::equal_bytes(token_text(source, next), expected);
+}
+
+fn is_trailing_comma(
+    source: []const u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64,
+    text: []const u8
+) -> !bool {
+    if !std::mem::equal_bytes(text, ",") {
+        return false;
+    }
+    return try next_token_text_equals(source, tokens, index, "}");
+}
+
+fn should_insert_space(
+    previous: []const u8,
+    current: []const u8,
+    last: u8
+) -> bool {
+    if last == cast<u8>(0) or last == cast<u8>(10) or last == cast<u8>(32) {
+        return false;
+    }
+    if no_space_before(current) {
+        return false;
+    }
+    if std::mem::equal_bytes(current, "const") and std::mem::equal_bytes(previous, "]") {
+        return false;
+    }
+    if no_space_after(previous) {
+        return false;
+    }
+    return true;
+}
+
+fn no_space_before(text: []const u8) -> bool {
+    return std::mem::equal_bytes(text, ")") or
+        std::mem::equal_bytes(text, "]") or
+        std::mem::equal_bytes(text, ";") or
+        std::mem::equal_bytes(text, ",") or
+        std::mem::equal_bytes(text, ".") or
+        std::mem::equal_bytes(text, "::") or
+        std::mem::equal_bytes(text, ">") or
+        std::mem::equal_bytes(text, ":") or
+        std::mem::equal_bytes(text, "(");
+}
+
+fn no_space_after(text: []const u8) -> bool {
+    return std::mem::equal_bytes(text, "(") or
+        std::mem::equal_bytes(text, "[") or
+        std::mem::equal_bytes(text, ".") or
+        std::mem::equal_bytes(text, "::") or
+        std::mem::equal_bytes(text, "!") or
+        std::mem::equal_bytes(text, "&") or
+        std::mem::equal_bytes(text, "<");
+}
+
+fn is_top_level_decl_start(text: []const u8) -> bool {
+    return std::mem::equal_bytes(text, "import") or
+        std::mem::equal_bytes(text, "pub") or
+        std::mem::equal_bytes(text, "unsafe") or
+        std::mem::equal_bytes(text, "extern") or
+        std::mem::equal_bytes(text, "fn") or
+        std::mem::equal_bytes(text, "struct") or
+        std::mem::equal_bytes(text, "enum") or
+        std::mem::equal_bytes(text, "union");
+}
+
+fn last_byte(text: []const u8) -> u8 {
+    return text[std::mem::len(text) - 1];
 }

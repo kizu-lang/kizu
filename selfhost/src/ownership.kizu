@@ -1,9 +1,9 @@
-import selfhost::lexer;
 import selfhost::source;
 import selfhost::types;
 
 pub enum ResourceKind {
     Value,
+    Record,
     Array,
     Map,
     String,
@@ -75,6 +75,24 @@ pub fn check_sources(
     return summary_of(checked);
 }
 
+pub fn first_use_after_move_name(
+    allocator: Allocator,
+    text: []const u8
+) -> ![]const u8 {
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::Selfhost,
+        module: "main",
+        path: "<memory>",
+        text: text
+    };
+    let ast_source = std::kizu::ast::source_file(file.path, file.text);
+    let result = try std::kizu::parser::parse_program(allocator, ast_source);
+    let name = try first_use_after_move_ast_node(allocator, &file, result.ast, result.root);
+    result.deinit();
+    return name;
+}
+
 pub fn check_package(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
@@ -112,16 +130,704 @@ pub fn summary_of(checked: &CheckedPackage) -> OwnershipSummary {
     );
 }
 
+fn first_use_after_move_ast_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> ![]const u8 {
+    let node = ast.get(node_id);
+    return match node.data {
+        Program(program) => try first_use_after_move_in_decl_range(
+            allocator,
+            file,
+            ast,
+            program.declarations
+        ),
+        FnDecl(fn_decl) => try first_use_after_move_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body
+        ),
+        ImportDecl(import_decl) => "",
+        StructDecl(struct_decl) => "",
+        EnumDecl(enum_decl) => "",
+        UnionDecl(union_decl) => "",
+        Empty => "",
+        Int(int_node) => "",
+        String(string_node) => "",
+        TypeName(type_name) => "",
+        Var(var_node) => "",
+        Bool(bool_node) => "",
+        Prefix(prefix_node) => "",
+        Binary(binary) => "",
+        FieldExpr(field_expr_node) => "",
+        DerefExpr(deref_expr_node) => "",
+        Call(call_node) => "",
+        TypeApplyExpr(type_apply) => "",
+        CastExpr(cast_expr) => "",
+        IndexExpr(index_expr) => "",
+        StructLiteralExpr(struct_literal) => "",
+        StructFieldInit(struct_field_init) => "",
+        ArenaNewExpr(arena_new) => "",
+        TryExpr(try_expr_node) => "",
+        ComptimeExpr(comptime_expr_node) => "",
+        Block(block) => "",
+        If(if_node) => "",
+        Let(let_node) => "",
+        Assign(assign_node) => "",
+        Return(return_node) => "",
+        Defer(defer_node) => "",
+        ExprStmt(expr_stmt) => "",
+        While(while_node) => "",
+        For(for_node) => "",
+        Break(break_node) => "",
+        Continue(continue_node) => "",
+        Param(param_node) => "",
+        Field(field_node) => "",
+        UnionVariant(union_variant) => "",
+        Match(match_node) => "",
+        MatchArm(match_arm) => "",
+        Unsafe(unsafe_node) => "",
+        ComptimeIf(comptime_if_node) => "",
+    };
+}
+
+fn first_use_after_move_in_decl_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> ![]const u8 {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let name = try first_use_after_move_ast_node(allocator, file, ast, child);
+        if !std::mem::equal_bytes(name, "") {
+            return name;
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+fn first_use_after_move_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId
+) -> ![]const u8 {
+    var states = std::map::Map<[]const u8, OwnershipState>(allocator);
+    var kinds = std::map::Map<[]const u8, ResourceKind>(allocator);
+    var param_index = 0;
+    while param_index < params.len {
+        let param_child = try ast.child_at(params, param_index);
+        let param_name = param_binding_name(file, ast, param_child);
+        if !std::mem::equal_bytes(param_name, "") {
+            try declare_resource(states, kinds, param_name, param_resource_kind(file, ast, param_child));
+        }
+        param_index = param_index + 1;
+    }
+
+    var result = "";
+    let statements = function_body_statements(ast, body);
+    var statement_index = 0;
+    while statement_index < statements.len and std::mem::equal_bytes(result, "") {
+        let statement = try ast.child_at(statements, statement_index);
+        result = try first_use_after_move_statement(
+            file,
+            ast,
+            statement,
+            states,
+            kinds
+        );
+        statement_index = statement_index + 1;
+    }
+    states.deinit();
+    kinds.deinit();
+    return result;
+}
+
+fn first_use_after_move_statement(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>
+) -> ![]const u8 {
+    let node = ast.get(statement);
+    return match node.data {
+        Let(let_node) => try first_use_after_move_let(
+            file,
+            ast,
+            let_node.name,
+            let_node.value,
+            states,
+            kinds
+        ),
+        ExprStmt(expr_stmt) => try first_use_after_move_expr(
+            file,
+            ast,
+            expr_stmt.expr,
+            states,
+            kinds,
+            false
+        ),
+        Assign(assign_node) => try first_use_after_move_expr(
+            file,
+            ast,
+            assign_node.value,
+            states,
+            kinds,
+            false
+        ),
+        Return(return_node) => try first_use_after_move_expr(
+            file,
+            ast,
+            return_node.value,
+            states,
+            kinds,
+            false
+        ),
+        Defer(defer_node) => try first_use_after_move_expr(
+            file,
+            ast,
+            defer_node.expr,
+            states,
+            kinds,
+            false
+        ),
+        Block(block) => try first_use_after_move_statement_range(
+            file,
+            ast,
+            block.statements,
+            states,
+            kinds
+        ),
+        If(if_node) => try first_use_after_move_if(
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            states,
+            kinds
+        ),
+        While(while_node) => try first_use_after_move_if(
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            ast.add_empty(0),
+            states,
+            kinds
+        ),
+        Program(program) => "",
+        FnDecl(fn_decl) => "",
+        Empty => "",
+        ImportDecl(import_decl) => "",
+        StructDecl(struct_decl) => "",
+        EnumDecl(enum_decl) => "",
+        UnionDecl(union_decl) => "",
+        Int(int_node) => "",
+        String(string_node) => "",
+        TypeName(type_name) => "",
+        Var(var_node) => "",
+        Bool(bool_node) => "",
+        Prefix(prefix_node) => "",
+        Binary(binary) => "",
+        FieldExpr(field_expr_node) => "",
+        DerefExpr(deref_expr_node) => "",
+        Call(call_node) => "",
+        TypeApplyExpr(type_apply) => "",
+        CastExpr(cast_expr) => "",
+        IndexExpr(index_expr) => "",
+        StructLiteralExpr(struct_literal) => "",
+        StructFieldInit(struct_field_init) => "",
+        ArenaNewExpr(arena_new) => "",
+        TryExpr(try_expr_node) => "",
+        ComptimeExpr(comptime_expr_node) => "",
+        For(for_node) => "",
+        Break(break_node) => "",
+        Continue(continue_node) => "",
+        Param(param_node) => "",
+        Field(field_node) => "",
+        UnionVariant(union_variant) => "",
+        Match(match_node) => "",
+        MatchArm(match_arm) => "",
+        Unsafe(unsafe_node) => "",
+        ComptimeIf(comptime_if_node) => "",
+    };
+}
+
+fn first_use_after_move_statement_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>
+) -> ![]const u8 {
+    var index = 0;
+    while index < range.len {
+        let statement = try ast.child_at(range, index);
+        let name = try first_use_after_move_statement(file, ast, statement, states, kinds);
+        if !std::mem::equal_bytes(name, "") {
+            return name;
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+fn first_use_after_move_if(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>
+) -> ![]const u8 {
+    let condition_name = try first_use_after_move_expr(file, ast, condition, states, kinds, false);
+    if !std::mem::equal_bytes(condition_name, "") {
+        return condition_name;
+    }
+    let then_name = try first_use_after_move_statement(file, ast, then_block, states, kinds);
+    if !std::mem::equal_bytes(then_name, "") {
+        return then_name;
+    }
+    return try first_use_after_move_statement(file, ast, else_block, states, kinds);
+}
+
+fn first_use_after_move_let(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>
+) -> ![]const u8 {
+    let used = try first_use_after_move_expr(file, ast, value, states, kinds, true);
+    if !std::mem::equal_bytes(used, "") {
+        return used;
+    }
+    let name_text = ast_node_text(file, ast, name);
+    if !std::mem::equal_bytes(name_text, "") and !states.contains(name_text) {
+        let kind = try move_check_initializer_kind(file, ast, value, kinds);
+        try declare_resource(states, kinds, name_text, kind);
+    }
+    return "";
+}
+
+fn first_use_after_move_expr(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>,
+    move_direct: bool
+) -> ![]const u8 {
+    let base = moved_base_name(file, ast, expr);
+    if !std::mem::equal_bytes(base, "") and states.contains(base) {
+        let state = try states.get(base);
+        if state == OwnershipState::Moved {
+            return base;
+        }
+    }
+    let node = ast.get(expr);
+    return match node.data {
+        Var(var_node) => try move_direct_name_if_needed(file, ast, expr, states, kinds, move_direct),
+        FieldExpr(field_expr) => try first_use_after_move_expr(
+            file,
+            ast,
+            field_expr.receiver,
+            states,
+            kinds,
+            false
+        ),
+        Call(call_node) => try first_use_after_move_call(
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            states,
+            kinds
+        ),
+        StructLiteralExpr(struct_literal) => try first_use_after_move_expr_range(
+            file,
+            ast,
+            struct_literal.fields,
+            states,
+            kinds,
+            false
+        ),
+        StructFieldInit(field_init) => try first_use_after_move_expr(
+            file,
+            ast,
+            field_init.value,
+            states,
+            kinds,
+            false
+        ),
+        Prefix(prefix_node) => try first_use_after_move_expr(
+            file,
+            ast,
+            prefix_node.right,
+            states,
+            kinds,
+            false
+        ),
+        Binary(binary) => try first_use_after_move_two_exprs(
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            states,
+            kinds
+        ),
+        TypeApplyExpr(type_apply) => try first_use_after_move_expr(
+            file,
+            ast,
+            type_apply.callee,
+            states,
+            kinds,
+            false
+        ),
+        TryExpr(try_expr_node) => try first_use_after_move_expr(
+            file,
+            ast,
+            try_expr_node.value,
+            states,
+            kinds,
+            move_direct
+        ),
+        ComptimeExpr(comptime_expr_node) => try first_use_after_move_expr(
+            file,
+            ast,
+            comptime_expr_node.value,
+            states,
+            kinds,
+            move_direct
+        ),
+        DerefExpr(deref_expr) => try first_use_after_move_expr(
+            file,
+            ast,
+            deref_expr.receiver,
+            states,
+            kinds,
+            false
+        ),
+        IndexExpr(index_expr) => try first_use_after_move_index(
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end,
+            states,
+            kinds
+        ),
+        Program(program) => "",
+        FnDecl(fn_decl) => "",
+        Empty => "",
+        ImportDecl(import_decl) => "",
+        StructDecl(struct_decl) => "",
+        EnumDecl(enum_decl) => "",
+        UnionDecl(union_decl) => "",
+        Int(int_node) => "",
+        String(string_node) => "",
+        TypeName(type_name) => "",
+        Bool(bool_node) => "",
+        CastExpr(cast_expr) => try first_use_after_move_expr(
+            file,
+            ast,
+            cast_expr.value,
+            states,
+            kinds,
+            false
+        ),
+        ArenaNewExpr(arena_new) => try first_use_after_move_expr(
+            file,
+            ast,
+            arena_new.allocator,
+            states,
+            kinds,
+            false
+        ),
+        Block(block) => try first_use_after_move_statement_range(file, ast, block.statements, states, kinds),
+        If(if_node) => try first_use_after_move_if(
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            states,
+            kinds
+        ),
+        Let(let_node) => "",
+        Assign(assign_node) => "",
+        Return(return_node) => "",
+        Defer(defer_node) => "",
+        ExprStmt(expr_stmt) => "",
+        While(while_node) => "",
+        For(for_node) => "",
+        Break(break_node) => "",
+        Continue(continue_node) => "",
+        Param(param_node) => "",
+        Field(field_node) => "",
+        UnionVariant(union_variant) => "",
+        Match(match_node) => "",
+        MatchArm(match_arm) => "",
+        Unsafe(unsafe_node) => "",
+        ComptimeIf(comptime_if_node) => "",
+    };
+}
+
+fn first_use_after_move_call(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>
+) -> ![]const u8 {
+    let callee_name = try first_use_after_move_expr(file, ast, callee, states, kinds, false);
+    if !std::mem::equal_bytes(callee_name, "") {
+        return callee_name;
+    }
+    return try first_use_after_move_expr_range(
+        file,
+        ast,
+        args,
+        states,
+        kinds,
+        call_moves_direct_args(file, ast, callee)
+    );
+}
+
+fn first_use_after_move_expr_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>,
+    move_direct: bool
+) -> ![]const u8 {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        let name = try first_use_after_move_expr(file, ast, child, states, kinds, move_direct);
+        if !std::mem::equal_bytes(name, "") {
+            return name;
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+fn first_use_after_move_two_exprs(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    left: std::kizu::ast::NodeId,
+    right: std::kizu::ast::NodeId,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>
+) -> ![]const u8 {
+    let left_name = try first_use_after_move_expr(file, ast, left, states, kinds, false);
+    if !std::mem::equal_bytes(left_name, "") {
+        return left_name;
+    }
+    return try first_use_after_move_expr(file, ast, right, states, kinds, false);
+}
+
+fn first_use_after_move_index(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>
+) -> ![]const u8 {
+    let target_name = try first_use_after_move_expr(file, ast, target, states, kinds, false);
+    if !std::mem::equal_bytes(target_name, "") {
+        return target_name;
+    }
+    return try first_use_after_move_two_exprs(file, ast, start, end, states, kinds);
+}
+
+fn move_direct_name_if_needed(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId,
+    states: &mut std::map::Map<[]const u8, OwnershipState>,
+    kinds: &mut std::map::Map<[]const u8, ResourceKind>,
+    move_direct: bool
+) -> ![]const u8 {
+    if !move_direct {
+        return "";
+    }
+    let name = ast_node_text(file, ast, expr);
+    if !states.contains(name) {
+        return "";
+    }
+    let state = try states.get(name);
+    if state == OwnershipState::Moved {
+        return name;
+    }
+    let kind = try kinds.get(name);
+    if resource_kind_moves(kind) {
+        try move_value(states, name);
+    }
+    return "";
+}
+
+fn moved_base_name(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> []const u8 {
+    let node = ast.get(expr);
+    return match node.data {
+        Var(var_node) => ast_node_text(file, ast, expr),
+        FieldExpr(field_expr) => moved_base_name(file, ast, field_expr.receiver),
+        DerefExpr(deref_expr) => moved_base_name(file, ast, deref_expr.receiver),
+        TryExpr(try_expr_node) => moved_base_name(file, ast, try_expr_node.value),
+        ComptimeExpr(comptime_expr_node) => moved_base_name(file, ast, comptime_expr_node.value),
+        Program(program) => "",
+        FnDecl(fn_decl) => "",
+        Empty => "",
+        ImportDecl(import_decl) => "",
+        StructDecl(struct_decl) => "",
+        EnumDecl(enum_decl) => "",
+        UnionDecl(union_decl) => "",
+        Int(int_node) => "",
+        String(string_node) => "",
+        TypeName(type_name) => "",
+        Bool(bool_node) => "",
+        Prefix(prefix_node) => "",
+        Binary(binary) => "",
+        Call(call_node) => "",
+        TypeApplyExpr(type_apply) => "",
+        CastExpr(cast_expr) => "",
+        IndexExpr(index_expr) => "",
+        StructLiteralExpr(struct_literal) => "",
+        StructFieldInit(struct_field_init) => "",
+        ArenaNewExpr(arena_new) => "",
+        Block(block) => "",
+        If(if_node) => "",
+        Let(let_node) => "",
+        Assign(assign_node) => "",
+        Return(return_node) => "",
+        Defer(defer_node) => "",
+        ExprStmt(expr_stmt) => "",
+        While(while_node) => "",
+        For(for_node) => "",
+        Break(break_node) => "",
+        Continue(continue_node) => "",
+        Param(param_node) => "",
+        Field(field_node) => "",
+        UnionVariant(union_variant) => "",
+        Match(match_node) => "",
+        MatchArm(match_arm) => "",
+        Unsafe(unsafe_node) => "",
+        ComptimeIf(comptime_if_node) => "",
+    };
+}
+
+fn call_moves_direct_args(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId
+) -> bool {
+    let text = ast_node_text(file, ast, callee);
+    return !std::mem::equal_bytes(text, "print") and
+        !std::mem::equal_bytes(text, "std::testing::expect");
+}
+
+fn move_check_initializer_kind(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]const u8, ResourceKind>
+) -> !ResourceKind {
+    if initializer_text_is_record_literal(file, ast, value) {
+        return ResourceKind::Record;
+    }
+    let node = ast.get(value);
+    return match node.data {
+        StructLiteralExpr(struct_literal) => ResourceKind::Record,
+        Var(var_node) => try initializer_var_kind(file, ast, value, kinds),
+        TryExpr(try_expr_node) => try move_check_initializer_kind(
+            file,
+            ast,
+            try_expr_node.value,
+            kinds
+        ),
+        Program(program) => try initializer_resource_kind(file, ast, value),
+        FnDecl(fn_decl) => try initializer_resource_kind(file, ast, value),
+        Empty => try initializer_resource_kind(file, ast, value),
+        Int(int_node) => try initializer_resource_kind(file, ast, value),
+        String(string_node) => try initializer_resource_kind(file, ast, value),
+        TypeName(type_name) => try initializer_resource_kind(file, ast, value),
+        Bool(bool_node) => try initializer_resource_kind(file, ast, value),
+        Prefix(prefix_node) => try initializer_resource_kind(file, ast, value),
+        Binary(binary) => try initializer_resource_kind(file, ast, value),
+        FieldExpr(field_expr_node) => try initializer_resource_kind(file, ast, value),
+        DerefExpr(deref_expr_node) => try initializer_resource_kind(file, ast, value),
+        Call(call_node) => try initializer_resource_kind(file, ast, value),
+        TypeApplyExpr(type_apply) => try initializer_resource_kind(file, ast, value),
+        CastExpr(cast_expr) => try initializer_resource_kind(file, ast, value),
+        IndexExpr(index_expr) => try initializer_resource_kind(file, ast, value),
+        StructFieldInit(struct_field_init) => try initializer_resource_kind(file, ast, value),
+        ArenaNewExpr(arena_new) => try initializer_resource_kind(file, ast, value),
+        ComptimeExpr(comptime_expr_node) => try initializer_resource_kind(file, ast, value),
+        Block(block) => try initializer_resource_kind(file, ast, value),
+        If(if_node) => try initializer_resource_kind(file, ast, value),
+        Let(let_node) => try initializer_resource_kind(file, ast, value),
+        Assign(assign_node) => try initializer_resource_kind(file, ast, value),
+        Return(return_node) => try initializer_resource_kind(file, ast, value),
+        Defer(defer_node) => try initializer_resource_kind(file, ast, value),
+        ExprStmt(expr_stmt) => try initializer_resource_kind(file, ast, value),
+        While(while_node) => try initializer_resource_kind(file, ast, value),
+        For(for_node) => try initializer_resource_kind(file, ast, value),
+        Break(break_node) => try initializer_resource_kind(file, ast, value),
+        Continue(continue_node) => try initializer_resource_kind(file, ast, value),
+        ImportDecl(import_decl) => try initializer_resource_kind(file, ast, value),
+        Param(param_node) => try initializer_resource_kind(file, ast, value),
+        Field(field_node) => try initializer_resource_kind(file, ast, value),
+        StructDecl(struct_decl) => try initializer_resource_kind(file, ast, value),
+        EnumDecl(enum_decl) => try initializer_resource_kind(file, ast, value),
+        UnionDecl(union_decl) => try initializer_resource_kind(file, ast, value),
+        UnionVariant(union_variant) => try initializer_resource_kind(file, ast, value),
+        Match(match_node) => try initializer_resource_kind(file, ast, value),
+        MatchArm(match_arm) => try initializer_resource_kind(file, ast, value),
+        Unsafe(unsafe_node) => try initializer_resource_kind(file, ast, value),
+        ComptimeIf(comptime_if_node) => try initializer_resource_kind(file, ast, value),
+    };
+}
+
+fn initializer_text_is_record_literal(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> bool {
+    let text = ast_node_text(file, ast, value);
+    return !std::mem::starts_with(text, "{") and bytes_contains(text, "{");
+}
+
 fn check_source_summary(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
     typed: types::TypeSummary
 ) -> !OwnershipSummary {
-    var summary = ownership_summary(typed.symbols, typed.typed_nodes, 0, 0);
+    var summary = ownership_summary(typed.symbols, typed.typed_nodes, 0, typed.diagnostics);
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
-        if file.kind == source::SourceKind::Selfhost {
+        if source::is_frontend_source(file.kind) {
             summary = merge_ownership_summaries(
                 summary,
                 try check_file_ownership_ast(allocator, file)
@@ -154,7 +860,7 @@ fn first_checked_module(files: &std::array::Array<source::SourceFile>) -> !Check
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
-        if file.kind == source::SourceKind::Selfhost {
+        if source::is_frontend_source(file.kind) {
             return CheckedModuleRef {
                 source_id: file.id,
                 module: file.module,
@@ -647,51 +1353,51 @@ fn function_body_statements(
     body: std::kizu::ast::NodeId
 ) -> std::kizu::ast::ChildRange {
     let node = ast.get(body);
-    match node.data {
-        Block(block) => return block.statements;,
-        Program(program) => return empty_child_range();,
-        Empty => return empty_child_range();,
-        ImportDecl(import_decl) => return empty_child_range();,
-        StructDecl(struct_decl) => return empty_child_range();,
-        EnumDecl(enum_decl) => return empty_child_range();,
-        UnionDecl(union_decl) => return empty_child_range();,
-        FnDecl(fn_decl) => return empty_child_range();,
-        Int(int_node) => return empty_child_range();,
-        String(string_node) => return empty_child_range();,
-        TypeName(type_name) => return empty_child_range();,
-        Var(var_node) => return empty_child_range();,
-        Bool(bool_node) => return empty_child_range();,
-        Prefix(prefix_node) => return empty_child_range();,
-        Binary(binary) => return empty_child_range();,
-        FieldExpr(field_expr_node) => return empty_child_range();,
-        DerefExpr(deref_expr_node) => return empty_child_range();,
-        Call(call_node) => return empty_child_range();,
-        TypeApplyExpr(type_apply) => return empty_child_range();,
-        CastExpr(cast_expr) => return empty_child_range();,
-        IndexExpr(index_expr) => return empty_child_range();,
-        StructLiteralExpr(struct_literal) => return empty_child_range();,
-        StructFieldInit(struct_field_init) => return empty_child_range();,
-        ArenaNewExpr(arena_new) => return empty_child_range();,
-        TryExpr(try_expr_node) => return empty_child_range();,
-        ComptimeExpr(comptime_expr_node) => return empty_child_range();,
-        If(if_node) => return empty_child_range();,
-        Let(let_node) => return empty_child_range();,
-        Assign(assign_node) => return empty_child_range();,
-        Return(return_node) => return empty_child_range();,
-        Defer(defer_node) => return empty_child_range();,
-        ExprStmt(expr_stmt) => return empty_child_range();,
-        While(while_node) => return empty_child_range();,
-        For(for_node) => return empty_child_range();,
-        Break(break_node) => return empty_child_range();,
-        Continue(continue_node) => return empty_child_range();,
-        Param(param_node) => return empty_child_range();,
-        Field(field_node) => return empty_child_range();,
-        UnionVariant(union_variant) => return empty_child_range();,
-        Match(match_node) => return empty_child_range();,
-        MatchArm(match_arm) => return empty_child_range();,
-        Unsafe(unsafe_node) => return empty_child_range();,
-        ComptimeIf(comptime_if_node) => return empty_child_range();,
-    }
+    return match node.data {
+        Block(block) => block.statements,
+        Program(program) => empty_child_range(),
+        Empty => empty_child_range(),
+        ImportDecl(import_decl) => empty_child_range(),
+        StructDecl(struct_decl) => empty_child_range(),
+        EnumDecl(enum_decl) => empty_child_range(),
+        UnionDecl(union_decl) => empty_child_range(),
+        FnDecl(fn_decl) => empty_child_range(),
+        Int(int_node) => empty_child_range(),
+        String(string_node) => empty_child_range(),
+        TypeName(type_name) => empty_child_range(),
+        Var(var_node) => empty_child_range(),
+        Bool(bool_node) => empty_child_range(),
+        Prefix(prefix_node) => empty_child_range(),
+        Binary(binary) => empty_child_range(),
+        FieldExpr(field_expr_node) => empty_child_range(),
+        DerefExpr(deref_expr_node) => empty_child_range(),
+        Call(call_node) => empty_child_range(),
+        TypeApplyExpr(type_apply) => empty_child_range(),
+        CastExpr(cast_expr) => empty_child_range(),
+        IndexExpr(index_expr) => empty_child_range(),
+        StructLiteralExpr(struct_literal) => empty_child_range(),
+        StructFieldInit(struct_field_init) => empty_child_range(),
+        ArenaNewExpr(arena_new) => empty_child_range(),
+        TryExpr(try_expr_node) => empty_child_range(),
+        ComptimeExpr(comptime_expr_node) => empty_child_range(),
+        If(if_node) => empty_child_range(),
+        Let(let_node) => empty_child_range(),
+        Assign(assign_node) => empty_child_range(),
+        Return(return_node) => empty_child_range(),
+        Defer(defer_node) => empty_child_range(),
+        ExprStmt(expr_stmt) => empty_child_range(),
+        While(while_node) => empty_child_range(),
+        For(for_node) => empty_child_range(),
+        Break(break_node) => empty_child_range(),
+        Continue(continue_node) => empty_child_range(),
+        Param(param_node) => empty_child_range(),
+        Field(field_node) => empty_child_range(),
+        UnionVariant(union_variant) => empty_child_range(),
+        Match(match_node) => empty_child_range(),
+        MatchArm(match_arm) => empty_child_range(),
+        Unsafe(unsafe_node) => empty_child_range(),
+        ComptimeIf(comptime_if_node) => empty_child_range(),
+    };
 }
 
 fn empty_child_range() -> std::kizu::ast::ChildRange {
@@ -700,51 +1406,51 @@ fn empty_child_range() -> std::kizu::ast::ChildRange {
 
 fn statement_is_let(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
     let node = ast.get(node_id);
-    match node.data {
-        Let(let_node) => return true;,
-        Program(program) => return false;,
-        Empty => return false;,
-        ImportDecl(import_decl) => return false;,
-        StructDecl(struct_decl) => return false;,
-        EnumDecl(enum_decl) => return false;,
-        UnionDecl(union_decl) => return false;,
-        FnDecl(fn_decl) => return false;,
-        Int(int_node) => return false;,
-        String(string_node) => return false;,
-        TypeName(type_name) => return false;,
-        Var(var_node) => return false;,
-        Bool(bool_node) => return false;,
-        Prefix(prefix_node) => return false;,
-        Binary(binary) => return false;,
-        FieldExpr(field_expr_node) => return false;,
-        DerefExpr(deref_expr_node) => return false;,
-        Call(call_node) => return false;,
-        TypeApplyExpr(type_apply) => return false;,
-        CastExpr(cast_expr) => return false;,
-        IndexExpr(index_expr) => return false;,
-        StructLiteralExpr(struct_literal) => return false;,
-        StructFieldInit(struct_field_init) => return false;,
-        ArenaNewExpr(arena_new) => return false;,
-        TryExpr(try_expr_node) => return false;,
-        ComptimeExpr(comptime_expr_node) => return false;,
-        Block(block) => return false;,
-        If(if_node) => return false;,
-        Assign(assign_node) => return false;,
-        Return(return_node) => return false;,
-        Defer(defer_node) => return false;,
-        ExprStmt(expr_stmt) => return false;,
-        While(while_node) => return false;,
-        For(for_node) => return false;,
-        Break(break_node) => return false;,
-        Continue(continue_node) => return false;,
-        Param(param_node) => return false;,
-        Field(field_node) => return false;,
-        UnionVariant(union_variant) => return false;,
-        Match(match_node) => return false;,
-        MatchArm(match_arm) => return false;,
-        Unsafe(unsafe_node) => return false;,
-        ComptimeIf(comptime_if_node) => return false;,
-    }
+    return match node.data {
+        Let(let_node) => true,
+        Program(program) => false,
+        Empty => false,
+        ImportDecl(import_decl) => false,
+        StructDecl(struct_decl) => false,
+        EnumDecl(enum_decl) => false,
+        UnionDecl(union_decl) => false,
+        FnDecl(fn_decl) => false,
+        Int(int_node) => false,
+        String(string_node) => false,
+        TypeName(type_name) => false,
+        Var(var_node) => false,
+        Bool(bool_node) => false,
+        Prefix(prefix_node) => false,
+        Binary(binary) => false,
+        FieldExpr(field_expr_node) => false,
+        DerefExpr(deref_expr_node) => false,
+        Call(call_node) => false,
+        TypeApplyExpr(type_apply) => false,
+        CastExpr(cast_expr) => false,
+        IndexExpr(index_expr) => false,
+        StructLiteralExpr(struct_literal) => false,
+        StructFieldInit(struct_field_init) => false,
+        ArenaNewExpr(arena_new) => false,
+        TryExpr(try_expr_node) => false,
+        ComptimeExpr(comptime_expr_node) => false,
+        Block(block) => false,
+        If(if_node) => false,
+        Assign(assign_node) => false,
+        Return(return_node) => false,
+        Defer(defer_node) => false,
+        ExprStmt(expr_stmt) => false,
+        While(while_node) => false,
+        For(for_node) => false,
+        Break(break_node) => false,
+        Continue(continue_node) => false,
+        Param(param_node) => false,
+        Field(field_node) => false,
+        UnionVariant(union_variant) => false,
+        Match(match_node) => false,
+        MatchArm(match_arm) => false,
+        Unsafe(unsafe_node) => false,
+        ComptimeIf(comptime_if_node) => false,
+    };
 }
 
 fn statement_let_name(
@@ -752,51 +1458,51 @@ fn statement_let_name(
     node_id: std::kizu::ast::NodeId
 ) -> std::kizu::ast::NodeId {
     let node = ast.get(node_id);
-    match node.data {
-        Let(let_node) => return let_node.name;,
-        Program(program) => return node_id;,
-        Empty => return node_id;,
-        ImportDecl(import_decl) => return node_id;,
-        StructDecl(struct_decl) => return node_id;,
-        EnumDecl(enum_decl) => return node_id;,
-        UnionDecl(union_decl) => return node_id;,
-        FnDecl(fn_decl) => return node_id;,
-        Int(int_node) => return node_id;,
-        String(string_node) => return node_id;,
-        TypeName(type_name) => return node_id;,
-        Var(var_node) => return node_id;,
-        Bool(bool_node) => return node_id;,
-        Prefix(prefix_node) => return node_id;,
-        Binary(binary) => return node_id;,
-        FieldExpr(field_expr_node) => return node_id;,
-        DerefExpr(deref_expr_node) => return node_id;,
-        Call(call_node) => return node_id;,
-        TypeApplyExpr(type_apply) => return node_id;,
-        CastExpr(cast_expr) => return node_id;,
-        IndexExpr(index_expr) => return node_id;,
-        StructLiteralExpr(struct_literal) => return node_id;,
-        StructFieldInit(struct_field_init) => return node_id;,
-        ArenaNewExpr(arena_new) => return node_id;,
-        TryExpr(try_expr_node) => return node_id;,
-        ComptimeExpr(comptime_expr_node) => return node_id;,
-        Block(block) => return node_id;,
-        If(if_node) => return node_id;,
-        Assign(assign_node) => return node_id;,
-        Return(return_node) => return node_id;,
-        Defer(defer_node) => return node_id;,
-        ExprStmt(expr_stmt) => return node_id;,
-        While(while_node) => return node_id;,
-        For(for_node) => return node_id;,
-        Break(break_node) => return node_id;,
-        Continue(continue_node) => return node_id;,
-        Param(param_node) => return node_id;,
-        Field(field_node) => return node_id;,
-        UnionVariant(union_variant) => return node_id;,
-        Match(match_node) => return node_id;,
-        MatchArm(match_arm) => return node_id;,
-        Unsafe(unsafe_node) => return node_id;,
-        ComptimeIf(comptime_if_node) => return node_id;,
-    }
+    return match node.data {
+        Let(let_node) => let_node.name,
+        Program(program) => node_id,
+        Empty => node_id,
+        ImportDecl(import_decl) => node_id,
+        StructDecl(struct_decl) => node_id,
+        EnumDecl(enum_decl) => node_id,
+        UnionDecl(union_decl) => node_id,
+        FnDecl(fn_decl) => node_id,
+        Int(int_node) => node_id,
+        String(string_node) => node_id,
+        TypeName(type_name) => node_id,
+        Var(var_node) => node_id,
+        Bool(bool_node) => node_id,
+        Prefix(prefix_node) => node_id,
+        Binary(binary) => node_id,
+        FieldExpr(field_expr_node) => node_id,
+        DerefExpr(deref_expr_node) => node_id,
+        Call(call_node) => node_id,
+        TypeApplyExpr(type_apply) => node_id,
+        CastExpr(cast_expr) => node_id,
+        IndexExpr(index_expr) => node_id,
+        StructLiteralExpr(struct_literal) => node_id,
+        StructFieldInit(struct_field_init) => node_id,
+        ArenaNewExpr(arena_new) => node_id,
+        TryExpr(try_expr_node) => node_id,
+        ComptimeExpr(comptime_expr_node) => node_id,
+        Block(block) => node_id,
+        If(if_node) => node_id,
+        Assign(assign_node) => node_id,
+        Return(return_node) => node_id,
+        Defer(defer_node) => node_id,
+        ExprStmt(expr_stmt) => node_id,
+        While(while_node) => node_id,
+        For(for_node) => node_id,
+        Break(break_node) => node_id,
+        Continue(continue_node) => node_id,
+        Param(param_node) => node_id,
+        Field(field_node) => node_id,
+        UnionVariant(union_variant) => node_id,
+        Match(match_node) => node_id,
+        MatchArm(match_arm) => node_id,
+        Unsafe(unsafe_node) => node_id,
+        ComptimeIf(comptime_if_node) => node_id,
+    };
 }
 
 fn statement_let_value(
@@ -804,51 +1510,51 @@ fn statement_let_value(
     node_id: std::kizu::ast::NodeId
 ) -> std::kizu::ast::NodeId {
     let node = ast.get(node_id);
-    match node.data {
-        Let(let_node) => return let_node.value;,
-        Program(program) => return node_id;,
-        Empty => return node_id;,
-        ImportDecl(import_decl) => return node_id;,
-        StructDecl(struct_decl) => return node_id;,
-        EnumDecl(enum_decl) => return node_id;,
-        UnionDecl(union_decl) => return node_id;,
-        FnDecl(fn_decl) => return node_id;,
-        Int(int_node) => return node_id;,
-        String(string_node) => return node_id;,
-        TypeName(type_name) => return node_id;,
-        Var(var_node) => return node_id;,
-        Bool(bool_node) => return node_id;,
-        Prefix(prefix_node) => return node_id;,
-        Binary(binary) => return node_id;,
-        FieldExpr(field_expr_node) => return node_id;,
-        DerefExpr(deref_expr_node) => return node_id;,
-        Call(call_node) => return node_id;,
-        TypeApplyExpr(type_apply) => return node_id;,
-        CastExpr(cast_expr) => return node_id;,
-        IndexExpr(index_expr) => return node_id;,
-        StructLiteralExpr(struct_literal) => return node_id;,
-        StructFieldInit(struct_field_init) => return node_id;,
-        ArenaNewExpr(arena_new) => return node_id;,
-        TryExpr(try_expr_node) => return node_id;,
-        ComptimeExpr(comptime_expr_node) => return node_id;,
-        Block(block) => return node_id;,
-        If(if_node) => return node_id;,
-        Assign(assign_node) => return node_id;,
-        Return(return_node) => return node_id;,
-        Defer(defer_node) => return node_id;,
-        ExprStmt(expr_stmt) => return node_id;,
-        While(while_node) => return node_id;,
-        For(for_node) => return node_id;,
-        Break(break_node) => return node_id;,
-        Continue(continue_node) => return node_id;,
-        Param(param_node) => return node_id;,
-        Field(field_node) => return node_id;,
-        UnionVariant(union_variant) => return node_id;,
-        Match(match_node) => return node_id;,
-        MatchArm(match_arm) => return node_id;,
-        Unsafe(unsafe_node) => return node_id;,
-        ComptimeIf(comptime_if_node) => return node_id;,
-    }
+    return match node.data {
+        Let(let_node) => let_node.value,
+        Program(program) => node_id,
+        Empty => node_id,
+        ImportDecl(import_decl) => node_id,
+        StructDecl(struct_decl) => node_id,
+        EnumDecl(enum_decl) => node_id,
+        UnionDecl(union_decl) => node_id,
+        FnDecl(fn_decl) => node_id,
+        Int(int_node) => node_id,
+        String(string_node) => node_id,
+        TypeName(type_name) => node_id,
+        Var(var_node) => node_id,
+        Bool(bool_node) => node_id,
+        Prefix(prefix_node) => node_id,
+        Binary(binary) => node_id,
+        FieldExpr(field_expr_node) => node_id,
+        DerefExpr(deref_expr_node) => node_id,
+        Call(call_node) => node_id,
+        TypeApplyExpr(type_apply) => node_id,
+        CastExpr(cast_expr) => node_id,
+        IndexExpr(index_expr) => node_id,
+        StructLiteralExpr(struct_literal) => node_id,
+        StructFieldInit(struct_field_init) => node_id,
+        ArenaNewExpr(arena_new) => node_id,
+        TryExpr(try_expr_node) => node_id,
+        ComptimeExpr(comptime_expr_node) => node_id,
+        Block(block) => node_id,
+        If(if_node) => node_id,
+        Assign(assign_node) => node_id,
+        Return(return_node) => node_id,
+        Defer(defer_node) => node_id,
+        ExprStmt(expr_stmt) => node_id,
+        While(while_node) => node_id,
+        For(for_node) => node_id,
+        Break(break_node) => node_id,
+        Continue(continue_node) => node_id,
+        Param(param_node) => node_id,
+        Field(field_node) => node_id,
+        UnionVariant(union_variant) => node_id,
+        Match(match_node) => node_id,
+        MatchArm(match_arm) => node_id,
+        Unsafe(unsafe_node) => node_id,
+        ComptimeIf(comptime_if_node) => node_id,
+    };
 }
 
 fn check_function_params(
@@ -1673,51 +2379,51 @@ fn initializer_borrow_mutable(
     value: std::kizu::ast::NodeId
 ) -> bool {
     let node = ast.get(value);
-    match node.data {
-        Prefix(prefix_node) => return prefix_node.op == std::kizu::ast::prefix_mut_borrow();,
-        TryExpr(try_expr_node) => return initializer_borrow_mutable(ast, try_expr_node.value);,
-        Program(program) => return false;,
-        FnDecl(fn_decl) => return false;,
-        Empty => return false;,
-        Int(int_node) => return false;,
-        String(string_node) => return false;,
-        TypeName(type_name) => return false;,
-        Var(var_node) => return false;,
-        Bool(bool_node) => return false;,
-        Binary(binary) => return false;,
-        FieldExpr(field_expr_node) => return false;,
-        DerefExpr(deref_expr_node) => return false;,
-        Call(call_node) => return false;,
-        TypeApplyExpr(type_apply) => return false;,
-        CastExpr(cast_expr) => return false;,
-        IndexExpr(index_expr) => return false;,
-        StructLiteralExpr(struct_literal) => return false;,
-        StructFieldInit(struct_field_init) => return false;,
-        ArenaNewExpr(arena_new) => return false;,
-        ComptimeExpr(comptime_expr_node) => return false;,
-        Block(block) => return false;,
-        If(if_node) => return false;,
-        Let(let_node) => return false;,
-        Assign(assign_node) => return false;,
-        Return(return_node) => return false;,
-        Defer(defer_node) => return false;,
-        ExprStmt(expr_stmt) => return false;,
-        While(while_node) => return false;,
-        For(for_node) => return false;,
-        Break(break_node) => return false;,
-        Continue(continue_node) => return false;,
-        ImportDecl(import_decl) => return false;,
-        Param(param_node) => return false;,
-        Field(field_node) => return false;,
-        StructDecl(struct_decl) => return false;,
-        EnumDecl(enum_decl) => return false;,
-        UnionDecl(union_decl) => return false;,
-        UnionVariant(union_variant) => return false;,
-        Match(match_node) => return false;,
-        MatchArm(match_arm) => return false;,
-        Unsafe(unsafe_node) => return false;,
-        ComptimeIf(comptime_if_node) => return false;,
-    }
+    return match node.data {
+        Prefix(prefix_node) => prefix_node.op == std::kizu::ast::prefix_mut_borrow(),
+        TryExpr(try_expr_node) => initializer_borrow_mutable(ast, try_expr_node.value),
+        Program(program) => false,
+        FnDecl(fn_decl) => false,
+        Empty => false,
+        Int(int_node) => false,
+        String(string_node) => false,
+        TypeName(type_name) => false,
+        Var(var_node) => false,
+        Bool(bool_node) => false,
+        Binary(binary) => false,
+        FieldExpr(field_expr_node) => false,
+        DerefExpr(deref_expr_node) => false,
+        Call(call_node) => false,
+        TypeApplyExpr(type_apply) => false,
+        CastExpr(cast_expr) => false,
+        IndexExpr(index_expr) => false,
+        StructLiteralExpr(struct_literal) => false,
+        StructFieldInit(struct_field_init) => false,
+        ArenaNewExpr(arena_new) => false,
+        ComptimeExpr(comptime_expr_node) => false,
+        Block(block) => false,
+        If(if_node) => false,
+        Let(let_node) => false,
+        Assign(assign_node) => false,
+        Return(return_node) => false,
+        Defer(defer_node) => false,
+        ExprStmt(expr_stmt) => false,
+        While(while_node) => false,
+        For(for_node) => false,
+        Break(break_node) => false,
+        Continue(continue_node) => false,
+        ImportDecl(import_decl) => false,
+        Param(param_node) => false,
+        Field(field_node) => false,
+        StructDecl(struct_decl) => false,
+        EnumDecl(enum_decl) => false,
+        UnionDecl(union_decl) => false,
+        UnionVariant(union_variant) => false,
+        Match(match_node) => false,
+        MatchArm(match_arm) => false,
+        Unsafe(unsafe_node) => false,
+        ComptimeIf(comptime_if_node) => false,
+    };
 }
 
 fn is_as_bytes_method(
@@ -1733,6 +2439,9 @@ fn is_as_bytes_method(
 }
 
 fn resource_kind_moves(kind: ResourceKind) -> bool {
+    if kind == ResourceKind::Record {
+        return true;
+    }
     if kind == ResourceKind::Array or kind == ResourceKind::Map or kind == ResourceKind::String {
         return true;
     }
@@ -1991,13 +2700,6 @@ fn ownership_summary(
         borrows: borrows,
         errors: errors
     };
-}
-
-fn token_text(
-    source_text: []const u8,
-    token: std::kizu::lexer::Token
-) -> []const u8 {
-    return source_text[token.start..token.end];
 }
 
 fn ast_node_text(

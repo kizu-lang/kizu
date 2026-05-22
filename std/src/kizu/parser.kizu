@@ -149,10 +149,10 @@ fn parse_decl_with_visibility(
         Struct => return std::kizu::parser::parse_struct_decl(allocator, ast, text, token, public);,
         Enum => return std::kizu::parser::parse_enum_decl(allocator, ast, text, token, public);,
         Union => return std::kizu::parser::parse_union_decl(allocator, ast, text, token, public);,
+        Ident => return std::kizu::parser::parse_ident_top_level_decl(ast, text, token);,
         Eof => return error("expected declaration");,
         Return => return error("expected declaration");,
         Defer => return error("expected declaration");,
-        Ident => return error("expected declaration");,
         Lifetime => return error("expected declaration");,
         Number => return error("expected declaration");,
         String => return error("expected declaration");,
@@ -203,6 +203,66 @@ fn parse_decl_with_visibility(
         Range => return error("expected declaration");,
         Pipe => return error("expected declaration");,
 }
+}
+
+fn parse_ident_top_level_decl(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    if try std::kizu::parser::is_token_text(text, token, "impl") {
+        return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
+    }
+    if try std::kizu::parser::is_token_text(text, token, "contract") {
+        return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
+    }
+    return error("expected declaration");
+}
+
+fn parse_skipped_top_level_block(
+    ast: std::kizu::ast::Ast,
+    text: []const u8,
+    token: std::kizu::lexer::Token
+) -> !ParseNode {
+    var current = std::kizu::lexer::next_token(text, token);
+    while !std::kizu::parser::is_left_brace_token(current) {
+        if std::kizu::parser::is_eof_token(current) {
+            return error("expected left brace");
+        }
+        current = std::kizu::lexer::next_token(text, current);
+    }
+    let close = try std::kizu::parser::skip_balanced_block(text, current);
+    return std::kizu::parser::parse_node(
+        ast.add_empty(token.start),
+        std::kizu::lexer::next_token(text, close)
+    );
+}
+
+fn skip_balanced_block(
+    text: []const u8,
+    open: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    var depth = 1;
+    var token = std::kizu::lexer::next_token(text, open);
+    while depth > 0 {
+        var handled = false;
+        if std::kizu::parser::is_left_brace_token(token) {
+            depth = depth + 1;
+            handled = true;
+        }
+        if !handled and std::kizu::parser::is_right_brace_token(token) {
+            depth = depth - 1;
+            if depth == 0 {
+                return token;
+            }
+            handled = true;
+        }
+        if !handled and std::kizu::parser::is_eof_token(token) {
+            return error("expected right brace");
+        }
+        token = std::kizu::lexer::next_token(text, token);
+    }
+    return error("expected right brace");
 }
 
 fn parse_public_decl(
@@ -2411,6 +2471,20 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
     }
 }
 
+fn is_left_brace_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        LBrace => true,
+        _ => false,
+    };
+}
+
+fn is_right_brace_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        RBrace => true,
+        _ => false,
+    };
+}
+
 fn is_block_close_token(token: std::kizu::lexer::Token) -> bool {
     match token.kind {
         Import => return false;,
@@ -3396,7 +3470,7 @@ fn parse_primary(
         For => return error("expected expression");,
         Break => return error("expected expression");,
         Continue => return error("expected expression");,
-        Match => return error("expected expression");,
+        Match => return std::kizu::parser::parse_match(allocator, ast, text, token);,
         Unsafe => return error("expected expression");,
         And => return error("expected expression");,
         Or => return error("expected expression");,

@@ -20,9 +20,27 @@ import (
 const (
 	parserParityExamplesRoot = "../../examples"
 	parserParitySelfhostRoot = "../../selfhost"
+	parserParityStdRoot      = "../../std"
 	parserParityCaseStart    = "@@KIZU_PARSER_PARITY_CASE@@"
 	parserParityCaseEnd      = "@@KIZU_PARSER_PARITY_END@@"
 )
+
+var parserParityFrontendStdPaths = []string{
+	"src/mem.kizu",
+	"src/array.kizu",
+	"src/string.kizu",
+	"src/map.kizu",
+	"src/fmt.kizu",
+	"src/testing.kizu",
+	"src/fs.kizu",
+	"src/path.kizu",
+	"src/io.kizu",
+	"src/process.kizu",
+	"src/kizu/ast.kizu",
+	"src/kizu/lexer.kizu",
+	"src/kizu/parser.kizu",
+	"src/kizu/diagnostic.kizu",
+}
 
 const stdKizuParserParityHarness = `
 fn run_case(allocator: Allocator, name: []const u8, text: []const u8) -> !void {
@@ -664,6 +682,13 @@ func TestStdKizuParserParitySelfhostPackage(t *testing.T) {
 	t.Logf("selfhost sources compared=%d", len(cases))
 }
 
+// TestStdKizuParserParsesFrontendStdSources gates std sources parsed by the selfhost frontend.
+func TestStdKizuParserParsesFrontendStdSources(t *testing.T) {
+	cases := collectParserFrontendStdSources(t)
+	runStdKizuParserParityHarness(t, cases)
+	t.Logf("frontend std sources parsed=%d", len(cases))
+}
+
 // collectParserParityExamples finds examples supported by the current std parser subset.
 func collectParserParityExamples(t *testing.T) ([]parserParityCase, parserParityStats) {
 	t.Helper()
@@ -738,6 +763,25 @@ func collectParserParitySelfhostSources(t *testing.T) []parserParityCase {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
+	return cases
+}
+
+// collectParserFrontendStdSources returns the std files loaded by source::load_file_sources.
+func collectParserFrontendStdSources(t *testing.T) []parserParityCase {
+	t.Helper()
+	cases := make([]parserParityCase, 0, len(parserParityFrontendStdPaths))
+	for _, rel := range parserParityFrontendStdPaths {
+		path := filepath.Join(parserParityStdRoot, rel)
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases = append(cases, parserParityCase{
+			name:   parserParityCaseName(parserParityStdRoot, "std", path),
+			source: string(source),
+		})
 	}
 	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
 	return cases
@@ -929,6 +973,11 @@ func parserParityExpressionSeedCases() []parserParityCase {
 		{
 			name:   "seed/fn_arena_type_apply_call",
 			source: "fn main() { let nodes = std::arena::Arena<Node>(allocator); }",
+		},
+		{
+			name: "seed/fn_match_expression",
+			source: "fn main() { let color = Color::Green; " +
+				`let name = match color { Red => "red", Green => "green" }; }`,
 		},
 	}
 }
@@ -1574,7 +1623,7 @@ func summarizeExprSubset(expr kizuast.Expression) ([]string, string) {
 	case *kizuast.IfStmt:
 		return nil, "non-selfhost if expression outside std parser subset"
 	case *kizuast.MatchStmt:
-		return nil, "non-selfhost match expression outside std parser subset"
+		return summarizeMatchSubset(node)
 	default:
 		return summarizePrimarySubset(expr)
 	}

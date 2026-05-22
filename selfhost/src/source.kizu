@@ -1,4 +1,5 @@
 pub enum SourceKind {
+    Manifest,
     User,
     Std,
     Selfhost,
@@ -27,7 +28,7 @@ pub fn load_selfhost_package(
     root: []const u8
 ) -> !PackageSummary {
     var files = try load_selfhost_sources(allocator, io, root);
-    let manifest_sources = try count_kind(files, SourceKind::User);
+    let manifest_sources = try count_kind(files, SourceKind::Manifest);
     let selfhost_sources = try count_kind(files, SourceKind::Selfhost);
     let std_sources = try count_kind(files, SourceKind::Std);
     let summary = summarize(
@@ -59,7 +60,7 @@ pub fn load_selfhost_sources(
     if !valid_manifest(manifest_text) {
         return error("invalid manifest");
     }
-    try files.append(source_file(0, SourceKind::User, "manifest", "selfhost/kizu.toml", manifest_text));
+    try files.append(source_file(0, SourceKind::Manifest, "manifest", "selfhost/kizu.toml", manifest_text));
     manifest_path.deinit();
     var next_id = 1;
 
@@ -83,31 +84,24 @@ pub fn load_selfhost_sources(
     }
     entries.deinit();
 
-    try append_std_source(files, io, next_id, "mem", "std/src/mem.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "array", "std/src/array.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "string", "std/src/string.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "map", "std/src/map.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "testing", "std/src/testing.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "fs", "std/src/fs.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "path", "std/src/path.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "io", "std/src/io.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "process", "std/src/process.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "kizu::ast", "std/src/kizu/ast.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "kizu::lexer", "std/src/kizu/lexer.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "kizu::parser", "std/src/kizu/parser.kizu");
-    next_id = next_id + 1;
-    try append_std_source(files, io, next_id, "kizu::diagnostic", "std/src/kizu/diagnostic.kizu");
+    next_id = try append_frontend_std_sources(files, io, next_id);
+    return files;
+}
+
+pub fn load_file_sources(
+    allocator: Allocator,
+    io: Io,
+    path: []const u8,
+    text: []const u8
+) -> !std::array::Array<SourceFile> {
+    var files = std::array::Array<SourceFile>(allocator);
+    let base = std::path::basename(path);
+    let module = module_name(base);
+    if std::mem::len(module) < 1 {
+        return error("invalid module");
+    }
+    try files.append(source_file(0, SourceKind::User, module, path, text));
+    try append_frontend_std_sources(files, io, 1);
     return files;
 }
 
@@ -143,6 +137,14 @@ pub fn count_kind(
         index = index + 1;
     }
     return count;
+}
+
+pub fn is_source_code(kind: SourceKind) -> bool {
+    return kind != SourceKind::Manifest;
+}
+
+pub fn is_frontend_source(kind: SourceKind) -> bool {
+    return kind == SourceKind::User or kind == SourceKind::Selfhost;
 }
 
 pub fn span(
@@ -241,6 +243,43 @@ fn append_std_source(
     let text = try std::fs::read_file(io, path);
     try files.append(source_file(id, SourceKind::Std, module, path, text));
     return;
+}
+
+fn append_frontend_std_sources(
+    files: &mut std::array::Array<SourceFile>,
+    io: Io,
+    next_id: i64
+) -> !i64 {
+    var id = next_id;
+    try append_std_source(files, io, id, "mem", "std/src/mem.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "array", "std/src/array.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "string", "std/src/string.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "map", "std/src/map.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "fmt", "std/src/fmt.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "testing", "std/src/testing.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "fs", "std/src/fs.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "path", "std/src/path.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "io", "std/src/io.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "process", "std/src/process.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "kizu::ast", "std/src/kizu/ast.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "kizu::lexer", "std/src/kizu/lexer.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "kizu::parser", "std/src/kizu/parser.kizu");
+    id = id + 1;
+    try append_std_source(files, io, id, "kizu::diagnostic", "std/src/kizu/diagnostic.kizu");
+    id = id + 1;
+    return id;
 }
 
 fn source_file(
