@@ -313,12 +313,12 @@ func typeParamText(lifetimes []string, types []string) string {
 func borrowPrefix(lifetime string, mutable bool) string {
 	if lifetime == "" {
 		if mutable {
-			return "&mut "
+			return "&var "
 		}
 		return "&"
 	}
 	if mutable {
-		return "&" + lifetime + " mut "
+		return "&" + lifetime + " var "
 	}
 	return "&" + lifetime + " "
 }

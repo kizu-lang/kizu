@@ -70,7 +70,7 @@ syntax does not introduce implicit pointer dereference.
 - Safe borrow code and raw pointer code have distinct surfaces:
 
 ```text
-&T / &mut T  -> borrow.field
+&T / &var T  -> borrow.field
 ptr<T>       -> unsafe { pointer.*.field }
 ```
 

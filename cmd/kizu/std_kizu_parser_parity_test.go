@@ -43,7 +43,7 @@ var parserParityFrontendStdPaths = []string{
 }
 
 const stdKizuParserParityHarness = `
-fn run_case(allocator: Allocator, name: []const u8, text: []const u8) -> !void {
+fn run_case(allocator: Allocator, name: []u8, text: []u8) -> !void {
     print("@@KIZU_PARSER_PARITY_CASE@@");
     print(name);
     let source = std::kizu::ast::source_file(name, text);
@@ -54,7 +54,7 @@ fn run_case(allocator: Allocator, name: []const u8, text: []const u8) -> !void {
 }
 
 fn dump_node(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     id: std::kizu::ast::NodeId
 ) -> !void {
@@ -116,7 +116,7 @@ fn dump_node(
 }
 
 fn dump_program(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     program: std::kizu::ast::ProgramNode
 ) -> !void {
@@ -126,7 +126,7 @@ fn dump_program(
 }
 
 fn dump_fn_decl(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     fn_decl: std::kizu::ast::FnDeclNode
 ) -> !void {
@@ -144,7 +144,7 @@ fn dump_fn_decl(
 }
 
 fn dump_param(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     param: std::kizu::ast::ParamNode
 ) -> !void {
@@ -160,7 +160,7 @@ fn dump_param(
 }
 
 fn dump_import_decl(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     import_decl: std::kizu::ast::ImportDeclNode
 ) -> !void {
@@ -170,7 +170,7 @@ fn dump_import_decl(
 }
 
 fn dump_field(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     field: std::kizu::ast::FieldNode
 ) -> !void {
@@ -182,7 +182,7 @@ fn dump_field(
 }
 
 fn dump_struct_decl(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     struct_decl: std::kizu::ast::StructDeclNode
 ) -> !void {
@@ -195,7 +195,7 @@ fn dump_struct_decl(
 }
 
 fn dump_enum_decl(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     enum_decl: std::kizu::ast::EnumDeclNode
 ) -> !void {
@@ -207,7 +207,7 @@ fn dump_enum_decl(
 }
 
 fn dump_union_decl(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     union_decl: std::kizu::ast::UnionDeclNode
 ) -> !void {
@@ -220,7 +220,7 @@ fn dump_union_decl(
 }
 
 fn dump_union_variant(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     union_variant: std::kizu::ast::UnionVariantNode
 ) -> !void {
@@ -249,7 +249,7 @@ fn dump_safety(unsafe_decl: bool) -> void {
 }
 
 fn dump_block(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     block: std::kizu::ast::BlockNode
 ) -> !void {
@@ -269,7 +269,7 @@ fn dump_bool(bool_node: std::kizu::ast::BoolNode) -> void {
 }
 
 fn dump_return(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     return_node: std::kizu::ast::ReturnNode
 ) -> !void {
@@ -279,7 +279,7 @@ fn dump_return(
 }
 
 fn dump_defer(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     defer_node: std::kizu::ast::DeferNode
 ) -> !void {
@@ -289,7 +289,7 @@ fn dump_defer(
 }
 
 fn dump_if(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     if_node: std::kizu::ast::IfNode
 ) -> !void {
@@ -301,7 +301,7 @@ fn dump_if(
 }
 
 fn dump_let(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     let_node: std::kizu::ast::LetNode
 ) -> !void {
@@ -317,7 +317,7 @@ fn dump_let(
 }
 
 fn dump_assign(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     assign_node: std::kizu::ast::AssignNode
 ) -> !void {
@@ -328,7 +328,7 @@ fn dump_assign(
 }
 
 fn dump_while(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     while_node: std::kizu::ast::WhileNode
 ) -> !void {
@@ -340,7 +340,7 @@ fn dump_while(
 }
 
 fn dump_for(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     for_node: std::kizu::ast::ForNode
 ) -> !void {
@@ -354,7 +354,7 @@ fn dump_for(
 }
 
 fn dump_break(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     break_node: std::kizu::ast::BreakNode
 ) -> !void {
@@ -364,7 +364,7 @@ fn dump_break(
 }
 
 fn dump_continue(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     continue_node: std::kizu::ast::ContinueNode
 ) -> !void {
@@ -374,7 +374,7 @@ fn dump_continue(
 }
 
 fn dump_binary(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     binary: std::kizu::ast::BinaryNode
 ) -> !void {
@@ -400,7 +400,7 @@ fn dump_binary(
 }
 
 fn dump_prefix(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     prefix: std::kizu::ast::PrefixNode
 ) -> !void {
@@ -416,7 +416,7 @@ fn dump_prefix(
 }
 
 fn dump_field_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     field_expr: std::kizu::ast::FieldExprNode
 ) -> !void {
@@ -432,7 +432,7 @@ fn dump_field_expr(
 }
 
 fn dump_deref_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     deref_expr: std::kizu::ast::DerefExprNode
 ) -> !void {
@@ -442,7 +442,7 @@ fn dump_deref_expr(
 }
 
 fn dump_call(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     call: std::kizu::ast::CallNode
 ) -> !void {
@@ -453,7 +453,7 @@ fn dump_call(
 }
 
 fn dump_type_apply_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     type_apply: std::kizu::ast::TypeApplyExprNode
 ) -> !void {
@@ -464,7 +464,7 @@ fn dump_type_apply_expr(
 }
 
 fn dump_cast_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     cast_expr: std::kizu::ast::CastExprNode
 ) -> !void {
@@ -475,7 +475,7 @@ fn dump_cast_expr(
 }
 
 fn dump_index_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     index_expr: std::kizu::ast::IndexExprNode
 ) -> !void {
@@ -492,7 +492,7 @@ fn dump_index_expr(
 }
 
 fn dump_struct_literal_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     struct_literal: std::kizu::ast::StructLiteralExprNode
 ) -> !void {
@@ -503,7 +503,7 @@ fn dump_struct_literal_expr(
 }
 
 fn dump_struct_field_init(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     struct_field_init: std::kizu::ast::StructFieldInitNode
 ) -> !void {
@@ -514,7 +514,7 @@ fn dump_struct_field_init(
 }
 
 fn dump_arena_new_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     arena_new: std::kizu::ast::ArenaNewExprNode
 ) -> !void {
@@ -525,7 +525,7 @@ fn dump_arena_new_expr(
 }
 
 fn dump_try_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     try_expr: std::kizu::ast::TryExprNode
 ) -> !void {
@@ -535,7 +535,7 @@ fn dump_try_expr(
 }
 
 fn dump_comptime_expr(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     comptime_expr: std::kizu::ast::ComptimeExprNode
 ) -> !void {
@@ -545,7 +545,7 @@ fn dump_comptime_expr(
 }
 
 fn dump_match(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     match_node: std::kizu::ast::MatchNode
 ) -> !void {
@@ -556,7 +556,7 @@ fn dump_match(
 }
 
 fn dump_match_arm(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     match_arm: std::kizu::ast::MatchArmNode
 ) -> !void {
@@ -568,7 +568,7 @@ fn dump_match_arm(
 }
 
 fn dump_unsafe(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     unsafe_node: std::kizu::ast::UnsafeNode
 ) -> !void {
@@ -578,7 +578,7 @@ fn dump_unsafe(
 }
 
 fn dump_comptime_if(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     comptime_if: std::kizu::ast::ComptimeIfNode
 ) -> !void {
@@ -590,7 +590,7 @@ fn dump_comptime_if(
 }
 
 fn dump_range(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     children: std::kizu::ast::ChildRange
 ) -> !void {
@@ -606,7 +606,7 @@ fn dump_range(
 }
 
 fn dump_expr_stmt(
-    source: []const u8,
+    source: []u8,
     ast: std::kizu::ast::Ast,
     expr_stmt: std::kizu::ast::ExprStmtNode
 ) -> !void {
@@ -616,8 +616,8 @@ fn dump_expr_stmt(
 }
 
 fn dump_leaf(
-    kind: []const u8,
-    source: []const u8,
+    kind: []u8,
+    source: []u8,
     span: &std::kizu::ast::Span
 ) -> !void {
     print(kind);
@@ -627,7 +627,7 @@ fn dump_leaf(
 }
 
 fn dump_string(
-    source: []const u8,
+    source: []u8,
     span: &std::kizu::ast::Span
 ) -> !void {
     print("String");
@@ -878,27 +878,27 @@ func parserParityFunctionSignatureSeedCases() []parserParityCase {
 		{name: "seed/fn_params_return", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
 		{name: "seed/fn_error_union_return", source: "fn main() -> !void {}"},
 		{name: "seed/fn_typed_error_union_return", source: "fn main() -> ConfigError!void {}"},
-		{name: "seed/fn_slice_param", source: "fn write(bytes: []const u8) {}"},
+		{name: "seed/fn_slice_param", source: "fn write(bytes: []u8) {}"},
 		{name: "seed/fn_borrow_param", source: "fn read(value: &i64) {}"},
-		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &mut i64) {}"},
+		{name: "seed/fn_mut_borrow_param", source: "fn fill(out: &var i64) {}"},
 		{name: "seed/fn_comptime_param", source: "fn scoped(comptime worker: Function) {}"},
 		{name: "seed/fn_type_params", source: "pub fn identity<T>(value: T) -> T { return value; }"},
 		{
 			name:   "seed/fn_slice_return",
-			source: "fn first(bytes: []const u8) -> []const u8 { return bytes; }",
+			source: "fn first(bytes: []u8) -> []u8 { return bytes; }",
 		},
 		{
 			name:   "seed/fn_borrow_return_provenance",
-			source: "fn first(bytes: []const u8) -> []const u8 borrows bytes { return bytes; }",
+			source: "fn first(bytes: []u8) -> []u8 borrows bytes { return bytes; }",
 		},
 		{
 			name:   "seed/fn_slice_borrow_param",
-			source: "fn show(bytes: &[]const u8) {}",
+			source: "fn show(bytes: &[]u8) {}",
 		},
 		{name: "seed/fn_namespace_type", source: "fn use(allocator: std::mem::Allocator) {}"},
 		{
 			name:   "seed/fn_generic_type",
-			source: "fn collect(items: std::array::Array<[]const u8>) {}",
+			source: "fn collect(items: std::array::Array<[]u8>) {}",
 		},
 	}
 }
@@ -988,11 +988,11 @@ func parserParityDeclarationSeedCases() []parserParityCase {
 		{name: "seed/import_decl", source: "import app::lexer;"},
 		{
 			name:   "seed/pub_struct_decl",
-			source: "pub struct User { pub name: []const u8, age: i64, }",
+			source: "pub struct User { pub name: []u8, age: i64, }",
 		},
 		{
 			name:   "seed/generic_struct_decl",
-			source: "struct Row<T> { data: []const T, }",
+			source: "struct Row<T> { data: []T, }",
 		},
 		{name: "seed/enum_decl", source: "enum Color { Red, Blue, }"},
 		{name: "seed/union_decl", source: "union Shape { Point, Circle(i64), }"},
@@ -1266,9 +1266,9 @@ func parserParityFieldTypeName(field kizuast.Field) string {
 	switch {
 	case field.MutBorrow:
 		if field.BorrowLifetime != "" {
-			return "&" + field.BorrowLifetime + " mut " + field.TypeName
+			return "&" + field.BorrowLifetime + " var " + field.TypeName
 		}
-		return "&mut " + field.TypeName
+		return "&var " + field.TypeName
 	case field.Borrow:
 		if field.BorrowLifetime != "" {
 			return "&" + field.BorrowLifetime + " " + field.TypeName
@@ -1354,9 +1354,9 @@ func parserParityParamTypeName(param kizuast.Param) string {
 	switch {
 	case param.MutBorrow:
 		if param.BorrowLifetime != "" {
-			return "&" + param.BorrowLifetime + " mut " + param.TypeName
+			return "&" + param.BorrowLifetime + " var " + param.TypeName
 		}
-		return "&mut " + param.TypeName
+		return "&var " + param.TypeName
 	case param.Borrow:
 		if param.BorrowLifetime != "" {
 			return "&" + param.BorrowLifetime + " " + param.TypeName
@@ -1704,7 +1704,7 @@ func parserParityPrefixOp(op string) (string, bool) {
 		return "Neg", true
 	case "&":
 		return "Borrow", true
-	case "&mut":
+	case "&var":
 		return "MutBorrow", true
 	default:
 		return "", false

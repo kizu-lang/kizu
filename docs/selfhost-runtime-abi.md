@@ -12,7 +12,7 @@ node-kind block
 node-kind diagnostic
 value-type i64
 value-type bool
-value-type []const u8
+value-type []u8
 value-type record
 value-type error-union
 value-type handle
@@ -92,7 +92,7 @@ resolved by host linker defaults.
 | `bool` | `i1` in SSA, zero-extended to `i8` only at runtime ABI boundaries | direct | none |
 | `i64` | `i64` | direct | none |
 | `u8` | `i8` | direct | none |
-| `[]const u8` | `%kizu.slice.u8 = type { ptr, i64 }` | passed and returned by value | borrowed; no cleanup |
+| `[]u8` | `%kizu.slice.u8 = type { ptr, i64 }` | passed and returned by value | borrowed; no cleanup |
 | selfhost record | `%kizu.record.<name> = type { <fields> }` | passed and returned by value | field-dependent |
 | `!T` | `%kizu.error.T = type { i1, T, %kizu.slice.u8 }` | passed and returned by value | field-dependent |
 | `std::arena::Handle<T>` | `%kizu.handle = type { ptr, i64 }` | passed and returned by value | copyable opaque ID |
@@ -129,7 +129,7 @@ Tagged-union payload storage is deferred to #495 unless #454 encounters a
 reachable union payload; in that case the payload shape is a blocker issue, not
 a silent fallback.
 
-Diagnostics use the same record rule. Diagnostic message text is `[]const u8`.
+Diagnostics use the same record rule. Diagnostic message text is `[]u8`.
 The renderer is outside this ABI; only the record layout and recoverable error
 boundary are specified here.
 
@@ -217,7 +217,7 @@ selfhost storage symbols are:
 | Array construction | `@kizu_rt_array_new` | token lists and AST child lists |
 | Array append | `@kizu_rt_array_append` | copies one lowered element into storage |
 | Array length | `@kizu_rt_array_len` | returns the checked element count |
-| Array borrowed view | `@kizu_rt_array_at` | returns `![]const u8` with a local read-only element view |
+| Array borrowed view | `@kizu_rt_array_at` | returns `![]u8` with a local read-only element view |
 | Array cleanup | `@kizu_rt_array_deinit` | releases owned array storage |
 | String construction | `@kizu_rt_string_new` | diagnostic and path buffers |
 | String append bytes | `@kizu_rt_string_append_bytes` | copies borrowed bytes |
@@ -226,7 +226,7 @@ selfhost storage symbols are:
 | String borrowed view | `@kizu_rt_string_as_bytes` | returns a local read-only byte view |
 | String cleanup | `@kizu_rt_string_deinit` | releases owned string storage |
 | Map construction | `@kizu_rt_map_new` | resolver, type, and ownership tables |
-| Map insert | `@kizu_rt_map_insert` | copies `[]const u8` key and copy value |
+| Map insert | `@kizu_rt_map_insert` | copies `[]u8` key and copy value |
 | Map contains | `@kizu_rt_map_contains` | checks key presence |
 | Map `i64` get | `@kizu_rt_map_get_i64` | returns copy payloads used by symbol tables |
 | Map cleanup | `@kizu_rt_map_deinit` | releases owned map storage |
@@ -248,7 +248,7 @@ For #575, Array storage is no longer a count-only smoke for the hosted runtime
 template. The runtime object stores allocator pointer, element byte buffer
 pointer, length, capacity, and element byte size. `append` copies exactly one
 copy-element payload whose byte length matches the Array element size, `at`
-returns a borrowed `[]const u8` view of the stored element bytes for in-bounds
+returns a borrowed `[]u8` view of the stored element bytes for in-bounds
 indexes, and returns the diagnostic `array index out of bounds` for invalid
 indexes. `deinit` releases both the element buffer and the Array object.
 Invalid element shape, null payload for positive element size, and
@@ -262,7 +262,7 @@ element`. The storage artifact metadata records
 For #574, owned String storage is no longer a length-only smoke. The runtime
 object stores allocator pointer, byte buffer pointer, byte length, and capacity.
 `append_bytes` and `append_byte` copy caller bytes into owned storage,
-`as_bytes` returns a borrowed `[]const u8` view of those stored bytes, and
+`as_bytes` returns a borrowed `[]u8` view of those stored bytes, and
 `deinit` releases both the byte buffer and the String object. `append_bytes`
 rejects negative lengths, positive lengths with null pointers, and length
 overflow with the diagnostic `invalid slice` before mutating the old buffer. The
@@ -272,7 +272,7 @@ storage artifact metadata records `string-storage byte-buffer`,
 `string-invalid-slice-diagnostic invalid slice`.
 
 For #576, Map storage is no longer a single found/value slot. The hosted
-runtime template implements the first bounded `Map<[]const u8, i64>` shape with
+runtime template implements the first bounded `Map<[]u8, i64>` shape with
 two owned key slots. `insert` copies key bytes into map-owned storage and stores
 the copy value, `contains` and `get_i64` compare key bytes instead of only
 checking whether any insert happened, and `deinit` releases copied keys plus the

@@ -46,7 +46,7 @@ Kizu の思想に基づく推奨判断は次の通り。
 | error | `!T` を recoverable failure に使う | diagnostic を失わず、Zig 的に明示的 |
 | optional | `?T` は absence のみ | failure と absence を混ぜない |
 | collection | `std::array::Array<T>` は allocator/deinit 明示 | allocation と cleanup を隠さない |
-| slice | `[]const u8` を source view に使う | primitive string を復活させない |
+| slice | `[]u8` を source view に使う | primitive string を復活させない |
 | test | `kizu test` は self-host component test の前提 | Go test だけでは Kizu 製 compiler の開発体験を検証できない |
 | legacy harness | `frontend.kizu` は freeze する | 新しい production logic を巨大単一ファイルに足さない |
 

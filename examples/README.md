@@ -43,7 +43,7 @@ go test ./...
 | one-level field borrow | `field_borrow.kizu` | updates a disjoint field while a field is borrowed |
 | copy through borrow dereference | `borrow_deref_copy.kizu` | copies an `i64` through `.*` |
 | copy values after owner-like calls | `copy_after_move.kizu` | `i64` remains usable after passing to a function |
-| mutable borrow parameter | `mutable_borrow.kizu` | `&mut` updates through checked field access |
+| mutable borrow parameter | `mutable_borrow.kizu` | `&var` updates through checked field access |
 | `std::arena::Arena<T>` / `std::arena::Handle<T>` | `arena.kizu` | stores and reads a struct through a handle with an explicit allocator |
 | `!T`, `error`, `try` | `error_union_try.kizu` | propagates success and prints `1` |
 | `!void` and `try` | `error_union_void.kizu` | propagates success without a payload |
@@ -72,10 +72,10 @@ go test ./...
 | stdio and process helpers | `std_io_process.kizu` | writes stdout and reads argv/env/exit-code helpers |
 | stderr helper shape | `std_io_stderr.kizu` | check-only diagnostic output through explicit Io |
 | stable page allocator capability | `std_page_allocator.kizu` | reuses one explicit allocator across Array, String, Map, arena, and another Array |
-| allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]const u8` safely |
-| borrowed-return provenance slice view | `borrow_return_provenance.kizu` | returns a `[]const u8` view tied to its source |
+| allocation-free byte helpers | `std_mem.kizu` | scans, compares, trims, and slices `[]u8` safely |
+| borrowed-return provenance slice view | `borrow_return_provenance.kizu` | returns a `[]u8` view tied to its source |
 | borrowed-return provenance | `borrow_provenance_return.kizu` | returns shared and mutable borrows tied to local owners |
-| checked index / slice syntax | `slice_syntax.kizu` | asserts trapping `[]const u8` indexing and slicing through `bytes[...]` |
+| checked index / slice syntax | `slice_syntax.kizu` | asserts trapping `[]u8` indexing and slicing through `bytes[...]` |
 | boolean logic | `logical.kizu` | asserts `and` / `or` precedence and short-circuit shape |
 | contextual integer literals | `contextual_integer_literals.kizu` | narrows integer literals in explicit `u8` / `i32` std and user API contexts |
 | owned array with explicit allocator | `std_array.kizu` | appends, reads, and deinitializes `Array<i64>` |
@@ -84,21 +84,21 @@ go test ./...
 | array element borrow | `std_array_borrow.kizu` | reads and updates non-copy elements through local borrows |
 | owned string with explicit allocator | `std_string.kizu` | builds owned bytes, reserves capacity, and exposes local byte views |
 | owned string storage boundary | `std_string_storage_boundary.kizu` | asserts reserve, append, truncate, clear, view, and deinit rules |
-| owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&mut String` |
+| owned string mutable borrow | `std_string_mut_borrow.kizu` | mutates owned bytes through `&var String` |
 | diagnostic formatting | `std_fmt.kizu` | appends deterministic i64, bool, and byte literal output |
 | diagnostic byte escaping | `std_fmt_escapes.kizu` | escapes newline, tab, and backslash bytes |
 | source artifact builder | `std_source_builder_artifact.kizu` | builds emitted text with `String` and `std::fmt` |
-| owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]const u8, i64>` |
+| owned map with explicit allocator | `std_map.kizu` | inserts, looks up, and deinitializes `Map<[]u8, i64>` |
 | symbol table map shape | `std_map_symbol_table.kizu` | maps byte keys to copy enum values |
-| resolver scope map shape | `std_map_resolver_scope.kizu` | uses `Map<[]const u8, V>` for selfhost-style symbol lookup |
+| resolver scope map shape | `std_map_resolver_scope.kizu` | uses `Map<[]u8, V>` for selfhost-style symbol lookup |
 | loop-built string map key | `std_map_string_key_loop.kizu` | builds copied map keys from `String.as_bytes()` and deinitializes builders inside a loop |
-| owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&mut Map` |
+| owned map mutable borrow | `std_map_mut_borrow.kizu` | mutates a map through `&var Map` |
 | deferred cleanup | `defer_cleanup.kizu` | registers explicit cleanup for Array, String, Map, and arena owners |
 | deferred cleanup order | `defer_order.kizu` | runs nested block cleanups and function cleanups in reverse registration order |
 | minimal test assertions | `std_testing.kizu` | checks `std::testing` assertions and typed equality through `kizu test` |
 | minimal explicit generics | `minimal_generics.kizu` | checks explicit static type arguments and `comptime if T == type<i64>` |
 | owned message passing | `channel.kizu` | sends and receives owned values through `std::channel` |
-| typed channel payload | `channel_string.kizu` | sends and receives `[]const u8` through `Channel<T>` |
+| typed channel payload | `channel_string.kizu` | sends and receives `[]u8` through `Channel<T>` |
 | atomic stop flag | `atomic_flag.kizu` | uses `Atomic<bool>` as a low-level flag |
 | deterministic deferred task queue | `task_queue.kizu` | queues work and drains it in FIFO order |
 | safe data parallelism | `parallel_for.kizu` | runs structured workers and disjoint partition output |
@@ -138,7 +138,7 @@ single source file. Run them with `kizu check <package-root>`.
 | non-copy values cannot move out of borrow deref | `negative/borrow_deref_move.kizu` | `cannot be moved out of borrow` |
 | mutable borrow conflicts are rejected | `negative/mut_borrow_conflict.kizu` | `mutably borrowed while borrowed` |
 | non-copy values cannot move out of mutable borrow deref | `negative/mut_borrow_deref_move.kizu` | `cannot be moved out of borrow` |
-| `&mut` requires mutable binding | `negative/mut_borrow_immutable.kizu` | `must be mutable` |
+| `&var` requires mutable binding | `negative/mut_borrow_immutable.kizu` | `must be mutable` |
 | runtime borrow cannot cross comptime | `negative/comptime_borrow_escape.kizu` | `runtime value cannot be used` |
 | `arena.add` moves inserted values | `negative/arena_add_move.kizu` | `moved value` |
 | `arena.get` returns a local borrow | `negative/arena_get_move.kizu` | `cannot be moved` |
@@ -217,21 +217,21 @@ single source file. Run them with `kizu check <package-root>`.
 | old spawn Io argument is rejected | `negative/task_spawn_old_io_arg.kizu` | `function name` |
 | file read requires Io | `negative/fs_read_without_io.kizu` | `expects Io` |
 | missing file returns `!T` error | `negative/fs_read_missing.kizu` | `no such file` |
-| file write bytes must be `[]const u8` | `negative/fs_write_wrong_bytes.kizu` | `bytes` |
+| file write bytes must be `[]u8` | `negative/fs_write_wrong_bytes.kizu` | `bytes` |
 | failing Io returns deterministic error | `negative/fs_failing_io.kizu` | `io runtime is failing` |
-| path helpers require byte paths | `negative/std_path_wrong_type.kizu` | `expects []const u8` |
+| path helpers require byte paths | `negative/std_path_wrong_type.kizu` | `expects []u8` |
 | fs helpers require Io | `negative/std_fs_exists_without_io.kizu` | `expects Io` |
 | stdio helpers surface failing Io | `negative/std_io_failing_write.kizu` | `io runtime is failing` |
 | process arg access is bounds-checked | `negative/std_process_arg_bounds.kizu` | `process arg index out of bounds` |
 | process exit code builtin is removed | `negative/std_process_exit_code_builtin_direct_call.kizu` | `was removed` |
-| byte-slice helper args must be `[]const u8` | `negative/std_mem_wrong_type.kizu` | `expects []const u8` |
+| byte-slice helper args must be `[]u8` | `negative/std_mem_wrong_type.kizu` | `expects []u8` |
 | byte access builtin is removed | `negative/std_mem_byte_at_builtin_direct_call.kizu` | `was removed` |
 | byte slice builtin is removed | `negative/std_mem_slice_builtin_direct_call.kizu` | `was removed` |
 | checked byte slices reject invalid ranges | `negative/std_mem_slice_out_of_bounds.kizu` | `range out of bounds` |
 | checked byte access rejects invalid indexes | `negative/std_mem_byte_at_out_of_bounds.kizu` | `index out of bounds` |
 | slice syntax rejects invalid ranges | `negative/slice_syntax_range_out_of_bounds.kizu` | `range out of bounds` |
 | index syntax rejects invalid indexes | `negative/slice_syntax_index_out_of_bounds.kizu` | `index out of bounds` |
-| index/slice syntax requires byte slices | `negative/slice_syntax_wrong_target.kizu` | `expects []const u8` |
+| index/slice syntax requires byte slices | `negative/slice_syntax_wrong_target.kizu` | `expects []u8` |
 | array access is bounds-checked | `negative/std_array_bounds.kizu` | `index out of bounds` |
 | array construction requires explicit allocator | `negative/std_array_no_allocator.kizu` | `expects allocator` |
 | arrays cannot be used after `deinit` | `negative/std_array_use_after_deinit.kizu` | `moved value` |
@@ -260,7 +260,7 @@ single source file. Run them with `kizu check <package-root>`.
 | string storage builtins are removed | `negative/std_string_builtin_direct_call.kizu` | `was removed` |
 | string view builtin is removed | `negative/std_string_builtin_as_bytes_direct_call.kizu` | `was removed` |
 | string storage field stays private | `negative/std_string_private_storage.kizu` | `is private` |
-| string append bytes requires `[]const u8` | `negative/std_string_wrong_append_type.kizu` | `expects []const u8` |
+| string append bytes requires `[]u8` | `negative/std_string_wrong_append_type.kizu` | `expects []u8` |
 | string append byte requires `u8` | `negative/std_string_append_byte_wrong_type.kizu` | `expects u8` |
 | string reserve requires `i64` | `negative/std_string_reserve_wrong_type.kizu` | `expects i64` |
 | string truncate requires `i64` | `negative/std_string_truncate_wrong_type.kizu` | `expects i64` |
@@ -281,11 +281,11 @@ single source file. Run them with `kizu check <package-root>`.
 | mutable string borrows cannot deinit | `negative/std_string_deinit_through_mut_borrow.kizu` | `requires owned String receiver` |
 | shared string borrows cannot append | `negative/std_string_append_through_shared_borrow.kizu` | `requires mutable String receiver` |
 | fmt i64 formatting requires `i64` | `negative/std_fmt_wrong_i64_type.kizu` | `expects i64` |
-| fmt byte literal formatting requires bytes | `negative/std_fmt_wrong_bytes_type.kizu` | `expects []const u8` |
+| fmt byte literal formatting requires bytes | `negative/std_fmt_wrong_bytes_type.kizu` | `expects []u8` |
 | map missing key is checked | `negative/std_map_get_missing.kizu` | `key not found` |
 | map construction requires explicit allocator | `negative/std_map_no_allocator.kizu` | `expects allocator` |
 | map values are copy-only in v0.2 | `negative/std_map_non_copy_value.kizu` | `value type must be copy` |
-| map keys are `[]const u8` in v0.2 | `negative/std_map_wrong_key_type.kizu` | `key type must be []const u8` |
+| map keys are `[]u8` in v0.2 | `negative/std_map_wrong_key_type.kizu` | `key type must be []u8` |
 | map insert value type must match `V` | `negative/std_map_wrong_insert_type.kizu` | `Map.insert` |
 | maps cannot be used after `deinit` | `negative/std_map_use_after_deinit.kizu` | `moved value` |
 | shared map borrows cannot insert | `negative/std_map_insert_through_shared_borrow.kizu` | `requires mutable Map receiver` |
@@ -318,7 +318,7 @@ single source file. Run them with `kizu check <package-root>`.
 | parallel worker errors propagate | `negative/parallel_for_error.kizu` | `parallel failed` |
 | partition slot access is bounds-checked | `negative/partition_index_out_of_bounds.kizu` | `out of bounds` |
 | parallel map ranges are bounds-checked | `negative/parallel_map_out_of_bounds.kizu` | `out of bounds` |
-| parallel map requires mutable partition owner | `negative/parallel_map_immutable_partition.kizu` | `&mut argument` |
+| parallel map requires mutable partition owner | `negative/parallel_map_immutable_partition.kizu` | `&var argument` |
 | local buffer access is bounds-checked | `negative/local_buffer_out_of_bounds.kizu` | `out of bounds` |
 | scoped thread cannot capture borrow params | `negative/thread_borrow_capture.kizu` | `thread cannot capture borrow` |
 | scoped thread cannot capture safe raw pointers | `negative/thread_scoped_pointer.kizu` | `raw pointer` |

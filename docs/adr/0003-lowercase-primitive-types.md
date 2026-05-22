@@ -31,5 +31,5 @@ f32 f64
 
 - examples と parser tests は小文字型を使う
 - `void` は戻り値省略時の型として扱う
-- string literal は `[]const u8` として扱い、`string` primitive は採用しない
+- string literal は `[]u8` として扱い、`string` primitive は採用しない
 - `Int` / `String` / `Unit` は採用しない

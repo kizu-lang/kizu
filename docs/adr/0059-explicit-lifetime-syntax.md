@@ -21,7 +21,7 @@ Kizu adopts named lifetime parameters for borrowed views:
 
 ```kizu
 struct Row<'a, T> {
-    data: []'a const T
+    data: []'a T
 }
 
 fn row<'a, T>(matrix: &'a Matrix<T>, index: i64) -> !Row<'a, T>
@@ -31,9 +31,10 @@ Rules for the first implementation:
 
 - Lifetime parameters share the `<...>` list with type parameters, and
   lifetimes come first: `<'a, T>`.
-- Borrow types use `&'a T` and `&'a mut T`.
-- Slice view types use `[]'a const T` and `[]'a mut T`.
-- `[]const T` remains an elided local spelling where no boundary lifetime is
+- Borrow types use `&'a T` and `&'a var T`.
+- Slice view types use `[]'a T`; slice mutability is expressed by the outer
+  borrow, such as `&'a []T` or `&'a var []T`.
+- `[]T` remains an elided local spelling where no boundary lifetime is
   needed.
 - Borrow-returning functions must spell the returned lifetime explicitly.
 - Struct and union fields may store borrowed views only when the declaration

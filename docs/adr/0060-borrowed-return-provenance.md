@@ -21,9 +21,9 @@ variables.
 Kizu uses return provenance syntax for borrowed returns:
 
 ```kizu
-fn first(bytes: []const u8) -> []const u8 borrows bytes
+fn first(bytes: []u8) -> []u8 borrows bytes
 fn shared(value: &i64) -> &i64 borrows value
-fn as_bytes(self: std::string::String) -> []const u8 borrows self
+fn as_bytes(self: std::string::String) -> []u8 borrows self
 fn at<T>(self: std::array::Array<T>, index: i64) -> !&T borrows self
 ```
 
@@ -34,7 +34,7 @@ Rules:
 - Borrow returns such as `-> &T` require `borrows <source>`.
 - Slice view returns may use `borrows <source>` when they return input-backed
   storage.
-- Named lifetime parameters such as `<'a>`, `&'a T`, and `[]'a const T` are not
+- Named lifetime parameters such as `<'a>`, `&'a T`, and `[]'a T` are not
   source syntax.
 - Borrow fields in structs and union payloads are not part of v0.2.
 

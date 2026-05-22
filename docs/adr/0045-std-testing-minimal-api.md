@@ -16,11 +16,11 @@ v0.2 で `std::testing` の最小 API を Kizu source として実装する。
 
 ```text
 std::testing::expect(condition: bool) -> void
-std::testing::fail(message: []const u8) -> !void
+std::testing::fail(message: []u8) -> !void
 ```
 
 `expect` は assertion ごとの `try` を不要にするため void を返す。
-condition failure は `std::builtin::test_fail(message: []const u8) -> void`
+condition failure は `std::builtin::test_fail(message: []u8) -> void`
 経由で runtime error として停止し、runner が readable な failure message を表示する。
 Go 側の責務は、この明示 trap primitive と runner の未処理 runtime error 表示境界に限定する。
 

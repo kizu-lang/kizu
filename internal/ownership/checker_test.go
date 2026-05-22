@@ -33,7 +33,7 @@ func TestCheckRejectsMoveErrors(t *testing.T) {
 	}{
 		{
 			name: "assignment move",
-			source: `struct Name { value: []const u8 }
+			source: `struct Name { value: []u8 }
 fn main() {
     let a = Name { value: "hello" };
     let b = a;
@@ -44,7 +44,7 @@ fn main() {
 		},
 		{
 			name: "function argument move",
-			source: `struct Name { value: []const u8 }
+			source: `struct Name { value: []u8 }
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
@@ -55,7 +55,7 @@ fn main() {
 		},
 		{
 			name: "double move",
-			source: `struct Name { value: []const u8 }
+			source: `struct Name { value: []u8 }
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
@@ -70,7 +70,7 @@ fn main() {
 
 // TestCheckBorrowArgumentDoesNotMove checks borrow parameters preserve ownership.
 func TestCheckBorrowArgumentDoesNotMove(t *testing.T) {
-	source := `fn show(s: &[]const u8) { print(s); }
+	source := `fn show(s: &[]u8) { print(s); }
 fn main() {
     let name = "alice";
     show(name);
@@ -86,7 +86,7 @@ func TestCheckAllowsBorrowProvenanceReturns(t *testing.T) {
 	source := `fn shared(value: &i64) -> &i64 borrows value {
     return value;
 }
-fn mutable(value: &mut i64) -> &mut i64 borrows value {
+fn mutable(value: &var i64) -> &var i64 borrows value {
     return value;
 }
 fn main() {
@@ -124,7 +124,7 @@ fn main() {
 		},
 		{
 			name: "read while mutable return live",
-			source: `fn mutable(value: &mut i64) -> &mut i64 borrows value {
+			source: `fn mutable(value: &var i64) -> &var i64 borrows value {
     return value;
 }
 fn main() {
@@ -139,10 +139,10 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
-// TestCheckMutableBorrowArgumentDoesNotMove checks &mut preserves ownership.
+// TestCheckMutableBorrowArgumentDoesNotMove checks &var preserves ownership.
 func TestCheckMutableBorrowArgumentDoesNotMove(t *testing.T) {
-	source := `struct User { name: []const u8 }
-fn show(user: &mut User) { print(user.name); }
+	source := `struct User { name: []u8 }
+fn show(user: &var User) { print(user.name); }
 fn main() {
     let user = User { name: "alice" };
     show(user);
@@ -153,11 +153,11 @@ fn main() {
 	}
 }
 
-// TestCheckAcceptsMutableBorrowForwarding checks &mut params can be reborrowed for calls.
+// TestCheckAcceptsMutableBorrowForwarding checks &var params can be reborrowed for calls.
 func TestCheckAcceptsMutableBorrowForwarding(t *testing.T) {
-	source := `struct User { name: []const u8 }
-fn rename(user: &mut User) { user.name = "bob"; }
-fn outer(user: &mut User) {
+	source := `struct User { name: []u8 }
+fn rename(user: &var User) { user.name = "bob"; }
+fn outer(user: &var User) {
     rename(user);
     user.name = "carol";
 }
@@ -172,12 +172,12 @@ fn main() {
 
 // TestCheckRejectsMutableBorrowForwardingAlias checks reborrows stay exclusive.
 func TestCheckRejectsMutableBorrowForwardingAlias(t *testing.T) {
-	source := `struct User { name: []const u8 }
-fn use(left: &User, right: &mut User) {
+	source := `struct User { name: []u8 }
+fn use(left: &User, right: &var User) {
     print(left.name);
     print(right.name);
 }
-fn outer(user: &mut User) {
+fn outer(user: &var User) {
     use(user, user);
 }`
 	err := checkSource(source)
@@ -209,14 +209,14 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 	}{
 		{
 			name: "return borrowed parameter",
-			source: `fn bad(s: &[]const u8) -> []const u8 {
+			source: `fn bad(s: &[]u8) -> []u8 {
     return s;
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
 		{
 			name: "store borrowed parameter in local",
-			source: `fn bad(s: &[]const u8) {
+			source: `fn bad(s: &[]u8) {
     let alias = s;
     print(alias);
 }`,
@@ -224,8 +224,8 @@ func TestCheckRejectsBorrowEscape(t *testing.T) {
 		},
 		{
 			name: "pass borrowed parameter to owner",
-			source: `fn take(s: []const u8) { print(s); }
-fn bad(s: &[]const u8) {
+			source: `fn take(s: []u8) { print(s); }
+fn bad(s: &[]u8) {
     take(s);
 }`,
 			want: "borrowed value `s` cannot escape",
@@ -233,14 +233,14 @@ fn bad(s: &[]const u8) {
 		{
 			name: "borrow field",
 			source: `struct Bad {
-    value: &[]const u8,
+    value: &[]u8,
 }
 fn main() {}`,
 			want: "struct field `Bad.value` cannot store borrow",
 		},
 		{
 			name: "move non-copy deref",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn bad(user: &User) -> User {
     return user.*;
 }`,
@@ -248,8 +248,8 @@ fn bad(user: &User) -> User {
 		},
 		{
 			name: "move non-copy mutable deref",
-			source: `struct User { name: []const u8 }
-fn bad(user: &mut User) -> User {
+			source: `struct User { name: []u8 }
+fn bad(user: &var User) -> User {
     return user.*;
 }`,
 			want: "cannot be moved out of borrow",
@@ -274,7 +274,7 @@ fn main() {
 
 // TestCheckAcceptsRawPointerDerefSyntax keeps unsafe pointer access out of borrow rules.
 func TestCheckAcceptsRawPointerDerefSyntax(t *testing.T) {
-	source := `struct Node { tag: i64, name: []const u8 }
+	source := `struct Node { tag: i64, name: []u8 }
 fn read_tag(node: ptr<const Node>) -> i64 {
     unsafe {
         return node.*.tag;
@@ -299,7 +299,7 @@ fn replace(node: ptr<Node>, value: Node) -> void {
 
 // TestCheckRejectsMoveWhileBorrowed checks overlapping borrow and move in a call.
 func TestCheckRejectsMoveWhileBorrowed(t *testing.T) {
-	source := `struct Name { value: []const u8 }
+	source := `struct Name { value: []u8 }
 fn use(a: &Name, b: Name) {
     print(a.value);
     print(b.value);
@@ -317,7 +317,7 @@ fn main() {
 	}
 }
 
-// TestCheckRejectsMutableBorrowConflicts checks & and &mut cannot overlap.
+// TestCheckRejectsMutableBorrowConflicts checks & and &var cannot overlap.
 func TestCheckRejectsMutableBorrowConflicts(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -326,8 +326,8 @@ func TestCheckRejectsMutableBorrowConflicts(t *testing.T) {
 	}{
 		{
 			name: "shared then mutable",
-			source: `struct User { name: []const u8 }
-fn use(left: &User, right: &mut User) {
+			source: `struct User { name: []u8 }
+fn use(left: &User, right: &var User) {
     print(left.name);
     print(right.name);
 }
@@ -339,8 +339,8 @@ fn main() {
 		},
 		{
 			name: "mutable then shared",
-			source: `struct User { name: []const u8 }
-fn use(left: &mut User, right: &User) {
+			source: `struct User { name: []u8 }
+fn use(left: &var User, right: &User) {
     print(left.name);
     print(right.name);
 }
@@ -352,8 +352,8 @@ fn main() {
 		},
 		{
 			name: "double mutable",
-			source: `struct User { name: []const u8 }
-fn use(left: &mut User, right: &mut User) {
+			source: `struct User { name: []u8 }
+fn use(left: &var User, right: &var User) {
     print(left.name);
     print(right.name);
 }
@@ -369,7 +369,7 @@ fn main() {
 
 // TestCheckRejectsBorrowedFieldMove checks field access cannot bypass borrow rules.
 func TestCheckRejectsBorrowedFieldMove(t *testing.T) {
-	source := `struct User { name: []const u8 }
+	source := `struct User { name: []u8 }
 struct Box { user: User }
 fn take(user: User) { print(user.name); }
 fn bad(box: &Box) {
@@ -387,7 +387,7 @@ fn bad(box: &Box) {
 // TestCheckAcceptsArenaHandle checks arena handles with matching provenance.
 func TestCheckAcceptsArenaHandle(t *testing.T) {
 	source := `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -404,7 +404,7 @@ fn main() {
 // TestCheckAcceptsDeferredArenaCleanup checks cleanup runs at block exit.
 func TestCheckAcceptsDeferredArenaCleanup(t *testing.T) {
 	source := `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -421,7 +421,7 @@ fn main() {
 // TestCheckArenaAllocatorReadOnly checks arena construction reads allocator capabilities.
 func TestCheckArenaAllocatorReadOnly(t *testing.T) {
 	source := `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -444,7 +444,7 @@ func TestCheckRejectsArenaHandleProvenanceErrors(t *testing.T) {
 	}{
 		{
 			name: "wrong arena",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let left = std::arena::Arena<User>(allocator);
@@ -456,7 +456,7 @@ fn main() {
 		},
 		{
 			name: "inline wrong arena",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let left = std::arena::Arena<User>(allocator);
@@ -467,7 +467,7 @@ fn main() {
 		},
 		{
 			name: "unknown handle parameter",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn show(users: std::arena::Arena<User>, user: std::arena::Handle<User>) {
     print(users.get(user).name);
 }`,
@@ -475,7 +475,7 @@ fn show(users: std::arena::Arena<User>, user: std::arena::Handle<User>) {
 		},
 		{
 			name: "returned handle",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn make() -> std::arena::Handle<User> {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -497,7 +497,7 @@ func TestCheckRejectsArenaHandleMoveErrors(t *testing.T) {
 	}{
 		{
 			name: "move after arena add",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -510,7 +510,7 @@ fn main() {
 		},
 		{
 			name: "move field from arena borrow",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 struct Box { user: User }
 fn take(user: User) { print(user.name); }
 fn main() {
@@ -534,7 +534,7 @@ func TestCheckRejectsArenaUseAfterDeinit(t *testing.T) {
 	}{
 		{
 			name: "double deinit",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -545,7 +545,7 @@ fn main() {
 		},
 		{
 			name: "add after deinit",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -556,7 +556,7 @@ fn main() {
 		},
 		{
 			name: "get after deinit",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -579,7 +579,7 @@ func TestCheckRejectsArenaDeinitWithLiveReferences(t *testing.T) {
 	}{
 		{
 			name: "deinit while borrowed",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -591,7 +591,7 @@ fn main() {
 		},
 		{
 			name: "handle after deinit",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -603,7 +603,7 @@ fn main() {
 		},
 		{
 			name: "borrow after deinit",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -640,7 +640,7 @@ func TestCheckRejectsDeferredCleanupExitErrors(t *testing.T) {
 	}{
 		{
 			name: "after explicit deinit",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -651,7 +651,7 @@ fn main() {
 		},
 		{
 			name: "moved before cleanup",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -663,7 +663,7 @@ fn main() {
 		},
 		{
 			name: "borrowed at cleanup",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -679,7 +679,7 @@ fn main() {
 
 // TestCheckBranchMoveMarksOuterValueMoved checks possible moves escape branches.
 func TestCheckBranchMoveMarksOuterValueMoved(t *testing.T) {
-	source := `struct Name { value: []const u8 }
+	source := `struct Name { value: []u8 }
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
@@ -697,7 +697,7 @@ fn main() {
 
 // TestCheckControlExpressionMoveMarksOuterValueMoved checks expression branch moves.
 func TestCheckControlExpressionMoveMarksOuterValueMoved(t *testing.T) {
-	source := `struct Name { value: []const u8 }
+	source := `struct Name { value: []u8 }
 fn pick(left: Name, right: Name) -> Name {
     let chosen = if true { left } else { right }
     return chosen;
@@ -727,7 +727,7 @@ func TestCheckUnsafeDoesNotDisableMoveAndBorrowRules(t *testing.T) {
 	}{
 		{
 			name: "moved value in unsafe block",
-			source: `struct Name { value: []const u8 }
+			source: `struct Name { value: []u8 }
 fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
@@ -738,14 +738,14 @@ fn main() {
 		},
 		{
 			name: "borrow escape in unsafe function",
-			source: `unsafe fn bad(s: &[]const u8) -> []const u8 {
+			source: `unsafe fn bad(s: &[]u8) -> []u8 {
     return s;
 }`,
 			want: "borrowed value `s` cannot escape",
 		},
 		{
 			name: "borrow escape in unsafe block",
-			source: `fn bad(s: &[]const u8) {
+			source: `fn bad(s: &[]u8) {
     unsafe {
         let alias = s;
         print(alias);
@@ -756,7 +756,7 @@ fn main() {
 		{
 			name: "borrow field in unsafe-adjacent code",
 			source: `struct Bad {
-    value: &[]const u8,
+    value: &[]u8,
 }
 fn main() { unsafe { print(1); } }`,
 			want: "struct field `Bad.value` cannot store borrow",
@@ -780,7 +780,7 @@ fn main() {
 
 // TestCheckRejectsComptimeRuntimeBorrow checks runtime borrows cannot cross comptime.
 func TestCheckRejectsComptimeRuntimeBorrow(t *testing.T) {
-	source := `fn bad(s: &[]const u8) -> []const u8 {
+	source := `fn bad(s: &[]u8) -> []u8 {
     let alias = comptime s;
     return alias;
 }`
@@ -811,7 +811,7 @@ func TestCheckComptimeRejectsRuntimeBoundary(t *testing.T) {
 
 // TestCheckMinimalGenericInstantiation checks ownership after explicit type application.
 func TestCheckMinimalGenericInstantiation(t *testing.T) {
-	source := `struct Name { value: []const u8 }
+	source := `struct Name { value: []u8 }
 fn Pass<T>(value: T) -> T {
     return value;
 }
@@ -827,7 +827,7 @@ fn main() {
 
 // TestCheckArrayLenDoesNotMoveNonCopyArray keeps read-only Array methods non-consuming.
 func TestCheckArrayLenDoesNotMoveNonCopyArray(t *testing.T) {
-	source := `struct Name { value: []const u8 }
+	source := `struct Name { value: []u8 }
 fn main(values: std::array::Array<Name>) {
     let count = values.len();
     print(count);
@@ -862,7 +862,7 @@ fn main() {
 func TestCheckRejectsImplMethodReturnTypeMismatch(t *testing.T) {
 	source := `struct Counter { value: i64 }
 impl Counter {
-    fn label(self: Counter) -> []const u8 {
+    fn label(self: Counter) -> []u8 {
         return "one";
     }
 }
@@ -877,7 +877,7 @@ fn main() {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "arg 2 of `ExpectEqual` expects i64, got []const u8") {
+	if !strings.Contains(err.Error(), "arg 2 of `ExpectEqual` expects i64, got []u8") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
@@ -905,7 +905,7 @@ fn main() {
 
 // TestCheckAcceptsDirectFieldReceiverMethods checks owner fields can forward storage APIs.
 func TestCheckAcceptsDirectFieldReceiverMethods(t *testing.T) {
-	source := `struct User { name: []const u8 }
+	source := `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 impl Registry {
     fn add(self: Registry, user: User) -> void {
@@ -938,7 +938,7 @@ func TestCheckRejectsDirectFieldReceiverPolicy(t *testing.T) {
 	}{
 		{
 			name: "field cleanup outside owner deinit",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -949,7 +949,7 @@ fn main() {
 		},
 		{
 			name: "use after field cleanup",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 impl Registry {
     fn deinit(self: Registry) -> void {
@@ -967,7 +967,7 @@ fn main() {
 		},
 		{
 			name: "nested field receiver",
-			source: `struct User { name: []const u8 }
+			source: `struct User { name: []u8 }
 struct Registry { users: std::arena::Arena<User> }
 struct Wrapper { registry: Registry }
 fn main() {

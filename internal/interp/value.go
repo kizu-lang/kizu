@@ -351,7 +351,7 @@ func arrayValue(typeName string) Value {
 func mapValue(valueType string) Value {
 	return Value{
 		kind:     kindMap,
-		typeName: fmt.Sprintf("std::map::Map<[]const u8, %s>", valueType),
+		typeName: fmt.Sprintf("std::map::Map<[]u8, %s>", valueType),
 		mapValue: &Map{
 			valueType: valueType,
 			entries:   map[string]Value{},

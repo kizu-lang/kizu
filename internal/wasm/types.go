@@ -9,7 +9,7 @@ func wasmType(typ string) string {
 		return "i32"
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		return "i64"
-	case "[]const u8":
+	case "[]u8":
 		return "i32"
 	default:
 		return "i32"

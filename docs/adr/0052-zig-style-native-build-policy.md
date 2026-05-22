@@ -87,7 +87,7 @@ symbols explicitly.
 The current backend supports only the LLVM-lowered subset:
 
 - scalar integer and boolean operations
-- string literals as `[]const u8`
+- string literals as `[]u8`
 - `print` through `kizu_print_*`
 - simple functions
 - if / if expression

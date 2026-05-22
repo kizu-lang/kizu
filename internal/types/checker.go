@@ -17,7 +17,7 @@ const (
 	typeFunction   Type = "Function"
 	typeI64        Type = "i64"
 	typeU8         Type = "u8"
-	typeByteString Type = "[]const u8"
+	typeByteString Type = "[]u8"
 	typeSelf       Type = "Self"
 	typeType       Type = "type"
 	typeVoid       Type = "void"
@@ -861,12 +861,12 @@ func borrowWrappedType(borrow bool, lifetime string, mutable bool, typ string) s
 	}
 	if lifetime == "" {
 		if mutable {
-			return "&mut " + typ
+			return "&var " + typ
 		}
 		return "&" + typ
 	}
 	if mutable {
-		return "&" + lifetime + " mut " + typ
+		return "&" + lifetime + " var " + typ
 	}
 	return "&" + lifetime + " " + typ
 }
@@ -974,12 +974,10 @@ func substituteTypeParams(typ Type, subst map[string]Type) Type {
 	out := string(typ)
 	for name, replacement := range subst {
 		repl := string(replacement)
-		out = strings.ReplaceAll(out, "[]const "+name, "[]const "+repl)
-		out = strings.ReplaceAll(out, "[]mut "+name, "[]mut "+repl)
 		out = strings.ReplaceAll(out, "[]"+name, "[]"+repl)
-		out = strings.ReplaceAll(out, "!&mut "+name, "!&mut "+repl)
+		out = strings.ReplaceAll(out, "!&var "+name, "!&var "+repl)
 		out = strings.ReplaceAll(out, "!&"+name, "!&"+repl)
-		out = strings.ReplaceAll(out, "&mut "+name, "&mut "+repl)
+		out = strings.ReplaceAll(out, "&var "+name, "&var "+repl)
 		out = strings.ReplaceAll(out, "&"+name, "&"+repl)
 		out = strings.ReplaceAll(out, "<"+name+">", "<"+string(replacement)+">")
 		out = strings.ReplaceAll(out, "<"+name+",", "<"+repl+",")
@@ -1056,7 +1054,7 @@ func (c *Checker) parseBorrowType(name string) (Type, error) {
 		return "", fmt.Errorf(
 			"type error: explicit lifetime syntax is not supported; use `borrows`")
 	}
-	inner = strings.TrimPrefix(inner, "mut ")
+	inner = strings.TrimPrefix(inner, "var ")
 	if inner == "" {
 		return "", fmt.Errorf("type error: & must wrap a type")
 	}
@@ -1066,17 +1064,12 @@ func (c *Checker) parseBorrowType(name string) (Type, error) {
 	return Type(name), nil
 }
 
-// parseSliceType validates lifetime-qualified and elided slice spellings.
+// parseSliceType validates slice view type spellings.
 func (c *Checker) parseSliceType(name string) (Type, error) {
 	rest := strings.TrimPrefix(name, "[]")
 	if strings.HasPrefix(rest, "'") {
 		return "", fmt.Errorf(
 			"type error: explicit lifetime syntax is not supported; use `borrows`")
-	}
-	if strings.HasPrefix(rest, "const ") {
-		rest = strings.TrimPrefix(rest, "const ")
-	} else if strings.HasPrefix(rest, "mut ") {
-		rest = strings.TrimPrefix(rest, "mut ")
 	}
 	if rest == "" {
 		return "", fmt.Errorf("type error: [] must wrap a type")
@@ -1195,7 +1188,7 @@ func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 		return "", fmt.Errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(Type(args[0]), typeByteString) && !c.typeParams[args[0]] {
-		return "", fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
+		return "", fmt.Errorf("type error: std::map::Map key type must be []u8 in v0.2")
 	}
 	if _, err := c.parseType(args[1]); err != nil {
 		return "", err
@@ -2093,7 +2086,7 @@ func isErrorConstruction(expr ast.Expression) bool {
 	return ok && ident.Name == "error"
 }
 
-// explicitBorrowType extracts &T and &mut T spellings.
+// explicitBorrowType extracts &T and &var T spellings.
 func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 	text := string(typ)
 	if !strings.HasPrefix(text, "&") {
@@ -2101,9 +2094,9 @@ func explicitBorrowType(typ Type) (string, bool, Type, bool) {
 	}
 	rest := strings.TrimPrefix(text, "&")
 	mutable := false
-	if strings.HasPrefix(rest, "mut ") {
+	if strings.HasPrefix(rest, "var ") {
 		mutable = true
-		rest = strings.TrimPrefix(rest, "mut ")
+		rest = strings.TrimPrefix(rest, "var ")
 	}
 	if rest == "" {
 		return "", false, "", false
@@ -2616,7 +2609,7 @@ func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe bool) (
 		return "", err
 	}
 	if !sameType(target, typeByteString) {
-		return "", fmt.Errorf("type error: index/slice target expects []const u8, got %s", target)
+		return "", fmt.Errorf("type error: index/slice target expects []u8, got %s", target)
 	}
 	if !expr.Slice {
 		if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
@@ -2766,7 +2759,7 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 
 // checkPrefixExpr validates unary operators.
 func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope, unsafe bool) (Type, error) {
-	if expr.Operator == "&" || expr.Operator == "&mut" {
+	if expr.Operator == "&" || expr.Operator == "&var" {
 		typ, _, err := c.checkBorrowPrefix(expr, env, unsafe)
 		return typ, err
 	}
@@ -2796,7 +2789,7 @@ func (c *Checker) checkBorrowPrefix(
 	env *scope,
 	unsafe bool,
 ) (Type, bool, error) {
-	mutable := expr.Operator == "&mut"
+	mutable := expr.Operator == "&var"
 	if mutable {
 		if err := requireMutableBorrowArg(expr.Right, env); err != nil {
 			return "", false, err
@@ -2901,7 +2894,7 @@ func (c *Checker) checkErrorUnionCast(source Type, target Type) (bool, error) {
 	}
 	if !c.unionHasMessageVariant(targetError) {
 		return true, fmt.Errorf(
-			"type error: typed error cast requires %s::Message([]const u8)",
+			"type error: typed error cast requires %s::Message([]u8)",
 			targetError,
 		)
 	}
@@ -3183,7 +3176,7 @@ func coreSignatureArgsText(args []stdprim.ArgKind) string {
 		case stdprim.ArgIo:
 			parts = append(parts, "io")
 		case stdprim.ArgBytes:
-			parts = append(parts, "[]const u8")
+			parts = append(parts, "[]u8")
 		default:
 			parts = append(parts, string(arg))
 		}
@@ -3272,10 +3265,10 @@ func (c *Checker) checkFsReadFile(
 		return "", true, err
 	}
 	if !sameType(path, typeByteString) {
-		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects []const u8 path, got %s",
+		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
-	return "![]const u8", true, nil
+	return "![]u8", true, nil
 }
 
 // checkFsWriteFile validates std::fs::write_file.
@@ -3297,7 +3290,7 @@ func (c *Checker) checkFsWriteFile(
 		}
 		if !sameType(got, typeByteString) {
 			return "", true, fmt.Errorf(
-				"type error: `std::fs::write_file` expects []const u8 %s, got %s", label, got)
+				"type error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
 	return "!void", true, nil
@@ -3363,7 +3356,7 @@ func (c *Checker) checkFsPathArgs(
 		return "", "", err
 	}
 	if !sameType(path, typeByteString) {
-		return "", "", fmt.Errorf("type error: `%s` expects []const u8 path, got %s", name, path)
+		return "", "", fmt.Errorf("type error: `%s` expects []u8 path, got %s", name, path)
 	}
 	return "Io", path, nil
 }
@@ -3814,7 +3807,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 		case "borrow":
 			return Type("&" + string(elem)), nil
 		case "borrow_mut":
-			return Type("&mut " + string(elem)), nil
+			return Type("&var " + string(elem)), nil
 		default:
 			return typeVoid, nil
 		}
@@ -3960,7 +3953,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
 		}
-		return Type("!&mut " + string(elem)), nil
+		return Type("!&var " + string(elem)), nil
 	case "get", "get_or_panic":
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
@@ -4328,7 +4321,7 @@ func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe bool) (T
 		return "", err
 	}
 	if !sameType(got, typeByteString) {
-		return "", fmt.Errorf("type error: `error` expects []const u8, got %s", got)
+		return "", fmt.Errorf("type error: `error` expects []u8, got %s", got)
 	}
 	errorType, _, ok := errorUnionParts(c.currentReturn)
 	if !ok {
@@ -4803,7 +4796,7 @@ func (c *Checker) checkAssignableField(expr *ast.FieldExpr, env *scope, unsafe b
 	return c.checkFieldExpr(expr, env, unsafe)
 }
 
-// checkAssignableDeref validates mutation through an &mut borrow or raw pointer.
+// checkAssignableDeref validates mutation through an &var borrow or raw pointer.
 func (c *Checker) checkAssignableDeref(expr *ast.DerefExpr, env *scope, unsafe bool) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
 		return c.checkDerefExpr(expr, env, unsafe)
@@ -5082,7 +5075,7 @@ func isStringMutatingMethod(name string) bool {
 	}
 }
 
-// checkStringBytesArg validates a []const u8 String method argument.
+// checkStringBytesArg validates a []u8 String method argument.
 func (c *Checker) checkStringBytesArg(
 	name string,
 	args []ast.Expression,
@@ -5097,7 +5090,7 @@ func (c *Checker) checkStringBytesArg(
 		return err
 	}
 	if !sameType(got, typeByteString) {
-		return fmt.Errorf("type error: `String.%s` expects []const u8, got %s", name, got)
+		return fmt.Errorf("type error: `String.%s` expects []u8, got %s", name, got)
 	}
 	return nil
 }
@@ -5418,7 +5411,7 @@ func (c *Checker) checkMapConstructorForArgs(
 	return Type(fmt.Sprintf("std::map::Map<%s, %s>", keyType, valueType)), true, nil
 }
 
-// checkMapMethod validates owned Map<[]const u8, V> prototype methods.
+// checkMapMethod validates owned Map<[]u8, V> prototype methods.
 func (c *Checker) checkMapMethod(
 	valueType Type,
 	name string,
@@ -5467,7 +5460,7 @@ func (c *Checker) checkMapInsert(
 	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
 		return "", err
 	} else if !sameType(got, typeByteString) {
-		return "", fmt.Errorf("type error: `Map.insert` expects []const u8 key, got %s", got)
+		return "", fmt.Errorf("type error: `Map.insert` expects []u8 key, got %s", got)
 	}
 	got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
 	if err != nil {
@@ -5479,7 +5472,7 @@ func (c *Checker) checkMapInsert(
 	return "!void", nil
 }
 
-// checkMapKeyArg validates one []const u8 lookup key.
+// checkMapKeyArg validates one []u8 lookup key.
 func (c *Checker) checkMapKeyArg(
 	name string,
 	args []ast.Expression,
@@ -5494,7 +5487,7 @@ func (c *Checker) checkMapKeyArg(
 		return err
 	}
 	if !sameType(got, typeByteString) {
-		return fmt.Errorf("type error: `Map.%s` expects []const u8 key, got %s", name, got)
+		return fmt.Errorf("type error: `Map.%s` expects []u8 key, got %s", name, got)
 	}
 	return nil
 }
@@ -5529,7 +5522,7 @@ func (c *Checker) checkMapTypeArgContract(args []Type) error {
 		return fmt.Errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(args[0], typeByteString) {
-		return fmt.Errorf("type error: std::map::Map key type must be []const u8 in v0.2")
+		return fmt.Errorf("type error: std::map::Map key type must be []u8 in v0.2")
 	}
 	if !c.isCopyType(args[1]) {
 		return fmt.Errorf("type error: std::map::Map value type must be copy in v0.2")
@@ -6097,33 +6090,33 @@ func (c *Checker) checkMethodArgs(
 	return method.returnType, nil
 }
 
-// requireMutableBorrowArg restricts &mut arguments to mutable locals or reborrowed &mut params.
+// requireMutableBorrowArg restricts &var arguments to mutable locals or reborrowed &var params.
 func requireMutableBorrowArg(expr ast.Expression, env *scope) error {
 	ident, ok := expr.(*ast.IdentExpr)
 	if ok {
 		if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
 			return nil
 		}
-		return fmt.Errorf("type error: &mut argument `%s` must be mutable", ident.Name)
+		return fmt.Errorf("type error: &var argument `%s` must be mutable", ident.Name)
 	}
 	field, fieldOK := expr.(*ast.FieldExpr)
 	if !fieldOK {
-		return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+		return fmt.Errorf("type error: &var argument must be a mutable local binding")
 	}
 	ident, ok = field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("type error: &mut argument must be a mutable local binding")
+		return fmt.Errorf("type error: &var argument must be a mutable local binding")
 	}
 	if env.isMutable(ident.Name) {
 		return nil
 	}
-	return fmt.Errorf("type error: &mut argument `%s` must be mutable", ident.Name)
+	return fmt.Errorf("type error: &var argument `%s` must be mutable", ident.Name)
 }
 
-// borrowPrefix reports whether an expression is &T or &mut T syntax.
+// borrowPrefix reports whether an expression is &T or &var T syntax.
 func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
 	prefix, ok := expr.(*ast.PrefixExpr)
-	if !ok || (prefix.Operator != "&" && prefix.Operator != "&mut") {
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&var") {
 		return nil, false
 	}
 	return prefix, true
@@ -6836,7 +6829,7 @@ func (s *scope) isMutable(name string) bool {
 	return false
 }
 
-// isBorrowed reports whether a local name is an &T or &mut T parameter.
+// isBorrowed reports whether a local name is an &T or &var T parameter.
 func (s *scope) isBorrowed(name string) bool {
 	for cur := s; cur != nil; cur = cur.parent {
 		if _, ok := cur.values[name]; ok {
@@ -6846,7 +6839,7 @@ func (s *scope) isBorrowed(name string) bool {
 	return false
 }
 
-// isMutBorrowed reports whether a local name is an &mut T parameter.
+// isMutBorrowed reports whether a local name is an &var T parameter.
 func (s *scope) isMutBorrowed(name string) bool {
 	for cur := s; cur != nil; cur = cur.parent {
 		if _, ok := cur.values[name]; ok {

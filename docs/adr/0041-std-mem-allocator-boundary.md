@@ -19,26 +19,26 @@ pointer access, or implicit runtime behavior through convenient byte helpers.
 slices:
 
 ```text
-std::mem::len(bytes: []const u8) -> i64
-std::mem::byte_at(bytes: []const u8, index: i64) -> !u8
-std::mem::equal_bytes(left: []const u8, right: []const u8) -> bool
-std::mem::starts_with(bytes: []const u8, prefix: []const u8) -> bool
-std::mem::slice(bytes: []const u8, start: i64, end: i64) -> ![]const u8 borrows bytes
-std::mem::trim_ascii(bytes: []const u8) -> []const u8 borrows bytes
+std::mem::len(bytes: []u8) -> i64
+std::mem::byte_at(bytes: []u8, index: i64) -> !u8
+std::mem::equal_bytes(left: []u8, right: []u8) -> bool
+std::mem::starts_with(bytes: []u8, prefix: []u8) -> bool
+std::mem::slice(bytes: []u8, start: i64, end: i64) -> ![]u8 borrows bytes
+std::mem::trim_ascii(bytes: []u8) -> []u8 borrows bytes
 ```
 
 `byte_at` and `slice` return `!T` because an invalid index or range is a
 recoverable failure with a reason. Absence-oriented APIs such as
 `index_of -> ?usize` are deferred until `option<T>` has runtime helpers.
 
-`std::mem` safe APIs return values or `[]const u8` views only. They do not return
+`std::mem` safe APIs return values or `[]u8` views only. They do not return
 raw pointers, do not allocate, and do not weaken borrow, move, or raw pointer
 checks for callers.
 
 The future mutable-buffer APIs are reserved as follows:
 
 ```text
-std::mem::copy(dst: slice<u8>, src: []const u8) -> !void
+std::mem::copy(dst: slice<u8>, src: []u8) -> !void
 std::mem::zero(dst: slice<u8>) -> void
 std::mem::fill(dst: slice<u8>, byte: u8) -> void
 ```
@@ -50,7 +50,7 @@ expose raw pointer writes to safe Kizu.
 
 ## Consequences
 
-- A self-host lexer can scan `[]const u8` with checked byte access and slicing.
+- A self-host lexer can scan `[]u8` with checked byte access and slicing.
 - Byte compare and prefix checks are allocation-free.
 - Hidden global allocator behavior is avoided.
 - `index_of` and mutable byte operations have explicit blocking dependencies

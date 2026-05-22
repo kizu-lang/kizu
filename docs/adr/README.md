@@ -51,7 +51,7 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0030: エラー処理は Zig 風の !T に寄せる](0030-zig-style-error-union.md)
 - [ADR-0031: 幅が曖昧な int を廃止する](0031-remove-ambiguous-int.md)
 - [ADR-0032: v0.1 はメモリ安全性監査を release gate にする](0032-v0-1-memory-safety-release-gate.md)
-- [ADR-0033: borrow syntax は &T / &mut T にする](0033-reference-borrow-syntax.md)
+- [ADR-0033: borrow syntax は &T / &var T にする](0033-reference-borrow-syntax.md)
 - [ADR-0034: dereference と field assignment は Zig 寄りにする](0034-zig-style-deref-and-field-assignment.md)
 - [ADR-0035: v0.1 loop control は while / for / labeled branch に限定する](0035-v0-1-loop-control.md)
 - [ADR-0036: statement semicolon を必須にする](0036-require-statement-semicolons.md)

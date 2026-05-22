@@ -47,13 +47,13 @@ func TestRunVariablesAndAssignment(t *testing.T) {
 	}
 }
 
-// TestRunFieldAndDerefAssignment checks mutable fields and &mut writes.
+// TestRunFieldAndDerefAssignment checks mutable fields and &var writes.
 func TestRunFieldAndDerefAssignment(t *testing.T) {
 	got := runSource(t, `struct User {
-    name: []const u8,
+    name: []u8,
     age: i64,
 }
-fn rename(user: &mut User) -> void {
+fn rename(user: &var User) -> void {
     user.name = "bob";
 }
 fn main() -> void {
@@ -124,7 +124,7 @@ func TestRunLoopControl(t *testing.T) {
 // TestRunArenaHandle checks Phase 6 arena add/get and field access.
 func TestRunArenaHandle(t *testing.T) {
 	got := runSource(t, `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
@@ -141,7 +141,7 @@ fn main() {
 
 // TestRunRejectsArenaNonAllocator checks runtime allocator capability validation.
 func TestRunRejectsArenaNonAllocator(t *testing.T) {
-	_, err := parseAndRun(`struct User { name: []const u8 }
+	_, err := parseAndRun(`struct User { name: []u8 }
 fn main() {
     let users = std::arena::Arena<User>(1);
     print(users);
@@ -156,7 +156,7 @@ fn main() {
 
 // TestRunRejectsArenaUseAfterDeinit checks runtime arena cleanup state.
 func TestRunRejectsArenaUseAfterDeinit(t *testing.T) {
-	_, err := parseAndRun(`struct User { name: []const u8 }
+	_, err := parseAndRun(`struct User { name: []u8 }
 fn main() {
     let allocator = std::builtin::mem_page_allocator();
     let users = std::arena::Arena<User>(allocator);
@@ -174,7 +174,7 @@ fn main() {
 // TestRunDeferCleanupOrder checks nested blocks and reverse cleanup order.
 func TestRunDeferCleanupOrder(t *testing.T) {
 	got := runSource(t, `struct Trace {
-    label: []const u8,
+    label: []u8,
 }
 impl Trace {
     fn deinit(self: Trace) -> void {
@@ -243,7 +243,7 @@ fn main() {
 // TestRunMatchWildcard checks fallback arms for enum and union matches.
 func TestRunMatchWildcard(t *testing.T) {
 	got := runSource(t, `enum Color { Red, Green, Blue }
-union Shape { Point, Circle(i64), Label([]const u8), }
+union Shape { Point, Circle(i64), Label([]u8), }
 fn describe(shape: &Shape) -> void {
     match shape {
         Circle(radius) => print(radius);,
@@ -283,7 +283,7 @@ func TestRunTaggedUnionMatch(t *testing.T) {
 	got := runSource(t, `union Shape {
     Point,
     Circle(i64),
-    Label([]const u8),
+    Label([]u8),
 }
 fn main() {
     let first = Shape::Circle(10);
@@ -335,7 +335,7 @@ fn IsI64<T>(value: T) -> bool {
 }
 fn main() {
     print(Identity<i64>(7));
-    print(Identity<[]const u8>("kizu"));
+    print(Identity<[]u8>("kizu"));
     print(IsI64<i64>(1));
     print(IsI64<bool>(false));
 }`)
@@ -382,7 +382,7 @@ fn main() -> !i64 {
 // TestRunTypedErrorTryPropagatesFunctionExpr checks typed errors from calls.
 func TestRunTypedErrorTryPropagatesFunctionExpr(t *testing.T) {
 	got, err := parseAndRun(`union CompileError {
-    Message([]const u8),
+    Message([]u8),
 }
 fn parse(ok: bool) -> CompileError!i64 {
     if ok {
@@ -407,7 +407,7 @@ fn main() -> CompileError!void {
 // TestRunTypedErrorCastMapsUntypedError checks explicit message adaptation at runtime.
 func TestRunTypedErrorCastMapsUntypedError(t *testing.T) {
 	got, err := parseAndRun(`union CompileError {
-    Message([]const u8),
+    Message([]u8),
 }
 fn lower(ok: bool) -> !i64 {
     if ok {

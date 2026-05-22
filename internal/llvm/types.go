@@ -19,7 +19,7 @@ func llvmType(typ string) string {
 		return "i1"
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		return integerLLVMType(typ)
-	case "[]const u8":
+	case "[]u8":
 		return "ptr"
 	default:
 		return "ptr"

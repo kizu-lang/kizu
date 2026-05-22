@@ -29,7 +29,7 @@ unsafe が必要な cast:
 
 禁止する cast:
 
-- `[]const u8` から numeric
+- `[]u8` から numeric
 - `bool` から numeric
 - numeric から raw pointer
 - raw pointer から numeric

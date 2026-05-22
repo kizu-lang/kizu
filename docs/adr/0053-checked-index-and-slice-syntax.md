@@ -6,8 +6,8 @@ Accepted.
 
 ## Context
 
-Kizu uses `[]const u8` for string literals and read-only byte slices. The
-current standard library exposes byte access through functions such as
+Kizu uses `[]u8` for string literals and byte slices. The current standard
+library exposes read-only byte access through functions such as
 `std::mem::byte_at(bytes, index)` and `std::mem::slice(bytes, start, end)`.
 
 That is enough for prototypes, but it makes Kizu-written stdlib code noisy and
@@ -31,8 +31,8 @@ let head = bytes[..end];
 Index and slice syntax returns plain values:
 
 ```text
-[]const u8 [ i64 ] -> u8
-[]const u8 [ i64 .. i64 ] -> []const u8
+[]u8 [ i64 ] -> u8
+[]u8 [ i64 .. i64 ] -> []u8
 ```
 
 The bounds are half-open: `start..end` includes `start` and excludes `end`.
@@ -47,7 +47,7 @@ Rules:
 - `bytes[i]` and `bytes[a..b]` do not return error unions
 - recoverable bounds handling remains an explicit library API such as
   `std::mem::byte_at` and `std::mem::slice`
-- direct indexing is initially read-only and supports `[]const u8`
+- direct indexing is initially read-only and supports `[]u8`
 - mutable indexed assignment is not part of this decision
 - indexed borrow such as `&items[i]` remains deferred
 - `std::mem::byte_at` and `std::mem::slice` remain the recoverable alternatives

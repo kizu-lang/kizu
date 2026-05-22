@@ -399,7 +399,7 @@ func (i *Interpreter) assignCallTarget(expr *ast.CallExpr, value Value, env *Env
 	return nil
 }
 
-// assignField writes a struct field through a mutable binding or &mut dereference.
+// assignField writes a struct field through a mutable binding or &var dereference.
 func (i *Interpreter) assignField(expr *ast.FieldExpr, value Value, env *Env) error {
 	switch receiver := expr.Receiver.(type) {
 	case *ast.IdentExpr:
@@ -758,7 +758,7 @@ func (i *Interpreter) evalIndexExpr(expr *ast.IndexExpr, env *Env) (Value, error
 		return voidValue(), err
 	}
 	if target.kind != kindString {
-		return voidValue(), fmt.Errorf("runtime error: index/slice target expects []const u8")
+		return voidValue(), fmt.Errorf("runtime error: index/slice target expects []u8")
 	}
 	if !expr.Slice {
 		return i.evalByteIndex(target.s, expr.Index, env, true)
@@ -872,7 +872,7 @@ func (i *Interpreter) evalIdent(name string, env *Env) (Value, error) {
 
 // evalPrefixExpr evaluates supported unary operators.
 func (i *Interpreter) evalPrefixExpr(expr *ast.PrefixExpr, env *Env) (Value, error) {
-	if expr.Operator == "&" || expr.Operator == "&mut" {
+	if expr.Operator == "&" || expr.Operator == "&var" {
 		return i.evalBorrowPrefix(expr, env)
 	}
 	right, err := i.evalExpr(expr.Right, env)
@@ -921,7 +921,7 @@ func (i *Interpreter) evalBorrowPrefix(expr *ast.PrefixExpr, env *Env) (Value, e
 			return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", target.Name)
 		}
 		cell := &binding{
-			value: fieldValue, mutable: expr.Operator == "&mut",
+			value: fieldValue, mutable: expr.Operator == "&var",
 			fieldParent: ownerBinding, fieldName: target.Name,
 		}
 		return refValue(cell), nil
@@ -1234,7 +1234,7 @@ func (i *Interpreter) evalMemLen(args []ast.Expression, env *Env) (Value, error)
 	return intValue(int64(len(bytes))), nil
 }
 
-// evalMemOneBytes evaluates one []const u8 argument.
+// evalMemOneBytes evaluates one []u8 argument.
 func (i *Interpreter) evalMemOneBytes(
 	name string,
 	args []ast.Expression,
@@ -1248,7 +1248,7 @@ func (i *Interpreter) evalMemOneBytes(
 		return "", err
 	}
 	if bytes.kind != kindString {
-		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
+		return "", fmt.Errorf("runtime error: %s expects []u8", name)
 	}
 	return bytes.s, nil
 }
@@ -1412,7 +1412,7 @@ func (i *Interpreter) evalFsWriteFile(args []ast.Expression, env *Env) (Value, e
 	}
 	bytes = unwrapRefValue(bytes)
 	if bytes.kind != kindString {
-		return errorUnionValue("std::fs::write_file expected []const u8 bytes"), nil
+		return errorUnionValue("std::fs::write_file expected []u8 bytes"), nil
 	}
 	if failure, ok := failingIoError(ioValue); ok {
 		return failure, nil
@@ -1525,14 +1525,14 @@ func (i *Interpreter) evalFsRemove(args []ast.Expression, env *Env, name string)
 	return voidValue(), nil
 }
 
-// evalPathArg evaluates one []const u8 path helper argument.
+// evalPathArg evaluates one []u8 path helper argument.
 func (i *Interpreter) evalPathArg(expr ast.Expression, env *Env, name string) (string, error) {
 	value, err := i.evalExpr(expr, env)
 	if err != nil {
 		return "", err
 	}
 	if value.kind != kindString {
-		return "", fmt.Errorf("runtime error: %s expects []const u8", name)
+		return "", fmt.Errorf("runtime error: %s expects []u8", name)
 	}
 	return value.s, nil
 }
@@ -1595,7 +1595,7 @@ func (i *Interpreter) evalIoBytes(
 	}
 	bytes = unwrapRefValue(bytes)
 	if bytes.kind != kindString {
-		return voidValue(), "", fmt.Errorf("runtime error: %s expects []const u8 bytes", name)
+		return voidValue(), "", fmt.Errorf("runtime error: %s expects []u8 bytes", name)
 	}
 	return ioValue, bytes.s, nil
 }
@@ -1677,7 +1677,7 @@ func (i *Interpreter) evalFsIoPath(
 	}
 	path = unwrapRefValue(path)
 	if path.kind != kindString {
-		return voidValue(), "", fmt.Errorf("runtime error: %s expects []const u8 path", name)
+		return voidValue(), "", fmt.Errorf("runtime error: %s expects []u8 path", name)
 	}
 	return ioValue, path.s, nil
 }
@@ -2549,15 +2549,15 @@ func (i *Interpreter) evalArrayConstructor(
 	return arrayValue(typeArg), nil
 }
 
-// evalMapConstructor creates an owned Map<[]const u8, V> with an allocator.
+// evalMapConstructor creates an owned Map<[]u8, V> with an allocator.
 func (i *Interpreter) evalMapConstructor(
 	typeArg string,
 	args []ast.Expression,
 	env *Env,
 ) (Value, error) {
 	parts, ok := splitGenericArgs(typeArg)
-	if !ok || len(parts) != 2 || parts[0] != "[]const u8" {
-		return voidValue(), fmt.Errorf("runtime error: std::map::Map expects []const u8 key")
+	if !ok || len(parts) != 2 || parts[0] != "[]u8" {
+		return voidValue(), fmt.Errorf("runtime error: std::map::Map expects []u8 key")
 	}
 	if len(args) != 1 {
 		return voidValue(), fmt.Errorf("runtime error: std::map::Map<%s> expects allocator", typeArg)
@@ -2579,7 +2579,7 @@ func runtimeValueMatchesType(value Value, typeName string) bool {
 		return value.kind == kindBool
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		return value.kind == kindInt
-	case "[]const u8":
+	case "[]u8":
 		return value.kind == kindString
 	default:
 		if base, elem, ok := splitGenericType(typeName); ok && base == "std::mem::Box" {
@@ -3067,7 +3067,7 @@ func (i *Interpreter) evalMapMethod(
 	return voidValue(), missingStdMethodWrapper("std.map." + name)
 }
 
-// evalMapRuntimeMethod executes owned Map<[]const u8, V> prototype operations.
+// evalMapRuntimeMethod executes owned Map<[]u8, V> prototype operations.
 func (i *Interpreter) evalMapRuntimeMethod(
 	mapVal Value,
 	name string,
@@ -3148,7 +3148,7 @@ func (i *Interpreter) evalMapEntryArgs(
 		return voidValue(), voidValue(), err
 	}
 	if key.kind != kindString {
-		return voidValue(), voidValue(), fmt.Errorf("runtime error: Map.insert expects []const u8 key")
+		return voidValue(), voidValue(), fmt.Errorf("runtime error: Map.insert expects []u8 key")
 	}
 	value, err := i.evalExpr(args[1], env)
 	if err != nil {
@@ -3157,7 +3157,7 @@ func (i *Interpreter) evalMapEntryArgs(
 	return key, value, nil
 }
 
-// evalMapKey evaluates one []const u8 lookup key.
+// evalMapKey evaluates one []u8 lookup key.
 func (i *Interpreter) evalMapKey(name string, args []ast.Expression, env *Env) (string, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("runtime error: %s expects 1 arg", name)
@@ -3167,7 +3167,7 @@ func (i *Interpreter) evalMapKey(name string, args []ast.Expression, env *Env) (
 		return "", err
 	}
 	if key.kind != kindString {
-		return "", fmt.Errorf("runtime error: %s expects []const u8 key", name)
+		return "", fmt.Errorf("runtime error: %s expects []u8 key", name)
 	}
 	return key.s, nil
 }
@@ -3470,7 +3470,7 @@ func (i *Interpreter) callPrint(args []Value) (Value, error) {
 // callError constructs an error-union error value by copying message bytes.
 func callError(args []Value) (Value, error) {
 	if len(args) != 1 || args[0].kind != kindString {
-		return voidValue(), fmt.Errorf("runtime error: error expected []const u8")
+		return voidValue(), fmt.Errorf("runtime error: error expected []u8")
 	}
 	return errorUnionValue(args[0].s), nil
 }
@@ -3567,10 +3567,10 @@ func qualifiedName(expr ast.Expression) (string, bool) {
 	}
 }
 
-// borrowPrefix reports whether an expression is &T or &mut T syntax.
+// borrowPrefix reports whether an expression is &T or &var T syntax.
 func borrowPrefix(expr ast.Expression) (*ast.PrefixExpr, bool) {
 	prefix, ok := expr.(*ast.PrefixExpr)
-	if !ok || (prefix.Operator != "&" && prefix.Operator != "&mut") {
+	if !ok || (prefix.Operator != "&" && prefix.Operator != "&var") {
 		return nil, false
 	}
 	return prefix, true

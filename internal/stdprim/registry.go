@@ -7,7 +7,7 @@ type ArgKind string
 
 const (
 	// ArgBytes is a read-only byte slice argument.
-	ArgBytes ArgKind = "[]const u8"
+	ArgBytes ArgKind = "[]u8"
 	// ArgI64 is a signed 64-bit integer argument.
 	ArgI64 ArgKind = "i64"
 	// ArgIo is an explicit I/O capability argument.
@@ -26,10 +26,10 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std.builtin.mem_len":            {Args: []ArgKind{ArgBytes}, Return: "i64"},
 	"std.builtin.io_write_stdout":    {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!void"},
 	"std.builtin.io_write_stderr":    {Args: []ArgKind{ArgIo, ArgBytes}, Return: "!void"},
-	"std.builtin.io_read_stdin":      {Args: []ArgKind{ArgIo}, Return: "![]const u8"},
+	"std.builtin.io_read_stdin":      {Args: []ArgKind{ArgIo}, Return: "![]u8"},
 	"std.builtin.process_arg_count":  {Return: "i64"},
-	"std.builtin.process_arg":        {Args: []ArgKind{ArgI64}, Return: "![]const u8"},
-	"std.builtin.process_env":        {Args: []ArgKind{ArgBytes}, Return: "![]const u8"},
+	"std.builtin.process_arg":        {Args: []ArgKind{ArgI64}, Return: "![]u8"},
+	"std.builtin.process_env":        {Args: []ArgKind{ArgBytes}, Return: "![]u8"},
 	"std.builtin.test_fail":          {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 

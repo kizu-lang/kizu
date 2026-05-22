@@ -52,7 +52,7 @@ paths, byte spans, line/column data, and related spans.
 
 The resolver boundary consumes the source table, registers selfhost/std modules,
 and scans top-level declarations into qualified symbol and visibility maps using
-`std::map::Map<[]const u8, V>`. Resolver diagnostics use
+`std::map::Map<[]u8, V>`. Resolver diagnostics use
 `std::kizu::diagnostic` and the oracle covers missing symbols, duplicate
 symbols, private access, and import cycles.
 

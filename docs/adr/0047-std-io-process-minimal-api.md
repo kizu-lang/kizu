@@ -13,17 +13,17 @@ globals where an `Io` capability is the correct boundary.
 Stdio helpers require explicit `Io`.
 
 ```text
-std::io::write_stdout(io: Io, bytes: &[]const u8) -> !void
-std::io::write_stderr(io: Io, bytes: &[]const u8) -> !void
-std::io::read_stdin(io: Io) -> ![]const u8
+std::io::write_stdout(io: Io, bytes: &[]u8) -> !void
+std::io::write_stderr(io: Io, bytes: &[]u8) -> !void
+std::io::read_stdin(io: Io) -> ![]u8
 ```
 
 Process helpers expose CLI state without filesystem or stdio side effects.
 
 ```text
 std::process::arg_count() -> i64
-std::process::arg(index: i64) -> ![]const u8
-std::process::env(name: []const u8) -> ![]const u8
+std::process::arg(index: i64) -> ![]u8
+std::process::env(name: []u8) -> ![]u8
 std::process::exit_code(code: i64) -> i64
 ```
 

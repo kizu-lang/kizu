@@ -22,7 +22,7 @@ const (
 )
 
 const stdKizuLexerParityHarness = `
-fn run_lexer_case(name: []const u8, text: []const u8) -> !void {
+fn run_lexer_case(name: []u8, text: []u8) -> !void {
     print("@@KIZU_LEXER_PARITY_CASE@@");
     print(name);
     var token = std::kizu::lexer::first_token(text);
@@ -36,7 +36,7 @@ fn run_lexer_case(name: []const u8, text: []const u8) -> !void {
     }
 }
 
-fn run_tokenize_case(name: []const u8, text: []const u8) -> !void {
+fn run_tokenize_case(name: []u8, text: []u8) -> !void {
     print("@@KIZU_LEXER_PARITY_CASE@@");
     print(name);
     let allocator = std::mem::page_allocator();
@@ -118,7 +118,7 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
     };
 }
 
-fn dump_token(source: []const u8, token: std::kizu::lexer::Token) -> !void {
+fn dump_token(source: []u8, token: std::kizu::lexer::Token) -> !void {
     match token.kind {
         Fn => print("Fn");,
         Import => print("Import");,
@@ -385,7 +385,7 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/fn_signature", source: "fn add(a: i64, b: i64) -> i64 { return a + b; }"},
 		{
 			name:   "seed/type_tokens",
-			source: "fn f<'a>(a: &'a mut []'a const std::array::Array<i64>) -> !void {}",
+			source: "fn f<'a>(a: &'a var []'a std::array::Array<i64>) -> !void {}",
 		},
 		{name: "seed/string_call", source: `fn main() { print("hello"); }`},
 		{name: "seed/binary_precedence", source: "fn main() { print(1 + 2 * 3); }"},
@@ -400,7 +400,7 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 		{name: "seed/operator_tokens", source: "a = b - c / d % e != f <= g > h >= i.x .. j | k => l"},
 		{
 			name: "seed/declaration_tokens",
-			source: "import app::lexer; pub struct User { pub name: []const u8, } " +
+			source: "import app::lexer; pub struct User { pub name: []u8, } " +
 				"enum Color { Red, Blue, } union Shape { Point, Circle(i64), } " +
 				"extern \"c\" fn puts(s: ptr<const u8>) -> i32",
 		},

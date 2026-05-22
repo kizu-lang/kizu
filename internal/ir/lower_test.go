@@ -122,7 +122,7 @@ const whileSource = `fn main() {
 }`
 
 const arenaSource = `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main(allocator: Allocator) {
     let users = std::arena::Arena<User>(allocator);
@@ -155,8 +155,8 @@ fn main() -> !i64 {
 
 const helloSnapshot = `fn main() -> void {
 entry:
-  %1: []const u8 = const "hello, kizu"
-  call.print %1: []const u8
+  %1: []u8 = const "hello, kizu"
+  call.print %1: []u8
   return void: void
 }`
 
@@ -176,11 +176,11 @@ entry:
 
 const variablesSnapshot = `fn main() -> void {
 entry:
-  %1: []const u8 = const "alice"
+  %1: []u8 = const "alice"
   %2: i64 = const 30
   %3: i64 = const 1
   %4: i64 = binary.+ %2: i64, %3: i64
-  call.print %1: []const u8
+  call.print %1: []u8
   call.print %4: i64
   return void: void
 }`
@@ -192,12 +192,12 @@ entry:
   %3: bool = binary.>= %1: i64, %2: i64
   branch %3: bool, if.then.1, if.else.2
 if.then.1:
-  %4: []const u8 = const "adult"
-  call.print %4: []const u8
+  %4: []u8 = const "adult"
+  call.print %4: []u8
   jump if.end.3
 if.else.2:
-  %6: []const u8 = const "minor"
-  call.print %6: []const u8
+  %6: []u8 = const "minor"
+  call.print %6: []u8
   jump if.end.3
 if.end.3:
   return void: void
@@ -224,12 +224,12 @@ while.end.3:
 const arenaSnapshot = `fn main(%allocator: Allocator) -> void {
 entry:
   %1: std::arena::Arena<User> = arena.new %allocator: Allocator, User
-  %2: []const u8 = const "alice"
-  %3: User = struct.new {name: %2: []const u8}
+  %2: []u8 = const "alice"
+  %3: User = struct.new {name: %2: []u8}
   %4: std::arena::Handle<User> = arena.add %1: std::arena::Arena<User>, %3: User
   %5: User = arena.get %1: std::arena::Arena<User>, %4: std::arena::Handle<User>
-  %6: []const u8 = field.name %5: User
-  call.print %6: []const u8
+  %6: []u8 = field.name %5: User
+  call.print %6: []u8
   arena.deinit %1: std::arena::Arena<User>
   return void: void
 }`

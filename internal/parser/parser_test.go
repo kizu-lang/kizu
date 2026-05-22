@@ -29,7 +29,7 @@ func TestParseHello(t *testing.T) {
 
 // TestParseFunctionWithParamsAndReturn checks typed parameters and return parsing.
 func TestParseFunctionWithParamsAndReturn(t *testing.T) {
-	input := `fn add(a: &i64, b: &mut i64) -> i64 {
+	input := `fn add(a: &i64, b: &var i64) -> i64 {
     return a + b;
 }`
 	p := New(lexer.New(input))
@@ -38,7 +38,7 @@ func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn add(a: &i64, b: &mut i64) -> i64 { return (a + b); }`
+	want := `fn add(a: &i64, b: &var i64) -> i64 { return (a + b); }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -83,7 +83,7 @@ func TestParseRejectsDeferredStatements(t *testing.T) {
 
 // TestParseFieldAndDerefAssignment checks assignment targets beyond identifiers.
 func TestParseFieldAndDerefAssignment(t *testing.T) {
-	input := `fn rename(user: &mut User) -> void {
+	input := `fn rename(user: &var User) -> void {
     user.*.name = "bob";
 }`
 	p := New(lexer.New(input))
@@ -92,7 +92,7 @@ func TestParseFieldAndDerefAssignment(t *testing.T) {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `fn rename(user: &mut User) -> void { user.*.name = "bob"; }`
+	want := `fn rename(user: &var User) -> void { user.*.name = "bob"; }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -186,7 +186,7 @@ func TestParseLoopControl(t *testing.T) {
 // TestParseStructDecl checks top-level struct field parsing.
 func TestParseStructDecl(t *testing.T) {
 	input := `struct User {
-    name: []const u8,
+    name: []u8,
     age: i64,
 }
 fn main() {}`
@@ -196,7 +196,7 @@ fn main() {}`
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	got := program.String()
-	want := `struct User { name: []const u8, age: i64 }
+	want := `struct User { name: []u8, age: i64 }
 fn main() {  }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -235,7 +235,7 @@ pub struct Token {
 pub enum TokenKind {
     Ident,
 }
-pub fn lex(source: []const u8) -> void {}`
+pub fn lex(source: []u8) -> void {}`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
@@ -244,7 +244,7 @@ pub fn lex(source: []const u8) -> void {}`
 	want := `import app::lexer
 pub struct Token { pub kind: TokenKind, start: i64 }
 pub enum TokenKind { Ident }
-pub fn lex(source: []const u8) -> void {  }`
+pub fn lex(source: []u8) -> void {  }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -278,7 +278,7 @@ func TestParseUnionDecl(t *testing.T) {
 	input := `union Shape {
     Point,
     Circle(i64),
-    Label([]const u8),
+    Label([]u8),
 }
 fn main() {
     let shape = Shape::Circle(10);
@@ -293,7 +293,7 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `union Shape { Point, Circle(i64), Label([]const u8) }
+	want := `union Shape { Point, Circle(i64), Label([]u8) }
 fn main() { let shape = Shape::Circle(10); match shape { Point => print("point"), ` +
 		`Circle(radius) => print(radius), Label(text) => print(text) } }`
 	if got := program.String(); got != want {
@@ -396,7 +396,7 @@ func TestParseRequiresCommaListDelimiters(t *testing.T) {
 		want  string
 	}{
 		{
-			input: `struct User { name: []const u8; age: i64 }`,
+			input: `struct User { name: []u8; age: i64 }`,
 			want:  "expected `,` after struct field",
 		},
 		{
@@ -435,7 +435,7 @@ func TestParseAllowsTrailingCommas(t *testing.T) {
     return value;
 }
 struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let user = User { name: "alice", }
@@ -450,7 +450,7 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `fn id<T>(value: T) -> T { return value; }
-struct User { name: []const u8 }
+struct User { name: []u8 }
 fn main() { let user = User { name: "alice" }; let values = std::array::Array<i64>(allocator); ` +
 		`print(id(1)); print(values.len()); print(user.name); }`
 	if got := program.String(); got != want {
@@ -461,7 +461,7 @@ fn main() { let user = User { name: "alice" }; let values = std::array::Array<i6
 // TestParseArenaAndStructLiteral checks Phase 6 arena and struct literal syntax.
 func TestParseArenaAndStructLiteral(t *testing.T) {
 	input := `struct User {
-    name: []const u8,
+    name: []u8,
 }
 fn main() {
     let users = std::arena::Arena<User>(allocator);
@@ -473,7 +473,7 @@ fn main() {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `struct User { name: []const u8 }
+	want := `struct User { name: []u8 }
 fn main() { let users = std::arena::Arena<User>(allocator); ` +
 		`let alice = users.add(User { name: "alice" }); ` +
 		`print(users.get(alice).name); }`
@@ -502,31 +502,31 @@ fn main() { let token = token::Token { kind: 1 }; }`
 
 // TestParseMultiArgGenericTypes checks static type argument lists.
 func TestParseMultiArgGenericTypes(t *testing.T) {
-	input := `fn lookup(table: std::map::Map<[]const u8, i64>) -> i64 {
+	input := `fn lookup(table: std::map::Map<[]u8, i64>) -> i64 {
     return table.get("main");
 }
 fn main() {
-    let table = std::map::Map<[]const u8, i64>(allocator);
+    let table = std::map::Map<[]u8, i64>(allocator);
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn lookup(table: std::map::Map<[]const u8, i64>) -> i64 { ` +
+	want := `fn lookup(table: std::map::Map<[]u8, i64>) -> i64 { ` +
 		`return table.get("main"); }
-fn main() { let table = std::map::Map<[]const u8, i64>(allocator); }`
+fn main() { let table = std::map::Map<[]u8, i64>(allocator); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
-// TestParseBorrowErrorUnionReturnType checks !&T and !&mut T return spellings.
+// TestParseBorrowErrorUnionReturnType checks !&T and !&var T return spellings.
 func TestParseBorrowErrorUnionReturnType(t *testing.T) {
 	input := `fn at<T>(values: std::array::Array<T>, index: i64) -> !&T {
     return std::builtin::array_at<T>(values, index);
 }
-fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&mut T {
+fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&var T {
     return std::builtin::array_at_mut<T>(values, index);
 }`
 	p := New(lexer.New(input))
@@ -536,7 +536,7 @@ fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&mut T {
 	}
 	want := `fn at<T>(values: std::array::Array<T>, index: i64) -> !&T { ` +
 		`return std::builtin::array_at<T>(values, index); }
-fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&mut T { ` +
+fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&var T { ` +
 		`return std::builtin::array_at_mut<T>(values, index); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -675,7 +675,7 @@ func TestParseTry(t *testing.T) {
 
 // TestParseBorrowReturnProvenance checks borrowed-return provenance syntax.
 func TestParseBorrowReturnProvenance(t *testing.T) {
-	input := `fn show(s: []const u8) -> []const u8 borrows s {
+	input := `fn show(s: []u8) -> []u8 borrows s {
     return s[0..1];
 }`
 	p := New(lexer.New(input))
@@ -683,7 +683,7 @@ func TestParseBorrowReturnProvenance(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn show(s: []const u8) -> []const u8 borrows s { return s[0..1]; }`
+	want := `fn show(s: []u8) -> []u8 borrows s { return s[0..1]; }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

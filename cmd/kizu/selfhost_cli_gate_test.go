@@ -157,7 +157,7 @@ func selfhostCLIFrontendHappyCases(fixtures selfhostCLIFrontendFixtures) []selfh
 		{
 			name: "parse_temp_source",
 			args: []string{"parse", fixtures.source},
-			wantOut: "enum Flag { Yes, No }\nstruct Name { value: []const u8 }\n" +
+			wantOut: "enum Flag { Yes, No }\nstruct Name { value: []u8 }\n" +
 				"fn choose(flag: Flag) -> bool { return match flag { " +
 				"Yes => true, No => false }; }\n" +
 				"fn main(values: std::array::Array <Name>) { let count = values.len(); " +
@@ -619,7 +619,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		t,
 		"frontend_source.kizu",
 		`enum Flag{Yes,No}
-struct Name{value:[]const u8,}
+struct Name{value:[]u8,}
 fn choose(flag:Flag)->bool{return match flag{Yes=>true,No=>false};}
 fn main(values:std::array::Array<Name>){let count=values.len();print(count);values.deinit();}
 `,
@@ -846,7 +846,7 @@ func writeSelfhostCLIMoveFrontendFixtures(t *testing.T) (string, string) {
 	t.Helper()
 
 	const movedSource = `struct User {
-    value: []const u8,
+    value: []u8,
 }
 
 fn take(user: User) {
@@ -862,7 +862,7 @@ fn main() {
 	tempMovedSource := writeTempKizuSource(t, "frontend_moved_record.kizu", movedSource)
 
 	const movedValueSource = `struct Name {
-    value: []const u8,
+    value: []u8,
 }
 
 fn take(name: Name) {
