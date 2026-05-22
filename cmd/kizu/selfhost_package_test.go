@@ -134,17 +134,19 @@ func TestSelfhostFunctionCallDiagnosticsUseSourcePath(t *testing.T) {
 	}
 }
 
-// TestSelfhostPackageCallDiagnosticsCollectCandidates keeps target parsing single-pass.
-func TestSelfhostPackageCallDiagnosticsCollectCandidates(t *testing.T) {
+// TestSelfhostPackageCallDiagnosticsBorrowAST keeps target parsing single-pass.
+func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost types: %v", err)
 	}
 	content := string(bytes)
 	required := []string{
-		"std::array::Array<FunctionCallCandidate>",
-		"collect_package_function_call_candidates(",
-		"first_function_call_error_in_candidates(",
+		"has_package_function_call(",
+		"collect_other_package_function_arities_from_ast(",
+		"ast: &std::kizu::ast::Ast,",
+		"ast_ref_node_text(",
+		"&result.ast",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
@@ -156,10 +158,13 @@ func TestSelfhostPackageCallDiagnosticsCollectCandidates(t *testing.T) {
 		"source_local_function_call_error(",
 		"function_call_error_at(",
 		"local_function_call_error_at(",
+		"FunctionCallCandidate",
+		"collect_package_function_call_candidates(",
+		"first_function_call_error_in_candidates(",
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(content, fragment) {
-			t.Fatalf("selfhost package call diagnostics keep raw token scan %q", fragment)
+			t.Fatalf("selfhost package call diagnostics keep removed path %q", fragment)
 		}
 	}
 	body := selfhostKizuFunctionBody(t, content, "pub fn first_function_call_error(")
@@ -167,8 +172,16 @@ func TestSelfhostPackageCallDiagnosticsCollectCandidates(t *testing.T) {
 	if count := strings.Count(body, parseCall); count != 1 {
 		t.Fatalf("first_function_call_error parses target %d times, want 1", count)
 	}
-	if strings.Contains(body, "let checked = try "+parseCall) {
-		t.Fatal("first_function_call_error reparses target after collecting package arities")
+	if !strings.Contains(body, "collect_function_arities_from_ast(") {
+		t.Fatal("first_function_call_error does not collect target arity from the parsed target AST")
+	}
+	otherBody := selfhostKizuFunctionBody(
+		t,
+		content,
+		"fn collect_other_package_function_arities_from_ast(",
+	)
+	if !strings.Contains(otherBody, "!std::mem::equal_bytes(file.path, target_path)") {
+		t.Fatal("package arity collection does not skip the already parsed target file")
 	}
 }
 
