@@ -718,6 +718,22 @@ Kizu は `int` のような幅が曖昧な整数型を導入しません。
 文字列 literal の型は `[]u8` です。
 `string` primitive は導入しません。
 
+文字列 literal には次の 2 形式があります。
+
+* **single-line literal** `"..."`：1 行に収まる literal。escape 解釈は v0.2 では行わず、二重引用符の間のバイト列がそのまま値になります。
+* **multi-line literal** `\\<content>`：行頭の `\\` (backslash 二つ) で始まる行を 1 つ以上連続させると、`\n` で連結された 1 つの literal になります。delimiter は行末で閉じるため末尾編集で誤って閉じ忘れる事故が起きません。連続性は「次の非空白文字が `\\` で始まる行か」で判定し、空白行や注釈行は許容しません。
+
+```kizu
+let help =
+    \\Usage: kizu <command>
+    \\
+    \\Commands:
+    \\  build    Build the project
+;
+```
+
+multi-line literal の値は連結後のバイト列 (`Usage: kizu <command>\n\nCommands:\n  build    Build the project`) で、`[]u8` 型として `"..."` と相互に交換可能です。
+
 `void` は値を返さない関数の戻り値です。
 Kizu v0.1 では `Unit` という別名は導入しません。
 
