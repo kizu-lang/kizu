@@ -212,6 +212,11 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"define i1 @kizu_selfhost__slice_equal",
 		"define i1 @kizu_selfhost__slice_contains",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
+		"define i1 @kizu_selfhost__parse_format_write",
+		"define i64 @kizu_selfhost__parse_missing_expr_index",
+		"@.kizu.cli.parse_expected_expr_prefix",
+		"%parse_format_ok = call i1 @kizu_selfhost__parse_format_write",
+		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
 		"@.kizu.cli.move_prefix",
 		"@.kizu.cli.move_suffix",
@@ -907,8 +912,9 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler parse exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		return 1
 	}
-	if stdout != source {
-		t.Errorf("hosted compiler parse stdout mismatch:\nwant:\n%s\ngot:\n%s", source, stdout)
+	expected := "fn main() { print(\"from temp\"); }\n"
+	if stdout != expected {
+		t.Errorf("hosted compiler parse stdout mismatch:\nwant:\n%s\ngot:\n%s", expected, stdout)
 		return 1
 	}
 	if stderr != "" {
