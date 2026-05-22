@@ -212,6 +212,13 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"define i1 @kizu_selfhost__slice_equal",
 		"define i1 @kizu_selfhost__slice_contains",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
+		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
+		"@.kizu.cli.move_prefix",
+		"@.kizu.cli.move_suffix",
+		"@.kizu.cli.main_fn_pattern",
+		"%moved_name = call %kizu.slice.u8 @kizu_selfhost__moved_value_name",
+		"br i1 %has_moved_name, label %check_file_move_error, label %check_file_shape",
+		"br i1 %main_fn_found, label %check_file_ok, label %usage",
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
 	}
