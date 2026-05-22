@@ -14,6 +14,7 @@ pub struct PackageModuleRef {
     pub end: i64,
     pub absolute: bool,
 }
+
 pub fn first_function_call_error(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
@@ -41,10 +42,20 @@ pub fn first_function_call_error(
                     function_arities
                 );
                 var referenced_modules = std::array::Array<PackageModuleRef>(allocator);
+                var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
+                var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
                 var target_tokens = try lexer::tokenize(allocator, file.text);
+                try collect_import_aliases(
+                    file,
+                    target_tokens,
+                    import_alias_starts,
+                    import_alias_ends
+                );
                 try collect_referenced_package_call_modules(
                     file,
                     target_tokens,
+                    import_alias_starts,
+                    import_alias_ends,
                     referenced_modules
                 );
                 target_tokens.deinit();
@@ -55,14 +66,18 @@ pub fn first_function_call_error(
                     referenced_modules,
                     function_arities
                 );
-                found = try first_function_call_error_ast_node(
+                found = try first_function_call_error_ast_node_with_imports(
                     allocator,
                     file,
                     &result.ast,
                     result.root,
                     function_arities,
+                    import_alias_starts,
+                    import_alias_ends,
                     false
                 );
+                import_alias_starts.deinit();
+                import_alias_ends.deinit();
                 referenced_modules.deinit();
                 function_arities.deinit();
             }
@@ -174,6 +189,8 @@ fn collect_other_package_function_arities_for_modules_from_ast(
 fn collect_referenced_package_call_modules(
     file: &source::SourceFile,
     tokens: &std::array::Array<std::kizu::lexer::Token>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     modules: &var std::array::Array<PackageModuleRef>
 ) -> !void {
     var index = 0;
@@ -184,9 +201,46 @@ fn collect_referenced_package_call_modules(
             let last = try tokens.get(path_end);
             let name = file.text[first.start..last.end];
             if is_referenced_package_function_call(name) {
-                try append_package_function_module(file, first.start, name, modules);
+                try append_package_function_module(
+                    file,
+                    first.start,
+                    name,
+                    import_alias_starts,
+                    import_alias_ends,
+                    modules
+                );
             }
             index = path_end + 1;
+        } else {
+            index = index + 1;
+        }
+    }
+    return;
+}
+
+fn collect_import_aliases(
+    file: &source::SourceFile,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    alias_starts: &var std::map::Map<[]u8, i64>,
+    alias_ends: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while index < tokens.len() {
+        if try token_at_equals(file.text, tokens, index, "import") {
+            let path_start = index + 1;
+            let path_end = try qualified_path_end(file.text, tokens, path_start);
+            if path_end >= path_start {
+                let first = try tokens.get(path_start);
+                let last = try tokens.get(path_end);
+                let alias = token_text(file.text, last);
+                if !alias_starts.contains(alias) {
+                    try alias_starts.insert(alias, first.start);
+                    try alias_ends.insert(alias, last.end);
+                }
+                index = path_end + 1;
+            } else {
+                index = index + 1;
+            }
         } else {
             index = index + 1;
         }
@@ -207,11 +261,31 @@ fn append_package_function_module(
     file: &source::SourceFile,
     source_start: i64,
     name: []u8,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     modules: &var std::array::Array<PackageModuleRef>
 ) -> !void {
     let end = package_function_module_end(name);
     if end < 1 {
         return;
+    }
+    let first_end = first_qualified_segment_end(name);
+    if end == first_end {
+        let alias = name[0..first_end];
+        if import_alias_starts.contains(alias) {
+            let module_start = try import_alias_starts.get(alias);
+            let module_end = try import_alias_ends.get(alias);
+            let module_text = file.text[module_start..module_end];
+            let imported_module = PackageModuleRef {
+                start: module_start,
+                end: module_end,
+                absolute: import_module_is_absolute(module_text)
+            };
+            if !(try package_module_list_contains(file, modules, &imported_module)) {
+                try modules.append(imported_module);
+            }
+            return;
+        }
     }
     let absolute = std::mem::starts_with(name, "std::") or
         std::mem::starts_with(name, "selfhost::");
@@ -226,6 +300,11 @@ fn append_package_function_module(
     return;
 }
 
+fn import_module_is_absolute(name: []u8) -> bool {
+    return std::mem::starts_with(name, "std::") or
+        std::mem::starts_with(name, "selfhost::");
+}
+
 fn package_function_module_end(name: []u8) -> i64 {
     var end = 0;
     var index = 0;
@@ -236,6 +315,17 @@ fn package_function_module_end(name: []u8) -> i64 {
         index = index + 1;
     }
     return end;
+}
+
+fn first_qualified_segment_end(name: []u8) -> i64 {
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return std::mem::len(name);
 }
 
 fn package_module_list_contains(
@@ -668,6 +758,36 @@ pub fn first_function_call_error_ast_node(
     functions: &std::map::Map<[]u8, i64>,
     local_only: bool
 ) -> !model::FunctionCallSummary {
+    var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
+    var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
+    var tokens = try lexer::tokenize(allocator, file.text);
+    try collect_import_aliases(file, tokens, import_alias_starts, import_alias_ends);
+    tokens.deinit();
+    let found = try first_function_call_error_ast_node_with_imports(
+        allocator,
+        file,
+        ast,
+        node_id,
+        functions,
+        import_alias_starts,
+        import_alias_ends,
+        local_only
+    );
+    import_alias_starts.deinit();
+    import_alias_ends.deinit();
+    return found;
+}
+
+fn first_function_call_error_ast_node_with_imports(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    local_only: bool
+) -> !model::FunctionCallSummary {
     let node = ast.get(node_id);
     match node.data {
         Program(program) => return first_function_call_error_in_range(
@@ -676,14 +796,18 @@ pub fn first_function_call_error_ast_node(
             ast,
             program.declarations,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        FnDecl(fn_decl) => return first_function_call_error_ast_node(
+        FnDecl(fn_decl) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             fn_decl.body,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         Block(block) => return first_function_call_error_in_range(
@@ -692,14 +816,18 @@ pub fn first_function_call_error_ast_node(
             ast,
             block.statements,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        Let(let_node) => return first_function_call_error_ast_node(
+        Let(let_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             let_node.value,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         Assign(assign_node) => return first_function_call_error_in_two_nodes(
@@ -709,30 +837,38 @@ pub fn first_function_call_error_ast_node(
             assign_node.target,
             assign_node.value,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        Return(return_node) => return first_function_call_error_ast_node(
+        Return(return_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             return_node.value,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        Defer(defer_node) => return first_function_call_error_ast_node(
+        Defer(defer_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             defer_node.expr,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        ExprStmt(expr_stmt) => return first_function_call_error_ast_node(
+        ExprStmt(expr_stmt) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             expr_stmt.expr,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         If(if_node) => return first_function_call_error_in_three_nodes(
@@ -743,6 +879,8 @@ pub fn first_function_call_error_ast_node(
             if_node.then_block,
             if_node.else_block,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         While(while_node) => return first_function_call_error_in_two_nodes(
@@ -752,6 +890,8 @@ pub fn first_function_call_error_ast_node(
             while_node.condition,
             while_node.body,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         For(for_node) => return first_function_call_error_in_three_nodes(
@@ -762,6 +902,8 @@ pub fn first_function_call_error_ast_node(
             for_node.end,
             for_node.body,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         Match(match_node) => return first_function_call_error_in_match(
@@ -771,22 +913,28 @@ pub fn first_function_call_error_ast_node(
             match_node.value,
             match_node.arms,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        MatchArm(match_arm) => return first_function_call_error_ast_node(
+        MatchArm(match_arm) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             match_arm.body,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        Unsafe(unsafe_node) => return first_function_call_error_ast_node(
+        Unsafe(unsafe_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             unsafe_node.body,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         ComptimeIf(comptime_if_node) => return first_function_call_error_in_three_nodes(
@@ -797,14 +945,18 @@ pub fn first_function_call_error_ast_node(
             comptime_if_node.then_block,
             comptime_if_node.else_block,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        Prefix(prefix_node) => return first_function_call_error_ast_node(
+        Prefix(prefix_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             prefix_node.right,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         Binary(binary) => return first_function_call_error_in_two_nodes(
@@ -814,22 +966,28 @@ pub fn first_function_call_error_ast_node(
             binary.left,
             binary.right,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        FieldExpr(field_expr_node) => return first_function_call_error_ast_node(
+        FieldExpr(field_expr_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             field_expr_node.receiver,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        DerefExpr(deref_expr_node) => return first_function_call_error_ast_node(
+        DerefExpr(deref_expr_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             deref_expr_node.receiver,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         Call(call_node) => return first_function_call_error_in_call(
@@ -839,22 +997,28 @@ pub fn first_function_call_error_ast_node(
             call_node.callee,
             call_node.args,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        TypeApplyExpr(type_apply) => return first_function_call_error_ast_node(
+        TypeApplyExpr(type_apply) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             type_apply.callee,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        CastExpr(cast_expr) => return first_function_call_error_ast_node(
+        CastExpr(cast_expr) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             cast_expr.value,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         IndexExpr(index_expr) => return first_function_call_error_in_three_nodes(
@@ -865,6 +1029,8 @@ pub fn first_function_call_error_ast_node(
             index_expr.start,
             index_expr.end,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         StructLiteralExpr(struct_literal) => return first_function_call_error_in_range(
@@ -873,38 +1039,48 @@ pub fn first_function_call_error_ast_node(
             ast,
             struct_literal.fields,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        StructFieldInit(struct_field_init) => return first_function_call_error_ast_node(
+        StructFieldInit(struct_field_init) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             struct_field_init.value,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        ArenaNewExpr(arena_new) => return first_function_call_error_ast_node(
+        ArenaNewExpr(arena_new) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             arena_new.allocator,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        TryExpr(try_expr_node) => return first_function_call_error_ast_node(
+        TryExpr(try_expr_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             try_expr_node.value,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
-        ComptimeExpr(comptime_expr_node) => return first_function_call_error_ast_node(
+        ComptimeExpr(comptime_expr_node) => return first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             comptime_expr_node.value,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );,
         _ => return function_call_summary(false, 0, 0, 0, 0, 0);,
@@ -920,10 +1096,22 @@ pub fn check_file_function_references(
     var index = 0;
     var typed_nodes = 0;
     var diagnostics = 0;
+    var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
+    var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
+    try collect_import_aliases(file, tokens, import_alias_starts, import_alias_ends);
     while index < tokens.len() {
         let path_end = try qualified_path_end(file.text, tokens, index);
         if path_end >= index and try is_function_call_at(file.text, tokens, index, path_end) {
-            let checked = try check_function_call_at(allocator, file, tokens, functions, index, path_end);
+            let checked = try check_function_call_at(
+                allocator,
+                file,
+                tokens,
+                functions,
+                import_alias_starts,
+                import_alias_ends,
+                index,
+                path_end
+            );
             typed_nodes = typed_nodes + checked.typed_nodes;
             diagnostics = diagnostics + checked.diagnostics;
             index = checked.next;
@@ -931,6 +1119,8 @@ pub fn check_file_function_references(
             index = index + 1;
         }
     }
+    import_alias_starts.deinit();
+    import_alias_ends.deinit();
     return function_reference_scan(index, typed_nodes, diagnostics);
 }
 
@@ -940,17 +1130,21 @@ fn first_function_call_error_in_range(
     ast: &std::kizu::ast::Ast,
     range: std::kizu::ast::ChildRange,
     functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     local_only: bool
 ) -> !model::FunctionCallSummary {
     var index = 0;
     while index < range.len {
         let child = try ast.child_at(range, index);
-        let found = try first_function_call_error_ast_node(
+        let found = try first_function_call_error_ast_node_with_imports(
             allocator,
             file,
             ast,
             child,
             functions,
+            import_alias_starts,
+            import_alias_ends,
             local_only
         );
         if found.found {
@@ -968,20 +1162,33 @@ fn first_function_call_error_in_two_nodes(
     first: std::kizu::ast::NodeId,
     second: std::kizu::ast::NodeId,
     functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     local_only: bool
 ) -> !model::FunctionCallSummary {
-    let first_found = try first_function_call_error_ast_node(
+    let first_found = try first_function_call_error_ast_node_with_imports(
         allocator,
         file,
         ast,
         first,
         functions,
+        import_alias_starts,
+        import_alias_ends,
         local_only
     );
     if first_found.found {
         return first_found;
     }
-    return first_function_call_error_ast_node(allocator, file, ast, second, functions, local_only);
+    return first_function_call_error_ast_node_with_imports(
+        allocator,
+        file,
+        ast,
+        second,
+        functions,
+        import_alias_starts,
+        import_alias_ends,
+        local_only
+    );
 }
 
 fn first_function_call_error_in_three_nodes(
@@ -992,14 +1199,18 @@ fn first_function_call_error_in_three_nodes(
     second: std::kizu::ast::NodeId,
     third: std::kizu::ast::NodeId,
     functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     local_only: bool
 ) -> !model::FunctionCallSummary {
-    let first_found = try first_function_call_error_ast_node(
+    let first_found = try first_function_call_error_ast_node_with_imports(
         allocator,
         file,
         ast,
         first,
         functions,
+        import_alias_starts,
+        import_alias_ends,
         local_only
     );
     if first_found.found {
@@ -1012,6 +1223,8 @@ fn first_function_call_error_in_three_nodes(
         second,
         third,
         functions,
+        import_alias_starts,
+        import_alias_ends,
         local_only
     );
 }
@@ -1023,20 +1236,33 @@ fn first_function_call_error_in_match(
     value: std::kizu::ast::NodeId,
     arms: std::kizu::ast::ChildRange,
     functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     local_only: bool
 ) -> !model::FunctionCallSummary {
-    let value_found = try first_function_call_error_ast_node(
+    let value_found = try first_function_call_error_ast_node_with_imports(
         allocator,
         file,
         ast,
         value,
         functions,
+        import_alias_starts,
+        import_alias_ends,
         local_only
     );
     if value_found.found {
         return value_found;
     }
-    return first_function_call_error_in_range(allocator, file, ast, arms, functions, local_only);
+    return first_function_call_error_in_range(
+        allocator,
+        file,
+        ast,
+        arms,
+        functions,
+        import_alias_starts,
+        import_alias_ends,
+        local_only
+    );
 }
 
 fn first_function_call_error_in_call(
@@ -1046,6 +1272,8 @@ fn first_function_call_error_in_call(
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     local_only: bool
 ) -> !model::FunctionCallSummary {
     let call_found = try function_call_error_for_ast_call(
@@ -1055,23 +1283,36 @@ fn first_function_call_error_in_call(
         callee,
         args,
         functions,
+        import_alias_starts,
+        import_alias_ends,
         local_only
     );
     if call_found.found {
         return call_found;
     }
-    let callee_found = try first_function_call_error_ast_node(
+    let callee_found = try first_function_call_error_ast_node_with_imports(
         allocator,
         file,
         ast,
         callee,
         functions,
+        import_alias_starts,
+        import_alias_ends,
         local_only
     );
     if callee_found.found {
         return callee_found;
     }
-    return first_function_call_error_in_range(allocator, file, ast, args, functions, local_only);
+    return first_function_call_error_in_range(
+        allocator,
+        file,
+        ast,
+        args,
+        functions,
+        import_alias_starts,
+        import_alias_ends,
+        local_only
+    );
 }
 
 fn function_call_error_for_ast_call(
@@ -1081,6 +1322,8 @@ fn function_call_error_for_ast_call(
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     local_only: bool
 ) -> !model::FunctionCallSummary {
     if function_call_callee_is_member(ast, callee) {
@@ -1095,7 +1338,13 @@ fn function_call_error_for_ast_call(
         return function_call_summary(false, 0, 0, 0, 0, 0);
     }
     var resolved = std::string::String(allocator);
-    try append_resolved_function_name(resolved, file, name);
+    try append_resolved_function_name(
+        resolved,
+        file,
+        name,
+        import_alias_starts,
+        import_alias_ends
+    );
     let key = resolved.as_bytes();
     let found = functions.contains(key);
     var expected = 0;
@@ -1155,6 +1404,8 @@ fn check_function_call_at(
     file: &source::SourceFile,
     tokens: &std::array::Array<std::kizu::lexer::Token>,
     functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
     start: i64,
     end: i64
 ) -> !FunctionReferenceScan {
@@ -1166,7 +1417,13 @@ fn check_function_call_at(
         return function_reference_scan(close + 1, 0, 0);
     }
     var resolved = std::string::String(allocator);
-    try append_resolved_function_name(resolved, file, name);
+    try append_resolved_function_name(
+        resolved,
+        file,
+        name,
+        import_alias_starts,
+        import_alias_ends
+    );
     let key = resolved.as_bytes();
     var diagnostics = 0;
     if functions.contains(key) {
@@ -1218,13 +1475,24 @@ fn should_skip_function_reference(name: []u8) -> bool {
 fn append_resolved_function_name(
     out: &var std::string::String,
     file: &source::SourceFile,
-    name: []u8
+    name: []u8,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !void {
     if std::mem::starts_with(name, "std::") or std::mem::starts_with(name, "selfhost::") {
         try out.append_bytes(name);
         return;
     }
     if is_qualified_name(name) {
+        let first_end = first_qualified_segment_end(name);
+        let alias = name[0..first_end];
+        if import_alias_starts.contains(alias) {
+            let module_start = try import_alias_starts.get(alias);
+            let module_end = try import_alias_ends.get(alias);
+            try out.append_bytes(file.text[module_start..module_end]);
+            try out.append_bytes(name[first_end..std::mem::len(name)]);
+            return;
+        }
         try out.append_bytes("selfhost::");
         try out.append_bytes(name);
         return;

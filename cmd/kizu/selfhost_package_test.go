@@ -409,6 +409,30 @@ func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
 	}
 }
 
+// TestSelfhostFunctionCallsResolveImportAliases keeps qualified calls import-owned.
+func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
+	functionCalls := readSelfhostFile(t, "../../selfhost/src/types/function_calls.kizu")
+	checkCLI := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	required := []string{
+		"var import_alias_starts = std::map::Map<[]u8, i64>(allocator)",
+		"var import_alias_ends = std::map::Map<[]u8, i64>(allocator)",
+		"collect_import_aliases(",
+		"first_qualified_segment_end(name)",
+		"if import_alias_starts.contains(alias) {",
+		"file.text[module_start..module_end]",
+		"try output::stderr_newline(allocator, io);",
+	}
+	content := functionCalls + checkCLI
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("selfhost import alias call resolution missing %q", fragment)
+		}
+	}
+	if strings.Contains(checkCLI, "var newline = std::string::String(allocator)") {
+		t.Fatal("missing-return diagnostic keeps manual newline after alias resolution")
+	}
+}
+
 // TestSelfhostFrontendResponsibilitiesStaySplit keeps frontend boundaries split.
 func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
 	assertSelfhostSplitFiles(t)
