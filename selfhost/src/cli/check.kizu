@@ -43,7 +43,14 @@ pub fn file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
 }
 
 pub fn package_cli(allocator: Allocator, io: Io, root: []u8) -> !i64 {
-    let diagnostics_count = try package_diagnostics(allocator, io, root);
+    var files = try source::load_package_sources(allocator, io, root);
+    defer files.deinit();
+
+    if !(try package_fast_diagnostics(allocator, io, files)) {
+        try output::error_line(allocator, io, "error: check failed");
+        return std::process::exit_code(1);
+    }
+    let diagnostics_count = try package_diagnostics_loaded(allocator, files);
     if diagnostics_count != 0 {
         try output::error_line(allocator, io, "error: check failed");
         return std::process::exit_code(1);
@@ -56,10 +63,60 @@ pub fn package_diagnostics(allocator: Allocator, io: Io, root: []u8) -> !i64 {
     var files = try source::load_package_sources(allocator, io, root);
     defer files.deinit();
 
+    return try package_diagnostics_loaded(allocator, files);
+}
+
+fn package_diagnostics_loaded(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>
+) -> !i64 {
     let resolved = try resolver::resolve_sources(allocator, files);
     let typed = try types::check_sources(allocator, files, resolved);
     let checked = try ownership::check_package(allocator, files, typed);
     return checked.diagnostics;
+}
+
+fn package_fast_diagnostics(
+    allocator: Allocator,
+    io: Io,
+    files: &std::array::Array<source::SourceFile>
+) -> !bool {
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) {
+            if !(try package_fast_diagnostic_file(allocator, io, files, file)) {
+                return false;
+            }
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn package_fast_diagnostic_file(
+    allocator: Allocator,
+    io: Io,
+    files: &std::array::Array<source::SourceFile>,
+    file: &source::SourceFile
+) -> !bool {
+    let parsed_validation = try parser::validate_diagnostic_file(
+        allocator,
+        file.path,
+        file.text
+    );
+    let validation_ok = parsed_validation.ok;
+    if !validation_ok {
+        return try write_parse_failure(allocator, io, parsed_validation);
+    }
+    let parsed = try parser::parse_validated_file(
+        allocator,
+        file.path,
+        file.text,
+        validation_ok
+    );
+    defer parsed.deinit();
+    return try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root);
 }
 
 pub fn fast_diagnostics(
