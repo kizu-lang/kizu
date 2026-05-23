@@ -1138,6 +1138,35 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 	}
 }
 
+// TestSelfhostCheckManifestTargetUsesContent rejects manifest filename dispatch.
+func TestSelfhostCheckManifestTargetUsesContent(t *testing.T) {
+	bytes, err := os.ReadFile("../../selfhost/src/main.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost main: %v", err)
+	}
+	body := selfhostKizuFunctionBody(t, string(bytes), "fn check_file_or_package_cli(")
+	forbidden := []string{
+		"std::path::basename(target)",
+		"\"kizu.toml\"",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(body, fragment) {
+			t.Fatalf("check file/package dispatch keeps filename branch %q", fragment)
+		}
+	}
+	required := []string{
+		"let target_text = try std::fs::read_file(io, target)",
+		"source::is_manifest_text(target_text)",
+		"check::package_cli(allocator, io, std::path::dirname(target))",
+		"check::file_cli(allocator, io, target)",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("check file/package dispatch missing %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostMoveDiagnosticsUseParsedAST keeps move diagnostics on the parsed AST entry.
 func TestSelfhostMoveDiagnosticsUseParsedAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/ownership/move_diagnostic.kizu")
