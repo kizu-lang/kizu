@@ -349,6 +349,52 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	}
 }
 
+// TestSelfhostFunctionReferenceScanUsesParsedAST keeps package summaries off token walking.
+func TestSelfhostFunctionReferenceScanUsesParsedAST(t *testing.T) {
+	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
+	functionCalls := readSelfhostFile(t, "../../selfhost/src/types/function_calls.kizu")
+	scan := readSelfhostFile(t, "../../selfhost/src/types/function_call_scan_ast.kizu")
+	required := []string{
+		"function_call_scan_ast::check_file_function_references_from_ast(",
+		"fn check_file_body_ast_node(",
+		"pub fn check_file_function_references_from_ast(",
+		"package_modules::collect_import_aliases_from_ast(",
+		"function_calls::function_call_name_text(",
+		"pub fn function_call_name_text(",
+	}
+	content := checker + functionCalls + scan
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("selfhost function reference AST scan missing %q", fragment)
+		}
+	}
+	functionScanContent := functionCalls + scan
+	forbidden := []string{
+		"pub fn check_file_function_references(",
+		"std::array::Array<std::kizu::lexer::Token>",
+		"fn function_param_close(",
+		"fn count_function_params(",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(functionScanContent, fragment) {
+			t.Fatalf("selfhost function reference scan keeps token or reparse path %q", fragment)
+		}
+	}
+	checkerForbidden := []string{
+		"function_calls::check_file_function_references(",
+		"fn check_file_body_ast(",
+	}
+	for _, fragment := range checkerForbidden {
+		if strings.Contains(checker, fragment) {
+			t.Fatalf("selfhost checker keeps token or reparse path %q", fragment)
+		}
+	}
+	body := selfhostKizuFunctionBody(t, checker, "fn check_file_body_ast_node(")
+	if strings.Contains(body, "parser::parse_checked_file(") {
+		t.Fatal("body checker reparses a file after the package checker already parsed it")
+	}
+}
+
 // TestSelfhostTypeLocalsUseParsedAST rejects raw body text scans for function locals.
 func TestSelfhostTypeLocalsUseParsedAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
@@ -671,17 +717,18 @@ func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
 // TestSelfhostFunctionCallsResolveImportAliases keeps qualified calls import-owned.
 func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
 	functionCalls := readSelfhostFile(t, "../../selfhost/src/types/function_calls.kizu")
+	functionScan := readSelfhostFile(t, "../../selfhost/src/types/function_call_scan_ast.kizu")
 	checkCLI := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
 	required := []string{
 		"var import_alias_starts = std::map::Map<[]u8, i64>(allocator)",
 		"var import_alias_ends = std::map::Map<[]u8, i64>(allocator)",
-		"collect_import_aliases(",
+		"package_modules::collect_import_aliases_from_ast(",
 		"first_qualified_segment_end(name)",
 		"if import_alias_starts.contains(alias) {",
 		"file.text[module_start..module_end]",
 		"try output::stderr_newline(allocator, io);",
 	}
-	content := functionCalls + checkCLI
+	content := functionCalls + functionScan + checkCLI
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("selfhost import alias call resolution missing %q", fragment)
@@ -749,7 +796,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/types/function_calls.kizu": {
 		"pub fn first_function_call_error(",
-		"pub fn check_file_function_references(",
+		"pub fn function_call_name_text(",
+	},
+	"../../selfhost/src/types/function_call_scan_ast.kizu": {
+		"pub fn check_file_function_references_from_ast(",
+		"fn scan_function_reference_ast_node(",
 	},
 	"../../selfhost/src/types/package_modules.kizu": {
 		"pub struct PackageModuleRef",
