@@ -568,6 +568,7 @@ func TestSelfhostTypeCheckerNormalizesBorrowProvenance(t *testing.T) {
 		"let marker = \" borrows \";",
 		"let expected_type = value_type_text(expected);",
 		"let actual_type = value_type_text(actual);",
+		"fn type_text_has_error_marker(type_name: []u8) -> bool",
 		"std::mem::equal_bytes(value_type_text(type_name), \"[]u8\")",
 	}
 	for _, fragment := range required {
@@ -578,7 +579,14 @@ func TestSelfhostTypeCheckerNormalizesBorrowProvenance(t *testing.T) {
 	if strings.Contains(checker, "debug-") {
 		t.Fatal("selfhost type checker keeps temporary debug output")
 	}
+	if strings.Contains(checker, "fn bytes_contains(") ||
+		strings.Contains(checker, "bytes_contains(") {
+		t.Fatal("selfhost type checker keeps generic byte contains helper")
+	}
 	body := selfhostKizuFunctionBody(t, checker, "fn known_type_mismatch(")
+	if !strings.Contains(body, "type_text_has_error_marker(actual_type)") {
+		t.Fatal("selfhost type mismatch comparison does not use closed error-marker predicate")
+	}
 	if !strings.Contains(body, "return !std::mem::equal_bytes(expected_type, actual_type);") {
 		t.Fatal("selfhost type mismatch comparison does not use normalized type text")
 	}
