@@ -23,6 +23,10 @@ check:
 selfhost-oracle:
     GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
 
+# Enforce the aggregate selfhost oracle wall-time budget.
+selfhost-oracle-budget:
+    GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 KIZU_ENFORCE_SELFHOST_ORACLE_BUDGET=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
+
 # Run direct heavyweight selfhost gates for focused debugging.
 selfhost-integration-gates:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate|PipelineGate)$' -v
@@ -34,7 +38,6 @@ selfhost-cli-gate:
 # Run the selfhost production switch review gate.
 selfhost-switch-gate:
     just selfhost-production-from-scratch
-    just selfhost-oracle
     go test ./cmd/kizu -run 'TestSelfhostPackageSkeletonChecks$' -v
     go test ./internal/project ./internal/types ./internal/ownership
 
@@ -51,15 +54,19 @@ selfhost-bootstrap:
 selfhost-production-gate:
     KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1 -v
 
-# Build the hosted artifact once, then run production, corpus, and CLI parity gates.
-selfhost-production-from-scratch:
-    just selfhost-bootstrap
+# Run hosted artifact production, corpus, and CLI parity gates without rebuilding.
+selfhost-fast-gate:
     just selfhost-production-gate
     just selfhost-corpus-gate
     just selfhost-parse-parity-gate
     just selfhost-check-parity-gate
     just selfhost-run-parity-gate
     just selfhost-test-parity-gate
+
+# Build the hosted artifact once, then run production, corpus, and CLI parity gates.
+selfhost-production-from-scratch:
+    just selfhost-bootstrap
+    just selfhost-fast-gate
 
 # Run the supported corpus through the hosted selfhost artifact.
 selfhost-corpus-gate:

@@ -31,6 +31,7 @@ The aggregate oracle is the bootstrap preflight tier:
 
 ```sh
 just selfhost-oracle
+just selfhost-oracle-budget
 ```
 
 It runs with `KIZU_RUN_SELFHOST_ORACLE=1` and compares Go-owned behavior against
@@ -39,11 +40,21 @@ backend oracle paths. Production resolver/type/ownership/IR/backend checks run
 through a single Kizu-owned pipeline oracle so that the selfhost package is
 loaded, checked, and interpreted once for those stages.
 
-The aggregate oracle has a 60 second local budget enforced by
-`TestSelfhostOracleRunner`. `just selfhost-oracle` sets `GOGC=1000` for this
-allocation-heavy interpreted path. The broader std lexer/parser examples and
-selfhost-source parity harnesses remain in ordinary `go test ./cmd/kizu` tests;
-the aggregate oracle must not duplicate them.
+The aggregate oracle has a 60 second local budget reported by
+`TestSelfhostOracleRunner`. `just selfhost-oracle-budget` enforces that budget
+with `KIZU_ENFORCE_SELFHOST_ORACLE_BUDGET=1`; the ordinary
+`just selfhost-oracle` recipe fails on parity mismatches but only logs a budget
+overrun. This keeps functional oracle signal separate from interpreter
+performance work. Both recipes set `GOGC=1000` for this allocation-heavy
+interpreted path. The broader std lexer/parser examples and selfhost-source
+parity harnesses remain in ordinary `go test ./cmd/kizu` tests; the aggregate
+oracle must not duplicate them.
+
+The pipeline oracle writes its fixed `target/selfhost` artifact paths while it
+runs, but the Go harness isolates that target by moving any existing
+`target/selfhost` aside and restoring it afterward. A slow or failing aggregate
+oracle must not destroy a previously bootstrapped
+`target/selfhost/stage2/selfhost` artifact used by fast hosted gates.
 
 Measured locally during #456/#503:
 
@@ -225,9 +236,10 @@ just selfhost-bootstrap
 
 The preflight runs `just selfhost-switch-gate` and then runs cache smoke
 coverage. After #461, the switch gate includes production-from-scratch and the
-aggregate selfhost oracle once. It intentionally does not run
-`just selfhost-integration-gates` after the aggregate oracle, to avoid duplicate
-selfhost package loading, checking, and interpreted `RunEntry` execution.
+small Go package checks required by the switch review. The aggregate selfhost
+oracle is kept as an explicit parity/performance preflight instead of being
+chained into the switch gate, because it executes the interpreted production
+pipeline and has a separate wall-time budget.
 
 `just selfhost-bootstrap` is the #459 stage0-stage1-stage2 comparison runner. It
 uses the explicit stage0 bootstrap/oracle gate to build the supported selfhost
@@ -248,6 +260,7 @@ The #461 production boundary gate runs only the hosted stage2 artifact for the
 
 ```sh
 just selfhost-production-gate
+just selfhost-fast-gate
 ```
 
 It requires the same `target/selfhost/stage2/selfhost` executable and passing
@@ -258,10 +271,11 @@ workspace, run:
 just selfhost-production-from-scratch
 ```
 
-That command runs `just selfhost-bootstrap`, `just selfhost-production-gate`,
-`just selfhost-corpus-gate`, `just selfhost-parse-parity-gate`,
-`just selfhost-check-parity-gate`, `just selfhost-run-parity-gate`, and
-`just selfhost-test-parity-gate` in sequence. Go is present only as the
+That command runs `just selfhost-bootstrap` followed by `just selfhost-fast-gate`.
+`just selfhost-fast-gate` reuses the existing stage2 artifact and runs
+`selfhost-production-gate`, `selfhost-corpus-gate`, `selfhost-parse-parity-gate`,
+`selfhost-check-parity-gate`, `selfhost-run-parity-gate`, and
+`selfhost-test-parity-gate` without rebuilding. Go is present only as the
 explicit stage0 bootstrap/oracle harness in the first step and as the test
 runner for the gate; the production commands are direct executions of the
 hosted artifact.
@@ -375,7 +389,9 @@ The accepted policy for now is:
 
 - daily gate: fast default `go test ./...`;
 - aggregate oracle: explicit bootstrap/preflight command with a 60s local budget;
+- aggregate oracle budget: explicit performance gate, not a routine switch gate;
 - direct heavyweight gates: explicit debugging commands;
+- hosted artifact fast gate: routine selfhost CLI parity loop after bootstrap;
 - aggregate production checks: one pass through `selfhost::pipeline_oracle`;
 - CLI contract checks: one pass through `selfhost::cli_contract_gate`;
 - no routine recipe runs both aggregate oracle and direct heavyweight gates.

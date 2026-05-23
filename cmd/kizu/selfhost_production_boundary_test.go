@@ -43,14 +43,23 @@ func TestSelfhostProductionBoundaryRecipes(t *testing.T) {
 
 	fromScratch := justRecipe(content, "selfhost-production-from-scratch")
 	requireRecipeFragment(t, fromScratch, "just selfhost-bootstrap")
-	requireRecipeFragment(t, fromScratch, "just selfhost-production-gate")
-	requireRecipeFragment(t, fromScratch, "just selfhost-corpus-gate")
-	requireRecipeFragment(t, fromScratch, "just selfhost-check-parity-gate")
-	requireRecipeFragment(t, fromScratch, "just selfhost-run-parity-gate")
-	requireRecipeFragment(t, fromScratch, "just selfhost-test-parity-gate")
+	requireRecipeFragment(t, fromScratch, "just selfhost-fast-gate")
+
+	fastGate := justRecipe(content, "selfhost-fast-gate")
+	requireRecipeFragment(t, fastGate, "just selfhost-production-gate")
+	requireRecipeFragment(t, fastGate, "just selfhost-corpus-gate")
+	requireRecipeFragment(t, fastGate, "just selfhost-parse-parity-gate")
+	requireRecipeFragment(t, fastGate, "just selfhost-check-parity-gate")
+	requireRecipeFragment(t, fastGate, "just selfhost-run-parity-gate")
+	requireRecipeFragment(t, fastGate, "just selfhost-test-parity-gate")
+	requireNoRecipeFragment(t, fastGate, "just selfhost-bootstrap")
+	requireNoRecipeFragment(t, fastGate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
+	requireNoRecipeFragment(t, fastGate, "KIZU_RUN_SELFHOST_ORACLE=1")
 
 	switchGate := justRecipe(content, "selfhost-switch-gate")
 	requireRecipeFragment(t, switchGate, "just selfhost-production-from-scratch")
+	requireNoRecipeFragment(t, switchGate, "just selfhost-oracle")
+	requireNoRecipeFragment(t, switchGate, "KIZU_RUN_SELFHOST_ORACLE=1")
 	requireNoRecipeFragment(t, switchGate, "go run ./cmd/kizu check selfhost")
 }
 

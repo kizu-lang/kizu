@@ -46,6 +46,15 @@ parity case 追加だけでは前進と見なしません。
 並列化でごまかす改善は NG です。
 commit 前は原則 `pre-commit run --all-files` を通してください。
 
+selfhost 作業では、毎回 full bootstrap しないで検証段階を分けます。
+
+- 既存 `target/selfhost/stage2/selfhost` がある場合、日常ループはまず `just selfhost-fast-gate` を使う。
+- selfhost source を実装した checkpoint で `just selfhost-production-from-scratch` を通す。
+- `just selfhost-oracle` は Go/Kizu oracle evidence が必要な PR や frontend parity 確認で明示的に使う。
+- oracle の時間予算そのものを検証する場合だけ `just selfhost-oracle-budget` を使う。
+- IR / backend / runtime / CLI contract の direct heavyweight gate は focused debugging 用で、通常ループに入れない。
+- heavyweight gate や oracle が遅い場合でも、hidden fallback や Go fallback で短縮しない。
+
 ## PR Workflow
 
 作業は topic branch / Pull Request ベースで進めます。
