@@ -119,8 +119,8 @@ func TestSelfhostParserSummaryUsesParsedAST(t *testing.T) {
 	}
 }
 
-// TestSelfhostFunctionCallDiagnosticsUseSourcePath keeps file selection path-owned.
-func TestSelfhostFunctionCallDiagnosticsUseSourcePath(t *testing.T) {
+// TestSelfhostFunctionCallDiagnosticsUseASTEntry keeps diagnostics off source-text wrappers.
+func TestSelfhostFunctionCallDiagnosticsUseASTEntry(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost function calls: %v", err)
@@ -129,8 +129,18 @@ func TestSelfhostFunctionCallDiagnosticsUseSourcePath(t *testing.T) {
 	if strings.Contains(content, "std::mem::equal_bytes(file.text, source_text)") {
 		t.Fatal("function call diagnostics select files by source bytes")
 	}
-	if !strings.Contains(content, "std::mem::equal_bytes(file.path, target_path)") {
-		t.Fatal("function call diagnostics do not select files by source path")
+	if strings.Contains(content, "target_path") ||
+		strings.Contains(content, "pub fn first_function_call_error(") {
+		t.Fatal("function call diagnostics keep path-based target wrapper")
+	}
+	required := []string{
+		"pub fn first_package_function_call_error_ast_node(",
+		"collect_other_package_function_arities_for_modules_from_ast(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("function call diagnostics missing AST entry fragment %q", fragment)
+		}
 	}
 	if !strings.Contains(content, "return first_qualified_segment_end(name) < std::mem::len(name);") {
 		t.Fatal("function call diagnostics do not reuse qualified segment scanning")
@@ -351,19 +361,12 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 		"fn collect_referenced_package_call_modules(",
 		"collect_other_package_function_arities_from_ast(",
 		"has_package_function_call(",
+		"pub fn first_function_call_error(",
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(content, fragment) {
 			t.Fatalf("selfhost package call diagnostics keep removed path %q", fragment)
 		}
-	}
-	body := selfhostKizuFunctionBody(t, content, "pub fn first_function_call_error(")
-	parseCall := "parser::parse_checked_file(allocator, file.path, file.text)"
-	if count := strings.Count(body, parseCall); count != 1 {
-		t.Fatalf("first_function_call_error parses target %d times, want 1", count)
-	}
-	if !strings.Contains(body, "first_package_function_call_error_ast_node(") {
-		t.Fatal("first_function_call_error does not delegate to the parsed target AST entry")
 	}
 	astBody := selfhostKizuFunctionBody(
 		t,
@@ -371,7 +374,7 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 		"pub fn first_package_function_call_error_ast_node(",
 	)
 	if !strings.Contains(astBody, "collect_function_arities_from_ast(") {
-		t.Fatal("first_function_call_error does not collect target arity from the parsed target AST")
+		t.Fatal("package call diagnostics do not collect target arity from the parsed target AST")
 	}
 	if strings.Contains(astBody, "lexer::tokenize(allocator, file.text)") ||
 		strings.Contains(astBody, "target_tokens") {
@@ -519,8 +522,6 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 			t.Fatalf("selfhost semantic diagnostics missing %q", fragment)
 		}
 	}
-	preBody := selfhostKizuFunctionBody(t, content, "pub fn first_pre_move_check_diagnostic(")
-	postBody := selfhostKizuFunctionBody(t, content, "pub fn first_post_move_check_diagnostic(")
 	preASTBody := selfhostKizuFunctionBody(
 		t,
 		content,
@@ -531,12 +532,6 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 		content,
 		"pub fn first_post_move_check_diagnostic_ast_node(",
 	)
-	if !strings.Contains(preBody, "parser::parse_checked_file(allocator, path, text)") {
-		t.Fatal("pre-move diagnostic pass does not parse checked AST")
-	}
-	if !strings.Contains(postBody, "parser::parse_checked_file(allocator, path, text)") {
-		t.Fatal("post-move diagnostic pass does not parse checked AST")
-	}
 	if !strings.Contains(preASTBody+postASTBody, "collect_function_returns_from_ast(") {
 		t.Fatal("shared diagnostic passes do not collect function returns from AST")
 	}
@@ -549,6 +544,8 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 		"pub fn first_match_diagnostic(",
 		"pub fn first_type_reference_error(",
 		"pub fn first_user_function_call_error(",
+		"pub fn first_pre_move_check_diagnostic(",
+		"pub fn first_post_move_check_diagnostic(",
 	}
 	for _, fragment := range oldEntries {
 		if strings.Contains(content, fragment) {
@@ -846,10 +843,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/types/checker.kizu": {
 		"pub fn check_sources(",
-		"pub fn first_pre_move_check_diagnostic(",
+		"pub fn first_pre_move_check_diagnostic_ast_node(",
 	},
 	"../../selfhost/src/types/function_calls.kizu": {
-		"pub fn first_function_call_error(",
+		"pub fn first_package_function_call_error_ast_node(",
 		"pub fn function_call_name_text(",
 	},
 	"../../selfhost/src/types/function_call_scan_ast.kizu": {
@@ -897,7 +894,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn ast_node_text(",
 	},
 	"../../selfhost/src/ownership/move_diagnostic.kizu": {
-		"pub fn first_use_after_move_name(",
+		"pub fn first_use_after_move_name_ast_node(",
 		"fn first_use_after_move_ast_node(",
 	},
 	"../../selfhost/src/backend/runtime.kizu": {
@@ -1073,18 +1070,16 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 	}
 }
 
-// TestSelfhostMoveDiagnosticsUseSourcePath keeps move diagnostics file-owned.
-func TestSelfhostMoveDiagnosticsUseSourcePath(t *testing.T) {
+// TestSelfhostMoveDiagnosticsUseParsedAST keeps move diagnostics on the parsed AST entry.
+func TestSelfhostMoveDiagnosticsUseParsedAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/ownership/move_diagnostic.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost move diagnostic: %v", err)
 	}
 	content := string(bytes)
 	required := []string{
-		"pub fn first_use_after_move_name(",
-		"path: []u8,",
-		"kind: source::SourceKind::User,",
-		"path: path,",
+		"pub fn first_use_after_move_name_ast_node(",
+		"file: &source::SourceFile,",
 		"fn initializer_is_record_literal(",
 		"StructLiteralExpr(struct_literal) => true",
 	}
@@ -1094,6 +1089,8 @@ func TestSelfhostMoveDiagnosticsUseSourcePath(t *testing.T) {
 		}
 	}
 	forbidden := []string{
+		"pub fn first_use_after_move_name(",
+		"parser::parse_checked_file(",
 		"initializer_text_is_record_literal(",
 		"fn bytes_contains(",
 		"bytes_contains(text, \"{\")",
