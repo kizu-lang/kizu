@@ -204,11 +204,18 @@ func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 	}
 	source := "import frontend::checks;\n" +
 		"import frontend::parser::ast;\n\n" +
+		"pub fn root_touch() -> void {\n" +
+		"    return;\n" +
+		"}\n\n" +
 		"fn main() {\n" +
 		"    checks::touch();\n" +
 		"    ast::touch();\n" +
 		"}\n"
 	if err := os.WriteFile(filepath.Join(libDir, "main.kizu"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested = "pub fn touch() -> void {\n    frontend::root_touch();\n}\n"
+	if err := os.WriteFile(filepath.Join(parserDir, "ast.kizu"), []byte(nested), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
