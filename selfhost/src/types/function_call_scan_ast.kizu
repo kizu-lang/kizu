@@ -1,0 +1,564 @@
+import selfhost::source;
+import selfhost::types::function_calls;
+import selfhost::types::package_modules;
+
+pub struct FunctionReferenceScan {
+    pub next: i64,
+    pub typed_nodes: i64,
+    pub diagnostics: i64,
+}
+
+pub fn check_file_function_references_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
+    var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
+    try package_modules::collect_import_aliases_from_ast(
+        file,
+        ast,
+        root,
+        import_alias_starts,
+        import_alias_ends
+    );
+    let scan = try scan_function_reference_ast_node(
+        allocator,
+        file,
+        ast,
+        root,
+        functions,
+        import_alias_starts,
+        import_alias_ends
+    );
+    import_alias_starts.deinit();
+    import_alias_ends.deinit();
+    return scan;
+}
+
+fn scan_function_reference_ast_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return scan_function_reference_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        FnDecl(fn_decl) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            fn_decl.body,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Block(block) => return scan_function_reference_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Let(let_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            let_node.value,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Assign(assign_node) => return scan_function_reference_two_nodes(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Return(return_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Defer(defer_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        ExprStmt(expr_stmt) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        If(if_node) => return scan_function_reference_three_nodes(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        While(while_node) => return scan_function_reference_two_nodes(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        For(for_node) => return scan_function_reference_three_nodes(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Match(match_node) => return scan_function_reference_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        MatchArm(match_arm) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Unsafe(unsafe_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        ComptimeIf(comptime_if_node) => return scan_function_reference_three_nodes(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Prefix(prefix_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            prefix_node.right,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Binary(binary) => return scan_function_reference_two_nodes(
+            allocator,
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        FieldExpr(field_expr_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        DerefExpr(deref_expr_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        Call(call_node) => return scan_function_reference_call(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        TypeApplyExpr(type_apply) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        CastExpr(cast_expr) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            cast_expr.value,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        IndexExpr(index_expr) => return scan_function_reference_three_nodes(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        StructLiteralExpr(struct_literal) => return scan_function_reference_range(
+            allocator,
+            file,
+            ast,
+            struct_literal.fields,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        StructFieldInit(struct_field_init) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        ArenaNewExpr(arena_new) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        TryExpr(try_expr_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        ComptimeExpr(comptime_expr_node) => return scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        );,
+        _ => return function_reference_scan(0, 0, 0);,
+    }
+}
+
+fn scan_function_reference_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    var summary = function_reference_scan(range.start + range.len, 0, 0);
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        summary = merge_function_reference_scans(
+            summary,
+            try scan_function_reference_ast_node(
+                allocator,
+                file,
+                ast,
+                child,
+                functions,
+                import_alias_starts,
+                import_alias_ends
+            )
+        );
+        index = index + 1;
+    }
+    return summary;
+}
+
+fn scan_function_reference_two_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    var summary = try scan_function_reference_ast_node(
+        allocator,
+        file,
+        ast,
+        first,
+        functions,
+        import_alias_starts,
+        import_alias_ends
+    );
+    summary = merge_function_reference_scans(
+        summary,
+        try scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            second,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        )
+    );
+    return summary;
+}
+
+fn scan_function_reference_three_nodes(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    var summary = try scan_function_reference_ast_node(
+        allocator,
+        file,
+        ast,
+        first,
+        functions,
+        import_alias_starts,
+        import_alias_ends
+    );
+    summary = merge_function_reference_scans(
+        summary,
+        try scan_function_reference_two_nodes(
+            allocator,
+            file,
+            ast,
+            second,
+            third,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        )
+    );
+    return summary;
+}
+
+fn scan_function_reference_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    var summary = try scan_function_reference_ast_node(
+        allocator,
+        file,
+        ast,
+        value,
+        functions,
+        import_alias_starts,
+        import_alias_ends
+    );
+    summary = merge_function_reference_scans(
+        summary,
+        try scan_function_reference_range(
+            allocator,
+            file,
+            ast,
+            arms,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        )
+    );
+    return summary;
+}
+
+fn scan_function_reference_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    var summary = try function_reference_for_ast_call(
+        allocator,
+        file,
+        ast,
+        callee,
+        args,
+        functions,
+        import_alias_starts,
+        import_alias_ends
+    );
+    summary = merge_function_reference_scans(
+        summary,
+        try scan_function_reference_ast_node(
+            allocator,
+            file,
+            ast,
+            callee,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        )
+    );
+    summary = merge_function_reference_scans(
+        summary,
+        try scan_function_reference_range(
+            allocator,
+            file,
+            ast,
+            args,
+            functions,
+            import_alias_starts,
+            import_alias_ends
+        )
+    );
+    return summary;
+}
+
+fn function_reference_for_ast_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    functions: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !FunctionReferenceScan {
+    if function_calls::function_call_callee_is_member(ast, callee) {
+        return function_reference_scan(0, 0, 0);
+    }
+    let name = function_calls::function_call_name_text(file, ast, callee);
+    if function_calls::should_skip_function_reference(name) or
+        function_calls::last_segment_starts_with_uppercase(name) or
+        function_calls::is_generic_constructor_text(name) {
+        return function_reference_scan(0, 0, 0);
+    }
+    var resolved = std::string::String(allocator);
+    try function_calls::append_resolved_function_name(
+        resolved,
+        file,
+        name,
+        import_alias_starts,
+        import_alias_ends
+    );
+    let key = resolved.as_bytes();
+    var diagnostics = 0;
+    if functions.contains(key) {
+        let expected = try functions.get(key);
+        if expected != args.len {
+            diagnostics = 1;
+        }
+    } else {
+        diagnostics = 1;
+    }
+    resolved.deinit();
+    return function_reference_scan(0, 1, diagnostics);
+}
+
+fn function_reference_scan(
+    next: i64,
+    typed_nodes: i64,
+    diagnostics: i64
+) -> FunctionReferenceScan {
+    return FunctionReferenceScan {
+        next: next,
+        typed_nodes: typed_nodes,
+        diagnostics: diagnostics
+    };
+}
+
+fn merge_function_reference_scans(
+    left: FunctionReferenceScan,
+    right: FunctionReferenceScan
+) -> FunctionReferenceScan {
+    return function_reference_scan(
+        right.next,
+        left.typed_nodes + right.typed_nodes,
+        left.diagnostics + right.diagnostics
+    );
+}

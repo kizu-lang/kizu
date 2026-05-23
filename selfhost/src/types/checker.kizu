@@ -3,6 +3,7 @@ import selfhost::parser;
 import selfhost::resolver;
 import selfhost::source;
 import selfhost::types::body_scan;
+import selfhost::types::function_call_scan_ast;
 import selfhost::types::function_calls;
 import selfhost::types::model;
 import selfhost::types::type_ref_ast;
@@ -89,22 +90,31 @@ pub fn check_sources(
     while index < files.len() {
         let file = try files.at(index);
         if source::is_frontend_source(file.kind) {
+            let result = try parser::parse_checked_file(allocator, file.path, file.text);
             var tokens = try lexer::tokenize(allocator, file.text);
             let scan = try type_refs::check_file_type_references(allocator, file, tokens, kinds, arities);
             typed_nodes = typed_nodes + scan.typed_nodes;
             diagnostics = diagnostics + scan.diagnostics;
-            let call_scan = try function_calls::check_file_function_references(
+            let call_scan = try function_call_scan_ast::check_file_function_references_from_ast(
                 allocator,
                 file,
-                tokens,
+                &result.ast,
+                result.root,
                 function_arities
             );
-            let body_scan = try check_file_body_ast(allocator, file, function_returns);
+            let body_scan = try check_file_body_ast_node(
+                allocator,
+                file,
+                result.ast,
+                result.root,
+                function_returns
+            );
             typed_nodes = typed_nodes + call_scan.typed_nodes;
             diagnostics = diagnostics + call_scan.diagnostics;
             typed_nodes = typed_nodes + body_scan.typed_nodes;
             diagnostics = diagnostics + body_scan.diagnostics;
             tokens.deinit();
+            result.deinit();
         }
         index = index + 1;
     }
@@ -537,18 +547,19 @@ fn collect_function_return(
     return;
 }
 
-fn check_file_body_ast(
+fn check_file_body_ast_node(
     allocator: Allocator,
     file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !TypeScanSummary {
-    let result = try parser::parse_checked_file(allocator, file.path, file.text);
-    let traversal = try body_scan::scan_body_ast_node(result.ast, result.root);
+    let traversal = try body_scan::scan_body_ast_node(ast, root);
     let statements = try check_ast_statements(
         allocator,
         file,
-        result.ast,
-        result.root,
+        ast,
+        root,
         function_returns
     );
     let traversal_summary = type_scan_summary(
@@ -557,7 +568,6 @@ fn check_file_body_ast(
         traversal.diagnostics
     );
     let summary = merge_type_summaries(traversal_summary, statements);
-    result.deinit();
     return summary;
 }
 
