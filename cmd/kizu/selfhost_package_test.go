@@ -280,6 +280,44 @@ func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeReferenceSummaryUsesParsedAST keeps package summaries AST-owned.
+func TestSelfhostTypeReferenceSummaryUsesParsedAST(t *testing.T) {
+	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
+	typeRefs := readSelfhostFile(t, "../../selfhost/src/types/type_refs.kizu")
+	typeRefAST := readSelfhostFile(t, "../../selfhost/src/types/type_ref_ast.kizu")
+	scan := readSelfhostFile(t, "../../selfhost/src/types/type_ref_scan_ast.kizu")
+	required := []string{
+		"type_ref_scan_ast::check_file_type_references_from_ast(",
+		"pub fn check_file_type_references_from_ast(",
+		"type_ref_ast::type_error_for_name_text_with_imports(",
+		"pub fn type_error_for_name_text(",
+	}
+	content := checker + typeRefs + typeRefAST + scan
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("selfhost type reference AST scan missing %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"type_refs::check_file_type_references(",
+		"pub fn check_file_type_references(",
+		"std::array::Array<std::kizu::lexer::Token>",
+		"fn scan_type_range(",
+		"fn scan_type_arguments(",
+		"fn qualified_path_end(",
+	}
+	typeSummaryContent := checker + typeRefs + scan
+	for _, fragment := range forbidden {
+		if strings.Contains(typeSummaryContent, fragment) {
+			t.Fatalf("selfhost type reference scan keeps token path %q", fragment)
+		}
+	}
+	checkSourcesBody := selfhostKizuFunctionBody(t, checker, "pub fn check_sources(")
+	if strings.Contains(checkSourcesBody, "lexer::tokenize(allocator, file.text)") {
+		t.Fatal("check_sources still tokenizes source for type reference summary")
+	}
+}
+
 // TestSelfhostPackageCallDiagnosticsBorrowAST keeps target parsing single-pass.
 func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
@@ -811,12 +849,16 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn scan_body_child_range(",
 	},
 	"../../selfhost/src/types/type_refs.kizu": {
-		"pub fn check_file_type_references(",
 		"pub fn collect_declared_types_from_ast(",
+		"pub fn collect_type_parameters_from_ast(",
 	},
 	"../../selfhost/src/types/type_ref_ast.kizu": {
 		"pub fn first_type_error_in_ast(",
 		"fn first_type_error_in_type_node_ast(",
+	},
+	"../../selfhost/src/types/type_ref_scan_ast.kizu": {
+		"pub fn check_file_type_references_from_ast(",
+		"fn scan_type_reference_ast_node(",
 	},
 	"../../selfhost/src/ownership/data.kizu": {
 		"pub enum ResourceKind",
