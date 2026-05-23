@@ -991,7 +991,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn render_host_metadata(",
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
-		"pub fn emit_run_hello_artifact(",
+		"pub fn emit_run_print_artifact(",
 		"fn render_test_expect_ok_llvm(",
 	},
 	"../../selfhost/src/backend/llvm.kizu": {
@@ -1005,11 +1005,18 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_artifact_path_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn append_write_concat5_function(",
+		"fn append_write_concat9_function(",
+		"fn append_i64_decimal_function(",
 		"fn append_artifact_path_function(",
+	},
+	"../../selfhost/src/backend/cli_run_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_cli_run_blocks(",
+		"fn append_run_print_emit_block(",
 	},
 	"../../selfhost/src/backend/cli_match_llvm.kizu": {
 		"pub fn append_functions(",
-		"fn append_cli_run_prints_hello_function(",
+		"fn append_cli_run_print_payload_function(",
 		"fn append_cli_test_expect_value_function(",
 		"fn append_cli_moved_value_name_function(",
 	},
@@ -1084,7 +1091,7 @@ func assertSelfhostRootOmitsResponsibilities(t *testing.T) {
 		"backend.kizu": {
 			"fn render_llvm_module(",
 			"fn append_cli_globals(",
-			"fn render_run_hello_llvm(",
+			"fn render_run_print_llvm(",
 			"fn render_test_expect_ok_llvm(",
 		},
 		"parser/validation.kizu": {

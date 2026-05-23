@@ -1,9 +1,10 @@
 import selfhost::backend::data;
 
-pub fn emit_run_hello_artifact(
+pub fn emit_run_print_artifact(
     allocator: Allocator,
     io: Io,
-    source_path: []u8
+    source_path: []u8,
+    stdout_payload: []u8
 ) -> !data::RunArtifact {
     try std::fs::create_dir(io, "target/selfhost/run");
 
@@ -19,10 +20,11 @@ pub fn emit_run_hello_artifact(
         source_path,
         ".ll.meta"
     );
-    let artifact = try write_run_hello_artifact(
+    let artifact = try write_run_print_artifact(
         allocator,
         io,
         source_path,
+        stdout_payload,
         ll_path,
         metadata_path
     );
@@ -95,16 +97,17 @@ pub fn emit_test_expect_failure_artifact(
     return artifact;
 }
 
-fn write_run_hello_artifact(
+fn write_run_print_artifact(
     allocator: Allocator,
     io: Io,
     source_path: []u8,
+    stdout_payload: []u8,
     ll_path: &std::string::String,
     metadata_path: &std::string::String
 ) -> !data::RunArtifact {
     let ll_path_view = ll_path.as_bytes();
     let metadata_path_view = metadata_path.as_bytes();
-    var module = try render_run_hello_llvm(allocator, source_path);
+    var module = try render_run_print_llvm(allocator, source_path, stdout_payload);
     let module_view = module.as_bytes();
     let module_len = try write_backend_bytes(
         io,
@@ -225,10 +228,12 @@ fn write_backend_bytes(
     try std::fs::write_file(io, path, bytes);
     return byte_len;
 }
-fn render_run_hello_llvm(
+fn render_run_print_llvm(
     allocator: Allocator,
-    source_path: []u8
+    source_path: []u8,
+    stdout_payload: []u8
 ) -> !std::string::String {
+    let stdout_len = std::mem::len(stdout_payload) + 1;
     var out = std::string::String(allocator);
     try append_line(out, "; kizu run artifact ll v0");
     try out.append_bytes("source_filename = ");
@@ -241,9 +246,12 @@ fn render_run_hello_llvm(
     try append_line(out, "%kizu.owned = type { ptr }");
     try append_line(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
     try append_line(out, "");
-    try out.append_bytes("@.kizu.run.stdout = private unnamed_addr constant [12 x i8] c");
+    try out.append_bytes("@.kizu.run.stdout = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, stdout_len);
+    try out.append_bytes(" x i8] c");
     try out.append_byte(cast<u8>(34));
-    try out.append_bytes("hello, kizu\0A");
+    try append_llvm_c_string_payload(out, stdout_payload);
+    try out.append_bytes("\0A");
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
     try append_line(out, "");
@@ -255,16 +263,40 @@ fn render_run_hello_llvm(
     try append_line(out, "define i64 @kizu_run_main() {");
     try append_line(out, "entry:");
     try append_line(out, "  %io = call %kizu.owned @kizu_rt_io_blocking()");
-    try append_line(out,
-        "  %ptr = getelementptr inbounds [12 x i8], ptr @.kizu.run.stdout, i64 0, i64 0");
-    try append_line(out, "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0");
-    try append_line(out, "  %slice = insertvalue %kizu.slice.u8 %base, i64 12, 1");
+    try append_line(out, "  %base = insertvalue %kizu.slice.u8 poison, ptr @.kizu.run.stdout, 0");
+    try out.append_bytes("  %slice = insertvalue %kizu.slice.u8 %base, i64 ");
+    try std::fmt::append_i64(out, stdout_len);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
     try append_line(out,
         "  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)");
     try append_line(out, "  %code = call i64 @kizu_rt_process_exit_code(i64 0)");
     try append_line(out, "  ret i64 %code");
     try append_line(out, "}");
     return out;
+}
+
+fn append_llvm_c_string_payload(out: &var std::string::String, payload: []u8) -> !void {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        if byte == cast<u8>(34) {
+            try out.append_bytes("\22");
+        } else {
+            if byte == cast<u8>(92) {
+                try out.append_bytes("\5C");
+            } else {
+                if byte == cast<u8>(10) {
+                    try out.append_bytes("\0A");
+                } else {
+                    try out.append_byte(byte);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
 }
 
 fn render_test_expect_ok_llvm(

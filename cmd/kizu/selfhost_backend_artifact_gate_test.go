@@ -211,6 +211,13 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 
 // requiredLLVMFragments returns mandatory hosted compiler LLVM fragments.
 func requiredLLVMFragments() []string {
+	fragments := requiredLLVMRuntimeFragments()
+	fragments = append(fragments, requiredLLVMCLIFragments()...)
+	return fragments
+}
+
+// requiredLLVMRuntimeFragments returns mandatory hosted runtime declarations.
+func requiredLLVMRuntimeFragments() []string {
 	return []string{
 		"; kizu selfhost bootstrap ll v0\n",
 		"source_filename = \"target/selfhost/selfhost.ir\"\n",
@@ -242,10 +249,18 @@ func requiredLLVMFragments() []string {
 		"declare void @kizu_rt_trap(%kizu.slice.u8) noreturn\n",
 		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
 		"declare i64 @kizu_selfhost__host_capability_smoke()\n",
+	}
+}
+
+// requiredLLVMCLIFragments returns mandatory hosted CLI helper fragments.
+func requiredLLVMCLIFragments() []string {
+	return []string{
 		"define i1 @kizu_selfhost__slice_equal",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
 		"define %kizu.error.void @kizu_selfhost__write_concat3",
 		"define %kizu.error.void @kizu_selfhost__write_concat5",
+		"define %kizu.error.void @kizu_selfhost__write_concat9",
+		"define %kizu.error.slice.u8 @kizu_selfhost__i64_decimal",
 		"define %kizu.error.slice.u8 @kizu_selfhost__artifact_path",
 		"define i1 @kizu_selfhost__parse_format_write",
 		"define i64 @kizu_selfhost__parse_skip_comment_or_self",
@@ -258,10 +273,11 @@ func requiredLLVMFragments() []string {
 		"%is_fmt = call i1 @kizu_selfhost__slice_equal",
 		"dispatch_fmt:",
 		"%fmt_format_ok = call i1 @kizu_selfhost__parse_format_write",
-		"define i1 @kizu_selfhost__cli_run_prints_hello",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
+		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
 		"define i64 @kizu_selfhost__cli_test_expect_value",
-		"%run_hello_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
-		"%run_hello_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
+		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
+		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
 		"%test_ok_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%test_failure_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
@@ -287,6 +303,8 @@ func forbiddenLLVMFragments() []string {
 	return []string{
 		"@.kizu.cli.main_fn_pattern",
 		"@.kizu.cli.run_hello_pattern",
+		"define i1 @kizu_selfhost__cli_run_prints_hello",
+		"@.kizu.cli.run_hello_ll_suffix",
 		"@.kizu.cli.test_expect_true_pattern",
 		"@.kizu.cli.test_expect_false_pattern",
 		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
@@ -335,7 +353,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"cli-command check file source\n",
 		"cli-command parse file source\n",
 		"cli-command fmt file source\n",
-		"cli-command run file source print-call\n",
+		"cli-command run file source print-string\n",
 		"cli-command test file source expect-call\n",
 		"cli-parity-manifest selfhost/tests/cli/parse-parity.tsv\n",
 		"cli-parity-manifest selfhost/tests/cli/check-parity.tsv\n",
@@ -1227,7 +1245,7 @@ func countHostedCompilerCLIFmtFailures(t *testing.T, exePath string) int {
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	sourcePath := filepath.Join(t.TempDir(), "hosted_run_generic.kizu")
-	source := "fn main(){print ( \"hello, kizu\" );}\n"
+	source := "fn main(){print ( \"from hosted\" );}\n"
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		t.Errorf("write hosted run smoke source: %v", err)
 		return 1
