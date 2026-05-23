@@ -918,7 +918,7 @@ func writeSelfhostCLIPackageFrontendFixture(t *testing.T) (string, string) {
 
 	root := t.TempDir()
 	manifest := filepath.Join(root, "kizu.toml")
-	manifestContent := []byte("[package]\nname = \"frontend-package\"\n")
+	manifestContent := []byte("[package]\nname = \"frontend\"\n")
 	if err := os.WriteFile(manifest, manifestContent, 0o644); err != nil {
 		t.Fatalf("write package manifest: %v", err)
 	}
@@ -927,13 +927,24 @@ func writeSelfhostCLIPackageFrontendFixture(t *testing.T) (string, string) {
 		t.Fatalf("create package src dir: %v", err)
 	}
 	source := filepath.Join(srcDir, "main.kizu")
-	const content = `fn main() {
+	const content = `import frontend::checks;
+
+fn main() {
+    checks::touch();
     let count = 1;
     print(count);
 }
 `
 	if err := os.WriteFile(source, []byte(content), 0o644); err != nil {
 		t.Fatalf("write package source: %v", err)
+	}
+	checks := filepath.Join(srcDir, "checks.kizu")
+	const checksContent = `pub fn touch() -> void {
+    return;
+}
+`
+	if err := os.WriteFile(checks, []byte(checksContent), 0o644); err != nil {
+		t.Fatalf("write package helper source: %v", err)
 	}
 	return root, manifest
 }

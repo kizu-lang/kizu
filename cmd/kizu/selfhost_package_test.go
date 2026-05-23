@@ -9,7 +9,7 @@ import (
 
 // TestSelfhostPackageSkeletonChecks keeps the source-owned selfhost layout valid.
 func TestSelfhostPackageSkeletonChecks(t *testing.T) {
-	runKizuOK(t, "check", "selfhost")
+	runReferenceCheckOK(t, "selfhost")
 }
 
 // TestSelfhostCheckPhasesUseParserFacade keeps parse ownership in selfhost::parser.

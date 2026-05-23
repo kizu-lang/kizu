@@ -71,6 +71,33 @@ func (i *Interpreter) Run(program *ast.Program) error {
 
 // RunEntry registers top-level declarations and calls entry.
 func (i *Interpreter) RunEntry(program *ast.Program, entry string) error {
+	value, err := i.runEntryValue(program, entry)
+	if err != nil {
+		return err
+	}
+	if value.kind == kindErrorUnion {
+		return fmt.Errorf("runtime error: %s", errorUnionMessage(value))
+	}
+	return nil
+}
+
+// RunEntryInt registers top-level declarations, calls entry, and returns an i64 result.
+func (i *Interpreter) RunEntryInt(program *ast.Program, entry string) (int64, error) {
+	value, err := i.runEntryValue(program, entry)
+	if err != nil {
+		return 0, err
+	}
+	if value.kind == kindErrorUnion {
+		return 0, fmt.Errorf("runtime error: %s", errorUnionMessage(value))
+	}
+	if value.kind != kindInt {
+		return 0, fmt.Errorf("runtime error: `%s` returned %s", entry, value.String())
+	}
+	return value.i, nil
+}
+
+// runEntryValue registers top-level declarations and returns the entry result.
+func (i *Interpreter) runEntryValue(program *ast.Program, entry string) (Value, error) {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.EnumDecl:
@@ -88,14 +115,7 @@ func (i *Interpreter) RunEntry(program *ast.Program, entry string) error {
 			continue
 		}
 	}
-	value, err := i.callFunction(entry, nil)
-	if err != nil {
-		return err
-	}
-	if value.kind == kindErrorUnion {
-		return fmt.Errorf("runtime error: %s", errorUnionMessage(value))
-	}
-	return nil
+	return i.callFunction(entry, nil)
 }
 
 // errorUnionMessage extracts a readable message from an unhandled !T value.

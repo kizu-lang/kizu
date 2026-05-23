@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,9 +31,23 @@ func main() {
 		os.Exit(2)
 	}
 	if err := dispatch(os.Args[1], os.Args[2:]); err != nil {
+		var status exitStatus
+		if errors.As(err, &status) {
+			os.Exit(status.code)
+		}
 		printError(err)
 		os.Exit(1)
 	}
+}
+
+// exitStatus exits without printing an extra Go diagnostic.
+type exitStatus struct {
+	code int
+}
+
+// Error renders the process exit status for tests and wrapping.
+func (s exitStatus) Error() string {
+	return fmt.Sprintf("exit status %d", s.code)
 }
 
 // printError writes a stable top-level CLI error prefix.
@@ -49,12 +64,12 @@ func printError(err error) {
 func dispatch(cmd string, args []string) error {
 	switch cmd {
 	case "parse":
-		return parseFile(args[0])
+		return runSelfhostFrontendCommand("parse", args[0])
 	case "run":
 		path, programArgs := splitProgramArgs(args)
 		return runFile(path, programArgs)
 	case "check":
-		return checkFile(args[0])
+		return runSelfhostFrontendCommand("check", args[0])
 	case "test":
 		path, programArgs := splitProgramArgs(args)
 		return testFile(path, programArgs)
@@ -74,6 +89,46 @@ func dispatch(cmd string, args []string) error {
 		usage()
 		return fmt.Errorf("unknown command `%s`", cmd)
 	}
+}
+
+// runSelfhostFrontendCommand executes parse/check through the Kizu-owned frontend.
+func runSelfhostFrontendCommand(command string, target string) error {
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	manifestPath, err := findRepoFile("selfhost/kizu.toml")
+	if err != nil {
+		return err
+	}
+	repoRoot := filepath.Dir(filepath.Dir(manifestPath))
+	oldWd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := os.Chdir(repoRoot); err != nil {
+		return err
+	}
+	defer func() {
+		_ = os.Chdir(oldWd)
+	}()
+
+	_, program, err := loadPackageProgram("selfhost")
+	if err != nil {
+		return err
+	}
+	if err := checkProgram(program); err != nil {
+		return err
+	}
+	code, err := interp.NewWithProcessArgs(os.Stdout, []string{command, absTarget}).
+		RunEntryInt(program, "selfhost::cli_main")
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return exitStatus{code: int(code)}
+	}
+	return nil
 }
 
 // usage prints the supported command line shape.

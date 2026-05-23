@@ -70,13 +70,13 @@ func runConformanceCase(t *testing.T, tt conformanceCase) {
 	t.Helper()
 	switch tt.Mode {
 	case "run":
-		runKizuOK(t, "check", tt.Path)
+		runReferenceCheckOK(t, tt.Path)
 		out := runKizuOK(t, runArgs(tt)...)
 		if out != tt.Stdout {
 			t.Fatalf("got %q, want %q", out, tt.Stdout)
 		}
 	case "check":
-		runKizuOK(t, "check", tt.Path)
+		runReferenceCheckOK(t, tt.Path)
 	case "test":
 		out := runKizuOK(t, "test", tt.Path)
 		if out != tt.Stdout {
@@ -96,11 +96,19 @@ func runConformanceErrorCase(t *testing.T, tt conformanceCase) {
 	if command == "" {
 		command = "check"
 	}
-	args := []string{command, tt.Path}
-	if command == "run" || command == "test" {
-		args = append(args, tt.Args...)
+	var out string
+	var err error
+	if command == "check" {
+		out, err = runReferenceCheck(tt.Path)
+	} else if command == "parse" {
+		out, err = runReferenceParse(tt.Path)
+	} else {
+		args := []string{command, tt.Path}
+		if command == "run" || command == "test" {
+			args = append(args, tt.Args...)
+		}
+		out, err = runKizu(args...)
 	}
-	out, err := runKizu(args...)
 	if err == nil {
 		t.Fatalf("expected command to fail\n%s", out)
 	}
@@ -254,6 +262,36 @@ func runKizuOK(t *testing.T, args ...string) string {
 	return out
 }
 
+// runReferenceCheckOK validates a source against the Go reference checker.
+func runReferenceCheckOK(t *testing.T, path string) string {
+	t.Helper()
+	out, err := runReferenceCheck(path)
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	return out
+}
+
+// runReferenceCheck keeps conformance manifests tied to the full reference checker.
+func runReferenceCheck(path string) (string, error) {
+	conformanceProcessMu.Lock()
+	defer conformanceProcessMu.Unlock()
+
+	return runWithCapture(func() error {
+		return checkFile(path)
+	})
+}
+
+// runReferenceParse keeps parse conformance tied to the Go reference parser.
+func runReferenceParse(path string) (string, error) {
+	conformanceProcessMu.Lock()
+	defer conformanceProcessMu.Unlock()
+
+	return runWithCapture(func() error {
+		return parseFile(path)
+	})
+}
+
 // runKizu runs the Kizu CLI from the repository root.
 func runKizu(args ...string) (string, error) {
 	conformanceProcessMu.Lock()
@@ -267,6 +305,13 @@ func runKizu(args ...string) (string, error) {
 
 // runDispatchWithCapture runs dispatch while capturing process-global output.
 func runDispatchWithCapture(command string, args []string) (string, error) {
+	return runWithCapture(func() error {
+		return dispatch(command, args)
+	})
+}
+
+// runWithCapture runs one in-process command while capturing process-global output.
+func runWithCapture(run func() error) (string, error) {
 	oldStdout := os.Stdout
 	oldStderr := os.Stderr
 	oldWd, wdErr := os.Getwd()
@@ -296,7 +341,7 @@ func runDispatchWithCapture(command string, args []string) (string, error) {
 	if chdirErr != nil {
 		err = chdirErr
 	} else {
-		err = dispatch(command, args)
+		err = run()
 		if err != nil {
 			printError(err)
 		}
