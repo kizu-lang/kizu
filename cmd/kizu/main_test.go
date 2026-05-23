@@ -110,6 +110,9 @@ func TestFrontendCommandsUseSelfhostArgValidation(t *testing.T) {
 		{name: "fmt_missing_target", command: "fmt"},
 		{name: "fmt_extra_arg", command: "fmt", args: []string{"missing.kizu", "extra"}},
 		{name: "fmt_flag_target", command: "fmt", args: []string{"--help"}},
+		{name: "fmt_write_missing_target", command: "fmt", args: []string{"--write"}},
+		{name: "fmt_write_flag_target", command: "fmt", args: []string{"--write", "--help"}},
+		{name: "fmt_write_extra_arg", command: "fmt", args: []string{"--write", "missing.kizu", "extra"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			out, runErr := runDispatchCaptureStderr(t, tt.command, tt.args)
@@ -122,6 +125,74 @@ func TestFrontendCommandsUseSelfhostArgValidation(t *testing.T) {
 				t.Fatalf("got %q, want %q", out, want)
 			}
 		})
+	}
+}
+
+// TestFmtWriteUpdatesFile checks --write rewrites through the selfhost CLI path.
+func TestFmtWriteUpdatesFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unformatted.kizu")
+	if err := os.WriteFile(path, []byte("fn main(){print(\"hello, kizu\");}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, runErr := runDispatchCaptureStderr(t, "fmt", []string{"--write", path})
+	if runErr != nil {
+		t.Fatalf("command failed: %v\n%s", runErr, out)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "fn main() {\n    print(\"hello, kizu\");\n}"
+	if string(got) != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestFmtCommandHasNoGoWriteFallback keeps fmt implementation owned by selfhost code.
+func TestFmtCommandHasNoGoWriteFallback(t *testing.T) {
+	content, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(content)
+	required := strings.Join([]string{
+		"func fmtCommand(args []string) error {",
+		"\treturn runSelfhostFrontendCommand(\"fmt\", args)",
+		"}",
+	}, "\n")
+	if !strings.Contains(source, required) {
+		t.Fatalf("fmtCommand is not a direct selfhost dispatch")
+	}
+	sourceForbidden := []string{
+		"internal/fmt",
+		"validateFormatSource",
+		"containsLineComment",
+	}
+	for _, fragment := range sourceForbidden {
+		if strings.Contains(source, fragment) {
+			t.Fatalf("fmt command keeps Go fallback fragment %q", fragment)
+		}
+	}
+	start := strings.Index(source, "func fmtCommand(args []string) error {")
+	if start < 0 {
+		t.Fatalf("fmtCommand boundaries changed")
+	}
+	end := strings.Index(source[start:], "\n// isFmtWriteFlag")
+	if end < 0 {
+		t.Fatalf("fmtCommand boundaries changed")
+	}
+	body := source[start : start+end]
+	bodyForbidden := []string{
+		"kfmt.Format",
+		"os.WriteFile",
+	}
+	for _, fragment := range bodyForbidden {
+		if strings.Contains(body, fragment) {
+			t.Fatalf("fmt command keeps Go fallback fragment %q", fragment)
+		}
 	}
 }
 
@@ -407,9 +478,14 @@ func TestFmtWriteRejectsLineComments(t *testing.T) {
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := fmtCommand([]string{"--write", path})
-	if err == nil || !strings.Contains(err.Error(), "line comments") {
-		t.Fatalf("got error %v, want line comments rejection", err)
+	out, runErr := runDispatchCaptureStderr(t, "fmt", []string{"--write", path})
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	wantErr := "error: fmt --write does not support line comments yet\n"
+	if out != wantErr {
+		t.Fatalf("got %q, want %q", out, wantErr)
 	}
 	got, readErr := os.ReadFile(path)
 	if readErr != nil {
