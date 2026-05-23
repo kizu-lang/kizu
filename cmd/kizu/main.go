@@ -91,7 +91,7 @@ func dispatch(cmd string, args []string) error {
 	}
 }
 
-// runSelfhostFrontendCommand executes parse/check through the Kizu-owned frontend.
+// runSelfhostFrontendCommand executes frontend commands through Kizu-owned code.
 func runSelfhostFrontendCommand(command string, args []string) error {
 	processArgs, err := selfhostFrontendProcessArgs(command, args)
 	if err != nil {
@@ -379,11 +379,19 @@ func splitProgramArgs(args []string) (string, []string) {
 //	--write: rewrite the file in-place.
 func fmtCommand(args []string) error {
 	write := false
+	for _, a := range args {
+		if a == "--write" || a == "-w" {
+			write = true
+		}
+	}
+	if !write {
+		return runSelfhostFrontendCommand("fmt", args)
+	}
+
 	var path string
 	for _, a := range args {
 		switch a {
 		case "--write", "-w":
-			write = true
 		default:
 			if path != "" {
 				return fmt.Errorf("invalid command arguments")

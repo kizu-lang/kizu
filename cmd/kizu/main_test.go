@@ -94,8 +94,8 @@ func TestParseCommandPropagatesSelfhostExitCode(t *testing.T) {
 	}
 }
 
-// TestParseCheckCommandsUseSelfhostArgValidation keeps CLI usage owned by Kizu.
-func TestParseCheckCommandsUseSelfhostArgValidation(t *testing.T) {
+// TestFrontendCommandsUseSelfhostArgValidation keeps CLI usage owned by Kizu.
+func TestFrontendCommandsUseSelfhostArgValidation(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		command string
@@ -107,6 +107,9 @@ func TestParseCheckCommandsUseSelfhostArgValidation(t *testing.T) {
 		{name: "check_missing_target", command: "check"},
 		{name: "check_extra_arg", command: "check", args: []string{"missing.kizu", "extra"}},
 		{name: "check_flag_target", command: "check", args: []string{"--help"}},
+		{name: "fmt_missing_target", command: "fmt"},
+		{name: "fmt_extra_arg", command: "fmt", args: []string{"missing.kizu", "extra"}},
+		{name: "fmt_flag_target", command: "fmt", args: []string{"--help"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			out, runErr := runDispatchCaptureStderr(t, tt.command, tt.args)
@@ -380,15 +383,20 @@ func TestFmtCommandSmoke(t *testing.T) {
 	}
 }
 
-// TestFmtCommandRejectsInvalidSyntax checks fmt does not rewrite parser failures.
+// TestFmtCommandRejectsInvalidSyntax checks fmt reports parser failures through selfhost.
 func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.kizu")
 	if err := os.WriteFile(path, []byte("fn main( { return; }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := fmtCommand([]string{path})
-	if err == nil || err.Error() != "format failed" {
-		t.Fatalf("got error %v, want format failed", err)
+	out, runErr := runDispatchCaptureStderr(t, "fmt", []string{path})
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	want := "error: expected right paren at 2:1\nerror: parse failed\n"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
 	}
 }
 
