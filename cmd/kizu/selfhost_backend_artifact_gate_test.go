@@ -217,6 +217,8 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"@.kizu.cli.parse_expected_expr_prefix",
 		"%parse_format_ok = call i1 @kizu_selfhost__parse_format_write",
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
+		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
+		"%check_parse_ok = call i1 @kizu_selfhost__parse_write_missing_expr",
 		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
 		"@.kizu.cli.move_prefix",
 		"@.kizu.cli.move_suffix",
@@ -876,7 +878,8 @@ func countHostedCompilerCLICheckFailures(t *testing.T, exePath string) int {
 // countHostedCompilerCLIFileCheckFailures checks an arbitrary readable source.
 func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 	t.Helper()
-	sourcePath := filepath.Join(t.TempDir(), "hosted_check_generic.kizu")
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "hosted_check_generic.kizu")
 	source := "fn main() { print(\"checked from temp\"); }\n"
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		t.Errorf("write hosted check smoke source: %v", err)
@@ -893,6 +896,35 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 	}
 	if stderr != "" {
 		t.Errorf("hosted compiler file check stderr mismatch: %q", stderr)
+		return 1
+	}
+	invalidPath := filepath.Join(dir, "hosted_check_invalid.kizu")
+	invalidSource := "fn main() { let value = ; }\n"
+	if err := os.WriteFile(invalidPath, []byte(invalidSource), 0o644); err != nil {
+		t.Errorf("write hosted check invalid source: %v", err)
+		return 1
+	}
+	stdout, stderr, code = runHostedCompilerCLI(t, exePath, "check", invalidPath)
+	if code != 1 {
+		t.Errorf(
+			"hosted compiler invalid file check exit=%d\nstdout:\n%s\nstderr:\n%s",
+			code,
+			stdout,
+			stderr,
+		)
+		return 1
+	}
+	if stdout != "" {
+		t.Errorf("hosted compiler invalid file check stdout mismatch: %q", stdout)
+		return 1
+	}
+	expectedStderr := "error: expected expression, got ; at 1:25\nerror: parse failed\n"
+	if stderr != expectedStderr {
+		t.Errorf(
+			"hosted compiler invalid file check stderr mismatch:\nwant:\n%s\ngot:\n%s",
+			expectedStderr,
+			stderr,
+		)
 		return 1
 	}
 	return 0
