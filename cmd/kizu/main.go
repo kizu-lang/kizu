@@ -10,7 +10,6 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/cimport"
-	kfmt "github.com/kizu-lang/kizu/internal/fmt"
 	"github.com/kizu-lang/kizu/internal/interp"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -136,14 +135,23 @@ func selfhostFrontendProcessArgs(command string, args []string) ([]string, error
 	processArgs := make([]string, 0, len(args)+1)
 	processArgs = append(processArgs, command)
 	processArgs = append(processArgs, args...)
-	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+	if len(args) == 1 && !strings.HasPrefix(args[0], "-") {
+		absTarget, err := filepath.Abs(args[0])
+		if err != nil {
+			return nil, err
+		}
+		processArgs[1] = absTarget
 		return processArgs, nil
 	}
-	absTarget, err := filepath.Abs(args[0])
+	if command != "fmt" || len(args) != 2 || !isFmtWriteFlag(args[0]) ||
+		strings.HasPrefix(args[1], "-") {
+		return processArgs, nil
+	}
+	absTarget, err := filepath.Abs(args[1])
 	if err != nil {
 		return nil, err
 	}
-	processArgs[1] = absTarget
+	processArgs[2] = absTarget
 	return processArgs, nil
 }
 
@@ -378,88 +386,12 @@ func splitProgramArgs(args []string) (string, []string) {
 //
 //	--write: rewrite the file in-place.
 func fmtCommand(args []string) error {
-	write := false
-	for _, a := range args {
-		if a == "--write" || a == "-w" {
-			write = true
-		}
-	}
-	if !write {
-		return runSelfhostFrontendCommand("fmt", args)
-	}
-
-	var path string
-	for _, a := range args {
-		switch a {
-		case "--write", "-w":
-		default:
-			if path != "" {
-				return fmt.Errorf("invalid command arguments")
-			}
-			path = a
-		}
-	}
-	if path == "" {
-		return fmt.Errorf("invalid command arguments")
-	}
-	src, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	source := string(src)
-	if err := validateFormatSource(source); err != nil {
-		return err
-	}
-	if write && containsLineComment(source) {
-		return fmt.Errorf("fmt --write does not support line comments yet")
-	}
-	out := kfmt.Format(source)
-	if write {
-		return os.WriteFile(path, []byte(out), 0o644)
-	}
-	_, _ = fmt.Print(out)
-	return nil
+	return runSelfhostFrontendCommand("fmt", args)
 }
 
-// validateFormatSource keeps fmt from silently accepting parser errors.
-func validateFormatSource(source string) error {
-	p := parser.New(lexer.New(source))
-	p.ParseProgram()
-	if len(p.Errors()) == 0 {
-		return nil
-	}
-	for _, msg := range p.Errors() {
-		_, _ = fmt.Fprintln(os.Stderr, msg)
-	}
-	return fmt.Errorf("format failed")
-}
-
-// containsLineComment reports whether source has a `//` comment outside string literals.
-func containsLineComment(source string) bool {
-	inString := false
-	for i := 0; i < len(source); i++ {
-		ch := source[i]
-		if inString {
-			if ch == '"' {
-				inString = false
-			}
-			continue
-		}
-		if ch == '"' {
-			inString = true
-			continue
-		}
-		if ch == '\\' && i+1 < len(source) && source[i+1] == '\\' {
-			for i < len(source) && source[i] != '\n' {
-				i++
-			}
-			continue
-		}
-		if ch == '/' && i+1 < len(source) && source[i+1] == '/' {
-			return true
-		}
-	}
-	return false
+// isFmtWriteFlag reports whether an argument selects in-place formatting.
+func isFmtWriteFlag(arg string) bool {
+	return arg == "--write" || arg == "-w"
 }
 
 // irCommand parses options and dumps typed SSA IR.
