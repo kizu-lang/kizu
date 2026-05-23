@@ -98,11 +98,16 @@ pub fn load_package_sources(
     try files.append(source_file(0, SourceKind::Manifest, package_name, root, manifest_text));
     var next_id = 1;
 
-    var source_dir = try std::path::join(allocator, root, "src");
-    let source_dir_path = source_dir.as_bytes();
     let package_source_start = next_id;
-    next_id = try append_selfhost_source_dir(files, io, source_dir_path, next_id, package_name);
-    source_dir.deinit();
+    next_id = try append_manifest_package_source_dirs(
+        allocator,
+        files,
+        io,
+        root,
+        manifest_text,
+        next_id,
+        package_name
+    );
 
     next_id = try append_package_referenced_frontend_std_sources(
         allocator,
@@ -379,13 +384,141 @@ fn append_selfhost_source_dir(
                     return error("invalid module");
                 }
                 let text = try std::fs::read_file(io, entry.path);
-                try files.append(source_file(id, SourceKind::Selfhost, package_name, entry.path, text));
+                try files.append(source_file(
+                    id,
+                    SourceKind::Selfhost,
+                    package_name,
+                    entry.path,
+                    text
+                ));
                 id = id + 1;
             }
         }
         index = index + 1;
     }
     entries.deinit();
+    return id;
+}
+
+fn append_manifest_package_source_dirs(
+    allocator: Allocator,
+    files: &var std::array::Array<SourceFile>,
+    io: Io,
+    root: []u8,
+    manifest_text: []u8,
+    next_id: i64,
+    package_name: []u8
+) -> !i64 {
+    let paths_start = manifest_paths_array_start(manifest_text);
+    if paths_start < 0 {
+        return try append_package_source_dir(
+            allocator,
+            files,
+            io,
+            root,
+            "src",
+            next_id,
+            package_name
+        );
+    }
+    return try append_manifest_path_array_source_dirs(
+        allocator,
+        files,
+        io,
+        root,
+        manifest_text,
+        paths_start,
+        next_id,
+        package_name
+    );
+}
+
+fn append_manifest_path_array_source_dirs(
+    allocator: Allocator,
+    files: &var std::array::Array<SourceFile>,
+    io: Io,
+    root: []u8,
+    manifest_text: []u8,
+    paths_start: i64,
+    next_id: i64,
+    package_name: []u8
+) -> !i64 {
+    var id = next_id;
+    var found = false;
+    var index = paths_start;
+    while index < std::mem::len(manifest_text) {
+        if manifest_text[index] == cast<u8>(93) {
+            if found {
+                return id;
+            }
+            return try append_package_source_dir(
+                allocator,
+                files,
+                io,
+                root,
+                "src",
+                id,
+                package_name
+            );
+        }
+        if manifest_text[index] == cast<u8>(34) {
+            let path_start = index + 1;
+            var path_end = path_start;
+            while path_end < std::mem::len(manifest_text) {
+                if manifest_text[path_end] == cast<u8>(34) {
+                    let path = manifest_text[path_start..path_end];
+                    id = try append_package_source_dir(
+                        allocator,
+                        files,
+                        io,
+                        root,
+                        path,
+                        id,
+                        package_name
+                    );
+                    found = true;
+                    index = path_end + 1;
+                    break;
+                }
+                path_end = path_end + 1;
+            }
+            if path_end >= std::mem::len(manifest_text) {
+                return error("invalid manifest");
+            }
+        } else {
+            if !manifest_path_array_separator_byte(manifest_text[index]) {
+                return error("invalid manifest");
+            }
+            index = index + 1;
+        }
+    }
+    return error("invalid manifest");
+}
+
+fn manifest_path_array_separator_byte(byte: u8) -> bool {
+    return byte == cast<u8>(32) or
+        byte == cast<u8>(9) or
+        byte == cast<u8>(10) or
+        byte == cast<u8>(13) or
+        byte == cast<u8>(44);
+}
+
+fn append_package_source_dir(
+    allocator: Allocator,
+    files: &var std::array::Array<SourceFile>,
+    io: Io,
+    root: []u8,
+    source_path: []u8,
+    next_id: i64,
+    package_name: []u8
+) -> !i64 {
+    if std::mem::len(source_path) < 1 {
+        return error("invalid manifest");
+    }
+    var source_dir = try std::path::join(allocator, root, source_path);
+    let source_dir_path = source_dir.as_bytes();
+    let id = try append_selfhost_source_dir(files, io, source_dir_path, next_id, package_name);
+    source_dir.deinit();
     return id;
 }
 
@@ -641,6 +774,19 @@ fn manifest_module_root(text: []u8) -> ![]u8 borrows text {
         return error("invalid manifest");
     }
     return root;
+}
+
+fn manifest_paths_array_start(text: []u8) -> i64 {
+    let marker = "paths = [";
+    let marker_len = std::mem::len(marker);
+    var index = 0;
+    while index + marker_len <= std::mem::len(text) {
+        if std::mem::equal_bytes(text[index..index + marker_len], marker) {
+            return index + marker_len;
+        }
+        index = index + 1;
+    }
+    return -1;
 }
 
 fn validate_manifest_module_root(
