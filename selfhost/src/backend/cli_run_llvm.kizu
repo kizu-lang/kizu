@@ -41,6 +41,11 @@ pub fn append_globals(out: &var std::string::String) -> !void {
     return;
 }
 
+pub fn append_functions(out: &var std::string::String) -> !void {
+    try append_cli_run_payload_llvm_c_string_function(out);
+    return;
+}
+
 pub fn append_cli_run_blocks(out: &var std::string::String) -> !void {
     try append_line(out, "dispatch_run:");
     try append_line(out, "  %run_io = call %kizu.owned @kizu_rt_io_blocking()");
@@ -76,6 +81,15 @@ fn append_run_print_emit_block(out: &var std::string::String) -> !void {
     try append_line(out, "  br i1 %run_print_mkdir_ok, label %run_print_prepare, label %check_failed");
     try append_line(out, "run_print_prepare:");
     try append_line(out, "  %run_print_payload_slice = extractvalue %kizu.error.slice.u8 %run_payload, 1");
+    try append_line(out,
+        "  %run_print_payload_llvm_result = call %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string(%kizu.slice.u8 %run_print_payload_slice)");
+    try append_line(out,
+        "  %run_print_payload_llvm_ok = extractvalue %kizu.error.slice.u8 %run_print_payload_llvm_result, 0");
+    try append_line(out,
+        "  br i1 %run_print_payload_llvm_ok, label %run_print_prepare_len, label %check_failed");
+    try append_line(out, "run_print_prepare_len:");
+    try append_line(out,
+        "  %run_print_payload_llvm_slice = extractvalue %kizu.error.slice.u8 %run_print_payload_llvm_result, 1");
     try append_line(out, "  %run_print_payload_len = extractvalue %kizu.slice.u8 %run_print_payload_slice, 1");
     try append_line(out, "  %run_print_stdout_len = add i64 %run_print_payload_len, 1");
     try append_line(out,
@@ -102,7 +116,7 @@ fn append_run_print_emit_block(out: &var std::string::String) -> !void {
     try append_global_slice(out, "run_print", "ll_prefix_len2", "run_print_ll_prefix_len2", "377");
     try append_global_slice(out, "run_print", "ll_suffix", "run_print_ll_suffix", "173");
     try append_line(out,
-        "  %run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9(%kizu.owned %run_io, %kizu.slice.u8 %run_print_ll_path_slice, %kizu.slice.u8 %run_print_ll_prefix_source_slice, %kizu.slice.u8 %target, %kizu.slice.u8 %run_print_ll_prefix_len_slice, %kizu.slice.u8 %run_print_len_slice, %kizu.slice.u8 %run_print_ll_prefix_payload_slice, %kizu.slice.u8 %run_print_payload_slice, %kizu.slice.u8 %run_print_ll_prefix_len2_slice, %kizu.slice.u8 %run_print_len_slice, %kizu.slice.u8 %run_print_ll_suffix_slice)");
+        "  %run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9(%kizu.owned %run_io, %kizu.slice.u8 %run_print_ll_path_slice, %kizu.slice.u8 %run_print_ll_prefix_source_slice, %kizu.slice.u8 %target, %kizu.slice.u8 %run_print_ll_prefix_len_slice, %kizu.slice.u8 %run_print_len_slice, %kizu.slice.u8 %run_print_ll_prefix_payload_slice, %kizu.slice.u8 %run_print_payload_llvm_slice, %kizu.slice.u8 %run_print_ll_prefix_len2_slice, %kizu.slice.u8 %run_print_len_slice, %kizu.slice.u8 %run_print_ll_suffix_slice)");
     try append_line(out, "  %run_print_ll_ok = extractvalue %kizu.error.void %run_print_ll_write, 0");
     try append_line(out, "  br i1 %run_print_ll_ok, label %run_print_write_meta, label %check_failed");
     try append_line(out, "run_print_write_meta:");
@@ -124,6 +138,68 @@ fn append_run_print_emit_block(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %run_print_meta_ok = extractvalue %kizu.error.void %run_print_meta_write, 0");
     try append_line(out, "  br i1 %run_print_meta_ok, label %exit_zero, label %check_failed");
+    return;
+}
+
+fn append_cli_run_payload_llvm_c_string_function(out: &var std::string::String) -> !void {
+    try append_line(out,
+        "define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string(");
+    try append_line(out, "  %kizu.slice.u8 %payload");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %payload_ptr = extractvalue %kizu.slice.u8 %payload, 0");
+    try append_line(out, "  %payload_len = extractvalue %kizu.slice.u8 %payload, 1");
+    try append_line(out, "  %triple_len = mul i64 %payload_len, 3");
+    try append_line(out, "  %capacity = add i64 %triple_len, 1");
+    try append_line(out, "  %capacity_ok = icmp uge i64 %capacity, %payload_len");
+    try append_line(out, "  br i1 %capacity_ok, label %allocate, label %false");
+    try append_line(out, "allocate:");
+    try append_line(out, "  %allocator = call %kizu.owned @kizu_rt_mem_page_allocator()");
+    try append_line(out, "  %allocator_ptr = extractvalue %kizu.owned %allocator, 0");
+    try append_line(out, "  %buffer = call ptr @kizu_rt_alloc(ptr %allocator_ptr, i64 %capacity)");
+    try append_line(out, "  %allocated = icmp ne ptr %buffer, null");
+    try append_line(out, "  br i1 %allocated, label %loop, label %false");
+    try append_line(out, "loop:");
+    try append_line(out,
+        "  %index = phi i64 [ 0, %allocate ], [ %raw_next, %copy_raw ], [ %slash_next, %copy_backslash_tail ]");
+    try append_line(out, "  %written = phi i64 [ 0, %allocate ], [ %raw_written, %copy_raw ], [ %slash_written, %copy_backslash_tail ]");
+    try append_line(out, "  %done = icmp eq i64 %index, %payload_len");
+    try append_line(out, "  br i1 %done, label %true, label %load");
+    try append_line(out, "load:");
+    try append_line(out, "  %source_at = getelementptr i8, ptr %payload_ptr, i64 %index");
+    try append_line(out, "  %byte = load i8, ptr %source_at");
+    try append_line(out, "  %is_backslash = icmp eq i8 %byte, 92");
+    try append_line(out, "  br i1 %is_backslash, label %copy_backslash_head, label %copy_raw");
+    try append_line(out, "copy_raw:");
+    try append_line(out, "  %raw_dest = getelementptr i8, ptr %buffer, i64 %written");
+    try append_line(out, "  store i8 %byte, ptr %raw_dest");
+    try append_line(out, "  %raw_written = add i64 %written, 1");
+    try append_line(out, "  %raw_next = add i64 %index, 1");
+    try append_line(out, "  br label %loop");
+    try append_line(out, "copy_backslash_head:");
+    try append_line(out, "  %slash_dest = getelementptr i8, ptr %buffer, i64 %written");
+    try append_line(out, "  store i8 92, ptr %slash_dest");
+    try append_line(out, "  %hex_five_at = add i64 %written, 1");
+    try append_line(out, "  %hex_five_dest = getelementptr i8, ptr %buffer, i64 %hex_five_at");
+    try append_line(out, "  store i8 53, ptr %hex_five_dest");
+    try append_line(out, "  br label %copy_backslash_tail");
+    try append_line(out, "copy_backslash_tail:");
+    try append_line(out, "  %hex_c_at = add i64 %written, 2");
+    try append_line(out, "  %hex_c_dest = getelementptr i8, ptr %buffer, i64 %hex_c_at");
+    try append_line(out, "  store i8 67, ptr %hex_c_dest");
+    try append_line(out, "  %slash_written = add i64 %written, 3");
+    try append_line(out, "  %slash_next = add i64 %index, 1");
+    try append_line(out, "  br label %loop");
+    try append_line(out, "true:");
+    try append_line(out, "  %body_base = insertvalue %kizu.slice.u8 poison, ptr %buffer, 0");
+    try append_line(out, "  %body = insertvalue %kizu.slice.u8 %body_base, i64 %written, 1");
+    try append_line(out, "  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
+    try append_line(out, "  %result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %body, 1");
+    try append_line(out, "  ret %kizu.error.slice.u8 %result");
+    try append_line(out, "false:");
+    try append_line(out, "  ret %kizu.error.slice.u8 zeroinitializer");
+    try append_line(out, "}");
+    try append_line(out, "");
     return;
 }
 

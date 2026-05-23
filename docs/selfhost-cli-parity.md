@@ -29,7 +29,7 @@ The current hosted stage2 artifact supports these command slices:
 | `parse <missing-assign source file>` | #646 negative binding source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `fmt <source file>` | #648/#650 stdout formatter slice routed through the hosted selfhost formatter path | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
 | `fmt --write <source file>` | #629 bounded formatter mutation slice using the same hosted formatter bytes and `fs_write_file` | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
-| `run <print-hello source file>` | #588 positive source-shape slice via canonical emitted artifact | `just selfhost-run-parity-gate` |
+| `run <print-string source file>` | #588 positive source-shape slice via canonical emitted artifact with derived stdout payload and LLVM C string escaping | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
 | `test <expect-ok source file>` | #590 positive source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
 | `test <expect-failure source file>` | #590 assertion-failure source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |

@@ -284,6 +284,9 @@ func requiredLLVMCLIFragments() []string {
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
 		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
+		"%run_print_payload_llvm_result = call %kizu.error.slice.u8 " +
+			"@kizu_selfhost__cli_run_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_test_expect_value",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
@@ -1293,8 +1296,36 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 // countHostedCompilerCLIRunFailures runs a non-fixture source through `run`.
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
-	sourcePath := filepath.Join(t.TempDir(), "hosted_run_generic.kizu")
-	source := "fn main(){print ( \"from hosted\" );}\n"
+	failures := countHostedCompilerCLIRunSourceFailures(
+		t,
+		exePath,
+		"hosted_run_generic.kizu",
+		"hosted_run_generic",
+		"fn main(){print ( \"from hosted\" );}\n",
+		`c"from hosted\0A"`,
+	)
+	failures += countHostedCompilerCLIRunSourceFailures(
+		t,
+		exePath,
+		"hosted_run_backslash.kizu",
+		"hosted_run_backslash",
+		"fn main(){print(\"path\\value\");}\n",
+		`c"path\5Cvalue\0A"`,
+	)
+	return failures
+}
+
+// countHostedCompilerCLIRunSourceFailures checks one hosted `run` source.
+func countHostedCompilerCLIRunSourceFailures(
+	t *testing.T,
+	exePath string,
+	name string,
+	stem string,
+	source string,
+	expectedLLFragment string,
+) int {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		t.Errorf("write hosted run smoke source: %v", err)
 		return 1
@@ -1312,13 +1343,27 @@ func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler run stderr mismatch: %q", stderr)
 		return 1
 	}
-	return countHostedCompilerCLIArtifactSourceFailures(
+	llPath := filepath.Join("target", "selfhost", "run", stem+".ll")
+	metaPath := filepath.Join("target", "selfhost", "run", stem+".ll.meta")
+	failures := countHostedCompilerCLIArtifactSourceFailures(
 		t,
-		filepath.Join("target", "selfhost", "run", "hosted_run_generic.ll"),
-		filepath.Join("target", "selfhost", "run", "hosted_run_generic.ll.meta"),
+		llPath,
+		metaPath,
 		sourcePath,
 		"target/selfhost/run/runtime.kizu",
 	)
+	llContent, readFailures := readHostedCompilerCLIArtifact(t, llPath)
+	failures += readFailures
+	if readFailures == 0 && !strings.Contains(llContent, expectedLLFragment) {
+		t.Errorf(
+			"hosted compiler run artifact %s missing %q:\n%s",
+			llPath,
+			expectedLLFragment,
+			llContent,
+		)
+		failures++
+	}
+	return failures
 }
 
 // countHostedCompilerCLITestFailures runs non-fixture sources through `test`.
