@@ -19,11 +19,12 @@ type parseParityCase struct {
 }
 
 type parseParityGuardCase struct {
-	name     string
-	args     []string
-	exitCode int
-	stdout   string
-	stderr   string
+	name           string
+	args           []string
+	exitCode       int
+	stdout         string
+	stdoutContains []string
+	stderr         string
 }
 
 // TestSelfhostParseParityGate runs #525 parse cases through the stage2 artifact.
@@ -169,7 +170,7 @@ func countParseParityGuardFailures(
 	for _, item := range parseParityGuardCases() {
 		result := runBootstrapCommand(t, runner, item.args...)
 		if result.code != item.exitCode ||
-			result.stdout != item.stdout ||
+			!parseParityGuardStdoutMatches(result.stdout, item) ||
 			result.stderr != item.stderr {
 			t.Errorf("parse parity guard %s mismatch", item.name)
 			failures++
@@ -207,10 +208,10 @@ func parseParityGuardCases() []parseParityGuardCase {
 			stderr:   selfhostUsageStderr(),
 		},
 		{
-			name:     "unsupported_target",
-			args:     []string{"parse", "selfhost/src/main.kizu"},
-			exitCode: 64,
-			stderr:   selfhostUsageStderr(),
+			name:           "real_source_target",
+			args:           []string{"parse", "selfhost/src/main.kizu"},
+			exitCode:       0,
+			stdoutContains: []string{"parse_file_cli", "check::fast_diagnostics"},
 		},
 		{
 			name:     "unsupported_command",
@@ -221,6 +222,22 @@ func parseParityGuardCases() []parseParityGuardCase {
 	}
 }
 
+// parseParityGuardStdoutMatches supports exact and fragment-based stdout checks.
+func parseParityGuardStdoutMatches(stdout string, item parseParityGuardCase) bool {
+	if len(item.stdoutContains) == 0 {
+		return stdout == item.stdout
+	}
+	if stdout == "" {
+		return false
+	}
+	for _, fragment := range item.stdoutContains {
+		if !strings.Contains(stdout, fragment) {
+			return false
+		}
+	}
+	return true
+}
+
 // selfhostUsageStderr returns the stable hosted CLI usage line.
 func selfhostUsageStderr() string {
 	return "usage: selfhost <check|stage|parse|run|test|fmt> <target>\n"
@@ -229,7 +246,7 @@ func selfhostUsageStderr() string {
 // appendParseParityHeader writes durable #525 gate metadata.
 func appendParseParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "kizu-selfhost-parse-parity-v0\n")
-	fmt.Fprintf(out, "issue #525\n")
+	fmt.Fprintf(out, "issue #525/#665\n")
 	fmt.Fprintf(out, "tracker #497\n")
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/parse-parity.tsv\n")
 	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
