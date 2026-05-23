@@ -64,6 +64,8 @@ type selfhostCLIFrontendFixtures struct {
 	invalidStruct       string
 	invalidField        string
 	missingFieldComma   string
+	missingEnumComma    string
+	missingUnionComma   string
 	missingColon        string
 	missingType         string
 	expectOK            string
@@ -404,6 +406,18 @@ func selfhostCLIFrontendParseAggregateFailureCases(
 			wantErr: "error: expected comma or right brace, got right at 1:25\nerror: parse failed\n",
 		},
 		{
+			name:    "parse_temp_missing_enum_tag_comma",
+			args:    []string{"parse", fixtures.missingEnumComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right brace, got Green at 1:18\nerror: parse failed\n",
+		},
+		{
+			name:    "parse_temp_missing_union_variant_comma",
+			args:    []string{"parse", fixtures.missingUnionComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right brace, got Bool at 1:24\nerror: parse failed\n",
+		},
+		{
 			name:    "parse_temp_missing_struct_field_colon",
 			args:    []string{"parse", fixtures.missingColon},
 			wantOut: "exit-code\n1\n",
@@ -742,6 +756,18 @@ func selfhostCLIFrontendCheckAggregateParseFailureCases(
 			wantErr: "error: expected comma or right brace, got right at 1:25\nerror: parse failed\n",
 		},
 		{
+			name:    "check_temp_missing_enum_tag_comma",
+			args:    []string{"check", fixtures.missingEnumComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right brace, got Green at 1:18\nerror: parse failed\n",
+		},
+		{
+			name:    "check_temp_missing_union_variant_comma",
+			args:    []string{"check", fixtures.missingUnionComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right brace, got Bool at 1:24\nerror: parse failed\n",
+		},
+		{
 			name:    "check_temp_missing_struct_field_colon",
 			args:    []string{"check", fixtures.missingColon},
 			wantOut: "exit-code\n1\n",
@@ -776,7 +802,8 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		tempInvalidToken, tempInvalidExpr,
 		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
-		tempMissingFieldComma, tempMissingColon, tempMissingType :=
+		tempMissingFieldComma, tempMissingEnumComma, tempMissingUnionComma,
+		tempMissingColon, tempMissingType :=
 		writeSelfhostCLIInvalidFrontendFixtures(t)
 	tempExpectOK, tempExpectFail := writeSelfhostCLIExpectFrontendFixtures(t)
 
@@ -818,6 +845,8 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		invalidStruct:       tempInvalidStruct,
 		invalidField:        tempInvalidField,
 		missingFieldComma:   tempMissingFieldComma,
+		missingEnumComma:    tempMissingEnumComma,
+		missingUnionComma:   tempMissingUnionComma,
 		missingColon:        tempMissingColon,
 		missingType:         tempMissingType,
 		expectOK:            tempExpectOK,
@@ -1135,7 +1164,7 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 ) (
 	string, string, string, string, string,
 	string, string, string, string, string,
-	string, string, string, string, string, string, string, string, string,
+	string, string, string, string, string, string, string, string, string, string, string,
 ) {
 	t.Helper()
 
@@ -1143,14 +1172,16 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 		tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam, tempMissingParamComma,
 		tempInvalidTypeParam, tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
 		writeSelfhostCLIInvalidGeneralFrontendFixtures(t)
-	tempInvalidStruct, tempInvalidField, tempMissingFieldComma, tempMissingColon, tempMissingType :=
+	tempInvalidStruct, tempInvalidField, tempMissingFieldComma, tempMissingEnumComma,
+		tempMissingUnionComma, tempMissingColon, tempMissingType :=
 		writeSelfhostCLIInvalidAggregateFrontendFixtures(t)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
 		tempTopLevelStmt, tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam,
 		tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
-		tempMissingFieldComma, tempMissingColon, tempMissingType
+		tempMissingFieldComma, tempMissingEnumComma, tempMissingUnionComma,
+		tempMissingColon, tempMissingType
 }
 
 // writeSelfhostCLIInvalidGeneralFrontendFixtures writes common parse failures.
@@ -1282,7 +1313,7 @@ func writeSelfhostCLIInvalidFunctionFrontendFixtures(
 // writeSelfhostCLIInvalidAggregateFrontendFixtures writes aggregate parse failures.
 func writeSelfhostCLIInvalidAggregateFrontendFixtures(
 	t *testing.T,
-) (string, string, string, string, string) {
+) (string, string, string, string, string, string, string) {
 	t.Helper()
 
 	const invalidStructSource = `struct {}
@@ -1301,6 +1332,22 @@ func writeSelfhostCLIInvalidAggregateFrontendFixtures(
 		missingFieldCommaSource,
 	)
 
+	const missingEnumCommaSource = `enum Color { Red Green }
+`
+	tempMissingEnumComma := writeTempKizuSource(
+		t,
+		"frontend_missing_enum_tag_comma.kizu",
+		missingEnumCommaSource,
+	)
+
+	const missingUnionCommaSource = `union Value { Int(i64) Bool(bool) }
+`
+	tempMissingUnionComma := writeTempKizuSource(
+		t,
+		"frontend_missing_union_variant_comma.kizu",
+		missingUnionCommaSource,
+	)
+
 	const missingColonSource = `struct Name { value }
 `
 	tempMissingColon := writeTempKizuSource(t, "frontend_missing_field_colon.kizu", missingColonSource)
@@ -1310,7 +1357,7 @@ func writeSelfhostCLIInvalidAggregateFrontendFixtures(
 	tempMissingType := writeTempKizuSource(t, "frontend_missing_field_type.kizu", missingTypeSource)
 
 	return tempInvalidStruct, tempInvalidField, tempMissingFieldComma,
-		tempMissingColon, tempMissingType
+		tempMissingEnumComma, tempMissingUnionComma, tempMissingColon, tempMissingType
 }
 
 // writeSelfhostCLIExpectFrontendFixtures writes std::testing frontend inputs.
