@@ -47,32 +47,42 @@ pub fn fast_diagnostics(
     let parsed = try parser::parse_checked_file(allocator, path, file_text);
     defer parsed.deinit();
 
+    return try fast_diagnostics_ast_node(allocator, io, &file, parsed.ast, parsed.root);
+}
+
+pub fn fast_diagnostics_ast_node(
+    allocator: Allocator,
+    io: Io,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !bool {
     let duplicate = try resolver::first_duplicate_declaration_ast_node(
         allocator,
-        &file,
-        parsed.ast,
-        parsed.root
+        file,
+        ast,
+        root
     );
     if duplicate.found {
-        try diagnostics::duplicate_symbol_error(allocator, io, file_text[duplicate.start..duplicate.end]);
+        try diagnostics::duplicate_symbol_error(allocator, io, file.text[duplicate.start..duplicate.end]);
         return false;
     }
 
     let pre_move = try types::first_pre_move_check_diagnostic_ast_node(
         allocator,
-        &file,
-        parsed.ast,
-        parsed.root
+        file,
+        ast,
+        root
     );
-    if !(try write_check_diagnostic(allocator, io, file_text, &pre_move)) {
+    if !(try write_check_diagnostic(allocator, io, file.text, &pre_move)) {
         return false;
     }
 
     let moved_name = try ownership::first_use_after_move_name_ast_node(
         allocator,
-        &file,
-        parsed.ast,
-        parsed.root
+        file,
+        ast,
+        root
     );
     if !std::mem::equal_bytes(moved_name, "") {
         try diagnostics::move_error(allocator, io, moved_name);
@@ -81,19 +91,19 @@ pub fn fast_diagnostics(
 
     let post_move = try types::first_post_move_check_diagnostic_ast_node(
         allocator,
-        &file,
-        parsed.ast,
-        parsed.root
+        file,
+        ast,
+        root
     );
-    if !(try write_check_diagnostic(allocator, io, file_text, &post_move)) {
+    if !(try write_check_diagnostic(allocator, io, file.text, &post_move)) {
         return false;
     }
     if !(try write_package_function_call_diagnostic(
         allocator,
         io,
-        &file,
-        &parsed.ast,
-        parsed.root
+        file,
+        &ast,
+        root
     )) {
         return false;
     }

@@ -193,12 +193,22 @@ fn write_parse_failure(
 
 fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
-    if !(try check::fast_diagnostics(allocator, io, path, file_text)) {
+    let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
+    if !parsed_validation.ok {
+        return try write_parse_failure(allocator, io, parsed_validation);
+    }
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: file_text
+    };
+    let parsed = try parser::parse_checked_file(allocator, path, file_text);
+    defer parsed.deinit();
+    if !(try check::fast_diagnostics_ast_node(allocator, io, &file, parsed.ast, parsed.root)) {
         return std::process::exit_code(1);
     }
-    var parsed = try parser::parse_checked_file(allocator, path, file_text);
     let prints_hello = try ast_prints_hello(file_text, parsed.ast, parsed.root);
-    parsed.deinit();
     if prints_hello {
         let artifact = try backend::emit_run_hello_artifact(allocator, io, path);
         if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
@@ -211,12 +221,22 @@ fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
 
 fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
-    if !(try check::fast_diagnostics(allocator, io, path, file_text)) {
+    let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
+    if !parsed_validation.ok {
+        return try write_parse_failure(allocator, io, parsed_validation);
+    }
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: file_text
+    };
+    let parsed = try parser::parse_checked_file(allocator, path, file_text);
+    defer parsed.deinit();
+    if !(try check::fast_diagnostics_ast_node(allocator, io, &file, parsed.ast, parsed.root)) {
         return std::process::exit_code(1);
     }
-    var parsed = try parser::parse_checked_file(allocator, path, file_text);
     let expect = try ast_testing_expect_value(file_text, parsed.ast, parsed.root);
-    parsed.deinit();
     if expect == 1 {
         let artifact = try backend::emit_test_expect_ok_artifact(allocator, io, path);
         if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
