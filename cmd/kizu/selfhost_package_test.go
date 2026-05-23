@@ -347,6 +347,7 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	required := []string{
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
 		"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
+		"resolver::first_duplicate_declaration_ast_node(",
 		"types::first_pre_move_check_diagnostic_ast_node(",
 		"types::first_post_move_check_diagnostic_ast_node(",
 		"ownership::first_use_after_move_name_ast_node(",
@@ -361,6 +362,7 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	}
 	forbidden := []string{
 		"parser::parse_diagnostic_file(",
+		"resolver::first_duplicate_declaration(allocator, path, file_text)",
 		"types::first_pre_move_check_diagnostic(allocator, path, file_text)",
 		"types::first_post_move_check_diagnostic(allocator, path, file_text)",
 		"ownership::first_use_after_move_name(allocator, path, file_text)",
