@@ -27,52 +27,53 @@ type selfhostCLIArtifactExpectation struct {
 }
 
 type selfhostCLIFrontendFixtures struct {
-	source              string
-	runSource           string
-	movedSource         string
-	unknownSource       string
-	unknownStd          string
-	undefinedVariable   string
-	undefinedMatch      string
-	aritySource         string
-	duplicate           string
-	typeArity           string
-	unknownType         string
-	argumentMismatch    string
-	assignmentMismatch  string
-	immutableAssignment string
-	invalidAssignment   string
-	returnMismatch      string
-	returnMatchMismatch string
-	returningIf         string
-	missingReturn       string
-	ifMissingReturn     string
-	matchMissing        string
-	invalidSource       string
-	missingSemicolon    string
-	missingAssign       string
-	missingMatchComma   string
-	topLevelStmt        string
-	invalidToken        string
-	invalidExpr         string
-	invalidFnName       string
-	invalidParam        string
-	missingParamComma   string
-	invalidTypeParam    string
-	invalidReturn       string
-	missingFnBody       string
-	invalidImport       string
-	invalidStruct       string
-	invalidField        string
-	missingFieldComma   string
-	missingEnumComma    string
-	missingUnionComma   string
-	missingColon        string
-	missingType         string
-	expectOK            string
-	expectFail          string
-	missingExpr         string
-	movedValue          string
+	source               string
+	runSource            string
+	movedSource          string
+	unknownSource        string
+	unknownStd           string
+	undefinedVariable    string
+	undefinedMatch       string
+	aritySource          string
+	duplicate            string
+	typeArity            string
+	unknownType          string
+	argumentMismatch     string
+	assignmentMismatch   string
+	immutableAssignment  string
+	invalidAssignment    string
+	returnMismatch       string
+	returnMatchMismatch  string
+	returningIf          string
+	missingReturn        string
+	ifMissingReturn      string
+	matchMissing         string
+	invalidSource        string
+	missingSemicolon     string
+	missingAssign        string
+	missingMatchComma    string
+	missingMatchEndComma string
+	topLevelStmt         string
+	invalidToken         string
+	invalidExpr          string
+	invalidFnName        string
+	invalidParam         string
+	missingParamComma    string
+	invalidTypeParam     string
+	invalidReturn        string
+	missingFnBody        string
+	invalidImport        string
+	invalidStruct        string
+	invalidField         string
+	missingFieldComma    string
+	missingEnumComma     string
+	missingUnionComma    string
+	missingColon         string
+	missingType          string
+	expectOK             string
+	expectFail           string
+	missingExpr          string
+	movedValue           string
 }
 
 // TestSelfhostCLIGate executes the minimum Kizu-owned selfhost CLI contract.
@@ -172,7 +173,7 @@ func selfhostCLIFrontendHappyCases(fixtures selfhostCLIFrontendFixtures) []selfh
 			args: []string{"parse", fixtures.source},
 			wantOut: "enum Flag { Yes, No }\nstruct Name { value: []u8 }\n" +
 				"fn choose(flag: Flag) -> bool { return match flag { " +
-				"Yes => true, No => false }; }\n" +
+				"Yes => true, No => false, }; }\n" +
 				"fn main(values: std::array::Array <Name>) { let count = values.len(); " +
 				"print(count); values.deinit(); }\nexit-code\n0\n",
 		},
@@ -316,7 +317,13 @@ func selfhostCLIFrontendParseSyntaxFailureCases(
 			name:    "parse_temp_missing_match_arm_comma",
 			args:    []string{"parse", fixtures.missingMatchComma},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: expected comma or right brace, got Green at 2:59\nerror: parse failed\n",
+			wantErr: "error: expected comma, got Green at 2:59\nerror: parse failed\n",
+		},
+		{
+			name:    "parse_temp_missing_match_terminal_comma",
+			args:    []string{"parse", fixtures.missingMatchEndComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma, got } at 2:84\nerror: parse failed\n",
 		},
 		{
 			name:    "parse_temp_top_level_statement",
@@ -672,7 +679,13 @@ func selfhostCLIFrontendCheckSyntaxParseFailureCases(
 			name:    "check_temp_missing_match_arm_comma",
 			args:    []string{"check", fixtures.missingMatchComma},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: expected comma or right brace, got Green at 2:59\nerror: parse failed\n",
+			wantErr: "error: expected comma, got Green at 2:59\nerror: parse failed\n",
+		},
+		{
+			name:    "check_temp_missing_match_terminal_comma",
+			args:    []string{"check", fixtures.missingMatchEndComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma, got } at 2:84\nerror: parse failed\n",
 		},
 		{
 			name:    "check_temp_top_level_statement",
@@ -850,7 +863,8 @@ func writeSelfhostCLIInvalidFrontendFixtureFields(
 	t.Helper()
 
 	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempMissingMatchComma, tempMissingMatchEndComma, tempTopLevelStmt,
+		tempInvalidToken, tempInvalidExpr,
 		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
 		tempMissingFieldComma, tempMissingEnumComma, tempMissingUnionComma,
@@ -861,6 +875,7 @@ func writeSelfhostCLIInvalidFrontendFixtureFields(
 	fixtures.missingSemicolon = tempMissingSemicolon
 	fixtures.missingAssign = tempMissingAssign
 	fixtures.missingMatchComma = tempMissingMatchComma
+	fixtures.missingMatchEndComma = tempMissingMatchEndComma
 	fixtures.topLevelStmt = tempTopLevelStmt
 	fixtures.invalidToken = tempInvalidToken
 	fixtures.invalidExpr = tempInvalidExpr
@@ -890,7 +905,7 @@ func writeSelfhostCLIHappyFrontendFixtures(t *testing.T) (string, string) {
 		"frontend_source.kizu",
 		`enum Flag{Yes,No}
 struct Name{value:[]u8,}
-fn choose(flag:Flag)->bool{return match flag{Yes=>true,No=>false};}
+fn choose(flag:Flag)->bool{return match flag{Yes=>true,No=>false,};}
 fn main(values:std::array::Array<Name>){let count=values.len();print(count);values.deinit();}
 `,
 	)
@@ -1188,13 +1203,14 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 	t *testing.T,
 ) (
 	string, string, string, string, string,
-	string, string, string, string, string, string,
+	string, string, string, string, string, string, string,
 	string, string, string, string, string, string, string, string, string, string, string,
 ) {
 	t.Helper()
 
 	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempMissingMatchComma, tempMissingMatchEndComma, tempTopLevelStmt,
+		tempInvalidToken, tempInvalidExpr,
 		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
 		writeSelfhostCLIInvalidGeneralFrontendFixtures(t)
@@ -1203,7 +1219,8 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 		writeSelfhostCLIInvalidAggregateFrontendFixtures(t)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempMissingMatchComma, tempMissingMatchEndComma, tempTopLevelStmt,
+		tempInvalidToken, tempInvalidExpr,
 		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
 		tempMissingFieldComma, tempMissingEnumComma, tempMissingUnionComma,
@@ -1215,19 +1232,21 @@ func writeSelfhostCLIInvalidGeneralFrontendFixtures(
 	t *testing.T,
 ) (
 	string, string, string, string, string,
-	string, string, string, string, string, string, string, string, string, string,
+	string, string, string, string, string, string, string, string, string, string, string,
 ) {
 	t.Helper()
 
 	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr :=
+		tempMissingMatchComma, tempMissingMatchEndComma, tempTopLevelStmt,
+		tempInvalidToken, tempInvalidExpr :=
 		writeSelfhostCLIInvalidSyntaxFrontendFixtures(t)
 	tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
 		writeSelfhostCLIInvalidFunctionFrontendFixtures(t)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempMissingMatchComma, tempMissingMatchEndComma, tempTopLevelStmt,
+		tempInvalidToken, tempInvalidExpr,
 		tempInvalidFnName, tempInvalidParam,
 		tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport
@@ -1236,7 +1255,7 @@ func writeSelfhostCLIInvalidGeneralFrontendFixtures(
 // writeSelfhostCLIInvalidSyntaxFrontendFixtures writes syntax parse failures.
 func writeSelfhostCLIInvalidSyntaxFrontendFixtures(
 	t *testing.T,
-) (string, string, string, string, string, string, string, string) {
+) (string, string, string, string, string, string, string, string, string) {
 	t.Helper()
 
 	const missingExprSource = `fn main() { let value = ; }
@@ -1271,6 +1290,15 @@ fn main(color: Color) { match color { Red => print("red") Green => print("green"
 		missingMatchCommaSource,
 	)
 
+	const missingMatchEndCommaSource = `enum Color { Red, Green }
+fn main(color: Color) { match color { Red => print("red"), Green => print("green") } }
+`
+	tempMissingMatchEndComma := writeTempKizuSource(
+		t,
+		"frontend_missing_match_terminal_comma.kizu",
+		missingMatchEndCommaSource,
+	)
+
 	const topLevelStmtSource = `let value = 1;
 `
 	tempTopLevelStmt := writeTempKizuSource(t, "frontend_top_level_stmt.kizu", topLevelStmtSource)
@@ -1286,7 +1314,8 @@ fn main(color: Color) { match color { Red => print("red") Green => print("green"
 	tempInvalidExpr := writeTempKizuSource(t, "frontend_invalid_expr_token.kizu", invalidExprSource)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr
+		tempMissingMatchComma, tempMissingMatchEndComma, tempTopLevelStmt, tempInvalidToken,
+		tempInvalidExpr
 }
 
 // writeSelfhostCLIInvalidFunctionFrontendFixtures writes function parse failures.

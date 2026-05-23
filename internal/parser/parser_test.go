@@ -373,7 +373,7 @@ func TestParseControlExpressions(t *testing.T) {
 fn main() {
     let color = Color::Green
     let value = if true { 1 } else { 2 }
-    let name = match color { Red => "red", Green => "green" }
+    let name = match color { Red => "red", Green => "green", }
     print(value)
     print(name)
 }`

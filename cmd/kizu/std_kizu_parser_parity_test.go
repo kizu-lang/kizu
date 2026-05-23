@@ -979,7 +979,7 @@ func parserParityExpressionSeedCases() []parserParityCase {
 		{
 			name: "seed/fn_match_expression",
 			source: "fn main() { let color = Color::Green; " +
-				`let name = match color { Red => "red", Green => "green" }; }`,
+				`let name = match color { Red => "red", Green => "green", }; }`,
 		},
 	}
 }
