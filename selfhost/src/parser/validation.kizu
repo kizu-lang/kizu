@@ -109,6 +109,10 @@ pub fn validate_tokens(
     if !invalid_token.ok {
         return invalid_token;
     }
+    let statement_separators = try validate_statement_separators(source, validation_tokens);
+    if !statement_separators.ok {
+        return statement_separators;
+    }
     return valid_parse_validation();
 }
 
@@ -689,6 +693,117 @@ fn skip_balanced_parens(
         cursor = cursor + 1;
     }
     return cursor;
+}
+
+fn validate_statement_separators(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !ParseValidation {
+    var index = 0;
+    while index + 1 < tokens.len() {
+        let token = try tokens.get(index);
+        if is_fn_token(token) {
+            let body = try find_fn_body_open_index(tokens, index);
+            if body < tokens.len() {
+                let validation = try validate_block_statement_separators(source, tokens, body);
+                if !validation.ok {
+                    return validation;
+                }
+            }
+            index = try skip_top_level_declaration(tokens, index);
+        } else {
+            index = index + 1;
+        }
+    }
+    return valid_parse_validation();
+}
+
+fn find_fn_body_open_index(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    let type_params = try skip_optional_type_params(tokens, index + 2);
+    let params = try tokens.get(type_params);
+    if !is_left_paren_token(params) {
+        return tokens.len();
+    }
+    let after_params = try skip_balanced_parens(tokens, type_params);
+    var cursor = after_params;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if is_left_brace_token(token) {
+            return cursor;
+        }
+        if is_semicolon_token(token) or lexer::is_eof(token) {
+            return tokens.len();
+        }
+        cursor = cursor + 1;
+    }
+    return tokens.len();
+}
+
+fn validate_block_statement_separators(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64
+) -> !ParseValidation {
+    var cursor = open_index + 1;
+    var depth = 1;
+    while cursor < tokens.len() and depth > 0 {
+        let previous = try tokens.get(cursor - 1);
+        let token = try tokens.get(cursor);
+        if needs_statement_separator(previous, token) {
+            return invalid_parse_validation(
+                "expected semicolon",
+                token.line,
+                token.column,
+                token_text(source, token)
+            );
+        }
+        if is_left_brace_token(token) {
+            depth = depth + 1;
+        }
+        if is_right_brace_token(token) {
+            depth = depth - 1;
+        }
+        cursor = cursor + 1;
+    }
+    return valid_parse_validation();
+}
+
+fn needs_statement_separator(
+    previous: std::kizu::lexer::Token,
+    token: std::kizu::lexer::Token
+) -> bool {
+    if previous.line != token.line {
+        return false;
+    }
+    return can_end_expression_token(previous) and can_start_expression_token(token);
+}
+
+fn can_end_expression_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Ident => true,
+        Number => true,
+        String => true,
+        True => true,
+        False => true,
+        _ => false,
+    };
+}
+
+fn can_start_expression_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Ident => true,
+        Number => true,
+        String => true,
+        True => true,
+        False => true,
+        Try => true,
+        Match => true,
+        If => true,
+        _ => false,
+    };
 }
 
 fn validate_ident_top_level_decl_start(
