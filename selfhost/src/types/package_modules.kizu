@@ -1,0 +1,727 @@
+import selfhost::source;
+
+pub struct PackageModuleRef {
+    pub start: i64,
+    pub end: i64,
+    pub absolute: bool,
+}
+
+pub fn collect_import_aliases_from_ast(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    alias_starts: &var std::map::Map<[]u8, i64>,
+    alias_ends: &var std::map::Map<[]u8, i64>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_import_aliases_in_range(
+            file,
+            ast,
+            program.declarations,
+            alias_starts,
+            alias_ends
+        );,
+        ImportDecl(import_decl) => return collect_import_alias_from_path(
+            file,
+            ast,
+            import_decl.path,
+            alias_starts,
+            alias_ends
+        );,
+        _ => return;,
+    }
+}
+
+pub fn collect_referenced_package_call_modules_from_ast(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_referenced_package_call_modules_in_range(
+            file,
+            ast,
+            program.declarations,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        FnDecl(fn_decl) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            fn_decl.body,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Block(block) => return collect_referenced_package_call_modules_in_range(
+            file,
+            ast,
+            block.statements,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Let(let_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            let_node.value,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Assign(assign_node) => return collect_referenced_package_call_modules_in_two_nodes(
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Return(return_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            return_node.value,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Defer(defer_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            defer_node.expr,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        ExprStmt(expr_stmt) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            expr_stmt.expr,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        If(if_node) => return collect_referenced_package_call_modules_in_three_nodes(
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        While(while_node) => return collect_referenced_package_call_modules_in_two_nodes(
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        For(for_node) => return collect_referenced_package_call_modules_in_three_nodes(
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Match(match_node) => return collect_referenced_package_call_modules_in_match(
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        MatchArm(match_arm) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            match_arm.body,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Unsafe(unsafe_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            unsafe_node.body,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        ComptimeIf(comptime_if_node) => return collect_referenced_package_call_modules_in_three_nodes(
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Prefix(prefix_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            prefix_node.right,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Binary(binary) => return collect_referenced_package_call_modules_in_two_nodes(
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        FieldExpr(field_expr_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            field_expr_node.receiver,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        DerefExpr(deref_expr_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            deref_expr_node.receiver,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        Call(call_node) => return collect_referenced_package_call_modules_in_call(
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        TypeApplyExpr(type_apply) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            type_apply.callee,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        CastExpr(cast_expr) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            cast_expr.value,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        IndexExpr(index_expr) => return collect_referenced_package_call_modules_in_three_nodes(
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            index_expr.end,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        StructLiteralExpr(struct_literal) => return collect_referenced_package_call_modules_in_range(
+            file,
+            ast,
+            struct_literal.fields,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        StructFieldInit(struct_field_init) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            struct_field_init.value,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        ArenaNewExpr(arena_new) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            arena_new.allocator,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        TryExpr(try_expr_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            try_expr_node.value,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        ComptimeExpr(comptime_expr_node) => return collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            comptime_expr_node.value,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );,
+        _ => return;,
+    }
+}
+
+pub fn list_contains_file(
+    target_file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
+    file: &source::SourceFile
+) -> !bool {
+    var index = 0;
+    while index < modules.len() {
+        let module = try modules.at(index);
+        if module_matches_file(target_file, module, file) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn collect_import_aliases_in_range(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    alias_starts: &var std::map::Map<[]u8, i64>,
+    alias_ends: &var std::map::Map<[]u8, i64>
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        try collect_import_aliases_from_ast(file, ast, child, alias_starts, alias_ends);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_import_alias_from_path(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    path: std::kizu::ast::ChildRange,
+    alias_starts: &var std::map::Map<[]u8, i64>,
+    alias_ends: &var std::map::Map<[]u8, i64>
+) -> !void {
+    if path.len < 1 {
+        return;
+    }
+    let first = try ast.child_at(path, 0);
+    let last = try ast.child_at(path, path.len - 1);
+    let first_node = ast.get(first);
+    let last_node = ast.get(last);
+    let alias = ast_node_text(file, ast, last);
+    if !alias_starts.contains(alias) {
+        try alias_starts.insert(alias, first_node.span.start);
+        try alias_ends.insert(alias, last_node.span.end);
+    }
+    return;
+}
+
+fn collect_referenced_package_call_modules_in_range(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        try collect_referenced_package_call_modules_from_ast(
+            file,
+            ast,
+            child,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_referenced_package_call_modules_in_two_nodes(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    try collect_referenced_package_call_modules_from_ast(
+        file,
+        ast,
+        first,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+    return collect_referenced_package_call_modules_from_ast(
+        file,
+        ast,
+        second,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+}
+
+fn collect_referenced_package_call_modules_in_three_nodes(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    third: std::kizu::ast::NodeId,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    try collect_referenced_package_call_modules_from_ast(
+        file,
+        ast,
+        first,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+    return collect_referenced_package_call_modules_in_two_nodes(
+        file,
+        ast,
+        second,
+        third,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+}
+
+fn collect_referenced_package_call_modules_in_match(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    try collect_referenced_package_call_modules_from_ast(
+        file,
+        ast,
+        value,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+    return collect_referenced_package_call_modules_in_range(
+        file,
+        ast,
+        arms,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+}
+
+fn collect_referenced_package_call_modules_in_call(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    try collect_referenced_package_call_module_for_callee(
+        file,
+        ast,
+        callee,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+    try collect_referenced_package_call_modules_from_ast(
+        file,
+        ast,
+        callee,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+    return collect_referenced_package_call_modules_in_range(
+        file,
+        ast,
+        args,
+        import_alias_starts,
+        import_alias_ends,
+        modules
+    );
+}
+
+fn collect_referenced_package_call_module_for_callee(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    if function_call_callee_is_member(ast, callee) {
+        return;
+    }
+    let name = ast_node_text(file, ast, callee);
+    if is_referenced_package_function_call(name) {
+        let node = ast.get(callee);
+        try append_module(
+            file,
+            node.span.start,
+            name,
+            import_alias_starts,
+            import_alias_ends,
+            modules
+        );
+    }
+    return;
+}
+
+fn function_call_callee_is_member(
+    ast: &std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(callee);
+    match node.data {
+        FieldExpr(field_expr_node) => return !field_expr_node.namespace;,
+        TypeApplyExpr(type_apply) => return function_call_callee_is_member(ast, type_apply.callee);,
+        _ => return false;,
+    }
+}
+
+fn is_referenced_package_function_call(name: []u8) -> bool {
+    if should_skip_function_reference(name) or
+        last_segment_starts_with_uppercase(name) or
+        is_generic_constructor_text(name) {
+        return false;
+    }
+    return is_qualified_name(name);
+}
+
+fn append_module(
+    file: &source::SourceFile,
+    source_start: i64,
+    name: []u8,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>,
+    modules: &var std::array::Array<PackageModuleRef>
+) -> !void {
+    let end = package_function_module_end(name);
+    if end < 1 {
+        return;
+    }
+    let first_end = first_qualified_segment_end(name);
+    if end == first_end {
+        let alias = name[0..first_end];
+        if import_alias_starts.contains(alias) {
+            let module_start = try import_alias_starts.get(alias);
+            let module_end = try import_alias_ends.get(alias);
+            let module_text = file.text[module_start..module_end];
+            let imported_module = PackageModuleRef {
+                start: module_start,
+                end: module_end,
+                absolute: module_is_absolute(module_text)
+            };
+            if !(try list_contains(file, modules, &imported_module)) {
+                try modules.append(imported_module);
+            }
+            return;
+        }
+    }
+    let absolute = std::mem::starts_with(name, "std::") or
+        std::mem::starts_with(name, "selfhost::");
+    let module = PackageModuleRef {
+        start: source_start,
+        end: source_start + end,
+        absolute: absolute
+    };
+    if !(try list_contains(file, modules, &module)) {
+        try modules.append(module);
+    }
+    return;
+}
+
+fn module_is_absolute(name: []u8) -> bool {
+    return std::mem::starts_with(name, "std::") or
+        std::mem::starts_with(name, "selfhost::");
+}
+
+fn package_function_module_end(name: []u8) -> i64 {
+    var end = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            end = index;
+        }
+        index = index + 1;
+    }
+    return end;
+}
+
+fn first_qualified_segment_end(name: []u8) -> i64 {
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return std::mem::len(name);
+}
+
+fn list_contains(
+    file: &source::SourceFile,
+    modules: &std::array::Array<PackageModuleRef>,
+    module: &PackageModuleRef
+) -> !bool {
+    var index = 0;
+    while index < modules.len() {
+        let current = try modules.at(index);
+        if module_refs_equal(file, current, module) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn module_refs_equal(
+    file: &source::SourceFile,
+    left: &PackageModuleRef,
+    right: &PackageModuleRef
+) -> bool {
+    if left.absolute != right.absolute {
+        return false;
+    }
+    return std::mem::equal_bytes(
+        file.text[left.start..left.end],
+        file.text[right.start..right.end]
+    );
+}
+
+fn module_matches_file(
+    target_file: &source::SourceFile,
+    module: &PackageModuleRef,
+    file: &source::SourceFile
+) -> bool {
+    let text = target_file.text[module.start..module.end];
+    if file.kind == source::SourceKind::Std {
+        if !std::mem::starts_with(text, "std::") {
+            return false;
+        }
+        return module_matches_path(text[5..std::mem::len(text)], source::module_path(file));
+    }
+    if file.kind == source::SourceKind::Selfhost {
+        if module.absolute {
+            if !std::mem::starts_with(text, "selfhost::") {
+                return false;
+            }
+            return module_matches_path(text[10..std::mem::len(text)], source::module_path(file));
+        }
+        return module_matches_path(text, source::module_path(file));
+    }
+    return false;
+}
+
+fn module_matches_path(module: []u8, path: []u8) -> bool {
+    var module_index = 0;
+    var path_index = 0;
+    while module_index < std::mem::len(module) and path_index < std::mem::len(path) {
+        if module_index + 1 < std::mem::len(module) and
+            module[module_index] == cast<u8>(58) and
+            module[module_index + 1] == cast<u8>(58) {
+            if path[path_index] != cast<u8>(47) {
+                return false;
+            }
+            module_index = module_index + 2;
+            path_index = path_index + 1;
+        } else {
+            if module[module_index] != path[path_index] {
+                return false;
+            }
+            module_index = module_index + 1;
+            path_index = path_index + 1;
+        }
+    }
+    return module_index == std::mem::len(module) and path_index == std::mem::len(path);
+}
+
+fn ast_node_text(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(file.text[span.start..span.end]);
+}
+
+fn should_skip_function_reference(name: []u8) -> bool {
+    return std::mem::equal_bytes(name, "print") or
+        std::mem::equal_bytes(name, "error") or
+        std::mem::equal_bytes(name, "cast") or
+        std::mem::equal_bytes(name, "return") or
+        std::mem::equal_bytes(name, "or") or
+        std::mem::equal_bytes(name, "and") or
+        std::mem::equal_bytes(name, "if") or
+        std::mem::equal_bytes(name, "while") or
+        std::mem::equal_bytes(name, "for") or
+        std::mem::equal_bytes(name, "match");
+}
+
+fn last_segment_starts_with_uppercase(name: []u8) -> bool {
+    var start = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            start = index + 2;
+        }
+        index = index + 1;
+    }
+    if start >= std::mem::len(name) {
+        return false;
+    }
+    let byte = name[start];
+    return byte >= cast<u8>(65) and byte <= cast<u8>(90);
+}
+
+fn is_generic_constructor_text(text: []u8) -> bool {
+    return std::mem::starts_with(text, "std::array::Array<") or
+        std::mem::starts_with(text, "std::map::Map<") or
+        std::mem::starts_with(text, "std::mem::Box<") or
+        std::mem::starts_with(text, "std::arena::Arena<") or
+        std::mem::starts_with(text, "std::arena::Handle<");
+}
+
+fn is_qualified_name(name: []u8) -> bool {
+    return first_qualified_segment_end(name) < std::mem::len(name);
+}

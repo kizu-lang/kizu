@@ -156,7 +156,8 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	}
 	content := string(bytes)
 	required := []string{
-		"collect_referenced_package_call_modules(",
+		"collect_import_aliases_from_ast(",
+		"collect_referenced_package_call_modules_from_ast(",
 		"collect_other_package_function_arities_for_modules_from_ast(",
 		"pub fn first_package_function_call_error_ast_node(",
 		"PackageModuleRef",
@@ -177,6 +178,7 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 		"FunctionCallCandidate",
 		"collect_package_function_call_candidates(",
 		"first_function_call_error_in_candidates(",
+		"fn collect_referenced_package_call_modules(",
 		"collect_other_package_function_arities_from_ast(",
 		"has_package_function_call(",
 	}
@@ -200,6 +202,18 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	)
 	if !strings.Contains(astBody, "collect_function_arities_from_ast(") {
 		t.Fatal("first_function_call_error does not collect target arity from the parsed target AST")
+	}
+	if strings.Contains(astBody, "lexer::tokenize(allocator, file.text)") ||
+		strings.Contains(astBody, "target_tokens") {
+		t.Fatal("package call diagnostics re-tokenize the target source in the AST entry")
+	}
+	localBody := selfhostKizuFunctionBody(
+		t,
+		content,
+		"pub fn first_function_call_error_ast_node(",
+	)
+	if strings.Contains(localBody, "lexer::tokenize(allocator, file.text)") {
+		t.Fatal("local function call diagnostics re-tokenize the parsed target AST")
 	}
 }
 
@@ -494,7 +508,11 @@ func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read selfhost function calls: %v", err)
 	}
-	content := string(bytes)
+	moduleBytes, err := os.ReadFile("../../selfhost/src/types/package_modules.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost package modules: %v", err)
+	}
+	content := string(bytes) + string(moduleBytes)
 	forbidden := []string{
 		"std_package_module_id(",
 		"std_package_module_matches_file(",
@@ -506,8 +524,9 @@ func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
 		}
 	}
 	required := []string{
-		"struct PackageModuleRef",
-		"package_module_matches_path(",
+		"pub struct PackageModuleRef",
+		"package_modules::list_contains_file(",
+		"fn module_matches_path(",
 		"source::module_path(file)",
 	}
 	for _, fragment := range required {
@@ -591,6 +610,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/types/function_calls.kizu": {
 		"pub fn first_function_call_error(",
 		"pub fn check_file_function_references(",
+	},
+	"../../selfhost/src/types/package_modules.kizu": {
+		"pub struct PackageModuleRef",
+		"pub fn collect_referenced_package_call_modules_from_ast(",
 	},
 	"../../selfhost/src/types/body_scan.kizu": {
 		"pub fn scan_body_ast_node(",

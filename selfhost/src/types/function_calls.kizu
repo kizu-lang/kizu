@@ -2,17 +2,12 @@ import selfhost::lexer;
 import selfhost::parser;
 import selfhost::source;
 import selfhost::types::model;
+import selfhost::types::package_modules;
 
 pub struct FunctionReferenceScan {
     pub next: i64,
     pub typed_nodes: i64,
     pub diagnostics: i64,
-}
-
-pub struct PackageModuleRef {
-    pub start: i64,
-    pub end: i64,
-    pub absolute: bool,
 }
 
 pub fn first_function_call_error(
@@ -55,23 +50,23 @@ pub fn first_package_function_call_error_ast_node(
         root,
         function_arities
     );
-    var referenced_modules = std::array::Array<PackageModuleRef>(allocator);
+    var referenced_modules = std::array::Array<package_modules::PackageModuleRef>(allocator);
     defer referenced_modules.deinit();
     var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
     defer import_alias_starts.deinit();
     var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
     defer import_alias_ends.deinit();
-    var target_tokens = try lexer::tokenize(allocator, file.text);
-    defer target_tokens.deinit();
-    try collect_import_aliases(
+    try package_modules::collect_import_aliases_from_ast(
         file,
-        target_tokens,
+        ast,
+        root,
         import_alias_starts,
         import_alias_ends
     );
-    try collect_referenced_package_call_modules(
+    try package_modules::collect_referenced_package_call_modules_from_ast(
         file,
-        target_tokens,
+        ast,
+        root,
         import_alias_starts,
         import_alias_ends,
         referenced_modules
@@ -132,14 +127,14 @@ fn collect_other_package_function_arities_for_modules_from_ast(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
     target_file: &source::SourceFile,
-    modules: &std::array::Array<PackageModuleRef>,
+    modules: &std::array::Array<package_modules::PackageModuleRef>,
     function_arities: &var std::map::Map<[]u8, i64>
 ) -> !void {
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
         if source::is_source_code(file.kind) and !std::mem::equal_bytes(file.path, target_file.path) {
-            if try package_module_list_contains_file(target_file, modules, file) {
+            if try package_modules::list_contains_file(target_file, modules, file) {
                 let result = try parser::parse_checked_file(allocator, file.path, file.text);
                 try collect_function_arities_from_ast(
                     allocator,
@@ -152,38 +147,6 @@ fn collect_other_package_function_arities_for_modules_from_ast(
             }
         }
         index = index + 1;
-    }
-    return;
-}
-
-fn collect_referenced_package_call_modules(
-    file: &source::SourceFile,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    import_alias_starts: &std::map::Map<[]u8, i64>,
-    import_alias_ends: &std::map::Map<[]u8, i64>,
-    modules: &var std::array::Array<PackageModuleRef>
-) -> !void {
-    var index = 0;
-    while index < tokens.len() {
-        let path_end = try qualified_path_end(file.text, tokens, index);
-        if path_end >= index and try is_function_call_at(file.text, tokens, index, path_end) {
-            let first = try tokens.get(index);
-            let last = try tokens.get(path_end);
-            let name = file.text[first.start..last.end];
-            if is_referenced_package_function_call(name) {
-                try append_package_function_module(
-                    file,
-                    first.start,
-                    name,
-                    import_alias_starts,
-                    import_alias_ends,
-                    modules
-                );
-            }
-            index = path_end + 1;
-        } else {
-            index = index + 1;
-        }
     }
     return;
 }
@@ -216,179 +179,6 @@ fn collect_import_aliases(
         }
     }
     return;
-}
-
-fn is_referenced_package_function_call(name: []u8) -> bool {
-    if should_skip_function_reference(name) or
-        last_segment_starts_with_uppercase(name) or
-        is_generic_constructor_text(name) {
-        return false;
-    }
-    return is_qualified_name(name);
-}
-
-fn append_package_function_module(
-    file: &source::SourceFile,
-    source_start: i64,
-    name: []u8,
-    import_alias_starts: &std::map::Map<[]u8, i64>,
-    import_alias_ends: &std::map::Map<[]u8, i64>,
-    modules: &var std::array::Array<PackageModuleRef>
-) -> !void {
-    let end = package_function_module_end(name);
-    if end < 1 {
-        return;
-    }
-    let first_end = first_qualified_segment_end(name);
-    if end == first_end {
-        let alias = name[0..first_end];
-        if import_alias_starts.contains(alias) {
-            let module_start = try import_alias_starts.get(alias);
-            let module_end = try import_alias_ends.get(alias);
-            let module_text = file.text[module_start..module_end];
-            let imported_module = PackageModuleRef {
-                start: module_start,
-                end: module_end,
-                absolute: import_module_is_absolute(module_text)
-            };
-            if !(try package_module_list_contains(file, modules, &imported_module)) {
-                try modules.append(imported_module);
-            }
-            return;
-        }
-    }
-    let absolute = std::mem::starts_with(name, "std::") or
-        std::mem::starts_with(name, "selfhost::");
-    let module = PackageModuleRef {
-        start: source_start,
-        end: source_start + end,
-        absolute: absolute
-    };
-    if !(try package_module_list_contains(file, modules, &module)) {
-        try modules.append(module);
-    }
-    return;
-}
-
-fn import_module_is_absolute(name: []u8) -> bool {
-    return std::mem::starts_with(name, "std::") or
-        std::mem::starts_with(name, "selfhost::");
-}
-
-fn package_function_module_end(name: []u8) -> i64 {
-    var end = 0;
-    var index = 0;
-    while index + 1 < std::mem::len(name) {
-        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
-            end = index;
-        }
-        index = index + 1;
-    }
-    return end;
-}
-
-fn first_qualified_segment_end(name: []u8) -> i64 {
-    var index = 0;
-    while index + 1 < std::mem::len(name) {
-        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
-            return index;
-        }
-        index = index + 1;
-    }
-    return std::mem::len(name);
-}
-
-fn package_module_list_contains(
-    file: &source::SourceFile,
-    modules: &std::array::Array<PackageModuleRef>,
-    module: &PackageModuleRef
-) -> !bool {
-    var index = 0;
-    while index < modules.len() {
-        let current = try modules.at(index);
-        if package_module_refs_equal(file, current, module) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-fn package_module_refs_equal(
-    file: &source::SourceFile,
-    left: &PackageModuleRef,
-    right: &PackageModuleRef
-) -> bool {
-    if left.absolute != right.absolute {
-        return false;
-    }
-    return std::mem::equal_bytes(
-        file.text[left.start..left.end],
-        file.text[right.start..right.end]
-    );
-}
-
-fn package_module_list_contains_file(
-    target_file: &source::SourceFile,
-    modules: &std::array::Array<PackageModuleRef>,
-    file: &source::SourceFile
-) -> !bool {
-    var index = 0;
-    while index < modules.len() {
-        let module = try modules.at(index);
-        if package_module_matches_file(target_file, module, file) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-fn package_module_matches_file(
-    target_file: &source::SourceFile,
-    module: &PackageModuleRef,
-    file: &source::SourceFile
-) -> bool {
-    let text = target_file.text[module.start..module.end];
-    if file.kind == source::SourceKind::Std {
-        if !std::mem::starts_with(text, "std::") {
-            return false;
-        }
-        return package_module_matches_path(text[5..std::mem::len(text)], source::module_path(file));
-    }
-    if file.kind == source::SourceKind::Selfhost {
-        if module.absolute {
-            if !std::mem::starts_with(text, "selfhost::") {
-                return false;
-            }
-            return package_module_matches_path(text[10..std::mem::len(text)], source::module_path(file));
-        }
-        return package_module_matches_path(text, source::module_path(file));
-    }
-    return false;
-}
-
-fn package_module_matches_path(module: []u8, path: []u8) -> bool {
-    var module_index = 0;
-    var path_index = 0;
-    while module_index < std::mem::len(module) and path_index < std::mem::len(path) {
-        if module_index + 1 < std::mem::len(module) and
-            module[module_index] == cast<u8>(58) and
-            module[module_index + 1] == cast<u8>(58) {
-            if path[path_index] != cast<u8>(47) {
-                return false;
-            }
-            module_index = module_index + 2;
-            path_index = path_index + 1;
-        } else {
-            if module[module_index] != path[path_index] {
-                return false;
-            }
-            module_index = module_index + 1;
-            path_index = path_index + 1;
-        }
-    }
-    return module_index == std::mem::len(module) and path_index == std::mem::len(path);
 }
 
 pub fn collect_function_signatures(
@@ -730,9 +520,13 @@ pub fn first_function_call_error_ast_node(
 ) -> !model::FunctionCallSummary {
     var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
     var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
-    var tokens = try lexer::tokenize(allocator, file.text);
-    try collect_import_aliases(file, tokens, import_alias_starts, import_alias_ends);
-    tokens.deinit();
+    try package_modules::collect_import_aliases_from_ast(
+        file,
+        ast,
+        node_id,
+        import_alias_starts,
+        import_alias_ends
+    );
     let found = try first_function_call_error_ast_node_with_imports(
         allocator,
         file,
@@ -1583,6 +1377,17 @@ fn is_generic_constructor_text(text: []u8) -> bool {
         std::mem::starts_with(text, "std::mem::Box<") or
         std::mem::starts_with(text, "std::arena::Arena<") or
         std::mem::starts_with(text, "std::arena::Handle<");
+}
+
+fn first_qualified_segment_end(name: []u8) -> i64 {
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return std::mem::len(name);
 }
 
 fn should_ignore_type_name(name: []u8) -> bool {
