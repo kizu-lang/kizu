@@ -448,11 +448,7 @@ func TestSelfhostFunctionReferenceScanUsesParsedAST(t *testing.T) {
 
 // TestSelfhostTypeLocalsUseParsedAST rejects raw body text scans for function locals.
 func TestSelfhostTypeLocalsUseParsedAST(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
-	if err != nil {
-		t.Fatalf("read selfhost types: %v", err)
-	}
-	content := string(bytes)
+	content := readSelfhostFile(t, "../../selfhost/src/types/local_facts.kizu")
 	forbidden := []string{
 		"let body_text = ast_node_text(file, ast, body)",
 		"local_initializer_end(",
@@ -927,6 +923,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn infer_expression_type(",
 		"pub fn known_type_mismatch(",
 		"fn field_expression_type(",
+	},
+	"../../selfhost/src/types/local_facts.kizu": {
+		"pub fn collect_function_statement_locals(",
+		"pub fn function_statement_return_type(",
+		"fn collect_let_statement_local(",
 	},
 	"../../selfhost/src/types/function_calls.kizu": {
 		"pub fn first_package_function_call_error_ast_node(",
