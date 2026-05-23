@@ -3221,14 +3221,8 @@ func (c *Checker) rejectArrayStorageGeneric(typ Type, seen map[Type]bool) error 
 		return nil
 	}
 	switch base {
-	case "std::arena::Arena":
-		return fmt.Errorf("type error: Array element cannot be arena in v0.2")
-	case "std::arena::Handle":
-		return fmt.Errorf("type error: Array element cannot be handle in v0.2")
-	case "std::array::Array":
-		return fmt.Errorf("type error: Array element cannot be nested array in v0.2")
-	case "std::map::Map":
-		return fmt.Errorf("type error: Array element cannot be std::map::Map in v0.2")
+	case "std::arena::Arena", "std::arena::Handle", "std::array::Array", "std::map::Map":
+		return nil
 	case "Task", "Channel", "Mutex", "Atomic":
 		return fmt.Errorf("type error: Array element cannot be %s in v0.2", base)
 	case "option":
@@ -3619,7 +3613,7 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_pop", "std.builtin.array_get", "std.builtin.array_get_or_panic",
 		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		return c.checkBuiltinArrayMethod(name, typeArg, args, env, unsafe)
@@ -3739,6 +3733,11 @@ func (c *Checker) checkArrayPrimitiveMethod(
 	unsafe bool,
 ) (Type, error) {
 	switch name {
+	case "pop":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
+		}
+		return Type("!" + string(elem)), nil
 	case "at":
 		if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 			return "", err
@@ -5013,6 +5012,11 @@ func (c *Checker) checkArrayMethod(
 	switch name {
 	case "append":
 		return c.checkArrayAppendArg(elem, args, env, unsafe)
+	case "pop":
+		if len(args) != 0 {
+			return "", fmt.Errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
+		}
+		return Type("!" + string(elem)), nil
 	case "len", "capacity":
 		if len(args) != 0 {
 			return "", fmt.Errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))

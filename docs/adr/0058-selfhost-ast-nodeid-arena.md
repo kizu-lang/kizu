@@ -11,10 +11,11 @@ Go implementation's interface, pointer, and slice shape. Declarations,
 statements, and expressions need one stable representation with spans and
 variable-length child lists.
 
-Kizu v0.2 currently rejects `std::array::Array<std::arena::Handle<T>>` and structs that
-contain handles because general handle storage needs arena lifetime rules that
-are not complete. A compiler AST is a narrower case: node handles are owned by
-one AST arena and are only resolved through AST methods.
+Earlier v0.2 builds rejected `std::array::Array<std::arena::Handle<T>>` and structs that
+contain handles because general handle storage needed array element cleanup and
+move-out rules. ADR-0042 now defines resource-owning Array elements. A compiler
+AST is still a narrower case: node handles are owned by one AST arena and are
+only resolved through AST methods.
 
 ## Decision
 
@@ -42,8 +43,8 @@ fields, block statements, call args, and match arms.
 
 ## Consequences
 
-- The Go checker keeps the general `Array<std::arena::Handle<T>>` rejection.
-- A narrow exception allows `std::kizu::ast::NodeId` in `std::array::Array`.
+- `std::kizu::ast::NodeId` remains copyable even though general resource values
+  stored in `std::array::Array` are move-only.
 - Copying `NodeId` copies an opaque id, not an AST node or raw pointer.
 - Parser APIs return `ParseResult { ast, root }` so a root `NodeId` is paired
   with the AST that owns it.
@@ -59,6 +60,6 @@ this AST arena.
 
 ## Non-goals
 
-- This does not make arbitrary handle wrappers safe for array storage.
+- This does not make raw pointers or dynamic dispatch payloads safe for array storage.
 - This does not expose raw pointers or mutable arena storage to safe Kizu.
 - This does not complete the full parser grammar for Issue #393.

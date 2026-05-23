@@ -765,6 +765,32 @@ func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeCheckReusesParsedFrontendAST keeps check_sources on one parse per source.
+func TestSelfhostTypeCheckReusesParsedFrontendAST(t *testing.T) {
+	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost types: %v", err)
+	}
+	body := selfhostKizuFunctionBody(t, string(bytes), "pub fn check_sources(")
+	required := []string{
+		"var parsed_frontend = std::array::Array<std::kizu::ast::ParseResult>(allocator)",
+		"var parsed_frontend_files = std::array::Array<i64>(allocator)",
+		"try parsed_frontend.append(result)",
+		"try parsed_frontend_files.append(index)",
+		"let result = try parsed_frontend.pop()",
+		"let file_index = try parsed_frontend_files.pop()",
+		"result.deinit()",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("type checker does not cache frontend ASTs with %q", fragment)
+		}
+	}
+	if count := strings.Count(body, "parser::parse_checked_file("); count != 1 {
+		t.Fatalf("type checker parses source in %d syntactic sites, want 1", count)
+	}
+}
+
 // TestSelfhostPackageAritySelectionUsesModulePaths rejects hardcoded std module IDs.
 func TestSelfhostPackageAritySelectionUsesModulePaths(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")

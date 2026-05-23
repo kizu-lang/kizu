@@ -1652,6 +1652,7 @@ std::array::Array<T>(allocator: Allocator) -> std::array::Array<T>
 array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
+array.pop() -> !T
 array.get(index: i64) -> !T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
@@ -1666,16 +1667,21 @@ array.deinit() -> void
 範囲外なら runtime error で停止するため、recoverable lookup には `get` を使います。
 v0.2 の `get` / `get_or_panic` は copy element 限定です。
 non-copy element は `at` / `at_mut` で local borrow として読み書きします。
-element borrow が生きている間は `append`、`set`、`deinit` を禁止します。
+`pop` は最後の initialized element を array から move して `!T` を返します。
+`set` は置換前の element を cleanup してから新しい value を move します。
+`deinit` は残っている initialized element を cleanup してから array storage を解放します。
+element cleanup は explicit `deinit(self: T) -> void` があればそれを使い、
+なければ field / payload 内の既知 owner を再帰的に cleanup します。
+element borrow が生きている間は `append`、`pop`、`set`、`deinit` を禁止します。
 mutable element borrow が生きている間は array 全体の read も禁止します。
 `deinit` 後の array 使用は safe Kizu では禁止します。
 `owner.field.deinit()` は owner 型自身の `deinit(self: Owner) -> void` method 内だけ許可し、
 その field は同じ body 内で以後使用できません。
-v0.2 の `Array<T>` element には raw pointer、arena、handle、nested array、
-`std::map::Map<K, V>`、concurrency capability type を入れられません。
+v0.2 の `Array<T>` element は arena、handle、nested array、`std::map::Map<K, V>` を
+含められます。raw pointer、dyn、concurrency capability type は入れられません。
 この制限は struct field と union payload の中も再帰的に検査します。
-これらは lifetime、provenance、thread boundary
-の仕様を collection 向けに固めてから扱います。
+これらは provenance、dynamic dispatch、thread boundary の仕様を collection 向けに
+固めてから扱います。
 
 v0.2 の `std::map::Map<K, V>` は、self-host compiler の symbol table と
 scope lookup に必要な最小 owned map です。

@@ -974,6 +974,31 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsArrayResourceElements checks resource-owning Array element types.
+func TestCheckAcceptsArrayResourceElements(t *testing.T) {
+	source := `struct User { name: []u8 }
+struct Parsed {
+    users: std::arena::Arena<User>,
+    ids: std::array::Array<i64>,
+}
+impl Parsed {
+    fn deinit(self: Parsed) -> void {
+        self.users.deinit();
+        self.ids.deinit();
+    }
+}
+fn check(values: std::array::Array<Parsed>) -> !void {
+    let item = try values.pop();
+    item.deinit();
+    values.deinit();
+    return;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckRejectsInvalidDeferredCleanup checks the first supported defer form.
 func TestCheckRejectsInvalidDeferredCleanup(t *testing.T) {
 	source := `fn main() {
