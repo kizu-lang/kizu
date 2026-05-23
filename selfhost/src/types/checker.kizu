@@ -172,11 +172,32 @@ pub fn first_pre_move_check_diagnostic_ast_node(
     var copyable = std::map::Map<[]u8, bool>(allocator);
     try type_refs::seed_builtin_types(kinds, arities, copyable);
     try type_refs::collect_declared_types_from_ast(allocator, file, ast, root, kinds, arities, copyable);
-    try type_refs::collect_type_parameters_from_ast(file, ast, root, kinds, arities, copyable);
-    let type_ref = try type_ref_ast::first_type_error_in_ast(allocator, file, ast, root, kinds, arities);
+    let diagnostic = try first_pre_move_check_diagnostic_ast_node_with_types(
+        allocator,
+        file,
+        ast,
+        root,
+        kinds,
+        arities,
+        copyable
+    );
     kinds.deinit();
     arities.deinit();
     copyable.deinit();
+    return diagnostic;
+}
+
+pub fn first_pre_move_check_diagnostic_ast_node_with_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    kinds: &var std::map::Map<[]u8, model::TypeKind>,
+    arities: &var std::map::Map<[]u8, i64>,
+    copyable: &var std::map::Map<[]u8, bool>
+) -> !model::CheckDiagnosticSummary {
+    try type_refs::collect_type_parameters_from_ast(file, ast, root, kinds, arities, copyable);
+    let type_ref = try type_ref_ast::first_type_error_in_ast(allocator, file, ast, root, kinds, arities);
     if type_ref.found {
         return check_diagnostic_from_type_reference(type_ref);
     }
@@ -3232,6 +3253,7 @@ fn collect_statement_locals_from_node(
             allocator,
             file,
             ast,
+            match_arm.pattern,
             match_arm.binding,
             match_arm.body,
             local_types,
@@ -3265,6 +3287,7 @@ fn collect_match_arm_locals(
     allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
+    pattern: std::kizu::ast::NodeId,
     binding: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     local_types: &var std::map::Map<[]u8, []u8>,
@@ -3274,7 +3297,7 @@ fn collect_match_arm_locals(
     var count = 0;
     let binding_name = ast_node_text(file, ast, binding);
     if !std::mem::equal_bytes(binding_name, "") and !local_types.contains(binding_name) {
-        try local_types.insert(binding_name, "unknown");
+        try local_types.insert(binding_name, ast_match_arm_binding_type(file, ast, pattern));
         try local_mutability.insert(binding_name, false);
         count = count + 1;
     }
@@ -3287,6 +3310,74 @@ fn collect_match_arm_locals(
         local_mutability,
         function_returns
     );
+}
+
+fn ast_match_arm_binding_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    binding: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(binding);
+    match node.data {
+        Var(var_node) => return ast_data_payload_type(ast_node_text(file, ast, binding));,
+        _ => return "unknown";,
+    }
+}
+
+fn ast_data_payload_type(pattern: []u8) -> []u8 {
+    if std::mem::equal_bytes(pattern, "Program") { return "std::kizu::ast::ProgramNode"; }
+    if std::mem::equal_bytes(pattern, "Int") { return "std::kizu::ast::IntNode"; }
+    if std::mem::equal_bytes(pattern, "String") { return "std::kizu::ast::StringNode"; }
+    if std::mem::equal_bytes(pattern, "TypeName") {
+        return "std::kizu::ast::TypeNameNode";
+    }
+    if std::mem::equal_bytes(pattern, "Var") { return "std::kizu::ast::VarNode"; }
+    if std::mem::equal_bytes(pattern, "Bool") { return "std::kizu::ast::BoolNode"; }
+    if std::mem::equal_bytes(pattern, "Prefix") { return "std::kizu::ast::PrefixNode"; }
+    if std::mem::equal_bytes(pattern, "Binary") { return "std::kizu::ast::BinaryNode"; }
+    if std::mem::equal_bytes(pattern, "FieldExpr") { return "std::kizu::ast::FieldExprNode"; }
+    if std::mem::equal_bytes(pattern, "DerefExpr") { return "std::kizu::ast::DerefExprNode"; }
+    if std::mem::equal_bytes(pattern, "Call") { return "std::kizu::ast::CallNode"; }
+    if std::mem::equal_bytes(pattern, "TypeApplyExpr") {
+        return "std::kizu::ast::TypeApplyExprNode";
+    }
+    if std::mem::equal_bytes(pattern, "CastExpr") { return "std::kizu::ast::CastExprNode"; }
+    if std::mem::equal_bytes(pattern, "IndexExpr") { return "std::kizu::ast::IndexExprNode"; }
+    if std::mem::equal_bytes(pattern, "StructLiteralExpr") {
+        return "std::kizu::ast::StructLiteralExprNode";
+    }
+    if std::mem::equal_bytes(pattern, "StructFieldInit") {
+        return "std::kizu::ast::StructFieldInitNode";
+    }
+    if std::mem::equal_bytes(pattern, "ArenaNewExpr") {
+        return "std::kizu::ast::ArenaNewExprNode";
+    }
+    if std::mem::equal_bytes(pattern, "TryExpr") { return "std::kizu::ast::TryExprNode"; }
+    if std::mem::equal_bytes(pattern, "ComptimeExpr") { return "std::kizu::ast::ComptimeExprNode"; }
+    if std::mem::equal_bytes(pattern, "Block") { return "std::kizu::ast::BlockNode"; }
+    if std::mem::equal_bytes(pattern, "If") { return "std::kizu::ast::IfNode"; }
+    if std::mem::equal_bytes(pattern, "Let") { return "std::kizu::ast::LetNode"; }
+    if std::mem::equal_bytes(pattern, "Assign") { return "std::kizu::ast::AssignNode"; }
+    if std::mem::equal_bytes(pattern, "Return") { return "std::kizu::ast::ReturnNode"; }
+    if std::mem::equal_bytes(pattern, "Defer") { return "std::kizu::ast::DeferNode"; }
+    if std::mem::equal_bytes(pattern, "ExprStmt") { return "std::kizu::ast::ExprStmtNode"; }
+    if std::mem::equal_bytes(pattern, "While") { return "std::kizu::ast::WhileNode"; }
+    if std::mem::equal_bytes(pattern, "For") { return "std::kizu::ast::ForNode"; }
+    if std::mem::equal_bytes(pattern, "Break") { return "std::kizu::ast::BreakNode"; }
+    if std::mem::equal_bytes(pattern, "Continue") { return "std::kizu::ast::ContinueNode"; }
+    if std::mem::equal_bytes(pattern, "ImportDecl") { return "std::kizu::ast::ImportDeclNode"; }
+    if std::mem::equal_bytes(pattern, "Param") { return "std::kizu::ast::ParamNode"; }
+    if std::mem::equal_bytes(pattern, "Field") { return "std::kizu::ast::FieldNode"; }
+    if std::mem::equal_bytes(pattern, "StructDecl") { return "std::kizu::ast::StructDeclNode"; }
+    if std::mem::equal_bytes(pattern, "EnumDecl") { return "std::kizu::ast::EnumDeclNode"; }
+    if std::mem::equal_bytes(pattern, "UnionDecl") { return "std::kizu::ast::UnionDeclNode"; }
+    if std::mem::equal_bytes(pattern, "UnionVariant") { return "std::kizu::ast::UnionVariantNode"; }
+    if std::mem::equal_bytes(pattern, "Match") { return "std::kizu::ast::MatchNode"; }
+    if std::mem::equal_bytes(pattern, "MatchArm") { return "std::kizu::ast::MatchArmNode"; }
+    if std::mem::equal_bytes(pattern, "Unsafe") { return "std::kizu::ast::UnsafeNode"; }
+    if std::mem::equal_bytes(pattern, "ComptimeIf") { return "std::kizu::ast::ComptimeIfNode"; }
+    if std::mem::equal_bytes(pattern, "FnDecl") { return "std::kizu::ast::FnDeclNode"; }
+    return "unknown";
 }
 
 fn collect_expression_locals_from_node(
@@ -5305,12 +5396,15 @@ fn infer_expression_type(
             local_types,
             function_returns
         ));,
-        FieldExpr(field_expr_node) => return field_expression_type(
+        FieldExpr(field_expr_node) => return try field_expression_type(
+            allocator,
             file,
             ast,
             field_expr_node.receiver,
             field_expr_node.namespace,
-            field_expr_node.name
+            field_expr_node.name,
+            local_types,
+            function_returns
         );,
         DerefExpr(deref_expr_node) => return "unknown";,
         Call(call_node) => return call_expression_type(
@@ -5461,19 +5555,246 @@ fn success_type_of(value_type: []u8) -> []u8 {
 }
 
 fn field_expression_type(
+    allocator: Allocator,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     receiver: std::kizu::ast::NodeId,
     namespace: bool,
-    name: std::kizu::ast::NodeId
-) -> []u8 {
+    name: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
     if namespace {
         let receiver_text = ast_node_text(file, ast, receiver);
         if last_segment_starts_with_uppercase(receiver_text) {
             return receiver_text;
         }
     }
-    return field_name_type(ast_node_text(file, ast, name));
+    let receiver_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        receiver,
+        local_types,
+        function_returns
+    );
+    let field = ast_node_text(file, ast, name);
+    let typed_field = typed_field_name_type(receiver_type, field);
+    if !std::mem::equal_bytes(typed_field, "unknown") {
+        return typed_field;
+    }
+    return field_name_type(field);
+}
+
+fn typed_field_name_type(receiver_type: []u8, field: []u8) -> []u8 {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::AstNode") {
+        if std::mem::equal_bytes(field, "span") { return "std::kizu::ast::Span"; }
+        if std::mem::equal_bytes(field, "data") { return "std::kizu::ast::AstData"; }
+    }
+    if ast_node_id_field_type(receiver_type, field) {
+        return "std::kizu::ast::NodeId";
+    }
+    if ast_child_range_field_type(receiver_type, field) {
+        return "std::kizu::ast::ChildRange";
+    }
+    if ast_bool_field_type(receiver_type, field) {
+        return "bool";
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::PrefixNode") and
+        std::mem::equal_bytes(field, "op") {
+        return "std::kizu::ast::PrefixOp";
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BinaryNode") and
+        std::mem::equal_bytes(field, "op") {
+        return "std::kizu::ast::BinaryOp";
+    }
+    return "unknown";
+}
+
+fn ast_node_id_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FnDeclNode") {
+        return std::mem::equal_bytes(field, "extern_abi") or
+            std::mem::equal_bytes(field, "name") or
+            std::mem::equal_bytes(field, "return_type") or
+            std::mem::equal_bytes(field, "return_borrow") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::EnumDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionDeclNode") {
+        return std::mem::equal_bytes(field, "name");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionVariantNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ParamNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldNode") {
+        return std::mem::equal_bytes(field, "name") or std::mem::equal_bytes(field, "type_node") or
+            std::mem::equal_bytes(field, "payload");
+    }
+    return ast_node_id_expression_field_type(receiver_type, field);
+}
+
+fn ast_node_id_expression_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::PrefixNode") {
+        return std::mem::equal_bytes(field, "right");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BinaryNode") {
+        return std::mem::equal_bytes(field, "left") or std::mem::equal_bytes(field, "right");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldExprNode") {
+        return std::mem::equal_bytes(field, "receiver") or std::mem::equal_bytes(field, "name");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::DerefExprNode") {
+        return std::mem::equal_bytes(field, "receiver");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::CallNode") {
+        return std::mem::equal_bytes(field, "callee");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::TypeApplyExprNode") {
+        return std::mem::equal_bytes(field, "callee");
+    }
+    return ast_node_id_statement_field_type(receiver_type, field);
+}
+
+fn ast_node_id_statement_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::CastExprNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ArenaNewExprNode") {
+        return std::mem::equal_bytes(field, "type_node") or std::mem::equal_bytes(field, "value") or
+            std::mem::equal_bytes(field, "allocator");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::IndexExprNode") {
+        return std::mem::equal_bytes(field, "target") or std::mem::equal_bytes(field, "start") or
+            std::mem::equal_bytes(field, "end");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructLiteralExprNode") {
+        return std::mem::equal_bytes(field, "type_name");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructFieldInitNode") {
+        return std::mem::equal_bytes(field, "name") or std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::TryExprNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ComptimeExprNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ReturnNode") {
+        return std::mem::equal_bytes(field, "value");
+    }
+    return ast_node_id_control_field_type(receiver_type, field);
+}
+
+fn ast_node_id_control_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::LetNode") {
+        return std::mem::equal_bytes(field, "name") or std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::AssignNode") {
+        return std::mem::equal_bytes(field, "target") or std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::DeferNode") {
+        return std::mem::equal_bytes(field, "expr");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ExprStmtNode") {
+        return std::mem::equal_bytes(field, "expr");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::IfNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ComptimeIfNode") {
+        return std::mem::equal_bytes(field, "condition") or
+            std::mem::equal_bytes(field, "then_block") or
+            std::mem::equal_bytes(field, "else_block");
+    }
+    return ast_node_id_loop_match_field_type(receiver_type, field);
+}
+
+fn ast_node_id_loop_match_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::WhileNode") {
+        return std::mem::equal_bytes(field, "label") or
+            std::mem::equal_bytes(field, "condition") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ForNode") {
+        return std::mem::equal_bytes(field, "label") or std::mem::equal_bytes(field, "name") or
+            std::mem::equal_bytes(field, "start") or std::mem::equal_bytes(field, "end") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BreakNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ContinueNode") {
+        return std::mem::equal_bytes(field, "label");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::MatchNode") {
+        return std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::MatchArmNode") {
+        return std::mem::equal_bytes(field, "pattern") or
+            std::mem::equal_bytes(field, "binding") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnsafeNode") {
+        return std::mem::equal_bytes(field, "body");
+    }
+    return false;
+}
+
+fn ast_child_range_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ProgramNode") {
+        return std::mem::equal_bytes(field, "declarations");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FnDeclNode") {
+        return std::mem::equal_bytes(field, "type_params") or
+            std::mem::equal_bytes(field, "params");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionDeclNode") {
+        return std::mem::equal_bytes(field, "type_params") or
+            std::mem::equal_bytes(field, "fields") or
+            std::mem::equal_bytes(field, "variants");
+    }
+    return ast_child_range_expression_field_type(receiver_type, field);
+}
+
+fn ast_child_range_expression_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::EnumDeclNode") {
+        return std::mem::equal_bytes(field, "tags");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ImportDeclNode") {
+        return std::mem::equal_bytes(field, "path");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BlockNode") {
+        return std::mem::equal_bytes(field, "statements");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::CallNode") {
+        return std::mem::equal_bytes(field, "args");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::TypeApplyExprNode") {
+        return std::mem::equal_bytes(field, "type_args");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructLiteralExprNode") {
+        return std::mem::equal_bytes(field, "fields");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::MatchNode") {
+        return std::mem::equal_bytes(field, "arms");
+    }
+    return false;
+}
+
+fn ast_bool_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BoolNode") {
+        return std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldExprNode") {
+        return std::mem::equal_bytes(field, "namespace");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::IndexExprNode") {
+        return std::mem::equal_bytes(field, "slice");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::LetNode") {
+        return std::mem::equal_bytes(field, "mutable");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ParamNode") {
+        return std::mem::equal_bytes(field, "comptime_param");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::FnDeclNode") {
+        return std::mem::equal_bytes(field, "public") or
+            std::mem::equal_bytes(field, "unsafe_decl");
+    }
+    return false;
 }
 
 fn call_expression_type(
@@ -5849,6 +6170,9 @@ fn known_type_mismatch(expected: []u8, actual: []u8) -> bool {
     if std::mem::starts_with(actual_type, "!") or type_text_has_error_marker(actual_type) {
         return false;
     }
+    if borrow_type_accepts_actual(expected_type, actual_type) {
+        return false;
+    }
     if is_u8_slice(expected_type) or is_u8_slice(actual_type) {
         return !(is_u8_slice(expected_type) and is_u8_slice(actual_type));
     }
@@ -5856,6 +6180,25 @@ fn known_type_mismatch(expected: []u8, actual: []u8) -> bool {
         return false;
     }
     return !std::mem::equal_bytes(expected_type, actual_type);
+}
+
+fn borrow_type_accepts_actual(expected: []u8, actual: []u8) -> bool {
+    if std::mem::starts_with(expected, "&var ") {
+        let borrowed = std::mem::trim_ascii(expected[5..std::mem::len(expected)]);
+        return type_text_equal_for_borrow(borrowed, actual);
+    }
+    if std::mem::starts_with(expected, "&") {
+        let borrowed = std::mem::trim_ascii(expected[1..std::mem::len(expected)]);
+        return type_text_equal_for_borrow(borrowed, actual);
+    }
+    return false;
+}
+
+fn type_text_equal_for_borrow(expected: []u8, actual: []u8) -> bool {
+    if is_u8_slice(expected) or is_u8_slice(actual) {
+        return is_u8_slice(expected) and is_u8_slice(actual);
+    }
+    return std::mem::equal_bytes(expected, actual);
 }
 
 fn value_type_text(type_name: []u8) -> []u8 {
