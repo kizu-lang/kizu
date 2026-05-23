@@ -2,6 +2,7 @@ import selfhost::parser;
 import selfhost::resolver;
 import selfhost::source;
 import selfhost::types::body_scan;
+import selfhost::types::diagnostic_summary;
 import selfhost::types::function_call_scan_ast;
 import selfhost::types::function_calls;
 import selfhost::types::model;
@@ -199,7 +200,7 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_types(
     try type_refs::collect_type_parameters_from_ast(file, ast, root, kinds, arities, copyable);
     let type_ref = try type_ref_ast::first_type_error_in_ast(allocator, file, ast, root, kinds, arities);
     if type_ref.found {
-        return check_diagnostic_from_type_reference(type_ref);
+        return diagnostic_summary::from_type_reference(type_ref);
     }
 
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
@@ -207,7 +208,7 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_types(
     var enum_tags = std::map::Map<[]u8, bool>(allocator);
     try collect_function_returns_from_ast(allocator, file, ast, root, function_returns);
     try collect_match_enum_types(allocator, file, ast, root, enum_counts, enum_tags);
-    var diagnostic = check_diagnostic_none();
+    var diagnostic = diagnostic_summary::none();
     let match_diagnostic = try first_match_diagnostic_node(
         allocator,
         file,
@@ -218,7 +219,7 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_types(
         function_returns
     );
     if match_diagnostic.found {
-        diagnostic = check_diagnostic_from_match(match_diagnostic);
+        diagnostic = diagnostic_summary::from_match(match_diagnostic);
     } else {
         let return_type = try first_return_type_mismatch_node(
             allocator,
@@ -228,7 +229,7 @@ pub fn first_pre_move_check_diagnostic_ast_node_with_types(
             function_returns
         );
         if return_type.found {
-            diagnostic = check_diagnostic_from_return_type(return_type);
+            diagnostic = diagnostic_summary::from_return_type(return_type);
         } else {
             let missing_return = try first_missing_return_node(
                 allocator,
@@ -267,7 +268,7 @@ pub fn first_post_move_check_diagnostic_ast_node(
         local_function_param_types
     );
 
-    var diagnostic = check_diagnostic_none();
+    var diagnostic = diagnostic_summary::none();
     let local_call = try function_calls::first_function_call_error_ast_node(
         allocator,
         file,
@@ -277,7 +278,7 @@ pub fn first_post_move_check_diagnostic_ast_node(
         true
     );
     if local_call.found {
-        diagnostic = check_diagnostic_from_function_call(local_call);
+        diagnostic = diagnostic_summary::from_function_call(local_call);
     } else {
         let undefined = try first_undefined_variable_node(
             allocator,
@@ -287,7 +288,7 @@ pub fn first_post_move_check_diagnostic_ast_node(
             function_returns
         );
         if undefined.found {
-            diagnostic = check_diagnostic_from_undefined_variable(undefined);
+            diagnostic = diagnostic_summary::from_undefined_variable(undefined);
         } else {
             let argument = try first_argument_type_mismatch_node(
                 allocator,
@@ -298,7 +299,7 @@ pub fn first_post_move_check_diagnostic_ast_node(
                 function_returns
             );
             if argument.found {
-                diagnostic = check_diagnostic_from_argument_type(argument);
+                diagnostic = diagnostic_summary::from_argument_type(argument);
             } else {
                 let immutable = try first_immutable_assignment_node(
                     allocator,
@@ -308,7 +309,9 @@ pub fn first_post_move_check_diagnostic_ast_node(
                     function_returns
                 );
                 if immutable.found {
-                    diagnostic = check_diagnostic_from_immutable_assignment(immutable);
+                    diagnostic = diagnostic_summary::from_immutable_assignment(
+                        immutable
+                    );
                 } else {
                     let invalid = try first_invalid_assignment_target_node(
                         file,
@@ -316,7 +319,9 @@ pub fn first_post_move_check_diagnostic_ast_node(
                         root
                     );
                     if invalid.found {
-                        diagnostic = check_diagnostic_from_invalid_assignment_target(invalid);
+                        diagnostic = diagnostic_summary::from_invalid_assignment_target(
+                            invalid
+                        );
                     } else {
                         let assignment = try first_assignment_type_mismatch_node(
                             allocator,
@@ -326,7 +331,9 @@ pub fn first_post_move_check_diagnostic_ast_node(
                             function_returns
                         );
                         if assignment.found {
-                            diagnostic = check_diagnostic_from_assignment_type(assignment);
+                            diagnostic = diagnostic_summary::from_assignment_type(
+                                assignment
+                            );
                         }
                     }
                 }
@@ -727,7 +734,7 @@ fn first_return_type_mismatch_node(
             fn_decl.body,
             function_returns
         );,
-        _ => return no_return_type_mismatch();,
+        _ => return diagnostic_summary::no_return_type_mismatch();,
     }
 }
 
@@ -753,7 +760,7 @@ fn first_return_type_mismatch_in_declarations(
         }
         index = index + 1;
     }
-    return no_return_type_mismatch();
+    return diagnostic_summary::no_return_type_mismatch();
 }
 
 fn first_return_type_mismatch_in_function(
@@ -904,7 +911,7 @@ fn first_return_type_mismatch_in_statement(
             expected_return,
             function_returns
         );,
-        _ => return no_return_type_mismatch();,
+        _ => return diagnostic_summary::no_return_type_mismatch();,
     }
 }
 
@@ -936,7 +943,7 @@ fn first_return_type_mismatch_in_statement_range(
         }
         index = index + 1;
     }
-    return no_return_type_mismatch();
+    return diagnostic_summary::no_return_type_mismatch();
 }
 
 fn first_return_type_mismatch_in_two_statements(
@@ -994,7 +1001,7 @@ fn return_statement_type_mismatch(
     );
     if known_type_mismatch(expected_return, actual) {
         let value_node = ast.get(value);
-        return return_type_summary(
+        return diagnostic_summary::return_type_summary(
             true,
             value_node.span.start,
             value_node.span.end,
@@ -1002,7 +1009,7 @@ fn return_statement_type_mismatch(
             actual
         );
     }
-    return no_return_type_mismatch();
+    return diagnostic_summary::no_return_type_mismatch();
 }
 
 fn first_missing_return_node(
@@ -1030,7 +1037,7 @@ fn first_missing_return_node(
             fn_decl.body,
             function_returns
         );,
-        _ => return check_diagnostic_none();,
+        _ => return diagnostic_summary::none();,
     }
 }
 
@@ -1056,7 +1063,7 @@ fn first_missing_return_in_declarations(
         }
         index = index + 1;
     }
-    return check_diagnostic_none();
+    return diagnostic_summary::none();
 }
 
 fn first_missing_return_in_function(
@@ -1077,12 +1084,12 @@ fn first_missing_return_in_function(
         function_returns
     );
     if !function_requires_return(expected_return) {
-        return check_diagnostic_none();
+        return diagnostic_summary::none();
     }
     if try statement_always_returns(ast, body) {
-        return check_diagnostic_none();
+        return diagnostic_summary::none();
     }
-    return check_diagnostic_from_missing_return(
+    return diagnostic_summary::from_missing_return(
         ast_node_text(file, ast, name),
         expected_return
     );
@@ -1172,7 +1179,7 @@ fn first_argument_type_mismatch_node(
             function_param_types,
             function_returns
         );,
-        _ => return no_argument_type_mismatch();,
+        _ => return diagnostic_summary::no_argument_type_mismatch();,
     }
 }
 
@@ -1200,7 +1207,7 @@ fn first_argument_type_mismatch_in_declarations(
         }
         index = index + 1;
     }
-    return no_argument_type_mismatch();
+    return diagnostic_summary::no_argument_type_mismatch();
 }
 
 fn first_argument_type_mismatch_in_function(
@@ -1375,7 +1382,7 @@ fn first_argument_type_mismatch_in_statement(
             function_param_types,
             function_returns
         );,
-        _ => return no_argument_type_mismatch();,
+        _ => return diagnostic_summary::no_argument_type_mismatch();,
     }
 }
 
@@ -1405,7 +1412,7 @@ fn first_argument_type_mismatch_in_statement_range(
         }
         index = index + 1;
     }
-    return no_argument_type_mismatch();
+    return diagnostic_summary::no_argument_type_mismatch();
 }
 
 fn first_argument_type_mismatch_in_expression_range(
@@ -1434,7 +1441,7 @@ fn first_argument_type_mismatch_in_expression_range(
         }
         index = index + 1;
     }
-    return no_argument_type_mismatch();
+    return diagnostic_summary::no_argument_type_mismatch();
 }
 
 fn first_argument_type_mismatch_in_expression(
@@ -1578,7 +1585,7 @@ fn first_argument_type_mismatch_in_expression(
             function_param_types,
             function_returns
         );,
-        _ => return no_argument_type_mismatch();,
+        _ => return diagnostic_summary::no_argument_type_mismatch();,
     }
 }
 
@@ -1643,14 +1650,14 @@ fn argument_type_mismatch_for_call(
         last_segment_starts_with_uppercase(callee_text) or
         is_generic_constructor_text(callee_text) or
         is_qualified_name(callee_text) {
-        return no_argument_type_mismatch();
+        return diagnostic_summary::no_argument_type_mismatch();
     }
     var index = 0;
     while index < args.len {
         let arg = try ast.child_at(args, index);
         let expected = try lookup_function_param_type(function_param_types, callee_text, index);
         if !expected.found {
-            return no_argument_type_mismatch();
+            return diagnostic_summary::no_argument_type_mismatch();
         }
         let actual = try infer_expression_type(
             allocator,
@@ -1662,7 +1669,7 @@ fn argument_type_mismatch_for_call(
         );
         if known_type_mismatch(expected.type_name, actual) {
             let arg_node = ast.get(arg);
-            return argument_type_summary(
+            return diagnostic_summary::argument_type_summary(
                 true,
                 arg_node.span.start,
                 arg_node.span.end,
@@ -1672,7 +1679,7 @@ fn argument_type_mismatch_for_call(
         }
         index = index + 1;
     }
-    return no_argument_type_mismatch();
+    return diagnostic_summary::no_argument_type_mismatch();
 }
 
 fn first_argument_type_mismatch_in_two_expressions(
@@ -1879,7 +1886,7 @@ fn first_assignment_type_mismatch_node(
             fn_decl.body,
             function_returns
         );,
-        _ => return no_assignment_type_mismatch();,
+        _ => return diagnostic_summary::no_assignment_type_mismatch();,
     }
 }
 
@@ -1905,7 +1912,7 @@ fn first_assignment_type_mismatch_in_declarations(
         }
         index = index + 1;
     }
-    return no_assignment_type_mismatch();
+    return diagnostic_summary::no_assignment_type_mismatch();
 }
 
 fn first_assignment_type_mismatch_in_function(
@@ -2026,7 +2033,7 @@ fn first_assignment_type_mismatch_in_statement(
             local_types,
             function_returns
         );,
-        _ => return no_assignment_type_mismatch();,
+        _ => return diagnostic_summary::no_assignment_type_mismatch();,
     }
 }
 
@@ -2054,7 +2061,7 @@ fn first_assignment_type_mismatch_in_statement_range(
         }
         index = index + 1;
     }
-    return no_assignment_type_mismatch();
+    return diagnostic_summary::no_assignment_type_mismatch();
 }
 
 fn first_assignment_type_mismatch_in_two_statements(
@@ -2107,7 +2114,7 @@ fn assignment_type_mismatch_for_assign(
             local_types,
             function_returns
         );,
-        _ => return no_assignment_type_mismatch();,
+        _ => return diagnostic_summary::no_assignment_type_mismatch();,
     }
 }
 
@@ -2122,7 +2129,7 @@ fn assignment_type_mismatch_for_var_assign(
 ) -> !model::AssignmentTypeSummary {
     let name = ast_node_text(file, ast, target);
     if !local_types.contains(name) {
-        return no_assignment_type_mismatch();
+        return diagnostic_summary::no_assignment_type_mismatch();
     }
     let expected = try local_types.get(name);
     let actual = try infer_expression_type(
@@ -2135,7 +2142,7 @@ fn assignment_type_mismatch_for_var_assign(
     );
     if known_type_mismatch(expected, actual) {
         let value_node = ast.get(value);
-        return assignment_type_summary(
+        return diagnostic_summary::assignment_type_summary(
             true,
             value_node.span.start,
             value_node.span.end,
@@ -2143,7 +2150,7 @@ fn assignment_type_mismatch_for_var_assign(
             actual
         );
     }
-    return no_assignment_type_mismatch();
+    return diagnostic_summary::no_assignment_type_mismatch();
 }
 
 fn first_immutable_assignment_node(
@@ -2170,7 +2177,7 @@ fn first_immutable_assignment_node(
             fn_decl.body,
             function_returns
         );,
-        _ => return no_immutable_assignment();,
+        _ => return diagnostic_summary::no_immutable_assignment();,
     }
 }
 
@@ -2196,7 +2203,7 @@ fn first_immutable_assignment_in_declarations(
         }
         index = index + 1;
     }
-    return no_immutable_assignment();
+    return diagnostic_summary::no_immutable_assignment();
 }
 
 fn first_immutable_assignment_in_function(
@@ -2315,7 +2322,7 @@ fn first_immutable_assignment_in_statement(
             local_types,
             local_mutability
         );,
-        _ => return no_immutable_assignment();,
+        _ => return diagnostic_summary::no_immutable_assignment();,
     }
 }
 
@@ -2343,7 +2350,7 @@ fn first_immutable_assignment_in_statement_range(
         }
         index = index + 1;
     }
-    return no_immutable_assignment();
+    return diagnostic_summary::no_immutable_assignment();
 }
 
 fn first_immutable_assignment_in_two_statements(
@@ -2392,7 +2399,7 @@ fn immutable_assignment_for_assign(
             local_types,
             local_mutability
         );,
-        _ => return no_immutable_assignment();,
+        _ => return diagnostic_summary::no_immutable_assignment();,
     }
 }
 
@@ -2405,19 +2412,19 @@ fn immutable_assignment_for_var_assign(
 ) -> !model::ImmutableAssignmentSummary {
     let name = ast_node_text(file, ast, target);
     if !local_types.contains(name) {
-        return no_immutable_assignment();
+        return diagnostic_summary::no_immutable_assignment();
     }
     let mutable = try local_mutability.get(name);
     if !mutable {
         let target_node = ast.get(target);
-        return immutable_assignment_summary(
+        return diagnostic_summary::immutable_assignment_summary(
             true,
             target_node.span.start,
             target_node.span.end,
             name
         );
     }
-    return no_immutable_assignment();
+    return diagnostic_summary::no_immutable_assignment();
 }
 
 fn first_invalid_assignment_target_node(
@@ -2475,7 +2482,7 @@ fn first_invalid_assignment_target_node(
             comptime_if_node.then_block,
             comptime_if_node.else_block
         );,
-        _ => return no_invalid_assignment_target();,
+        _ => return diagnostic_summary::no_invalid_assignment_target();,
     }
 }
 
@@ -2493,7 +2500,7 @@ fn first_invalid_assignment_target_in_range(
         }
         index = index + 1;
     }
-    return no_invalid_assignment_target();
+    return diagnostic_summary::no_invalid_assignment_target();
 }
 
 fn first_invalid_assignment_target_in_two_nodes(
@@ -2515,11 +2522,11 @@ fn invalid_assignment_target_for_assign(
 ) -> model::InvalidAssignmentTargetSummary {
     let target_node = ast.get(target);
     match target_node.data {
-        Var(var_node) => return no_invalid_assignment_target();,
-        FieldExpr(field_expr_node) => return no_invalid_assignment_target();,
-        DerefExpr(deref_expr_node) => return no_invalid_assignment_target();,
-        IndexExpr(index_expr) => return no_invalid_assignment_target();,
-        _ => return invalid_assignment_target_result(
+        Var(var_node) => return diagnostic_summary::no_invalid_assignment_target();,
+        FieldExpr(field_expr_node) => return diagnostic_summary::no_invalid_assignment_target();,
+        DerefExpr(deref_expr_node) => return diagnostic_summary::no_invalid_assignment_target();,
+        IndexExpr(index_expr) => return diagnostic_summary::no_invalid_assignment_target();,
+        _ => return diagnostic_summary::invalid_assignment_target_result(
             true,
             target_node.span.start,
             target_node.span.end
@@ -2551,7 +2558,7 @@ fn first_undefined_variable_node(
             fn_decl.body,
             function_returns
         );,
-        _ => return no_undefined_variable();,
+        _ => return diagnostic_summary::no_undefined_variable();,
     }
 }
 
@@ -2577,7 +2584,7 @@ fn first_undefined_variable_in_declarations(
         }
         index = index + 1;
     }
-    return no_undefined_variable();
+    return diagnostic_summary::no_undefined_variable();
 }
 
 fn first_undefined_variable_in_function(
@@ -2720,7 +2727,7 @@ fn first_undefined_variable_in_statement(
             comptime_if_node.else_block,
             local_types
         );,
-        _ => return no_undefined_variable();,
+        _ => return diagnostic_summary::no_undefined_variable();,
     }
 }
 
@@ -2746,7 +2753,7 @@ fn first_undefined_variable_in_statement_range(
         }
         index = index + 1;
     }
-    return no_undefined_variable();
+    return diagnostic_summary::no_undefined_variable();
 }
 
 fn first_undefined_variable_in_expression(
@@ -2796,7 +2803,7 @@ fn first_undefined_variable_in_expression(
             call_node.args,
             local_types
         );,
-        TypeApplyExpr(type_apply) => return no_undefined_variable();,
+        TypeApplyExpr(type_apply) => return diagnostic_summary::no_undefined_variable();,
         CastExpr(cast_expr) => return first_undefined_variable_in_expression(
             allocator,
             file,
@@ -2856,7 +2863,7 @@ fn first_undefined_variable_in_expression(
             match_node.arms,
             local_types
         );,
-        _ => return no_undefined_variable();,
+        _ => return diagnostic_summary::no_undefined_variable();,
     }
 }
 
@@ -2882,7 +2889,7 @@ fn first_undefined_variable_in_expression_range(
         }
         index = index + 1;
     }
-    return no_undefined_variable();
+    return diagnostic_summary::no_undefined_variable();
 }
 
 fn first_undefined_variable_in_two_expressions(
@@ -3042,7 +3049,7 @@ fn first_undefined_variable_in_field_expr(
     local_types: &std::map::Map<[]u8, []u8>
 ) -> !model::UndefinedVariableSummary {
     if namespace {
-        return no_undefined_variable();
+        return diagnostic_summary::no_undefined_variable();
     }
     return first_undefined_variable_in_expression(allocator, file, ast, receiver, local_types);
 }
@@ -3055,10 +3062,15 @@ fn undefined_variable_for_var(
 ) -> !model::UndefinedVariableSummary {
     let name = ast_node_text(file, ast, node_id);
     if local_types.contains(name) {
-        return no_undefined_variable();
+        return diagnostic_summary::no_undefined_variable();
     }
     let node = ast.get(node_id);
-    return undefined_variable_summary(true, node.span.start, node.span.end, name);
+    return diagnostic_summary::undefined_variable_summary(
+        true,
+        node.span.start,
+        node.span.end,
+        name
+    );
 }
 
 fn collect_function_statement_locals(
@@ -4331,47 +4343,47 @@ fn first_match_diagnostic_node(
             enum_tags,
             function_returns
         );,
-        Empty => return no_match_diagnostic();,
-        ImportDecl(import_decl) => return no_match_diagnostic();,
-        StructDecl(struct_decl) => return no_match_diagnostic();,
-        EnumDecl(enum_decl) => return no_match_diagnostic();,
-        UnionDecl(union_decl) => return no_match_diagnostic();,
-        Int(int_node) => return no_match_diagnostic();,
-        String(string_node) => return no_match_diagnostic();,
-        TypeName(type_name) => return no_match_diagnostic();,
-        Var(var_node) => return no_match_diagnostic();,
-        Bool(bool_node) => return no_match_diagnostic();,
-        Prefix(prefix_node) => return no_match_diagnostic();,
-        Binary(binary) => return no_match_diagnostic();,
-        FieldExpr(field_expr_node) => return no_match_diagnostic();,
-        DerefExpr(deref_expr_node) => return no_match_diagnostic();,
-        Call(call_node) => return no_match_diagnostic();,
-        TypeApplyExpr(type_apply) => return no_match_diagnostic();,
-        CastExpr(cast_expr) => return no_match_diagnostic();,
-        IndexExpr(index_expr) => return no_match_diagnostic();,
-        StructLiteralExpr(struct_literal) => return no_match_diagnostic();,
-        StructFieldInit(struct_field_init) => return no_match_diagnostic();,
-        ArenaNewExpr(arena_new) => return no_match_diagnostic();,
-        TryExpr(try_expr_node) => return no_match_diagnostic();,
-        ComptimeExpr(comptime_expr_node) => return no_match_diagnostic();,
-        Block(block) => return no_match_diagnostic();,
-        If(if_node) => return no_match_diagnostic();,
-        Let(let_node) => return no_match_diagnostic();,
-        Assign(assign_node) => return no_match_diagnostic();,
-        Return(return_node) => return no_match_diagnostic();,
-        Defer(defer_node) => return no_match_diagnostic();,
-        ExprStmt(expr_stmt) => return no_match_diagnostic();,
-        While(while_node) => return no_match_diagnostic();,
-        For(for_node) => return no_match_diagnostic();,
-        Break(break_node) => return no_match_diagnostic();,
-        Continue(continue_node) => return no_match_diagnostic();,
-        Param(param_node) => return no_match_diagnostic();,
-        Field(field_node) => return no_match_diagnostic();,
-        UnionVariant(union_variant) => return no_match_diagnostic();,
-        Match(match_node) => return no_match_diagnostic();,
-        MatchArm(match_arm) => return no_match_diagnostic();,
-        Unsafe(unsafe_node) => return no_match_diagnostic();,
-        ComptimeIf(comptime_if_node) => return no_match_diagnostic();,
+        Empty => return diagnostic_summary::no_match_diagnostic();,
+        ImportDecl(import_decl) => return diagnostic_summary::no_match_diagnostic();,
+        StructDecl(struct_decl) => return diagnostic_summary::no_match_diagnostic();,
+        EnumDecl(enum_decl) => return diagnostic_summary::no_match_diagnostic();,
+        UnionDecl(union_decl) => return diagnostic_summary::no_match_diagnostic();,
+        Int(int_node) => return diagnostic_summary::no_match_diagnostic();,
+        String(string_node) => return diagnostic_summary::no_match_diagnostic();,
+        TypeName(type_name) => return diagnostic_summary::no_match_diagnostic();,
+        Var(var_node) => return diagnostic_summary::no_match_diagnostic();,
+        Bool(bool_node) => return diagnostic_summary::no_match_diagnostic();,
+        Prefix(prefix_node) => return diagnostic_summary::no_match_diagnostic();,
+        Binary(binary) => return diagnostic_summary::no_match_diagnostic();,
+        FieldExpr(field_expr_node) => return diagnostic_summary::no_match_diagnostic();,
+        DerefExpr(deref_expr_node) => return diagnostic_summary::no_match_diagnostic();,
+        Call(call_node) => return diagnostic_summary::no_match_diagnostic();,
+        TypeApplyExpr(type_apply) => return diagnostic_summary::no_match_diagnostic();,
+        CastExpr(cast_expr) => return diagnostic_summary::no_match_diagnostic();,
+        IndexExpr(index_expr) => return diagnostic_summary::no_match_diagnostic();,
+        StructLiteralExpr(struct_literal) => return diagnostic_summary::no_match_diagnostic();,
+        StructFieldInit(struct_field_init) => return diagnostic_summary::no_match_diagnostic();,
+        ArenaNewExpr(arena_new) => return diagnostic_summary::no_match_diagnostic();,
+        TryExpr(try_expr_node) => return diagnostic_summary::no_match_diagnostic();,
+        ComptimeExpr(comptime_expr_node) => return diagnostic_summary::no_match_diagnostic();,
+        Block(block) => return diagnostic_summary::no_match_diagnostic();,
+        If(if_node) => return diagnostic_summary::no_match_diagnostic();,
+        Let(let_node) => return diagnostic_summary::no_match_diagnostic();,
+        Assign(assign_node) => return diagnostic_summary::no_match_diagnostic();,
+        Return(return_node) => return diagnostic_summary::no_match_diagnostic();,
+        Defer(defer_node) => return diagnostic_summary::no_match_diagnostic();,
+        ExprStmt(expr_stmt) => return diagnostic_summary::no_match_diagnostic();,
+        While(while_node) => return diagnostic_summary::no_match_diagnostic();,
+        For(for_node) => return diagnostic_summary::no_match_diagnostic();,
+        Break(break_node) => return diagnostic_summary::no_match_diagnostic();,
+        Continue(continue_node) => return diagnostic_summary::no_match_diagnostic();,
+        Param(param_node) => return diagnostic_summary::no_match_diagnostic();,
+        Field(field_node) => return diagnostic_summary::no_match_diagnostic();,
+        UnionVariant(union_variant) => return diagnostic_summary::no_match_diagnostic();,
+        Match(match_node) => return diagnostic_summary::no_match_diagnostic();,
+        MatchArm(match_arm) => return diagnostic_summary::no_match_diagnostic();,
+        Unsafe(unsafe_node) => return diagnostic_summary::no_match_diagnostic();,
+        ComptimeIf(comptime_if_node) => return diagnostic_summary::no_match_diagnostic();,
     }
 }
 
@@ -4401,7 +4413,7 @@ fn first_match_diagnostic_in_range(
         }
         index = index + 1;
     }
-    return no_match_diagnostic();
+    return diagnostic_summary::no_match_diagnostic();
 }
 
 fn first_match_diagnostic_in_function(
@@ -4591,36 +4603,36 @@ fn first_match_diagnostic_in_statement(
             enum_tags,
             function_returns
         );,
-        Empty => return no_match_diagnostic();,
-        Break(break_node) => return no_match_diagnostic();,
-        Continue(continue_node) => return no_match_diagnostic();,
-        Program(program) => return no_match_diagnostic();,
-        ImportDecl(import_decl) => return no_match_diagnostic();,
-        Param(param_node) => return no_match_diagnostic();,
-        Field(field_node) => return no_match_diagnostic();,
-        StructDecl(struct_decl) => return no_match_diagnostic();,
-        EnumDecl(enum_decl) => return no_match_diagnostic();,
-        UnionDecl(union_decl) => return no_match_diagnostic();,
-        UnionVariant(union_variant) => return no_match_diagnostic();,
-        FnDecl(fn_decl) => return no_match_diagnostic();,
-        Int(int_node) => return no_match_diagnostic();,
-        String(string_node) => return no_match_diagnostic();,
-        TypeName(type_name) => return no_match_diagnostic();,
-        Var(var_node) => return no_match_diagnostic();,
-        Bool(bool_node) => return no_match_diagnostic();,
-        Prefix(prefix_node) => return no_match_diagnostic();,
-        Binary(binary) => return no_match_diagnostic();,
-        FieldExpr(field_expr_node) => return no_match_diagnostic();,
-        DerefExpr(deref_expr_node) => return no_match_diagnostic();,
-        Call(call_node) => return no_match_diagnostic();,
-        TypeApplyExpr(type_apply) => return no_match_diagnostic();,
-        CastExpr(cast_expr) => return no_match_diagnostic();,
-        IndexExpr(index_expr) => return no_match_diagnostic();,
-        StructLiteralExpr(struct_literal) => return no_match_diagnostic();,
-        StructFieldInit(struct_field_init) => return no_match_diagnostic();,
-        ArenaNewExpr(arena_new) => return no_match_diagnostic();,
-        TryExpr(try_expr_node) => return no_match_diagnostic();,
-        ComptimeExpr(comptime_expr_node) => return no_match_diagnostic();,
+        Empty => return diagnostic_summary::no_match_diagnostic();,
+        Break(break_node) => return diagnostic_summary::no_match_diagnostic();,
+        Continue(continue_node) => return diagnostic_summary::no_match_diagnostic();,
+        Program(program) => return diagnostic_summary::no_match_diagnostic();,
+        ImportDecl(import_decl) => return diagnostic_summary::no_match_diagnostic();,
+        Param(param_node) => return diagnostic_summary::no_match_diagnostic();,
+        Field(field_node) => return diagnostic_summary::no_match_diagnostic();,
+        StructDecl(struct_decl) => return diagnostic_summary::no_match_diagnostic();,
+        EnumDecl(enum_decl) => return diagnostic_summary::no_match_diagnostic();,
+        UnionDecl(union_decl) => return diagnostic_summary::no_match_diagnostic();,
+        UnionVariant(union_variant) => return diagnostic_summary::no_match_diagnostic();,
+        FnDecl(fn_decl) => return diagnostic_summary::no_match_diagnostic();,
+        Int(int_node) => return diagnostic_summary::no_match_diagnostic();,
+        String(string_node) => return diagnostic_summary::no_match_diagnostic();,
+        TypeName(type_name) => return diagnostic_summary::no_match_diagnostic();,
+        Var(var_node) => return diagnostic_summary::no_match_diagnostic();,
+        Bool(bool_node) => return diagnostic_summary::no_match_diagnostic();,
+        Prefix(prefix_node) => return diagnostic_summary::no_match_diagnostic();,
+        Binary(binary) => return diagnostic_summary::no_match_diagnostic();,
+        FieldExpr(field_expr_node) => return diagnostic_summary::no_match_diagnostic();,
+        DerefExpr(deref_expr_node) => return diagnostic_summary::no_match_diagnostic();,
+        Call(call_node) => return diagnostic_summary::no_match_diagnostic();,
+        TypeApplyExpr(type_apply) => return diagnostic_summary::no_match_diagnostic();,
+        CastExpr(cast_expr) => return diagnostic_summary::no_match_diagnostic();,
+        IndexExpr(index_expr) => return diagnostic_summary::no_match_diagnostic();,
+        StructLiteralExpr(struct_literal) => return diagnostic_summary::no_match_diagnostic();,
+        StructFieldInit(struct_field_init) => return diagnostic_summary::no_match_diagnostic();,
+        ArenaNewExpr(arena_new) => return diagnostic_summary::no_match_diagnostic();,
+        TryExpr(try_expr_node) => return diagnostic_summary::no_match_diagnostic();,
+        ComptimeExpr(comptime_expr_node) => return diagnostic_summary::no_match_diagnostic();,
     }
 }
 
@@ -4652,7 +4664,7 @@ fn first_match_diagnostic_in_statement_range(
         }
         index = index + 1;
     }
-    return no_match_diagnostic();
+    return diagnostic_summary::no_match_diagnostic();
 }
 
 fn first_match_diagnostic_in_expression(
@@ -4832,33 +4844,33 @@ fn first_match_diagnostic_in_expression(
             enum_tags,
             function_returns
         );,
-        Int(int_node) => return no_match_diagnostic();,
-        String(string_node) => return no_match_diagnostic();,
-        TypeName(type_name) => return no_match_diagnostic();,
-        Var(var_node) => return no_match_diagnostic();,
-        Bool(bool_node) => return no_match_diagnostic();,
-        Empty => return no_match_diagnostic();,
-        Let(let_node) => return no_match_diagnostic();,
-        Assign(assign_node) => return no_match_diagnostic();,
-        Return(return_node) => return no_match_diagnostic();,
-        Defer(defer_node) => return no_match_diagnostic();,
-        ExprStmt(expr_stmt) => return no_match_diagnostic();,
-        While(while_node) => return no_match_diagnostic();,
-        For(for_node) => return no_match_diagnostic();,
-        Break(break_node) => return no_match_diagnostic();,
-        Continue(continue_node) => return no_match_diagnostic();,
-        Program(program) => return no_match_diagnostic();,
-        ImportDecl(import_decl) => return no_match_diagnostic();,
-        Param(param_node) => return no_match_diagnostic();,
-        Field(field_node) => return no_match_diagnostic();,
-        StructDecl(struct_decl) => return no_match_diagnostic();,
-        EnumDecl(enum_decl) => return no_match_diagnostic();,
-        UnionDecl(union_decl) => return no_match_diagnostic();,
-        UnionVariant(union_variant) => return no_match_diagnostic();,
-        MatchArm(match_arm) => return no_match_diagnostic();,
-        Unsafe(unsafe_node) => return no_match_diagnostic();,
-        ComptimeIf(comptime_if_node) => return no_match_diagnostic();,
-        FnDecl(fn_decl) => return no_match_diagnostic();,
+        Int(int_node) => return diagnostic_summary::no_match_diagnostic();,
+        String(string_node) => return diagnostic_summary::no_match_diagnostic();,
+        TypeName(type_name) => return diagnostic_summary::no_match_diagnostic();,
+        Var(var_node) => return diagnostic_summary::no_match_diagnostic();,
+        Bool(bool_node) => return diagnostic_summary::no_match_diagnostic();,
+        Empty => return diagnostic_summary::no_match_diagnostic();,
+        Let(let_node) => return diagnostic_summary::no_match_diagnostic();,
+        Assign(assign_node) => return diagnostic_summary::no_match_diagnostic();,
+        Return(return_node) => return diagnostic_summary::no_match_diagnostic();,
+        Defer(defer_node) => return diagnostic_summary::no_match_diagnostic();,
+        ExprStmt(expr_stmt) => return diagnostic_summary::no_match_diagnostic();,
+        While(while_node) => return diagnostic_summary::no_match_diagnostic();,
+        For(for_node) => return diagnostic_summary::no_match_diagnostic();,
+        Break(break_node) => return diagnostic_summary::no_match_diagnostic();,
+        Continue(continue_node) => return diagnostic_summary::no_match_diagnostic();,
+        Program(program) => return diagnostic_summary::no_match_diagnostic();,
+        ImportDecl(import_decl) => return diagnostic_summary::no_match_diagnostic();,
+        Param(param_node) => return diagnostic_summary::no_match_diagnostic();,
+        Field(field_node) => return diagnostic_summary::no_match_diagnostic();,
+        StructDecl(struct_decl) => return diagnostic_summary::no_match_diagnostic();,
+        EnumDecl(enum_decl) => return diagnostic_summary::no_match_diagnostic();,
+        UnionDecl(union_decl) => return diagnostic_summary::no_match_diagnostic();,
+        UnionVariant(union_variant) => return diagnostic_summary::no_match_diagnostic();,
+        MatchArm(match_arm) => return diagnostic_summary::no_match_diagnostic();,
+        Unsafe(unsafe_node) => return diagnostic_summary::no_match_diagnostic();,
+        ComptimeIf(comptime_if_node) => return diagnostic_summary::no_match_diagnostic();,
+        FnDecl(fn_decl) => return diagnostic_summary::no_match_diagnostic();,
     }
 }
 
@@ -4890,7 +4902,7 @@ fn first_match_diagnostic_in_expression_range(
         }
         index = index + 1;
     }
-    return no_match_diagnostic();
+    return diagnostic_summary::no_match_diagnostic();
 }
 
 fn first_match_diagnostic_in_two_nodes(
@@ -5012,7 +5024,7 @@ fn first_match_diagnostic_for_match(
     }
     if !enum_counts.contains(value_type) {
         if unsupported_match_value_type(value_type) {
-            return match_diagnostic_summary(true, 1, value_type, "");
+            return diagnostic_summary::match_diagnostic_summary(true, 1, value_type, "");
         }
         return first_match_diagnostic_in_statement_range(
             allocator,
@@ -5076,7 +5088,7 @@ fn first_current_enum_match_diagnostic(
             enum_tags
         );
         if scan.diagnostic_found {
-            return match_diagnostic_summary(
+            return diagnostic_summary::match_diagnostic_summary(
                 true,
                 scan.diagnostic_kind,
                 scan.diagnostic_name,
@@ -5089,9 +5101,9 @@ fn first_current_enum_match_diagnostic(
     }
     let expected = try enum_counts.get(value_type);
     if !wildcard and explicit_count != expected {
-        return match_diagnostic_summary(true, 4, value_type, "");
+        return diagnostic_summary::match_diagnostic_summary(true, 4, value_type, "");
     }
-    return no_match_diagnostic();
+    return diagnostic_summary::no_match_diagnostic();
 }
 
 fn current_enum_match_arm_scan(
@@ -6326,321 +6338,6 @@ fn ast_ref_node_text(
     let node = ast.get(node_id);
     let span = &node.span;
     return std::mem::trim_ascii(file.text[span.start..span.end]);
-}
-
-fn check_diagnostic_none() -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: false,
-        kind: 0,
-        detail_kind: 0,
-        start: 0,
-        end: 0,
-        name: "",
-        tag: "",
-        expected_text: "",
-        actual_text: "",
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_type_reference(summary: model::TypeReferenceSummary) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 1,
-        detail_kind: summary.kind,
-        start: summary.start,
-        end: summary.end,
-        name: "",
-        tag: "",
-        expected_text: "",
-        actual_text: "",
-        expected: summary.expected,
-        observed: summary.observed
-    };
-}
-
-fn check_diagnostic_from_match(summary: model::MatchDiagnosticSummary) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 2,
-        detail_kind: summary.kind,
-        start: 0,
-        end: 0,
-        name: summary.name,
-        tag: summary.tag,
-        expected_text: "",
-        actual_text: "",
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_return_type(summary: model::ReturnTypeSummary) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 3,
-        detail_kind: 0,
-        start: summary.start,
-        end: summary.end,
-        name: "",
-        tag: "",
-        expected_text: summary.expected,
-        actual_text: summary.actual,
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_function_call(summary: model::FunctionCallSummary) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 4,
-        detail_kind: summary.kind,
-        start: summary.start,
-        end: summary.end,
-        name: "",
-        tag: "",
-        expected_text: "",
-        actual_text: "",
-        expected: summary.expected,
-        observed: summary.observed
-    };
-}
-
-fn check_diagnostic_from_undefined_variable(
-    summary: model::UndefinedVariableSummary
-) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 5,
-        detail_kind: 0,
-        start: summary.start,
-        end: summary.end,
-        name: summary.name,
-        tag: "",
-        expected_text: "",
-        actual_text: "",
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_argument_type(summary: model::ArgumentTypeSummary) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 6,
-        detail_kind: 0,
-        start: summary.start,
-        end: summary.end,
-        name: "",
-        tag: "",
-        expected_text: summary.expected,
-        actual_text: summary.actual,
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_immutable_assignment(
-    summary: model::ImmutableAssignmentSummary
-) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 7,
-        detail_kind: 0,
-        start: summary.start,
-        end: summary.end,
-        name: summary.name,
-        tag: "",
-        expected_text: "",
-        actual_text: "",
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_invalid_assignment_target(
-    summary: model::InvalidAssignmentTargetSummary
-) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 8,
-        detail_kind: 0,
-        start: summary.start,
-        end: summary.end,
-        name: "",
-        tag: "",
-        expected_text: "",
-        actual_text: "",
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_assignment_type(summary: model::AssignmentTypeSummary) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: summary.found,
-        kind: 9,
-        detail_kind: 0,
-        start: summary.start,
-        end: summary.end,
-        name: "",
-        tag: "",
-        expected_text: summary.expected,
-        actual_text: summary.actual,
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn check_diagnostic_from_missing_return(
-    name: []u8,
-    expected_return: []u8
-) -> model::CheckDiagnosticSummary {
-    return model::CheckDiagnosticSummary {
-        found: true,
-        kind: 10,
-        detail_kind: 0,
-        start: 0,
-        end: 0,
-        name: name,
-        tag: "",
-        expected_text: expected_return,
-        actual_text: "",
-        expected: 0,
-        observed: 0
-    };
-}
-
-fn return_type_summary(
-    found: bool,
-    start: i64,
-    end: i64,
-    expected: []u8,
-    actual: []u8
-) -> model::ReturnTypeSummary {
-    return model::ReturnTypeSummary {
-        found: found,
-        start: start,
-        end: end,
-        expected: expected,
-        actual: actual
-    };
-}
-
-fn no_return_type_mismatch() -> model::ReturnTypeSummary {
-    return return_type_summary(false, 0, 0, "", "");
-}
-
-fn argument_type_summary(
-    found: bool,
-    start: i64,
-    end: i64,
-    expected: []u8,
-    actual: []u8
-) -> model::ArgumentTypeSummary {
-    return model::ArgumentTypeSummary {
-        found: found,
-        start: start,
-        end: end,
-        expected: expected,
-        actual: actual
-    };
-}
-
-fn no_argument_type_mismatch() -> model::ArgumentTypeSummary {
-    return argument_type_summary(false, 0, 0, "", "");
-}
-
-fn assignment_type_summary(
-    found: bool,
-    start: i64,
-    end: i64,
-    expected: []u8,
-    actual: []u8
-) -> model::AssignmentTypeSummary {
-    return model::AssignmentTypeSummary {
-        found: found,
-        start: start,
-        end: end,
-        expected: expected,
-        actual: actual
-    };
-}
-
-fn no_assignment_type_mismatch() -> model::AssignmentTypeSummary {
-    return assignment_type_summary(false, 0, 0, "", "");
-}
-
-fn immutable_assignment_summary(
-    found: bool,
-    start: i64,
-    end: i64,
-    name: []u8
-) -> model::ImmutableAssignmentSummary {
-    return model::ImmutableAssignmentSummary {
-        found: found,
-        start: start,
-        end: end,
-        name: name
-    };
-}
-
-fn no_immutable_assignment() -> model::ImmutableAssignmentSummary {
-    return immutable_assignment_summary(false, 0, 0, "");
-}
-
-fn invalid_assignment_target_result(
-    found: bool,
-    start: i64,
-    end: i64
-) -> model::InvalidAssignmentTargetSummary {
-    return model::InvalidAssignmentTargetSummary {
-        found: found,
-        start: start,
-        end: end
-    };
-}
-
-fn no_invalid_assignment_target() -> model::InvalidAssignmentTargetSummary {
-    return invalid_assignment_target_result(false, 0, 0);
-}
-
-fn undefined_variable_summary(
-    found: bool,
-    start: i64,
-    end: i64,
-    name: []u8
-) -> model::UndefinedVariableSummary {
-    return model::UndefinedVariableSummary {
-        found: found,
-        start: start,
-        end: end,
-        name: name
-    };
-}
-
-fn no_undefined_variable() -> model::UndefinedVariableSummary {
-    return undefined_variable_summary(false, 0, 0, "");
-}
-
-fn match_diagnostic_summary(
-    found: bool,
-    kind: i64,
-    name: []u8,
-    tag: []u8
-) -> model::MatchDiagnosticSummary {
-    return model::MatchDiagnosticSummary {
-        found: found,
-        kind: kind,
-        name: name,
-        tag: tag
-    };
-}
-
-fn no_match_diagnostic() -> model::MatchDiagnosticSummary {
-    return match_diagnostic_summary(false, 0, "", "");
 }
 
 fn type_scan_summary(next: i64, typed_nodes: i64, diagnostics: i64) -> TypeScanSummary {
