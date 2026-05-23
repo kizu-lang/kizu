@@ -320,6 +320,10 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 	if !strings.Contains(content, call) {
 		t.Fatal("check entry does not run package call diagnostics")
 	}
+	packageCall := "types::first_function_call_error(allocator, files, path)"
+	if count := strings.Count(content, packageCall); count != 1 {
+		t.Fatalf("check entry runs package call diagnostics %d times, want 1", count)
+	}
 }
 
 // TestSelfhostCheckEntrySharesDiagnosticPasses keeps per-file checks grouped by phase.
