@@ -142,7 +142,6 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	}
 	content := string(bytes)
 	required := []string{
-		"has_package_function_call(",
 		"collect_referenced_package_call_modules(",
 		"collect_other_package_function_arities_for_modules_from_ast(",
 		"PackageModuleRef",
@@ -164,6 +163,7 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 		"collect_package_function_call_candidates(",
 		"first_function_call_error_in_candidates(",
 		"collect_other_package_function_arities_from_ast(",
+		"has_package_function_call(",
 	}
 	for _, fragment := range forbidden {
 		if strings.Contains(content, fragment) {
