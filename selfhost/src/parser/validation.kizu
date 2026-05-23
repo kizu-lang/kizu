@@ -543,10 +543,71 @@ fn validate_fn_params(
                 token_text(source, type_start)
             );
         }
+        let separator_validation = try validate_fn_param_type_separator(
+            source,
+            tokens,
+            cursor + 2
+        );
+        if !separator_validation.ok {
+            return separator_validation;
+        }
         cursor = try skip_fn_param_type(tokens, cursor + 3);
     }
     let eof = try tokens.get(tokens.len() - 1);
     return invalid_parse_validation("expected right paren", eof.line, eof.column, "");
+}
+
+fn validate_fn_param_type_separator(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    type_start_index: i64
+) -> !ParseValidation {
+    var cursor = type_start_index;
+    var angle_depth = 0;
+    var bracket_depth = 0;
+    var previous = try tokens.get(type_start_index);
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if cursor > type_start_index and angle_depth == 0 and bracket_depth == 0 {
+            if is_comma_token(token) or is_right_paren_token(token) {
+                return valid_parse_validation();
+            }
+            if needs_type_separator(previous, token) {
+                return invalid_parse_validation(
+                    "expected comma or right paren",
+                    token.line,
+                    token.column,
+                    token_text(source, token)
+                );
+            }
+        }
+        if is_lt_token(token) {
+            angle_depth = angle_depth + 1;
+        }
+        if is_gt_token(token) and angle_depth > 0 {
+            angle_depth = angle_depth - 1;
+        }
+        if is_left_bracket_token(token) {
+            bracket_depth = bracket_depth + 1;
+        }
+        if is_right_bracket_token(token) and bracket_depth > 0 {
+            bracket_depth = bracket_depth - 1;
+        }
+        previous = token;
+        cursor = cursor + 1;
+    }
+    let eof = try tokens.get(tokens.len() - 1);
+    return invalid_parse_validation("expected comma or right paren", eof.line, eof.column, "");
+}
+
+fn needs_type_separator(
+    previous: std::kizu::lexer::Token,
+    token: std::kizu::lexer::Token
+) -> bool {
+    if !is_ident_token(token) {
+        return false;
+    }
+    return is_ident_token(previous) or is_gt_token(previous);
 }
 
 fn skip_fn_param_type(

@@ -56,6 +56,7 @@ type selfhostCLIFrontendFixtures struct {
 	invalidExpr         string
 	invalidFnName       string
 	invalidParam        string
+	missingParamComma   string
 	invalidTypeParam    string
 	invalidReturn       string
 	missingFnBody       string
@@ -344,6 +345,12 @@ func selfhostCLIFrontendParseFunctionFailureCases(
 			args:    []string{"parse", fixtures.invalidParam},
 			wantOut: "exit-code\n1\n",
 			wantErr: "error: expected colon, got ) at 1:14\nerror: parse failed\n",
+		},
+		{
+			name:    "parse_temp_missing_fn_param_comma",
+			args:    []string{"parse", fixtures.missingParamComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right paren, got right at 1:19\nerror: parse failed\n",
 		},
 		{
 			name:    "parse_temp_invalid_fn_type_param",
@@ -672,6 +679,12 @@ func selfhostCLIFrontendCheckFunctionParseFailureCases(
 			wantErr: "error: expected colon, got ) at 1:14\nerror: parse failed\n",
 		},
 		{
+			name:    "check_temp_missing_fn_param_comma",
+			args:    []string{"check", fixtures.missingParamComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right paren, got right at 1:19\nerror: parse failed\n",
+		},
+		{
 			name:    "check_temp_invalid_fn_type_param",
 			args:    []string{"check", fixtures.invalidTypeParam},
 			wantOut: "exit-code\n1\n",
@@ -748,9 +761,9 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 
 	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign, tempTopLevelStmt,
 		tempInvalidToken, tempInvalidExpr,
-		tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam, tempInvalidReturn,
-		tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField, tempMissingColon,
-		tempMissingType :=
+		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
+		tempMissingColon, tempMissingType :=
 		writeSelfhostCLIInvalidFrontendFixtures(t)
 	tempExpectOK, tempExpectFail := writeSelfhostCLIExpectFrontendFixtures(t)
 
@@ -784,6 +797,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		invalidExpr:         tempInvalidExpr,
 		invalidFnName:       tempInvalidFnName,
 		invalidParam:        tempInvalidParam,
+		missingParamComma:   tempMissingParamComma,
 		invalidTypeParam:    tempInvalidTypeParam,
 		invalidReturn:       tempInvalidReturn,
 		missingFnBody:       tempMissingFnBody,
@@ -1107,20 +1121,20 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 ) (
 	string, string, string, string, string,
 	string, string, string, string, string,
-	string, string, string, string, string, string, string,
+	string, string, string, string, string, string, string, string,
 ) {
 	t.Helper()
 
 	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign, tempTopLevelStmt,
-		tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam,
-		tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
+		tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam, tempMissingParamComma,
+		tempInvalidTypeParam, tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
 		writeSelfhostCLIInvalidGeneralFrontendFixtures(t)
 	tempInvalidStruct, tempInvalidField, tempMissingColon, tempMissingType :=
 		writeSelfhostCLIInvalidAggregateFrontendFixtures(t)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
 		tempTopLevelStmt, tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam,
-		tempInvalidTypeParam,
+		tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
 		tempMissingColon, tempMissingType
 }
@@ -1130,18 +1144,19 @@ func writeSelfhostCLIInvalidGeneralFrontendFixtures(
 	t *testing.T,
 ) (
 	string, string, string, string, string,
-	string, string, string, string, string, string, string, string,
+	string, string, string, string, string, string, string, string, string,
 ) {
 	t.Helper()
 
 	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign, tempTopLevelStmt,
 		tempInvalidToken, tempInvalidExpr := writeSelfhostCLIInvalidSyntaxFrontendFixtures(t)
-	tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam, tempInvalidReturn, tempMissingFnBody,
-		tempInvalidImport := writeSelfhostCLIInvalidFunctionFrontendFixtures(t)
+	tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
+		writeSelfhostCLIInvalidFunctionFrontendFixtures(t)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
 		tempTopLevelStmt, tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam,
-		tempInvalidTypeParam,
+		tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport
 }
 
@@ -1195,7 +1210,7 @@ func writeSelfhostCLIInvalidSyntaxFrontendFixtures(
 // writeSelfhostCLIInvalidFunctionFrontendFixtures writes function parse failures.
 func writeSelfhostCLIInvalidFunctionFrontendFixtures(
 	t *testing.T,
-) (string, string, string, string, string, string) {
+) (string, string, string, string, string, string, string) {
 	t.Helper()
 
 	const invalidFnNameSource = `fn {}
@@ -1207,6 +1222,16 @@ func writeSelfhostCLIInvalidFunctionFrontendFixtures(
 }
 `
 	tempInvalidParam := writeTempKizuSource(t, "frontend_invalid_fn_param.kizu", invalidParamSource)
+
+	const missingParamCommaSource = `fn main(left: i64 right: i64) {
+    return;
+}
+`
+	tempMissingParamComma := writeTempKizuSource(
+		t,
+		"frontend_missing_fn_param_comma.kizu",
+		missingParamCommaSource,
+	)
 
 	const invalidTypeParamSource = `fn main<>() {
     return;
@@ -1236,8 +1261,8 @@ func writeSelfhostCLIInvalidFunctionFrontendFixtures(
 `
 	tempInvalidImport := writeTempKizuSource(t, "frontend_invalid_import.kizu", invalidImportSource)
 
-	return tempInvalidFnName, tempInvalidParam, tempInvalidTypeParam, tempInvalidReturn,
-		tempMissingFnBody, tempInvalidImport
+	return tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport
 }
 
 // writeSelfhostCLIInvalidAggregateFrontendFixtures writes aggregate parse failures.
