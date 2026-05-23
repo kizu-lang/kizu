@@ -802,3 +802,31 @@ func TestSelfhostMoveDiagnosticsUseSourcePath(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfhostOwnershipBorrowKindsUseTypeNodes rejects raw substring borrow fallback.
+func TestSelfhostOwnershipBorrowKindsUseTypeNodes(t *testing.T) {
+	kind := readSelfhostFile(t, "../../selfhost/src/ownership/kind.kizu")
+	checker := readSelfhostFile(t, "../../selfhost/src/ownership/checker.kizu")
+	required := []string{
+		"pub fn resource_kind_for_type_node(",
+		"resource_type_node_is_borrowed(file, ast, type_node)",
+		"kind::resource_kind_for_type_node(file, ast, type_node)",
+		"Param(param_node) => return resource_kind_for_type_node(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(kind+checker, fragment) {
+			t.Fatalf("ownership resource kind missing parsed type-node path %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"fn resource_text_is_borrowed(",
+		"bytes_contains(",
+		"\": &\"",
+		"\": []\"",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(kind, fragment) {
+			t.Fatalf("ownership resource kind keeps raw borrowed-type fallback %q", fragment)
+		}
+	}
+}
