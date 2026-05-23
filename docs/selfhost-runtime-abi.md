@@ -434,15 +434,21 @@ selfhost check selfhost/tests/cli/test_expect_ok.kizu
 selfhost check selfhost/tests/cli/test_expect_ok_alias.kizu
 selfhost check selfhost/tests/cli/test_expect_failure.kizu
 selfhost check selfhost/tests/cli/test_expect_failure_alias.kizu
+selfhost check selfhost/tests/cli/parse_invalid_missing_expr.kizu
+selfhost check selfhost/tests/cli/parse_invalid_missing_expr_alias.kizu
+selfhost check selfhost/tests/cli/parse_invalid_missing_assign.kizu
+selfhost check selfhost/tests/cli/parse_invalid_missing_assign_alias.kizu
 selfhost check examples/negative/moved_value.kizu
 ```
 
 For #592, the check parity manifest adds aliases with identical source bytes.
 For #602, the manifest also covers the positive minimal-main-return source and
 its alias. For #604, it covers the `std::testing::expect(true|false)` sources
-and aliases. The hosted stage2 artifact reads the selected target source and
-recognizes the print-hello, minimal-main-return, testing-expect, and
-moved-value-use source shapes instead of branching on those fixed fixture paths.
+and aliases. For #646, it covers the missing-assignment parse diagnostic source
+and alias. The hosted stage2 artifact reads the selected target source and
+recognizes the print-hello, minimal-main-return, testing-expect,
+missing-expression, missing-assignment, and moved-value-use source shapes
+instead of branching on those fixed fixture paths.
 The check parity gate runs through
 `target/selfhost/stage2/selfhost`, records `go.cmd-kizu-fallback none`, and does
 not bootstrap from scratch by default. This does not claim general
@@ -464,6 +470,8 @@ selfhost parse examples/negative/moved_value.kizu
 selfhost parse selfhost/tests/cli/check_moved_value_alias.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr.kizu
 selfhost parse selfhost/tests/cli/parse_invalid_missing_expr_alias.kizu
+selfhost parse selfhost/tests/cli/parse_invalid_missing_assign.kizu
+selfhost parse selfhost/tests/cli/parse_invalid_missing_assign_alias.kizu
 ```
 
 The parse parity gate compares byte-for-byte stdout, stderr, and exit codes
@@ -481,9 +489,11 @@ field access, direct calls, and repeated value use to the positive parse
 surface. For #586, the negative missing-expression shape is also source-driven:
 any file containing exactly the newline-terminated
 `fn main() { let value = ; }` source uses the same hosted diagnostic path. The
-alias fixtures prove these parse branches are no longer bound to a single path.
-Broader parse and diagnostic recovery remain deferred. The current CLI parity
-support and deferrals are recorded in `docs/selfhost-cli-parity.md`.
+same source-driven guarantee applies to #646 for the multi-line
+`let value;` missing-assignment diagnostic path. The alias fixtures prove these
+parse branches are no longer bound to a single path. Broader parse and
+diagnostic recovery remain deferred. The current CLI parity support and
+deferrals are recorded in `docs/selfhost-cli-parity.md`.
 
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
 emit/link/execute instead of a selfhost interpreter. The first runnable fixture

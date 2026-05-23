@@ -62,7 +62,9 @@ the first `std::testing::expect` qualified-call parse shapes. For #600,
 `check_moved_value_alias.kizu` reuses the `examples/negative/moved_value.kizu`
 source bytes for the first declaration, record-literal, field-access, and direct
 call parse shape. For #586, `parse_invalid_missing_expr_alias.kizu` does the
-same for the first negative missing-expression diagnostic path.
+same for the first negative missing-expression diagnostic path. For #646,
+`parse_invalid_missing_assign_alias.kizu` does the same for the first negative
+missing-assignment diagnostic path.
 
 The #530 `check <file>` parity cases are also tracked in a separate CLI
 manifest so repeated local validation stays focused:
@@ -87,7 +89,8 @@ is source-driven for the first success and move-check failure shapes. For #602,
 inputs for the first minimal return-statement success shape. For #604,
 `test_expect_ok(.kizu/_alias)` and `test_expect_failure(.kizu/_alias)` are check
 parity inputs for the first `std::testing::expect` qualified-call success
-shapes.
+shapes. For #646, `parse_invalid_missing_assign(.kizu/_alias)` are check parity
+inputs for the missing-assignment parse diagnostic path.
 
 Issue #531 defines the first hosted `run <file>` and `kizu test <file>`
 strategy, but those cases are not part of the production-switch corpus yet.
