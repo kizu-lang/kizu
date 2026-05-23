@@ -688,6 +688,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"fn append_parse_missing_assign_index_function(",
 	},
+	"../../selfhost/src/parser/validation_tokens.kizu": {
+		"pub fn token_text(",
+		"pub fn skip_top_level_declaration(",
+		"pub fn skip_balanced_parens(",
+	},
 	"../../selfhost/src/cli/check.kizu": {
 		"pub fn file_cli(",
 		"pub fn fast_diagnostics(",
@@ -715,6 +720,7 @@ func assertSelfhostRootOmitsResponsibilities(t *testing.T) {
 	rootOwnership := readSelfhostFile(t, "../../selfhost/src/ownership.kizu")
 	rootMain := readSelfhostFile(t, "../../selfhost/src/main.kizu")
 	rootBackend := readSelfhostFile(t, "../../selfhost/src/backend.kizu")
+	parserValidation := readSelfhostFile(t, "../../selfhost/src/parser/validation.kizu")
 	forbidden := map[string][]string{
 		"types.kizu": {
 			"pub enum TypeKind",
@@ -740,12 +746,18 @@ func assertSelfhostRootOmitsResponsibilities(t *testing.T) {
 			"fn render_run_hello_llvm(",
 			"fn render_test_expect_ok_llvm(",
 		},
+		"parser/validation.kizu": {
+			"fn token_text(",
+			"fn skip_top_level_declaration(",
+			"fn skip_balanced_parens(",
+		},
 	}
 	contents := map[string]string{
-		"types.kizu":     rootTypes,
-		"ownership.kizu": rootOwnership,
-		"main.kizu":      rootMain,
-		"backend.kizu":   rootBackend,
+		"types.kizu":             rootTypes,
+		"ownership.kizu":         rootOwnership,
+		"main.kizu":              rootMain,
+		"backend.kizu":           rootBackend,
+		"parser/validation.kizu": parserValidation,
 	}
 	for name, fragments := range forbidden {
 		for _, fragment := range fragments {
