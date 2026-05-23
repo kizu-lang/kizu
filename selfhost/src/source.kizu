@@ -49,10 +49,6 @@ pub fn load_selfhost_sources(
     io: Io,
     root: []u8
 ) -> !std::array::Array<SourceFile> {
-    if !std::mem::equal_bytes(root, "selfhost") {
-        return error("source manager currently loads the selfhost root");
-    }
-
     var files = std::array::Array<SourceFile>(allocator);
 
     var manifest_path = try std::path::join(allocator, root, "kizu.toml");
@@ -71,6 +67,39 @@ pub fn load_selfhost_sources(
     source_dir.deinit();
 
     next_id = try append_frontend_std_sources(files, io, next_id);
+    return files;
+}
+
+pub fn load_package_sources(
+    allocator: Allocator,
+    io: Io,
+    root: []u8
+) -> !std::array::Array<SourceFile> {
+    var files = std::array::Array<SourceFile>(allocator);
+
+    var manifest_path = try std::path::join(allocator, root, "kizu.toml");
+    let manifest_bytes = manifest_path.as_bytes();
+    let manifest_text = try std::fs::read_file(io, manifest_bytes);
+    if !valid_manifest(manifest_text) {
+        return error("invalid manifest");
+    }
+    try files.append(source_file(0, SourceKind::Manifest, root, manifest_text));
+    manifest_path.deinit();
+    var next_id = 1;
+
+    var source_dir = try std::path::join(allocator, root, "src");
+    let source_dir_path = source_dir.as_bytes();
+    let package_source_start = next_id;
+    next_id = try append_selfhost_source_dir(files, io, source_dir_path, next_id);
+    source_dir.deinit();
+
+    next_id = try append_package_referenced_frontend_std_sources(
+        allocator,
+        files,
+        io,
+        next_id,
+        package_source_start
+    );
     return files;
 }
 
@@ -356,6 +385,38 @@ fn append_referenced_frontend_std_sources(
     return id;
 }
 
+fn append_package_referenced_frontend_std_sources(
+    allocator: Allocator,
+    files: &var std::array::Array<SourceFile>,
+    io: Io,
+    next_id: i64,
+    package_source_start: i64
+) -> !i64 {
+    var pending = std::array::Array<[]u8>(allocator);
+    defer pending.deinit();
+    var seen = std::map::Map<[]u8, bool>(allocator);
+    defer seen.deinit();
+
+    var source_index = package_source_start;
+    while source_index < next_id {
+        let file = try files.at(source_index);
+        try queue_frontend_std_references(allocator, file.text, pending, seen);
+        source_index = source_index + 1;
+    }
+
+    var id = next_id;
+    var pending_index = 0;
+    while pending_index < pending.len() {
+        let path = try pending.get(pending_index);
+        let std_text = try std::fs::read_file(io, path);
+        try files.append(source_file(id, SourceKind::Std, path, std_text));
+        id = id + 1;
+        try queue_frontend_std_references(allocator, std_text, pending, seen);
+        pending_index = pending_index + 1;
+    }
+    return id;
+}
+
 fn queue_frontend_std_references(
     allocator: Allocator,
     text: []u8,
@@ -516,9 +577,45 @@ fn module_path_for(kind: SourceKind, path: []u8) -> []u8 borrows path {
         return path_after_prefix(path, "std/src");
     }
     if kind == SourceKind::Selfhost {
-        return path_after_prefix(path, "selfhost/src");
+        return package_module_path(path);
     }
     return module_name(std::path::basename(path));
+}
+
+fn package_module_path(path: []u8) -> []u8 borrows path {
+    let start = package_src_module_start(path);
+    if start < 0 {
+        return module_name(std::path::basename(path));
+    }
+    return strip_kizu_suffix(path[start..std::mem::len(path)]);
+}
+
+fn package_src_module_start(path: []u8) -> i64 {
+    let length = std::mem::len(path);
+    var index = 0;
+    var result = -1;
+    while index + 4 <= length {
+        if path_src_segment_at(path, index) {
+            result = index + 4;
+        }
+        index = index + 1;
+    }
+    return result;
+}
+
+fn path_src_segment_at(path: []u8, index: i64) -> bool {
+    if index > 0 and path[index - 1] != cast<u8>(47) {
+        return false;
+    }
+    return std::mem::equal_bytes(path[index..index + 4], "src/");
+}
+
+fn strip_kizu_suffix(path: []u8) -> []u8 borrows path {
+    let length = std::mem::len(path);
+    if length > 5 and std::mem::equal_bytes(path[length - 5..length], ".kizu") {
+        return path[0..length - 5];
+    }
+    return path;
 }
 
 fn path_after_prefix(path: []u8, prefix: []u8) -> []u8 borrows path {

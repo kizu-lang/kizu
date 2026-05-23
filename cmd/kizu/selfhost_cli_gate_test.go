@@ -28,6 +28,8 @@ type selfhostCLIArtifactExpectation struct {
 
 type selfhostCLIFrontendFixtures struct {
 	source               string
+	packageRoot          string
+	packageManifest      string
 	runSource            string
 	movedSource          string
 	unknownSource        string
@@ -210,6 +212,16 @@ fn main(values: std::array::Array <Name>) {
 exit-code
 0
 `,
+		},
+		{
+			name:    "check_temp_package_root",
+			args:    []string{"check", fixtures.packageRoot},
+			wantOut: "check: ok\nexit-code\n0\n",
+		},
+		{
+			name:    "check_temp_package_manifest",
+			args:    []string{"check", fixtures.packageManifest},
+			wantOut: "check: ok\nexit-code\n0\n",
 		},
 		{
 			name:    "run_temp_source",
@@ -855,6 +867,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 	t.Helper()
 
 	tempSource, tempRunSource := writeSelfhostCLIHappyFrontendFixtures(t)
+	tempPackageRoot, tempPackageManifest := writeSelfhostCLIPackageFrontendFixture(t)
 	tempMovedSource, tempMovedValue, tempUnknownSource, tempUnknownStd, tempAritySource,
 		tempDuplicate, tempTypeArity, tempUnknownType, tempUndefinedVariable, tempUndefinedMatch :=
 		writeSelfhostCLISemanticFrontendFixtures(t)
@@ -869,6 +882,8 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 
 	fixtures := selfhostCLIFrontendFixtures{
 		source:              tempSource,
+		packageRoot:         tempPackageRoot,
+		packageManifest:     tempPackageManifest,
 		runSource:           tempRunSource,
 		movedSource:         tempMovedSource,
 		unknownSource:       tempUnknownSource,
@@ -895,6 +910,32 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 	}
 	writeSelfhostCLIInvalidFrontendFixtureFields(t, &fixtures)
 	return fixtures
+}
+
+// writeSelfhostCLIPackageFrontendFixture writes a real package root for check.
+func writeSelfhostCLIPackageFrontendFixture(t *testing.T) (string, string) {
+	t.Helper()
+
+	root := t.TempDir()
+	manifest := filepath.Join(root, "kizu.toml")
+	manifestContent := []byte("[package]\nname = \"frontend-package\"\n")
+	if err := os.WriteFile(manifest, manifestContent, 0o644); err != nil {
+		t.Fatalf("write package manifest: %v", err)
+	}
+	srcDir := filepath.Join(root, "src")
+	if err := os.Mkdir(srcDir, 0o755); err != nil {
+		t.Fatalf("create package src dir: %v", err)
+	}
+	source := filepath.Join(srcDir, "main.kizu")
+	const content = `fn main() {
+    let count = 1;
+    print(count);
+}
+`
+	if err := os.WriteFile(source, []byte(content), 0o644); err != nil {
+		t.Fatalf("write package source: %v", err)
+	}
+	return root, manifest
 }
 
 // writeSelfhostCLIInvalidFrontendFixtureFields adds invalid frontend inputs to fixtures.
