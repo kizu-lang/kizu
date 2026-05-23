@@ -6,6 +6,7 @@ import selfhost::parser::validation;
 import selfhost::resolver;
 import selfhost::source;
 import selfhost::types;
+import selfhost::types::function_calls;
 import selfhost::types::model;
 
 pub fn file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
@@ -81,11 +82,69 @@ fn package_fast_diagnostics(
     io: Io,
     files: &std::array::Array<source::SourceFile>
 ) -> !bool {
+    var parsed_sources = std::array::Array<std::kizu::ast::ParseResult>(allocator);
+    var parsed_file_indexes = std::array::Array<i64>(allocator);
+    var function_arities = std::map::Map<[]u8, i64>(allocator);
+    var ok = try parse_package_fast_diagnostic_sources(
+        allocator,
+        io,
+        files,
+        parsed_sources,
+        parsed_file_indexes,
+        function_arities
+    );
+    var index = 0;
+    while ok and index < parsed_sources.len() {
+        let file_index = try parsed_file_indexes.get(index);
+        let file = try files.at(file_index);
+        if source::is_frontend_source(file.kind) {
+            let parsed = try parsed_sources.at(index);
+            if !(try fast_diagnostics_ast_node_with_arities(
+                allocator,
+                io,
+                files,
+                file,
+                parsed.ast,
+                parsed.root,
+                function_arities,
+                true
+            )) {
+                ok = false;
+            }
+        }
+        index = index + 1;
+    }
+    while parsed_sources.len() > 0 {
+        let parsed = try parsed_sources.pop();
+        parsed.deinit();
+    }
+    parsed_sources.deinit();
+    parsed_file_indexes.deinit();
+    function_arities.deinit();
+    return ok;
+}
+
+fn parse_package_fast_diagnostic_sources(
+    allocator: Allocator,
+    io: Io,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_file_indexes: &var std::array::Array<i64>,
+    function_arities: &var std::map::Map<[]u8, i64>
+) -> !bool {
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
-        if source::is_frontend_source(file.kind) {
-            if !(try package_fast_diagnostic_file(allocator, io, files, file)) {
+        if source::is_source_code(file.kind) {
+            if !(try parse_package_fast_diagnostic_source(
+                allocator,
+                io,
+                file,
+                index,
+                parsed_sources,
+                parsed_file_indexes,
+                function_arities
+            )) {
                 return false;
             }
         }
@@ -94,29 +153,78 @@ fn package_fast_diagnostics(
     return true;
 }
 
-fn package_fast_diagnostic_file(
+fn parse_package_fast_diagnostic_source(
     allocator: Allocator,
     io: Io,
-    files: &std::array::Array<source::SourceFile>,
-    file: &source::SourceFile
+    file: &source::SourceFile,
+    file_index: i64,
+    parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_file_indexes: &var std::array::Array<i64>,
+    function_arities: &var std::map::Map<[]u8, i64>
 ) -> !bool {
-    let parsed_validation = try parser::validate_diagnostic_file(
+    if source::is_frontend_source(file.kind) {
+        let parsed_validation = try parser::validate_diagnostic_file(
+            allocator,
+            file.path,
+            file.text
+        );
+        let validation_ok = parsed_validation.ok;
+        if !validation_ok {
+            return try write_parse_failure(allocator, io, parsed_validation);
+        }
+        let parsed = try parser::parse_validated_file(
+            allocator,
+            file.path,
+            file.text,
+            validation_ok
+        );
+        try append_package_fast_diagnostic_source(
+            allocator,
+            file,
+            file_index,
+            parsed,
+            parsed_sources,
+            parsed_file_indexes,
+            function_arities
+        );
+        return true;
+    }
+    let parsed = try parser::parse_checked_file(
         allocator,
         file.path,
         file.text
     );
-    let validation_ok = parsed_validation.ok;
-    if !validation_ok {
-        return try write_parse_failure(allocator, io, parsed_validation);
-    }
-    let parsed = try parser::parse_validated_file(
+    try append_package_fast_diagnostic_source(
         allocator,
-        file.path,
-        file.text,
-        validation_ok
+        file,
+        file_index,
+        parsed,
+        parsed_sources,
+        parsed_file_indexes,
+        function_arities
     );
-    defer parsed.deinit();
-    return try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root);
+    return true;
+}
+
+fn append_package_fast_diagnostic_source(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    file_index: i64,
+    parsed: std::kizu::ast::ParseResult,
+    parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_file_indexes: &var std::array::Array<i64>,
+    function_arities: &var std::map::Map<[]u8, i64>
+) -> !void {
+    try function_calls::collect_function_arities_from_ast(
+        allocator,
+        file,
+        &parsed.ast,
+        parsed.root,
+        function_arities
+    );
+    try parsed_sources.append(parsed);
+    try parsed_file_indexes.append(file_index);
+    return;
 }
 
 pub fn fast_diagnostics(
@@ -152,6 +260,30 @@ pub fn fast_diagnostics_ast_node(
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId
 ) -> !bool {
+    var function_arities = std::map::Map<[]u8, i64>(allocator);
+    defer function_arities.deinit();
+    return try fast_diagnostics_ast_node_with_arities(
+        allocator,
+        io,
+        files,
+        file,
+        ast,
+        root,
+        function_arities,
+        false
+    );
+}
+
+fn fast_diagnostics_ast_node_with_arities(
+    allocator: Allocator,
+    io: Io,
+    files: &std::array::Array<source::SourceFile>,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_arities: &std::map::Map<[]u8, i64>,
+    use_cached_arities: bool
+) -> !bool {
     let duplicate = try resolver::first_duplicate_declaration_ast_node(
         allocator,
         file,
@@ -159,7 +291,8 @@ pub fn fast_diagnostics_ast_node(
         root
     );
     if duplicate.found {
-        try diagnostics::duplicate_symbol_error(allocator, io, file.text[duplicate.start..duplicate.end]);
+        let duplicate_name = file.text[duplicate.start..duplicate.end];
+        try diagnostics::duplicate_symbol_error(allocator, io, duplicate_name);
         return false;
     }
 
@@ -193,7 +326,17 @@ pub fn fast_diagnostics_ast_node(
     if !(try write_check_diagnostic(allocator, io, file.text, &post_move)) {
         return false;
     }
-    if !(try write_package_function_call_diagnostic(
+    if use_cached_arities and !(try write_cached_package_function_call_diagnostic(
+        allocator,
+        io,
+        file,
+        &ast,
+        root,
+        function_arities
+    )) {
+        return false;
+    }
+    if !use_cached_arities and !(try write_package_function_call_diagnostic(
         allocator,
         io,
         files,
@@ -339,6 +482,29 @@ fn write_package_function_call_diagnostic(
         file,
         ast,
         root
+    );
+    if call_error.found {
+        try diagnostics::function_call_error(allocator, io, file.text, call_error);
+        return false;
+    }
+    return true;
+}
+
+fn write_cached_package_function_call_diagnostic(
+    allocator: Allocator,
+    io: Io,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_arities: &std::map::Map<[]u8, i64>
+) -> !bool {
+    let call_error = try function_calls::first_function_call_error_ast_node(
+        allocator,
+        file,
+        ast,
+        root,
+        function_arities,
+        false
     );
     if call_error.found {
         try diagnostics::function_call_error(allocator, io, file.text, call_error);

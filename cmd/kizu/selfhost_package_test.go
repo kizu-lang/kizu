@@ -583,6 +583,7 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 		}
 	}
 	astBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics_ast_node(")
+	coreBody := selfhostFastDiagnosticsCoreBody(t, content)
 	callFragments := []string{
 		"write_package_function_call_diagnostic(",
 		"files,",
@@ -591,7 +592,7 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 		"root",
 	}
 	for _, fragment := range callFragments {
-		if !strings.Contains(astBody, fragment) {
+		if !strings.Contains(astBody+coreBody, fragment) {
 			t.Fatalf("check entry package call diagnostic missing call fragment %q", fragment)
 		}
 	}
@@ -616,6 +617,12 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 	}
 }
 
+// selfhostFastDiagnosticsCoreBody extracts the shared parsed-AST diagnostic core.
+func selfhostFastDiagnosticsCoreBody(t *testing.T, content string) string {
+	t.Helper()
+	return selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_arities(")
+}
+
 // TestSelfhostCheckEntrySharesDiagnosticPasses keeps per-file checks grouped by phase.
 func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/cli/check.kizu")
@@ -626,7 +633,8 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	wrapperBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics(")
 	assertSelfhostFastDiagnosticsWrapper(t, wrapperBody)
 	astBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics_ast_node(")
-	assertSelfhostFastDiagnosticsASTNode(t, wrapperBody, astBody)
+	coreBody := selfhostFastDiagnosticsCoreBody(t, content)
+	assertSelfhostFastDiagnosticsASTNode(t, wrapperBody, astBody+coreBody)
 	assertSelfhostCheckEntryDropsOldDiagnosticWrappers(t, content)
 }
 
@@ -1187,6 +1195,31 @@ func TestSelfhostPackageSourceLoaderUsesManifestPaths(t *testing.T) {
 	for _, fragment := range forbidden {
 		if strings.Contains(string(bytes), fragment) {
 			t.Fatalf("package source loader keeps fixed src module helper %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostPackageFastDiagnosticsReuseParsedAST rejects package call reparse loops.
+func TestSelfhostPackageFastDiagnosticsReuseParsedAST(t *testing.T) {
+	content := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	body := selfhostKizuFunctionBody(t, content, "fn package_fast_diagnostics(")
+	required := []string{
+		"parse_package_fast_diagnostic_sources(",
+		"var function_arities = std::map::Map<[]u8, i64>(allocator)",
+		"fast_diagnostics_ast_node_with_arities(",
+		"write_cached_package_function_call_diagnostic(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(body+content, fragment) {
+			t.Fatalf("package fast diagnostics missing parsed AST reuse %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"package_fast_diagnostic_file(",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(content, fragment) {
+			t.Fatalf("package fast diagnostics keeps per-file reparse helper %q", fragment)
 		}
 	}
 }

@@ -269,6 +269,34 @@ func TestCheckPackageCommandRejectsDuplicateModules(t *testing.T) {
 	}
 }
 
+// TestCheckCommandAcceptsMatchArmBinding keeps payload bindings visible in arm bodies.
+func TestCheckCommandAcceptsMatchArmBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "match_binding.kizu")
+	source := `pub union Expr {
+    Ident(i64),
+    Other(i64),
+}
+
+fn main() {
+    let expr = Expr::Ident(1);
+    match expr {
+        Ident(value) => print(value),
+        Other(other) => print(other),
+    }
+}
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{path})
+	if runErr != nil {
+		t.Fatalf("check failed: %v\n%s", runErr, out)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+}
+
 // TestCheckPackageCommandRejectsInvalidManifestPaths avoids silent path fallback.
 func TestCheckPackageCommandRejectsInvalidManifestPaths(t *testing.T) {
 	root := t.TempDir()
