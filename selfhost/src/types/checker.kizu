@@ -3153,13 +3153,40 @@ fn collect_statement_locals_from_node(
             local_mutability,
             function_returns
         );,
-        Let(let_node) => return collect_let_statement_local(
+        Let(let_node) => return collect_let_statement_local_with_expression(
             allocator,
             file,
             ast,
             let_node.mutable,
             let_node.name,
             let_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Assign(assign_node) => return try collect_expression_locals_from_node(
+            allocator,
+            file,
+            ast,
+            assign_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        Return(return_node) => return collect_expression_locals_from_node(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        ExprStmt(expr_stmt) => return collect_expression_locals_from_node(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
             local_types,
             local_mutability,
             function_returns
@@ -3201,10 +3228,11 @@ fn collect_statement_locals_from_node(
             local_mutability,
             function_returns
         );,
-        MatchArm(match_arm) => return collect_statement_locals_from_node(
+        MatchArm(match_arm) => return collect_match_arm_locals(
             allocator,
             file,
             ast,
+            match_arm.binding,
             match_arm.body,
             local_types,
             local_mutability,
@@ -3231,6 +3259,108 @@ fn collect_statement_locals_from_node(
         );,
         _ => return 0;,
     }
+}
+
+fn collect_match_arm_locals(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    binding: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    var count = 0;
+    let binding_name = ast_node_text(file, ast, binding);
+    if !std::mem::equal_bytes(binding_name, "") and !local_types.contains(binding_name) {
+        try local_types.insert(binding_name, "unknown");
+        try local_mutability.insert(binding_name, false);
+        count = count + 1;
+    }
+    return count + try collect_statement_locals_from_node(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+}
+
+fn collect_expression_locals_from_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let node = ast.get(node_id);
+    match node.data {
+        Match(match_node) => return collect_match_expression_locals(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        TryExpr(try_expr_node) => return collect_expression_locals_from_node(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        ComptimeExpr(comptime_expr_node) => return collect_expression_locals_from_node(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            local_types,
+            local_mutability,
+            function_returns
+        );,
+        _ => return 0;,
+    }
+}
+
+fn collect_match_expression_locals(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let value_count = try collect_expression_locals_from_node(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let arm_count = try collect_statement_locals_from_range(
+        allocator,
+        file,
+        ast,
+        arms,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    return value_count + arm_count;
 }
 
 fn collect_statement_locals_from_two_nodes(
@@ -3262,6 +3392,40 @@ fn collect_statement_locals_from_two_nodes(
         function_returns
     );
     return first_count + second_count;
+}
+
+fn collect_let_statement_local_with_expression(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    mutable: bool,
+    name_id: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId,
+    local_types: &var std::map::Map<[]u8, []u8>,
+    local_mutability: &var std::map::Map<[]u8, bool>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !i64 {
+    let local_count = try collect_let_statement_local(
+        allocator,
+        file,
+        ast,
+        mutable,
+        name_id,
+        value,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let expression_count = try collect_expression_locals_from_node(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    return local_count + expression_count;
 }
 
 fn collect_let_statement_local(
