@@ -197,6 +197,12 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 			return 1
 		}
 	}
+	for _, fragment := range forbiddenLLVMFragments() {
+		if strings.Contains(llContent, fragment) {
+			t.Errorf("LLVM artifact keeps source-shape gate %q:\n%s", fragment, llContent)
+			return 1
+		}
+	}
 	return countLLVMMetadataValidationFailures(t, metaContent)
 }
 
@@ -253,12 +259,21 @@ func requiredLLVMFragments() []string {
 		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
 		"@.kizu.cli.move_prefix",
 		"@.kizu.cli.move_suffix",
-		"@.kizu.cli.main_fn_pattern",
 		"%moved_name = call %kizu.slice.u8 @kizu_selfhost__moved_value_name",
-		"br i1 %has_moved_name, label %check_file_move_error, label %check_file_shape",
-		"br i1 %main_fn_found, label %check_file_ok, label %usage",
+		"br i1 %has_moved_name, label %check_file_move_error, label %check_file_ok",
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
+	}
+}
+
+// forbiddenLLVMFragments returns source-shape gates removed from the hosted CLI.
+func forbiddenLLVMFragments() []string {
+	return []string{
+		"@.kizu.cli.main_fn_pattern",
+		"%parse_small",
+		"%corpus_small",
+		"%main_fn_found",
+		"label %check_file_shape",
 	}
 }
 
@@ -914,6 +929,8 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler file check stderr mismatch: %q", stderr)
 		return 1
 	}
+	failures := countHostedCompilerCLIRealSourceCheckFailures(t, exePath)
+
 	invalidPath := filepath.Join(dir, "hosted_check_invalid.kizu")
 	invalidSource := "fn main() { let value = ; }\n"
 	if err := os.WriteFile(invalidPath, []byte(invalidSource), 0o644); err != nil {
@@ -921,7 +938,7 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 		return 1
 	}
 	expectedStderr := "error: expected expression, got ; at 1:25\nerror: parse failed\n"
-	failures := countHostedCompilerCLIExpectedFailure(
+	failures += countHostedCompilerCLIExpectedFailure(
 		t,
 		exePath,
 		"check",
@@ -948,6 +965,26 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 	return failures
 }
 
+// countHostedCompilerCLIRealSourceCheckFailures checks a full selfhost source file.
+func countHostedCompilerCLIRealSourceCheckFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "check", "selfhost/src/main.kizu")
+	if code != 0 {
+		t.Errorf("hosted compiler real source check exit=%d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
+		return 1
+	}
+	if stdout != "check: ok\n" {
+		t.Errorf("hosted compiler real source check stdout mismatch: %q", stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler real source check stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
 // countHostedCompilerCLIParseFailures runs generic parse source through the artifact.
 func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 	t.Helper()
@@ -972,6 +1009,35 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler parse stderr mismatch: %q", stderr)
 		return 1
 	}
+	failures := countHostedCompilerCLICommentParseFailures(t, exePath, dir, expected)
+	failures += countHostedCompilerCLIRealSourceParseFailures(t, exePath)
+
+	invalidAssignPath := filepath.Join(dir, "hosted_parse_missing_assign.kizu")
+	invalidAssignSource := "fn main() {\n    let value;\n}\n"
+	if err := os.WriteFile(invalidAssignPath, []byte(invalidAssignSource), 0o644); err != nil {
+		t.Errorf("write hosted parse missing assign source: %v", err)
+		return 1
+	}
+	expectedStderr := "error: expected assign, got ; at 2:14\nerror: parse failed\n"
+	failures += countHostedCompilerCLIExpectedFailure(
+		t,
+		exePath,
+		"parse",
+		invalidAssignPath,
+		expectedStderr,
+		"missing assign parse",
+	)
+	return failures
+}
+
+// countHostedCompilerCLICommentParseFailures checks comments do not trigger parse scans.
+func countHostedCompilerCLICommentParseFailures(
+	t *testing.T,
+	exePath string,
+	dir string,
+	expected string,
+) int {
+	t.Helper()
 	commentPath := filepath.Join(dir, "hosted_parse_comment_binding.kizu")
 	commentSource := "fn main() {\n" +
 		"    // let value = ;\n" +
@@ -982,7 +1048,7 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		t.Errorf("write hosted parse comment binding source: %v", err)
 		return 1
 	}
-	stdout, stderr, code = runHostedCompilerCLI(t, exePath, "parse", commentPath)
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "parse", commentPath)
 	if code != 0 {
 		t.Errorf(
 			"hosted compiler parse comment binding exit=%d\nstdout:\n%s\nstderr:\n%s",
@@ -1004,22 +1070,29 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler parse comment binding stderr mismatch: %q", stderr)
 		return 1
 	}
+	return 0
+}
 
-	invalidAssignPath := filepath.Join(dir, "hosted_parse_missing_assign.kizu")
-	invalidAssignSource := "fn main() {\n    let value;\n}\n"
-	if err := os.WriteFile(invalidAssignPath, []byte(invalidAssignSource), 0o644); err != nil {
-		t.Errorf("write hosted parse missing assign source: %v", err)
+// countHostedCompilerCLIRealSourceParseFailures checks a full selfhost source file.
+func countHostedCompilerCLIRealSourceParseFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "parse", "selfhost/src/main.kizu")
+	if code != 0 {
+		t.Errorf("hosted compiler real source parse exit=%d\nstdout:\n%s\nstderr:\n%s",
+			code, stdout, stderr)
 		return 1
 	}
-	expectedStderr := "error: expected assign, got ; at 2:14\nerror: parse failed\n"
-	return countHostedCompilerCLIExpectedFailure(
-		t,
-		exePath,
-		"parse",
-		invalidAssignPath,
-		expectedStderr,
-		"missing assign parse",
-	)
+	for _, fragment := range []string{"parse_file_cli", "check::fast_diagnostics"} {
+		if !strings.Contains(stdout, fragment) {
+			t.Errorf("hosted compiler real source parse missing %q:\n%s", fragment, stdout)
+			return 1
+		}
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler real source parse stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
 }
 
 // countHostedCompilerCLIExpectedFailure validates one expected CLI failure.
