@@ -217,6 +217,9 @@ func requiredLLVMFragments() []string {
 		"%kizu.error.bool = type { i1, i1, %kizu.slice.u8 }\n",
 		"%kizu.error.owned = type { i1, %kizu.owned, %kizu.slice.u8 }\n",
 		"declare %kizu.owned @kizu_rt_mem_page_allocator()\n",
+		"declare ptr @kizu_rt_alloc(ptr, i64)\n",
+		"declare void @kizu_rt_free(ptr, ptr)\n",
+		"declare void @llvm.memcpy.p0.p0.i64",
 		"declare %kizu.owned @kizu_rt_io_blocking()\n",
 		"declare %kizu.error.bool @kizu_rt_fs_exists",
 		"declare %kizu.error.metadata @kizu_rt_fs_metadata",
@@ -238,6 +241,7 @@ func requiredLLVMFragments() []string {
 		"declare i64 @kizu_selfhost__host_capability_smoke()\n",
 		"define i1 @kizu_selfhost__slice_equal",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
+		"define %kizu.error.void @kizu_selfhost__write_concat3",
 		"define i1 @kizu_selfhost__parse_format_write",
 		"define i64 @kizu_selfhost__parse_skip_comment_or_self",
 		"define i64 @kizu_selfhost__parse_missing_expr_index",
@@ -251,6 +255,9 @@ func requiredLLVMFragments() []string {
 		"%fmt_format_ok = call i1 @kizu_selfhost__parse_format_write",
 		"define i1 @kizu_selfhost__cli_run_prints_hello",
 		"define i64 @kizu_selfhost__cli_test_expect_value",
+		"%run_hello_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
+		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
+		"%test_failure_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"%parse_missing_assign_index = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
@@ -282,6 +289,9 @@ func forbiddenLLVMFragments() []string {
 		"%run_hello_found = call i1 @kizu_selfhost__slice_contains",
 		"%test_ok_found = call i1 @kizu_selfhost__slice_contains",
 		"%test_failure_found = call i1 @kizu_selfhost__slice_contains",
+		"target/selfhost/run/runtime.kizu",
+		"target/selfhost/test/expectoksrc.kizu",
+		"target/selfhost/test/expectfailureabc.kizu",
 	}
 }
 
@@ -337,6 +347,9 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"external @kizu_rt_process_exit\n",
 		"external @kizu_rt_owned_deinit\n",
 		"external @kizu_rt_trap\n",
+		"external @kizu_rt_alloc\n",
+		"external @kizu_rt_free\n",
+		"external @llvm.memcpy.p0.p0.i64\n",
 		"unsupported-policy blocker\n",
 		"deferred tagged-union-payload issue-495\n",
 	}
@@ -1218,7 +1231,13 @@ func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler run stderr mismatch: %q", stderr)
 		return 1
 	}
-	return 0
+	return countHostedCompilerCLIArtifactSourceFailures(
+		t,
+		filepath.Join("target", "selfhost", "run", "run_hello.ll"),
+		filepath.Join("target", "selfhost", "run", "run_hello.ll.meta"),
+		sourcePath,
+		"target/selfhost/run/runtime.kizu",
+	)
 }
 
 // countHostedCompilerCLITestFailures runs non-fixture sources through `test`.
@@ -1228,13 +1247,17 @@ func countHostedCompilerCLITestFailures(t *testing.T, exePath string) int {
 		t,
 		exePath,
 		"hosted_test_ok_generic.kizu",
+		"test_expect_ok",
 		"fn main()->!void{std :: testing :: expect ( true );return;}\n",
+		"target/selfhost/test/expectoksrc.kizu",
 	)
 	failures += countHostedCompilerCLITestSourceFailures(
 		t,
 		exePath,
 		"hosted_test_failure_generic.kizu",
+		"test_expect_failure",
 		"fn main()->!void{std :: testing :: expect ( false );return;}\n",
+		"target/selfhost/test/expectfailureabc.kizu",
 	)
 	return failures
 }
@@ -1244,7 +1267,9 @@ func countHostedCompilerCLITestSourceFailures(
 	t *testing.T,
 	exePath string,
 	name string,
+	stem string,
 	source string,
+	rejectedSourcePath string,
 ) int {
 	t.Helper()
 	sourcePath := filepath.Join(t.TempDir(), name)
@@ -1265,7 +1290,68 @@ func countHostedCompilerCLITestSourceFailures(
 		t.Errorf("hosted compiler test stderr mismatch: %q", stderr)
 		return 1
 	}
+	return countHostedCompilerCLIArtifactSourceFailures(
+		t,
+		filepath.Join("target", "selfhost", "test", stem+".ll"),
+		filepath.Join("target", "selfhost", "test", stem+".ll.meta"),
+		sourcePath,
+		rejectedSourcePath,
+	)
+}
+
+// countHostedCompilerCLIArtifactSourceFailures checks artifact source paths.
+func countHostedCompilerCLIArtifactSourceFailures(
+	t *testing.T,
+	llPath string,
+	metaPath string,
+	sourcePath string,
+	rejectedSourcePath string,
+) int {
+	t.Helper()
+	llContent, failures := readHostedCompilerCLIArtifact(t, llPath)
+	if failures > 0 {
+		return failures
+	}
+	metaContent, failures := readHostedCompilerCLIArtifact(t, metaPath)
+	if failures > 0 {
+		return failures
+	}
+	expectedLL := `source_filename = "` + sourcePath + `"`
+	if !strings.Contains(llContent, expectedLL) {
+		t.Errorf("hosted compiler artifact %s missing %q:\n%s", llPath, expectedLL, llContent)
+		return 1
+	}
+	expectedMeta := "source " + sourcePath + "\n"
+	if !strings.Contains(metaContent, expectedMeta) {
+		t.Errorf("hosted compiler artifact %s missing %q:\n%s", metaPath, expectedMeta, metaContent)
+		return 1
+	}
+	if strings.Contains(llContent, rejectedSourcePath) {
+		t.Errorf("hosted compiler artifact %s kept rejected source %q:\n%s",
+			llPath, rejectedSourcePath, llContent)
+		return 1
+	}
+	if strings.Contains(metaContent, rejectedSourcePath) {
+		t.Errorf("hosted compiler artifact %s kept rejected source %q:\n%s",
+			metaPath, rejectedSourcePath, metaContent)
+		return 1
+	}
 	return 0
+}
+
+// readHostedCompilerCLIArtifact reads a repo-root artifact emitted by the hosted CLI.
+func readHostedCompilerCLIArtifact(t *testing.T, path string) (string, int) {
+	t.Helper()
+	bytes, err := os.ReadFile(filepath.Join("..", "..", path))
+	if err != nil {
+		t.Errorf("read hosted compiler artifact %s: %v", path, err)
+		return "", 1
+	}
+	if len(bytes) == 0 {
+		t.Errorf("hosted compiler artifact %s is empty", path)
+		return "", 1
+	}
+	return string(bytes), 0
 }
 
 // countHostedCompilerCLIStageFailures runs `stage selfhost` through the artifact.
