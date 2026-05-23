@@ -1,3 +1,5 @@
+import selfhost::backend::cli_parse_llvm;
+
 pub fn append_globals(out: &var std::string::String) -> !void {
     try append_llvm_constant(out, "check", "5", "check");
     try append_llvm_constant(out, "stage", "5", "stage");
@@ -5,6 +7,7 @@ pub fn append_globals(out: &var std::string::String) -> !void {
     try append_llvm_constant(out, "run", "3", "run");
     try append_llvm_constant(out, "test", "4", "test");
     try append_llvm_constant(out, "selfhost", "8", "selfhost");
+    try cli_parse_llvm::append_globals(out);
     try append_llvm_constant(
         out,
         "run_hello_pattern",
@@ -200,6 +203,7 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_slice_equal_function(out);
     try append_slice_contains_function(out);
     try append_slice_starts_with_dash_function(out);
+    try cli_parse_llvm::append_functions(out);
     try append_moved_value_name_function(out);
     try append_cli_main_function(out);
     return;
@@ -468,7 +472,7 @@ fn append_cli_main_function(out: &var std::string::String) -> !void {
     try append_cli_corpus_blocks(out);
     try append_cli_test_blocks(out);
     try append_cli_run_blocks(out);
-    try append_cli_parse_blocks(out);
+    try cli_parse_llvm::append_cli_parse_blocks(out);
     try append_cli_check_blocks(out);
     try append_cli_stage_blocks(out);
     try append_cli_error_blocks(out);
@@ -713,6 +717,15 @@ fn append_cli_run_blocks(out: &var std::string::String) -> !void {
     try append_global_slice(out, "run_hello", "pattern", "run_hello_pattern", "20");
     try append_line(out, "  %run_bytes = extractvalue %kizu.error.slice.u8 %run_file, 1");
     try append_line(out,
+        "  %run_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index(%kizu.slice.u8 %run_bytes)");
+    try append_line(out, "  %run_has_missing = icmp sge i64 %run_missing_index, 0");
+    try append_line(out, "  br i1 %run_has_missing, label %run_missing_expr, label %run_match_source");
+    try append_line(out, "run_missing_expr:");
+    try append_line(out,
+        "  %run_missing_ok = call i1 @kizu_selfhost__parse_write_missing_expr(%kizu.owned %run_io, %kizu.slice.u8 %run_bytes, i64 %run_missing_index)");
+    try append_line(out, "  br i1 %run_missing_ok, label %exit_one, label %check_failed");
+    try append_line(out, "run_match_source:");
+    try append_line(out,
         "  %run_hello_found = call i1 @kizu_selfhost__slice_contains(%kizu.slice.u8 %run_bytes, %kizu.slice.u8 %run_hello_pattern_slice)");
     try append_line(out, "  br i1 %run_hello_found, label %run_hello_emit, label %usage");
     try append_run_hello_emit_block(out);
@@ -740,31 +753,6 @@ fn append_run_hello_emit_block(out: &var std::string::String) -> !void {
         "  %run_hello_meta_write = call %kizu.error.void @kizu_rt_fs_write_file(%kizu.owned %run_io, %kizu.slice.u8 %run_hello_meta_path_slice, %kizu.slice.u8 %run_hello_meta_slice)");
     try append_line(out, "  %run_hello_meta_ok = extractvalue %kizu.error.void %run_hello_meta_write, 0");
     try append_line(out, "  br i1 %run_hello_meta_ok, label %exit_zero, label %check_failed");
-    return;
-}
-
-fn append_cli_parse_blocks(out: &var std::string::String) -> !void {
-    try append_line(out, "dispatch_parse:");
-    try append_line(out, "  %parse_io = call %kizu.owned @kizu_rt_io_blocking()");
-    try append_line(out,
-        "  %parse_file = call %kizu.error.slice.u8 @kizu_rt_fs_read_file(%kizu.owned %parse_io, %kizu.slice.u8 %target)");
-    try append_line(out, "  %parse_file_ok = extractvalue %kizu.error.slice.u8 %parse_file, 0");
-    try append_line(out, "  br i1 %parse_file_ok, label %parse_read_ok, label %check_failed");
-    try append_line(out, "parse_read_ok:");
-    try append_line(out, "  %parse_bytes = extractvalue %kizu.error.slice.u8 %parse_file, 1");
-    try append_line(out, "  br label %parse_generic_source");
-    try append_parse_generic_source_block(out);
-    return;
-}
-
-fn append_parse_generic_source_block(out: &var std::string::String) -> !void {
-    try append_line(out, "parse_generic_source:");
-    try append_line(out,
-        "  %parse_generic_write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %parse_io, %kizu.slice.u8 %parse_bytes)");
-    try append_line(out,
-        "  %parse_generic_ok = extractvalue %kizu.error.void %parse_generic_write, 0");
-    try append_line(out,
-        "  br i1 %parse_generic_ok, label %exit_zero, label %check_failed");
     return;
 }
 
