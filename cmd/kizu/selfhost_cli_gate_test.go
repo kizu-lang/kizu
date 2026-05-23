@@ -81,7 +81,10 @@ type selfhostCLIFrontendFixtures struct {
 // TestSelfhostCLIGate executes the minimum Kizu-owned selfhost CLI contract.
 func TestSelfhostCLIGate(t *testing.T) {
 	requireSelfhostGate(t)
-	if failures := countSelfhostCLIGateFailures(t); failures > 0 {
+	if failures := countWithIsolatedSelfhostTarget(
+		t,
+		func() int { return countSelfhostCLIGateFailures(t) },
+	); failures > 0 {
 		t.Fatalf("selfhost CLI gate failures=%d", failures)
 	}
 }
