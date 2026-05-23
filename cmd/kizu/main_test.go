@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +63,59 @@ func TestIRCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestParseCommandUsesSelfhostFrontend keeps parse routed through Kizu frontend code.
+func TestParseCommandUsesSelfhostFrontend(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "parse", "../../examples/hello.kizu")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "fn main() {\n    print(\"hello, kizu\");\n}\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestParseCommandPropagatesSelfhostExitCode keeps Go from adding fallback diagnostics.
+func TestParseCommandPropagatesSelfhostExitCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.kizu")
+	if err := os.WriteFile(path, []byte("fn main() { let x = ; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = reader.Close()
+	}()
+	runErr := func() error {
+		os.Stderr = writer
+		defer func() {
+			os.Stderr = oldStderr
+		}()
+		return dispatch("parse", []string{path})
+	}()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	want := "error: expected expression, got ; at 1:21\nerror: parse failed\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
 func TestFmtCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "fmt", "../../examples/hello.kizu")
@@ -108,7 +163,7 @@ func TestFmtWriteRejectsLineComments(t *testing.T) {
 
 // TestCheckPackageCommandSmoke checks package roots can be statically checked.
 func TestCheckPackageCommandSmoke(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "check", "../../examples/modules/cross_module_types")
+	cmd := exec.Command("go", "run", ".", "check", "../../examples/modules/same_module_helper_lookup")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
