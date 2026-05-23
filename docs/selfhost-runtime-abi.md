@@ -497,10 +497,10 @@ deferrals are recorded in `docs/selfhost-cli-parity.md`.
 
 For #648/#650, hosted `fmt <file>` is routed through the same selfhost formatter
 writer used by the bounded parse stdout path, but has its own dispatch and does
-not require the parse command's `fn main` source-shape guard. The slice is
-stdout-only and uses the existing file-read, stdout, stderr, and process-exit
-ABI; it does not add a write-file mutation contract for `--write`. Broader
-formatter behavior remains under #629.
+not require the parse command's `fn main` source-shape guard. For #629, hosted
+`fmt --write <file>` reuses the same formatted byte buffer and writes it through
+the existing `fs_write_file` ABI. Broader formatter behavior remains under
+#629.
 
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
 emit/link/execute instead of a selfhost interpreter. The first runnable fixture

@@ -10,6 +10,8 @@ pub fn append_globals(out: &var std::string::String) -> !void {
     try append_llvm_constant(out, "run", "3", "run");
     try append_llvm_constant(out, "test", "4", "test");
     try append_llvm_constant(out, "fmt", "3", "fmt");
+    try append_llvm_constant(out, "fmt_write", "7", "--write");
+    try append_llvm_constant(out, "fmt_write_short", "2", "-w");
     try append_llvm_constant(out, "selfhost", "8", "selfhost");
     try cli_parse_llvm::append_globals(out);
     try cli_run_llvm::append_globals(out);
@@ -271,6 +273,7 @@ fn append_cli_main_function(out: &var std::string::String) -> !void {
     try cli_run_llvm::append_cli_run_blocks(out);
     try cli_parse_llvm::append_cli_parse_blocks(out);
     try cli_parse_llvm::append_cli_fmt_blocks(out);
+    try cli_parse_llvm::append_cli_fmt_write_blocks(out);
     try append_cli_check_blocks(out);
     try append_cli_stage_blocks(out);
     try append_cli_error_blocks(out);
@@ -282,12 +285,30 @@ fn append_cli_main_header(out: &var std::string::String) -> !void {
     try append_line(out, "define i64 @kizu_selfhost__cli_main() {");
     try append_line(out, "entry:");
     try append_line(out, "  %argc = call i64 @kizu_rt_process_arg_count()");
-    try append_line(out, "  %argc_ok = icmp eq i64 %argc, 2");
+    try append_line(out, "  %argc_is_two = icmp eq i64 %argc, 2");
+    try append_line(out, "  %argc_is_three = icmp eq i64 %argc, 3");
+    try append_line(out, "  %argc_ok = or i1 %argc_is_two, %argc_is_three");
     try append_line(out, "  br i1 %argc_ok, label %load_command, label %usage");
     try append_line(out, "load_command:");
     try append_line(out, "  %command_result = call %kizu.error.slice.u8 @kizu_rt_process_arg(i64 0)");
     try append_line(out, "  %command_ok = extractvalue %kizu.error.slice.u8 %command_result, 0");
-    try append_line(out, "  br i1 %command_ok, label %load_target, label %check_failed");
+    try append_line(out, "  br i1 %command_ok, label %route_args, label %check_failed");
+    try append_line(out, "route_args:");
+    try append_line(out, "  br i1 %argc_is_three, label %load_fmt_write_flag, label %load_target");
+    try append_line(out, "load_fmt_write_flag:");
+    try append_line(out,
+        "  %fmt_write_flag_result = call %kizu.error.slice.u8 @kizu_rt_process_arg(i64 1)");
+    try append_line(out,
+        "  %fmt_write_flag_ok = extractvalue %kizu.error.slice.u8 %fmt_write_flag_result, 0");
+    try append_line(out,
+        "  br i1 %fmt_write_flag_ok, label %load_fmt_write_target, label %check_failed");
+    try append_line(out, "load_fmt_write_target:");
+    try append_line(out,
+        "  %fmt_write_target_result = call %kizu.error.slice.u8 @kizu_rt_process_arg(i64 2)");
+    try append_line(out,
+        "  %fmt_write_target_ok = extractvalue %kizu.error.slice.u8 %fmt_write_target_result, 0");
+    try append_line(out,
+        "  br i1 %fmt_write_target_ok, label %dispatch_fmt_write_arg, label %check_failed");
     try append_line(out, "load_target:");
     try append_line(out, "  %target_result = call %kizu.error.slice.u8 @kizu_rt_process_arg(i64 1)");
     try append_line(out, "  %target_ok = extractvalue %kizu.error.slice.u8 %target_result, 0");
@@ -296,6 +317,7 @@ fn append_cli_main_header(out: &var std::string::String) -> !void {
 }
 
 fn append_cli_main_dispatch(out: &var std::string::String) -> !void {
+    try append_cli_fmt_write_arg_dispatch(out);
     try append_line(out, "dispatch:");
     try append_line(out, "  %command = extractvalue %kizu.error.slice.u8 %command_result, 1");
     try append_line(out, "  %target = extractvalue %kizu.error.slice.u8 %target_result, 1");
@@ -362,6 +384,57 @@ fn append_cli_main_dispatch(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %is_stage = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %command, %kizu.slice.u8 %stage_slice)");
     try append_line(out, "  br i1 %is_stage, label %run_stage, label %unsupported");
+    return;
+}
+
+fn append_cli_fmt_write_arg_dispatch(out: &var std::string::String) -> !void {
+    try append_line(out, "dispatch_fmt_write_arg:");
+    try append_line(out,
+        "  %fmt_write_command = extractvalue %kizu.error.slice.u8 %command_result, 1");
+    try append_line(out,
+        "  %fmt_write_flag = extractvalue %kizu.error.slice.u8 %fmt_write_flag_result, 1");
+    try append_line(out,
+        "  %fmt_write_target = extractvalue %kizu.error.slice.u8 %fmt_write_target_result, 1");
+    try append_line(out,
+        "  %fmt_write_command_is_flag = call i1 @kizu_selfhost__slice_starts_with_dash(%kizu.slice.u8 %fmt_write_command)");
+    try append_line(out,
+        "  br i1 %fmt_write_command_is_flag, label %usage, label %check_fmt_write_target_flag");
+    try append_line(out, "check_fmt_write_target_flag:");
+    try append_line(out,
+        "  %fmt_write_target_is_flag = call i1 @kizu_selfhost__slice_starts_with_dash(%kizu.slice.u8 %fmt_write_target)");
+    try append_line(out,
+        "  br i1 %fmt_write_target_is_flag, label %usage, label %match_fmt_write_command");
+    try append_line(out, "match_fmt_write_command:");
+    try append_line(out,
+        "  %fmt_write_command_ptr = getelementptr inbounds [3 x i8], ptr @.kizu.cli.fmt, i64 0, i64 0");
+    try append_line(out,
+        "  %fmt_write_command_base = insertvalue %kizu.slice.u8 poison, ptr %fmt_write_command_ptr, 0");
+    try append_line(out,
+        "  %fmt_write_command_slice = insertvalue %kizu.slice.u8 %fmt_write_command_base, i64 3, 1");
+    try append_line(out,
+        "  %fmt_write_is_fmt = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %fmt_write_command, %kizu.slice.u8 %fmt_write_command_slice)");
+    try append_line(out,
+        "  br i1 %fmt_write_is_fmt, label %match_fmt_write_flag, label %usage");
+    try append_line(out, "match_fmt_write_flag:");
+    try append_line(out,
+        "  %fmt_write_flag_ptr = getelementptr inbounds [7 x i8], ptr @.kizu.cli.fmt_write, i64 0, i64 0");
+    try append_line(out,
+        "  %fmt_write_flag_base = insertvalue %kizu.slice.u8 poison, ptr %fmt_write_flag_ptr, 0");
+    try append_line(out,
+        "  %fmt_write_flag_slice = insertvalue %kizu.slice.u8 %fmt_write_flag_base, i64 7, 1");
+    try append_line(out,
+        "  %fmt_write_is_long = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %fmt_write_flag, %kizu.slice.u8 %fmt_write_flag_slice)");
+    try append_line(out,
+        "  %fmt_write_short_ptr = getelementptr inbounds [2 x i8], ptr @.kizu.cli.fmt_write_short, i64 0, i64 0");
+    try append_line(out,
+        "  %fmt_write_short_base = insertvalue %kizu.slice.u8 poison, ptr %fmt_write_short_ptr, 0");
+    try append_line(out,
+        "  %fmt_write_short_slice = insertvalue %kizu.slice.u8 %fmt_write_short_base, i64 2, 1");
+    try append_line(out,
+        "  %fmt_write_is_short = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %fmt_write_flag, %kizu.slice.u8 %fmt_write_short_slice)");
+    try append_line(out, "  %fmt_write_flag_matches = or i1 %fmt_write_is_long, %fmt_write_is_short");
+    try append_line(out,
+        "  br i1 %fmt_write_flag_matches, label %dispatch_fmt_write, label %usage");
     return;
 }
 
