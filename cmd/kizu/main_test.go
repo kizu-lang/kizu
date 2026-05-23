@@ -97,7 +97,7 @@ func TestParseCommandPropagatesSelfhostExitCode(t *testing.T) {
 // TestCheckPackageCommandReportsSelfhostDiagnostic keeps package diagnostics detailed.
 func TestCheckPackageCommandReportsSelfhostDiagnostic(t *testing.T) {
 	root := t.TempDir()
-	manifest := []byte("[package]\nname = \"app\"\n")
+	manifest := []byte("[package]\nname = \"app\"\n\n[modules]\nroot = \"src/main.kizu\"\n")
 	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +118,34 @@ func TestCheckPackageCommandReportsSelfhostDiagnostic(t *testing.T) {
 	want := "error: unknown function `missing`\nerror: check failed\n"
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestCheckPackageCommandRejectsMissingModuleRoot keeps package manifests explicit.
+func TestCheckPackageCommandRejectsMissingModuleRoot(t *testing.T) {
+	root := t.TempDir()
+	manifest := []byte("[package]\nname = \"app\"\n")
+	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(root, "src")
+	if err := os.Mkdir(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(srcDir, "main.kizu"),
+		[]byte("fn main() {}\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{root})
+	if runErr == nil || !strings.Contains(runErr.Error(), "invalid manifest") {
+		t.Fatalf("got error %v, want invalid manifest", runErr)
+	}
+	if out != "" {
+		t.Fatalf("got stdout %q, want empty", out)
 	}
 }
 

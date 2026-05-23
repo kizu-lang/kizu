@@ -55,10 +55,12 @@ pub fn load_selfhost_sources(
     var manifest_path = try std::path::join(allocator, root, "kizu.toml");
     let manifest_bytes = manifest_path.as_bytes();
     let manifest_text = try std::fs::read_file(io, manifest_bytes);
+    manifest_path.deinit();
     if !valid_manifest(manifest_text) {
         return error("invalid manifest");
     }
     let package_name = try manifest_package_name(manifest_text);
+    try validate_manifest_module_root(allocator, io, root, manifest_text);
     try files.append(source_file(
         0,
         SourceKind::Manifest,
@@ -66,7 +68,6 @@ pub fn load_selfhost_sources(
         "selfhost/kizu.toml",
         manifest_text
     ));
-    manifest_path.deinit();
     var next_id = 1;
 
     var source_dir = try std::path::join(allocator, root, "src");
@@ -88,12 +89,13 @@ pub fn load_package_sources(
     var manifest_path = try std::path::join(allocator, root, "kizu.toml");
     let manifest_bytes = manifest_path.as_bytes();
     let manifest_text = try std::fs::read_file(io, manifest_bytes);
+    manifest_path.deinit();
     if !valid_manifest(manifest_text) {
         return error("invalid manifest");
     }
     let package_name = try manifest_package_name(manifest_text);
+    try validate_manifest_module_root(allocator, io, root, manifest_text);
     try files.append(source_file(0, SourceKind::Manifest, package_name, root, manifest_text));
-    manifest_path.deinit();
     var next_id = 1;
 
     var source_dir = try std::path::join(allocator, root, "src");
@@ -630,7 +632,35 @@ fn valid_manifest(text: []u8) -> bool {
 }
 
 fn manifest_package_name(text: []u8) -> ![]u8 borrows text {
-    let marker = "name = ";
+    return try manifest_quoted_marker_value(text, "name = ");
+}
+
+fn manifest_module_root(text: []u8) -> ![]u8 borrows text {
+    let root = try manifest_quoted_marker_value(text, "root = ");
+    if std::mem::len(root) < 1 {
+        return error("invalid manifest");
+    }
+    return root;
+}
+
+fn validate_manifest_module_root(
+    allocator: Allocator,
+    io: Io,
+    root: []u8,
+    manifest_text: []u8
+) -> !void {
+    let module_root = try manifest_module_root(manifest_text);
+    var root_path = try std::path::join(allocator, root, module_root);
+    let root_path_bytes = root_path.as_bytes();
+    let root_exists = try std::fs::exists(io, root_path_bytes);
+    root_path.deinit();
+    if !root_exists {
+        return error("missing module root");
+    }
+    return;
+}
+
+fn manifest_quoted_marker_value(text: []u8, marker: []u8) -> ![]u8 borrows text {
     let marker_len = std::mem::len(marker);
     var index = 0;
     while index + marker_len <= std::mem::len(text) {
