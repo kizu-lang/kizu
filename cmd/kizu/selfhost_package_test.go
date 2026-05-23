@@ -335,14 +335,15 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 			t.Fatalf("check entry package call diagnostic missing %q", fragment)
 		}
 	}
+	astBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics_ast_node(")
 	callFragments := []string{
 		"write_package_function_call_diagnostic(",
-		"&file,",
-		"&parsed.ast,",
-		"parsed.root",
+		"file,",
+		"&ast,",
+		"root",
 	}
 	for _, fragment := range callFragments {
-		if !strings.Contains(content, fragment) {
+		if !strings.Contains(astBody, fragment) {
 			t.Fatalf("check entry package call diagnostic missing call fragment %q", fragment)
 		}
 	}
@@ -362,22 +363,31 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 		t.Fatalf("read selfhost cli check: %v", err)
 	}
 	content := string(bytes)
-	body := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics(")
-	required := []string{
+	wrapperBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics(")
+	wrapperRequired := []string{
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
 		"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
+		"return try fast_diagnostics_ast_node(allocator, io, &file, parsed.ast, parsed.root)",
+	}
+	for _, fragment := range wrapperRequired {
+		if !strings.Contains(wrapperBody, fragment) {
+			t.Fatalf("fast_diagnostics missing wrapper phase %q", fragment)
+		}
+	}
+	if count := strings.Count(wrapperBody, "parser::parse_checked_file("); count != 1 {
+		t.Fatalf("fast_diagnostics parses checked source %d times, want 1", count)
+	}
+	astBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics_ast_node(")
+	required := []string{
 		"resolver::first_duplicate_declaration_ast_node(",
 		"types::first_pre_move_check_diagnostic_ast_node(",
 		"types::first_post_move_check_diagnostic_ast_node(",
 		"ownership::first_use_after_move_name_ast_node(",
 	}
 	for _, fragment := range required {
-		if !strings.Contains(body, fragment) {
+		if !strings.Contains(astBody, fragment) {
 			t.Fatalf("fast_diagnostics missing shared phase %q", fragment)
 		}
-	}
-	if count := strings.Count(body, "parser::parse_checked_file("); count != 1 {
-		t.Fatalf("fast_diagnostics parses checked source %d times, want 1", count)
 	}
 	forbidden := []string{
 		"parser::parse_diagnostic_file(",
@@ -396,7 +406,7 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 		"write_assignment_type_diagnostic(",
 	}
 	for _, fragment := range forbidden {
-		if strings.Contains(body, fragment) {
+		if strings.Contains(wrapperBody+astBody, fragment) {
 			t.Fatalf("fast_diagnostics keeps per-diagnostic call %q", fragment)
 		}
 	}
@@ -413,6 +423,37 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	for _, fragment := range oldWrappers {
 		if strings.Contains(content, fragment) {
 			t.Fatalf("selfhost cli check keeps unused diagnostic wrapper %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostRunTestReuseCheckedAST keeps run/test on one parsed frontend path.
+func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
+	main := readSelfhostFile(t, "../../selfhost/src/main.kizu")
+	check := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	if !strings.Contains(check, "pub fn fast_diagnostics_ast_node(") {
+		t.Fatal("check module does not expose parsed-AST fast diagnostics")
+	}
+	for _, signature := range []string{
+		"fn run_file_cli(",
+		"fn test_file_cli(",
+	} {
+		body := selfhostKizuFunctionBody(t, main, signature)
+		required := []string{
+			"parser::validate_diagnostic_file(allocator, path, file_text)",
+			"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
+			"check::fast_diagnostics_ast_node(",
+		}
+		for _, fragment := range required {
+			if !strings.Contains(body, fragment) {
+				t.Fatalf("%s missing shared frontend fragment %q", signature, fragment)
+			}
+		}
+		if strings.Contains(body, "check::fast_diagnostics(allocator, io, path, file_text)") {
+			t.Fatalf("%s reparses source through check::fast_diagnostics", signature)
+		}
+		if count := strings.Count(body, "parser::parse_checked_file("); count != 1 {
+			t.Fatalf("%s parses checked source %d times, want 1", signature, count)
 		}
 	}
 }
@@ -605,6 +646,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/cli/check.kizu": {
 		"pub fn file_cli(",
 		"pub fn fast_diagnostics(",
+		"pub fn fast_diagnostics_ast_node(",
 	},
 }
 
