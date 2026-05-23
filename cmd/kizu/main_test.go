@@ -190,12 +190,25 @@ func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 	if err := os.Mkdir(libDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	source := "import frontend::checks;\n\nfn main() {\n    checks::touch();\n}\n"
-	if err := os.WriteFile(filepath.Join(libDir, "main.kizu"), []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	checks := "pub fn touch() -> void {\n    return;\n}\n"
 	if err := os.WriteFile(filepath.Join(libDir, "checks.kizu"), []byte(checks), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parserDir := filepath.Join(libDir, "parser")
+	if err := os.Mkdir(parserDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := "pub fn touch() -> void {\n    return;\n}\n"
+	if err := os.WriteFile(filepath.Join(parserDir, "ast.kizu"), []byte(nested), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source := "import frontend::checks;\n" +
+		"import frontend::parser::ast;\n\n" +
+		"fn main() {\n" +
+		"    checks::touch();\n" +
+		"    ast::touch();\n" +
+		"}\n"
+	if err := os.WriteFile(filepath.Join(libDir, "main.kizu"), []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

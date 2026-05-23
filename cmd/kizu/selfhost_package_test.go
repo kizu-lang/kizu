@@ -1180,6 +1180,15 @@ func TestSelfhostPackageSourceLoaderUsesManifestPaths(t *testing.T) {
 	if !strings.Contains(body, "append_manifest_package_source_dirs(") {
 		t.Fatal("package source loader does not use manifest source paths")
 	}
+	forbidden := []string{
+		"package_src_module_start",
+		"path_src_segment_at",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(string(bytes), fragment) {
+			t.Fatalf("package source loader keeps fixed src module helper %q", fragment)
+		}
+	}
 }
 
 // TestSelfhostMoveDiagnosticsUseParsedAST keeps move diagnostics on the parsed AST entry.
