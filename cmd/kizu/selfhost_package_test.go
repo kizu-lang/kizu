@@ -929,6 +929,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn function_statement_return_type(",
 		"fn collect_let_statement_local(",
 	},
+	"../../selfhost/src/types/return_diagnostics.kizu": {
+		"pub fn first_return_type_mismatch_node(",
+		"pub fn first_missing_return_node(",
+		"fn statement_always_returns(",
+	},
 	"../../selfhost/src/types/function_calls.kizu": {
 		"pub fn first_package_function_call_error_ast_node(",
 		"pub fn function_call_name_text(",
