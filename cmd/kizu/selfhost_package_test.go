@@ -571,7 +571,7 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 		t.Fatal("check entry keeps a separate package-call prefilter")
 	}
 	required := []string{
-		"var files = try source::load_file_sources(allocator, io, file.path, file.text)",
+		"files: &std::array::Array<source::SourceFile>",
 		"types::first_package_function_call_error_ast_node(",
 	}
 	for _, fragment := range required {
@@ -582,6 +582,7 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 	astBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics_ast_node(")
 	callFragments := []string{
 		"write_package_function_call_diagnostic(",
+		"files,",
 		"file,",
 		"&ast,",
 		"root",
@@ -594,6 +595,18 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 	packageCall := "types::first_package_function_call_error_ast_node("
 	if count := strings.Count(content, packageCall); count != 1 {
 		t.Fatalf("check entry runs package call diagnostics %d times, want 1", count)
+	}
+	diagnosticBody := selfhostKizuFunctionBody(
+		t,
+		content,
+		"fn write_package_function_call_diagnostic(",
+	)
+	if strings.Contains(diagnosticBody, "source::load_file_sources(") {
+		t.Fatal("check entry package call diagnostic reloads the source table")
+	}
+	fileCliBody := selfhostKizuFunctionBody(t, content, "pub fn file_cli(")
+	if count := strings.Count(fileCliBody, "source::load_file_sources("); count != 1 {
+		t.Fatalf("check file_cli loads source table %d times, want 1", count)
 	}
 	if strings.Contains(content, "types::first_function_call_error(allocator, files, path)") {
 		t.Fatal("check entry package call diagnostics reparse the target file")
@@ -610,8 +623,9 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	wrapperBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics(")
 	wrapperRequired := []string{
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
+		"var files = try source::load_file_sources(allocator, io, path, file_text)",
 		"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
-		"return try fast_diagnostics_ast_node(allocator, io, &file, parsed.ast, parsed.root)",
+		"return try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root)",
 	}
 	for _, fragment := range wrapperRequired {
 		if !strings.Contains(wrapperBody, fragment) {
@@ -685,6 +699,8 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		body := selfhostKizuFunctionBody(t, main, signature)
 		required := []string{
 			"parser::validate_diagnostic_file(allocator, path, file_text)",
+			"var files = try source::load_file_sources(allocator, io, path, file_text)",
+			"let file = try files.at(0)",
 			"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
 			"check::fast_diagnostics_ast_node(",
 		}
