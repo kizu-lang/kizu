@@ -237,7 +237,6 @@ func requiredLLVMFragments() []string {
 		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
 		"declare i64 @kizu_selfhost__host_capability_smoke()\n",
 		"define i1 @kizu_selfhost__slice_equal",
-		"define i1 @kizu_selfhost__slice_contains",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
 		"define i1 @kizu_selfhost__parse_format_write",
 		"define i64 @kizu_selfhost__parse_skip_comment_or_self",
@@ -250,6 +249,8 @@ func requiredLLVMFragments() []string {
 		"%is_fmt = call i1 @kizu_selfhost__slice_equal",
 		"dispatch_fmt:",
 		"%fmt_format_ok = call i1 @kizu_selfhost__parse_format_write",
+		"define i1 @kizu_selfhost__cli_run_prints_hello",
+		"define i64 @kizu_selfhost__cli_test_expect_value",
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"%parse_missing_assign_index = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
@@ -270,10 +271,16 @@ func requiredLLVMFragments() []string {
 func forbiddenLLVMFragments() []string {
 	return []string{
 		"@.kizu.cli.main_fn_pattern",
+		"@.kizu.cli.run_hello_pattern",
+		"@.kizu.cli.test_expect_true_pattern",
+		"@.kizu.cli.test_expect_false_pattern",
 		"%parse_small",
 		"%corpus_small",
 		"%main_fn_found",
 		"label %check_file_shape",
+		"%run_hello_found = call i1 @kizu_selfhost__slice_contains",
+		"%test_ok_found = call i1 @kizu_selfhost__slice_contains",
+		"%test_failure_found = call i1 @kizu_selfhost__slice_contains",
 	}
 }
 
@@ -1162,7 +1169,7 @@ func countHostedCompilerCLIFmtFailures(t *testing.T, exePath string) int {
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	sourcePath := filepath.Join(t.TempDir(), "hosted_run_generic.kizu")
-	source := "fn main(){print(\"hello, kizu\");}\n"
+	source := "fn main(){print ( \"hello, kizu\" );}\n"
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		t.Errorf("write hosted run smoke source: %v", err)
 		return 1
@@ -1190,13 +1197,13 @@ func countHostedCompilerCLITestFailures(t *testing.T, exePath string) int {
 		t,
 		exePath,
 		"hosted_test_ok_generic.kizu",
-		"fn main()->!void{std::testing::expect(true);return;}\n",
+		"fn main()->!void{std :: testing :: expect ( true );return;}\n",
 	)
 	failures += countHostedCompilerCLITestSourceFailures(
 		t,
 		exePath,
 		"hosted_test_failure_generic.kizu",
-		"fn main()->!void{std::testing::expect(false);return;}\n",
+		"fn main()->!void{std :: testing :: expect ( false );return;}\n",
 	)
 	return failures
 }
