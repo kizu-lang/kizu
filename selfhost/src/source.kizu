@@ -63,6 +63,7 @@ pub fn load_selfhost_sources(
     }
     let package_name = try manifest_package_name(manifest_text);
     try validate_manifest_module_root(allocator, io, root, manifest_text);
+    let module_root = try manifest_module_root(manifest_text);
     try files.append(source_file(
         0,
         SourceKind::Manifest,
@@ -82,6 +83,7 @@ pub fn load_selfhost_sources(
         io,
         source_dir_path,
         source_dir_len,
+        module_root,
         next_id,
         package_name
     );
@@ -107,6 +109,7 @@ pub fn load_package_sources(
     }
     let package_name = try manifest_package_name(manifest_text);
     try validate_manifest_module_root(allocator, io, root, manifest_text);
+    let module_root = try manifest_module_root(manifest_text);
     try files.append(source_file(
         0,
         SourceKind::Manifest,
@@ -125,6 +128,7 @@ pub fn load_package_sources(
         io,
         root,
         manifest_text,
+        module_root,
         next_id,
         package_name
     );
@@ -224,8 +228,11 @@ pub fn append_qualified_module_name(
     file: &SourceFile
 ) -> !void {
     try append_package_prefix(out, file);
-    try out.append_bytes("::");
-    try append_module_path(out, file);
+    let module = module_path(file);
+    if std::mem::len(module) > 0 {
+        try out.append_bytes("::");
+        try append_module_path_text(out, module);
+    }
     return;
 }
 
@@ -257,18 +264,29 @@ pub fn starts_with_package_prefix(file: &SourceFile, name: []u8) -> bool {
     if package_len < 1 {
         return false;
     }
-    if std::mem::len(name) <= package_len + 2 {
+    let name_len = std::mem::len(name);
+    if name_len < package_len {
         return false;
     }
-    return std::mem::equal_bytes(name[0..package_len], package_name) and
-        name[package_len] == cast<u8>(58) and
-        name[package_len + 1] == cast<u8>(58);
+    if !std::mem::equal_bytes(name[0..package_len], package_name) {
+        return false;
+    }
+    if name_len == package_len {
+        return true;
+    }
+    if name_len <= package_len + 2 {
+        return false;
+    }
+    return name[package_len] == cast<u8>(58) and name[package_len + 1] == cast<u8>(58);
 }
 
 pub fn strip_package_prefix(file: &SourceFile, name: []u8) -> []u8 borrows name {
     let package_name = file.package_name;
     let package_len = std::mem::len(package_name);
     if starts_with_package_prefix(file, name) {
+        if std::mem::len(name) == package_len {
+            return "";
+        }
         return name[package_len + 2..std::mem::len(name)];
     }
     return name;
@@ -374,8 +392,18 @@ fn append_std_source(
     io: Io,
     id: i64,
     path: []u8
-) -> !void {
+) -> !i64 {
     let text = try std::fs::read_file(io, path);
+    try append_std_source_text(files, id, path, text);
+    return id + 1;
+}
+
+fn append_std_source_text(
+    files: &var std::array::Array<SourceFile>,
+    id: i64,
+    path: []u8,
+    text: []u8
+) -> !void {
     try files.append(source_file(
         id,
         SourceKind::Std,
@@ -393,6 +421,7 @@ fn append_selfhost_source_dir(
     io: Io,
     dir: &[]u8,
     source_root_len: i64,
+    module_root: []u8,
     next_id: i64,
     package_name: []u8
 ) -> !i64 {
@@ -407,15 +436,20 @@ fn append_selfhost_source_dir(
                 io,
                 entry.path,
                 source_root_len,
+                module_root,
                 id,
                 package_name
             );
         } else {
             if std::mem::equal_bytes(std::path::extension(entry.name), ".kizu") {
-                let module_start = package_module_start(source_root_len, entry.path);
-                let module_end = package_module_end(entry.path, module_start);
-                if module_end <= module_start {
-                    return error("invalid module");
+                var module_start = 0;
+                var module_end = 0;
+                if !is_manifest_root_source(module_root, entry.path) {
+                    module_start = package_module_start(source_root_len, entry.path);
+                    module_end = package_module_end(entry.path, module_start);
+                    if module_end <= module_start {
+                        return error("invalid module");
+                    }
                 }
                 let text = try std::fs::read_file(io, entry.path);
                 try files.append(source_file(
@@ -442,6 +476,7 @@ fn append_manifest_package_source_dirs(
     io: Io,
     root: []u8,
     manifest_text: []u8,
+    module_root: []u8,
     next_id: i64,
     package_name: []u8
 ) -> !i64 {
@@ -453,6 +488,7 @@ fn append_manifest_package_source_dirs(
             io,
             root,
             "src",
+            module_root,
             next_id,
             package_name
         );
@@ -464,6 +500,7 @@ fn append_manifest_package_source_dirs(
         root,
         manifest_text,
         paths_start,
+        module_root,
         next_id,
         package_name
     );
@@ -476,6 +513,7 @@ fn append_manifest_path_array_source_dirs(
     root: []u8,
     manifest_text: []u8,
     paths_start: i64,
+    module_root: []u8,
     next_id: i64,
     package_name: []u8
 ) -> !i64 {
@@ -493,6 +531,7 @@ fn append_manifest_path_array_source_dirs(
                 io,
                 root,
                 "src",
+                module_root,
                 id,
                 package_name
             );
@@ -509,6 +548,7 @@ fn append_manifest_path_array_source_dirs(
                         io,
                         root,
                         path,
+                        module_root,
                         id,
                         package_name
                     );
@@ -545,6 +585,7 @@ fn append_package_source_dir(
     io: Io,
     root: []u8,
     source_path: []u8,
+    module_root: []u8,
     next_id: i64,
     package_name: []u8
 ) -> !i64 {
@@ -559,6 +600,7 @@ fn append_package_source_dir(
         io,
         source_dir_path,
         source_dir_len,
+        module_root,
         next_id,
         package_name
     );
@@ -572,34 +614,20 @@ fn append_frontend_std_sources(
     next_id: i64
 ) -> !i64 {
     var id = next_id;
-    try append_std_source(files, io, id, "std/src/mem.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/array.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/string.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/map.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/fmt.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/testing.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/fs.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/path.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/io.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/process.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/kizu/ast.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/kizu/lexer.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/kizu/parser.kizu");
-    id = id + 1;
-    try append_std_source(files, io, id, "std/src/kizu/diagnostic.kizu");
-    id = id + 1;
+    id = try append_std_source(files, io, id, "std/src/mem.kizu");
+    id = try append_std_source(files, io, id, "std/src/array.kizu");
+    id = try append_std_source(files, io, id, "std/src/string.kizu");
+    id = try append_std_source(files, io, id, "std/src/map.kizu");
+    id = try append_std_source(files, io, id, "std/src/fmt.kizu");
+    id = try append_std_source(files, io, id, "std/src/testing.kizu");
+    id = try append_std_source(files, io, id, "std/src/fs.kizu");
+    id = try append_std_source(files, io, id, "std/src/path.kizu");
+    id = try append_std_source(files, io, id, "std/src/io.kizu");
+    id = try append_std_source(files, io, id, "std/src/process.kizu");
+    id = try append_std_source(files, io, id, "std/src/kizu/ast.kizu");
+    id = try append_std_source(files, io, id, "std/src/kizu/lexer.kizu");
+    id = try append_std_source(files, io, id, "std/src/kizu/parser.kizu");
+    id = try append_std_source(files, io, id, "std/src/kizu/diagnostic.kizu");
     return id;
 }
 
@@ -622,15 +650,7 @@ fn append_referenced_frontend_std_sources(
     while index < pending.len() {
         let path = try pending.get(index);
         let std_text = try std::fs::read_file(io, path);
-        try files.append(source_file(
-            id,
-            SourceKind::Std,
-            "std",
-            module_start_for(SourceKind::Std, path),
-            module_end_for(path),
-            path,
-            std_text
-        ));
+        try append_std_source_text(files, id, path, std_text);
         id = id + 1;
         try queue_frontend_std_references(allocator, std_text, pending, seen);
         index = index + 1;
@@ -662,15 +682,7 @@ fn append_package_referenced_frontend_std_sources(
     while pending_index < pending.len() {
         let path = try pending.get(pending_index);
         let std_text = try std::fs::read_file(io, path);
-        try files.append(source_file(
-            id,
-            SourceKind::Std,
-            "std",
-            module_start_for(SourceKind::Std, path),
-            module_end_for(path),
-            path,
-            std_text
-        ));
+        try append_std_source_text(files, id, path, std_text);
         id = id + 1;
         try queue_frontend_std_references(allocator, std_text, pending, seen);
         pending_index = pending_index + 1;
@@ -927,6 +939,19 @@ fn path_after_prefix_start(path: []u8, prefix: []u8) -> i64 {
         start = start + 1;
     }
     return start;
+}
+
+fn is_manifest_root_source(module_root: []u8, path: []u8) -> bool {
+    let module_root_len = std::mem::len(module_root);
+    let path_len = std::mem::len(path);
+    if path_len < module_root_len {
+        return false;
+    }
+    let start = path_len - module_root_len;
+    if start > 0 and path[start - 1] != cast<u8>(47) {
+        return false;
+    }
+    return std::mem::equal_bytes(path[start..path_len], module_root);
 }
 
 fn package_module_start(source_root_len: i64, path: []u8) -> i64 {
