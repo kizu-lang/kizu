@@ -26,30 +26,34 @@ The current hosted stage2 artifact supports these command slices:
 | `parse <std::testing::expect source file>` | #598 positive qualified-call source-shape slices for expect true/false | `just selfhost-parse-parity-gate` |
 | `parse <moved-value declarations source file>` | #600 positive declaration, record-literal, field-access, and call source-shape slice | `just selfhost-parse-parity-gate` |
 | `parse <missing-expression source file>` | #586 negative source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
+| `parse <missing-assign source file>` | #646 negative binding source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `run <print-hello source file>` | #588 positive source-shape slice via canonical emitted artifact | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
 | `test <expect-ok source file>` | #590 positive source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
 | `test <expect-failure source file>` | #590 assertion-failure source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
 
-`selfhost/tests/cli/parse-parity.tsv` is the #525/#579/#586/#594/#598/#600 parse
-parity manifest. It records command args, fixture paths, expected exit codes,
-and checked-in stdout/stderr golden paths. The positive minimal-main-return,
-positive print-call, positive `std::testing::expect(true|false)`, positive
-moved-value declaration/record/field/call, and negative missing-expression rows
-each include the original fixture plus an alias fixture with the same source
-bytes, proving the hosted paths are no longer bound to one fixed path. The gate
-runs through `target/selfhost/stage2/selfhost` and records
+`selfhost/tests/cli/parse-parity.tsv` is the
+#525/#579/#586/#594/#598/#600/#646 parse parity manifest. It records command
+args, fixture paths, expected exit codes, and checked-in stdout/stderr golden
+paths. The positive minimal-main-return, positive print-call, positive
+`std::testing::expect(true|false)`, positive moved-value
+declaration/record/field/call, negative missing-expression, and negative
+missing-assign rows each include the original fixture plus an alias fixture
+with the same source bytes, proving the hosted paths are no longer bound to one
+fixed path. The gate runs through `target/selfhost/stage2/selfhost` and records
 `go.cmd-kizu-fallback none`.
 
-`selfhost/tests/cli/check-parity.tsv` is the #530/#602/#604 check parity
-manifest. It records command args, fixture paths, expected exit codes, and
-checked-in stdout/stderr golden paths for the bounded `check <file>` slice. For
-#592, the positive hello and negative moved-value rows each include the original
-fixture plus an alias fixture with the same source bytes. For #602, the positive
-minimal-main-return row reuses the parse fixture and alias to add the first
-return-statement check source shape. For #604, the
+`selfhost/tests/cli/check-parity.tsv` is the #530/#602/#604/#646 check
+parity manifest. It records command args, fixture paths, expected exit codes,
+and checked-in stdout/stderr golden paths for the bounded `check <file>` slice.
+For #592, the positive hello and negative moved-value rows each include the
+original fixture plus an alias fixture with the same source bytes. For #602,
+the positive minimal-main-return row reuses the parse fixture and alias to add
+the first return-statement check source shape. For #604, the
 `std::testing::expect(true|false)` rows reuse the test fixtures and aliases to
-cover the first error-union return plus qualified-call check source shapes.
+cover the first error-union return plus qualified-call check source shapes. For
+#646, the missing binding assignment rows reuse the parse fixtures and aliases
+to cover another parse-diagnostic check source shape.
 These rows prove the hosted dispatch paths are no longer bound to one fixed
 path. The fast
 `just selfhost-check-parity-gate` recipe reuses an existing passing

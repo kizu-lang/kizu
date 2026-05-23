@@ -181,7 +181,28 @@ func countSelfhostBackendArtifactFileFailures(t *testing.T) int {
 // countTextualLLVMValidationFailures applies the documented textual IR validation.
 func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaContent string) int {
 	t.Helper()
-	requiredLL := []string{
+	for _, fragment := range requiredLLVMFragments() {
+		if !strings.Contains(llContent, fragment) {
+			t.Errorf("LLVM artifact missing %q:\n%s", fragment, llContent)
+			return 1
+		}
+	}
+	for _, fragment := range []string{
+		"selfhost/tests/cli/run_hello.kizu",
+		"selfhost/tests/cli/test_expect_ok.kizu",
+		"selfhost/tests/cli/test_expect_failure.kizu",
+	} {
+		if strings.Contains(llContent, fragment) {
+			t.Errorf("LLVM artifact keeps fixed CLI fixture path %q:\n%s", fragment, llContent)
+			return 1
+		}
+	}
+	return countLLVMMetadataValidationFailures(t, metaContent)
+}
+
+// requiredLLVMFragments returns mandatory hosted compiler LLVM fragments.
+func requiredLLVMFragments() []string {
+	return []string{
 		"; kizu selfhost bootstrap ll v0\n",
 		"source_filename = \"target/selfhost/selfhost.ir\"\n",
 		"%kizu.slice.u8 = type { ptr, i64 }\n",
@@ -213,12 +234,18 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"define i1 @kizu_selfhost__slice_contains",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
 		"define i1 @kizu_selfhost__parse_format_write",
+		"define i64 @kizu_selfhost__parse_skip_comment_or_self",
 		"define i64 @kizu_selfhost__parse_missing_expr_index",
+		"define i64 @kizu_selfhost__parse_missing_assign_index",
 		"@.kizu.cli.parse_expected_expr_prefix",
+		"@.kizu.cli.parse_expected_assign_prefix",
 		"%parse_format_ok = call i1 @kizu_selfhost__parse_format_write",
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
+		"%parse_missing_assign_index = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"%check_parse_ok = call i1 @kizu_selfhost__parse_write_missing_expr",
+		"%check_missing_assign = call i64 @kizu_selfhost__parse_missing_assign_index",
+		"%check_assign_ok = call i1 @kizu_selfhost__parse_write_missing_assign",
 		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
 		"@.kizu.cli.move_prefix",
 		"@.kizu.cli.move_suffix",
@@ -229,23 +256,6 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
 	}
-	for _, fragment := range requiredLL {
-		if !strings.Contains(llContent, fragment) {
-			t.Errorf("LLVM artifact missing %q:\n%s", fragment, llContent)
-			return 1
-		}
-	}
-	for _, fragment := range []string{
-		"selfhost/tests/cli/run_hello.kizu",
-		"selfhost/tests/cli/test_expect_ok.kizu",
-		"selfhost/tests/cli/test_expect_failure.kizu",
-	} {
-		if strings.Contains(llContent, fragment) {
-			t.Errorf("LLVM artifact keeps fixed CLI fixture path %q:\n%s", fragment, llContent)
-			return 1
-		}
-	}
-	return countLLVMMetadataValidationFailures(t, metaContent)
 }
 
 // countLLVMMetadataValidationFailures validates artifact metadata for stage comparison.
@@ -880,7 +890,7 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "hosted_check_generic.kizu")
-	source := "fn main() { print(\"checked from temp\"); }\n"
+	source := "fn main() {\n    // let value = ;\n    print(\"checked from temp\");\n}\n"
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		t.Errorf("write hosted check smoke source: %v", err)
 		return 1
@@ -904,36 +914,39 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 		t.Errorf("write hosted check invalid source: %v", err)
 		return 1
 	}
-	stdout, stderr, code = runHostedCompilerCLI(t, exePath, "check", invalidPath)
-	if code != 1 {
-		t.Errorf(
-			"hosted compiler invalid file check exit=%d\nstdout:\n%s\nstderr:\n%s",
-			code,
-			stdout,
-			stderr,
-		)
-		return 1
-	}
-	if stdout != "" {
-		t.Errorf("hosted compiler invalid file check stdout mismatch: %q", stdout)
-		return 1
-	}
 	expectedStderr := "error: expected expression, got ; at 1:25\nerror: parse failed\n"
-	if stderr != expectedStderr {
-		t.Errorf(
-			"hosted compiler invalid file check stderr mismatch:\nwant:\n%s\ngot:\n%s",
-			expectedStderr,
-			stderr,
-		)
+	failures := countHostedCompilerCLIExpectedFailure(
+		t,
+		exePath,
+		"check",
+		invalidPath,
+		expectedStderr,
+		"invalid file check",
+	)
+
+	invalidAssignPath := filepath.Join(dir, "hosted_check_missing_assign.kizu")
+	invalidAssignSource := "fn main() {\n    let value;\n}\n"
+	if err := os.WriteFile(invalidAssignPath, []byte(invalidAssignSource), 0o644); err != nil {
+		t.Errorf("write hosted check missing assign source: %v", err)
 		return 1
 	}
-	return 0
+	expectedAssignStderr := "error: expected assign, got ; at 2:14\nerror: parse failed\n"
+	failures += countHostedCompilerCLIExpectedFailure(
+		t,
+		exePath,
+		"check",
+		invalidAssignPath,
+		expectedAssignStderr,
+		"missing assign check",
+	)
+	return failures
 }
 
 // countHostedCompilerCLIParseFailures runs generic parse source through the artifact.
 func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 	t.Helper()
-	sourcePath := filepath.Join(t.TempDir(), "hosted_parse_generic.kizu")
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "hosted_parse_generic.kizu")
 	source := "fn main() {\n    print(\"from temp\");\n}\n"
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		t.Errorf("write hosted parse smoke source: %v", err)
@@ -951,6 +964,90 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 	}
 	if stderr != "" {
 		t.Errorf("hosted compiler parse stderr mismatch: %q", stderr)
+		return 1
+	}
+	commentPath := filepath.Join(dir, "hosted_parse_comment_binding.kizu")
+	commentSource := "fn main() {\n" +
+		"    // let value = ;\n" +
+		"    // let value;\n" +
+		"    print(\"from temp\");\n" +
+		"}\n"
+	if err := os.WriteFile(commentPath, []byte(commentSource), 0o644); err != nil {
+		t.Errorf("write hosted parse comment binding source: %v", err)
+		return 1
+	}
+	stdout, stderr, code = runHostedCompilerCLI(t, exePath, "parse", commentPath)
+	if code != 0 {
+		t.Errorf(
+			"hosted compiler parse comment binding exit=%d\nstdout:\n%s\nstderr:\n%s",
+			code,
+			stdout,
+			stderr,
+		)
+		return 1
+	}
+	if stdout != expected {
+		t.Errorf(
+			"hosted compiler parse comment binding stdout mismatch:\nwant:\n%s\ngot:\n%s",
+			expected,
+			stdout,
+		)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler parse comment binding stderr mismatch: %q", stderr)
+		return 1
+	}
+
+	invalidAssignPath := filepath.Join(dir, "hosted_parse_missing_assign.kizu")
+	invalidAssignSource := "fn main() {\n    let value;\n}\n"
+	if err := os.WriteFile(invalidAssignPath, []byte(invalidAssignSource), 0o644); err != nil {
+		t.Errorf("write hosted parse missing assign source: %v", err)
+		return 1
+	}
+	expectedStderr := "error: expected assign, got ; at 2:14\nerror: parse failed\n"
+	return countHostedCompilerCLIExpectedFailure(
+		t,
+		exePath,
+		"parse",
+		invalidAssignPath,
+		expectedStderr,
+		"missing assign parse",
+	)
+}
+
+// countHostedCompilerCLIExpectedFailure validates one expected CLI failure.
+func countHostedCompilerCLIExpectedFailure(
+	t *testing.T,
+	exePath string,
+	command string,
+	sourcePath string,
+	expectedStderr string,
+	label string,
+) int {
+	t.Helper()
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, command, sourcePath)
+	if code != 1 {
+		t.Errorf(
+			"hosted compiler %s exit=%d\nstdout:\n%s\nstderr:\n%s",
+			label,
+			code,
+			stdout,
+			stderr,
+		)
+		return 1
+	}
+	if stdout != "" {
+		t.Errorf("hosted compiler %s stdout mismatch: %q", label, stdout)
+		return 1
+	}
+	if stderr != expectedStderr {
+		t.Errorf(
+			"hosted compiler %s stderr mismatch:\nwant:\n%s\ngot:\n%s",
+			label,
+			expectedStderr,
+			stderr,
+		)
 		return 1
 	}
 	return 0

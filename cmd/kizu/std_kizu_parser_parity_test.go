@@ -796,6 +796,8 @@ func isParserParityNegativeCLIFixture(path string) bool {
 	switch filepath.ToSlash(rel) {
 	case "tests/cli/parse_invalid_missing_expr.kizu",
 		"tests/cli/parse_invalid_missing_expr_alias.kizu",
+		"tests/cli/parse_invalid_missing_assign.kizu",
+		"tests/cli/parse_invalid_missing_assign_alias.kizu",
 		"tests/cli/run_invalid_missing_expr.kizu",
 		"tests/cli/run_invalid_missing_expr_alias.kizu":
 		return true
