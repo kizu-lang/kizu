@@ -243,6 +243,7 @@ func requiredLLVMFragments() []string {
 		"%parse_format_ok = call i1 @kizu_selfhost__parse_format_write",
 		"%is_fmt = call i1 @kizu_selfhost__slice_equal",
 		"dispatch_fmt:",
+		"%fmt_format_ok = call i1 @kizu_selfhost__parse_format_write",
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"%parse_missing_assign_index = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
@@ -1062,7 +1063,7 @@ func countHostedCompilerCLIExpectedFailure(
 func countHostedCompilerCLIFmtFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	sourcePath := filepath.Join(t.TempDir(), "hosted_fmt_generic.kizu")
-	source := "fn main(){print(\"from fmt\");}\n"
+	source := "import std::fmt; struct Point{x:i64,y:i64,}\n"
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		t.Errorf("write hosted fmt smoke source: %v", err)
 		return 1
@@ -1072,7 +1073,7 @@ func countHostedCompilerCLIFmtFailures(t *testing.T, exePath string) int {
 		t.Errorf("hosted compiler fmt exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		return 1
 	}
-	expected := "fn main() { print(\"from fmt\"); }\n"
+	expected := "import std::fmt;\nstruct Point { x: i64, y: i64 }\n"
 	if stdout != expected {
 		t.Errorf("hosted compiler fmt stdout mismatch:\nwant:\n%s\ngot:\n%s", expected, stdout)
 		return 1
