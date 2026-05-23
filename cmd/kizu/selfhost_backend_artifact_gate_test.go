@@ -262,17 +262,26 @@ func requiredLLVMCLIFragments() []string {
 		"define %kizu.error.void @kizu_selfhost__write_concat9",
 		"define %kizu.error.slice.u8 @kizu_selfhost__i64_decimal",
 		"define %kizu.error.slice.u8 @kizu_selfhost__artifact_path",
+		"define i64 @kizu_selfhost__parse_buffer_append",
+		"define %kizu.error.slice.u8 @kizu_selfhost__parse_format_alloc",
 		"define i1 @kizu_selfhost__parse_format_write",
+		"define i1 @kizu_selfhost__parse_format_file_write",
 		"define i64 @kizu_selfhost__parse_skip_comment_or_self",
 		"define i64 @kizu_selfhost__parse_missing_expr_index",
 		"define i64 @kizu_selfhost__parse_missing_assign_index",
 		"@.kizu.cli.parse_expected_expr_prefix",
 		"@.kizu.cli.parse_expected_assign_prefix",
 		"@.kizu.cli.fmt",
+		"@.kizu.cli.fmt_write",
+		"@.kizu.cli.fmt_write_short",
+		"%argc_is_three = icmp eq i64 %argc, 3",
 		"%parse_format_ok = call i1 @kizu_selfhost__parse_format_write",
 		"%is_fmt = call i1 @kizu_selfhost__slice_equal",
 		"dispatch_fmt:",
 		"%fmt_format_ok = call i1 @kizu_selfhost__parse_format_write",
+		"dispatch_fmt_write_arg:",
+		"dispatch_fmt_write:",
+		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
 		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
 		"define i64 @kizu_selfhost__cli_test_expect_value",
@@ -934,6 +943,7 @@ func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 	failures += countHostedCompilerCLIStageFailures(t, exePath)
 	failures += countHostedCompilerCLIParseFailures(t, exePath)
 	failures += countHostedCompilerCLIFmtFailures(t, exePath)
+	failures += countHostedCompilerCLIFmtWriteFailures(t, exePath)
 	failures += countHostedCompilerCLIRunFailures(t, exePath)
 	failures += countHostedCompilerCLITestFailures(t, exePath)
 	failures += countHostedCompilerCLIUnsupportedFailures(t, exePath)
@@ -1236,6 +1246,45 @@ func countHostedCompilerCLIFmtFailures(t *testing.T, exePath string) int {
 	}
 	if stderr != "" {
 		t.Errorf("hosted compiler fmt stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
+}
+
+// countHostedCompilerCLIFmtWriteFailures checks the hosted artifact mutates fmt input.
+func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), "hosted_fmt_write_generic.kizu")
+	source := "import std::fmt; struct Point{x:i64,y:i64,}\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted fmt --write smoke source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "fmt", "--write", sourcePath)
+	if code != 0 {
+		t.Errorf("hosted compiler fmt --write exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	if stdout != "" {
+		t.Errorf("hosted compiler fmt --write stdout mismatch: %q", stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler fmt --write stderr mismatch: %q", stderr)
+		return 1
+	}
+	formatted, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Errorf("read hosted fmt --write source: %v", err)
+		return 1
+	}
+	expected := "import std::fmt;\nstruct Point { x: i64, y: i64 }\n"
+	if string(formatted) != expected {
+		t.Errorf(
+			"hosted compiler fmt --write content mismatch:\nwant:\n%s\ngot:\n%s",
+			expected,
+			formatted,
+		)
 		return 1
 	}
 	return 0
