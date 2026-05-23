@@ -535,6 +535,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_parse_blocks(",
+		"pub fn append_cli_fmt_blocks(",
 		"fn append_parse_format_write_function(",
 	},
 	"../../selfhost/src/backend/cli_parse_diag_llvm.kizu": {

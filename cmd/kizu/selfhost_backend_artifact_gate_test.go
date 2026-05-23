@@ -239,7 +239,10 @@ func requiredLLVMFragments() []string {
 		"define i64 @kizu_selfhost__parse_missing_assign_index",
 		"@.kizu.cli.parse_expected_expr_prefix",
 		"@.kizu.cli.parse_expected_assign_prefix",
+		"@.kizu.cli.fmt",
 		"%parse_format_ok = call i1 @kizu_selfhost__parse_format_write",
+		"%is_fmt = call i1 @kizu_selfhost__slice_equal",
+		"dispatch_fmt:",
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"%parse_missing_assign_index = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
@@ -283,6 +286,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"cli-command stage selfhost\n",
 		"cli-command check file source\n",
 		"cli-command parse file source\n",
+		"cli-command fmt file source\n",
 		"cli-command run file source print-call\n",
 		"cli-command test file source expect-call\n",
 		"cli-parity-manifest selfhost/tests/cli/parse-parity.tsv\n",
@@ -860,6 +864,7 @@ func countHostedCompilerCLISmokeFailures(t *testing.T) int {
 	failures := countHostedCompilerCLICheckFailures(t, exePath)
 	failures += countHostedCompilerCLIStageFailures(t, exePath)
 	failures += countHostedCompilerCLIParseFailures(t, exePath)
+	failures += countHostedCompilerCLIFmtFailures(t, exePath)
 	failures += countHostedCompilerCLIRunFailures(t, exePath)
 	failures += countHostedCompilerCLITestFailures(t, exePath)
 	failures += countHostedCompilerCLIUnsupportedFailures(t, exePath)
@@ -1048,6 +1053,32 @@ func countHostedCompilerCLIExpectedFailure(
 			expectedStderr,
 			stderr,
 		)
+		return 1
+	}
+	return 0
+}
+
+// countHostedCompilerCLIFmtFailures runs generic fmt source through the artifact.
+func countHostedCompilerCLIFmtFailures(t *testing.T, exePath string) int {
+	t.Helper()
+	sourcePath := filepath.Join(t.TempDir(), "hosted_fmt_generic.kizu")
+	source := "fn main(){print(\"from fmt\");}\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted fmt smoke source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "fmt", sourcePath)
+	if code != 0 {
+		t.Errorf("hosted compiler fmt exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		return 1
+	}
+	expected := "fn main() { print(\"from fmt\"); }\n"
+	if stdout != expected {
+		t.Errorf("hosted compiler fmt stdout mismatch:\nwant:\n%s\ngot:\n%s", expected, stdout)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler fmt stderr mismatch: %q", stderr)
 		return 1
 	}
 	return 0

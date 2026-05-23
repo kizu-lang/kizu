@@ -495,6 +495,12 @@ parse branches are no longer bound to a single path. Broader parse and
 diagnostic recovery remain deferred. The current CLI parity support and
 deferrals are recorded in `docs/selfhost-cli-parity.md`.
 
+For #648, hosted `fmt <file>` is routed through the same selfhost formatter
+path used by the bounded parse stdout path. The slice is stdout-only and uses
+the existing file-read, stdout, stderr, and process-exit ABI; it does not add a
+write-file mutation contract for `--write`. Broader formatter behavior remains
+under #629.
+
 For #531, hosted `run <file>` and `kizu test <file>` use backend artifact
 emit/link/execute instead of a selfhost interpreter. The first runnable fixture
 pair only requires the existing stdout, stderr, process exit, and trap
