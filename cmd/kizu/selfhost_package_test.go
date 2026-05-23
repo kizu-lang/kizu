@@ -998,6 +998,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_cli_fmt_blocks(",
 		"fn append_parse_format_write_function(",
 	},
+	"../../selfhost/src/backend/cli_parse_comment_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+		"fn append_parse_has_unsupported_line_comment_function(",
+	},
 	"../../selfhost/src/backend/cli_parse_diag_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_functions(",

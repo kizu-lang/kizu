@@ -8,7 +8,7 @@ import (
 )
 
 const selfhostFormatOracleOutput = `format-cases
-5
+6
 `
 
 // TestSelfhostFormatGate executes the Kizu-owned formatter oracle entry.
