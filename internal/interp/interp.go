@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1813,7 +1814,7 @@ func (i *Interpreter) evalBuiltinTypeApply(
 		value, err := i.evalArrayConstructor(i.resolveTypeArg(typeArg), args, env)
 		return value, true, err
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
-		"std.builtin.array_get", "std.builtin.array_get_or_panic",
+		"std.builtin.array_pop", "std.builtin.array_get", "std.builtin.array_get_or_panic",
 		"std.builtin.array_at", "std.builtin.array_at_mut",
 		"std.builtin.array_set", "std.builtin.array_deinit":
 		value, err := i.evalArrayPrimitive(name, args, env)
@@ -2282,6 +2283,9 @@ func (i *Interpreter) evalBoxRuntimeMethod(
 			value: box.box.value, mutable: name == "borrow_mut", boxParent: box.box,
 		}), nil
 	case "deinit":
+		if err := i.deinitValue(box.box.value); err != nil {
+			return voidValue(), err
+		}
 		box.box.deinit = true
 		return voidValue(), nil
 	default:
@@ -2582,18 +2586,43 @@ func runtimeValueMatchesType(value Value, typeName string) bool {
 	case "[]u8":
 		return value.kind == kindString
 	default:
-		if base, elem, ok := splitGenericType(typeName); ok && base == "std::mem::Box" {
-			return value.kind == kindBox && value.typeName == fmt.Sprintf("std::mem::Box<%s>", elem)
-		}
-		if value.kind == kindEnum {
-			return value.enum.typeName == typeName
-		}
-		if value.kind == kindUnion {
-			return value.union.typeName == typeName
-		}
-		if value.kind == kindStruct {
-			return value.typeName == typeName
-		}
+		return runtimeGenericValueMatchesType(value, typeName) ||
+			runtimeNamedValueMatchesType(value, typeName)
+	}
+}
+
+// runtimeGenericValueMatchesType checks generic runtime owner values.
+func runtimeGenericValueMatchesType(value Value, typeName string) bool {
+	base, elem, ok := splitGenericType(typeName)
+	if !ok {
+		return false
+	}
+	switch base {
+	case "std::mem::Box":
+		return value.kind == kindBox && value.typeName == fmt.Sprintf("std::mem::Box<%s>", elem)
+	case "std::array::Array":
+		return value.kind == kindArray && value.typeName == elem
+	case "std::arena::Arena":
+		return value.kind == kindArena
+	case "std::arena::Handle":
+		return value.kind == kindHandle
+	case "std::map::Map":
+		return value.kind == kindMap && value.typeName == typeName
+	default:
+		return false
+	}
+}
+
+// runtimeNamedValueMatchesType checks named enum, union, and struct values.
+func runtimeNamedValueMatchesType(value Value, typeName string) bool {
+	switch value.kind {
+	case kindEnum:
+		return value.enum.typeName == typeName
+	case kindUnion:
+		return value.union.typeName == typeName
+	case kindStruct:
+		return value.typeName == typeName
+	default:
 		return false
 	}
 }
@@ -2865,36 +2894,101 @@ func (i *Interpreter) evalArrayRuntimeMethod(
 	if array.array.deinit {
 		return voidValue(), fmt.Errorf("runtime error: Array was deinitialized")
 	}
+	if value, ok, err := i.evalArrayMutationRuntimeMethod(array, name, args, env); ok || err != nil {
+		return value, err
+	}
+	if value, ok, err := i.evalArrayReadRuntimeMethod(array, name, args, env); ok || err != nil {
+		return value, err
+	}
+	return i.evalArrayCleanupRuntimeMethod(array, name, args)
+}
+
+// evalArrayMutationRuntimeMethod executes Array mutations that keep the owner alive.
+func (i *Interpreter) evalArrayMutationRuntimeMethod(
+	array Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
 	switch name {
 	case "append":
-		return i.evalArrayAppend(array, args, env)
+		value, err := i.evalArrayAppend(array, args, env)
+		return value, true, err
+	case "pop":
+		value, err := i.evalArrayPop(array, args)
+		return value, true, err
 	case "reserve":
-		return i.evalArrayReserve(array, args, env)
-	case "len":
-		return intValue(int64(len(array.array.values))), requireNoArgs("Array.len", args)
-	case "capacity":
-		return intValue(int64(cap(array.array.values))), requireNoArgs("Array.capacity", args)
-	case "as_bytes":
-		return evalArrayAsBytes(array, args)
-	case "get":
-		return i.evalArrayGet(array, args, env)
-	case "get_or_panic":
-		return i.evalArrayGetOrPanic(array, args, env)
-	case "at":
-		return i.evalArrayAt(array, args, env, false)
-	case "at_mut":
-		return i.evalArrayAt(array, args, env, true)
+		value, err := i.evalArrayReserve(array, args, env)
+		return value, true, err
 	case "set":
-		return i.evalArraySet(array, args, env)
-	case "clear":
-		array.array.values = array.array.values[:0]
-		return voidValue(), requireNoArgs("Array.clear", args)
+		value, err := i.evalArraySet(array, args, env)
+		return value, true, err
 	case "truncate":
-		return i.evalArrayTruncate(array, args, env)
+		value, err := i.evalArrayTruncate(array, args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalArrayReadRuntimeMethod executes Array reads and borrow view creation.
+func (i *Interpreter) evalArrayReadRuntimeMethod(
+	array Value,
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "len":
+		return intValue(int64(len(array.array.values))), true, requireNoArgs("Array.len", args)
+	case "capacity":
+		return intValue(int64(cap(array.array.values))), true, requireNoArgs("Array.capacity", args)
+	case "as_bytes":
+		value, err := evalArrayAsBytes(array, args)
+		return value, true, err
+	case "get":
+		value, err := i.evalArrayGet(array, args, env)
+		return value, true, err
+	case "get_or_panic":
+		value, err := i.evalArrayGetOrPanic(array, args, env)
+		return value, true, err
+	case "at":
+		value, err := i.evalArrayAt(array, args, env, false)
+		return value, true, err
+	case "at_mut":
+		value, err := i.evalArrayAt(array, args, env, true)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
+}
+
+// evalArrayCleanupRuntimeMethod executes cleanup and storage-release operations.
+func (i *Interpreter) evalArrayCleanupRuntimeMethod(
+	array Value,
+	name string,
+	args []ast.Expression,
+) (Value, error) {
+	switch name {
+	case "clear":
+		if err := requireNoArgs("Array.clear", args); err != nil {
+			return voidValue(), err
+		}
+		if err := i.deinitValues(array.array.values); err != nil {
+			return voidValue(), err
+		}
+		array.array.values = array.array.values[:0]
+		return voidValue(), nil
 	case "deinit":
+		if err := requireNoArgs("Array.deinit", args); err != nil {
+			return voidValue(), err
+		}
+		if err := i.deinitValues(array.array.values); err != nil {
+			return voidValue(), err
+		}
 		array.array.values = nil
 		array.array.deinit = true
-		return voidValue(), requireNoArgs("Array.deinit", args)
+		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Array has no method `%s`", name)
 	}
@@ -2929,6 +3023,9 @@ func (i *Interpreter) evalArrayTruncate(
 	}
 	if length < 0 || length > len(array.array.values) {
 		return errorUnionValue("Array.truncate length out of bounds"), nil
+	}
+	if err := i.deinitValues(array.array.values[length:]); err != nil {
+		return voidValue(), err
 	}
 	array.array.values = array.array.values[:length]
 	return voidValue(), nil
@@ -2994,6 +3091,9 @@ func (i *Interpreter) evalArraySet(array Value, args []ast.Expression, env *Env)
 	if !runtimeValueMatchesType(value, array.typeName) {
 		return errorUnionValue("Array.set element type mismatch"), nil
 	}
+	if err := i.deinitValue(array.array.values[index]); err != nil {
+		return voidValue(), err
+	}
 	array.array.values[index] = value
 	return voidValue(), nil
 }
@@ -3012,6 +3112,21 @@ func (i *Interpreter) evalArrayAppend(array Value, args []ast.Expression, env *E
 	}
 	array.array.values = append(array.array.values, value)
 	return voidValue(), nil
+}
+
+// evalArrayPop moves the last initialized element out of an Array.
+func (i *Interpreter) evalArrayPop(array Value, args []ast.Expression) (Value, error) {
+	if len(args) != 0 {
+		return voidValue(), fmt.Errorf("runtime error: Array.pop expects 0 args")
+	}
+	if len(array.array.values) == 0 {
+		return errorUnionValue("Array.pop empty array"), nil
+	}
+	index := len(array.array.values) - 1
+	value := array.array.values[index]
+	array.array.values[index] = voidValue()
+	array.array.values = array.array.values[:index]
+	return value, nil
 }
 
 // ensureArrayCapacity grows an Array backing slice without changing its length.
@@ -3052,6 +3167,140 @@ func (i *Interpreter) evalArrayGetOrPanic(
 	return array.array.values[index], nil
 }
 
+// deinitValues drops owned values in reverse storage order.
+func (i *Interpreter) deinitValues(values []Value) error {
+	for index := len(values) - 1; index >= 0; index-- {
+		if err := i.deinitValue(values[index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deinitValue applies the runtime side of the resource-container drop rule.
+func (i *Interpreter) deinitValue(value Value) error {
+	value = unwrapRefValue(value)
+	switch value.kind {
+	case kindStruct:
+		return i.deinitStructValue(value)
+	case kindUnion:
+		return i.deinitUnionValue(value)
+	case kindArena:
+		return deinitArenaValue(value.arena)
+	case kindArray:
+		return i.deinitArrayValue(value.array)
+	case kindMap:
+		return i.deinitMapValue(value.mapValue)
+	case kindBox:
+		return i.deinitBoxValue(value.box)
+	}
+	return nil
+}
+
+// deinitStructValue runs explicit struct cleanup or recursively drops fields.
+func (i *Interpreter) deinitStructValue(value Value) error {
+	if method := i.deinitMethod(value.typeName); method != nil {
+		_, err := i.callMethod(method, []Value{value})
+		return err
+	}
+	return i.deinitStructFields(value.fields)
+}
+
+// deinitUnionValue drops the active union payload when it owns one.
+func (i *Interpreter) deinitUnionValue(value Value) error {
+	if value.union.payload == nil {
+		return nil
+	}
+	return i.deinitValue(*value.union.payload)
+}
+
+// deinitArenaValue releases arena storage without recursively dropping payloads.
+func deinitArenaValue(arena *Arena) error {
+	if arena.deinit {
+		return nil
+	}
+	arena.values = nil
+	arena.deinit = true
+	return nil
+}
+
+// deinitArrayValue drops initialized Array elements and releases storage.
+func (i *Interpreter) deinitArrayValue(array *Array) error {
+	if array.deinit {
+		return nil
+	}
+	if err := i.deinitValues(array.values); err != nil {
+		return err
+	}
+	array.values = nil
+	array.deinit = true
+	return nil
+}
+
+// deinitMapValue drops Map entries and releases storage.
+func (i *Interpreter) deinitMapValue(mapValue *Map) error {
+	if mapValue.deinit {
+		return nil
+	}
+	if err := i.deinitMapEntries(mapValue); err != nil {
+		return err
+	}
+	mapValue.entries = nil
+	mapValue.deinit = true
+	return nil
+}
+
+// deinitBoxValue drops the Box payload and marks the Box released.
+func (i *Interpreter) deinitBoxValue(box *Box) error {
+	if box.deinit {
+		return nil
+	}
+	if err := i.deinitValue(box.value); err != nil {
+		return err
+	}
+	box.deinit = true
+	return nil
+}
+
+// deinitStructFields drops fields deterministically when no explicit deinit exists.
+func (i *Interpreter) deinitStructFields(fields map[string]Value) error {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for index := len(names) - 1; index >= 0; index-- {
+		if err := i.deinitValue(fields[names[index]]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deinitMapEntries drops map values in deterministic key order.
+func (i *Interpreter) deinitMapEntries(entries *Map) error {
+	keys := make([]string, 0, len(entries.entries))
+	for key := range entries.entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for index := len(keys) - 1; index >= 0; index-- {
+		if err := i.deinitValue(entries.entries[keys[index]]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deinitMethod returns a user-defined cleanup method for a concrete value.
+func (i *Interpreter) deinitMethod(typeName string) *ast.FunctionDecl {
+	methods := i.impls[typeName]
+	if methods == nil {
+		return nil
+	}
+	return methods["deinit"]
+}
+
 // evalMapMethod dispatches public Map methods through Kizu std wrappers.
 func (i *Interpreter) evalMapMethod(
 	mapVal Value,
@@ -3087,9 +3336,15 @@ func (i *Interpreter) evalMapRuntimeMethod(
 	case "len":
 		return intValue(int64(len(mapVal.mapValue.entries))), requireNoArgs("Map.len", args)
 	case "deinit":
+		if err := requireNoArgs("Map.deinit", args); err != nil {
+			return voidValue(), err
+		}
+		if err := i.deinitMapEntries(mapVal.mapValue); err != nil {
+			return voidValue(), err
+		}
 		mapVal.mapValue.entries = nil
 		mapVal.mapValue.deinit = true
-		return voidValue(), requireNoArgs("Map.deinit", args)
+		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Map has no method `%s`", name)
 	}
@@ -3106,6 +3361,11 @@ func (i *Interpreter) evalMapInsert(mapVal Value, args []ast.Expression, env *En
 	}
 	if !runtimeValueMatchesType(value, mapVal.mapValue.valueType) {
 		return errorUnionValue("Map.insert value type mismatch"), nil
+	}
+	if old, ok := mapVal.mapValue.entries[key.s]; ok {
+		if err := i.deinitValue(old); err != nil {
+			return voidValue(), err
+		}
 	}
 	mapVal.mapValue.entries[key.s] = value
 	return voidValue(), nil
@@ -3429,6 +3689,7 @@ func (i *Interpreter) evalArenaDeinit(arena *Arena, args []ast.Expression) (Valu
 	if len(args) != 0 {
 		return voidValue(), fmt.Errorf("runtime error: arena.deinit expected 0 args")
 	}
+	arena.values = nil
 	arena.deinit = true
 	return voidValue(), nil
 }

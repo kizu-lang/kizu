@@ -838,6 +838,46 @@ fn main(values: std::array::Array<Name>) {
 	}
 }
 
+// TestCheckArrayPopMovesNonCopyElement keeps resource arrays usable without copy reads.
+func TestCheckArrayPopMovesNonCopyElement(t *testing.T) {
+	source := `struct Name { value: []u8 }
+fn check(values: std::array::Array<Name>) -> !void {
+    let value = try values.pop();
+    print(value.value);
+    values.deinit();
+    return;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckArrayAcceptsNestedResourceElement checks Array owns element cleanup.
+func TestCheckArrayAcceptsNestedResourceElement(t *testing.T) {
+	source := `struct User { name: []u8 }
+struct Parsed {
+    users: std::arena::Arena<User>,
+    ids: std::array::Array<i64>,
+}
+impl Parsed {
+    fn deinit(self: Parsed) -> void {
+        self.users.deinit();
+        self.ids.deinit();
+    }
+}
+fn check(values: std::array::Array<Parsed>) -> !void {
+    let item = try values.pop();
+    item.deinit();
+    values.deinit();
+    return;
+}
+fn main() {}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
 // TestCheckImplMethodReturnTypeFeedsGenericCall keeps method result types precise.
 func TestCheckImplMethodReturnTypeFeedsGenericCall(t *testing.T) {
 	source := `struct Counter { value: i64 }

@@ -27,6 +27,7 @@ std::array::Array<T>(allocator: Allocator) -> std::array::Array<T>
 array.append(value: T) -> !void
 array.len() -> i64
 array.capacity() -> i64
+array.pop() -> !T
 array.get(index: i64) -> !T
 array.get_or_panic(index: i64) -> T
 array.at(index: i64) -> !&T borrows self
@@ -38,22 +39,30 @@ array.deinit() -> void
 `Allocator` is an explicit capability. Array construction must name an
 allocator factory or binding; `std::array::Array<T>()` is rejected.
 
-`append` moves non-copy values into the array. In v0.2, `get` is copy-only and
-returns `!T` so out-of-bounds access is a recoverable checked error.
+`append` moves non-copy values into the array. `pop` moves the last initialized
+element back out as `!T`. In v0.2, `get` is copy-only and returns `!T` so
+out-of-bounds access is a recoverable checked error.
 `get_or_panic` is the explicit trap variant for tests and invariant-checked
 code where a bounds failure should stop execution instead of propagating.
 Non-copy elements are read or updated through local borrow views returned by
 `at` and `at_mut`.
 
-While an element borrow is alive, `append`, `set`, and `deinit` are rejected.
+`set` drops the replaced element before moving the new value into the slot.
+`deinit` drops all remaining initialized elements before releasing array
+storage. Element drop calls an explicit `deinit(self: T) -> void` method when
+one exists; otherwise it recursively drops known owned fields and union
+payloads.
+
+While an element borrow is alive, `append`, `pop`, `set`, and `deinit` are rejected.
 While a mutable element borrow is alive, reads such as `get`, `len`, and
 `capacity` are also rejected. This keeps Rust-style aliasing and reallocation
 safety without exposing lifetime annotations.
 
-Array element types are conservative in v0.2. Safe `Array<T>` rejects raw
-pointers, `std::arena::Arena<T>`, `std::arena::Handle<T>`, nested arrays, and concurrency capability
-types. The rejection is recursive through struct fields and union payloads.
-These exclusions avoid storing values whose lifetime, provenance, or
+Safe `Array<T>` can store resource-owning values, including
+`std::arena::Arena<T>`, `std::arena::Handle<T>`, nested arrays, and maps. It
+still rejects raw pointers, `dyn`, and concurrency capability types. The
+rejection is recursive through struct fields and union payloads. These
+exclusions avoid storing values whose provenance, dynamic dispatch, or
 thread-boundary rules are not yet fully specified for owned collections.
 
 `deinit` invalidates the array binding in the ownership checker. Using an array

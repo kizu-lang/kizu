@@ -201,6 +201,38 @@ fn main() {
 	}
 }
 
+// TestRunArrayPopMovesAndDeinitDropsRemaining checks resource Array cleanup.
+func TestRunArrayPopMovesAndDeinitDropsRemaining(t *testing.T) {
+	got := runSource(t, `struct Trace {
+    label: []u8,
+}
+impl Trace {
+    fn deinit(self: Trace) -> void {
+        print(self.label);
+    }
+}
+fn main() -> !void {
+    let allocator = std::builtin::mem_page_allocator();
+    let traces = std::builtin::array<Trace>(allocator);
+    let first = Trace { label: "first" };
+    let second = Trace { label: "second" };
+    let first_result = std::builtin::array_append<Trace>(traces, first);
+    try first_result;
+    let second_result = std::builtin::array_append<Trace>(traces, second);
+    try second_result;
+    let pop_result = std::builtin::array_pop<Trace>(traces);
+    let last = try pop_result;
+    print(last.label);
+    last.deinit();
+    std::builtin::array_deinit<Trace>(traces);
+    return;
+}`)
+	want := "second\nsecond\nfirst\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunEnumValueAccess checks Zig/C-style tag enum runtime values.
 func TestRunEnumValueAccess(t *testing.T) {
 	got := runSource(t, `enum Color {
