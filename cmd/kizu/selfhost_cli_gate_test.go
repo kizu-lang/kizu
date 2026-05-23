@@ -918,7 +918,9 @@ func writeSelfhostCLIPackageFrontendFixture(t *testing.T) (string, string) {
 
 	root := t.TempDir()
 	manifest := filepath.Join(root, "kizu.toml")
-	manifestContent := []byte("[package]\nname = \"frontend\"\n")
+	manifestContent := []byte(
+		"[package]\nname = \"frontend\"\n\n[modules]\nroot = \"src/main.kizu\"\n",
+	)
 	if err := os.WriteFile(manifest, manifestContent, 0o644); err != nil {
 		t.Fatalf("write package manifest: %v", err)
 	}
