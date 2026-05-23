@@ -526,7 +526,7 @@ fn first_type_error_in_type_text(
     return no_type_reference_error();
 }
 
-fn type_error_for_name_text(
+pub fn type_error_for_name_text(
     allocator: Allocator,
     file: &source::SourceFile,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
@@ -537,9 +537,57 @@ fn type_error_for_name_text(
     start: i64,
     end: i64
 ) -> !model::TypeReferenceSummary {
-    if try type_reference_exists(allocator, file, kinds, name) {
+    var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
+    var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
+    let summary = try type_error_for_name_text_with_imports(
+        allocator,
+        file,
+        kinds,
+        arities,
+        name,
+        text,
+        next_index,
+        start,
+        end,
+        import_alias_starts,
+        import_alias_ends
+    );
+    import_alias_starts.deinit();
+    import_alias_ends.deinit();
+    return summary;
+}
+
+pub fn type_error_for_name_text_with_imports(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    name: []u8,
+    text: []u8,
+    next_index: i64,
+    start: i64,
+    end: i64,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
+    var resolved = std::string::String(allocator);
+    try append_resolved_type_reference_name(
+        resolved,
+        file,
+        kinds,
+        name,
+        import_alias_starts,
+        import_alias_ends
+    );
+    let key = resolved.as_bytes();
+    let exists = kinds.contains(key);
+    var expected = -1;
+    if exists and arities.contains(key) {
+        expected = try arities.get(key);
+    }
+    resolved.deinit();
+    if exists {
         let observed = observed_type_arity_text(text, next_index);
-        let expected = try expected_type_arity(allocator, file, kinds, arities, name);
         if expected >= 0 and expected != observed {
             return type_reference_summary(true, 2, start, end, expected, observed);
         }
@@ -548,45 +596,37 @@ fn type_error_for_name_text(
     return type_reference_summary(true, 1, start, end, 0, 0);
 }
 
-fn type_reference_exists(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    kinds: &std::map::Map<[]u8, model::TypeKind>,
-    name: []u8
-) -> !bool {
-    var resolved = std::string::String(allocator);
-    try append_resolved_type_reference_name(resolved, file, kinds, name);
-    let key = resolved.as_bytes();
-    let exists = kinds.contains(key);
-    resolved.deinit();
-    return exists;
-}
-
-fn expected_type_arity(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>,
-    name: []u8
-) -> !i64 {
-    var arity_name = std::string::String(allocator);
-    try append_resolved_type_reference_name(arity_name, file, kinds, name);
-    let key = arity_name.as_bytes();
-    var expected = -1;
-    if arities.contains(key) {
-        expected = try arities.get(key);
-    }
-    arity_name.deinit();
-    return expected;
-}
-
 fn append_resolved_type_reference_name(
     resolved: &var std::string::String,
     file: &source::SourceFile,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    name: []u8
+    name: []u8,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !void {
-    if kinds.contains(name) or is_qualified_name(name) {
+    if kinds.contains(name) {
+        try resolved.append_bytes(name);
+        return;
+    }
+    if is_qualified_name(name) {
+        if std::mem::starts_with(name, "std::") or std::mem::starts_with(name, "selfhost::") {
+            try resolved.append_bytes(name);
+            return;
+        }
+        let first_end = first_qualified_segment_end(name);
+        let alias = name[0..first_end];
+        if import_alias_starts.contains(alias) {
+            let module_start = try import_alias_starts.get(alias);
+            let module_end = try import_alias_ends.get(alias);
+            try resolved.append_bytes(file.text[module_start..module_end]);
+            try resolved.append_bytes(name[first_end..std::mem::len(name)]);
+            return;
+        }
+        if file.kind == source::SourceKind::Std {
+            try resolved.append_bytes("std::");
+        } else {
+            try resolved.append_bytes("selfhost::");
+        }
         try resolved.append_bytes(name);
         return;
     }
@@ -598,6 +638,17 @@ fn append_resolved_type_reference_name(
     }
     try resolved.append_bytes(name);
     return;
+}
+
+fn first_qualified_segment_end(name: []u8) -> i64 {
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return std::mem::len(name);
 }
 
 fn append_module_name(
@@ -645,7 +696,7 @@ fn no_type_reference_error() -> model::TypeReferenceSummary {
     return type_reference_summary(false, 0, 0, 0, 0, 0);
 }
 
-fn should_ignore_type_name(name: []u8) -> bool {
+pub fn should_ignore_type_name(name: []u8) -> bool {
     return std::mem::equal_bytes(name, "const") or
         std::mem::equal_bytes(name, "dyn") or
         std::mem::equal_bytes(name, "mut") or
@@ -669,7 +720,7 @@ fn starts_with_uppercase(name: []u8) -> bool {
     return byte >= cast<u8>(65) and byte <= cast<u8>(90);
 }
 
-fn is_type_identifier_start_byte(byte: u8) -> bool {
+pub fn is_type_identifier_start_byte(byte: u8) -> bool {
     return (byte >= cast<u8>(65) and byte <= cast<u8>(90)) or
         (byte >= cast<u8>(97) and byte <= cast<u8>(122)) or
         byte == cast<u8>(95);
@@ -688,7 +739,7 @@ fn type_segment_end_in_text(text: []u8, start: i64) -> i64 {
     return cursor;
 }
 
-fn type_path_end_in_text(text: []u8, start: i64) -> i64 {
+pub fn type_path_end_in_text(text: []u8, start: i64) -> i64 {
     var cursor = type_segment_end_in_text(text, start);
     while cursor + 2 < std::mem::len(text) and
         text[cursor] == cast<u8>(58) and
@@ -742,7 +793,7 @@ fn count_type_arguments_text(text: []u8, open_index: i64) -> i64 {
     return count;
 }
 
-fn is_generic_constructor_name(name: []u8) -> bool {
+pub fn is_generic_constructor_name(name: []u8) -> bool {
     return std::mem::equal_bytes(name, "std::array::Array") or
         std::mem::equal_bytes(name, "std::map::Map") or
         std::mem::equal_bytes(name, "std::mem::Box") or
