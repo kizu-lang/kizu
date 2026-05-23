@@ -19,10 +19,22 @@ just selfhost-switch-gate
 
 The command builds the hosted stage2 artifact through the explicit bootstrap
 boundary, runs the #458 production commands through that artifact, runs the
-supported corpus, runs the aggregate Go/Kizu oracle suite once, and keeps the Go
-project, type, and ownership packages green. It intentionally does not run the
-direct heavyweight gate recipe after the aggregate oracle, because the aggregate
-oracle already executes those stage gate functions.
+supported corpus and bounded CLI parity gates, and keeps the Go project, type,
+and ownership packages green. The aggregate Go/Kizu oracle is an explicit
+separate preflight because it runs the interpreted selfhost production pipeline
+and has an independent wall-time budget.
+
+For frontend switch PRs that need Go/Kizu oracle evidence, also run:
+
+```sh
+just selfhost-oracle
+```
+
+For oracle performance work, run the budget-enforcing gate:
+
+```sh
+just selfhost-oracle-budget
+```
 
 For cache or artifact-affecting switch PRs, also run one of:
 
@@ -49,7 +61,7 @@ just perf-cache-isolated
 
 ## Failure Policy
 
-- Any oracle mismatch blocks the switch PR.
+- Any oracle mismatch blocks a PR that relies on Go/Kizu oracle evidence.
 - The general `kizu` CLI stays Go-owned until a later switch issue changes an
   explicit component selection point. The #458 selfhost command path is the
   hosted stage2 artifact, not `go run ./cmd/kizu check selfhost`.

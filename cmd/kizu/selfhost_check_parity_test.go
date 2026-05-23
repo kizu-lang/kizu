@@ -52,7 +52,12 @@ func TestSelfhostCheckParityRecipes(t *testing.T) {
 	requireNoRecipeFragment(t, gate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
 
 	fromScratch := justRecipe(content, "selfhost-production-from-scratch")
-	requireRecipeFragment(t, fromScratch, "just selfhost-check-parity-gate")
+	requireRecipeFragment(t, fromScratch, "just selfhost-fast-gate")
+
+	fastGate := justRecipe(content, "selfhost-fast-gate")
+	requireRecipeFragment(t, fastGate, "just selfhost-check-parity-gate")
+	requireNoRecipeFragment(t, fastGate, "just selfhost-bootstrap")
+	requireNoRecipeFragment(t, fastGate, "KIZU_RUN_SELFHOST_BOOTSTRAP=1")
 }
 
 // runSelfhostCheckParity executes the #530 manifest with the hosted artifact.

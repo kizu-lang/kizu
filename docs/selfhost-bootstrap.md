@@ -200,17 +200,23 @@ go test ./...
 
 `just selfhost-production-from-scratch` builds the stage2 hosted artifact
 through the explicit stage0 bootstrap/oracle boundary, then runs the #458
-production command path, the supported corpus, parse parity, and check parity
-through that artifact.
+production command path, the supported corpus, parse parity, check parity, run
+parity, and test parity through that artifact.
 
 Local jobs that already have a passing stage2 artifact can run the fast gates:
 
 ```sh
+just selfhost-fast-gate
 just selfhost-production-gate
 just selfhost-corpus-gate
 just selfhost-parse-parity-gate
 just selfhost-check-parity-gate
+just selfhost-run-parity-gate
+just selfhost-test-parity-gate
 ```
+
+`just selfhost-fast-gate` runs the hosted artifact gates above without
+rebuilding bootstrap artifacts.
 
 `just selfhost-production-gate` is the #461 production-boundary gate. It runs
 `target/selfhost/stage2/selfhost check selfhost`, `stage selfhost`, and the
