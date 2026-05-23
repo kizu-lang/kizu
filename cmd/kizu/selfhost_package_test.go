@@ -268,13 +268,23 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 	}
 	preBody := selfhostKizuFunctionBody(t, content, "pub fn first_pre_move_check_diagnostic(")
 	postBody := selfhostKizuFunctionBody(t, content, "pub fn first_post_move_check_diagnostic(")
+	preASTBody := selfhostKizuFunctionBody(
+		t,
+		content,
+		"pub fn first_pre_move_check_diagnostic_ast_node(",
+	)
+	postASTBody := selfhostKizuFunctionBody(
+		t,
+		content,
+		"pub fn first_post_move_check_diagnostic_ast_node(",
+	)
 	if !strings.Contains(preBody, "parser::parse_checked_file(allocator, path, text)") {
 		t.Fatal("pre-move diagnostic pass does not parse checked AST")
 	}
 	if !strings.Contains(postBody, "parser::parse_checked_file(allocator, path, text)") {
 		t.Fatal("post-move diagnostic pass does not parse checked AST")
 	}
-	if !strings.Contains(preBody+postBody, "collect_function_returns_from_ast(") {
+	if !strings.Contains(preASTBody+postASTBody, "collect_function_returns_from_ast(") {
 		t.Fatal("shared diagnostic passes do not collect function returns from AST")
 	}
 	oldEntries := []string{
@@ -335,16 +345,25 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	content := string(bytes)
 	body := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics(")
 	required := []string{
-		"types::first_pre_move_check_diagnostic(allocator, path, file_text)",
-		"types::first_post_move_check_diagnostic(allocator, path, file_text)",
-		"ownership::first_use_after_move_name(allocator, path, file_text)",
+		"parser::validate_diagnostic_file(allocator, path, file_text)",
+		"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
+		"types::first_pre_move_check_diagnostic_ast_node(",
+		"types::first_post_move_check_diagnostic_ast_node(",
+		"ownership::first_use_after_move_name_ast_node(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("fast_diagnostics missing shared phase %q", fragment)
 		}
 	}
+	if count := strings.Count(body, "parser::parse_checked_file("); count != 1 {
+		t.Fatalf("fast_diagnostics parses checked source %d times, want 1", count)
+	}
 	forbidden := []string{
+		"parser::parse_diagnostic_file(",
+		"types::first_pre_move_check_diagnostic(allocator, path, file_text)",
+		"types::first_post_move_check_diagnostic(allocator, path, file_text)",
+		"ownership::first_use_after_move_name(allocator, path, file_text)",
 		"write_type_reference_diagnostic(",
 		"write_match_diagnostic(",
 		"write_return_type_diagnostic(",
