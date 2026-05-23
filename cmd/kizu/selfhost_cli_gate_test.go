@@ -86,6 +86,21 @@ func TestSelfhostCLIGate(t *testing.T) {
 
 // TestSelfhostCLIFileFrontendGate runs file commands through Kizu frontend code.
 func TestSelfhostCLIFileFrontendGate(t *testing.T) {
+	runSelfhostCLIFileFrontendGate(t, selfhostCLIFrontendCases)
+}
+
+// TestSelfhostCLIFileFrontendHeavyGate runs heavyweight file frontend checks.
+func TestSelfhostCLIFileFrontendHeavyGate(t *testing.T) {
+	requireSelfhostGate(t)
+	runSelfhostCLIFileFrontendGate(t, selfhostCLIFrontendHeavyCheckCases)
+}
+
+// runSelfhostCLIFileFrontendGate runs source-driven CLI frontend cases.
+func runSelfhostCLIFileFrontendGate(
+	t *testing.T,
+	buildCases func(selfhostCLIFrontendFixtures) []selfhostCLIFrontendCase,
+) {
+	t.Helper()
 	restore, err := chdirRepoRoot()
 	if err != nil {
 		t.Fatalf("chdir repo root: %v", err)
@@ -102,7 +117,7 @@ func TestSelfhostCLIFileFrontendGate(t *testing.T) {
 		t.Fatalf("check selfhost package: %v", err)
 	}
 
-	for _, tt := range selfhostCLIFrontendCases(fixtures) {
+	for _, tt := range buildCases(fixtures) {
 		t.Run(tt.name, func(t *testing.T) {
 			stdout, stderr, err := runSelfhostCLIFileFrontendCase(program, tt.args)
 			if err != nil {
@@ -158,15 +173,17 @@ func readSelfhostCLIArtifact(t *testing.T, path string) string {
 
 // selfhostCLIFrontendCases returns source-driven CLI frontend cases.
 func selfhostCLIFrontendCases(fixtures selfhostCLIFrontendFixtures) []selfhostCLIFrontendCase {
-	cases := selfhostCLIFrontendHappyCases(fixtures)
+	cases := selfhostCLIFrontendDefaultHappyCases(fixtures)
 	cases = append(cases, selfhostCLIFrontendParseFailureCases(fixtures)...)
 	cases = append(cases, selfhostCLIFrontendCheckSemanticFailureCases(fixtures)...)
 	cases = append(cases, selfhostCLIFrontendCheckParseFailureCases(fixtures)...)
 	return cases
 }
 
-// selfhostCLIFrontendHappyCases returns successful source-driven frontend cases.
-func selfhostCLIFrontendHappyCases(fixtures selfhostCLIFrontendFixtures) []selfhostCLIFrontendCase {
+// selfhostCLIFrontendDefaultHappyCases returns fast successful frontend cases.
+func selfhostCLIFrontendDefaultHappyCases(
+	fixtures selfhostCLIFrontendFixtures,
+) []selfhostCLIFrontendCase {
 	return []selfhostCLIFrontendCase{
 		{
 			name: "parse_temp_source",
@@ -176,16 +193,6 @@ func selfhostCLIFrontendHappyCases(fixtures selfhostCLIFrontendFixtures) []selfh
 				"Yes => true, No => false, }; }\n" +
 				"fn main(values: std::array::Array <Name>) { let count = values.len(); " +
 				"print(count); values.deinit(); }\nexit-code\n0\n",
-		},
-		{
-			name:    "check_temp_source",
-			args:    []string{"check", fixtures.source},
-			wantOut: "check: ok\nexit-code\n0\n",
-		},
-		{
-			name:    "check_temp_returning_if",
-			args:    []string{"check", fixtures.returningIf},
-			wantOut: "check: ok\nexit-code\n0\n",
 		},
 		{
 			name:    "run_temp_source",
@@ -215,6 +222,24 @@ func selfhostCLIFrontendHappyCases(fixtures selfhostCLIFrontendFixtures) []selfh
 				"test_expect_failure",
 				"selfhost/tests/cli/test_expect_failure.kizu",
 			),
+		},
+	}
+}
+
+// selfhostCLIFrontendHeavyCheckCases returns successful checks through selfhost type analysis.
+func selfhostCLIFrontendHeavyCheckCases(
+	fixtures selfhostCLIFrontendFixtures,
+) []selfhostCLIFrontendCase {
+	return []selfhostCLIFrontendCase{
+		{
+			name:    "check_temp_source",
+			args:    []string{"check", fixtures.source},
+			wantOut: "check: ok\nexit-code\n0\n",
+		},
+		{
+			name:    "check_temp_returning_if",
+			args:    []string{"check", fixtures.returningIf},
+			wantOut: "check: ok\nexit-code\n0\n",
 		},
 	}
 }
