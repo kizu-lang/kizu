@@ -768,7 +768,7 @@ func collectParserParitySelfhostSources(t *testing.T) []parserParityCase {
 	return cases
 }
 
-// collectParserFrontendStdSources returns the std files loaded by source::load_file_sources.
+// collectParserFrontendStdSources returns std files the selfhost frontend can demand-load.
 func collectParserFrontendStdSources(t *testing.T) []parserParityCase {
 	t.Helper()
 	cases := make([]parserParityCase, 0, len(parserParityFrontendStdPaths))
