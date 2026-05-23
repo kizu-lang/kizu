@@ -4,8 +4,13 @@ pub fn format_source(
     allocator: Allocator,
     source: []u8
 ) -> !std::string::String {
-    var format_tokens = try lexer::tokenize(allocator, source);
+    let prefix_end = leading_comment_prefix_end(source);
+    let body = source[prefix_end..std::mem::len(source)];
+    var format_tokens = try lexer::tokenize(allocator, body);
     var out = std::string::String(allocator);
+    if prefix_end > 0 {
+        try out.append_bytes(source[0..prefix_end]);
+    }
     var index = 0;
     var depth = 0;
     var previous = "";
@@ -16,8 +21,8 @@ pub fn format_source(
         if lexer::is_eof(token) {
             index = format_tokens.len();
         } else {
-            let text = token_text(source, token);
-            let trailing_comma = try is_trailing_comma(source, &format_tokens, index, text);
+            let text = token_text(body, token);
+            let trailing_comma = try is_trailing_comma(body, &format_tokens, index, text);
             if !trailing_comma {
                 if std::mem::equal_bytes(text, "}") {
                     if depth > 0 {
@@ -35,7 +40,7 @@ pub fn format_source(
                     last = last_byte(text);
                     previous = text;
                     at_line_start = false;
-                    let wants_newline = try rbrace_wants_newline(source, &format_tokens, index);
+                    let wants_newline = try rbrace_wants_newline(body, &format_tokens, index);
                     if wants_newline {
                         try out.append_byte(cast<u8>(10));
                         last = cast<u8>(10);
@@ -67,7 +72,7 @@ pub fn format_source(
                     previous = text;
                     if std::mem::equal_bytes(text, "{") {
                         depth = depth + 1;
-                        if !(try next_token_text_equals(source, &format_tokens, index, "}")) {
+                        if !(try next_token_text_equals(body, &format_tokens, index, "}")) {
                             try out.append_byte(cast<u8>(10));
                             last = cast<u8>(10);
                             at_line_start = true;
@@ -87,11 +92,112 @@ pub fn format_source(
     return out;
 }
 
+pub fn has_unsupported_line_comment(source: []u8) -> bool {
+    let prefix_end = leading_comment_prefix_end(source);
+    return has_line_comment_after(source, prefix_end);
+}
+
 fn token_text(
     source: []u8,
     token: std::kizu::lexer::Token
 ) -> []u8 {
     return source[token.start..token.end];
+}
+
+fn leading_comment_prefix_end(source: []u8) -> i64 {
+    var index = 0;
+    let length = std::mem::len(source);
+    var seen_comment = false;
+    while index < length {
+        var cursor = index;
+        while cursor < length and is_horizontal_space(source[cursor]) {
+            cursor = cursor + 1;
+        }
+        if cursor >= length {
+            if seen_comment {
+                return length;
+            }
+            return 0;
+        }
+        if is_line_break(source[cursor]) {
+            index = after_line_break(source, cursor);
+            continue;
+        }
+        if cursor + 1 < length and source[cursor] == cast<u8>(47) and
+            source[cursor + 1] == cast<u8>(47) {
+            seen_comment = true;
+            index = line_end_including_break(source, cursor + 2);
+            continue;
+        }
+        if seen_comment {
+            return index;
+        }
+        return 0;
+    }
+    if seen_comment {
+        return index;
+    }
+    return 0;
+}
+
+fn has_line_comment_after(source: []u8, start: i64) -> bool {
+    var index = start;
+    let length = std::mem::len(source);
+    var in_string = false;
+    while index < length {
+        let byte = source[index];
+        if in_string {
+            if byte == cast<u8>(92) and index + 1 < length {
+                index = index + 2;
+                continue;
+            }
+            if byte == cast<u8>(34) {
+                in_string = false;
+            }
+            index = index + 1;
+            continue;
+        }
+        if byte == cast<u8>(34) {
+            in_string = true;
+            index = index + 1;
+            continue;
+        }
+        if byte == cast<u8>(47) and index + 1 < length and
+            source[index + 1] == cast<u8>(47) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn line_end_including_break(source: []u8, start: i64) -> i64 {
+    var index = start;
+    let length = std::mem::len(source);
+    while index < length and !is_line_break(source[index]) {
+        index = index + 1;
+    }
+    if index < length {
+        return after_line_break(source, index);
+    }
+    return index;
+}
+
+fn after_line_break(source: []u8, index: i64) -> i64 {
+    let length = std::mem::len(source);
+    if source[index] == cast<u8>(13) and index + 1 < length and
+        source[index + 1] == cast<u8>(10) {
+        return index + 2;
+    }
+    return index + 1;
+}
+
+fn is_horizontal_space(byte: u8) -> bool {
+    return byte == cast<u8>(32) or byte == cast<u8>(9);
+}
+
+fn is_line_break(byte: u8) -> bool {
+    return byte == cast<u8>(10) or byte == cast<u8>(13);
 }
 
 fn next_token_text_equals(

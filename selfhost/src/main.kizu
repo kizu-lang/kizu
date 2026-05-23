@@ -182,6 +182,9 @@ fn fmt_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     if !(try validate_file_cli_parse(allocator, io, path, file_text)) {
         return std::process::exit_code(1);
     }
+    if format::has_unsupported_line_comment(file_text) {
+        return try write_fmt_unsupported_line_comment(allocator, io);
+    }
     return try write_parse_success(allocator, io, file_text);
 }
 
@@ -190,13 +193,8 @@ fn fmt_write_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     if !(try validate_file_cli_parse(allocator, io, path, file_text)) {
         return std::process::exit_code(1);
     }
-    if source_has_line_comment(file_text) {
-        try output::error_line(
-            allocator,
-            io,
-            "error: fmt --write does not support line comments yet"
-        );
-        return std::process::exit_code(1);
+    if format::has_unsupported_line_comment(file_text) {
+        return try write_fmt_unsupported_line_comment(allocator, io);
     }
     var formatted = try format::format_source(allocator, file_text);
     let formatted_bytes = formatted.as_bytes();
@@ -205,38 +203,13 @@ fn fmt_write_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     return std::process::exit_code(0);
 }
 
-fn source_has_line_comment(source: []u8) -> bool {
-    var in_string = false;
-    var index = 0;
-    let length = std::mem::len(source);
-    while index < length {
-        let byte = source[index];
-        if in_string {
-            if byte == cast<u8>(34) {
-                in_string = false;
-            }
-            index = index + 1;
-            continue;
-        }
-        if byte == cast<u8>(34) {
-            in_string = true;
-            index = index + 1;
-            continue;
-        }
-        if byte == cast<u8>(92) and index + 1 < length and
-            source[index + 1] == cast<u8>(92) {
-            while index < length and source[index] != cast<u8>(10) {
-                index = index + 1;
-            }
-            continue;
-        }
-        if byte == cast<u8>(47) and index + 1 < length and
-            source[index + 1] == cast<u8>(47) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
+fn write_fmt_unsupported_line_comment(allocator: Allocator, io: Io) -> !i64 {
+    try output::error_line(
+        allocator,
+        io,
+        "error: fmt does not support non-leading line comments yet"
+    );
+    return std::process::exit_code(1);
 }
 
 fn validate_file_cli_parse(
