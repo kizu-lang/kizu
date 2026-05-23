@@ -229,6 +229,7 @@ exit-code
 			wantOut: "exit-code\n0\n",
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runSource,
+				selfhostArtifactStem(fixtures.runSource),
 				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
@@ -238,7 +239,7 @@ exit-code
 			wantOut: "exit-code\n0\n",
 			wantFiles: selfhostTestArtifactExpectations(
 				fixtures.expectOK,
-				"test_expect_ok",
+				selfhostArtifactStem(fixtures.expectOK),
 				"selfhost/tests/cli/test_expect_ok.kizu",
 			),
 		},
@@ -248,7 +249,7 @@ exit-code
 			wantOut: "exit-code\n0\n",
 			wantFiles: selfhostTestArtifactExpectations(
 				fixtures.expectFail,
-				"test_expect_failure",
+				selfhostArtifactStem(fixtures.expectFail),
 				"selfhost/tests/cli/test_expect_failure.kizu",
 			),
 		},
@@ -276,20 +277,22 @@ func selfhostCLIFrontendHeavyCheckCases(
 // selfhostRunArtifactExpectations returns run artifact content checks.
 func selfhostRunArtifactExpectations(
 	sourcePath string,
+	stem string,
 	rejectedSourcePath string,
 ) []selfhostCLIArtifactExpectation {
 	return []selfhostCLIArtifactExpectation{
 		{
-			path: filepath.Join("target", "selfhost", "run", "run_hello.ll"),
+			path: filepath.Join("target", "selfhost", "run", stem+".ll"),
 			contains: []string{
 				`source_filename = "` + sourcePath + `"`,
 			},
 			rejects: []string{rejectedSourcePath},
 		},
 		{
-			path: filepath.Join("target", "selfhost", "run", "run_hello.ll.meta"),
+			path: filepath.Join("target", "selfhost", "run", stem+".ll.meta"),
 			contains: []string{
 				"source " + sourcePath + "\n",
+				"output " + filepath.ToSlash(filepath.Join("target", "selfhost", "run", stem+".ll")) + "\n",
 			},
 			rejects: []string{rejectedSourcePath},
 		},
@@ -314,10 +317,17 @@ func selfhostTestArtifactExpectations(
 			path: filepath.Join("target", "selfhost", "test", stem+".ll.meta"),
 			contains: []string{
 				"source " + sourcePath + "\n",
+				"output " + filepath.ToSlash(filepath.Join("target", "selfhost", "test", stem+".ll")) + "\n",
 			},
 			rejects: []string{rejectedSourcePath},
 		},
 	}
+}
+
+// selfhostArtifactStem returns the hosted artifact stem for a source path.
+func selfhostArtifactStem(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // selfhostCLIFrontendParseFailureCases returns parse diagnostic frontend cases.

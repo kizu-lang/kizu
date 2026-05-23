@@ -1002,6 +1002,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_globals(",
 		"pub fn append_functions(",
 	},
+	"../../selfhost/src/backend/cli_artifact_path_llvm.kizu": {
+		"pub fn append_functions(",
+		"fn append_write_concat5_function(",
+		"fn append_artifact_path_function(",
+	},
 	"../../selfhost/src/backend/cli_match_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn append_cli_run_prints_hello_function(",

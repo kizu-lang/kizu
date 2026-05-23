@@ -523,21 +523,19 @@ emitting those artifacts.
 
 For #588, the first `run <file>` success and frontend-failure dispatch paths are
 source-driven. Files containing exactly the newline-terminated print-hello source
-emit the canonical `target/selfhost/run/run_hello.ll` artifact, while files
+emit `target/selfhost/run/<basename-without-extension>.ll`, while files
 containing exactly the newline-terminated `fn main() { let value = ; }` source
 return the existing parse diagnostic without emitting an artifact. The original
 and alias rows in `run-parity.tsv` prove those branches are not bound to one
-fixture path. Broader source lowering and dynamic artifact naming remain outside
+fixture path or one fixed artifact stem. Broader source lowering remains outside
 this slice.
 
 For #590, the first `test <file>` expect-ok and expect-failure dispatch paths are
-also source-driven. Files containing exactly the newline-terminated expect-ok
-source emit the canonical `target/selfhost/test/test_expect_ok.ll` artifact, and
-files containing exactly the newline-terminated expect-failure source emit the
-canonical `target/selfhost/test/test_expect_failure.ll` artifact. The original
-and alias rows in `test-parity.tsv` prove those branches are not bound to one
-fixture path. Test discovery and dynamic artifact naming remain outside this
-slice.
+also source-driven. Files containing exactly the newline-terminated expect-ok or
+expect-failure source emit
+`target/selfhost/test/<basename-without-extension>.ll`. The original and alias
+rows in `test-parity.tsv` prove those branches are not bound to one fixture path
+or one fixed artifact stem. Test discovery remains outside this slice.
 
 The first #531 parity gate may execute the emitted program/test artifact outside
 the hosted compiler process. Therefore `selfhost-abi-v0` does not add a process

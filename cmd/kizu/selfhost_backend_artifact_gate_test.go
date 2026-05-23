@@ -242,6 +242,8 @@ func requiredLLVMFragments() []string {
 		"define i1 @kizu_selfhost__slice_equal",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
 		"define %kizu.error.void @kizu_selfhost__write_concat3",
+		"define %kizu.error.void @kizu_selfhost__write_concat5",
+		"define %kizu.error.slice.u8 @kizu_selfhost__artifact_path",
 		"define i1 @kizu_selfhost__parse_format_write",
 		"define i64 @kizu_selfhost__parse_skip_comment_or_self",
 		"define i64 @kizu_selfhost__parse_missing_expr_index",
@@ -256,8 +258,11 @@ func requiredLLVMFragments() []string {
 		"define i1 @kizu_selfhost__cli_run_prints_hello",
 		"define i64 @kizu_selfhost__cli_test_expect_value",
 		"%run_hello_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
+		"%run_hello_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
+		"%test_ok_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%test_failure_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
+		"%test_failure_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"%parse_missing_assign_index = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
@@ -290,8 +295,14 @@ func forbiddenLLVMFragments() []string {
 		"%test_ok_found = call i1 @kizu_selfhost__slice_contains",
 		"%test_failure_found = call i1 @kizu_selfhost__slice_contains",
 		"target/selfhost/run/runtime.kizu",
+		"target/selfhost/run/run_hello.ll",
+		"target/selfhost/run/run_hello.ll.meta",
 		"target/selfhost/test/expectoksrc.kizu",
 		"target/selfhost/test/expectfailureabc.kizu",
+		"target/selfhost/test/test_expect_ok.ll",
+		"target/selfhost/test/test_expect_ok.ll.meta",
+		"target/selfhost/test/test_expect_failure.ll",
+		"target/selfhost/test/test_expect_failure.ll.meta",
 	}
 }
 
@@ -1233,8 +1244,8 @@ func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	}
 	return countHostedCompilerCLIArtifactSourceFailures(
 		t,
-		filepath.Join("target", "selfhost", "run", "run_hello.ll"),
-		filepath.Join("target", "selfhost", "run", "run_hello.ll.meta"),
+		filepath.Join("target", "selfhost", "run", "hosted_run_generic.ll"),
+		filepath.Join("target", "selfhost", "run", "hosted_run_generic.ll.meta"),
 		sourcePath,
 		"target/selfhost/run/runtime.kizu",
 	)
@@ -1247,7 +1258,7 @@ func countHostedCompilerCLITestFailures(t *testing.T, exePath string) int {
 		t,
 		exePath,
 		"hosted_test_ok_generic.kizu",
-		"test_expect_ok",
+		"hosted_test_ok_generic",
 		"fn main()->!void{std :: testing :: expect ( true );return;}\n",
 		"target/selfhost/test/expectoksrc.kizu",
 	)
@@ -1255,7 +1266,7 @@ func countHostedCompilerCLITestFailures(t *testing.T, exePath string) int {
 		t,
 		exePath,
 		"hosted_test_failure_generic.kizu",
-		"test_expect_failure",
+		"hosted_test_failure_generic",
 		"fn main()->!void{std :: testing :: expect ( false );return;}\n",
 		"target/selfhost/test/expectfailureabc.kizu",
 	)
@@ -1324,6 +1335,11 @@ func countHostedCompilerCLIArtifactSourceFailures(
 	expectedMeta := "source " + sourcePath + "\n"
 	if !strings.Contains(metaContent, expectedMeta) {
 		t.Errorf("hosted compiler artifact %s missing %q:\n%s", metaPath, expectedMeta, metaContent)
+		return 1
+	}
+	expectedOutput := "output " + filepath.ToSlash(llPath) + "\n"
+	if !strings.Contains(metaContent, expectedOutput) {
+		t.Errorf("hosted compiler artifact %s missing %q:\n%s", metaPath, expectedOutput, metaContent)
 		return 1
 	}
 	if strings.Contains(llContent, rejectedSourcePath) {
