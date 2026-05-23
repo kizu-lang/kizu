@@ -297,6 +297,18 @@ fn main() {
 	}
 }
 
+// TestCheckCommandAcceptsSelfhostASTPayloadFields keeps AstData payload fields typed.
+func TestCheckCommandAcceptsSelfhostASTPayloadFields(t *testing.T) {
+	path := filepath.Join("..", "..", "selfhost", "src", "ast.kizu")
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{path})
+	if runErr != nil {
+		t.Fatalf("check failed: %v\n%s", runErr, out)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+}
+
 // TestCheckPackageCommandRejectsInvalidManifestPaths avoids silent path fallback.
 func TestCheckPackageCommandRejectsInvalidManifestPaths(t *testing.T) {
 	root := t.TempDir()

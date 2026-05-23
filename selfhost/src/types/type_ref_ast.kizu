@@ -1,5 +1,6 @@
 import selfhost::source;
 import selfhost::types::model;
+import selfhost::types::package_modules;
 
 pub fn first_type_error_in_ast(
     allocator: Allocator,
@@ -9,6 +10,40 @@ pub fn first_type_error_in_ast(
     kinds: &std::map::Map<[]u8, model::TypeKind>,
     arities: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
+    var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
+    var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
+    try package_modules::collect_import_aliases_from_ast(
+        file,
+        &ast,
+        root,
+        import_alias_starts,
+        import_alias_ends
+    );
+    let summary = try first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        root,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
+    import_alias_starts.deinit();
+    import_alias_ends.deinit();
+    return summary;
+}
+
+fn first_type_error_in_ast_with_imports(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    kinds: &std::map::Map<[]u8, model::TypeKind>,
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
+) -> !model::TypeReferenceSummary {
     let node = ast.get(root);
     match node.data {
         Program(program) => return first_type_error_in_ast_range(
@@ -17,7 +52,9 @@ pub fn first_type_error_in_ast(
             ast,
             program.declarations,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         FnDecl(fn_decl) => return first_type_error_in_fn_ast(
             allocator,
@@ -27,7 +64,9 @@ pub fn first_type_error_in_ast(
             fn_decl.return_type,
             fn_decl.body,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         StructDecl(struct_decl) => return first_type_error_in_ast_range(
             allocator,
@@ -35,7 +74,9 @@ pub fn first_type_error_in_ast(
             ast,
             struct_decl.fields,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         UnionDecl(union_decl) => return first_type_error_in_ast_range(
             allocator,
@@ -43,7 +84,9 @@ pub fn first_type_error_in_ast(
             ast,
             union_decl.variants,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         Param(param_node) => return first_type_error_in_type_node_ast(
             allocator,
@@ -51,7 +94,9 @@ pub fn first_type_error_in_ast(
             ast,
             param_node.type_node,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         Field(field_node) => return first_type_error_in_type_node_ast(
             allocator,
@@ -59,7 +104,9 @@ pub fn first_type_error_in_ast(
             ast,
             field_node.type_node,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         UnionVariant(union_variant) => return first_type_error_in_type_node_ast(
             allocator,
@@ -67,7 +114,9 @@ pub fn first_type_error_in_ast(
             ast,
             union_variant.payload,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         Block(block) => return first_type_error_in_ast_range(
             allocator,
@@ -75,15 +124,19 @@ pub fn first_type_error_in_ast(
             ast,
             block.statements,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        Let(let_node) => return first_type_error_in_ast(
+        Let(let_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             let_node.value,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         Assign(assign_node) => return first_type_error_in_two_ast(
             allocator,
@@ -92,31 +145,39 @@ pub fn first_type_error_in_ast(
             assign_node.target,
             assign_node.value,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        Return(return_node) => return first_type_error_in_ast(
+        Return(return_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             return_node.value,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        Defer(defer_node) => return first_type_error_in_ast(
+        Defer(defer_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             defer_node.expr,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        ExprStmt(expr_stmt) => return first_type_error_in_ast(
+        ExprStmt(expr_stmt) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             expr_stmt.expr,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         If(if_node) => return first_type_error_in_three_ast(
             allocator,
@@ -126,7 +187,9 @@ pub fn first_type_error_in_ast(
             if_node.then_block,
             if_node.else_block,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         While(while_node) => return first_type_error_in_two_ast(
             allocator,
@@ -135,7 +198,9 @@ pub fn first_type_error_in_ast(
             while_node.condition,
             while_node.body,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         For(for_node) => return first_type_error_in_three_ast(
             allocator,
@@ -145,7 +210,9 @@ pub fn first_type_error_in_ast(
             for_node.end,
             for_node.body,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         Match(match_node) => return first_type_error_in_node_and_range_ast(
             allocator,
@@ -154,7 +221,9 @@ pub fn first_type_error_in_ast(
             match_node.value,
             match_node.arms,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         MatchArm(match_arm) => return first_type_error_in_three_ast(
             allocator,
@@ -164,15 +233,19 @@ pub fn first_type_error_in_ast(
             match_arm.binding,
             match_arm.body,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        Unsafe(unsafe_node) => return first_type_error_in_ast(
+        Unsafe(unsafe_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             unsafe_node.body,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         ComptimeIf(comptime_if_node) => return first_type_error_in_three_ast(
             allocator,
@@ -182,15 +255,19 @@ pub fn first_type_error_in_ast(
             comptime_if_node.then_block,
             comptime_if_node.else_block,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        Prefix(prefix_node) => return first_type_error_in_ast(
+        Prefix(prefix_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             prefix_node.right,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         Binary(binary) => return first_type_error_in_two_ast(
             allocator,
@@ -199,7 +276,9 @@ pub fn first_type_error_in_ast(
             binary.left,
             binary.right,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         FieldExpr(field_expr_node) => return first_type_error_in_two_ast(
             allocator,
@@ -208,15 +287,19 @@ pub fn first_type_error_in_ast(
             field_expr_node.receiver,
             field_expr_node.name,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        DerefExpr(deref_expr_node) => return first_type_error_in_ast(
+        DerefExpr(deref_expr_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             deref_expr_node.receiver,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         Call(call_node) => return first_type_error_in_node_and_range_ast(
             allocator,
@@ -225,7 +308,9 @@ pub fn first_type_error_in_ast(
             call_node.callee,
             call_node.args,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         TypeApplyExpr(type_apply) => return first_type_error_in_type_apply_ast(
             allocator,
@@ -234,7 +319,9 @@ pub fn first_type_error_in_ast(
             type_apply.callee,
             type_apply.type_args,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         CastExpr(cast_expr) => return first_type_error_in_cast_ast(
             allocator,
@@ -243,7 +330,9 @@ pub fn first_type_error_in_ast(
             cast_expr.type_node,
             cast_expr.value,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         IndexExpr(index_expr) => return first_type_error_in_three_ast(
             allocator,
@@ -253,7 +342,9 @@ pub fn first_type_error_in_ast(
             index_expr.start,
             index_expr.end,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         StructLiteralExpr(struct_literal) => return first_type_error_in_struct_literal_ast(
             allocator,
@@ -262,15 +353,19 @@ pub fn first_type_error_in_ast(
             struct_literal.type_name,
             struct_literal.fields,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        StructFieldInit(struct_field_init) => return first_type_error_in_ast(
+        StructFieldInit(struct_field_init) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             struct_field_init.value,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         ArenaNewExpr(arena_new) => return first_type_error_in_cast_ast(
             allocator,
@@ -279,23 +374,29 @@ pub fn first_type_error_in_ast(
             arena_new.type_node,
             arena_new.allocator,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        TryExpr(try_expr_node) => return first_type_error_in_ast(
+        TryExpr(try_expr_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             try_expr_node.value,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
-        ComptimeExpr(comptime_expr_node) => return first_type_error_in_ast(
+        ComptimeExpr(comptime_expr_node) => return first_type_error_in_ast_with_imports(
             allocator,
             file,
             ast,
             comptime_expr_node.value,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
         _ => return no_type_reference_error();,
     }
@@ -308,12 +409,23 @@ fn first_type_error_in_ast_range(
     ast: std::kizu::ast::Ast,
     range: std::kizu::ast::ChildRange,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
     var index = 0;
     while index < range.len {
         let child = try ast.child_at(range, index);
-        let found = try first_type_error_in_ast(allocator, file, ast, child, kinds, arities);
+        let found = try first_type_error_in_ast_with_imports(
+            allocator,
+            file,
+            ast,
+            child,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );
         if found.found {
             return found;
         }
@@ -330,17 +442,46 @@ fn first_type_error_in_fn_ast(
     return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
-    let param_error = try first_type_error_in_ast_range(allocator, file, ast, params, kinds, arities);
+    let param_error = try first_type_error_in_ast_range(
+        allocator,
+        file,
+        ast,
+        params,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if param_error.found {
         return param_error;
     }
-    let return_error = try first_type_error_in_type_node_ast(allocator, file, ast, return_type, kinds, arities);
+    let return_error = try first_type_error_in_type_node_ast(
+        allocator,
+        file,
+        ast,
+        return_type,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if return_error.found {
         return return_error;
     }
-    return first_type_error_in_ast(allocator, file, ast, body, kinds, arities);
+    return first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        body,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
 }
 
 fn first_type_error_in_two_ast(
@@ -350,13 +491,33 @@ fn first_type_error_in_two_ast(
     first: std::kizu::ast::NodeId,
     second: std::kizu::ast::NodeId,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
-    let first_error = try first_type_error_in_ast(allocator, file, ast, first, kinds, arities);
+    let first_error = try first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        first,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if first_error.found {
         return first_error;
     }
-    return first_type_error_in_ast(allocator, file, ast, second, kinds, arities);
+    return first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        second,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
 }
 
 fn first_type_error_in_three_ast(
@@ -367,17 +528,46 @@ fn first_type_error_in_three_ast(
     second: std::kizu::ast::NodeId,
     third: std::kizu::ast::NodeId,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
-    let first_error = try first_type_error_in_ast(allocator, file, ast, first, kinds, arities);
+    let first_error = try first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        first,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if first_error.found {
         return first_error;
     }
-    let second_error = try first_type_error_in_ast(allocator, file, ast, second, kinds, arities);
+    let second_error = try first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        second,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if second_error.found {
         return second_error;
     }
-    return first_type_error_in_ast(allocator, file, ast, third, kinds, arities);
+    return first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        third,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
 }
 
 fn first_type_error_in_node_and_range_ast(
@@ -387,13 +577,33 @@ fn first_type_error_in_node_and_range_ast(
     node_id: std::kizu::ast::NodeId,
     range: std::kizu::ast::ChildRange,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
-    let node_error = try first_type_error_in_ast(allocator, file, ast, node_id, kinds, arities);
+    let node_error = try first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        node_id,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if node_error.found {
         return node_error;
     }
-    return first_type_error_in_ast_range(allocator, file, ast, range, kinds, arities);
+    return first_type_error_in_ast_range(
+        allocator,
+        file,
+        ast,
+        range,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
 }
 
 fn first_type_error_in_cast_ast(
@@ -403,13 +613,33 @@ fn first_type_error_in_cast_ast(
     type_node: std::kizu::ast::NodeId,
     value: std::kizu::ast::NodeId,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
-    let type_error = try first_type_error_in_type_node_ast(allocator, file, ast, type_node, kinds, arities);
+    let type_error = try first_type_error_in_type_node_ast(
+        allocator,
+        file,
+        ast,
+        type_node,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if type_error.found {
         return type_error;
     }
-    return first_type_error_in_ast(allocator, file, ast, value, kinds, arities);
+    return first_type_error_in_ast_with_imports(
+        allocator,
+        file,
+        ast,
+        value,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
 }
 
 fn first_type_error_in_struct_literal_ast(
@@ -419,13 +649,33 @@ fn first_type_error_in_struct_literal_ast(
     type_name: std::kizu::ast::NodeId,
     fields: std::kizu::ast::ChildRange,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
-    let type_error = try first_type_error_in_type_node_ast(allocator, file, ast, type_name, kinds, arities);
+    let type_error = try first_type_error_in_type_node_ast(
+        allocator,
+        file,
+        ast,
+        type_name,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
     if type_error.found {
         return type_error;
     }
-    return first_type_error_in_ast_range(allocator, file, ast, fields, kinds, arities);
+    return first_type_error_in_ast_range(
+        allocator,
+        file,
+        ast,
+        fields,
+        kinds,
+        arities,
+        import_alias_starts,
+        import_alias_ends
+    );
 }
 
 fn first_type_error_in_type_apply_ast(
@@ -435,11 +685,22 @@ fn first_type_error_in_type_apply_ast(
     callee: std::kizu::ast::NodeId,
     type_args: std::kizu::ast::ChildRange,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
     let callee_text = ast_node_text(file, ast, callee);
     if is_generic_constructor_name(callee_text) {
-        return first_type_error_in_type_range_ast(allocator, file, ast, type_args, kinds, arities);
+        return first_type_error_in_type_range_ast(
+            allocator,
+            file,
+            ast,
+            type_args,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );
     }
     return no_type_reference_error();
 }
@@ -450,12 +711,23 @@ fn first_type_error_in_type_range_ast(
     ast: std::kizu::ast::Ast,
     range: std::kizu::ast::ChildRange,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
     var index = 0;
     while index < range.len {
         let child = try ast.child_at(range, index);
-        let found = try first_type_error_in_type_node_ast(allocator, file, ast, child, kinds, arities);
+        let found = try first_type_error_in_type_node_ast(
+            allocator,
+            file,
+            ast,
+            child,
+            kinds,
+            arities,
+            import_alias_starts,
+            import_alias_ends
+        );
         if found.found {
             return found;
         }
@@ -470,7 +742,9 @@ fn first_type_error_in_type_node_ast(
     ast: std::kizu::ast::Ast,
     type_node: std::kizu::ast::NodeId,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
     let node = ast.get(type_node);
     match node.data {
@@ -481,7 +755,9 @@ fn first_type_error_in_type_node_ast(
             file.text[node.span.start..node.span.end],
             node.span.start,
             kinds,
-            arities
+            arities,
+            import_alias_starts,
+            import_alias_ends
         );,
     }
     return no_type_reference_error();
@@ -493,7 +769,9 @@ fn first_type_error_in_type_text(
     text: []u8,
     absolute_start: i64,
     kinds: &std::map::Map<[]u8, model::TypeKind>,
-    arities: &std::map::Map<[]u8, i64>
+    arities: &std::map::Map<[]u8, i64>,
+    import_alias_starts: &std::map::Map<[]u8, i64>,
+    import_alias_ends: &std::map::Map<[]u8, i64>
 ) -> !model::TypeReferenceSummary {
     var index = 0;
     while index < std::mem::len(text) {
@@ -503,7 +781,7 @@ fn first_type_error_in_type_text(
             let end = type_path_end_in_text(text, index);
             let name = text[start..end];
             if !should_ignore_type_name(name) {
-                let found = try type_error_for_name_text(
+                let found = try type_error_for_name_text_with_imports(
                     allocator,
                     file,
                     kinds,
@@ -512,7 +790,9 @@ fn first_type_error_in_type_text(
                     text,
                     end,
                     absolute_start + start,
-                    absolute_start + end
+                    absolute_start + end,
+                    import_alias_starts,
+                    import_alias_ends
                 );
                 if found.found {
                     return found;

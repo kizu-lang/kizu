@@ -281,6 +281,10 @@ func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 		t,
 		checker,
 		"pub fn first_pre_move_check_diagnostic_ast_node(",
+	) + selfhostKizuFunctionBody(
+		t,
+		checker,
+		"pub fn first_pre_move_check_diagnostic_ast_node_with_types(",
 	)
 	if !strings.Contains(preASTBody, "type_ref_ast::first_type_error_in_ast(") {
 		t.Fatal("pre-move AST diagnostic entry does not use AST type reference diagnostics")
@@ -620,7 +624,8 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 // selfhostFastDiagnosticsCoreBody extracts the shared parsed-AST diagnostic core.
 func selfhostFastDiagnosticsCoreBody(t *testing.T, content string) string {
 	t.Helper()
-	return selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_arities(")
+	return selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_arities(") +
+		selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_context(")
 }
 
 // TestSelfhostCheckEntrySharesDiagnosticPasses keeps per-file checks grouped by phase.
@@ -667,9 +672,9 @@ func assertSelfhostFastDiagnosticsASTNode(t *testing.T, wrapperBody string, astB
 	t.Helper()
 	required := []string{
 		"resolver::first_duplicate_declaration_ast_node(",
-		"types::first_pre_move_check_diagnostic_ast_node(",
+		"types::first_pre_move_check_diagnostic_ast_node_with_types(",
 		"types::first_post_move_check_diagnostic_ast_node(",
-		"ownership::first_use_after_move_name_ast_node(",
+		"ownership::first_use_after_move_name_ast_node_with_borrow_params(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(astBody, fragment) {
@@ -1202,6 +1207,13 @@ func TestSelfhostPackageSourceLoaderUsesManifestPaths(t *testing.T) {
 // TestSelfhostPackageFastDiagnosticsReuseParsedAST rejects package call reparse loops.
 func TestSelfhostPackageFastDiagnosticsReuseParsedAST(t *testing.T) {
 	content := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	packageBody := selfhostKizuFunctionBody(t, content, "pub fn package_cli(")
+	if !strings.Contains(packageBody, "package_fast_diagnostics(") {
+		t.Fatal("package check CLI does not run parsed-AST fast diagnostics")
+	}
+	if strings.Contains(packageBody, "package_diagnostics_loaded(") {
+		t.Fatal("package check CLI reruns full package diagnostics after fast diagnostics")
+	}
 	body := selfhostKizuFunctionBody(t, content, "fn package_fast_diagnostics(")
 	required := []string{
 		"parse_package_fast_diagnostic_sources(",
