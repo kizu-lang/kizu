@@ -83,6 +83,47 @@ func TestParseCommandPropagatesSelfhostExitCode(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	out, runErr := runDispatchCaptureStderr(t, "parse", []string{path})
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	want := "error: expected expression, got ; at 1:21\nerror: parse failed\n"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestCheckPackageCommandReportsSelfhostDiagnostic keeps package diagnostics detailed.
+func TestCheckPackageCommandReportsSelfhostDiagnostic(t *testing.T) {
+	root := t.TempDir()
+	manifest := []byte("[package]\nname = \"app\"\n")
+	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(root, "src")
+	if err := os.Mkdir(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := "fn main() {\n    missing();\n}\n"
+	if err := os.WriteFile(filepath.Join(srcDir, "main.kizu"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{root})
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	want := "error: unknown function `missing`\nerror: check failed\n"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// runDispatchCaptureStderr runs dispatch with process-global stderr captured.
+func runDispatchCaptureStderr(t *testing.T, command string, args []string) (string, error) {
+	t.Helper()
 	oldStderr := os.Stderr
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -96,7 +137,7 @@ func TestParseCommandPropagatesSelfhostExitCode(t *testing.T) {
 		defer func() {
 			os.Stderr = oldStderr
 		}()
-		return dispatch("parse", []string{path})
+		return dispatch(command, args)
 	}()
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
@@ -105,15 +146,7 @@ func TestParseCommandPropagatesSelfhostExitCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	var status exitStatus
-	if !errors.As(runErr, &status) || status.code != 1 {
-		t.Fatalf("got error %v, want exit status 1", runErr)
-	}
-	want := "error: expected expression, got ; at 1:21\nerror: parse failed\n"
-	if string(out) != want {
-		t.Fatalf("got %q, want %q", out, want)
-	}
+	return string(out), runErr
 }
 
 // TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
