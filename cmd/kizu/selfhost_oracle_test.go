@@ -46,6 +46,7 @@ func TestSelfhostOracleRunner(t *testing.T) {
 		timedSelfhostOracle(t, "lexer-production", runSelfhostLexerProductionOracle),
 		timedSelfhostOracle(t, "parser-production", runSelfhostParserProductionOracle),
 		timedSelfhostOracle(t, "source", runSelfhostSourceOracle),
+		timedSelfhostOracle(t, "format", runSelfhostFormatOracle),
 	}
 	pipelineStart := time.Now()
 	results = append(results, runSelfhostPipelineOracle(t)...)
@@ -113,6 +114,19 @@ func runSelfhostSourceOracle(t *testing.T) selfhostOracleResult {
 		corpus:    "selfhost",
 		scanned:   4,
 		compared:  4,
+		failures:  failures,
+	}
+}
+
+// runSelfhostFormatOracle checks the Kizu-owned formatter component gate.
+func runSelfhostFormatOracle(t *testing.T) selfhostOracleResult {
+	t.Helper()
+	failures := countSelfhostFormatGateFailures(t)
+	return selfhostOracleResult{
+		component: "format",
+		corpus:    "selfhost",
+		scanned:   1,
+		compared:  1,
 		failures:  failures,
 	}
 }
