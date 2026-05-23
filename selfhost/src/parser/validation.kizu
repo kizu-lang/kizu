@@ -371,7 +371,7 @@ fn validate_aggregate_decl_header(
     if require_field_type {
         return try validate_aggregate_field_separators(source, tokens, open_index);
     }
-    return valid_parse_validation();
+    return try validate_aggregate_item_separators(source, tokens, open_index);
 }
 
 fn validate_aggregate_body_start(
@@ -534,6 +534,62 @@ fn skip_aggregate_field_type(
     index: i64
 ) -> !i64 {
     return try skip_type_list_separator_index(tokens, index, 2);
+}
+
+fn validate_aggregate_item_separators(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64
+) -> !ParseValidation {
+    var cursor = open_index + 1;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if is_right_brace_token(token) {
+            return valid_parse_validation();
+        }
+        var name_index = cursor;
+        if is_pub_token(token) {
+            name_index = cursor + 1;
+        }
+        let name = try tokens.get(name_index);
+        if !is_ident_token(name) {
+            return invalid_parse_validation(
+                "expected identifier",
+                name.line,
+                name.column,
+                token_text(source, name)
+            );
+        }
+        cursor = name_index + 1;
+        if cursor >= tokens.len() {
+            let eof = try tokens.get(tokens.len() - 1);
+            return invalid_parse_validation("expected right brace", eof.line, eof.column, "");
+        }
+        let payload_start = try tokens.get(cursor);
+        if is_left_paren_token(payload_start) {
+            cursor = try skip_balanced_parens(tokens, cursor);
+        }
+        if cursor >= tokens.len() {
+            let eof = try tokens.get(tokens.len() - 1);
+            return invalid_parse_validation("expected right brace", eof.line, eof.column, "");
+        }
+        let separator = try tokens.get(cursor);
+        if is_comma_token(separator) {
+            cursor = cursor + 1;
+        } else {
+            if is_right_brace_token(separator) {
+                return valid_parse_validation();
+            }
+            return invalid_parse_validation(
+                "expected comma or right brace",
+                separator.line,
+                separator.column,
+                token_text(source, separator)
+            );
+        }
+    }
+    let eof = try tokens.get(tokens.len() - 1);
+    return invalid_parse_validation("expected right brace", eof.line, eof.column, "");
 }
 
 fn validate_fn_decl_header(
