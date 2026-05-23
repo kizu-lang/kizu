@@ -10,15 +10,23 @@ import selfhost::types::model;
 
 pub fn file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
-    if !(try fast_diagnostics(allocator, io, path, file_text)) {
-        return std::process::exit_code(1);
+    let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
+    if !parsed_validation.ok {
+        return try write_parse_failure_exit(allocator, io, parsed_validation);
     }
 
     var files = try source::load_file_sources(allocator, io, path, file_text);
+    defer files.deinit();
+    let file = try files.at(0);
+    let parsed = try parser::parse_checked_file(allocator, path, file_text);
+    defer parsed.deinit();
+    if !(try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
+        return std::process::exit_code(1);
+    }
+
     let resolved = try resolver::resolve_sources(allocator, files);
     let typed = try types::check_sources(allocator, files, resolved);
     let checked = try ownership::check_package(allocator, files, typed);
-    files.deinit();
 
     if checked.diagnostics != 0 {
         try output::error_line(allocator, io, "error: check failed");
@@ -38,21 +46,19 @@ pub fn fast_diagnostics(
     if !parsed_validation.ok {
         return try write_parse_failure(allocator, io, parsed_validation);
     }
-    let file = source::SourceFile {
-        id: 0,
-        kind: source::SourceKind::User,
-        path: path,
-        text: file_text
-    };
+    var files = try source::load_file_sources(allocator, io, path, file_text);
+    defer files.deinit();
+    let file = try files.at(0);
     let parsed = try parser::parse_checked_file(allocator, path, file_text);
     defer parsed.deinit();
 
-    return try fast_diagnostics_ast_node(allocator, io, &file, parsed.ast, parsed.root);
+    return try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root);
 }
 
 pub fn fast_diagnostics_ast_node(
     allocator: Allocator,
     io: Io,
+    files: &std::array::Array<source::SourceFile>,
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId
@@ -101,6 +107,7 @@ pub fn fast_diagnostics_ast_node(
     if !(try write_package_function_call_diagnostic(
         allocator,
         io,
+        files,
         file,
         &ast,
         root
@@ -117,6 +124,15 @@ fn write_parse_failure(
 ) -> !bool {
     try diagnostics::parse_validation_error(allocator, io, parsed_validation);
     return false;
+}
+
+fn write_parse_failure_exit(
+    allocator: Allocator,
+    io: Io,
+    parsed_validation: validation::ParseValidation
+) -> !i64 {
+    try diagnostics::parse_validation_error(allocator, io, parsed_validation);
+    return std::process::exit_code(1);
 }
 
 fn write_check_diagnostic(
@@ -223,12 +239,11 @@ fn write_check_type_reference_diagnostic(
 fn write_package_function_call_diagnostic(
     allocator: Allocator,
     io: Io,
+    files: &std::array::Array<source::SourceFile>,
     file: &source::SourceFile,
     ast: &std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId
 ) -> !bool {
-    var files = try source::load_file_sources(allocator, io, file.path, file.text);
-    defer files.deinit();
     let call_error = try types::first_package_function_call_error_ast_node(
         allocator,
         files,
