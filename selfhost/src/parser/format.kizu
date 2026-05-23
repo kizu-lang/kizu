@@ -1,28 +1,40 @@
 import selfhost::lexer;
 
+struct CommentFormatState {
+    last: u8,
+    at_line_start: bool,
+}
+
 pub fn format_source(
     allocator: Allocator,
     source: []u8
 ) -> !std::string::String {
-    let prefix_end = leading_comment_prefix_end(source);
-    let body = source[prefix_end..std::mem::len(source)];
-    var format_tokens = try lexer::tokenize(allocator, body);
+    var format_tokens = try lexer::tokenize(allocator, source);
     var out = std::string::String(allocator);
-    if prefix_end > 0 {
-        try out.append_bytes(source[0..prefix_end]);
-    }
     var index = 0;
+    var cursor = 0;
     var depth = 0;
     var previous = "";
     var last = cast<u8>(0);
     var at_line_start = true;
     while index < format_tokens.len() {
         let token = try format_tokens.get(index);
+        let state = try append_preserved_line_comments(
+            out,
+            source,
+            cursor,
+            token.start,
+            depth,
+            last,
+            at_line_start
+        );
+        last = state.last;
+        at_line_start = state.at_line_start;
         if lexer::is_eof(token) {
             index = format_tokens.len();
         } else {
-            let text = token_text(body, token);
-            let trailing_comma = try is_trailing_comma(body, &format_tokens, index, text);
+            let text = token_text(source, token);
+            let trailing_comma = try is_trailing_comma(source, &format_tokens, index, text);
             if !trailing_comma {
                 if std::mem::equal_bytes(text, "}") {
                     if depth > 0 {
@@ -40,14 +52,15 @@ pub fn format_source(
                     last = last_byte(text);
                     previous = text;
                     at_line_start = false;
-                    let wants_newline = try rbrace_wants_newline(body, &format_tokens, index);
+                    let wants_newline = try rbrace_wants_newline(source, &format_tokens, index);
                     if wants_newline {
                         try out.append_byte(cast<u8>(10));
                         last = cast<u8>(10);
                         at_line_start = true;
                     }
                 } else {
-                    if depth == 0 and out.len() > 0 and starts_new_top_level_decl(previous, text) {
+                    if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 and
+                        starts_new_top_level_decl(previous, text) {
                         if !at_line_start {
                             try out.append_byte(cast<u8>(10));
                             last = cast<u8>(10);
@@ -72,7 +85,7 @@ pub fn format_source(
                     previous = text;
                     if std::mem::equal_bytes(text, "{") {
                         depth = depth + 1;
-                        if !(try next_token_text_equals(body, &format_tokens, index, "}")) {
+                        if !(try next_token_text_equals(source, &format_tokens, index, "}")) {
                             try out.append_byte(cast<u8>(10));
                             last = cast<u8>(10);
                             at_line_start = true;
@@ -85,6 +98,7 @@ pub fn format_source(
                     }
                 }
             }
+            cursor = token.end;
             index = index + 1;
         }
     }
@@ -93,8 +107,7 @@ pub fn format_source(
 }
 
 pub fn has_unsupported_line_comment(source: []u8) -> bool {
-    let prefix_end = leading_comment_prefix_end(source);
-    return has_line_comment_after(source, prefix_end);
+    return has_unsupported_line_comment_after(source, 0);
 }
 
 fn token_text(
@@ -104,43 +117,43 @@ fn token_text(
     return source[token.start..token.end];
 }
 
-fn leading_comment_prefix_end(source: []u8) -> i64 {
-    var index = 0;
-    let length = std::mem::len(source);
-    var seen_comment = false;
-    while index < length {
-        var cursor = index;
-        while cursor < length and is_horizontal_space(source[cursor]) {
-            cursor = cursor + 1;
-        }
-        if cursor >= length {
-            if seen_comment {
-                return length;
+fn append_preserved_line_comments(
+    out: &var std::string::String,
+    source: []u8,
+    start: i64,
+    end: i64,
+    depth: i64,
+    last: u8,
+    at_line_start: bool
+) -> !CommentFormatState {
+    var current_last = last;
+    var current_at_line_start = at_line_start;
+    var index = start;
+    while index < end {
+        if index + 1 < end and source[index] == cast<u8>(47) and
+            source[index + 1] == cast<u8>(47) and
+            line_comment_is_full_line(source, index) {
+            if !current_at_line_start {
+                try out.append_byte(cast<u8>(10));
             }
-            return 0;
+            try append_indent(out, depth);
+            let comment_end = line_end_excluding_break(source, index + 2);
+            try out.append_bytes(source[index..comment_end]);
+            try out.append_byte(cast<u8>(10));
+            current_last = cast<u8>(10);
+            current_at_line_start = true;
+            index = line_end_including_break(source, index + 2);
+        } else {
+            index = index + 1;
         }
-        if is_line_break(source[cursor]) {
-            index = after_line_break(source, cursor);
-            continue;
-        }
-        if cursor + 1 < length and source[cursor] == cast<u8>(47) and
-            source[cursor + 1] == cast<u8>(47) {
-            seen_comment = true;
-            index = line_end_including_break(source, cursor + 2);
-            continue;
-        }
-        if seen_comment {
-            return index;
-        }
-        return 0;
     }
-    if seen_comment {
-        return index;
-    }
-    return 0;
+    return CommentFormatState {
+        last: current_last,
+        at_line_start: current_at_line_start
+    };
 }
 
-fn has_line_comment_after(source: []u8, start: i64) -> bool {
+fn has_unsupported_line_comment_after(source: []u8, start: i64) -> bool {
     var index = start;
     let length = std::mem::len(source);
     var in_string = false;
@@ -164,11 +177,39 @@ fn has_line_comment_after(source: []u8, start: i64) -> bool {
         }
         if byte == cast<u8>(47) and index + 1 < length and
             source[index + 1] == cast<u8>(47) {
-            return true;
+            if !line_comment_is_full_line(source, index) {
+                return true;
+            }
+            index = line_end_including_break(source, index + 2);
+            continue;
         }
         index = index + 1;
     }
     return false;
+}
+
+fn line_comment_is_full_line(source: []u8, comment_start: i64) -> bool {
+    var index = comment_start;
+    while index > 0 {
+        let previous = index - 1;
+        if is_line_break(source[previous]) {
+            return true;
+        }
+        if !is_horizontal_space(source[previous]) {
+            return false;
+        }
+        index = previous;
+    }
+    return true;
+}
+
+fn line_end_excluding_break(source: []u8, start: i64) -> i64 {
+    var index = start;
+    let length = std::mem::len(source);
+    while index < length and !is_line_break(source[index]) {
+        index = index + 1;
+    }
+    return index;
 }
 
 fn line_end_including_break(source: []u8, start: i64) -> i64 {

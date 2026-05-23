@@ -472,6 +472,24 @@ func TestFmtCommandPreservesLeadingLineComments(t *testing.T) {
 	}
 }
 
+// TestFmtCommandPreservesBlockLineComments keeps non-leading full-line comments.
+func TestFmtCommandPreservesBlockLineComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "block-comment.kizu")
+	src := "fn main(){\n    // keep this comment\n    print(\"hello, kizu\");\n}\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "fmt", path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "fn main() {\n    // keep this comment\n    print(\"hello, kizu\");\n}\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestFmtCommandRejectsInvalidSyntax checks fmt reports parser failures through selfhost.
 func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.kizu")
