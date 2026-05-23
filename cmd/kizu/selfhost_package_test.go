@@ -235,6 +235,51 @@ func TestSelfhostFunctionSignaturesUseParsedAST(t *testing.T) {
 	}
 }
 
+// TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST keeps the AST check entry parsed.
+func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
+	typeRefs := readSelfhostFile(t, "../../selfhost/src/types/type_ref_ast.kizu")
+	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
+	requiredTypeRefs := []string{
+		"pub fn first_type_error_in_ast(",
+		"fn first_type_error_in_type_node_ast(",
+		"fn first_type_error_in_type_text(",
+		"fn observed_type_arity_text(",
+	}
+	for _, fragment := range requiredTypeRefs {
+		if !strings.Contains(typeRefs, fragment) {
+			t.Fatalf("selfhost type reference AST diagnostic missing %q", fragment)
+		}
+	}
+	forbiddenTypeRefs := []string{
+		"pub fn first_type_error_in_file(",
+		"fn first_type_error_in_range(",
+		"fn first_type_error_in_arguments(",
+		"fn type_error_at(",
+	}
+	for _, fragment := range forbiddenTypeRefs {
+		if strings.Contains(typeRefs, fragment) {
+			t.Fatalf("selfhost type reference diagnostics keep token path %q", fragment)
+		}
+	}
+	preASTBody := selfhostKizuFunctionBody(
+		t,
+		checker,
+		"pub fn first_pre_move_check_diagnostic_ast_node(",
+	)
+	if !strings.Contains(preASTBody, "type_ref_ast::first_type_error_in_ast(") {
+		t.Fatal("pre-move AST diagnostic entry does not use AST type reference diagnostics")
+	}
+	forbiddenChecker := []string{
+		"lexer::tokenize(allocator, file.text)",
+		"type_refs::first_type_error_in_file(",
+	}
+	for _, fragment := range forbiddenChecker {
+		if strings.Contains(preASTBody, fragment) {
+			t.Fatalf("pre-move AST diagnostic entry keeps token type reference path %q", fragment)
+		}
+	}
+}
+
 // TestSelfhostPackageCallDiagnosticsBorrowAST keeps target parsing single-pass.
 func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
@@ -716,7 +761,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/types/type_refs.kizu": {
 		"pub fn check_file_type_references(",
-		"pub fn first_type_error_in_file(",
+		"pub fn collect_declared_types_from_ast(",
+	},
+	"../../selfhost/src/types/type_ref_ast.kizu": {
+		"pub fn first_type_error_in_ast(",
+		"fn first_type_error_in_type_node_ast(",
 	},
 	"../../selfhost/src/ownership/data.kizu": {
 		"pub enum ResourceKind",
