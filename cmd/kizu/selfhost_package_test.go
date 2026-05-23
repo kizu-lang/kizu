@@ -472,7 +472,7 @@ func TestSelfhostTypeLocalsUseParsedAST(t *testing.T) {
 		"try collect_param_local(file, ast, child, local_types, local_mutability);",
 		"collect_statement_locals_from_node(",
 		"collect_let_statement_local(",
-		"let type_name = try infer_expression_type(",
+		"let type_name = try expression_infer::infer_expression_type(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
@@ -506,7 +506,7 @@ func TestSelfhostArgumentTypesUseParsedParams(t *testing.T) {
 		"collect_function_param_node_type(",
 		"std::array::Array<FunctionParamType>",
 		"lookup_function_param_type(",
-		"ast_return_type_text(file, ast, type_node)",
+		"ast_text::ast_return_type_text(file, ast, type_node)",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
@@ -525,7 +525,7 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 	required := []string{
 		"collect_function_returns_from_ast(",
 		"FnDecl(fn_decl) => return collect_function_return(",
-		"ast_return_type_text(file, ast, return_type)",
+		"ast_text::ast_return_type_text(file, ast, return_type)",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
@@ -865,28 +865,28 @@ func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
 
 // TestSelfhostTypeCheckerNormalizesBorrowProvenance keeps borrowed returns type-owned.
 func TestSelfhostTypeCheckerNormalizesBorrowProvenance(t *testing.T) {
-	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
+	expressionInfer := readSelfhostFile(t, "../../selfhost/src/types/expression_infer.kizu")
 	required := []string{
 		"fn value_type_text(type_name: []u8) -> []u8",
 		"let marker = \" borrows \";",
 		"let expected_type = value_type_text(expected);",
 		"let actual_type = value_type_text(actual);",
-		"fn type_text_has_error_marker(type_name: []u8) -> bool",
+		"pub fn type_text_has_error_marker(type_name: []u8) -> bool",
 		"std::mem::equal_bytes(value_type_text(type_name), \"[]u8\")",
 	}
 	for _, fragment := range required {
-		if !strings.Contains(checker, fragment) {
+		if !strings.Contains(expressionInfer, fragment) {
 			t.Fatalf("selfhost type checker borrow provenance normalization missing %q", fragment)
 		}
 	}
-	if strings.Contains(checker, "debug-") {
+	if strings.Contains(expressionInfer, "debug-") {
 		t.Fatal("selfhost type checker keeps temporary debug output")
 	}
-	if strings.Contains(checker, "fn bytes_contains(") ||
-		strings.Contains(checker, "bytes_contains(") {
+	if strings.Contains(expressionInfer, "fn bytes_contains(") ||
+		strings.Contains(expressionInfer, "bytes_contains(") {
 		t.Fatal("selfhost type checker keeps generic byte contains helper")
 	}
-	body := selfhostKizuFunctionBody(t, checker, "fn known_type_mismatch(")
+	body := selfhostKizuFunctionBody(t, expressionInfer, "pub fn known_type_mismatch(")
 	if !strings.Contains(body, "type_text_has_error_marker(actual_type)") {
 		t.Fatal("selfhost type mismatch comparison does not use closed error-marker predicate")
 	}
@@ -917,6 +917,16 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/types/checker.kizu": {
 		"pub fn check_sources(",
 		"pub fn first_pre_move_check_diagnostic_ast_node(",
+	},
+	"../../selfhost/src/types/ast_text.kizu": {
+		"pub fn ast_node_text(",
+		"pub fn ast_return_type_text(",
+		"pub fn is_qualified_name(",
+	},
+	"../../selfhost/src/types/expression_infer.kizu": {
+		"pub fn infer_expression_type(",
+		"pub fn known_type_mismatch(",
+		"fn field_expression_type(",
 	},
 	"../../selfhost/src/types/function_calls.kizu": {
 		"pub fn first_package_function_call_error_ast_node(",

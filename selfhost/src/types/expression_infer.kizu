@@ -1,0 +1,868 @@
+import selfhost::source;
+import selfhost::types::ast_text;
+import selfhost::types::function_calls;
+
+pub fn infer_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        Int(int_node) => return "i64";,
+        String(string_node) => return "[]u8";,
+        Bool(bool_node) => return "bool";,
+        Empty => return "void";,
+        Var(var_node) => return infer_var_expression_type(file, ast, node_id, local_types);,
+        Binary(binary) => return binary_expression_type(binary.op);,
+        Prefix(prefix_node) => return prefix_expression_type(prefix_node.op);,
+        CastExpr(cast_expr) => return ast_text::ast_return_type_text(file, ast, cast_expr.type_node);,
+        ComptimeExpr(comptime_expr_node) => return infer_expression_type(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            local_types,
+            function_returns
+        );,
+        TryExpr(try_expr_node) => return success_type_of(try infer_expression_type(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types,
+            function_returns
+        ));,
+        FieldExpr(field_expr_node) => return try field_expression_type(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            field_expr_node.namespace,
+            field_expr_node.name,
+            local_types,
+            function_returns
+        );,
+        DerefExpr(deref_expr_node) => return "unknown";,
+        Call(call_node) => return call_expression_type(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            local_types,
+            function_returns
+        );,
+        TypeApplyExpr(type_apply) => return ast_text::ast_node_text(file, ast, node_id);,
+        IndexExpr(index_expr) => return index_expression_type(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.slice,
+            local_types,
+            function_returns
+        );,
+        StructLiteralExpr(struct_literal) => return ast_text::ast_node_text(file, ast, struct_literal.type_name);,
+        StructFieldInit(struct_field_init) => return "unknown";,
+        ArenaNewExpr(arena_new) => return arena_expression_type(file, ast, arena_new.type_node);,
+        Block(block) => return "unknown";,
+        If(if_node) => return "unknown";,
+        Let(let_node) => return "unknown";,
+        Assign(assign_node) => return "unknown";,
+        Return(return_node) => return "unknown";,
+        Defer(defer_node) => return "unknown";,
+        ExprStmt(expr_stmt) => return "unknown";,
+        While(while_node) => return "unknown";,
+        For(for_node) => return "unknown";,
+        Break(break_node) => return "void";,
+        Continue(continue_node) => return "void";,
+        Program(program) => return "unknown";,
+        ImportDecl(import_decl) => return "unknown";,
+        Param(param_node) => return "unknown";,
+        Field(field_node) => return "unknown";,
+        StructDecl(struct_decl) => return "unknown";,
+        EnumDecl(enum_decl) => return "unknown";,
+        UnionDecl(union_decl) => return "unknown";,
+        UnionVariant(union_variant) => return "unknown";,
+        Match(match_node) => return infer_match_expression_type(
+            allocator,
+            file,
+            ast,
+            match_node.arms,
+            local_types,
+            function_returns
+        );,
+        MatchArm(match_arm) => return "unknown";,
+        Unsafe(unsafe_node) => return "unknown";,
+        ComptimeIf(comptime_if_node) => return "unknown";,
+        FnDecl(fn_decl) => return "unknown";,
+        TypeName(type_name) => return ast_text::ast_node_text(file, ast, node_id);,
+    }
+}
+
+fn infer_match_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    var result = "unknown";
+    var index = 0;
+    while index < arms.len {
+        let child = try ast.child_at(arms, index);
+        let arm_type = try infer_match_arm_expression_type(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            function_returns
+        );
+        if std::mem::equal_bytes(result, "unknown") {
+            result = arm_type;
+        } else {
+            if known_type_mismatch(result, arm_type) {
+                return "unknown";
+            }
+        }
+        index = index + 1;
+    }
+    return result;
+}
+
+fn infer_match_arm_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        MatchArm(match_arm) => return infer_match_arm_body_expression_type(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            function_returns
+        );,
+        _ => return "unknown";,
+    }
+}
+
+fn infer_match_arm_body_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        ExprStmt(expr_stmt) => return infer_expression_type(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            local_types,
+            function_returns
+        );,
+        Empty => return "void";,
+        _ => return "unknown";,
+    }
+}
+
+fn success_type_of(value_type: []u8) -> []u8 {
+    if std::mem::starts_with(value_type, "!") {
+        return value_type[1..std::mem::len(value_type)];
+    }
+    var index = 0;
+    while index < std::mem::len(value_type) {
+        if value_type[index] == cast<u8>(33) {
+            return value_type[index + 1..std::mem::len(value_type)];
+        }
+        index = index + 1;
+    }
+    return value_type;
+}
+
+fn field_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    receiver: std::kizu::ast::NodeId,
+    namespace: bool,
+    name: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    if namespace {
+        let receiver_text = ast_text::ast_node_text(file, ast, receiver);
+        if last_segment_starts_with_uppercase(receiver_text) {
+            return receiver_text;
+        }
+    }
+    let receiver_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        receiver,
+        local_types,
+        function_returns
+    );
+    let field = ast_text::ast_node_text(file, ast, name);
+    let typed_field = typed_field_name_type(receiver_type, field);
+    if !std::mem::equal_bytes(typed_field, "unknown") {
+        return typed_field;
+    }
+    return field_name_type(field);
+}
+
+fn typed_field_name_type(receiver_type: []u8, field: []u8) -> []u8 {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::AstNode") {
+        if std::mem::equal_bytes(field, "span") { return "std::kizu::ast::Span"; }
+        if std::mem::equal_bytes(field, "data") { return "std::kizu::ast::AstData"; }
+    }
+    if ast_node_id_field_type(receiver_type, field) {
+        return "std::kizu::ast::NodeId";
+    }
+    if ast_child_range_field_type(receiver_type, field) {
+        return "std::kizu::ast::ChildRange";
+    }
+    if ast_bool_field_type(receiver_type, field) {
+        return "bool";
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::PrefixNode") and
+        std::mem::equal_bytes(field, "op") {
+        return "std::kizu::ast::PrefixOp";
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BinaryNode") and
+        std::mem::equal_bytes(field, "op") {
+        return "std::kizu::ast::BinaryOp";
+    }
+    return "unknown";
+}
+
+fn ast_node_id_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FnDeclNode") {
+        return std::mem::equal_bytes(field, "extern_abi") or
+            std::mem::equal_bytes(field, "name") or
+            std::mem::equal_bytes(field, "return_type") or
+            std::mem::equal_bytes(field, "return_borrow") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::EnumDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionDeclNode") {
+        return std::mem::equal_bytes(field, "name");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionVariantNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ParamNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldNode") {
+        return std::mem::equal_bytes(field, "name") or std::mem::equal_bytes(field, "type_node") or
+            std::mem::equal_bytes(field, "payload");
+    }
+    return ast_node_id_expression_field_type(receiver_type, field);
+}
+
+fn ast_node_id_expression_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::PrefixNode") {
+        return std::mem::equal_bytes(field, "right");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BinaryNode") {
+        return std::mem::equal_bytes(field, "left") or std::mem::equal_bytes(field, "right");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldExprNode") {
+        return std::mem::equal_bytes(field, "receiver") or std::mem::equal_bytes(field, "name");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::DerefExprNode") {
+        return std::mem::equal_bytes(field, "receiver");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::CallNode") {
+        return std::mem::equal_bytes(field, "callee");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::TypeApplyExprNode") {
+        return std::mem::equal_bytes(field, "callee");
+    }
+    return ast_node_id_statement_field_type(receiver_type, field);
+}
+
+fn ast_node_id_statement_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::CastExprNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ArenaNewExprNode") {
+        return std::mem::equal_bytes(field, "type_node") or std::mem::equal_bytes(field, "value") or
+            std::mem::equal_bytes(field, "allocator");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::IndexExprNode") {
+        return std::mem::equal_bytes(field, "target") or std::mem::equal_bytes(field, "start") or
+            std::mem::equal_bytes(field, "end");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructLiteralExprNode") {
+        return std::mem::equal_bytes(field, "type_name");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructFieldInitNode") {
+        return std::mem::equal_bytes(field, "name") or std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::TryExprNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ComptimeExprNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ReturnNode") {
+        return std::mem::equal_bytes(field, "value");
+    }
+    return ast_node_id_control_field_type(receiver_type, field);
+}
+
+fn ast_node_id_control_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::LetNode") {
+        return std::mem::equal_bytes(field, "name") or std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::AssignNode") {
+        return std::mem::equal_bytes(field, "target") or std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::DeferNode") {
+        return std::mem::equal_bytes(field, "expr");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ExprStmtNode") {
+        return std::mem::equal_bytes(field, "expr");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::IfNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ComptimeIfNode") {
+        return std::mem::equal_bytes(field, "condition") or
+            std::mem::equal_bytes(field, "then_block") or
+            std::mem::equal_bytes(field, "else_block");
+    }
+    return ast_node_id_loop_match_field_type(receiver_type, field);
+}
+
+fn ast_node_id_loop_match_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::WhileNode") {
+        return std::mem::equal_bytes(field, "label") or
+            std::mem::equal_bytes(field, "condition") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ForNode") {
+        return std::mem::equal_bytes(field, "label") or std::mem::equal_bytes(field, "name") or
+            std::mem::equal_bytes(field, "start") or std::mem::equal_bytes(field, "end") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BreakNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::ContinueNode") {
+        return std::mem::equal_bytes(field, "label");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::MatchNode") {
+        return std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::MatchArmNode") {
+        return std::mem::equal_bytes(field, "pattern") or
+            std::mem::equal_bytes(field, "binding") or
+            std::mem::equal_bytes(field, "body");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnsafeNode") {
+        return std::mem::equal_bytes(field, "body");
+    }
+    return false;
+}
+
+fn ast_child_range_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ProgramNode") {
+        return std::mem::equal_bytes(field, "declarations");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FnDeclNode") {
+        return std::mem::equal_bytes(field, "type_params") or
+            std::mem::equal_bytes(field, "params");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::UnionDeclNode") {
+        return std::mem::equal_bytes(field, "type_params") or
+            std::mem::equal_bytes(field, "fields") or
+            std::mem::equal_bytes(field, "variants");
+    }
+    return ast_child_range_expression_field_type(receiver_type, field);
+}
+
+fn ast_child_range_expression_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::EnumDeclNode") {
+        return std::mem::equal_bytes(field, "tags");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ImportDeclNode") {
+        return std::mem::equal_bytes(field, "path");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BlockNode") {
+        return std::mem::equal_bytes(field, "statements");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::CallNode") {
+        return std::mem::equal_bytes(field, "args");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::TypeApplyExprNode") {
+        return std::mem::equal_bytes(field, "type_args");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructLiteralExprNode") {
+        return std::mem::equal_bytes(field, "fields");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::MatchNode") {
+        return std::mem::equal_bytes(field, "arms");
+    }
+    return false;
+}
+
+fn ast_bool_field_type(receiver_type: []u8, field: []u8) -> bool {
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::BoolNode") {
+        return std::mem::equal_bytes(field, "value");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldExprNode") {
+        return std::mem::equal_bytes(field, "namespace");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::IndexExprNode") {
+        return std::mem::equal_bytes(field, "slice");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::LetNode") {
+        return std::mem::equal_bytes(field, "mutable");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::ParamNode") {
+        return std::mem::equal_bytes(field, "comptime_param");
+    }
+    if std::mem::equal_bytes(receiver_type, "std::kizu::ast::FieldNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::StructDeclNode") or
+        std::mem::equal_bytes(receiver_type, "std::kizu::ast::FnDeclNode") {
+        return std::mem::equal_bytes(field, "public") or
+            std::mem::equal_bytes(field, "unsafe_decl");
+    }
+    return false;
+}
+
+fn call_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let callee_text = ast_text::ast_node_text(file, ast, callee);
+    if is_generic_constructor_text(callee_text) {
+        return callee_text;
+    }
+    let method_type = try method_call_text_type(callee_text, local_types);
+    if !std::mem::equal_bytes(method_type, "unknown") {
+        return method_type;
+    }
+    return resolved_function_return_type(allocator, file, callee_text, function_returns);
+}
+
+fn index_expression_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    target: std::kizu::ast::NodeId,
+    slice: bool,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let target_type = try infer_expression_type(
+        allocator,
+        file,
+        ast,
+        target,
+        local_types,
+        function_returns
+    );
+    if slice {
+        if is_u8_slice(target_type) {
+            return "[]u8";
+        }
+        if std::mem::starts_with(target_type, "[]") {
+            return target_type;
+        }
+        return "unknown";
+    }
+    if is_u8_slice(target_type) {
+        return "u8";
+    }
+    return "unknown";
+}
+
+fn arena_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> []u8 {
+    let type_name = ast_text::ast_node_text(file, ast, type_node);
+    if std::mem::equal_bytes(type_name, "") {
+        return "unknown";
+    }
+    return "unknown";
+}
+
+fn field_name_type(field: []u8) -> []u8 {
+    if std::mem::equal_bytes(field, "start") or
+        std::mem::equal_bytes(field, "end") or
+        std::mem::equal_bytes(field, "line") or
+        std::mem::equal_bytes(field, "column") or
+        std::mem::equal_bytes(field, "raw") or
+        std::mem::equal_bytes(field, "len") or
+        std::mem::equal_bytes(field, "source_id") or
+        std::mem::equal_bytes(field, "byte_start") or
+        std::mem::equal_bytes(field, "byte_end") or
+        std::mem::equal_bytes(field, "span_start") or
+        std::mem::equal_bytes(field, "span_end") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(field, "modules") or
+        std::mem::equal_bytes(field, "symbols") or
+        std::mem::equal_bytes(field, "functions") or
+        std::mem::equal_bytes(field, "typed_nodes") or
+        std::mem::equal_bytes(field, "diagnostics") or
+        std::mem::equal_bytes(field, "params") or
+        std::mem::equal_bytes(field, "tokens") or
+        std::mem::equal_bytes(field, "bytes") or
+        std::mem::equal_bytes(field, "declarations") or
+        std::mem::equal_bytes(field, "nodes") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(field, "public") or
+        std::mem::equal_bytes(field, "unsafe_decl") or
+        std::mem::equal_bytes(field, "comptime_param") or
+        std::mem::equal_bytes(field, "mutable") or
+        std::mem::equal_bytes(field, "slice") or
+        std::mem::equal_bytes(field, "namespace") or
+        std::mem::equal_bytes(field, "value") or
+        std::mem::equal_bytes(field, "diagnostic") or
+        std::mem::equal_bytes(field, "is_dir") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(field, "path") or
+        std::mem::equal_bytes(field, "text") or
+        std::mem::equal_bytes(field, "module") or
+        std::mem::equal_bytes(field, "message") or
+        std::mem::equal_bytes(field, "name") or
+        std::mem::equal_bytes(field, "return_type") or
+        std::mem::equal_bytes(field, "param_source") {
+        return "[]u8";
+    }
+    return "unknown";
+}
+
+fn method_call_text_type(
+    callee: []u8,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let method = last_field_segment(callee);
+    var receiver_type = "unknown";
+    var last_dot = -1;
+    var index = 0;
+    while index < std::mem::len(callee) {
+        if callee[index] == cast<u8>(46) {
+            last_dot = index;
+        }
+        index = index + 1;
+    }
+    if last_dot > 0 {
+        let receiver = callee[0..last_dot];
+        if local_types.contains(receiver) {
+            receiver_type = try local_types.get(receiver);
+        }
+    }
+    return method_return_type(method, receiver_type);
+}
+
+fn last_field_segment(text: []u8) -> []u8 {
+    var start = 0;
+    var index = 0;
+    while index < std::mem::len(text) {
+        if text[index] == cast<u8>(46) {
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    return text[start..std::mem::len(text)];
+}
+
+fn method_return_type(method: []u8, receiver_type: []u8) -> []u8 {
+    if std::mem::equal_bytes(method, "len") or std::mem::equal_bytes(method, "capacity") {
+        return "i64";
+    }
+    if std::mem::equal_bytes(method, "contains") {
+        return "bool";
+    }
+    if std::mem::equal_bytes(method, "as_bytes") {
+        return "[]u8";
+    }
+    if std::mem::equal_bytes(method, "append") or
+        std::mem::equal_bytes(method, "append_bytes") or
+        std::mem::equal_bytes(method, "append_byte") or
+        std::mem::equal_bytes(method, "reserve") or
+        std::mem::equal_bytes(method, "set") or
+        std::mem::equal_bytes(method, "clear") or
+        std::mem::equal_bytes(method, "truncate") or
+        std::mem::equal_bytes(method, "deinit") {
+        return "void";
+    }
+    if std::mem::equal_bytes(method, "get") or
+        std::mem::equal_bytes(method, "at") or
+        std::mem::equal_bytes(method, "at_mut") {
+        return container_element_type(receiver_type);
+    }
+    return "unknown";
+}
+
+fn container_element_type(type_name: []u8) -> []u8 {
+    if std::mem::starts_with(type_name, "std::array::Array<") {
+        return first_generic_argument(type_name);
+    }
+    if std::mem::starts_with(type_name, "std::map::Map<") {
+        return second_generic_argument(type_name);
+    }
+    return "unknown";
+}
+
+fn first_generic_argument(type_name: []u8) -> []u8 {
+    var index = 0;
+    while index < std::mem::len(type_name) and type_name[index] != cast<u8>(60) {
+        index = index + 1;
+    }
+    if index >= std::mem::len(type_name) {
+        return "unknown";
+    }
+    let start = index + 1;
+    index = start;
+    var depth = 1;
+    while index < std::mem::len(type_name) and depth > 0 {
+        let byte = type_name[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                depth = depth - 1;
+                if depth == 0 {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+            } else {
+                if depth == 1 and byte == cast<u8>(44) {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+fn second_generic_argument(type_name: []u8) -> []u8 {
+    var index = 0;
+    var depth = 0;
+    var start = -1;
+    while index < std::mem::len(type_name) {
+        let byte = type_name[index];
+        if byte == cast<u8>(60) {
+            depth = depth + 1;
+        } else {
+            if byte == cast<u8>(62) {
+                if depth == 1 and start >= 0 {
+                    return std::mem::trim_ascii(type_name[start..index]);
+                }
+                depth = depth - 1;
+            } else {
+                if byte == cast<u8>(44) and depth == 1 {
+                    start = index + 1;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return "unknown";
+}
+
+pub fn is_generic_constructor_text(text: []u8) -> bool {
+    return std::mem::starts_with(text, "std::array::Array<") or
+        std::mem::starts_with(text, "std::map::Map<") or
+        std::mem::starts_with(text, "std::mem::Box<") or
+        std::mem::starts_with(text, "std::arena::Arena<") or
+        std::mem::starts_with(text, "std::arena::Handle<");
+}
+
+fn append_resolved_function_name(
+    out: &var std::string::String,
+    file: &source::SourceFile,
+    name: []u8
+) -> !void {
+    if source::is_absolute_name_for_file(file, name) {
+        try out.append_bytes(name);
+        return;
+    }
+    if ast_text::is_qualified_name(name) {
+        try source::append_package_prefix(out, file);
+        try out.append_bytes("::");
+        try out.append_bytes(name);
+        return;
+    }
+    try source::append_qualified_module_name(out, file);
+    try out.append_bytes("::");
+    try out.append_bytes(name);
+    return;
+}
+
+pub fn last_segment_starts_with_uppercase(name: []u8) -> bool {
+    var start = 0;
+    var index = 0;
+    while index + 1 < std::mem::len(name) {
+        if name[index] == cast<u8>(58) and name[index + 1] == cast<u8>(58) {
+            start = index + 2;
+        }
+        index = index + 1;
+    }
+    if start >= std::mem::len(name) {
+        return false;
+    }
+    let byte = name[start];
+    return byte >= cast<u8>(65) and byte <= cast<u8>(90);
+}
+
+fn resolved_function_return_type(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    name: []u8,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    if function_calls::should_skip_function_reference(name) {
+        return "unknown";
+    }
+    var resolved = std::string::String(allocator);
+    try append_resolved_function_name(resolved, file, name);
+    let key = resolved.as_bytes();
+    var result = "unknown";
+    if function_returns.contains(key) {
+        result = try function_returns.get(key);
+    }
+    resolved.deinit();
+    return result;
+}
+
+fn infer_var_expression_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>
+) -> ![]u8 {
+    let name = ast_text::ast_node_text(file, ast, node_id);
+    if local_types.contains(name) {
+        return local_types.get(name);
+    }
+    return "unknown";
+}
+
+fn binary_expression_type(op: std::kizu::ast::BinaryOp) -> []u8 {
+    match op {
+        Add => return "i64";,
+        Sub => return "i64";,
+        Mul => return "i64";,
+        Div => return "i64";,
+        Mod => return "i64";,
+        Eq => return "bool";,
+        NotEq => return "bool";,
+        LT => return "bool";,
+        LTE => return "bool";,
+        GT => return "bool";,
+        GTE => return "bool";,
+        And => return "bool";,
+        Or => return "bool";,
+    }
+}
+
+fn prefix_expression_type(op: std::kizu::ast::PrefixOp) -> []u8 {
+    match op {
+        Not => return "bool";,
+        Neg => return "i64";,
+        Borrow => return "unknown";,
+        MutBorrow => return "unknown";,
+    }
+}
+
+pub fn known_type_mismatch(expected: []u8, actual: []u8) -> bool {
+    let expected_type = value_type_text(expected);
+    let actual_type = value_type_text(actual);
+    if std::mem::equal_bytes(expected_type, "unknown") or
+        std::mem::equal_bytes(actual_type, "unknown") {
+        return false;
+    }
+    if std::mem::starts_with(expected_type, "!") {
+        return false;
+    }
+    if std::mem::starts_with(actual_type, "!") or type_text_has_error_marker(actual_type) {
+        return false;
+    }
+    if borrow_type_accepts_actual(expected_type, actual_type) {
+        return false;
+    }
+    if is_u8_slice(expected_type) or is_u8_slice(actual_type) {
+        return !(is_u8_slice(expected_type) and is_u8_slice(actual_type));
+    }
+    if !is_scalar_comparable_type(expected_type) or !is_scalar_comparable_type(actual_type) {
+        return false;
+    }
+    return !std::mem::equal_bytes(expected_type, actual_type);
+}
+
+fn borrow_type_accepts_actual(expected: []u8, actual: []u8) -> bool {
+    if std::mem::starts_with(expected, "&var ") {
+        let borrowed = std::mem::trim_ascii(expected[5..std::mem::len(expected)]);
+        return type_text_equal_for_borrow(borrowed, actual);
+    }
+    if std::mem::starts_with(expected, "&") {
+        let borrowed = std::mem::trim_ascii(expected[1..std::mem::len(expected)]);
+        return type_text_equal_for_borrow(borrowed, actual);
+    }
+    return false;
+}
+
+fn type_text_equal_for_borrow(expected: []u8, actual: []u8) -> bool {
+    if is_u8_slice(expected) or is_u8_slice(actual) {
+        return is_u8_slice(expected) and is_u8_slice(actual);
+    }
+    return std::mem::equal_bytes(expected, actual);
+}
+
+fn value_type_text(type_name: []u8) -> []u8 {
+    let trimmed = std::mem::trim_ascii(type_name);
+    let marker = " borrows ";
+    let marker_len = std::mem::len(marker);
+    var index = 0;
+    while index + marker_len <= std::mem::len(trimmed) {
+        if std::mem::equal_bytes(trimmed[index..index + marker_len], marker) {
+            return std::mem::trim_ascii(trimmed[0..index]);
+        }
+        index = index + 1;
+    }
+    return trimmed;
+}
+
+pub fn is_scalar_comparable_type(type_name: []u8) -> bool {
+    let value_type = value_type_text(type_name);
+    return std::mem::equal_bytes(value_type, "void") or
+        std::mem::equal_bytes(value_type, "bool") or
+        std::mem::equal_bytes(value_type, "i64") or
+        std::mem::equal_bytes(value_type, "u8") or
+        std::mem::equal_bytes(value_type, "Allocator") or
+        std::mem::equal_bytes(value_type, "Io");
+}
+
+pub fn is_u8_slice(type_name: []u8) -> bool {
+    return std::mem::equal_bytes(value_type_text(type_name), "[]u8");
+}
+
+pub fn type_text_has_error_marker(type_name: []u8) -> bool {
+    var index = 0;
+    while index < std::mem::len(type_name) {
+        if type_name[index] == cast<u8>(33) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
