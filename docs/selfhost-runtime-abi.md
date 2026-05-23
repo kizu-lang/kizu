@@ -524,12 +524,14 @@ emitting those artifacts.
 For #588, the first `run <file>` success and frontend-failure dispatch paths are
 source-driven. Files containing a supported `print("<simple ascii>")` call in
 `main` emit `target/selfhost/run/<basename-without-extension>.ll` with stdout
-derived from that string payload, while files containing exactly the
-newline-terminated `fn main() { let value = ; }` source return the existing
-parse diagnostic without emitting an artifact. The original, alias, and custom
-string rows in `run-parity.tsv` prove those branches are not bound to one
-fixture path, one fixed artifact stem, or the `hello, kizu` source literal.
-Broader expression lowering remains outside this slice.
+derived from that string payload. The hosted emitter escapes backslash bytes as
+LLVM C string hex escapes while keeping the runtime stdout length derived from
+the original payload. Files containing exactly the newline-terminated
+`fn main() { let value = ; }` source return the existing parse diagnostic
+without emitting an artifact. The original, alias, custom string, and backslash
+rows in `run-parity.tsv` prove those branches are not bound to one fixture path,
+one fixed artifact stem, or the `hello, kizu` source literal. Broader expression
+lowering remains outside this slice.
 
 For #590, the first `test <file>` expect-ok and expect-failure dispatch paths are
 also source-driven. Files containing exactly the newline-terminated expect-ok or
