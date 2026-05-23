@@ -5,6 +5,8 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_cli_token_string_hello_eq_function(out);
     try append_cli_run_prints_hello_function(out);
     try append_cli_test_expect_value_function(out);
+    try append_cli_token_equals_range_function(out);
+    try append_cli_moved_value_name_function(out);
     return;
 }
 
@@ -538,6 +540,160 @@ fn append_named_branch(
     return;
 }
 
+fn append_cli_token_equals_range_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define i1 @kizu_selfhost__cli_token_equals_range(");
+    try append_line(out, "  %kizu.slice.u8 %source,");
+    try append_line(out, "  i64 %token_start,");
+    try append_line(out, "  i64 %token_end,");
+    try append_line(out, "  i64 %name_start,");
+    try append_line(out, "  i64 %name_len");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
+    try append_line(out, "  %token_len = sub i64 %token_end, %token_start");
+    try append_line(out, "  %same_len = icmp eq i64 %token_len, %name_len");
+    try append_line(out, "  br i1 %same_len, label %loop, label %false");
+    try append_line(out, "loop:");
+    try append_line(out, "  %index = phi i64 [ 0, %entry ], [ %next, %advance ]");
+    try append_line(out, "  %done = icmp eq i64 %index, %name_len");
+    try append_line(out, "  br i1 %done, label %true, label %compare");
+    try append_line(out, "compare:");
+    try append_line(out, "  %token_at = add i64 %token_start, %index");
+    try append_line(out, "  %name_at = add i64 %name_start, %index");
+    try append_line(out, "  %token_ptr = getelementptr i8, ptr %source_ptr, i64 %token_at");
+    try append_line(out, "  %name_ptr = getelementptr i8, ptr %source_ptr, i64 %name_at");
+    try append_line(out, "  %token_byte = load i8, ptr %token_ptr");
+    try append_line(out, "  %name_byte = load i8, ptr %name_ptr");
+    try append_line(out, "  %same_byte = icmp eq i8 %token_byte, %name_byte");
+    try append_line(out, "  br i1 %same_byte, label %advance, label %false");
+    try append_line(out, "advance:");
+    try append_line(out, "  %next = add i64 %index, 1");
+    try append_line(out, "  br label %loop");
+    try append_line(out, "true:");
+    try append_line(out, "  ret i1 true");
+    try append_line(out, "false:");
+    try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_cli_moved_value_name_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name(");
+    try append_line(out, "  %kizu.slice.u8 %source");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
+    try append_line(out, "  %source_len = extractvalue %kizu.slice.u8 %source, 1");
+    try append_line(out, "  br label %find_let");
+    try append_line(out, "find_let:");
+    try append_line(out, "  %scan = phi i64 [ 0, %entry ], [ %token_end, %continue_let ]");
+    try append_line(out,
+        "  %index = call i64 @kizu_selfhost__parse_next_non_ws_index(%kizu.slice.u8 %source, i64 %scan)");
+    try append_line(out, "  %in_bounds = icmp slt i64 %index, %source_len");
+    try append_line(out, "  br i1 %in_bounds, label %load_token, label %empty");
+    try append_line(out, "load_token:");
+    try append_line(out,
+        "  %token_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %index)");
+    try append_line(out,
+        "  %is_let = call i1 @kizu_selfhost__cli_token_word_eq(%kizu.slice.u8 %source, i64 %index, i64 %token_end, i64 3, i8 108, i8 101, i8 116, i8 0, i8 0, i8 0, i8 0)");
+    try append_line(out, "  br i1 %is_let, label %load_name_start, label %continue_let");
+    try append_line(out, "continue_let:");
+    try append_line(out, "  br label %find_let");
+    try append_line(out, "load_name_start:");
+    try append_line(out,
+        "  %name_start = call i64 @kizu_selfhost__parse_next_non_ws_index(%kizu.slice.u8 %source, i64 %token_end)");
+    try append_line(out, "  %name_in_bounds = icmp slt i64 %name_start, %source_len");
+    try append_line(out, "  br i1 %name_in_bounds, label %load_name, label %empty");
+    try append_line(out, "load_name:");
+    try append_line(out,
+        "  %name_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %name_start)");
+    try append_line(out, "  %name_len = sub i64 %name_end, %name_start");
+    try append_line(out, "  %has_name = icmp sgt i64 %name_len, 0");
+    try append_line(out, "  br i1 %has_name, label %find_call, label %empty");
+    try append_line(out, "find_call:");
+    try append_line(out, "  br label %find_call_loop");
+    try append_line(out, "find_call_loop:");
+    try append_line(out,
+        "  %call_scan = phi i64 [ %name_end, %find_call ], [ %candidate_end, %continue_call ]");
+    try append_line(out,
+        "  %candidate_start = call i64 @kizu_selfhost__parse_next_non_ws_index(%kizu.slice.u8 %source, i64 %call_scan)");
+    try append_line(out, "  %candidate_in_bounds = icmp slt i64 %candidate_start, %source_len");
+    try append_line(out, "  br i1 %candidate_in_bounds, label %load_call_candidate, label %empty");
+    try append_line(out, "load_call_candidate:");
+    try append_line(out,
+        "  %candidate_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %candidate_start)");
+    try append_line(out,
+        "  %candidate_lparen = call i1 @kizu_selfhost__cli_token_char_eq(%kizu.slice.u8 %source, i64 %candidate_start, i64 %candidate_end, i8 40)");
+    try append_line(out, "  br i1 %candidate_lparen, label %check_call_arg, label %continue_call");
+    try append_line(out, "continue_call:");
+    try append_line(out, "  br label %find_call_loop");
+    try append_line(out, "check_call_arg:");
+    try append_line(out,
+        "  %arg_start = call i64 @kizu_selfhost__parse_next_non_ws_index(%kizu.slice.u8 %source, i64 %candidate_end)");
+    try append_line(out, "  %arg_in_bounds = icmp slt i64 %arg_start, %source_len");
+    try append_line(out, "  br i1 %arg_in_bounds, label %load_arg, label %continue_call");
+    try append_line(out, "load_arg:");
+    try append_line(out,
+        "  %arg_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %arg_start)");
+    try append_line(out,
+        "  %arg_matches = call i1 @kizu_selfhost__cli_token_equals_range(%kizu.slice.u8 %source, i64 %arg_start, i64 %arg_end, i64 %name_start, i64 %name_len)");
+    try append_line(out, "  br i1 %arg_matches, label %check_call_rparen, label %continue_call");
+    try append_line(out, "check_call_rparen:");
+    try append_line(out,
+        "  %call_rparen_start = call i64 @kizu_selfhost__parse_next_non_ws_index(%kizu.slice.u8 %source, i64 %arg_end)");
+    try append_line(out, "  %call_rparen_in_bounds = icmp slt i64 %call_rparen_start, %source_len");
+    try append_line(out,
+        "  br i1 %call_rparen_in_bounds, label %load_call_rparen, label %continue_call");
+    try append_line(out, "load_call_rparen:");
+    try append_line(out,
+        "  %call_rparen_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %call_rparen_start)");
+    try append_line(out,
+        "  %call_rparen_ok = call i1 @kizu_selfhost__cli_token_char_eq(%kizu.slice.u8 %source, i64 %call_rparen_start, i64 %call_rparen_end, i8 41)");
+    try append_line(out, "  br i1 %call_rparen_ok, label %find_field, label %continue_call");
+    try append_line(out, "find_field:");
+    try append_line(out, "  br label %find_field_loop");
+    try append_line(out, "find_field_loop:");
+    try append_line(out,
+        "  %field_scan = phi i64 [ %call_rparen_end, %find_field ], [ %field_candidate_end, %continue_field ]");
+    try append_line(out,
+        "  %field_candidate_start = call i64 @kizu_selfhost__parse_next_non_ws_index(%kizu.slice.u8 %source, i64 %field_scan)");
+    try append_line(out, "  %field_candidate_in_bounds = icmp slt i64 %field_candidate_start, %source_len");
+    try append_line(out,
+        "  br i1 %field_candidate_in_bounds, label %load_field_candidate, label %empty");
+    try append_line(out, "load_field_candidate:");
+    try append_line(out,
+        "  %field_candidate_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %field_candidate_start)");
+    try append_line(out,
+        "  %field_name_matches = call i1 @kizu_selfhost__cli_token_equals_range(%kizu.slice.u8 %source, i64 %field_candidate_start, i64 %field_candidate_end, i64 %name_start, i64 %name_len)");
+    try append_line(out,
+        "  br i1 %field_name_matches, label %check_field_dot, label %continue_field");
+    try append_line(out, "continue_field:");
+    try append_line(out, "  br label %find_field_loop");
+    try append_line(out, "check_field_dot:");
+    try append_line(out,
+        "  %dot_start = call i64 @kizu_selfhost__parse_next_non_ws_index(%kizu.slice.u8 %source, i64 %field_candidate_end)");
+    try append_line(out, "  %dot_in_bounds = icmp slt i64 %dot_start, %source_len");
+    try append_line(out, "  br i1 %dot_in_bounds, label %load_dot, label %continue_field");
+    try append_line(out, "load_dot:");
+    try append_line(out,
+        "  %dot_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %dot_start)");
+    try append_line(out,
+        "  %dot_ok = call i1 @kizu_selfhost__cli_token_char_eq(%kizu.slice.u8 %source, i64 %dot_start, i64 %dot_end, i8 46)");
+    try append_line(out, "  br i1 %dot_ok, label %return_name, label %continue_field");
+    try append_line(out, "return_name:");
+    try append_line(out, "  %result_ptr = getelementptr i8, ptr %source_ptr, i64 %name_start");
+    try append_line(out, "  %result_base = insertvalue %kizu.slice.u8 poison, ptr %result_ptr, 0");
+    try append_line(out, "  %result = insertvalue %kizu.slice.u8 %result_base, i64 %name_len, 1");
+    try append_line(out, "  ret %kizu.slice.u8 %result");
+    try append_line(out, "empty:");
+    try append_line(out, "  %empty_base = insertvalue %kizu.slice.u8 poison, ptr null, 0");
+    try append_line(out, "  %empty_slice = insertvalue %kizu.slice.u8 %empty_base, i64 0, 1");
+    try append_line(out, "  ret %kizu.slice.u8 %empty_slice");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
 
 fn append_line(out: &var std::string::String, text: []u8) -> !void {
     try out.append_bytes(text);

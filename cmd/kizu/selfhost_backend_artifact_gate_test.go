@@ -257,10 +257,10 @@ func requiredLLVMFragments() []string {
 		"%check_parse_ok = call i1 @kizu_selfhost__parse_write_missing_expr",
 		"%check_missing_assign = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_assign_ok = call i1 @kizu_selfhost__parse_write_missing_assign",
-		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
+		"define %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name",
 		"@.kizu.cli.move_prefix",
 		"@.kizu.cli.move_suffix",
-		"%moved_name = call %kizu.slice.u8 @kizu_selfhost__moved_value_name",
+		"%moved_name = call %kizu.slice.u8 @kizu_selfhost__cli_moved_value_name",
 		"br i1 %has_moved_name, label %check_file_move_error, label %check_file_ok",
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
@@ -274,6 +274,7 @@ func forbiddenLLVMFragments() []string {
 		"@.kizu.cli.run_hello_pattern",
 		"@.kizu.cli.test_expect_true_pattern",
 		"@.kizu.cli.test_expect_false_pattern",
+		"define %kizu.slice.u8 @kizu_selfhost__moved_value_name",
 		"%parse_small",
 		"%corpus_small",
 		"%main_fn_found",
@@ -938,6 +939,8 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 	}
 	failures := countHostedCompilerCLIRealSourceCheckFailures(t, exePath)
 
+	failures += countHostedCompilerCLIMovedCheckFailures(t, exePath, dir)
+
 	invalidPath := filepath.Join(dir, "hosted_check_invalid.kizu")
 	invalidSource := "fn main() { let value = ; }\n"
 	if err := os.WriteFile(invalidPath, []byte(invalidSource), 0o644); err != nil {
@@ -970,6 +973,34 @@ func countHostedCompilerCLIFileCheckFailures(t *testing.T, exePath string) int {
 		"missing assign check",
 	)
 	return failures
+}
+
+// countHostedCompilerCLIMovedCheckFailures checks token-spaced moved diagnostics.
+func countHostedCompilerCLIMovedCheckFailures(t *testing.T, exePath string, dir string) int {
+	t.Helper()
+	movedPath := filepath.Join(dir, "hosted_check_moved_spacing.kizu")
+	movedSource := strings.Join([]string{
+		"struct Name { value: []u8 }",
+		"fn take(name: Name) { print(name.value); }",
+		"fn main() {",
+		"    let name = Name { value: \"alice\" };",
+		"    take ( name );",
+		"    print ( name . value );",
+		"}",
+		"",
+	}, "\n")
+	if err := os.WriteFile(movedPath, []byte(movedSource), 0o644); err != nil {
+		t.Errorf("write hosted check moved source: %v", err)
+		return 1
+	}
+	return countHostedCompilerCLIExpectedFailure(
+		t,
+		exePath,
+		"check",
+		movedPath,
+		"error: move error: moved value `name` was used\n",
+		"moved value spacing check",
+	)
 }
 
 // countHostedCompilerCLIRealSourceCheckFailures checks a full selfhost source file.
