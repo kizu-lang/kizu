@@ -40,6 +40,9 @@ func TestSelfhostParserFacadeValidatesCheckedFiles(t *testing.T) {
 	required := []string{
 		"pub fn parse_file(",
 		"pub fn parse_checked_file(",
+		"pub fn parse_validated_file(",
+		"validation_ok: bool",
+		"if !validation_ok {",
 		"pub fn parse_diagnostic_file(",
 		"var tokens = try lexer::tokenize(allocator, source);",
 		"defer tokens.deinit();",
@@ -618,10 +621,21 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 	}
 	content := string(bytes)
 	wrapperBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics(")
+	assertSelfhostFastDiagnosticsWrapper(t, wrapperBody)
+	astBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics_ast_node(")
+	assertSelfhostFastDiagnosticsASTNode(t, wrapperBody, astBody)
+	assertSelfhostCheckEntryDropsOldDiagnosticWrappers(t, content)
+}
+
+// assertSelfhostFastDiagnosticsWrapper checks the wrapper validates once before AST parsing.
+func assertSelfhostFastDiagnosticsWrapper(t *testing.T, wrapperBody string) {
+	t.Helper()
 	wrapperRequired := []string{
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
+		"let validation_ok = parsed_validation.ok",
 		"var files = try source::load_file_sources(allocator, io, path, file_text)",
-		"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
+		"let parsed = try parser::parse_validated_file(",
+		"validation_ok",
 		"return try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root)",
 	}
 	for _, fragment := range wrapperRequired {
@@ -629,10 +643,17 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 			t.Fatalf("fast_diagnostics missing wrapper phase %q", fragment)
 		}
 	}
-	if count := strings.Count(wrapperBody, "parser::parse_checked_file("); count != 1 {
-		t.Fatalf("fast_diagnostics parses checked source %d times, want 1", count)
+	if strings.Contains(wrapperBody, "parser::parse_checked_file(") {
+		t.Fatal("fast_diagnostics revalidates an already validated source")
 	}
-	astBody := selfhostKizuFunctionBody(t, content, "pub fn fast_diagnostics_ast_node(")
+	if count := strings.Count(wrapperBody, "parser::parse_validated_file("); count != 1 {
+		t.Fatalf("fast_diagnostics parses validated source %d times, want 1", count)
+	}
+}
+
+// assertSelfhostFastDiagnosticsASTNode checks per-file diagnostics use parsed AST phases.
+func assertSelfhostFastDiagnosticsASTNode(t *testing.T, wrapperBody string, astBody string) {
+	t.Helper()
 	required := []string{
 		"resolver::first_duplicate_declaration_ast_node(",
 		"types::first_pre_move_check_diagnostic_ast_node(",
@@ -665,6 +686,11 @@ func TestSelfhostCheckEntrySharesDiagnosticPasses(t *testing.T) {
 			t.Fatalf("fast_diagnostics keeps per-diagnostic call %q", fragment)
 		}
 	}
+}
+
+// assertSelfhostCheckEntryDropsOldDiagnosticWrappers rejects removed per-diagnostic writers.
+func assertSelfhostCheckEntryDropsOldDiagnosticWrappers(t *testing.T, content string) {
+	t.Helper()
 	oldWrappers := []string{
 		"fn write_return_type_diagnostic(",
 		"fn write_argument_type_diagnostic(",
@@ -696,9 +722,11 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		body := selfhostKizuFunctionBody(t, main, signature)
 		required := []string{
 			"parser::validate_diagnostic_file(allocator, path, file_text)",
+			"let validation_ok = parsed_validation.ok",
 			"var files = try source::load_file_sources(allocator, io, path, file_text)",
 			"let file = try files.at(0)",
-			"let parsed = try parser::parse_checked_file(allocator, path, file_text)",
+			"let parsed = try parser::parse_validated_file(",
+			"validation_ok",
 			"check::fast_diagnostics_ast_node(",
 		}
 		for _, fragment := range required {
@@ -709,8 +737,11 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		if strings.Contains(body, "check::fast_diagnostics(allocator, io, path, file_text)") {
 			t.Fatalf("%s reparses source through check::fast_diagnostics", signature)
 		}
-		if count := strings.Count(body, "parser::parse_checked_file("); count != 1 {
-			t.Fatalf("%s parses checked source %d times, want 1", signature, count)
+		if strings.Contains(body, "parser::parse_checked_file(") {
+			t.Fatalf("%s revalidates an already validated source", signature)
+		}
+		if count := strings.Count(body, "parser::parse_validated_file("); count != 1 {
+			t.Fatalf("%s parses validated source %d times, want 1", signature, count)
 		}
 	}
 }
