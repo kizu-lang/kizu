@@ -188,11 +188,28 @@ func selfhostCLIFrontendDefaultHappyCases(
 		{
 			name: "parse_temp_source",
 			args: []string{"parse", fixtures.source},
-			wantOut: "enum Flag { Yes, No }\nstruct Name { value: []u8 }\n" +
-				"fn choose(flag: Flag) -> bool { return match flag { " +
-				"Yes => true, No => false, }; }\n" +
-				"fn main(values: std::array::Array <Name>) { let count = values.len(); " +
-				"print(count); values.deinit(); }\nexit-code\n0\n",
+			wantOut: `enum Flag {
+    Yes, No
+}
+
+struct Name {
+    value: []u8
+}
+
+fn choose(flag: Flag) -> bool {
+    return match flag {
+        Yes => true, No => false,
+    };
+}
+
+fn main(values: std::array::Array <Name>) {
+    let count = values.len();
+    print(count);
+    values.deinit();
+}
+exit-code
+0
+`,
 		},
 		{
 			name:    "run_temp_source",

@@ -10,6 +10,7 @@ pub fn format_source(
     var depth = 0;
     var previous = "";
     var last = cast<u8>(0);
+    var at_line_start = true;
     while index < format_tokens.len() {
         let token = try format_tokens.get(index);
         if lexer::is_eof(token) {
@@ -18,25 +19,66 @@ pub fn format_source(
             let text = token_text(source, token);
             let trailing_comma = try is_trailing_comma(source, &format_tokens, index, text);
             if !trailing_comma {
-                if depth == 0 and out.len() > 0 and is_top_level_decl_start(text) {
-                    if last != cast<u8>(10) {
+                if std::mem::equal_bytes(text, "}") {
+                    if depth > 0 {
+                        depth = depth - 1;
+                    }
+                    if std::mem::equal_bytes(previous, "{") {
+                        try out.append_bytes(text);
+                    } else {
+                        if !at_line_start {
+                            try out.append_byte(cast<u8>(10));
+                        }
+                        try append_indent(out, depth);
+                        try out.append_bytes(text);
+                    }
+                    last = last_byte(text);
+                    previous = text;
+                    at_line_start = false;
+                    let wants_newline = try rbrace_wants_newline(source, &format_tokens, index);
+                    if wants_newline {
                         try out.append_byte(cast<u8>(10));
                         last = cast<u8>(10);
+                        at_line_start = true;
+                    }
+                } else {
+                    if depth == 0 and out.len() > 0 and starts_new_top_level_decl(previous, text) {
+                        if !at_line_start {
+                            try out.append_byte(cast<u8>(10));
+                            last = cast<u8>(10);
+                            at_line_start = true;
+                        } else {
+                            if last == cast<u8>(10) {
+                                try out.append_byte(cast<u8>(10));
+                                last = cast<u8>(10);
+                            }
+                        }
+                    }
+                    if at_line_start {
+                        try append_indent(out, depth);
+                        at_line_start = false;
+                    }
+                    if should_insert_space(previous, text, last) {
+                        try out.append_byte(cast<u8>(32));
+                        last = cast<u8>(32);
+                    }
+                    try out.append_bytes(text);
+                    last = last_byte(text);
+                    previous = text;
+                    if std::mem::equal_bytes(text, "{") {
+                        depth = depth + 1;
+                        if !(try next_token_text_equals(source, &format_tokens, index, "}")) {
+                            try out.append_byte(cast<u8>(10));
+                            last = cast<u8>(10);
+                            at_line_start = true;
+                        }
+                    }
+                    if std::mem::equal_bytes(text, ";") {
+                        try out.append_byte(cast<u8>(10));
+                        last = cast<u8>(10);
+                        at_line_start = true;
                     }
                 }
-                if std::mem::equal_bytes(text, "}") {
-                    depth = depth - 1;
-                }
-                if should_insert_space(previous, text, last) {
-                    try out.append_byte(cast<u8>(32));
-                    last = cast<u8>(32);
-                }
-                try out.append_bytes(text);
-                last = last_byte(text);
-                if std::mem::equal_bytes(text, "{") {
-                    depth = depth + 1;
-                }
-                previous = text;
             }
             index = index + 1;
         }
@@ -68,6 +110,40 @@ fn next_token_text_equals(
     return std::mem::equal_bytes(token_text(source, next), expected);
 }
 
+fn append_indent(out: &var std::string::String, depth: i64) -> !void {
+    var index = 0;
+    while index < depth {
+        try out.append_bytes("    ");
+        index = index + 1;
+    }
+    return;
+}
+
+fn rbrace_wants_newline(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !bool {
+    if index + 1 >= tokens.len() {
+        return false;
+    }
+    let next = try tokens.get(index + 1);
+    if lexer::is_eof(next) {
+        return false;
+    }
+    let text = token_text(source, next);
+    return !(std::mem::equal_bytes(text, ",") or
+        std::mem::equal_bytes(text, ";") or
+        std::mem::equal_bytes(text, ".") or
+        std::mem::equal_bytes(text, "::") or
+        std::mem::equal_bytes(text, ")") or
+        std::mem::equal_bytes(text, "]") or
+        std::mem::equal_bytes(text, "}") or
+        std::mem::equal_bytes(text, "?") or
+        std::mem::equal_bytes(text, "!") or
+        std::mem::equal_bytes(text, "else"));
+}
+
 fn is_trailing_comma(
     source: []u8,
     tokens: &std::array::Array<std::kizu::lexer::Token>,
@@ -76,6 +152,14 @@ fn is_trailing_comma(
 ) -> !bool {
     if !std::mem::equal_bytes(text, ",") {
         return false;
+    }
+    let before_paren = try next_token_text_equals(source, tokens, index, ")");
+    if before_paren {
+        return true;
+    }
+    let before_bracket = try next_token_text_equals(source, tokens, index, "]");
+    if before_bracket {
+        return true;
     }
     if !(try next_token_text_equals(source, tokens, index, "}")) {
         return false;
@@ -175,6 +259,15 @@ fn is_top_level_decl_start(text: []u8) -> bool {
         std::mem::equal_bytes(text, "struct") or
         std::mem::equal_bytes(text, "enum") or
         std::mem::equal_bytes(text, "union");
+}
+
+fn starts_new_top_level_decl(previous: []u8, current: []u8) -> bool {
+    if !is_top_level_decl_start(current) {
+        return false;
+    }
+    return !(std::mem::equal_bytes(previous, "pub") or
+        std::mem::equal_bytes(previous, "unsafe") or
+        std::mem::equal_bytes(previous, "extern"));
 }
 
 fn last_byte(text: []u8) -> u8 {
