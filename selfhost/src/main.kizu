@@ -112,12 +112,7 @@ pub fn cli_main() -> !i64 {
         return std::process::exit_code(64);
     }
     if std::mem::equal_bytes(command, "check") {
-        if !std::mem::equal_bytes(target, "selfhost") {
-            return try check::file_cli(allocator, io, target);
-        }
-        try check_selfhost(allocator, io);
-        try output::line(allocator, io, "check: ok");
-        return std::process::exit_code(0);
+        return try check_file_or_package_cli(allocator, io, target);
     }
     if std::mem::equal_bytes(command, "parse") {
         return try parse_file_cli(allocator, io, target);
@@ -200,6 +195,17 @@ fn write_parse_success(
     try output::stdout_newline(allocator, io);
     formatted.deinit();
     return std::process::exit_code(0);
+}
+
+fn check_file_or_package_cli(allocator: Allocator, io: Io, target: []u8) -> !i64 {
+    let metadata = try std::fs::metadata(io, target);
+    if metadata.is_dir {
+        return try check::package_cli(allocator, io, target);
+    }
+    if std::mem::equal_bytes(std::path::basename(target), "kizu.toml") {
+        return try check::package_cli(allocator, io, std::path::dirname(target));
+    }
+    return try check::file_cli(allocator, io, target);
 }
 
 fn write_parse_failure(
@@ -605,19 +611,6 @@ pub fn cli_contract_gate() -> !void {
     try output::line(allocator, io, llvm.host_metadata_path);
     print("exit-code");
     print(std::process::exit_code(0));
-    return;
-}
-
-fn check_selfhost(allocator: Allocator, io: Io) -> !void {
-    var files = try source::load_selfhost_sources(allocator, io, "selfhost");
-    let resolved = try resolver::resolve_sources(allocator, files);
-    let typed = try types::check_sources(allocator, files, resolved);
-    let checked = try ownership::check_package(allocator, files, typed);
-    let diagnostics = checked.diagnostics;
-    files.deinit();
-    if diagnostics != 0 {
-        return error("selfhost check failed");
-    }
     return;
 }
 
