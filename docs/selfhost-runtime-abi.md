@@ -522,13 +522,14 @@ may still use the existing selfhost storage ABI while parsing, checking, and
 emitting those artifacts.
 
 For #588, the first `run <file>` success and frontend-failure dispatch paths are
-source-driven. Files containing exactly the newline-terminated print-hello source
-emit `target/selfhost/run/<basename-without-extension>.ll`, while files
-containing exactly the newline-terminated `fn main() { let value = ; }` source
-return the existing parse diagnostic without emitting an artifact. The original
-and alias rows in `run-parity.tsv` prove those branches are not bound to one
-fixture path or one fixed artifact stem. Broader source lowering remains outside
-this slice.
+source-driven. Files containing a supported `print("<simple ascii>")` call in
+`main` emit `target/selfhost/run/<basename-without-extension>.ll` with stdout
+derived from that string payload, while files containing exactly the
+newline-terminated `fn main() { let value = ; }` source return the existing
+parse diagnostic without emitting an artifact. The original, alias, and custom
+string rows in `run-parity.tsv` prove those branches are not bound to one
+fixture path, one fixed artifact stem, or the `hello, kizu` source literal.
+Broader expression lowering remains outside this slice.
 
 For #590, the first `test <file>` expect-ok and expect-failure dispatch paths are
 also source-driven. Files containing exactly the newline-terminated expect-ok or

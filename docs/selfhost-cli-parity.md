@@ -112,6 +112,7 @@ selfhost/tests/cli/run-parity.tsv
 # Columns: name command fixture exit stdout_golden stderr_golden artifact_mode artifact_stem
 run_hello run selfhost/tests/cli/run_hello.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello
 run_hello_alias run selfhost/tests/cli/run_hello_alias.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello_alias
+run_print_custom run selfhost/tests/cli/run_print_custom.kizu 0 selfhost/tests/cli/golden/run_print_custom.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_print_custom
 run_invalid_missing_expr run selfhost/tests/cli/run_invalid_missing_expr.kizu 1 selfhost/tests/cli/golden/run_invalid_missing_expr.stdout selfhost/tests/cli/golden/run_invalid_missing_expr.stderr hosted-artifact -
 run_invalid_missing_expr_alias run selfhost/tests/cli/run_invalid_missing_expr_alias.kizu 1 selfhost/tests/cli/golden/run_invalid_missing_expr.stdout selfhost/tests/cli/golden/run_invalid_missing_expr.stderr hosted-artifact -
 ```
@@ -125,6 +126,9 @@ fn main() {
 ```
 
 Its golden output is stdout `hello, kizu\n`, empty stderr, and exit code `0`.
+`run_print_custom.kizu` uses a different string literal so the hosted backend
+must derive the emitted stdout payload from source rather than from a fixed
+`hello, kizu` artifact template.
 The negative fixture reuses the smallest parse failure shape,
 `fn main() { let value = ; }`; its golden output is empty stdout, the hosted
 parse diagnostic on stderr, and exit code `1`. The `run` child must not execute

@@ -102,7 +102,9 @@ For #588, `run_hello_alias.kizu` and `run_invalid_missing_expr_alias.kizu` use
 the same source bytes as the original run fixtures to prove hosted run dispatch
 is source-driven for the first success and frontend-failure shapes. Positive run
 artifacts use the target basename, so the alias emits `run_hello_alias.ll`
-rather than reusing the original fixture stem.
+rather than reusing the original fixture stem. `run_print_custom.kizu` uses a
+different string payload, proving the hosted run artifact no longer hardcodes
+the `hello, kizu` stdout literal for the positive print-string slice.
 For #590, `test_expect_ok_alias.kizu` and `test_expect_failure_alias.kizu` do the
 same for the first single-file test artifact shapes. Positive test artifacts
 also use the target basename instead of a fixed expect-ok or expect-failure

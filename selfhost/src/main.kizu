@@ -13,6 +13,11 @@ import selfhost::resolver;
 import selfhost::source;
 import selfhost::types;
 
+struct RunPrintPayload {
+    found: bool,
+    payload: []u8,
+}
+
 pub fn smoke() -> parser::ParseError!i64 {
     let allocator = std::mem::page_allocator();
     let path = "selfhost/smoke.kizu";
@@ -288,9 +293,14 @@ fn run_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     if !(try check::fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
         return std::process::exit_code(1);
     }
-    let prints_hello = try ast_prints_hello(file_text, parsed.ast, parsed.root);
-    if prints_hello {
-        let artifact = try backend::emit_run_hello_artifact(allocator, io, path);
+    let print_payload = try ast_print_string_payload(file_text, parsed.ast, parsed.root);
+    if print_payload.found {
+        let artifact = try backend::emit_run_print_artifact(
+            allocator,
+            io,
+            path,
+            print_payload.payload
+        );
         if artifact.bytes > 0 and artifact.metadata_bytes > 0 {
             return std::process::exit_code(0);
         }
@@ -336,139 +346,182 @@ fn test_file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     return std::process::exit_code(64);
 }
 
-fn ast_prints_hello(
+fn ast_print_string_payload(
     text: []u8,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId
-) -> !bool {
+) -> !RunPrintPayload {
     let node = ast.get(node_id);
     return match node.data {
-        Program(program) => try ast_range_prints_hello(text, ast, program.declarations),
-        FnDecl(fn_decl) => try ast_fn_prints_hello(text, ast, fn_decl.name, fn_decl.body),
-        Block(block) => try ast_range_prints_hello(text, ast, block.statements),
-        ExprStmt(expr_stmt) => try ast_prints_hello(text, ast, expr_stmt.expr),
-        Call(call_node) => try ast_call_prints_hello(text, ast, call_node.callee, call_node.args),
-        TypeApplyExpr(type_apply) => try ast_prints_hello(text, ast, type_apply.callee),
-        TryExpr(try_expr_node) => try ast_prints_hello(text, ast, try_expr_node.value),
-        ComptimeExpr(comptime_expr_node) => try ast_prints_hello(text, ast, comptime_expr_node.value),
-        Unsafe(unsafe_node) => try ast_prints_hello(text, ast, unsafe_node.body),
-        If(if_node) => try ast_if_prints_hello(
+        Program(program) => try ast_range_print_string_payload(text, ast, program.declarations),
+        FnDecl(fn_decl) => try ast_fn_print_string_payload(text, ast, fn_decl.name, fn_decl.body),
+        Block(block) => try ast_range_print_string_payload(text, ast, block.statements),
+        ExprStmt(expr_stmt) => try ast_print_string_payload(text, ast, expr_stmt.expr),
+        Call(call_node) => try ast_call_print_string_payload(
+            text,
+            ast,
+            call_node.callee,
+            call_node.args
+        ),
+        TypeApplyExpr(type_apply) => try ast_print_string_payload(text, ast, type_apply.callee),
+        TryExpr(try_expr_node) => try ast_print_string_payload(text, ast, try_expr_node.value),
+        ComptimeExpr(comptime_expr_node) => try ast_print_string_payload(
+            text,
+            ast,
+            comptime_expr_node.value
+        ),
+        Unsafe(unsafe_node) => try ast_print_string_payload(text, ast, unsafe_node.body),
+        If(if_node) => try ast_if_print_string_payload(
             text,
             ast,
             if_node.then_block,
             if_node.else_block
         ),
-        Empty => false,
-        ImportDecl(import_decl) => false,
-        StructDecl(struct_decl) => false,
-        EnumDecl(enum_decl) => false,
-        UnionDecl(union_decl) => false,
-        Int(int_node) => false,
-        String(string_node) => false,
-        TypeName(type_name) => false,
-        Var(var_node) => false,
-        Bool(bool_node) => false,
-        Prefix(prefix_node) => false,
-        Binary(binary) => false,
-        FieldExpr(field_expr_node) => false,
-        DerefExpr(deref_expr_node) => false,
-        CastExpr(cast_expr) => false,
-        IndexExpr(index_expr) => false,
-        StructLiteralExpr(struct_literal) => false,
-        StructFieldInit(struct_field_init) => false,
-        ArenaNewExpr(arena_new) => false,
-        Let(let_node) => false,
-        Assign(assign_node) => false,
-        Return(return_node) => false,
-        Defer(defer_node) => false,
-        While(while_node) => false,
-        For(for_node) => false,
-        Break(break_node) => false,
-        Continue(continue_node) => false,
-        Param(param_node) => false,
-        Field(field_node) => false,
-        UnionVariant(union_variant) => false,
-        Match(match_node) => false,
-        MatchArm(match_arm) => false,
-        ComptimeIf(comptime_if_node) => false,
+        Empty => run_print_not_found(text),
+        ImportDecl(import_decl) => run_print_not_found(text),
+        StructDecl(struct_decl) => run_print_not_found(text),
+        EnumDecl(enum_decl) => run_print_not_found(text),
+        UnionDecl(union_decl) => run_print_not_found(text),
+        Int(int_node) => run_print_not_found(text),
+        String(string_node) => run_print_not_found(text),
+        TypeName(type_name) => run_print_not_found(text),
+        Var(var_node) => run_print_not_found(text),
+        Bool(bool_node) => run_print_not_found(text),
+        Prefix(prefix_node) => run_print_not_found(text),
+        Binary(binary) => run_print_not_found(text),
+        FieldExpr(field_expr_node) => run_print_not_found(text),
+        DerefExpr(deref_expr_node) => run_print_not_found(text),
+        CastExpr(cast_expr) => run_print_not_found(text),
+        IndexExpr(index_expr) => run_print_not_found(text),
+        StructLiteralExpr(struct_literal) => run_print_not_found(text),
+        StructFieldInit(struct_field_init) => run_print_not_found(text),
+        ArenaNewExpr(arena_new) => run_print_not_found(text),
+        Let(let_node) => run_print_not_found(text),
+        Assign(assign_node) => run_print_not_found(text),
+        Return(return_node) => run_print_not_found(text),
+        Defer(defer_node) => run_print_not_found(text),
+        While(while_node) => run_print_not_found(text),
+        For(for_node) => run_print_not_found(text),
+        Break(break_node) => run_print_not_found(text),
+        Continue(continue_node) => run_print_not_found(text),
+        Param(param_node) => run_print_not_found(text),
+        Field(field_node) => run_print_not_found(text),
+        UnionVariant(union_variant) => run_print_not_found(text),
+        Match(match_node) => run_print_not_found(text),
+        MatchArm(match_arm) => run_print_not_found(text),
+        ComptimeIf(comptime_if_node) => run_print_not_found(text),
     };
 }
 
-fn ast_fn_prints_hello(
+fn ast_fn_print_string_payload(
     text: []u8,
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId
-) -> !bool {
+) -> !RunPrintPayload {
     if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
-        return false;
+        return run_print_not_found(text);
     }
-    return try ast_prints_hello(text, ast, body);
+    return try ast_print_string_payload(text, ast, body);
 }
 
-fn ast_range_prints_hello(
+fn ast_range_print_string_payload(
     text: []u8,
     ast: std::kizu::ast::Ast,
     range: std::kizu::ast::ChildRange
-) -> !bool {
+) -> !RunPrintPayload {
     var index = 0;
     while index < range.len {
         let child = try ast.child_at(range, index);
-        if try ast_prints_hello(text, ast, child) {
-            return true;
+        let payload = try ast_print_string_payload(text, ast, child);
+        if payload.found {
+            return payload;
         }
         index = index + 1;
     }
-    return false;
+    return run_print_not_found(text);
 }
 
-fn ast_call_prints_hello(
+fn ast_call_print_string_payload(
     text: []u8,
     ast: std::kizu::ast::Ast,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange
-) -> !bool {
+) -> !RunPrintPayload {
     if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
-        return false;
+        return run_print_not_found(text);
     }
     let arg = try ast.child_at(args, 0);
-    return ast_string_payload_equal(text, ast, arg, "hello, kizu");
+    return ast_string_literal_payload(text, ast, arg);
 }
 
-fn ast_string_payload_equal(
+fn ast_string_literal_payload(
     text: []u8,
     ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId,
-    want: []u8
-) -> bool {
+    node_id: std::kizu::ast::NodeId
+) -> RunPrintPayload {
     let node = ast.get(node_id);
     return match node.data {
-        String(string_node) => ast_string_literal_payload_equal(ast_node_text(text, ast, node_id), want),
-        _ => false,
+        String(string_node) => run_print_payload_from_literal(
+            text,
+            ast_node_text(text, ast, node_id)
+        ),
+        _ => run_print_not_found(text),
     };
 }
 
-fn ast_string_literal_payload_equal(literal: []u8, want: []u8) -> bool {
+fn run_print_payload_from_literal(text: []u8, literal: []u8) -> RunPrintPayload {
     let length = std::mem::len(literal);
     if length < 2 {
-        return false;
+        return run_print_not_found(text);
     }
     if literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
-        return false;
+        return run_print_not_found(text);
     }
-    return std::mem::equal_bytes(literal[1..length - 1], want);
+    let payload = literal[1..length - 1];
+    if !is_supported_run_print_payload(payload) {
+        return run_print_not_found(text);
+    }
+    return RunPrintPayload {
+        found: true,
+        payload: payload
+    };
 }
 
-fn ast_if_prints_hello(
+fn is_supported_run_print_payload(payload: []u8) -> bool {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        if byte < cast<u8>(32) or byte > cast<u8>(126) {
+            return false;
+        }
+        if byte == cast<u8>(34) or byte == cast<u8>(92) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn run_print_not_found(text: []u8) -> RunPrintPayload {
+    return RunPrintPayload {
+        found: false,
+        payload: text[0..0]
+    };
+}
+
+fn ast_if_print_string_payload(
     text: []u8,
     ast: std::kizu::ast::Ast,
     then_block: std::kizu::ast::NodeId,
     else_block: std::kizu::ast::NodeId
-) -> !bool {
-    if try ast_prints_hello(text, ast, then_block) {
-        return true;
+) -> !RunPrintPayload {
+    let then_payload = try ast_print_string_payload(text, ast, then_block);
+    if then_payload.found {
+        return then_payload;
     }
-    return try ast_prints_hello(text, ast, else_block);
+    return try ast_print_string_payload(text, ast, else_block);
 }
 
 fn ast_testing_expect_value(
