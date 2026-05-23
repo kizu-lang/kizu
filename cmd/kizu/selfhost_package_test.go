@@ -43,7 +43,6 @@ func TestSelfhostParserFacadeValidatesCheckedFiles(t *testing.T) {
 		"pub fn parse_validated_file(",
 		"validation_ok: bool",
 		"if !validation_ok {",
-		"pub fn parse_diagnostic_file(",
 		"var tokens = try lexer::tokenize(allocator, source);",
 		"defer tokens.deinit();",
 		"let validation_ok = try validation::validate_tokens_ok(allocator, source, &tokens);",
@@ -52,13 +51,14 @@ func TestSelfhostParserFacadeValidatesCheckedFiles(t *testing.T) {
 		"if !validation_result.ok {",
 		"let token_check = require_checked_tokens(&tokens);",
 		"try token_check;",
-		"var parsed = try parse_program_file(allocator, path, source);",
-		"parsed.deinit();",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("selfhost parser checked path missing %q", fragment)
 		}
+	}
+	if strings.Contains(content, "pub fn parse_diagnostic_file(") {
+		t.Fatal("selfhost parser keeps AST-discarding diagnostic parse wrapper")
 	}
 	if strings.Contains(content, "return try validation::validate_source(allocator, source);") {
 		t.Fatal("selfhost parser diagnostic path retokenizes validation failures")
@@ -1089,13 +1089,21 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 	if strings.Contains(content, "validation::validate_source(allocator, file_text)") {
 		t.Fatal("CLI entry validates source outside parser facade")
 	}
+	if strings.Contains(content, "parser::parse_diagnostic_file(") {
+		t.Fatal("CLI parse path uses AST-discarding parser wrapper")
+	}
+	body := selfhostKizuFunctionBody(t, content, "fn validate_file_cli_parse(")
 	required := []string{
-		"parser::parse_diagnostic_file(allocator, path, file_text)",
-		"if !parsed_validation.ok {",
-		"return try write_parse_failure(allocator, io, parsed_validation);",
+		"parser::validate_diagnostic_file(allocator, path, file_text)",
+		"let validation_ok = parsed_validation.ok",
+		"if !validation_ok {",
+		"diagnostics::parse_validation_error(allocator, io, parsed_validation)",
+		"let parsed = try parser::parse_validated_file(",
+		"validation_ok",
+		"parsed.deinit();",
 	}
 	for _, fragment := range required {
-		if !strings.Contains(content, fragment) {
+		if !strings.Contains(body, fragment) {
 			t.Fatalf("CLI parse path missing %q", fragment)
 		}
 	}
