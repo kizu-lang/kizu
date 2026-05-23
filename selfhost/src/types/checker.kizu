@@ -52,31 +52,32 @@ pub fn check_sources(
     var arities = std::map::Map<[]u8, i64>(allocator);
     var copyable = std::map::Map<[]u8, bool>(allocator);
     var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var function_param_sources = std::map::Map<[]u8, []u8>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var function_visibility = std::map::Map<[]u8, bool>(allocator);
-    var function_span_starts = std::map::Map<[]u8, i64>(allocator);
-    var function_span_ends = std::map::Map<[]u8, i64>(allocator);
     try type_refs::seed_builtin_types(kinds, arities, copyable);
 
     var index = 0;
     while index < files.len() {
         let file = try files.at(index);
         if source::is_source_code(file.kind) {
-            var tokens = try lexer::tokenize(allocator, file.text);
-            try type_refs::collect_declared_types(allocator, file, tokens, kinds, arities, copyable);
-            try function_calls::collect_function_signatures(
+            let result = try parser::parse_checked_file(allocator, file.path, file.text);
+            try type_refs::collect_declared_types_from_ast(
                 allocator,
                 file,
-                tokens,
-                function_arities,
-                function_param_sources,
-                function_returns,
-                function_visibility,
-                function_span_starts,
-                function_span_ends
+                result.ast,
+                result.root,
+                kinds,
+                arities,
+                copyable
             );
-            tokens.deinit();
+            try function_calls::collect_function_signatures_from_ast(
+                allocator,
+                file,
+                &result.ast,
+                result.root,
+                function_arities,
+                function_returns
+            );
+            result.deinit();
         }
         index = index + 1;
     }
@@ -118,11 +119,7 @@ pub fn check_sources(
     arities.deinit();
     copyable.deinit();
     function_arities.deinit();
-    function_param_sources.deinit();
     function_returns.deinit();
-    function_visibility.deinit();
-    function_span_starts.deinit();
-    function_span_ends.deinit();
     return summary;
 }
 
@@ -176,9 +173,9 @@ pub fn first_pre_move_check_diagnostic_ast_node(
     var arities = std::map::Map<[]u8, i64>(allocator);
     var copyable = std::map::Map<[]u8, bool>(allocator);
     try type_refs::seed_builtin_types(kinds, arities, copyable);
+    try type_refs::collect_declared_types_from_ast(allocator, file, ast, root, kinds, arities, copyable);
+    try type_refs::collect_type_parameters_from_ast(file, ast, root, kinds, arities, copyable);
     var tokens = try lexer::tokenize(allocator, file.text);
-    try type_refs::collect_declared_types(allocator, file, tokens, kinds, arities, copyable);
-    try type_refs::collect_type_parameters(file, tokens, kinds, arities, copyable);
     let type_ref = try type_refs::first_type_error_in_file(allocator, file, tokens, kinds, arities);
     tokens.deinit();
     kinds.deinit();

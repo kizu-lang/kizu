@@ -148,6 +148,93 @@ func TestSelfhostTypeReferenceDiagnosticsAvoidDeadByteContains(t *testing.T) {
 	}
 }
 
+// TestSelfhostTypeDeclarationsUseParsedAST keeps declaration collection on the parsed tree.
+func TestSelfhostTypeDeclarationsUseParsedAST(t *testing.T) {
+	typeRefs := readSelfhostFile(t, "../../selfhost/src/types/type_refs.kizu")
+	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
+	requiredTypeRefs := []string{
+		"pub fn collect_declared_types_from_ast(",
+		"Program(program) => return collect_declared_types_in_range(",
+		"StructDecl(struct_decl) => return collect_declared_type_from_ast(",
+		"EnumDecl(enum_decl) => return collect_declared_type_from_ast(",
+		"UnionDecl(union_decl) => return collect_declared_type_from_ast(",
+		"pub fn collect_type_parameters_from_ast(",
+		"fn ast_node_text(",
+	}
+	for _, fragment := range requiredTypeRefs {
+		if !strings.Contains(typeRefs, fragment) {
+			t.Fatalf("selfhost type declaration AST collection missing %q", fragment)
+		}
+	}
+	forbiddenTypeRefs := []string{
+		"pub fn collect_declared_types(",
+		"pub fn collect_type_parameters(",
+		"fn collect_type_parameters_at(",
+		"fn type_decl_arity(",
+	}
+	for _, fragment := range forbiddenTypeRefs {
+		if strings.Contains(typeRefs, fragment) {
+			t.Fatalf("selfhost type declaration collection keeps token path %q", fragment)
+		}
+	}
+	requiredChecker := []string{
+		"parser::parse_checked_file(allocator, file.path, file.text)",
+		"type_refs::collect_declared_types_from_ast(",
+		"type_refs::collect_type_parameters_from_ast(",
+	}
+	for _, fragment := range requiredChecker {
+		if !strings.Contains(checker, fragment) {
+			t.Fatalf("selfhost checker does not use AST type declaration collection %q", fragment)
+		}
+	}
+	forbiddenChecker := []string{
+		"type_refs::collect_declared_types(allocator, file, tokens",
+		"type_refs::collect_type_parameters(file, tokens",
+	}
+	for _, fragment := range forbiddenChecker {
+		if strings.Contains(checker, fragment) {
+			t.Fatalf("selfhost checker keeps token type declaration collection %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostFunctionSignaturesUseParsedAST keeps the first type pass on the parsed tree.
+func TestSelfhostFunctionSignaturesUseParsedAST(t *testing.T) {
+	functionCalls := readSelfhostFile(t, "../../selfhost/src/types/function_calls.kizu")
+	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
+	requiredFunctionCalls := []string{
+		"pub fn collect_function_signatures_from_ast(",
+		"Program(program) => return collect_function_signatures_in_range_from_ast(",
+		"FnDecl(fn_decl) => return collect_function_signature_from_ast(",
+		"fn ast_return_type(",
+	}
+	for _, fragment := range requiredFunctionCalls {
+		if !strings.Contains(functionCalls, fragment) {
+			t.Fatalf("selfhost function signature AST collection missing %q", fragment)
+		}
+	}
+	forbiddenFunctionCalls := []string{
+		"fn collect_package_function_signatures(",
+		"pub fn collect_function_signatures(",
+		"fn function_param_open(",
+		"fn function_param_source(",
+		"fn function_return_type(",
+		"fn function_public_at(",
+		"fn ast_param_source(",
+	}
+	for _, fragment := range forbiddenFunctionCalls {
+		if strings.Contains(functionCalls, fragment) {
+			t.Fatalf("selfhost function signature collection keeps token path %q", fragment)
+		}
+	}
+	if !strings.Contains(checker, "function_calls::collect_function_signatures_from_ast(") {
+		t.Fatal("selfhost checker does not use AST function signature collection")
+	}
+	if strings.Contains(checker, "function_calls::collect_function_signatures(") {
+		t.Fatal("selfhost checker keeps token function signature collection")
+	}
+}
+
 // TestSelfhostPackageCallDiagnosticsBorrowAST keeps target parsing single-pass.
 func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/types/function_calls.kizu")
