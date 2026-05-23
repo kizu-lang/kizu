@@ -701,10 +701,22 @@ func TestSelfhostMoveDiagnosticsUseSourcePath(t *testing.T) {
 		"path: []u8,",
 		"kind: source::SourceKind::User,",
 		"path: path,",
+		"fn initializer_is_record_literal(",
+		"StructLiteralExpr(struct_literal) => true",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("move diagnostics missing %q", fragment)
+		}
+	}
+	forbidden := []string{
+		"initializer_text_is_record_literal(",
+		"fn bytes_contains(",
+		"bytes_contains(text, \"{\")",
+	}
+	for _, fragment := range forbidden {
+		if strings.Contains(content, fragment) {
+			t.Fatalf("move diagnostics keep raw initializer scan %q", fragment)
 		}
 	}
 }
