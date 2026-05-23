@@ -109,6 +109,10 @@ pub fn validate_tokens(
     if !invalid_token.ok {
         return invalid_token;
     }
+    let match_arms = try validate_match_arm_separators(source, validation_tokens);
+    if !match_arms.ok {
+        return match_arms;
+    }
     let statement_separators = try validate_statement_separators(source, validation_tokens);
     if !statement_separators.ok {
         return statement_separators;
@@ -950,6 +954,153 @@ fn skip_balanced_parens(
     return cursor;
 }
 
+fn validate_match_arm_separators(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !ParseValidation {
+    var index = 0;
+    while index + 1 < tokens.len() {
+        let token = try tokens.get(index);
+        if is_match_token(token) {
+            let body = try find_match_body_open_index(tokens, index);
+            if body < tokens.len() {
+                let validation = try validate_match_body_arm_separators(source, tokens, body);
+                if !validation.ok {
+                    return validation;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return valid_parse_validation();
+}
+
+fn find_match_body_open_index(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !i64 {
+    var cursor = index + 1;
+    var paren_depth = 0;
+    var bracket_depth = 0;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if paren_depth == 0 and bracket_depth == 0 and is_left_brace_token(token) {
+            return cursor;
+        }
+        if lexer::is_eof(token) or is_semicolon_token(token) {
+            return tokens.len();
+        }
+        if is_left_paren_token(token) {
+            paren_depth = paren_depth + 1;
+        }
+        if is_right_paren_token(token) and paren_depth > 0 {
+            paren_depth = paren_depth - 1;
+        }
+        if is_left_bracket_token(token) {
+            bracket_depth = bracket_depth + 1;
+        }
+        if is_right_bracket_token(token) and bracket_depth > 0 {
+            bracket_depth = bracket_depth - 1;
+        }
+        cursor = cursor + 1;
+    }
+    return tokens.len();
+}
+
+fn validate_match_body_arm_separators(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    open_index: i64
+) -> !ParseValidation {
+    var cursor = open_index + 1;
+    var brace_depth = 1;
+    while cursor < tokens.len() and brace_depth > 0 {
+        let token = try tokens.get(cursor);
+        if brace_depth == 1 and is_fat_arrow_token(token) {
+            let validation = try validate_match_arm_body_separator(source, tokens, cursor + 1);
+            if !validation.ok {
+                return validation;
+            }
+        }
+        if is_left_brace_token(token) {
+            brace_depth = brace_depth + 1;
+        }
+        if is_right_brace_token(token) {
+            brace_depth = brace_depth - 1;
+        }
+        cursor = cursor + 1;
+    }
+    return valid_parse_validation();
+}
+
+fn validate_match_arm_body_separator(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    start_index: i64
+) -> !ParseValidation {
+    var cursor = start_index;
+    var paren_depth = 0;
+    var bracket_depth = 0;
+    var brace_depth = 0;
+    while cursor < tokens.len() {
+        let token = try tokens.get(cursor);
+        if paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 {
+            if is_comma_token(token) or is_right_brace_token(token) {
+                return valid_parse_validation();
+            }
+            if try is_match_arm_start_at(tokens, cursor) {
+                return invalid_parse_validation(
+                    "expected comma or right brace",
+                    token.line,
+                    token.column,
+                    token_text(source, token)
+                );
+            }
+        }
+        if is_left_paren_token(token) {
+            paren_depth = paren_depth + 1;
+        }
+        if is_right_paren_token(token) and paren_depth > 0 {
+            paren_depth = paren_depth - 1;
+        }
+        if is_left_bracket_token(token) {
+            bracket_depth = bracket_depth + 1;
+        }
+        if is_right_bracket_token(token) and bracket_depth > 0 {
+            bracket_depth = bracket_depth - 1;
+        }
+        if is_left_brace_token(token) {
+            brace_depth = brace_depth + 1;
+        }
+        if is_right_brace_token(token) and brace_depth > 0 {
+            brace_depth = brace_depth - 1;
+        }
+        cursor = cursor + 1;
+    }
+    let eof = try tokens.get(tokens.len() - 1);
+    return invalid_parse_validation("expected comma or right brace", eof.line, eof.column, "");
+}
+
+fn is_match_arm_start_at(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    index: i64
+) -> !bool {
+    let token = try tokens.get(index);
+    if !is_ident_token(token) {
+        return false;
+    }
+    var next_index = index + 1;
+    let next = try tokens.get(next_index);
+    if is_left_paren_token(next) {
+        next_index = try skip_balanced_parens(tokens, next_index);
+    }
+    if next_index >= tokens.len() {
+        return false;
+    }
+    let marker = try tokens.get(next_index);
+    return is_fat_arrow_token(marker);
+}
+
 fn validate_statement_separators(
     source: []u8,
     tokens: &std::array::Array<std::kizu::lexer::Token>
@@ -1131,6 +1282,20 @@ fn is_enum_token(token: std::kizu::lexer::Token) -> bool {
 fn is_union_token(token: std::kizu::lexer::Token) -> bool {
     return match token.kind {
         Union => true,
+        _ => false,
+    };
+}
+
+fn is_match_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Match => true,
+        _ => false,
+    };
+}
+
+fn is_fat_arrow_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        FatArrow => true,
         _ => false,
     };
 }

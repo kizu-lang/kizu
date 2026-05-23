@@ -51,6 +51,7 @@ type selfhostCLIFrontendFixtures struct {
 	invalidSource       string
 	missingSemicolon    string
 	missingAssign       string
+	missingMatchComma   string
 	topLevelStmt        string
 	invalidToken        string
 	invalidExpr         string
@@ -310,6 +311,12 @@ func selfhostCLIFrontendParseSyntaxFailureCases(
 			args:    []string{"parse", fixtures.missingAssign},
 			wantOut: "exit-code\n1\n",
 			wantErr: "error: expected assign, got ; at 2:14\nerror: parse failed\n",
+		},
+		{
+			name:    "parse_temp_missing_match_arm_comma",
+			args:    []string{"parse", fixtures.missingMatchComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right brace, got Green at 2:59\nerror: parse failed\n",
 		},
 		{
 			name:    "parse_temp_top_level_statement",
@@ -662,6 +669,12 @@ func selfhostCLIFrontendCheckSyntaxParseFailureCases(
 			wantErr: "error: expected assign, got ; at 2:14\nerror: parse failed\n",
 		},
 		{
+			name:    "check_temp_missing_match_arm_comma",
+			args:    []string{"check", fixtures.missingMatchComma},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: expected comma or right brace, got Green at 2:59\nerror: parse failed\n",
+		},
+		{
 			name:    "check_temp_top_level_statement",
 			args:    []string{"check", fixtures.topLevelStmt},
 			wantOut: "exit-code\n1\n",
@@ -797,17 +810,9 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		tempMissingReturn, tempIfMissingReturn :=
 		writeSelfhostCLIReturnFrontendFixtures(t)
 	tempMatchMissing := writeSelfhostCLIMatchFrontendFixtures(t)
-
-	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign, tempTopLevelStmt,
-		tempInvalidToken, tempInvalidExpr,
-		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
-		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
-		tempMissingFieldComma, tempMissingEnumComma, tempMissingUnionComma,
-		tempMissingColon, tempMissingType :=
-		writeSelfhostCLIInvalidFrontendFixtures(t)
 	tempExpectOK, tempExpectFail := writeSelfhostCLIExpectFrontendFixtures(t)
 
-	return selfhostCLIFrontendFixtures{
+	fixtures := selfhostCLIFrontendFixtures{
 		source:              tempSource,
 		runSource:           tempRunSource,
 		movedSource:         tempMovedSource,
@@ -829,31 +834,51 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		missingReturn:       tempMissingReturn,
 		ifMissingReturn:     tempIfMissingReturn,
 		matchMissing:        tempMatchMissing,
-		invalidSource:       tempInvalidSource,
-		missingSemicolon:    tempMissingSemicolon,
-		missingAssign:       tempMissingAssign,
-		topLevelStmt:        tempTopLevelStmt,
-		invalidToken:        tempInvalidToken,
-		invalidExpr:         tempInvalidExpr,
-		invalidFnName:       tempInvalidFnName,
-		invalidParam:        tempInvalidParam,
-		missingParamComma:   tempMissingParamComma,
-		invalidTypeParam:    tempInvalidTypeParam,
-		invalidReturn:       tempInvalidReturn,
-		missingFnBody:       tempMissingFnBody,
-		invalidImport:       tempInvalidImport,
-		invalidStruct:       tempInvalidStruct,
-		invalidField:        tempInvalidField,
-		missingFieldComma:   tempMissingFieldComma,
-		missingEnumComma:    tempMissingEnumComma,
-		missingUnionComma:   tempMissingUnionComma,
-		missingColon:        tempMissingColon,
-		missingType:         tempMissingType,
 		expectOK:            tempExpectOK,
 		expectFail:          tempExpectFail,
-		missingExpr:         tempMissingExpr,
 		movedValue:          tempMovedValue,
 	}
+	writeSelfhostCLIInvalidFrontendFixtureFields(t, &fixtures)
+	return fixtures
+}
+
+// writeSelfhostCLIInvalidFrontendFixtureFields adds invalid frontend inputs to fixtures.
+func writeSelfhostCLIInvalidFrontendFixtureFields(
+	t *testing.T,
+	fixtures *selfhostCLIFrontendFixtures,
+) {
+	t.Helper()
+
+	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
+		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
+		tempMissingFieldComma, tempMissingEnumComma, tempMissingUnionComma,
+		tempMissingColon, tempMissingType :=
+		writeSelfhostCLIInvalidFrontendFixtures(t)
+
+	fixtures.invalidSource = tempInvalidSource
+	fixtures.missingSemicolon = tempMissingSemicolon
+	fixtures.missingAssign = tempMissingAssign
+	fixtures.missingMatchComma = tempMissingMatchComma
+	fixtures.topLevelStmt = tempTopLevelStmt
+	fixtures.invalidToken = tempInvalidToken
+	fixtures.invalidExpr = tempInvalidExpr
+	fixtures.invalidFnName = tempInvalidFnName
+	fixtures.invalidParam = tempInvalidParam
+	fixtures.missingParamComma = tempMissingParamComma
+	fixtures.invalidTypeParam = tempInvalidTypeParam
+	fixtures.invalidReturn = tempInvalidReturn
+	fixtures.missingFnBody = tempMissingFnBody
+	fixtures.invalidImport = tempInvalidImport
+	fixtures.invalidStruct = tempInvalidStruct
+	fixtures.invalidField = tempInvalidField
+	fixtures.missingFieldComma = tempMissingFieldComma
+	fixtures.missingEnumComma = tempMissingEnumComma
+	fixtures.missingUnionComma = tempMissingUnionComma
+	fixtures.missingColon = tempMissingColon
+	fixtures.missingType = tempMissingType
+	fixtures.missingExpr = tempMissingExpr
 }
 
 // writeSelfhostCLIHappyFrontendFixtures writes successful frontend inputs.
@@ -1163,22 +1188,23 @@ func writeSelfhostCLIInvalidFrontendFixtures(
 	t *testing.T,
 ) (
 	string, string, string, string, string,
-	string, string, string, string, string,
+	string, string, string, string, string, string,
 	string, string, string, string, string, string, string, string, string, string, string,
 ) {
 	t.Helper()
 
-	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign, tempTopLevelStmt,
-		tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam, tempMissingParamComma,
-		tempInvalidTypeParam, tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
+	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
+		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
+		tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
 		writeSelfhostCLIInvalidGeneralFrontendFixtures(t)
 	tempInvalidStruct, tempInvalidField, tempMissingFieldComma, tempMissingEnumComma,
 		tempMissingUnionComma, tempMissingColon, tempMissingType :=
 		writeSelfhostCLIInvalidAggregateFrontendFixtures(t)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempTopLevelStmt, tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam,
-		tempMissingParamComma, tempInvalidTypeParam,
+		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport, tempInvalidStruct, tempInvalidField,
 		tempMissingFieldComma, tempMissingEnumComma, tempMissingUnionComma,
 		tempMissingColon, tempMissingType
@@ -1189,18 +1215,20 @@ func writeSelfhostCLIInvalidGeneralFrontendFixtures(
 	t *testing.T,
 ) (
 	string, string, string, string, string,
-	string, string, string, string, string, string, string, string, string,
+	string, string, string, string, string, string, string, string, string, string,
 ) {
 	t.Helper()
 
-	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign, tempTopLevelStmt,
-		tempInvalidToken, tempInvalidExpr := writeSelfhostCLIInvalidSyntaxFrontendFixtures(t)
+	tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
+		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr :=
+		writeSelfhostCLIInvalidSyntaxFrontendFixtures(t)
 	tempInvalidFnName, tempInvalidParam, tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport :=
 		writeSelfhostCLIInvalidFunctionFrontendFixtures(t)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempTopLevelStmt, tempInvalidToken, tempInvalidExpr, tempInvalidFnName, tempInvalidParam,
+		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr,
+		tempInvalidFnName, tempInvalidParam,
 		tempMissingParamComma, tempInvalidTypeParam,
 		tempInvalidReturn, tempMissingFnBody, tempInvalidImport
 }
@@ -1208,7 +1236,7 @@ func writeSelfhostCLIInvalidGeneralFrontendFixtures(
 // writeSelfhostCLIInvalidSyntaxFrontendFixtures writes syntax parse failures.
 func writeSelfhostCLIInvalidSyntaxFrontendFixtures(
 	t *testing.T,
-) (string, string, string, string, string, string, string) {
+) (string, string, string, string, string, string, string, string) {
 	t.Helper()
 
 	const missingExprSource = `fn main() { let value = ; }
@@ -1234,6 +1262,15 @@ func writeSelfhostCLIInvalidSyntaxFrontendFixtures(
 `
 	tempMissingAssign := writeTempKizuSource(t, "frontend_missing_assign.kizu", missingAssignSource)
 
+	const missingMatchCommaSource = `enum Color { Red, Green }
+fn main(color: Color) { match color { Red => print("red") Green => print("green"), } }
+`
+	tempMissingMatchComma := writeTempKizuSource(
+		t,
+		"frontend_missing_match_arm_comma.kizu",
+		missingMatchCommaSource,
+	)
+
 	const topLevelStmtSource = `let value = 1;
 `
 	tempTopLevelStmt := writeTempKizuSource(t, "frontend_top_level_stmt.kizu", topLevelStmtSource)
@@ -1249,7 +1286,7 @@ func writeSelfhostCLIInvalidSyntaxFrontendFixtures(
 	tempInvalidExpr := writeTempKizuSource(t, "frontend_invalid_expr_token.kizu", invalidExprSource)
 
 	return tempMissingExpr, tempInvalidSource, tempMissingSemicolon, tempMissingAssign,
-		tempTopLevelStmt, tempInvalidToken, tempInvalidExpr
+		tempMissingMatchComma, tempTopLevelStmt, tempInvalidToken, tempInvalidExpr
 }
 
 // writeSelfhostCLIInvalidFunctionFrontendFixtures writes function parse failures.
