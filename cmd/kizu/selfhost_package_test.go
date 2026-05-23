@@ -132,6 +132,20 @@ func TestSelfhostFunctionCallDiagnosticsUseSourcePath(t *testing.T) {
 	if !strings.Contains(content, "std::mem::equal_bytes(file.path, target_path)") {
 		t.Fatal("function call diagnostics do not select files by source path")
 	}
+	if !strings.Contains(content, "return first_qualified_segment_end(name) < std::mem::len(name);") {
+		t.Fatal("function call diagnostics do not reuse qualified segment scanning")
+	}
+	if strings.Contains(content, "fn bytes_contains(") {
+		t.Fatal("function call diagnostics keep local byte-contains helper")
+	}
+}
+
+// TestSelfhostTypeReferenceDiagnosticsAvoidDeadByteContains keeps type refs lean.
+func TestSelfhostTypeReferenceDiagnosticsAvoidDeadByteContains(t *testing.T) {
+	content := readSelfhostFile(t, "../../selfhost/src/types/type_refs.kizu")
+	if strings.Contains(content, "fn bytes_contains(") {
+		t.Fatal("type reference diagnostics keep unused byte-contains helper")
+	}
 }
 
 // TestSelfhostPackageCallDiagnosticsBorrowAST keeps target parsing single-pass.
