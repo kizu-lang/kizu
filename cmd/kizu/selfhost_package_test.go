@@ -27,6 +27,9 @@ func TestSelfhostCheckPhasesUseParserFacade(t *testing.T) {
 		if strings.Contains(string(bytes), "std::kizu::parser::parse_program") {
 			t.Fatalf("%s bypasses selfhost::parser facade", filepath.Clean(path))
 		}
+		if strings.Contains(string(bytes), "pub fn first_duplicate_declaration(") {
+			t.Fatalf("%s keeps duplicate declaration path/text wrapper", filepath.Clean(path))
+		}
 	}
 }
 
