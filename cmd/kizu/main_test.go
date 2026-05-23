@@ -454,6 +454,24 @@ func TestFmtCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestFmtCommandPreservesLeadingLineComments keeps formatter output from dropping trivia.
+func TestFmtCommandPreservesLeadingLineComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "commented.kizu")
+	src := "// keep this comment\nfn main(){print(\"hello, kizu\");}\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "fmt", path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	want := "// keep this comment\nfn main() {\n    print(\"hello, kizu\");\n}\n"
+	if string(out) != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestFmtCommandRejectsInvalidSyntax checks fmt reports parser failures through selfhost.
 func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.kizu")
@@ -471,10 +489,34 @@ func TestFmtCommandRejectsInvalidSyntax(t *testing.T) {
 	}
 }
 
-// TestFmtWriteRejectsLineComments checks --write does not drop comment trivia.
-func TestFmtWriteRejectsLineComments(t *testing.T) {
-	src := "// keep this comment\nfn main() {}\n"
+// TestFmtWritePreservesLeadingLineComments checks --write keeps supported comment trivia.
+func TestFmtWritePreservesLeadingLineComments(t *testing.T) {
+	src := "// keep this comment\nfn main(){print(\"hello, kizu\");}\n"
 	path := filepath.Join(t.TempDir(), "commented.kizu")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, runErr := runDispatchCaptureStderr(t, "fmt", []string{"--write", path})
+	if runErr != nil {
+		t.Fatalf("command failed: %v\n%s", runErr, out)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	want := "// keep this comment\nfn main() {\n    print(\"hello, kizu\");\n}"
+	if string(got) != want {
+		t.Fatalf("file changed:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFmtWriteRejectsInlineLineComments checks unsupported comments are not dropped.
+func TestFmtWriteRejectsInlineLineComments(t *testing.T) {
+	src := "fn main() { // keep this comment\n    print(\"hello, kizu\");\n}\n"
+	path := filepath.Join(t.TempDir(), "inline-comment.kizu")
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +525,7 @@ func TestFmtWriteRejectsLineComments(t *testing.T) {
 	if !errors.As(runErr, &status) || status.code != 1 {
 		t.Fatalf("got error %v, want exit status 1", runErr)
 	}
-	wantErr := "error: fmt --write does not support line comments yet\n"
+	wantErr := "error: fmt does not support non-leading line comments yet\n"
 	if out != wantErr {
 		t.Fatalf("got %q, want %q", out, wantErr)
 	}
