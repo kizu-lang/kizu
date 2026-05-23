@@ -177,6 +177,67 @@ func TestCheckPackageCommandRejectsMissingModuleRoot(t *testing.T) {
 	}
 }
 
+// TestCheckPackageCommandUsesManifestPaths keeps package loading manifest-driven.
+func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
+	root := t.TempDir()
+	manifest := []byte(
+		"[package]\nname = \"frontend\"\n\n[modules]\nroot = \"lib/main.kizu\"\npaths = [\"lib\"]\n",
+	)
+	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	libDir := filepath.Join(root, "lib")
+	if err := os.Mkdir(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := "import frontend::checks;\n\nfn main() {\n    checks::touch();\n}\n"
+	if err := os.WriteFile(filepath.Join(libDir, "main.kizu"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checks := "pub fn touch() -> void {\n    return;\n}\n"
+	if err := os.WriteFile(filepath.Join(libDir, "checks.kizu"), []byte(checks), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{root})
+	if runErr != nil {
+		t.Fatalf("check failed: %v\n%s", runErr, out)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+}
+
+// TestCheckPackageCommandRejectsInvalidManifestPaths avoids silent path fallback.
+func TestCheckPackageCommandRejectsInvalidManifestPaths(t *testing.T) {
+	root := t.TempDir()
+	manifest := []byte(
+		"[package]\nname = \"frontend\"\n\n[modules]\nroot = \"lib/main.kizu\"\npaths = [lib]\n",
+	)
+	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	libDir := filepath.Join(root, "lib")
+	if err := os.Mkdir(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(libDir, "main.kizu"),
+		[]byte("fn main() {}\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{root})
+	if runErr == nil || !strings.Contains(runErr.Error(), "invalid manifest") {
+		t.Fatalf("got error %v, want invalid manifest", runErr)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+}
+
 // runDispatchCaptureStderr runs dispatch with process-global stderr captured.
 func runDispatchCaptureStderr(t *testing.T, command string, args []string) (string, error) {
 	t.Helper()

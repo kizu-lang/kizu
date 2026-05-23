@@ -1167,6 +1167,21 @@ func TestSelfhostCheckManifestTargetUsesContent(t *testing.T) {
 	}
 }
 
+// TestSelfhostPackageSourceLoaderUsesManifestPaths rejects fixed package roots.
+func TestSelfhostPackageSourceLoaderUsesManifestPaths(t *testing.T) {
+	bytes, err := os.ReadFile("../../selfhost/src/source.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost source: %v", err)
+	}
+	body := selfhostKizuFunctionBody(t, string(bytes), "pub fn load_package_sources(")
+	if strings.Contains(body, "std::path::join(allocator, root, \"src\")") {
+		t.Fatal("package source loader hardcodes src instead of manifest paths")
+	}
+	if !strings.Contains(body, "append_manifest_package_source_dirs(") {
+		t.Fatal("package source loader does not use manifest source paths")
+	}
+}
+
 // TestSelfhostMoveDiagnosticsUseParsedAST keeps move diagnostics on the parsed AST entry.
 func TestSelfhostMoveDiagnosticsUseParsedAST(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/ownership/move_diagnostic.kizu")
