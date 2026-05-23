@@ -90,39 +90,6 @@ pub fn first_package_function_call_error_ast_node(
     );
 }
 
-fn collect_package_function_signatures(
-    allocator: Allocator,
-    files: &std::array::Array<source::SourceFile>,
-    function_arities: &var std::map::Map<[]u8, i64>,
-    function_param_sources: &var std::map::Map<[]u8, []u8>,
-    function_returns: &var std::map::Map<[]u8, []u8>,
-    function_visibility: &var std::map::Map<[]u8, bool>,
-    function_span_starts: &var std::map::Map<[]u8, i64>,
-    function_span_ends: &var std::map::Map<[]u8, i64>
-) -> !void {
-    var index = 0;
-    while index < files.len() {
-        let file = try files.at(index);
-        if source::is_source_code(file.kind) {
-            var tokens = try lexer::tokenize(allocator, file.text);
-            try collect_function_signatures(
-                allocator,
-                file,
-                tokens,
-                function_arities,
-                function_param_sources,
-                function_returns,
-                function_visibility,
-                function_span_starts,
-                function_span_ends
-            );
-            tokens.deinit();
-        }
-        index = index + 1;
-    }
-    return;
-}
-
 fn collect_other_package_function_arities_for_modules_from_ast(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>,
@@ -181,60 +148,98 @@ fn collect_import_aliases(
     return;
 }
 
-pub fn collect_function_signatures(
+pub fn collect_function_signatures_from_ast(
     allocator: Allocator,
     file: &source::SourceFile,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    ast: &std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
     arities: &var std::map::Map<[]u8, i64>,
-    param_sources: &var std::map::Map<[]u8, []u8>,
-    returns: &var std::map::Map<[]u8, []u8>,
-    visibility: &var std::map::Map<[]u8, bool>,
-    span_starts: &var std::map::Map<[]u8, i64>,
-    span_ends: &var std::map::Map<[]u8, i64>
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return collect_function_signatures_in_range_from_ast(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            arities,
+            returns
+        );,
+        FnDecl(fn_decl) => return collect_function_signature_from_ast(
+            allocator,
+            file,
+            ast,
+            fn_decl.name,
+            fn_decl.params,
+            fn_decl.return_type,
+            arities,
+            returns
+        );,
+        _ => return;,
+    }
+    return;
+}
+
+fn collect_function_signatures_in_range_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    arities: &var std::map::Map<[]u8, i64>,
+    returns: &var std::map::Map<[]u8, []u8>
 ) -> !void {
     var index = 0;
-    var depth = 0;
-    while index < tokens.len() {
-        let token = try tokens.get(index);
-        let text = token_text(file.text, token);
-        var handled = false;
-        if std::mem::equal_bytes(text, "{") {
-            depth = depth + 1;
-            handled = true;
-        }
-        if !handled and std::mem::equal_bytes(text, "}") {
-            depth = depth - 1;
-            handled = true;
-        }
-        if !handled and depth == 0 and std::mem::equal_bytes(text, "fn") {
-            if index + 1 < tokens.len() {
-                let name = try tokens.get(index + 1);
-                let name_text = token_text(file.text, name);
-                let open = try function_param_open(file.text, tokens, index);
-                let close = try function_param_close(file.text, tokens, open);
-                let params = try count_function_params(file.text, tokens, open, close);
-                let param_source = try function_param_source(file.text, tokens, open, close);
-                let return_type = try function_return_type(file.text, tokens, close + 1);
-                var qualified = std::string::String(allocator);
-                try append_module_name(qualified, file);
-                try qualified.append_bytes("::");
-                try qualified.append_bytes(name_text);
-                let function_name = qualified.as_bytes();
-                if arities.contains(function_name) {
-                    return error("duplicate function");
-                }
-                try arities.insert(function_name, params);
-                try param_sources.insert(function_name, param_source);
-                try returns.insert(function_name, return_type);
-                try visibility.insert(function_name, try function_public_at(file.text, tokens, index));
-                try span_starts.insert(function_name, name.start);
-                try span_ends.insert(function_name, name.end);
-                qualified.deinit();
-            }
-        }
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_function_signatures_from_ast(
+            allocator,
+            file,
+            ast,
+            child,
+            arities,
+            returns
+        );
         index = index + 1;
     }
     return;
+}
+
+fn collect_function_signature_from_ast(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId,
+    arities: &var std::map::Map<[]u8, i64>,
+    returns: &var std::map::Map<[]u8, []u8>
+) -> !void {
+    var qualified = std::string::String(allocator);
+    try append_module_name(qualified, file);
+    try qualified.append_bytes("::");
+    try qualified.append_bytes(ast_ref_node_text(file, ast, name));
+    let function_name = qualified.as_bytes();
+    if arities.contains(function_name) {
+        return error("duplicate function");
+    }
+    try arities.insert(function_name, params.len);
+    try returns.insert(function_name, ast_return_type(file, ast, return_type));
+    qualified.deinit();
+    return;
+}
+
+fn ast_return_type(
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    return_type: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(return_type);
+    match node.data {
+        Empty => return "void";,
+        _ => return ast_ref_node_text(file, ast, return_type);,
+    }
+    return "void";
 }
 
 pub fn collect_function_arities_from_ast(
@@ -302,47 +307,6 @@ fn collect_function_arity(
     return;
 }
 
-fn function_param_open(
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    fn_index: i64
-) -> !i64 {
-    var cursor = fn_index + 2;
-    if cursor >= tokens.len() {
-        return cursor;
-    }
-    let token = try tokens.get(cursor);
-    if std::mem::equal_bytes(token_text(source_text, token), "<") {
-        return skip_balanced_angle(source_text, tokens, cursor);
-    }
-    return cursor;
-}
-
-fn skip_balanced_angle(
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    open_index: i64
-) -> !i64 {
-    var depth = 0;
-    var cursor = open_index;
-    while cursor < tokens.len() {
-        let token = try tokens.get(cursor);
-        let text = token_text(source_text, token);
-        if std::mem::equal_bytes(text, "<") {
-            depth = depth + 1;
-        } else {
-            if std::mem::equal_bytes(text, ">") {
-                depth = depth - 1;
-                if depth == 0 {
-                    return cursor + 1;
-                }
-            }
-        }
-        cursor = cursor + 1;
-    }
-    return cursor;
-}
-
 fn function_param_close(
     source_text: []u8,
     tokens: &std::array::Array<std::kizu::lexer::Token>,
@@ -366,20 +330,6 @@ fn function_param_close(
         cursor = cursor + 1;
     }
     return cursor;
-}
-
-fn function_param_source(
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    open_index: i64,
-    close_index: i64
-) -> ![]u8 {
-    if open_index + 1 >= close_index {
-        return "";
-    }
-    let start = try tokens.get(open_index + 1);
-    let end = try tokens.get(close_index - 1);
-    return std::mem::trim_ascii(source_text[start.start..end.end]);
 }
 
 fn count_function_params(
@@ -441,63 +391,6 @@ fn count_function_params(
         cursor = cursor + 1;
     }
     return count;
-}
-
-fn function_return_type(
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    index: i64
-) -> ![]u8 {
-    if index >= tokens.len() {
-        return "void";
-    }
-    let token = try tokens.get(index);
-    if !std::mem::equal_bytes(token_text(source_text, token), "->") {
-        return "void";
-    }
-    let start_token = try tokens.get(index + 1);
-    let end = try function_return_type_end(source_text, tokens, index + 1);
-    if end <= index {
-        return "void";
-    }
-    let end_token = try tokens.get(end);
-    return std::mem::trim_ascii(source_text[start_token.start..end_token.end]);
-}
-
-fn function_return_type_end(
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    start: i64
-) -> !i64 {
-    var cursor = start;
-    var end = start;
-    while cursor < tokens.len() {
-        let token = try tokens.get(cursor);
-        let text = token_text(source_text, token);
-        if std::mem::equal_bytes(text, "{") or std::mem::equal_bytes(text, ";") {
-            return end;
-        }
-        end = cursor;
-        cursor = cursor + 1;
-    }
-    return end;
-}
-
-fn function_public_at(
-    source_text: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    index: i64
-) -> !bool {
-    if index > 0 and try token_at_equals(source_text, tokens, index - 1, "pub") {
-        return true;
-    }
-    if index > 1 and try token_at_equals(source_text, tokens, index - 2, "pub") {
-        return true;
-    }
-    if index > 2 and try token_at_equals(source_text, tokens, index - 3, "pub") {
-        return true;
-    }
-    return false;
 }
 
 fn token_at_equals(
