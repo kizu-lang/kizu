@@ -228,6 +228,47 @@ func TestCheckPackageCommandUsesManifestPaths(t *testing.T) {
 	}
 }
 
+// TestCheckPackageCommandRejectsDuplicateModules keeps module graph invariants in selfhost.
+func TestCheckPackageCommandRejectsDuplicateModules(t *testing.T) {
+	root := t.TempDir()
+	manifest := []byte(
+		"[package]\nname = \"frontend\"\n\n[modules]\nroot = \"lib/main.kizu\"\npaths = [\"lib\"]\n",
+	)
+	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	libDir := filepath.Join(root, "lib")
+	if err := os.Mkdir(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parserDir := filepath.Join(libDir, "parser")
+	if err := os.Mkdir(parserDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mainPath := filepath.Join(libDir, "main.kizu")
+	if err := os.WriteFile(mainPath, []byte("fn main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parserFile := "pub fn touch() -> void {\n    return;\n}\n"
+	parserPath := filepath.Join(libDir, "parser.kizu")
+	if err := os.WriteFile(parserPath, []byte(parserFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parserMod := "pub fn other() -> void {\n    return;\n}\n"
+	parserModPath := filepath.Join(parserDir, "mod.kizu")
+	if err := os.WriteFile(parserModPath, []byte(parserMod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{root})
+	if runErr == nil || !strings.Contains(runErr.Error(), "duplicate module") {
+		t.Fatalf("got error %v, want duplicate module", runErr)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+}
+
 // TestCheckPackageCommandRejectsInvalidManifestPaths avoids silent path fallback.
 func TestCheckPackageCommandRejectsInvalidManifestPaths(t *testing.T) {
 	root := t.TempDir()
