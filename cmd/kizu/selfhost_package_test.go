@@ -144,6 +144,7 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	required := []string{
 		"collect_referenced_package_call_modules(",
 		"collect_other_package_function_arities_for_modules_from_ast(",
+		"pub fn first_package_function_call_error_ast_node(",
 		"PackageModuleRef",
 		"ast: &std::kizu::ast::Ast,",
 		"ast_ref_node_text(",
@@ -175,7 +176,15 @@ func TestSelfhostPackageCallDiagnosticsBorrowAST(t *testing.T) {
 	if count := strings.Count(body, parseCall); count != 1 {
 		t.Fatalf("first_function_call_error parses target %d times, want 1", count)
 	}
-	if !strings.Contains(body, "collect_function_arities_from_ast(") {
+	if !strings.Contains(body, "first_package_function_call_error_ast_node(") {
+		t.Fatal("first_function_call_error does not delegate to the parsed target AST entry")
+	}
+	astBody := selfhostKizuFunctionBody(
+		t,
+		content,
+		"pub fn first_package_function_call_error_ast_node(",
+	)
+	if !strings.Contains(astBody, "collect_function_arities_from_ast(") {
 		t.Fatal("first_function_call_error does not collect target arity from the parsed target AST")
 	}
 }
@@ -318,21 +327,31 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 		t.Fatal("check entry keeps a separate package-call prefilter")
 	}
 	required := []string{
-		"var files = try source::load_file_sources(allocator, io, path, file_text)",
-		"types::first_function_call_error(allocator, files, path)",
+		"var files = try source::load_file_sources(allocator, io, file.path, file.text)",
+		"types::first_package_function_call_error_ast_node(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("check entry package call diagnostic missing %q", fragment)
 		}
 	}
-	call := "write_package_function_call_diagnostic(allocator, io, path, file_text)"
-	if !strings.Contains(content, call) {
-		t.Fatal("check entry does not run package call diagnostics")
+	callFragments := []string{
+		"write_package_function_call_diagnostic(",
+		"&file,",
+		"&parsed.ast,",
+		"parsed.root",
 	}
-	packageCall := "types::first_function_call_error(allocator, files, path)"
+	for _, fragment := range callFragments {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("check entry package call diagnostic missing call fragment %q", fragment)
+		}
+	}
+	packageCall := "types::first_package_function_call_error_ast_node("
 	if count := strings.Count(content, packageCall); count != 1 {
 		t.Fatalf("check entry runs package call diagnostics %d times, want 1", count)
+	}
+	if strings.Contains(content, "types::first_function_call_error(allocator, files, path)") {
+		t.Fatal("check entry package call diagnostics reparse the target file")
 	}
 }
 
