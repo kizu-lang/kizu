@@ -14,7 +14,10 @@ import (
 // TestSelfhostBackendArtifactGate executes the Kizu-owned LLVM artifact smoke.
 func TestSelfhostBackendArtifactGate(t *testing.T) {
 	requireSelfhostGate(t)
-	if failures := countSelfhostBackendArtifactGateFailures(t); failures > 0 {
+	if failures := countWithIsolatedSelfhostTarget(
+		t,
+		func() int { return countSelfhostBackendArtifactGateFailures(t) },
+	); failures > 0 {
 		t.Fatalf("selfhost backend artifact gate failures=%d", failures)
 	}
 }
