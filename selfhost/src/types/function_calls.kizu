@@ -26,58 +26,73 @@ pub fn first_function_call_error(
         if source::is_frontend_source(file.kind) and std::mem::equal_bytes(file.path, target_path) {
             let result = try parser::parse_checked_file(allocator, file.path, file.text);
             defer result.deinit();
-            var function_arities = std::map::Map<[]u8, i64>(allocator);
-            defer function_arities.deinit();
-            try collect_function_arities_from_ast(
-                allocator,
-                file,
-                &result.ast,
-                result.root,
-                function_arities
-            );
-            var referenced_modules = std::array::Array<PackageModuleRef>(allocator);
-            defer referenced_modules.deinit();
-            var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
-            defer import_alias_starts.deinit();
-            var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
-            defer import_alias_ends.deinit();
-            var target_tokens = try lexer::tokenize(allocator, file.text);
-            try collect_import_aliases(
-                file,
-                target_tokens,
-                import_alias_starts,
-                import_alias_ends
-            );
-            try collect_referenced_package_call_modules(
-                file,
-                target_tokens,
-                import_alias_starts,
-                import_alias_ends,
-                referenced_modules
-            );
-            target_tokens.deinit();
-            try collect_other_package_function_arities_for_modules_from_ast(
+            return try first_package_function_call_error_ast_node(
                 allocator,
                 files,
                 file,
-                referenced_modules,
-                function_arities
-            );
-            let found = try first_function_call_error_ast_node_with_imports(
-                allocator,
-                file,
                 &result.ast,
-                result.root,
-                function_arities,
-                import_alias_starts,
-                import_alias_ends,
-                false
+                result.root
             );
-            return found;
         }
         index = index + 1;
     }
     return function_call_summary(false, 0, 0, 0, 0, 0);
+}
+
+pub fn first_package_function_call_error_ast_node(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    file: &source::SourceFile,
+    ast: &std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::FunctionCallSummary {
+    var function_arities = std::map::Map<[]u8, i64>(allocator);
+    defer function_arities.deinit();
+    try collect_function_arities_from_ast(
+        allocator,
+        file,
+        ast,
+        root,
+        function_arities
+    );
+    var referenced_modules = std::array::Array<PackageModuleRef>(allocator);
+    defer referenced_modules.deinit();
+    var import_alias_starts = std::map::Map<[]u8, i64>(allocator);
+    defer import_alias_starts.deinit();
+    var import_alias_ends = std::map::Map<[]u8, i64>(allocator);
+    defer import_alias_ends.deinit();
+    var target_tokens = try lexer::tokenize(allocator, file.text);
+    defer target_tokens.deinit();
+    try collect_import_aliases(
+        file,
+        target_tokens,
+        import_alias_starts,
+        import_alias_ends
+    );
+    try collect_referenced_package_call_modules(
+        file,
+        target_tokens,
+        import_alias_starts,
+        import_alias_ends,
+        referenced_modules
+    );
+    try collect_other_package_function_arities_for_modules_from_ast(
+        allocator,
+        files,
+        file,
+        referenced_modules,
+        function_arities
+    );
+    return try first_function_call_error_ast_node_with_imports(
+        allocator,
+        file,
+        ast,
+        root,
+        function_arities,
+        import_alias_starts,
+        import_alias_ends,
+        false
+    );
 }
 
 fn collect_package_function_signatures(
