@@ -11,6 +11,8 @@ pub struct SourceFile {
     pub id: i64,
     pub kind: SourceKind,
     pub package_name: []u8,
+    pub module_start: i64,
+    pub module_end: i64,
     pub path: []u8,
     pub text: []u8,
 }
@@ -65,14 +67,24 @@ pub fn load_selfhost_sources(
         0,
         SourceKind::Manifest,
         package_name,
+        0,
+        0,
         "selfhost/kizu.toml",
         manifest_text
     ));
     var next_id = 1;
 
     var source_dir = try std::path::join(allocator, root, "src");
+    let source_dir_len = source_dir.len();
     let source_dir_path = source_dir.as_bytes();
-    next_id = try append_selfhost_source_dir(files, io, source_dir_path, next_id, package_name);
+    next_id = try append_selfhost_source_dir(
+        files,
+        io,
+        source_dir_path,
+        source_dir_len,
+        next_id,
+        package_name
+    );
     source_dir.deinit();
 
     next_id = try append_frontend_std_sources(files, io, next_id);
@@ -95,7 +107,15 @@ pub fn load_package_sources(
     }
     let package_name = try manifest_package_name(manifest_text);
     try validate_manifest_module_root(allocator, io, root, manifest_text);
-    try files.append(source_file(0, SourceKind::Manifest, package_name, root, manifest_text));
+    try files.append(source_file(
+        0,
+        SourceKind::Manifest,
+        package_name,
+        0,
+        0,
+        root,
+        manifest_text
+    ));
     var next_id = 1;
 
     let package_source_start = next_id;
@@ -126,10 +146,18 @@ pub fn load_file_sources(
     text: []u8
 ) -> !std::array::Array<SourceFile> {
     var files = std::array::Array<SourceFile>(allocator);
-    if std::mem::len(module_path_for(SourceKind::User, path)) < 1 {
+    if module_end_for(path) <= module_start_for(SourceKind::User, path) {
         return error("invalid module");
     }
-    try files.append(source_file(0, SourceKind::User, "selfhost", path, text));
+    try files.append(source_file(
+        0,
+        SourceKind::User,
+        "selfhost",
+        module_start_for(SourceKind::User, path),
+        module_end_for(path),
+        path,
+        text
+    ));
     try append_referenced_frontend_std_sources(allocator, files, io, 1, text);
     return files;
 }
@@ -177,7 +205,10 @@ pub fn is_frontend_source(kind: SourceKind) -> bool {
 }
 
 pub fn module_path(file: &SourceFile) -> []u8 borrows file {
-    return module_path_for(file.kind, file.path);
+    if file.kind == SourceKind::Manifest {
+        return "manifest";
+    }
+    return file.path[file.module_start..file.module_end];
 }
 
 pub fn append_module_path(
@@ -185,15 +216,6 @@ pub fn append_module_path(
     file: &SourceFile
 ) -> !void {
     try append_module_path_text(out, module_path(file));
-    return;
-}
-
-pub fn append_module_path_for(
-    out: &var std::string::String,
-    kind: SourceKind,
-    path: []u8
-) -> !void {
-    try append_module_path_text(out, module_path_for(kind, path));
     return;
 }
 
@@ -354,7 +376,15 @@ fn append_std_source(
     path: []u8
 ) -> !void {
     let text = try std::fs::read_file(io, path);
-    try files.append(source_file(id, SourceKind::Std, "std", path, text));
+    try files.append(source_file(
+        id,
+        SourceKind::Std,
+        "std",
+        module_start_for(SourceKind::Std, path),
+        module_end_for(path),
+        path,
+        text
+    ));
     return;
 }
 
@@ -362,6 +392,7 @@ fn append_selfhost_source_dir(
     files: &var std::array::Array<SourceFile>,
     io: Io,
     dir: &[]u8,
+    source_root_len: i64,
     next_id: i64,
     package_name: []u8
 ) -> !i64 {
@@ -375,12 +406,15 @@ fn append_selfhost_source_dir(
                 files,
                 io,
                 entry.path,
+                source_root_len,
                 id,
                 package_name
             );
         } else {
             if std::mem::equal_bytes(std::path::extension(entry.name), ".kizu") {
-                if std::mem::len(module_path_for(SourceKind::Selfhost, entry.path)) < 1 {
+                let module_start = package_module_start(source_root_len, entry.path);
+                let module_end = package_module_end(entry.path, module_start);
+                if module_end <= module_start {
                     return error("invalid module");
                 }
                 let text = try std::fs::read_file(io, entry.path);
@@ -388,6 +422,8 @@ fn append_selfhost_source_dir(
                     id,
                     SourceKind::Selfhost,
                     package_name,
+                    module_start,
+                    module_end,
                     entry.path,
                     text
                 ));
@@ -516,8 +552,16 @@ fn append_package_source_dir(
         return error("invalid manifest");
     }
     var source_dir = try std::path::join(allocator, root, source_path);
+    let source_dir_len = source_dir.len();
     let source_dir_path = source_dir.as_bytes();
-    let id = try append_selfhost_source_dir(files, io, source_dir_path, next_id, package_name);
+    let id = try append_selfhost_source_dir(
+        files,
+        io,
+        source_dir_path,
+        source_dir_len,
+        next_id,
+        package_name
+    );
     source_dir.deinit();
     return id;
 }
@@ -578,7 +622,15 @@ fn append_referenced_frontend_std_sources(
     while index < pending.len() {
         let path = try pending.get(index);
         let std_text = try std::fs::read_file(io, path);
-        try files.append(source_file(id, SourceKind::Std, "std", path, std_text));
+        try files.append(source_file(
+            id,
+            SourceKind::Std,
+            "std",
+            module_start_for(SourceKind::Std, path),
+            module_end_for(path),
+            path,
+            std_text
+        ));
         id = id + 1;
         try queue_frontend_std_references(allocator, std_text, pending, seen);
         index = index + 1;
@@ -610,7 +662,15 @@ fn append_package_referenced_frontend_std_sources(
     while pending_index < pending.len() {
         let path = try pending.get(pending_index);
         let std_text = try std::fs::read_file(io, path);
-        try files.append(source_file(id, SourceKind::Std, "std", path, std_text));
+        try files.append(source_file(
+            id,
+            SourceKind::Std,
+            "std",
+            module_start_for(SourceKind::Std, path),
+            module_end_for(path),
+            path,
+            std_text
+        ));
         id = id + 1;
         try queue_frontend_std_references(allocator, std_text, pending, seen);
         pending_index = pending_index + 1;
@@ -748,6 +808,8 @@ fn source_file(
     id: i64,
     kind: SourceKind,
     package_name: []u8,
+    module_start: i64,
+    module_end: i64,
     path: []u8,
     text: []u8
 ) -> SourceFile {
@@ -755,6 +817,8 @@ fn source_file(
         id: id,
         kind: kind,
         package_name: package_name,
+        module_start: module_start,
+        module_end: module_end,
         path: path,
         text: text
     };
@@ -830,72 +894,64 @@ fn manifest_quoted_marker_value(text: []u8, marker: []u8) -> ![]u8 borrows text 
     return error("invalid manifest");
 }
 
-fn module_name(file_name: []u8) -> []u8 borrows file_name {
-    let length = std::mem::len(file_name);
-    if length > 5 and std::mem::equal_bytes(file_name[length - 5..length], ".kizu") {
-        return file_name[0..length - 5];
-    }
-    return file_name;
-}
-
-fn module_path_for(kind: SourceKind, path: []u8) -> []u8 borrows path {
-    if kind == SourceKind::Manifest {
-        return "manifest";
-    }
+fn module_start_for(kind: SourceKind, path: []u8) -> i64 {
     if kind == SourceKind::Std {
-        return path_after_prefix(path, "std/src");
+        return path_after_prefix_start(path, "std/src");
     }
-    if kind == SourceKind::Selfhost {
-        return package_module_path(path);
-    }
-    return module_name(std::path::basename(path));
+    return basename_module_start(path);
 }
 
-fn package_module_path(path: []u8) -> []u8 borrows path {
-    let start = package_src_module_start(path);
-    if start < 0 {
-        return module_name(std::path::basename(path));
-    }
-    return strip_kizu_suffix(path[start..std::mem::len(path)]);
-}
-
-fn package_src_module_start(path: []u8) -> i64 {
+fn module_end_for(path: []u8) -> i64 {
     let length = std::mem::len(path);
+    if length > 5 and std::mem::equal_bytes(path[length - 5..length], ".kizu") {
+        return length - 5;
+    }
+    return length;
+}
+
+fn basename_module_start(path: []u8) -> i64 {
+    var start = 0;
     var index = 0;
-    var result = -1;
-    while index + 4 <= length {
-        if path_src_segment_at(path, index) {
-            result = index + 4;
+    while index < std::mem::len(path) {
+        if path[index] == cast<u8>(47) {
+            start = index + 1;
         }
         index = index + 1;
     }
-    return result;
+    return start;
 }
 
-fn path_src_segment_at(path: []u8, index: i64) -> bool {
-    if index > 0 and path[index - 1] != cast<u8>(47) {
-        return false;
-    }
-    return std::mem::equal_bytes(path[index..index + 4], "src/");
-}
-
-fn strip_kizu_suffix(path: []u8) -> []u8 borrows path {
-    let length = std::mem::len(path);
-    if length > 5 and std::mem::equal_bytes(path[length - 5..length], ".kizu") {
-        return path[0..length - 5];
-    }
-    return path;
-}
-
-fn path_after_prefix(path: []u8, prefix: []u8) -> []u8 borrows path {
+fn path_after_prefix_start(path: []u8, prefix: []u8) -> i64 {
     var start = std::mem::len(prefix);
-    let length = std::mem::len(path);
-    if start < length and path[start] == cast<u8>(47) {
+    if start < std::mem::len(path) and path[start] == cast<u8>(47) {
         start = start + 1;
     }
-    var end = length;
-    if end > start + 5 and std::mem::equal_bytes(path[end - 5..end], ".kizu") {
-        end = end - 5;
+    return start;
+}
+
+fn package_module_start(source_root_len: i64, path: []u8) -> i64 {
+    if source_root_len < 0 {
+        return -1;
     }
-    return path[start..end];
+    if std::mem::len(path) <= source_root_len {
+        return -1;
+    }
+    if path[source_root_len] != cast<u8>(47) {
+        return -1;
+    }
+    return source_root_len + 1;
+}
+
+fn package_module_end(path: []u8, start: i64) -> i64 {
+    if start < 0 {
+        return -1;
+    }
+    let end = module_end_for(path);
+    if end > start + 4 and std::mem::equal_bytes(path[end - 4..end], "/mod") {
+        return end - 4;
+    }
+    if end > start + 5 and std::mem::equal_bytes(path[end - 5..end], "/main") {
+        return end - 5;
+    }
+    return end;
 }
