@@ -94,6 +94,34 @@ func TestParseCommandPropagatesSelfhostExitCode(t *testing.T) {
 	}
 }
 
+// TestParseCheckCommandsUseSelfhostArgValidation keeps CLI usage owned by Kizu.
+func TestParseCheckCommandsUseSelfhostArgValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		command string
+		args    []string
+	}{
+		{name: "parse_missing_target", command: "parse"},
+		{name: "parse_extra_arg", command: "parse", args: []string{"missing.kizu", "extra"}},
+		{name: "parse_flag_target", command: "parse", args: []string{"--help"}},
+		{name: "check_missing_target", command: "check"},
+		{name: "check_extra_arg", command: "check", args: []string{"missing.kizu", "extra"}},
+		{name: "check_flag_target", command: "check", args: []string{"--help"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, runErr := runDispatchCaptureStderr(t, tt.command, tt.args)
+			var status exitStatus
+			if !errors.As(runErr, &status) || status.code != 64 {
+				t.Fatalf("got error %v, want exit status 64", runErr)
+			}
+			want := "usage: selfhost <check|stage|parse|run|test|fmt> <target>\n"
+			if out != want {
+				t.Fatalf("got %q, want %q", out, want)
+			}
+		})
+	}
+}
+
 // TestCheckPackageCommandReportsSelfhostDiagnostic keeps package diagnostics detailed.
 func TestCheckPackageCommandReportsSelfhostDiagnostic(t *testing.T) {
 	root := t.TempDir()

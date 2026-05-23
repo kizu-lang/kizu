@@ -64,12 +64,12 @@ func printError(err error) {
 func dispatch(cmd string, args []string) error {
 	switch cmd {
 	case "parse":
-		return runSelfhostFrontendCommand("parse", args[0])
+		return runSelfhostFrontendCommand("parse", args)
 	case "run":
 		path, programArgs := splitProgramArgs(args)
 		return runFile(path, programArgs)
 	case "check":
-		return runSelfhostFrontendCommand("check", args[0])
+		return runSelfhostFrontendCommand("check", args)
 	case "test":
 		path, programArgs := splitProgramArgs(args)
 		return testFile(path, programArgs)
@@ -92,8 +92,8 @@ func dispatch(cmd string, args []string) error {
 }
 
 // runSelfhostFrontendCommand executes parse/check through the Kizu-owned frontend.
-func runSelfhostFrontendCommand(command string, target string) error {
-	absTarget, err := filepath.Abs(target)
+func runSelfhostFrontendCommand(command string, args []string) error {
+	processArgs, err := selfhostFrontendProcessArgs(command, args)
 	if err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func runSelfhostFrontendCommand(command string, target string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	code, err := interp.NewWithProcessArgs(os.Stdout, []string{command, absTarget}).
+	code, err := interp.NewWithProcessArgs(os.Stdout, processArgs).
 		RunEntryInt(program, "selfhost::cli_main")
 	if err != nil {
 		return err
@@ -129,6 +129,22 @@ func runSelfhostFrontendCommand(command string, target string) error {
 		return exitStatus{code: int(code)}
 	}
 	return nil
+}
+
+// selfhostFrontendProcessArgs preserves CLI validation for Kizu while normalizing real targets.
+func selfhostFrontendProcessArgs(command string, args []string) ([]string, error) {
+	processArgs := make([]string, 0, len(args)+1)
+	processArgs = append(processArgs, command)
+	processArgs = append(processArgs, args...)
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		return processArgs, nil
+	}
+	absTarget, err := filepath.Abs(args[0])
+	if err != nil {
+		return nil, err
+	}
+	processArgs[1] = absTarget
+	return processArgs, nil
 }
 
 // usage prints the supported command line shape.
