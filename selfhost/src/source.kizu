@@ -1,3 +1,5 @@
+import selfhost::lexer;
+
 pub enum SourceKind {
     Manifest,
     User,
@@ -83,7 +85,7 @@ pub fn load_file_sources(
         return error("invalid module");
     }
     try files.append(source_file(0, SourceKind::User, path, text));
-    try append_frontend_std_sources(files, io, 1);
+    try append_referenced_frontend_std_sources(allocator, files, io, 1, text);
     return files;
 }
 
@@ -245,14 +247,6 @@ pub fn import_cycle(
     return report;
 }
 
-fn load_std_source(
-    io: Io,
-    path: []u8
-) -> !void {
-    try std::fs::read_file(io, path);
-    return;
-}
-
 fn append_std_source(
     files: &var std::array::Array<SourceFile>,
     io: Io,
@@ -333,6 +327,159 @@ fn append_frontend_std_sources(
     try append_std_source(files, io, id, "std/src/kizu/diagnostic.kizu");
     id = id + 1;
     return id;
+}
+
+fn append_referenced_frontend_std_sources(
+    allocator: Allocator,
+    files: &var std::array::Array<SourceFile>,
+    io: Io,
+    next_id: i64,
+    text: []u8
+) -> !i64 {
+    var pending = std::array::Array<[]u8>(allocator);
+    defer pending.deinit();
+    var seen = std::map::Map<[]u8, bool>(allocator);
+    defer seen.deinit();
+
+    try queue_frontend_std_references(allocator, text, pending, seen);
+
+    var id = next_id;
+    var index = 0;
+    while index < pending.len() {
+        let path = try pending.get(index);
+        let std_text = try std::fs::read_file(io, path);
+        try files.append(source_file(id, SourceKind::Std, path, std_text));
+        id = id + 1;
+        try queue_frontend_std_references(allocator, std_text, pending, seen);
+        index = index + 1;
+    }
+    return id;
+}
+
+fn queue_frontend_std_references(
+    allocator: Allocator,
+    text: []u8,
+    pending: &var std::array::Array<[]u8>,
+    seen: &var std::map::Map<[]u8, bool>
+) -> !void {
+    var tokens = try lexer::tokenize(allocator, text);
+    defer tokens.deinit();
+
+    var index = 0;
+    while index + 2 < tokens.len() {
+        let first = try tokens.get(index);
+        let separator = try tokens.get(index + 1);
+        let module = try tokens.get(index + 2);
+        if is_ident_text(text, first, "std") and is_double_colon(separator) and
+            is_ident(module) {
+            try queue_frontend_std_reference(text, &tokens, index + 2, pending, seen);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn queue_frontend_std_reference(
+    text: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    module_index: i64,
+    pending: &var std::array::Array<[]u8>,
+    seen: &var std::map::Map<[]u8, bool>
+) -> !void {
+    let module = try tokens.get(module_index);
+    let module_text = lexer::token_text(text, module);
+    var submodule_text = "";
+    if std::mem::equal_bytes(module_text, "kizu") and module_index + 2 < tokens.len() {
+        let separator = try tokens.get(module_index + 1);
+        let submodule = try tokens.get(module_index + 2);
+        if is_double_colon(separator) and is_ident(submodule) {
+            submodule_text = lexer::token_text(text, submodule);
+        }
+    }
+    let path = frontend_std_source_path(module_text, submodule_text);
+    if std::mem::equal_bytes(path, "") {
+        return;
+    }
+    if seen.contains(path) {
+        return;
+    }
+    try seen.insert(path, true);
+    try pending.append(path);
+    return;
+}
+
+fn frontend_std_source_path(module: []u8, submodule: []u8) -> []u8 {
+    if std::mem::equal_bytes(module, "mem") {
+        return "std/src/mem.kizu";
+    }
+    if std::mem::equal_bytes(module, "array") {
+        return "std/src/array.kizu";
+    }
+    if std::mem::equal_bytes(module, "string") {
+        return "std/src/string.kizu";
+    }
+    if std::mem::equal_bytes(module, "map") {
+        return "std/src/map.kizu";
+    }
+    if std::mem::equal_bytes(module, "fmt") {
+        return "std/src/fmt.kizu";
+    }
+    if std::mem::equal_bytes(module, "testing") {
+        return "std/src/testing.kizu";
+    }
+    if std::mem::equal_bytes(module, "fs") {
+        return "std/src/fs.kizu";
+    }
+    if std::mem::equal_bytes(module, "path") {
+        return "std/src/path.kizu";
+    }
+    if std::mem::equal_bytes(module, "io") {
+        return "std/src/io.kizu";
+    }
+    if std::mem::equal_bytes(module, "process") {
+        return "std/src/process.kizu";
+    }
+    return frontend_kizu_std_source_path(module, submodule);
+}
+
+fn frontend_kizu_std_source_path(module: []u8, submodule: []u8) -> []u8 {
+    if !std::mem::equal_bytes(module, "kizu") {
+        return "";
+    }
+    if std::mem::equal_bytes(submodule, "ast") {
+        return "std/src/kizu/ast.kizu";
+    }
+    if std::mem::equal_bytes(submodule, "lexer") {
+        return "std/src/kizu/lexer.kizu";
+    }
+    if std::mem::equal_bytes(submodule, "parser") {
+        return "std/src/kizu/parser.kizu";
+    }
+    if std::mem::equal_bytes(submodule, "diagnostic") {
+        return "std/src/kizu/diagnostic.kizu";
+    }
+    return "";
+}
+
+fn is_ident(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Ident => true,
+        _ => false,
+    };
+}
+
+fn is_ident_text(text: []u8, token: std::kizu::lexer::Token, expected: []u8) -> bool {
+    if !is_ident(token) {
+        return false;
+    }
+    return std::mem::equal_bytes(lexer::token_text(text, token), expected);
+}
+
+fn is_double_colon(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        DoubleColon => true,
+        _ => false,
+    };
 }
 
 fn source_file(
