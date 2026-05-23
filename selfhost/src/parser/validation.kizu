@@ -1,4 +1,5 @@
 import selfhost::lexer;
+import selfhost::parser::validation_tokens;
 
 pub struct ParseValidation {
     pub ok: bool,
@@ -12,49 +13,49 @@ pub fn validate_source(
     allocator: Allocator,
     source: []u8
 ) -> !ParseValidation {
-    var validation_tokens = try lexer::tokenize(allocator, source);
-    defer validation_tokens.deinit();
-    return try validate_tokens(allocator, source, &validation_tokens);
+    var tokens = try lexer::tokenize(allocator, source);
+    defer tokens.deinit();
+    return try validate_tokens(allocator, source, &tokens);
 }
 
 pub fn validate_tokens(
     allocator: Allocator,
     source: []u8,
-    validation_tokens: &std::array::Array<std::kizu::lexer::Token>
+    tokens: &std::array::Array<std::kizu::lexer::Token>
 ) -> !ParseValidation {
     var delimiters = std::array::Array<i64>(allocator);
     defer delimiters.deinit();
     var delimiter_len = 0;
     var index = 0;
-    while index + 1 < validation_tokens.len() {
-        let token = try validation_tokens.get(index);
-        let text = token_text(source, token);
-        if try is_binding_statement(source, validation_tokens, index, text) {
-            let name = try validation_tokens.get(index + 1);
-            if !is_ident_token(name) {
+    while index + 1 < tokens.len() {
+        let token = try tokens.get(index);
+        let text = validation_tokens::token_text(source, token);
+        if try validation_tokens::is_binding_statement(source, tokens, index, text) {
+            let name = try tokens.get(index + 1);
+            if !validation_tokens::is_ident_token(name) {
                 return invalid_parse_validation(
                     "expected identifier",
                     name.line,
                     name.column,
-                    token_text(source, name)
+                    validation_tokens::token_text(source, name)
                 );
             }
             var assign_index = index + 2;
-            if assign_index >= validation_tokens.len() {
-                assign_index = validation_tokens.len() - 1;
+            if assign_index >= tokens.len() {
+                assign_index = tokens.len() - 1;
             }
-            let assign = try validation_tokens.get(assign_index);
-            if !std::mem::equal_bytes(token_text(source, assign), "=") {
+            let assign = try tokens.get(assign_index);
+            if !std::mem::equal_bytes(validation_tokens::token_text(source, assign), "=") {
                 return invalid_parse_validation(
                     "expected assign",
                     assign.line,
                     assign.column,
-                    token_text(source, assign)
+                    validation_tokens::token_text(source, assign)
                 );
             }
         }
-        if is_open_delimiter(text) {
-            let delimiter = closing_delimiter_code(text);
+        if validation_tokens::is_open_delimiter(text) {
+            let delimiter = validation_tokens::closing_delimiter_code(text);
             if delimiter_len < delimiters.len() {
                 try delimiters.set(delimiter_len, delimiter);
             } else {
@@ -62,14 +63,14 @@ pub fn validate_tokens(
             }
             delimiter_len = delimiter_len + 1;
         }
-        if is_close_delimiter(text) {
+        if validation_tokens::is_close_delimiter(text) {
             if delimiter_len < 1 {
                 return invalid_parse_validation("unexpected token", token.line, token.column, text);
             }
             let delimiter = try delimiters.get(delimiter_len - 1);
-            if !delimiter_matches(delimiter, text) {
+            if !validation_tokens::delimiter_matches(delimiter, text) {
                 return invalid_parse_validation(
-                    expected_delimiter_message(delimiter),
+                    validation_tokens::expected_delimiter_message(delimiter),
                     token.line,
                     token.column,
                     text
@@ -78,14 +79,14 @@ pub fn validate_tokens(
             delimiter_len = delimiter_len - 1;
         }
         if std::mem::equal_bytes(text, "=") {
-            let next = try validation_tokens.get(index + 1);
-            let next_text = token_text(source, next);
-            if expression_missing_before(next_text) {
+            let next = try tokens.get(index + 1);
+            let next_text = validation_tokens::token_text(source, next);
+            if validation_tokens::expression_missing_before(next_text) {
                 return invalid_parse_validation(
                     "expected expression",
                     next.line,
                     next.column,
-                    missing_expression_got_text(next_text)
+                    validation_tokens::missing_expression_got_text(next_text)
                 );
             }
         }
@@ -93,27 +94,27 @@ pub fn validate_tokens(
     }
     if delimiter_len > 0 {
         let delimiter = try delimiters.get(delimiter_len - 1);
-        let eof = try validation_tokens.get(validation_tokens.len() - 1);
+        let eof = try tokens.get(tokens.len() - 1);
         return invalid_parse_validation(
-            expected_delimiter_message(delimiter),
+            validation_tokens::expected_delimiter_message(delimiter),
             eof.line,
             eof.column,
             ""
         );
     }
-    let top_level = try validate_top_level_declarations(source, validation_tokens);
+    let top_level = try validate_top_level_declarations(source, tokens);
     if !top_level.ok {
         return top_level;
     }
-    let invalid_token = try validate_no_invalid_tokens(source, validation_tokens);
+    let invalid_token = try validate_no_invalid_tokens(source, tokens);
     if !invalid_token.ok {
         return invalid_token;
     }
-    let match_arms = try validate_match_arm_separators(source, validation_tokens);
+    let match_arms = try validate_match_arm_separators(source, tokens);
     if !match_arms.ok {
         return match_arms;
     }
-    let statement_separators = try validate_statement_separators(source, validation_tokens);
+    let statement_separators = try validate_statement_separators(source, tokens);
     if !statement_separators.ok {
         return statement_separators;
     }
@@ -123,20 +124,10 @@ pub fn validate_tokens(
 pub fn validate_tokens_ok(
     allocator: Allocator,
     source: []u8,
-    validation_tokens: &std::array::Array<std::kizu::lexer::Token>
+    tokens: &std::array::Array<std::kizu::lexer::Token>
 ) -> !bool {
-    let result = try validate_tokens(allocator, source, validation_tokens);
+    let result = try validate_tokens(allocator, source, tokens);
     return result.ok;
-}
-
-fn token_text(
-    source: []u8,
-    token: std::kizu::lexer::Token
-) -> []u8 {
-    if lexer::is_invalid_token(source, token) {
-        return lexer::invalid_token_display();
-    }
-    return lexer::token_text(source, token);
 }
 
 fn invalid_parse_validation(
@@ -175,7 +166,7 @@ fn validate_top_level_declarations(
         if !start.ok {
             return start;
         }
-        index = try skip_top_level_declaration(tokens, index);
+        index = try validation_tokens::skip_top_level_declaration(tokens, index);
     }
     return valid_parse_validation();
 }
@@ -192,7 +183,7 @@ fn validate_no_invalid_tokens(
                 "expected expression",
                 token.line,
                 token.column,
-                token_text(source, token)
+                validation_tokens::token_text(source, token)
             );
         }
         index = index + 1;
@@ -221,7 +212,7 @@ fn validate_top_level_decl_start(
             "expected declaration",
             token.line,
             token.column,
-            token_text(source, token)
+            validation_tokens::token_text(source, token)
         ),
     };
 }
@@ -235,22 +226,22 @@ fn validate_public_top_level_decl_start(
     if lexer::is_eof(next) {
         return invalid_parse_validation("expected declaration", next.line, next.column, "");
     }
-    if is_unsafe_modifier_token(next) {
+    if validation_tokens::is_unsafe_modifier_token(next) {
         return try validate_unsafe_top_level_decl_start(source, tokens, index + 1);
     }
-    if is_fn_token(next) {
+    if validation_tokens::is_fn_token(next) {
         return try validate_fn_decl_header(source, tokens, index + 1, true);
     }
-    if is_extern_token(next) {
+    if validation_tokens::is_extern_token(next) {
         return try validate_extern_decl_header(source, tokens, index + 1);
     }
-    if is_struct_token(next) {
+    if validation_tokens::is_struct_token(next) {
         return try validate_aggregate_decl_header(source, tokens, index + 1, true, true);
     }
-    if is_union_token(next) {
+    if validation_tokens::is_union_token(next) {
         return try validate_aggregate_decl_header(source, tokens, index + 1, true, false);
     }
-    if is_enum_token(next) {
+    if validation_tokens::is_enum_token(next) {
         return try validate_aggregate_decl_header(source, tokens, index + 1, false, false);
     }
     if is_public_top_level_decl_start(source, next) {
@@ -260,7 +251,7 @@ fn validate_public_top_level_decl_start(
         "expected declaration",
         next.line,
         next.column,
-        token_text(source, next)
+        validation_tokens::token_text(source, next)
     );
 }
 
@@ -273,17 +264,17 @@ fn validate_unsafe_top_level_decl_start(
     if lexer::is_eof(next) {
         return invalid_parse_validation("expected fn or extern after unsafe", next.line, next.column, "");
     }
-    if is_fn_token(next) {
+    if validation_tokens::is_fn_token(next) {
         return try validate_fn_decl_header(source, tokens, index + 1, true);
     }
-    if is_extern_token(next) {
+    if validation_tokens::is_extern_token(next) {
         return try validate_extern_decl_header(source, tokens, index + 1);
     }
     return invalid_parse_validation(
         "expected fn or extern after unsafe",
         next.line,
         next.column,
-        token_text(source, next)
+        validation_tokens::token_text(source, next)
     );
 }
 
@@ -293,12 +284,12 @@ fn validate_import_decl_header(
     index: i64
 ) -> !ParseValidation {
     let name = try tokens.get(index + 1);
-    if !is_ident_token(name) {
+    if !validation_tokens::is_ident_token(name) {
         return invalid_parse_validation(
             "expected identifier",
             name.line,
             name.column,
-            token_text(source, name)
+            validation_tokens::token_text(source, name)
         );
     }
     return valid_parse_validation();
@@ -310,21 +301,21 @@ fn validate_extern_decl_header(
     index: i64
 ) -> !ParseValidation {
     let abi = try tokens.get(index + 1);
-    if !is_string_token(abi) {
+    if !validation_tokens::is_string_token(abi) {
         return invalid_parse_validation(
             "expected string",
             abi.line,
             abi.column,
-            token_text(source, abi)
+            validation_tokens::token_text(source, abi)
         );
     }
     let fn_token = try tokens.get(index + 2);
-    if !is_fn_token(fn_token) {
+    if !validation_tokens::is_fn_token(fn_token) {
         return invalid_parse_validation(
             "expected fn",
             fn_token.line,
             fn_token.column,
-            token_text(source, fn_token)
+            validation_tokens::token_text(source, fn_token)
         );
     }
     return try validate_fn_decl_header(source, tokens, index + 2, false);
@@ -338,12 +329,12 @@ fn validate_aggregate_decl_header(
     require_field_type: bool
 ) -> !ParseValidation {
     let name = try tokens.get(index + 1);
-    if !is_ident_token(name) {
+    if !validation_tokens::is_ident_token(name) {
         return invalid_parse_validation(
             "expected identifier",
             name.line,
             name.column,
-            token_text(source, name)
+            validation_tokens::token_text(source, name)
         );
     }
     var open_index = index + 2;
@@ -355,12 +346,12 @@ fn validate_aggregate_decl_header(
         open_index = try skip_optional_type_params(tokens, open_index);
     }
     let open = try tokens.get(open_index);
-    if !is_left_brace_token(open) {
+    if !validation_tokens::is_left_brace_token(open) {
         return invalid_parse_validation(
             "expected left brace",
             open.line,
             open.column,
-            token_text(source, open)
+            validation_tokens::token_text(source, open)
         );
     }
     let body_validation = try validate_aggregate_body_start(
@@ -385,13 +376,13 @@ fn validate_aggregate_body_start(
     require_field_type: bool
 ) -> !ParseValidation {
     let first = try tokens.get(open_index + 1);
-    if is_right_brace_token(first) {
+    if validation_tokens::is_right_brace_token(first) {
         return valid_parse_validation();
     }
     var after_name_index = open_index + 2;
-    if is_pub_token(first) {
+    if validation_tokens::is_pub_token(first) {
         let name = try tokens.get(open_index + 2);
-        if is_ident_token(name) {
+        if validation_tokens::is_ident_token(name) {
             after_name_index = open_index + 3;
             return try validate_optional_field_type(
                 source,
@@ -404,10 +395,10 @@ fn validate_aggregate_body_start(
             "expected identifier",
             name.line,
             name.column,
-            token_text(source, name)
+            validation_tokens::token_text(source, name)
         );
     }
-    if is_ident_token(first) {
+    if validation_tokens::is_ident_token(first) {
         return try validate_optional_field_type(
             source,
             tokens,
@@ -419,7 +410,7 @@ fn validate_aggregate_body_start(
         "expected identifier",
         first.line,
         first.column,
-        token_text(source, first)
+        validation_tokens::token_text(source, first)
     );
 }
 
@@ -433,23 +424,23 @@ fn validate_optional_field_type(
         return valid_parse_validation();
     }
     let colon = try tokens.get(colon_index);
-    if !is_colon_token(colon) {
+    if !validation_tokens::is_colon_token(colon) {
         return invalid_parse_validation(
             "expected colon",
             colon.line,
             colon.column,
-            token_text(source, colon)
+            validation_tokens::token_text(source, colon)
         );
     }
     let type_start = try tokens.get(colon_index + 1);
-    if is_type_start_token(type_start) {
+    if validation_tokens::is_type_start_token(type_start) {
         return valid_parse_validation();
     }
     return invalid_parse_validation(
         "expected type name",
         type_start.line,
         type_start.column,
-        token_text(source, type_start)
+        validation_tokens::token_text(source, type_start)
     );
 }
 
@@ -461,40 +452,40 @@ fn validate_aggregate_field_separators(
     var cursor = open_index + 1;
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
-        if is_right_brace_token(token) {
+        if validation_tokens::is_right_brace_token(token) {
             return valid_parse_validation();
         }
         var name_index = cursor;
-        if is_pub_token(token) {
+        if validation_tokens::is_pub_token(token) {
             name_index = cursor + 1;
         }
         let name = try tokens.get(name_index);
-        if !is_ident_token(name) {
+        if !validation_tokens::is_ident_token(name) {
             return invalid_parse_validation(
                 "expected identifier",
                 name.line,
                 name.column,
-                token_text(source, name)
+                validation_tokens::token_text(source, name)
             );
         }
         let colon_index = name_index + 1;
         let colon = try tokens.get(colon_index);
-        if !is_colon_token(colon) {
+        if !validation_tokens::is_colon_token(colon) {
             return invalid_parse_validation(
                 "expected colon",
                 colon.line,
                 colon.column,
-                token_text(source, colon)
+                validation_tokens::token_text(source, colon)
             );
         }
         let type_start_index = colon_index + 1;
         let type_start = try tokens.get(type_start_index);
-        if !is_type_start_token(type_start) {
+        if !validation_tokens::is_type_start_token(type_start) {
             return invalid_parse_validation(
                 "expected type name",
                 type_start.line,
                 type_start.column,
-                token_text(source, type_start)
+                validation_tokens::token_text(source, type_start)
             );
         }
         let separator_validation = try validate_aggregate_field_type_separator(
@@ -511,7 +502,7 @@ fn validate_aggregate_field_separators(
             return invalid_parse_validation("expected right brace", eof.line, eof.column, "");
         }
         let separator = try tokens.get(cursor);
-        if is_comma_token(separator) {
+        if validation_tokens::is_comma_token(separator) {
             cursor = cursor + 1;
         }
     }
@@ -548,20 +539,20 @@ fn validate_aggregate_item_separators(
     var cursor = open_index + 1;
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
-        if is_right_brace_token(token) {
+        if validation_tokens::is_right_brace_token(token) {
             return valid_parse_validation();
         }
         var name_index = cursor;
-        if is_pub_token(token) {
+        if validation_tokens::is_pub_token(token) {
             name_index = cursor + 1;
         }
         let name = try tokens.get(name_index);
-        if !is_ident_token(name) {
+        if !validation_tokens::is_ident_token(name) {
             return invalid_parse_validation(
                 "expected identifier",
                 name.line,
                 name.column,
-                token_text(source, name)
+                validation_tokens::token_text(source, name)
             );
         }
         cursor = name_index + 1;
@@ -570,25 +561,25 @@ fn validate_aggregate_item_separators(
             return invalid_parse_validation("expected right brace", eof.line, eof.column, "");
         }
         let payload_start = try tokens.get(cursor);
-        if is_left_paren_token(payload_start) {
-            cursor = try skip_balanced_parens(tokens, cursor);
+        if validation_tokens::is_left_paren_token(payload_start) {
+            cursor = try validation_tokens::skip_balanced_parens(tokens, cursor);
         }
         if cursor >= tokens.len() {
             let eof = try tokens.get(tokens.len() - 1);
             return invalid_parse_validation("expected right brace", eof.line, eof.column, "");
         }
         let separator = try tokens.get(cursor);
-        if is_comma_token(separator) {
+        if validation_tokens::is_comma_token(separator) {
             cursor = cursor + 1;
         } else {
-            if is_right_brace_token(separator) {
+            if validation_tokens::is_right_brace_token(separator) {
                 return valid_parse_validation();
             }
             return invalid_parse_validation(
                 "expected comma or right brace",
                 separator.line,
                 separator.column,
-                token_text(source, separator)
+                validation_tokens::token_text(source, separator)
             );
         }
     }
@@ -603,12 +594,12 @@ fn validate_fn_decl_header(
     require_body: bool
 ) -> !ParseValidation {
     let name = try tokens.get(index + 1);
-    if !is_ident_token(name) {
+    if !validation_tokens::is_ident_token(name) {
         return invalid_parse_validation(
             "expected function name",
             name.line,
             name.column,
-            token_text(source, name)
+            validation_tokens::token_text(source, name)
         );
     }
     let type_param_validation = try validate_optional_type_params(source, tokens, index + 2);
@@ -617,19 +608,19 @@ fn validate_fn_decl_header(
     }
     let params_index = try skip_optional_type_params(tokens, index + 2);
     let params = try tokens.get(params_index);
-    if !is_left_paren_token(params) {
+    if !validation_tokens::is_left_paren_token(params) {
         return invalid_parse_validation(
             "expected left paren",
             params.line,
             params.column,
-            token_text(source, params)
+            validation_tokens::token_text(source, params)
         );
     }
     let param_validation = try validate_fn_params(source, tokens, params_index);
     if !param_validation.ok {
         return param_validation;
     }
-    let after_params = try skip_balanced_parens(tokens, params_index);
+    let after_params = try validation_tokens::skip_balanced_parens(tokens, params_index);
     let return_validation = try validate_optional_fn_return_type(source, tokens, after_params);
     if !return_validation.ok {
         return return_validation;
@@ -648,15 +639,15 @@ fn validate_required_fn_body(
     var cursor = index;
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
-        if is_left_brace_token(token) {
+        if validation_tokens::is_left_brace_token(token) {
             return valid_parse_validation();
         }
-        if is_semicolon_token(token) or lexer::is_eof(token) {
+        if validation_tokens::is_semicolon_token(token) or lexer::is_eof(token) {
             return invalid_parse_validation(
                 "expected left brace",
                 token.line,
                 token.column,
-                token_text(source, token)
+                validation_tokens::token_text(source, token)
             );
         }
         cursor = cursor + 1;
@@ -673,33 +664,33 @@ fn validate_fn_params(
     var cursor = open_index + 1;
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
-        if is_right_paren_token(token) {
+        if validation_tokens::is_right_paren_token(token) {
             return valid_parse_validation();
         }
-        if !is_ident_token(token) {
+        if !validation_tokens::is_ident_token(token) {
             return invalid_parse_validation(
                 "expected identifier",
                 token.line,
                 token.column,
-                token_text(source, token)
+                validation_tokens::token_text(source, token)
             );
         }
         let colon = try tokens.get(cursor + 1);
-        if !is_colon_token(colon) {
+        if !validation_tokens::is_colon_token(colon) {
             return invalid_parse_validation(
                 "expected colon",
                 colon.line,
                 colon.column,
-                token_text(source, colon)
+                validation_tokens::token_text(source, colon)
             );
         }
         let type_start = try tokens.get(cursor + 2);
-        if !is_type_start_token(type_start) {
+        if !validation_tokens::is_type_start_token(type_start) {
             return invalid_parse_validation(
                 "expected type name",
                 type_start.line,
                 type_start.column,
-                token_text(source, type_start)
+                validation_tokens::token_text(source, type_start)
             );
         }
         let separator_validation = try validate_fn_param_type_separator(
@@ -744,7 +735,7 @@ fn validate_type_list_separator(
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
         if cursor > type_start_index and angle_depth == 0 and bracket_depth == 0 {
-            if is_comma_token(token) or is_type_list_close_token(close_delimiter, token) {
+            if validation_tokens::is_comma_token(token) or validation_tokens::is_type_list_close_token(close_delimiter, token) {
                 return valid_parse_validation();
             }
             if needs_type_separator(previous, token) {
@@ -752,20 +743,20 @@ fn validate_type_list_separator(
                     message,
                     token.line,
                     token.column,
-                    token_text(source, token)
+                    validation_tokens::token_text(source, token)
                 );
             }
         }
-        if is_lt_token(token) {
+        if validation_tokens::is_lt_token(token) {
             angle_depth = angle_depth + 1;
         }
-        if is_gt_token(token) and angle_depth > 0 {
+        if validation_tokens::is_gt_token(token) and angle_depth > 0 {
             angle_depth = angle_depth - 1;
         }
-        if is_left_bracket_token(token) {
+        if validation_tokens::is_left_bracket_token(token) {
             bracket_depth = bracket_depth + 1;
         }
-        if is_right_bracket_token(token) and bracket_depth > 0 {
+        if validation_tokens::is_right_bracket_token(token) and bracket_depth > 0 {
             bracket_depth = bracket_depth - 1;
         }
         previous = token;
@@ -779,10 +770,10 @@ fn needs_type_separator(
     previous: std::kizu::lexer::Token,
     token: std::kizu::lexer::Token
 ) -> bool {
-    if !is_ident_token(token) {
+    if !validation_tokens::is_ident_token(token) {
         return false;
     }
-    return is_ident_token(previous) or is_gt_token(previous);
+    return validation_tokens::is_ident_token(previous) or validation_tokens::is_gt_token(previous);
 }
 
 fn skip_fn_param_type(
@@ -792,7 +783,7 @@ fn skip_fn_param_type(
     let separator = try skip_type_list_separator_index(tokens, index, 1);
     if separator < tokens.len() {
         let token = try tokens.get(separator);
-        if is_comma_token(token) {
+        if validation_tokens::is_comma_token(token) {
             return separator + 1;
         }
     }
@@ -809,35 +800,28 @@ fn skip_type_list_separator_index(
     var bracket_depth = 0;
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
-        if angle_depth == 0 and bracket_depth == 0 and is_comma_token(token) {
+        if angle_depth == 0 and bracket_depth == 0 and validation_tokens::is_comma_token(token) {
             return cursor;
         }
         if angle_depth == 0 and bracket_depth == 0 and
-            is_type_list_close_token(close_delimiter, token) {
+            validation_tokens::is_type_list_close_token(close_delimiter, token) {
             return cursor;
         }
-        if is_lt_token(token) {
+        if validation_tokens::is_lt_token(token) {
             angle_depth = angle_depth + 1;
         }
-        if is_gt_token(token) and angle_depth > 0 {
+        if validation_tokens::is_gt_token(token) and angle_depth > 0 {
             angle_depth = angle_depth - 1;
         }
-        if is_left_bracket_token(token) {
+        if validation_tokens::is_left_bracket_token(token) {
             bracket_depth = bracket_depth + 1;
         }
-        if is_right_bracket_token(token) and bracket_depth > 0 {
+        if validation_tokens::is_right_bracket_token(token) and bracket_depth > 0 {
             bracket_depth = bracket_depth - 1;
         }
         cursor = cursor + 1;
     }
     return cursor;
-}
-
-fn is_type_list_close_token(close_delimiter: i64, token: std::kizu::lexer::Token) -> bool {
-    if close_delimiter == 1 {
-        return is_right_paren_token(token);
-    }
-    return is_right_brace_token(token);
 }
 
 fn validate_optional_type_params(
@@ -846,30 +830,30 @@ fn validate_optional_type_params(
     index: i64
 ) -> !ParseValidation {
     let token = try tokens.get(index);
-    if !is_lt_token(token) {
+    if !validation_tokens::is_lt_token(token) {
         return valid_parse_validation();
     }
     var cursor = index + 1;
     while cursor < tokens.len() {
         let current = try tokens.get(cursor);
-        if !is_ident_token(current) {
+        if !validation_tokens::is_ident_token(current) {
             return invalid_parse_validation(
                 "expected type parameter",
                 current.line,
                 current.column,
-                token_text(source, current)
+                validation_tokens::token_text(source, current)
             );
         }
         let next = try tokens.get(cursor + 1);
-        if is_gt_token(next) {
+        if validation_tokens::is_gt_token(next) {
             return valid_parse_validation();
         }
-        if !is_comma_token(next) {
+        if !validation_tokens::is_comma_token(next) {
             return invalid_parse_validation(
                 "expected comma",
                 next.line,
                 next.column,
-                token_text(source, next)
+                validation_tokens::token_text(source, next)
             );
         }
         cursor = cursor + 2;
@@ -884,18 +868,18 @@ fn validate_optional_fn_return_type(
     index: i64
 ) -> !ParseValidation {
     let token = try tokens.get(index);
-    if !is_arrow_token(token) {
+    if !validation_tokens::is_arrow_token(token) {
         return valid_parse_validation();
     }
     let type_start = try tokens.get(index + 1);
-    if is_type_start_token(type_start) {
+    if validation_tokens::is_type_start_token(type_start) {
         return valid_parse_validation();
     }
     return invalid_parse_validation(
         "expected type name",
         type_start.line,
         type_start.column,
-        token_text(source, type_start)
+        validation_tokens::token_text(source, type_start)
     );
 }
 
@@ -904,54 +888,10 @@ fn skip_optional_type_params(
     index: i64
 ) -> !i64 {
     let token = try tokens.get(index);
-    if !is_lt_token(token) {
+    if !validation_tokens::is_lt_token(token) {
         return index;
     }
-    return try skip_balanced_angles(tokens, index);
-}
-
-fn skip_balanced_angles(
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    index: i64
-) -> !i64 {
-    var cursor = index;
-    var depth = 0;
-    while cursor < tokens.len() {
-        let token = try tokens.get(cursor);
-        if is_lt_token(token) {
-            depth = depth + 1;
-        }
-        if is_gt_token(token) {
-            depth = depth - 1;
-            if depth == 0 {
-                return cursor + 1;
-            }
-        }
-        cursor = cursor + 1;
-    }
-    return cursor;
-}
-
-fn skip_balanced_parens(
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    index: i64
-) -> !i64 {
-    var cursor = index;
-    var depth = 0;
-    while cursor < tokens.len() {
-        let token = try tokens.get(cursor);
-        if is_left_paren_token(token) {
-            depth = depth + 1;
-        }
-        if is_right_paren_token(token) {
-            depth = depth - 1;
-            if depth == 0 {
-                return cursor + 1;
-            }
-        }
-        cursor = cursor + 1;
-    }
-    return cursor;
+    return try validation_tokens::skip_balanced_angles(tokens, index);
 }
 
 fn validate_match_arm_separators(
@@ -961,7 +901,7 @@ fn validate_match_arm_separators(
     var index = 0;
     while index + 1 < tokens.len() {
         let token = try tokens.get(index);
-        if is_match_token(token) {
+        if validation_tokens::is_match_token(token) {
             let body = try find_match_body_open_index(tokens, index);
             if body < tokens.len() {
                 let validation = try validate_match_body_arm_separators(source, tokens, body);
@@ -984,22 +924,22 @@ fn find_match_body_open_index(
     var bracket_depth = 0;
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
-        if paren_depth == 0 and bracket_depth == 0 and is_left_brace_token(token) {
+        if paren_depth == 0 and bracket_depth == 0 and validation_tokens::is_left_brace_token(token) {
             return cursor;
         }
-        if lexer::is_eof(token) or is_semicolon_token(token) {
+        if lexer::is_eof(token) or validation_tokens::is_semicolon_token(token) {
             return tokens.len();
         }
-        if is_left_paren_token(token) {
+        if validation_tokens::is_left_paren_token(token) {
             paren_depth = paren_depth + 1;
         }
-        if is_right_paren_token(token) and paren_depth > 0 {
+        if validation_tokens::is_right_paren_token(token) and paren_depth > 0 {
             paren_depth = paren_depth - 1;
         }
-        if is_left_bracket_token(token) {
+        if validation_tokens::is_left_bracket_token(token) {
             bracket_depth = bracket_depth + 1;
         }
-        if is_right_bracket_token(token) and bracket_depth > 0 {
+        if validation_tokens::is_right_bracket_token(token) and bracket_depth > 0 {
             bracket_depth = bracket_depth - 1;
         }
         cursor = cursor + 1;
@@ -1016,16 +956,16 @@ fn validate_match_body_arm_separators(
     var brace_depth = 1;
     while cursor < tokens.len() and brace_depth > 0 {
         let token = try tokens.get(cursor);
-        if brace_depth == 1 and is_fat_arrow_token(token) {
+        if brace_depth == 1 and validation_tokens::is_fat_arrow_token(token) {
             let validation = try validate_match_arm_body_separator(source, tokens, cursor + 1);
             if !validation.ok {
                 return validation;
             }
         }
-        if is_left_brace_token(token) {
+        if validation_tokens::is_left_brace_token(token) {
             brace_depth = brace_depth + 1;
         }
-        if is_right_brace_token(token) {
+        if validation_tokens::is_right_brace_token(token) {
             brace_depth = brace_depth - 1;
         }
         cursor = cursor + 1;
@@ -1045,15 +985,15 @@ fn validate_match_arm_body_separator(
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
         if paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 {
-            if is_comma_token(token) {
+            if validation_tokens::is_comma_token(token) {
                 return valid_parse_validation();
             }
-            if is_right_brace_token(token) {
+            if validation_tokens::is_right_brace_token(token) {
                 return invalid_parse_validation(
                     "expected comma",
                     token.line,
                     token.column,
-                    token_text(source, token)
+                    validation_tokens::token_text(source, token)
                 );
             }
             if try is_match_arm_start_at(tokens, cursor) {
@@ -1061,26 +1001,26 @@ fn validate_match_arm_body_separator(
                     "expected comma",
                     token.line,
                     token.column,
-                    token_text(source, token)
+                    validation_tokens::token_text(source, token)
                 );
             }
         }
-        if is_left_paren_token(token) {
+        if validation_tokens::is_left_paren_token(token) {
             paren_depth = paren_depth + 1;
         }
-        if is_right_paren_token(token) and paren_depth > 0 {
+        if validation_tokens::is_right_paren_token(token) and paren_depth > 0 {
             paren_depth = paren_depth - 1;
         }
-        if is_left_bracket_token(token) {
+        if validation_tokens::is_left_bracket_token(token) {
             bracket_depth = bracket_depth + 1;
         }
-        if is_right_bracket_token(token) and bracket_depth > 0 {
+        if validation_tokens::is_right_bracket_token(token) and bracket_depth > 0 {
             bracket_depth = bracket_depth - 1;
         }
-        if is_left_brace_token(token) {
+        if validation_tokens::is_left_brace_token(token) {
             brace_depth = brace_depth + 1;
         }
-        if is_right_brace_token(token) and brace_depth > 0 {
+        if validation_tokens::is_right_brace_token(token) and brace_depth > 0 {
             brace_depth = brace_depth - 1;
         }
         cursor = cursor + 1;
@@ -1094,19 +1034,19 @@ fn is_match_arm_start_at(
     index: i64
 ) -> !bool {
     let token = try tokens.get(index);
-    if !is_ident_token(token) {
+    if !validation_tokens::is_ident_token(token) {
         return false;
     }
     var next_index = index + 1;
     let next = try tokens.get(next_index);
-    if is_left_paren_token(next) {
-        next_index = try skip_balanced_parens(tokens, next_index);
+    if validation_tokens::is_left_paren_token(next) {
+        next_index = try validation_tokens::skip_balanced_parens(tokens, next_index);
     }
     if next_index >= tokens.len() {
         return false;
     }
     let marker = try tokens.get(next_index);
-    return is_fat_arrow_token(marker);
+    return validation_tokens::is_fat_arrow_token(marker);
 }
 
 fn validate_statement_separators(
@@ -1116,7 +1056,7 @@ fn validate_statement_separators(
     var index = 0;
     while index + 1 < tokens.len() {
         let token = try tokens.get(index);
-        if is_fn_token(token) {
+        if validation_tokens::is_fn_token(token) {
             let body = try find_fn_body_open_index(tokens, index);
             if body < tokens.len() {
                 let validation = try validate_block_statement_separators(source, tokens, body);
@@ -1124,7 +1064,7 @@ fn validate_statement_separators(
                     return validation;
                 }
             }
-            index = try skip_top_level_declaration(tokens, index);
+            index = try validation_tokens::skip_top_level_declaration(tokens, index);
         } else {
             index = index + 1;
         }
@@ -1138,17 +1078,17 @@ fn find_fn_body_open_index(
 ) -> !i64 {
     let type_params = try skip_optional_type_params(tokens, index + 2);
     let params = try tokens.get(type_params);
-    if !is_left_paren_token(params) {
+    if !validation_tokens::is_left_paren_token(params) {
         return tokens.len();
     }
-    let after_params = try skip_balanced_parens(tokens, type_params);
+    let after_params = try validation_tokens::skip_balanced_parens(tokens, type_params);
     var cursor = after_params;
     while cursor < tokens.len() {
         let token = try tokens.get(cursor);
-        if is_left_brace_token(token) {
+        if validation_tokens::is_left_brace_token(token) {
             return cursor;
         }
-        if is_semicolon_token(token) or lexer::is_eof(token) {
+        if validation_tokens::is_semicolon_token(token) or lexer::is_eof(token) {
             return tokens.len();
         }
         cursor = cursor + 1;
@@ -1171,13 +1111,13 @@ fn validate_block_statement_separators(
                 "expected semicolon",
                 token.line,
                 token.column,
-                token_text(source, token)
+                validation_tokens::token_text(source, token)
             );
         }
-        if is_left_brace_token(token) {
+        if validation_tokens::is_left_brace_token(token) {
             depth = depth + 1;
         }
-        if is_right_brace_token(token) {
+        if validation_tokens::is_right_brace_token(token) {
             depth = depth - 1;
         }
         cursor = cursor + 1;
@@ -1224,14 +1164,14 @@ fn validate_ident_top_level_decl_start(
     source: []u8,
     token: std::kizu::lexer::Token
 ) -> ParseValidation {
-    if is_skipped_top_level_decl_ident(source, token) {
+    if validation_tokens::is_skipped_top_level_decl_ident(source, token) {
         return valid_parse_validation();
     }
     return invalid_parse_validation(
         "expected declaration",
         token.line,
         token.column,
-        token_text(source, token)
+        validation_tokens::token_text(source, token)
     );
 }
 
@@ -1246,320 +1186,7 @@ fn is_public_top_level_decl_start(
         Struct => true,
         Enum => true,
         Union => true,
-        Ident => is_skipped_top_level_decl_ident(source, token),
+        Ident => validation_tokens::is_skipped_top_level_decl_ident(source, token),
         _ => false,
     };
-}
-
-fn is_unsafe_top_level_decl_start(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Fn => true,
-        Extern => true,
-        _ => false,
-    };
-}
-
-fn is_fn_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Fn => true,
-        _ => false,
-    };
-}
-
-fn is_extern_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Extern => true,
-        _ => false,
-    };
-}
-
-fn is_struct_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Struct => true,
-        _ => false,
-    };
-}
-
-fn is_enum_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Enum => true,
-        _ => false,
-    };
-}
-
-fn is_union_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Union => true,
-        _ => false,
-    };
-}
-
-fn is_match_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Match => true,
-        _ => false,
-    };
-}
-
-fn is_fat_arrow_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        FatArrow => true,
-        _ => false,
-    };
-}
-
-fn is_unsafe_modifier_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Unsafe => true,
-        _ => false,
-    };
-}
-
-fn is_pub_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Pub => true,
-        _ => false,
-    };
-}
-
-fn is_string_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        String => true,
-        _ => false,
-    };
-}
-
-fn is_colon_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Colon => true,
-        _ => false,
-    };
-}
-
-fn is_arrow_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Arrow => true,
-        _ => false,
-    };
-}
-
-fn is_comma_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Comma => true,
-        _ => false,
-    };
-}
-
-fn is_type_start_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Ident => true,
-        Dyn => true,
-        Bang => true,
-        Amp => true,
-        LBracket => true,
-        Question => true,
-        _ => false,
-    };
-}
-
-fn is_skipped_top_level_decl_ident(
-    source: []u8,
-    token: std::kizu::lexer::Token
-) -> bool {
-    let text = token_text(source, token);
-    return std::mem::equal_bytes(text, "impl") or std::mem::equal_bytes(text, "contract");
-}
-
-fn skip_top_level_declaration(
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    index: i64
-) -> !i64 {
-    var cursor = index;
-    var paren_depth = 0;
-    var bracket_depth = 0;
-    var brace_depth = 0;
-    var seen_body = false;
-    while cursor + 1 < tokens.len() {
-        let token = try tokens.get(cursor);
-        if is_left_paren_token(token) {
-            paren_depth = paren_depth + 1;
-        }
-        if is_right_paren_token(token) and paren_depth > 0 {
-            paren_depth = paren_depth - 1;
-        }
-        if is_left_bracket_token(token) {
-            bracket_depth = bracket_depth + 1;
-        }
-        if is_right_bracket_token(token) and bracket_depth > 0 {
-            bracket_depth = bracket_depth - 1;
-        }
-        if is_left_brace_token(token) {
-            brace_depth = brace_depth + 1;
-            seen_body = true;
-        }
-        if is_right_brace_token(token) and brace_depth > 0 {
-            brace_depth = brace_depth - 1;
-            if seen_body and brace_depth == 0 {
-                return cursor + 1;
-            }
-        }
-        if is_semicolon_token(token) and paren_depth == 0 and
-            bracket_depth == 0 and brace_depth == 0 {
-            return cursor + 1;
-        }
-        cursor = cursor + 1;
-    }
-    return cursor;
-}
-
-fn is_left_paren_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        LParen => true,
-        _ => false,
-    };
-}
-
-fn is_right_paren_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        RParen => true,
-        _ => false,
-    };
-}
-
-fn is_lt_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        LT => true,
-        _ => false,
-    };
-}
-
-fn is_gt_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        GT => true,
-        _ => false,
-    };
-}
-
-fn is_left_bracket_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        LBracket => true,
-        _ => false,
-    };
-}
-
-fn is_right_bracket_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        RBracket => true,
-        _ => false,
-    };
-}
-
-fn is_left_brace_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        LBrace => true,
-        _ => false,
-    };
-}
-
-fn is_right_brace_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        RBrace => true,
-        _ => false,
-    };
-}
-
-fn is_semicolon_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Semicolon => true,
-        _ => false,
-    };
-}
-
-fn is_open_delimiter(text: []u8) -> bool {
-    return std::mem::equal_bytes(text, "(") or
-        std::mem::equal_bytes(text, "{") or
-        std::mem::equal_bytes(text, "[");
-}
-
-fn is_binding_keyword(text: []u8) -> bool {
-    return std::mem::equal_bytes(text, "let") or std::mem::equal_bytes(text, "var");
-}
-
-fn is_binding_statement(
-    source: []u8,
-    tokens: &std::array::Array<std::kizu::lexer::Token>,
-    index: i64,
-    text: []u8
-) -> !bool {
-    if !is_binding_keyword(text) {
-        return false;
-    }
-    if !std::mem::equal_bytes(text, "var") or index == 0 {
-        return true;
-    }
-    let previous = try tokens.get(index - 1);
-    return !std::mem::equal_bytes(token_text(source, previous), "&");
-}
-
-fn is_ident_token(token: std::kizu::lexer::Token) -> bool {
-    return match token.kind {
-        Ident => true,
-        _ => false,
-    };
-}
-
-fn is_close_delimiter(text: []u8) -> bool {
-    return std::mem::equal_bytes(text, ")") or
-        std::mem::equal_bytes(text, "}") or
-        std::mem::equal_bytes(text, "]");
-}
-
-fn closing_delimiter_code(text: []u8) -> i64 {
-    if std::mem::equal_bytes(text, "(") {
-        return 1;
-    }
-    if std::mem::equal_bytes(text, "{") {
-        return 2;
-    }
-    return 3;
-}
-
-fn delimiter_matches(expected: i64, text: []u8) -> bool {
-    if expected == 1 {
-        return std::mem::equal_bytes(text, ")");
-    }
-    if expected == 2 {
-        return std::mem::equal_bytes(text, "}");
-    }
-    return std::mem::equal_bytes(text, "]");
-}
-
-fn expected_delimiter_message(expected: i64) -> []u8 {
-    if expected == 1 {
-        return "expected right paren";
-    }
-    if expected == 2 {
-        return "expected right brace";
-    }
-    return "expected right bracket";
-}
-
-fn expression_missing_before(text: []u8) -> bool {
-    return std::mem::equal_bytes(text, ";") or
-        std::mem::equal_bytes(text, ")") or
-        std::mem::equal_bytes(text, "}") or
-        std::mem::equal_bytes(text, ",");
-}
-
-fn missing_expression_got_text(text: []u8) -> []u8 {
-    if std::mem::equal_bytes(text, ";") {
-        return ";";
-    }
-    if std::mem::equal_bytes(text, ")") {
-        return ")";
-    }
-    if std::mem::equal_bytes(text, "}") {
-        return "}";
-    }
-    return ",";
 }
