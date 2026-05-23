@@ -145,14 +145,25 @@ pub fn first_pre_move_check_diagnostic(
         path: path,
         text: text
     };
+    let result = try parser::parse_checked_file(allocator, path, text);
+    defer result.deinit();
+    return first_pre_move_check_diagnostic_ast_node(allocator, &file, result.ast, result.root);
+}
+
+pub fn first_pre_move_check_diagnostic_ast_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::CheckDiagnosticSummary {
     var kinds = std::map::Map<[]u8, model::TypeKind>(allocator);
     var arities = std::map::Map<[]u8, i64>(allocator);
     var copyable = std::map::Map<[]u8, bool>(allocator);
     try type_refs::seed_builtin_types(kinds, arities, copyable);
-    var tokens = try lexer::tokenize(allocator, text);
-    try type_refs::collect_declared_types(allocator, &file, tokens, kinds, arities, copyable);
-    try type_refs::collect_type_parameters(&file, tokens, kinds, arities, copyable);
-    let type_ref = try type_refs::first_type_error_in_file(allocator, &file, tokens, kinds, arities);
+    var tokens = try lexer::tokenize(allocator, file.text);
+    try type_refs::collect_declared_types(allocator, file, tokens, kinds, arities, copyable);
+    try type_refs::collect_type_parameters(file, tokens, kinds, arities, copyable);
+    let type_ref = try type_refs::first_type_error_in_file(allocator, file, tokens, kinds, arities);
     tokens.deinit();
     kinds.deinit();
     arities.deinit();
@@ -164,15 +175,14 @@ pub fn first_pre_move_check_diagnostic(
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
     var enum_counts = std::map::Map<[]u8, i64>(allocator);
     var enum_tags = std::map::Map<[]u8, bool>(allocator);
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
-    try collect_match_enum_types(allocator, &file, result.ast, result.root, enum_counts, enum_tags);
+    try collect_function_returns_from_ast(allocator, file, ast, root, function_returns);
+    try collect_match_enum_types(allocator, file, ast, root, enum_counts, enum_tags);
     var diagnostic = check_diagnostic_none();
     let match_diagnostic = try first_match_diagnostic_node(
         allocator,
-        &file,
-        result.ast,
-        result.root,
+        file,
+        ast,
+        root,
         enum_counts,
         enum_tags,
         function_returns
@@ -182,9 +192,9 @@ pub fn first_pre_move_check_diagnostic(
     } else {
         let return_type = try first_return_type_mismatch_node(
             allocator,
-            &file,
-            result.ast,
-            result.root,
+            file,
+            ast,
+            root,
             function_returns
         );
         if return_type.found {
@@ -192,9 +202,9 @@ pub fn first_pre_move_check_diagnostic(
         } else {
             let missing_return = try first_missing_return_node(
                 allocator,
-                &file,
-                result.ast,
-                result.root,
+                file,
+                ast,
+                root,
                 function_returns
             );
             if missing_return.found {
@@ -202,7 +212,6 @@ pub fn first_pre_move_check_diagnostic(
             }
         }
     }
-    result.deinit();
     enum_counts.deinit();
     enum_tags.deinit();
     function_returns.deinit();
@@ -220,26 +229,36 @@ pub fn first_post_move_check_diagnostic(
         path: path,
         text: text
     };
+    let result = try parser::parse_checked_file(allocator, path, text);
+    defer result.deinit();
+    return first_post_move_check_diagnostic_ast_node(allocator, &file, result.ast, result.root);
+}
+
+pub fn first_post_move_check_diagnostic_ast_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !model::CheckDiagnosticSummary {
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
     var function_arities = std::map::Map<[]u8, i64>(allocator);
     var local_function_param_types = std::array::Array<FunctionParamType>(allocator);
-    let result = try parser::parse_checked_file(allocator, path, text);
-    try collect_function_returns_from_ast(allocator, &file, result.ast, result.root, function_returns);
-    try function_calls::collect_function_arities_from_ast(allocator, &file, &result.ast, result.root, function_arities);
+    try collect_function_returns_from_ast(allocator, file, ast, root, function_returns);
+    try function_calls::collect_function_arities_from_ast(allocator, file, &ast, root, function_arities);
     try collect_local_function_param_types(
         allocator,
-        &file,
-        result.ast,
-        result.root,
+        file,
+        ast,
+        root,
         local_function_param_types
     );
 
     var diagnostic = check_diagnostic_none();
     let local_call = try function_calls::first_function_call_error_ast_node(
         allocator,
-        &file,
-        &result.ast,
-        result.root,
+        file,
+        &ast,
+        root,
         function_arities,
         true
     );
@@ -248,9 +267,9 @@ pub fn first_post_move_check_diagnostic(
     } else {
         let undefined = try first_undefined_variable_node(
             allocator,
-            &file,
-            result.ast,
-            result.root,
+            file,
+            ast,
+            root,
             function_returns
         );
         if undefined.found {
@@ -258,9 +277,9 @@ pub fn first_post_move_check_diagnostic(
         } else {
             let argument = try first_argument_type_mismatch_node(
                 allocator,
-                &file,
-                result.ast,
-                result.root,
+                file,
+                ast,
+                root,
                 local_function_param_types,
                 function_returns
             );
@@ -269,27 +288,27 @@ pub fn first_post_move_check_diagnostic(
             } else {
                 let immutable = try first_immutable_assignment_node(
                     allocator,
-                    &file,
-                    result.ast,
-                    result.root,
+                    file,
+                    ast,
+                    root,
                     function_returns
                 );
                 if immutable.found {
                     diagnostic = check_diagnostic_from_immutable_assignment(immutable);
                 } else {
                     let invalid = try first_invalid_assignment_target_node(
-                        &file,
-                        result.ast,
-                        result.root
+                        file,
+                        ast,
+                        root
                     );
                     if invalid.found {
                         diagnostic = check_diagnostic_from_invalid_assignment_target(invalid);
                     } else {
                         let assignment = try first_assignment_type_mismatch_node(
                             allocator,
-                            &file,
-                            result.ast,
-                            result.root,
+                            file,
+                            ast,
+                            root,
                             function_returns
                         );
                         if assignment.found {
@@ -300,7 +319,6 @@ pub fn first_post_move_check_diagnostic(
             }
         }
     }
-    result.deinit();
     local_function_param_types.deinit();
     function_arities.deinit();
     function_returns.deinit();

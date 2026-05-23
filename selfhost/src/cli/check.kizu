@@ -34,10 +34,18 @@ pub fn fast_diagnostics(
     path: []u8,
     file_text: []u8
 ) -> !bool {
-    let parsed_validation = try parser::parse_diagnostic_file(allocator, path, file_text);
+    let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
     if !parsed_validation.ok {
         return try write_parse_failure(allocator, io, parsed_validation);
     }
+    let file = source::SourceFile {
+        id: 0,
+        kind: source::SourceKind::User,
+        path: path,
+        text: file_text
+    };
+    let parsed = try parser::parse_checked_file(allocator, path, file_text);
+    defer parsed.deinit();
 
     let duplicate = try resolver::first_duplicate_declaration(allocator, path, file_text);
     if duplicate.found {
@@ -45,18 +53,33 @@ pub fn fast_diagnostics(
         return false;
     }
 
-    let pre_move = try types::first_pre_move_check_diagnostic(allocator, path, file_text);
+    let pre_move = try types::first_pre_move_check_diagnostic_ast_node(
+        allocator,
+        &file,
+        parsed.ast,
+        parsed.root
+    );
     if !(try write_check_diagnostic(allocator, io, file_text, &pre_move)) {
         return false;
     }
 
-    let moved_name = try ownership::first_use_after_move_name(allocator, path, file_text);
+    let moved_name = try ownership::first_use_after_move_name_ast_node(
+        allocator,
+        &file,
+        parsed.ast,
+        parsed.root
+    );
     if !std::mem::equal_bytes(moved_name, "") {
         try diagnostics::move_error(allocator, io, moved_name);
         return false;
     }
 
-    let post_move = try types::first_post_move_check_diagnostic(allocator, path, file_text);
+    let post_move = try types::first_post_move_check_diagnostic_ast_node(
+        allocator,
+        &file,
+        parsed.ast,
+        parsed.root
+    );
     if !(try write_check_diagnostic(allocator, io, file_text, &post_move)) {
         return false;
     }
