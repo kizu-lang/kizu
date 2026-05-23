@@ -697,6 +697,7 @@ fn main() {
 guard と多段 destructuring は v0.1 では扱いません。
 tagged union の payload binding だけを扱います。
 duplicate arm、unknown tag、non-exhaustive match は compile error です。
+すべての `match` arm は terminal comma を必須にします。
 v0.2 では wildcard pattern `_` を fallback arm として許可します。
 `_` arm は最後に 1 つだけ書けます。payload binding はできません。
 `_` arm がある場合、明示されていない残りの tag を束ねるため exhaustive とみなします。

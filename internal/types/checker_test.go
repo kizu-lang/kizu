@@ -649,7 +649,7 @@ fn describe(shape: &Shape) -> void {
 }
 fn main() -> void {
     let color = Color::Blue;
-    let name = match color { Red => "red", _ => "other" };
+    let name = match color { Red => "red", _ => "other", };
     print(name);
     describe(Shape::Label("tag"));
 }`
@@ -664,7 +664,7 @@ func TestCheckAcceptsControlExpressions(t *testing.T) {
 fn main() -> void {
     let color = Color::Green
     let value = if true { 1 } else { 2 }
-    let name = match color { Red => "red", Green => "green" }
+    let name = match color { Red => "red", Green => "green", }
     print(value)
     print(name)
 }`

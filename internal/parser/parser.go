@@ -810,6 +810,16 @@ func (p *Parser) consumeListDelimiter(context string) bool {
 	}
 }
 
+// consumeRequiredListComma consumes a comma-only list delimiter.
+func (p *Parser) consumeRequiredListComma(context string) bool {
+	if p.peek.Type == token.Comma {
+		p.nextToken()
+		return true
+	}
+	p.errorf("expected `,` after %s", context)
+	return false
+}
+
 // parseMatchStmt parses a simple enum tag match statement.
 func (p *Parser) parseMatchStmt() *ast.MatchStmt {
 	stmt := &ast.MatchStmt{}
@@ -832,7 +842,7 @@ func (p *Parser) parseMatchArms() []ast.MatchArm {
 			return arms
 		}
 		arms = append(arms, arm)
-		if !p.consumeListDelimiter("match arm") {
+		if !p.consumeRequiredListComma("match arm") {
 			return arms
 		}
 		p.nextToken()
