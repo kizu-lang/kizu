@@ -294,7 +294,7 @@ func TestSelfhostSemanticDiagnosticsCollectReturnsFromParsedAST(t *testing.T) {
 	}
 }
 
-// TestSelfhostCheckEntryRunsPackageCallDiagnostics rejects raw source prefilters.
+// TestSelfhostCheckEntryRunsPackageCallDiagnostics uses the package source path directly.
 func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 	bytes, err := os.ReadFile("../../selfhost/src/cli/check.kizu")
 	if err != nil {
@@ -304,8 +304,17 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 	if strings.Contains(content, "source_has_qualified_name") {
 		t.Fatal("check entry gates package call diagnostics on raw source content")
 	}
-	if !strings.Contains(content, "types::source_has_package_function_call(") {
-		t.Fatal("check entry does not probe package calls before loading package sources")
+	if strings.Contains(content, "source_has_package_function_call(") {
+		t.Fatal("check entry keeps a separate package-call prefilter")
+	}
+	required := []string{
+		"var files = try source::load_file_sources(allocator, io, path, file_text)",
+		"types::first_function_call_error(allocator, files, path)",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("check entry package call diagnostic missing %q", fragment)
+		}
 	}
 	call := "write_package_function_call_diagnostic(allocator, io, path, file_text)"
 	if !strings.Contains(content, call) {
