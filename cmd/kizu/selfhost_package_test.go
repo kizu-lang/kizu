@@ -1109,6 +1109,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
 		"pub fn append_functions(",
+		"fn append_cli_run_executable_function(",
+		"fn append_cli_test_executable_function(",
 		"fn append_cli_run_print_payload_function(",
 		"fn append_cli_run_return_ok_function(",
 		"fn append_cli_test_expect_value_function(",
