@@ -1014,6 +1014,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_cli_run_blocks(",
 		"fn append_run_print_emit_block(",
 	},
+	"../../selfhost/src/backend/cli_test_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_cli_test_blocks(",
+		"fn append_test_ok_emit_block(",
+	},
 	"../../selfhost/src/backend/cli_match_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn append_cli_run_print_payload_function(",
