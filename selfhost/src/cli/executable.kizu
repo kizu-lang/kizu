@@ -1,0 +1,326 @@
+import selfhost::backend::data;
+
+pub fn lower_run_executable(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !data::RunExecutable {
+    let node = ast.get(root);
+    return match node.data {
+        Program(program) => try lower_run_program(text, ast, program.declarations),
+        _ => unsupported_run_executable(text),
+    };
+}
+
+pub fn lower_test_executable(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !data::TestExecutable {
+    let node = ast.get(root);
+    return match node.data {
+        Program(program) => try lower_test_program(text, ast, program.declarations),
+        _ => unsupported_test_executable(),
+    };
+}
+
+fn lower_run_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !data::RunExecutable {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let node = ast.get(child);
+        let executable = match node.data {
+            FnDecl(fn_decl) => try lower_run_fn(text, ast, fn_decl.name, fn_decl.body),
+            _ => unsupported_run_executable(text),
+        };
+        if executable.supported {
+            return executable;
+        }
+        index = index + 1;
+    }
+    return unsupported_run_executable(text);
+}
+
+fn lower_run_fn(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !data::RunExecutable {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
+        return unsupported_run_executable(text);
+    }
+    let node = ast.get(body);
+    return match node.data {
+        Block(block) => try lower_run_block(text, ast, block.statements),
+        _ => unsupported_run_executable(text),
+    };
+}
+
+fn lower_run_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !data::RunExecutable {
+    if statements.len != 1 {
+        return unsupported_run_executable(text);
+    }
+    let statement = try ast.child_at(statements, 0);
+    let node = ast.get(statement);
+    return match node.data {
+        ExprStmt(expr_stmt) => try lower_run_print_stmt(text, ast, expr_stmt.expr),
+        Return(return_node) => lower_run_return_stmt(text, ast, return_node.value),
+        _ => unsupported_run_executable(text),
+    };
+}
+
+fn lower_run_return_stmt(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> data::RunExecutable {
+    if !is_empty_node(ast, value) {
+        return unsupported_run_executable(text);
+    }
+    return data::RunExecutable {
+        supported: true,
+        writes_stdout: false,
+        stdout_payload: text[0..0]
+    };
+}
+
+fn lower_run_print_stmt(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !data::RunExecutable {
+    let node = ast.get(expr);
+    return match node.data {
+        Call(call_node) => try lower_run_print_call(text, ast, call_node.callee, call_node.args),
+        _ => unsupported_run_executable(text),
+    };
+}
+
+fn lower_run_print_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !data::RunExecutable {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
+        return unsupported_run_executable(text);
+    }
+    let arg = try ast.child_at(args, 0);
+    let payload = run_string_literal_payload(text, ast, arg);
+    if payload.supported {
+        return data::RunExecutable {
+            supported: true,
+            writes_stdout: true,
+            stdout_payload: payload.stdout_payload
+        };
+    }
+    return unsupported_run_executable(text);
+}
+
+fn run_string_literal_payload(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> data::RunExecutable {
+    let node = ast.get(node_id);
+    return match node.data {
+        String(string_node) => run_payload_from_literal(text, ast_node_text(text, ast, node_id)),
+        _ => unsupported_run_executable(text),
+    };
+}
+
+fn run_payload_from_literal(text: []u8, literal: []u8) -> data::RunExecutable {
+    let length = std::mem::len(literal);
+    if length < 2 {
+        return unsupported_run_executable(text);
+    }
+    if literal[0] != cast<u8>(34) or literal[length - 1] != cast<u8>(34) {
+        return unsupported_run_executable(text);
+    }
+    let payload = literal[1..length - 1];
+    if !is_supported_run_print_payload(payload) {
+        return unsupported_run_executable(text);
+    }
+    return data::RunExecutable {
+        supported: true,
+        writes_stdout: true,
+        stdout_payload: payload
+    };
+}
+
+fn is_supported_run_print_payload(payload: []u8) -> bool {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        if byte < cast<u8>(32) or byte > cast<u8>(126) {
+            return false;
+        }
+        if byte == cast<u8>(34) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn unsupported_run_executable(text: []u8) -> data::RunExecutable {
+    return data::RunExecutable {
+        supported: false,
+        writes_stdout: false,
+        stdout_payload: text[0..0]
+    };
+}
+
+fn lower_test_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !data::TestExecutable {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let node = ast.get(child);
+        let executable = match node.data {
+            FnDecl(fn_decl) => try lower_test_fn(text, ast, fn_decl.name, fn_decl.body),
+            _ => unsupported_test_executable(),
+        };
+        if executable.supported {
+            return executable;
+        }
+        index = index + 1;
+    }
+    return unsupported_test_executable();
+}
+
+fn lower_test_fn(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !data::TestExecutable {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
+        return unsupported_test_executable();
+    }
+    let node = ast.get(body);
+    return match node.data {
+        Block(block) => try lower_test_block(text, ast, block.statements),
+        _ => unsupported_test_executable(),
+    };
+}
+
+fn lower_test_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !data::TestExecutable {
+    if statements.len != 2 {
+        return unsupported_test_executable();
+    }
+    let expect_statement = try ast.child_at(statements, 0);
+    let return_statement = try ast.child_at(statements, 1);
+    if !is_empty_return(ast, return_statement) {
+        return unsupported_test_executable();
+    }
+    let node = ast.get(expect_statement);
+    return match node.data {
+        ExprStmt(expr_stmt) => try lower_expect_stmt(text, ast, expr_stmt.expr),
+        _ => unsupported_test_executable(),
+    };
+}
+
+fn lower_expect_stmt(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !data::TestExecutable {
+    let node = ast.get(expr);
+    return match node.data {
+        Call(call_node) => try lower_expect_call(text, ast, call_node.callee, call_node.args),
+        _ => unsupported_test_executable(),
+    };
+}
+
+fn lower_expect_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !data::TestExecutable {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "std::testing::expect") or
+        args.len != 1 {
+        return unsupported_test_executable();
+    }
+    let arg = try ast.child_at(args, 0);
+    let expect = expect_bool_value(ast, arg);
+    if expect == 1 {
+        return data::TestExecutable {
+            supported: true,
+            expect_ok: true
+        };
+    }
+    if expect == 0 {
+        return data::TestExecutable {
+            supported: true,
+            expect_ok: false
+        };
+    }
+    return unsupported_test_executable();
+}
+
+fn is_empty_return(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Return(return_node) => is_empty_node(ast, return_node.value),
+        _ => false,
+    };
+}
+
+fn is_empty_node(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        Empty => true,
+        _ => false,
+    };
+}
+
+fn expect_bool_value(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> i64 {
+    let node = ast.get(node_id);
+    return match node.data {
+        Bool(bool_node) => bool_value_as_i64(bool_node.value),
+        _ => -1,
+    };
+}
+
+fn bool_value_as_i64(value: bool) -> i64 {
+    if value {
+        return 1;
+    }
+    return 0;
+}
+
+fn unsupported_test_executable() -> data::TestExecutable {
+    return data::TestExecutable {
+        supported: false,
+        expect_ok: false
+    };
+}
+
+fn ast_node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
+}

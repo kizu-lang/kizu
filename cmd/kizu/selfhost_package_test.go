@@ -727,6 +727,7 @@ func assertSelfhostCheckEntryDropsOldDiagnosticWrappers(t *testing.T, content st
 func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 	main := readSelfhostFile(t, "../../selfhost/src/main.kizu")
 	execute := readSelfhostFile(t, "../../selfhost/src/cli/execute.kizu")
+	executable := readSelfhostFile(t, "../../selfhost/src/cli/executable.kizu")
 	check := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
 	if !strings.Contains(check, "pub fn fast_diagnostics_ast_node(") {
 		t.Fatal("check module does not expose parsed-AST fast diagnostics")
@@ -769,13 +770,37 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		"fn lower_run_executable(",
-		"fn lower_test_executable(",
+		"executable::lower_run_executable(",
+		"executable::lower_test_executable(",
 		"backend::emit_run_executable_artifact(",
 		"backend::emit_test_executable_artifact(",
 	} {
 		if !strings.Contains(execute, fragment) {
 			t.Fatalf("execute module missing bounded executable path %q", fragment)
+		}
+	}
+	assertSelfhostExecutableLoweringSplit(t, execute, executable)
+}
+
+// assertSelfhostExecutableLoweringSplit keeps CLI I/O separate from AST lowering.
+func assertSelfhostExecutableLoweringSplit(t *testing.T, execute string, executable string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"pub fn lower_run_executable(",
+		"pub fn lower_test_executable(",
+		"fn lower_run_print_call(",
+		"fn lower_expect_call(",
+	} {
+		if !strings.Contains(executable, fragment) {
+			t.Fatalf("executable module missing AST executable lowering %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"fn lower_run_executable(",
+		"fn lower_test_executable(",
+	} {
+		if strings.Contains(execute, fragment) {
+			t.Fatalf("execute module still owns executable lowering %q", fragment)
 		}
 	}
 }
@@ -1084,8 +1109,14 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/cli/execute.kizu": {
 		"pub fn run_file_cli(",
 		"pub fn test_file_cli(",
-		"fn lower_run_executable(",
-		"fn lower_test_executable(",
+		"executable::lower_run_executable(",
+		"executable::lower_test_executable(",
+	},
+	"../../selfhost/src/cli/executable.kizu": {
+		"pub fn lower_run_executable(",
+		"pub fn lower_test_executable(",
+		"fn lower_run_print_call(",
+		"fn lower_expect_call(",
 	},
 }
 
