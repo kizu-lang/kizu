@@ -611,7 +611,7 @@ fn main() { let size = comptime (4 * 1024); ` +
 
 // TestParseMinimalGenerics checks explicit static type args and type literals.
 func TestParseMinimalGenerics(t *testing.T) {
-	input := `fn IsI64<T>(value: T) -> bool {
+	input := `fn is_i64<T>(value: T) -> bool {
     comptime if T == type<i64> {
         return true;
     } else {
@@ -619,17 +619,17 @@ func TestParseMinimalGenerics(t *testing.T) {
     }
 }
 fn main() {
-    print(IsI64<i64>(1));
-    print(IsI64<bool>(false));
+    print(is_i64<i64>(1));
+    print(is_i64<bool>(false));
 }`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn IsI64<T>(value: T) -> bool { ` +
+	want := `fn is_i64<T>(value: T) -> bool { ` +
 		`comptime if (T == type<i64>) { return true; } else { return false; } }
-fn main() { print(IsI64<i64>(1)); print(IsI64<bool>(false)); }`
+fn main() { print(is_i64<i64>(1)); print(is_i64<bool>(false)); }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -637,11 +637,11 @@ fn main() { print(IsI64<i64>(1)); print(IsI64<bool>(false)); }`
 
 // TestParseRejectsNonTypeStaticArg keeps v0.2 static arguments type-only.
 func TestParseRejectsNonTypeStaticArg(t *testing.T) {
-	input := `fn Identity<T>(value: T) -> T {
+	input := `fn identity<T>(value: T) -> T {
     return value;
 }
 fn main() {
-    print(Identity<1>(1));
+    print(identity<1>(1));
 }`
 	p := New(lexer.New(input))
 	p.ParseProgram()

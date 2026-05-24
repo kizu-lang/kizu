@@ -1643,10 +1643,10 @@ fn read(p: ptr<Node>) -> i64 {
 
 // TestCheckMinimalExplicitGenerics checks explicit instantiation and type branches.
 func TestCheckMinimalExplicitGenerics(t *testing.T) {
-	source := `fn Identity<T>(value: T) -> T {
+	source := `fn identity<T>(value: T) -> T {
     return value;
 }
-fn IsI64<T>(value: T) -> bool {
+fn is_i64<T>(value: T) -> bool {
     comptime if T == type<i64> {
         return true;
     } else {
@@ -1654,9 +1654,9 @@ fn IsI64<T>(value: T) -> bool {
     }
 }
 fn main() {
-    print(Identity<i64>(7));
-    print(IsI64<i64>(1));
-    print(IsI64<bool>(false));
+    print(identity<i64>(7));
+    print(is_i64<i64>(1));
+    print(is_i64<bool>(false));
 }`
 	if err := checkSource(source); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1665,7 +1665,7 @@ fn main() {
 
 // TestCheckRejectsBareTypeNameAsComptimeValue keeps type<T> canonical.
 func TestCheckRejectsBareTypeNameAsComptimeValue(t *testing.T) {
-	source := `fn IsI64<T>(value: T) -> bool {
+	source := `fn is_i64<T>(value: T) -> bool {
     comptime if T == i64 {
         return true;
     } else {
@@ -1673,7 +1673,7 @@ func TestCheckRejectsBareTypeNameAsComptimeValue(t *testing.T) {
     }
 }
 fn main() {
-    print(IsI64<i64>(1));
+    print(is_i64<i64>(1));
 }`
 	err := checkSource(source)
 	if err == nil {
@@ -1687,11 +1687,11 @@ fn main() {
 
 // TestCheckRejectsGenericCallWithoutTypeArgs keeps instantiation explicit.
 func TestCheckRejectsGenericCallWithoutTypeArgs(t *testing.T) {
-	source := `fn Identity<T>(value: T) -> T {
+	source := `fn identity<T>(value: T) -> T {
     return value;
 }
 fn main() {
-    print(Identity(7));
+    print(identity(7));
 }`
 	err := checkSource(source)
 	if err == nil {

@@ -1390,6 +1390,13 @@ v0.2 の最小 generics は、明示的な compile-time/static 引数リスト `
 型引数推論、non-type static argument、generic methods、bounds、associated types、
 higher-kinded types、specialization、reflection は実装しません。
 
+通常の function / method 名は、generic かどうかに関係なく snake_case にします。
+`<...>` を持つことは PascalCase にする理由にはなりません。型名は PascalCase に
+保ちます。例えば `Identity<T>` / `IsI64<T>` ではなく、`identity<T>` /
+`is_i64<T>` と書きます。既存の `std::array::Array<T>(allocator)` のような
+type-named std constructor spelling は std storage type に結びついた factory
+構文であり、通常の generic function naming の前例とはみなしません。
+
 `<...>` を type-only 構文として固定しません。将来 fixed-size buffer の長さや
 format string など、type 以外の comptime value が必要になった場合は、同じ
 `<...>` を static argument list として拡張します。ただし v0.2 では syntax の意味を
@@ -1452,7 +1459,7 @@ type namespace の衝突を避け、`type<[]u8>` や `type<std::map::Map<[]u8, i
 runtime local、field、union payload、collection element、return value として保持できません。
 
 ```kizu
-fn IsI64<T>(value: T) -> bool {
+fn is_i64<T>(value: T) -> bool {
     comptime if T == type<i64> {
         return true;
     } else {
