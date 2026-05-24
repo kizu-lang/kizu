@@ -232,12 +232,9 @@ func compareTestProgramResult(
 	return 0
 }
 
-// prepareTestParityDir recreates the bounded test artifact directory.
+// prepareTestParityDir removes bounded test artifacts without precreating the leaf.
 func prepareTestParityDir() error {
 	if err := os.RemoveAll("target/selfhost/test"); err != nil {
-		return err
-	}
-	if err := os.MkdirAll("target/selfhost/test", 0o755); err != nil {
 		return err
 	}
 	return os.MkdirAll("target/selfhost/reports", 0o755)

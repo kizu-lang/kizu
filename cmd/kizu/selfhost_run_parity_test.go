@@ -306,12 +306,9 @@ func readRunParityGoldens(item runParityCase) (string, string, error) {
 	return string(stdout), string(stderr), nil
 }
 
-// prepareRunParityDir recreates the bounded run artifact directory.
+// prepareRunParityDir removes bounded run artifacts without precreating the leaf.
 func prepareRunParityDir() error {
 	if err := os.RemoveAll("target/selfhost/run"); err != nil {
-		return err
-	}
-	if err := os.MkdirAll("target/selfhost/run", 0o755); err != nil {
 		return err
 	}
 	return os.MkdirAll("target/selfhost/reports", 0o755)
