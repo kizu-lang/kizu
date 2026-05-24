@@ -723,15 +723,24 @@ func assertSelfhostCheckEntryDropsOldDiagnosticWrappers(t *testing.T, content st
 // TestSelfhostRunTestReuseCheckedAST keeps run/test on one parsed frontend path.
 func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 	main := readSelfhostFile(t, "../../selfhost/src/main.kizu")
+	runSmoke := readSelfhostFile(t, "../../selfhost/src/cli/run_smoke.kizu")
 	check := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
 	if !strings.Contains(check, "pub fn fast_diagnostics_ast_node(") {
 		t.Fatal("check module does not expose parsed-AST fast diagnostics")
 	}
-	for _, signature := range []string{
-		"fn run_file_cli(",
-		"fn test_file_cli(",
+	for _, fragment := range []string{
+		"run_smoke::run_smoke_file_cli(",
+		"run_smoke::test_smoke_file_cli(",
 	} {
-		body := selfhostKizuFunctionBody(t, main, signature)
+		if !strings.Contains(main, fragment) {
+			t.Fatalf("main dispatch missing smoke module call %q", fragment)
+		}
+	}
+	for _, signature := range []string{
+		"pub fn run_smoke_file_cli(",
+		"pub fn test_smoke_file_cli(",
+	} {
+		body := selfhostKizuFunctionBody(t, runSmoke, signature)
 		required := []string{
 			"parser::validate_diagnostic_file(allocator, path, file_text)",
 			"let validation_ok = parsed_validation.ok",
