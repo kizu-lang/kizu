@@ -581,11 +581,12 @@ comparison.
 The backend consumes only IR artifacts that declare the checked selfhost package
 contract. The required facts include the `selfhost-checked-package-v1` contract,
 the checked `selfhost::cli_main` package entry, the hosted CLI and smoke entries,
-the bounded frontend executable lowering fact, the hosted executable-AST rule
-contract, each executable-AST recognition rule consumed by the hosted matcher,
-the hosted executable lowering rule contract, each AST-to-executable lowering
-rule consumed by the hosted backend, the hosted executable result layout and
-enum tag ABI, and `checked-diagnostics 0`.
+the executable contract source facts for `selfhost::backend::data` and
+`selfhost::backend::executable`, the bounded frontend executable lowering fact,
+the hosted executable-AST rule contract, each executable-AST recognition rule
+consumed by the hosted matcher, the hosted executable lowering rule contract,
+each AST-to-executable lowering rule consumed by the hosted backend, the hosted
+executable result layout and enum tag ABI, and `checked-diagnostics 0`.
 This keeps `target/selfhost/selfhost.ll` tied to a successful selfhost frontend
 check instead of accepting any file with a `kizu-ir-v0` header and `package
 selfhost`.

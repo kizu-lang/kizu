@@ -420,6 +420,8 @@ func requiredLLVMMetadataFragments() []string {
 		"backend-input checked-entry selfhost::cli_main\n",
 		"backend-input hosted-entry @kizu_selfhost__cli_main\n",
 		"backend-input hosted-smoke @kizu_selfhost__smoke\n",
+		"backend-input executable-contract-source data selfhost::backend::data\n",
+		"backend-input executable-contract-source lowering selfhost::backend::executable\n",
 		"backend-input executable-ast executable-ast-rules-v1\n",
 		"backend-input executable-ast-rule MainScan LeadingFunctions\n",
 		"backend-input executable-ast-rule RunPrintCall MainPrintString\n",

@@ -86,6 +86,8 @@ func requiredSelfhostIRContractFragments() []string {
 		"checked-entry selfhost::cli_main\n",
 		"hosted-entry @kizu_selfhost__cli_main\n",
 		"hosted-smoke @kizu_selfhost__smoke\n",
+		"executable-contract-source data selfhost::backend::data\n",
+		"executable-contract-source lowering selfhost::backend::executable\n",
 		"frontend-executable-lowering checked-ast-bounded\n",
 		"hosted-executable-ast executable-ast-rules-v1\n",
 		"executable-ast-rule MainScan LeadingFunctions\n",

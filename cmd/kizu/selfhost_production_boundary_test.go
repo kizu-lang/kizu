@@ -58,6 +58,7 @@ func TestSelfhostProductionBoundaryRecipes(t *testing.T) {
 
 	switchGate := justRecipe(content, "selfhost-switch-gate")
 	requireRecipeFragment(t, switchGate, "just selfhost-production-from-scratch")
+	requireRecipeFragment(t, switchGate, "just selfhost-native-source-gate")
 	requireNoRecipeFragment(t, switchGate, "just selfhost-oracle")
 	requireNoRecipeFragment(t, switchGate, "KIZU_RUN_SELFHOST_ORACLE=1")
 	requireNoRecipeFragment(t, switchGate, "go run ./cmd/kizu check selfhost")

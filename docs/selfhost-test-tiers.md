@@ -280,6 +280,16 @@ explicit stage0 bootstrap/oracle harness in the first step and as the test
 runner for the gate; the production commands are direct executions of the
 hosted artifact.
 
+`just selfhost-native-source-gate` is a focused #752 source-path gate. It builds
+the selfhost package from Kizu source as a native executable, runs `check
+selfhost` and `stage selfhost`, then emits and executes representative `run` and
+`test` artifacts through `selfhost::backend::executable`. The gate validates the
+artifact metadata marker
+`executable_lowering selfhost::backend::executable checked-ast` and the root
+host runtime path `target/selfhost/selfhost.host.ll`. This proves the Kizu-owned
+checked-AST lowering path works, but it does not claim the hosted stage2
+generated matcher has been removed.
+
 Measured locally on 2026-05-21 during #461:
 
 | Command | Elapsed |

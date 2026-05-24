@@ -1,6 +1,7 @@
 import selfhost::ownership;
 import selfhost::ownership::data;
 import selfhost::resolver;
+import selfhost::ir::executable_contract;
 import selfhost::source;
 import selfhost::source::loader;
 import selfhost::types;
@@ -34,7 +35,7 @@ pub fn emit_selfhost_artifacts(
     let typed = try types::check_sources(allocator, files, resolved);
     let checked = try ownership::check_package(allocator, files, typed);
     std::testing::expect_equal<i64>(0, checked.diagnostics);
-    let artifact = try emit_checked_artifacts(allocator, io, checked);
+    let artifact = try emit_checked_artifacts(allocator, io, files, checked);
     files.deinit();
     return artifact;
 }
@@ -42,12 +43,13 @@ pub fn emit_selfhost_artifacts(
 pub fn emit_checked_artifacts(
     allocator: Allocator,
     io: Io,
+    files: &std::array::Array<source::SourceFile>,
     checked: &data::CheckedPackage
 ) -> !IrArtifact {
     let lowered = lower(checked);
 
     try ensure_selfhost_target(io);
-    var text = try render_ir_artifact(allocator, lowered, checked);
+    var text = try render_ir_artifact(allocator, files, lowered, checked);
     let text_view = text.as_bytes();
     let byte_len = try write_artifact_bytes(
         io,
@@ -121,6 +123,7 @@ fn write_artifact_bytes(
 
 fn render_ir_artifact(
     allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
     lowered: IrSummary,
     checked: &data::CheckedPackage
 ) -> !std::string::String {
@@ -145,31 +148,7 @@ fn render_ir_artifact(
     try append_checked_entry_fact(out, checked);
     try append_line(out, "hosted-entry @kizu_selfhost__cli_main");
     try append_line(out, "hosted-smoke @kizu_selfhost__smoke");
-    try append_line(out, "frontend-executable-lowering checked-ast-bounded");
-    try append_line(out, "hosted-executable-ast executable-ast-rules-v1");
-    try append_line(out, "executable-ast-rule MainScan LeadingFunctions");
-    try append_line(out, "executable-ast-rule RunPrintCall MainPrintString");
-    try append_line(out, "executable-ast-rule RunReturnVoid MainReturnVoid");
-    try append_line(out, "executable-ast-rule TestExpectTrue MainExpectTrue");
-    try append_line(out, "executable-ast-rule TestExpectFalse MainExpectFalse");
-    try append_line(out, "hosted-executable-lowering executable-ir-rules-v1");
-    try append_line(out, "executable-lowering-rule RunPrintCall RunPrintString");
-    try append_line(out, "executable-lowering-rule RunReturnVoid RunReturnVoid");
-    try append_line(out, "executable-lowering-rule TestExpectTrue TestExpectOk");
-    try append_line(out, "executable-lowering-rule TestExpectFalse TestExpectFailure");
-    try append_line(out, "hosted-executable-abi executable-result-layout-v1");
-    try append_line(out, "executable-ast-layout kind:i64 payload:[]u8");
-    try append_line(out, "executable-layout kind:i64 stdout_payload:[]u8");
-    try append_line(out, "executable-ast-kind Unsupported 0");
-    try append_line(out, "executable-ast-kind RunPrintCall 1");
-    try append_line(out, "executable-ast-kind RunReturnVoid 2");
-    try append_line(out, "executable-ast-kind TestExpectTrue 3");
-    try append_line(out, "executable-ast-kind TestExpectFalse 4");
-    try append_line(out, "executable-kind Unsupported 0");
-    try append_line(out, "executable-kind RunPrintString 1");
-    try append_line(out, "executable-kind RunReturnVoid 2");
-    try append_line(out, "executable-kind TestExpectOk 3");
-    try append_line(out, "executable-kind TestExpectFailure 4");
+    try executable_contract::append_facts(allocator, out, files);
     try append_key_i64(out, "checked-nodes ", checked.checked_nodes);
     try append_key_i64(out, "checked-resources ", checked.resources);
     try append_key_i64(out, "checked-borrows ", checked.borrows);
