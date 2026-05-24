@@ -254,11 +254,13 @@ entry:
 const errorUnionSnapshot = `fn parse() -> !i64 {
 entry:
   %1: i64 = const 1
-  return %1: i64
+  %2: !i64 = error.ok %1: i64
+  return %2: !i64
 }
 fn main() -> !i64 {
 entry:
   %1: !i64 = call.parse
   %2: i64 = error.try %1: !i64
-  return %2: i64
+  %3: !i64 = error.ok %2: i64
+  return %3: !i64
 }`

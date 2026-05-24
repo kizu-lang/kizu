@@ -138,13 +138,7 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 		}
 		return err
 	case *ast.ReturnStmt:
-		if s.Value == nil {
-			l.block.Terminator = Terminator{Op: "return", Value: Value{Name: "void", Type: "void"}}
-			return nil
-		}
-		value, err := l.lowerExpr(s.Value)
-		l.block.Terminator = Terminator{Op: "return", Value: value}
-		return err
+		return l.lowerReturnStmt(s)
 	case *ast.DeferStmt:
 		return fmt.Errorf("ir error: defer is not supported by native lowering yet")
 	case *ast.ExprStmt:
@@ -167,6 +161,31 @@ func (l *lowerer) lowerStmt(stmt ast.Statement) error {
 	default:
 		return fmt.Errorf("ir error: unsupported statement %T", stmt)
 	}
+}
+
+// lowerReturnStmt lowers explicit returns and wraps !T success values.
+func (l *lowerer) lowerReturnStmt(stmt *ast.ReturnStmt) error {
+	if stmt.Value == nil {
+		l.block.Terminator = Terminator{Op: "return", Value: l.returnVoidValue()}
+		return nil
+	}
+	value, err := l.lowerExpr(stmt.Value)
+	if err != nil {
+		return err
+	}
+	if success, ok := errorUnionSuccessType(l.current.Return); ok && value.Type == success {
+		value = l.emit("error.ok", l.current.Return, []Value{value}, "")
+	}
+	l.block.Terminator = Terminator{Op: "return", Value: value}
+	return nil
+}
+
+// returnVoidValue returns the correct SSA return value for void-like returns.
+func (l *lowerer) returnVoidValue() Value {
+	if success, ok := errorUnionSuccessType(l.current.Return); ok && success == "void" {
+		return l.emit("error.ok", l.current.Return, nil, "")
+	}
+	return Value{Name: "void", Type: "void"}
 }
 
 // lowerExpr lowers an expression and returns its typed SSA value.

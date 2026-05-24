@@ -87,10 +87,23 @@ func arenaElementType(arena string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(arena, prefix), ">")
 }
 
-// errorUnionElementType returns T for !T.
+// errorUnionElementType returns T for !T or Error!T.
 func errorUnionElementType(result string) string {
-	if !strings.HasPrefix(result, "!") || len(result) == 1 {
+	success, ok := errorUnionSuccessType(result)
+	if !ok {
 		return "unknown"
 	}
-	return strings.TrimPrefix(result, "!")
+	return success
+}
+
+// errorUnionSuccessType returns T for !T or Error!T.
+func errorUnionSuccessType(result string) (string, bool) {
+	if strings.HasPrefix(result, "!") && len(result) > 1 {
+		return strings.TrimPrefix(result, "!"), true
+	}
+	idx := strings.Index(result, "!")
+	if idx <= 0 || idx == len(result)-1 {
+		return "", false
+	}
+	return result[idx+1:], true
 }

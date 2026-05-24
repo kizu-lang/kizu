@@ -25,6 +25,7 @@ func TestEmitSnapshots(t *testing.T) {
 		{name: "if", source: ifSource, want: ifLLVM},
 		{name: "while", source: whileSource, want: whileLLVM},
 		{name: "struct", source: structSource, want: structLLVM},
+		{name: "error_union", source: errorUnionSource, want: errorUnionLLVM},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -48,7 +49,7 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 		want   string
 	}{
 		{name: "arena", source: arenaSource, want: "`arena.new` is not supported"},
-		{name: "error union", source: errorUnionSource, want: "`error.try` is not supported"},
+		{name: "error union slice", source: errorUnionSliceSource, want: "success type `[]u8`"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -208,6 +209,93 @@ func TestEmitRejectsMismatchedFieldResult(t *testing.T) {
 	}
 }
 
+// TestEmitErrorUnionFailure checks error("message") lowers to failed !T.
+func TestEmitErrorUnionFailure(t *testing.T) {
+	module := lowerSource(t, errorUnionFailureSource)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"define %kizu.error.i64 @read()",
+		"%kizu.2 = insertvalue %kizu.error.i64 %kizu.2.base, %kizu.slice.u8 %kizu.slice.1, 2",
+		"ret %kizu.error.i64 %kizu.2",
+		"try.err.2:\n  ret i32 1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
+// TestEmitErrorUnionPropagatesMessage checks try preserves failure diagnostics.
+func TestEmitErrorUnionPropagatesMessage(t *testing.T) {
+	module := lowerSource(t, errorUnionMessagePropagationSource)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"%kizu.try.err.message.3 = extractvalue %kizu.error.i64 %kizu.1, 2",
+		"%kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i1 false, 0",
+		"%kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, " +
+			"%kizu.slice.u8 %kizu.try.err.message.3, 1",
+		"ret %kizu.error.void %kizu.try.err.4",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
+// TestEmitTypedErrorCast adapts untyped !T into typed Error!T explicitly.
+func TestEmitTypedErrorCast(t *testing.T) {
+	module := lowerSource(t, typedErrorCastSource)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"%kizu.error.CompileError.i64 = type { i1, i64, %kizu.slice.u8 }",
+		"%kizu.2.message = extractvalue %kizu.error.i64 %kizu.1, 2",
+		"%kizu.2 = insertvalue %kizu.error.CompileError.i64 %kizu.2.value.base, " +
+			"%kizu.slice.u8 %kizu.2.message, 2",
+		"ret %kizu.error.CompileError.i64 %kizu.4",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
+// TestEmitRejectsMismatchedErrorPropagation keeps malformed IR from crossing typed errors.
+func TestEmitRejectsMismatchedErrorPropagation(t *testing.T) {
+	module := &ir.Module{Functions: []*ir.Function{{
+		Name:   "main",
+		Return: "NetworkError!void",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%1", Type: "i64"},
+				Op:     "error.try",
+				Args:   []ir.Value{{Name: "%source", Type: "ConfigError!i64"}},
+			}},
+			Terminator: ir.Terminator{
+				Op:    "return",
+				Value: ir.Value{Name: "void", Type: "void"},
+			},
+		}},
+	}}}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject mismatched error propagation")
+	}
+	want := "error.try cannot propagate ConfigError!i64 into NetworkError!void"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // lowerSource parses, checks, and lowers a source snippet.
 func lowerSource(t *testing.T, source string) *ir.Module {
 	t.Helper()
@@ -274,6 +362,56 @@ fn main(allocator: Allocator) {
 
 const errorUnionSource = `fn read() -> !i64 {
     return 1;
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return;
+}`
+
+const errorUnionFailureSource = `fn read() -> !i64 {
+    return error("bad");
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return;
+}`
+
+const errorUnionMessagePropagationSource = `fn read() -> !i64 {
+    return error("bad");
+}
+fn wrap() -> !void {
+    let value = try read();
+    print(value);
+    return;
+}
+fn main() -> !void {
+    try wrap();
+    return;
+}`
+
+const typedErrorCastSource = `union CompileError {
+    Message([]u8),
+}
+fn lower(ok: bool) -> !i64 {
+    if ok {
+        return 7;
+    }
+    return error("bad");
+}
+fn parse(ok: bool) -> CompileError!i64 {
+    let value = try cast<CompileError!i64>(lower(ok));
+    return value;
+}
+fn main() -> CompileError!void {
+    let value = try parse(true);
+    print(value);
+    return;
+}`
+
+const errorUnionSliceSource = `fn read() -> ![]u8 {
+    return "bad";
 }
 fn main() -> !void {
     let value = try read();
@@ -386,4 +524,36 @@ entry:
   %kizu.3 = extractvalue %kizu.struct.User %kizu.2, 0
   call void @kizu_print_int(i64 %kizu.3)
   ret i32 0
+}`
+
+const errorUnionLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
+%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }
+%kizu.error.void = type { i1, %kizu.slice.u8 }
+
+declare void @kizu_print_string(ptr, i64)
+declare void @kizu_print_int(i64)
+declare void @kizu_print_bool(i1)
+
+define %kizu.error.i64 @read() {
+entry:
+  %kizu.2.ok = insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0
+  %kizu.2 = insertvalue %kizu.error.i64 %kizu.2.ok, i64 1, 1
+  ret %kizu.error.i64 %kizu.2
+}
+
+define i32 @main() {
+entry:
+  %kizu.1 = call %kizu.error.i64 @read()
+  %kizu.2.ok = extractvalue %kizu.error.i64 %kizu.1, 0
+  br i1 %kizu.2.ok, label %try.ok.1, label %try.err.2
+try.err.2:
+  ret i32 1
+try.ok.1:
+  %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
+  call void @kizu_print_int(i64 %kizu.2)
+  %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i1 true, 0
+  %kizu.main.ok.3 = extractvalue %kizu.error.void %kizu.4, 0
+  %kizu.main.code.4 = select i1 %kizu.main.ok.3, i32 0, i32 1
+  ret i32 %kizu.main.code.4
 }`
