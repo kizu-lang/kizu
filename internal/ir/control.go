@@ -190,6 +190,7 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	}
 	l.finishLoopPhis(phis, bodyEnd, bodyEnv, loop.continueEdges)
 	l.block = exit
+	l.finishLoopExitPhis(exit, phis, header.Name, loop.breakEdges)
 	return nil
 }
 
@@ -267,6 +268,11 @@ func (l *lowerer) lowerLoopBranch(kind string, label string) error {
 			block: l.block.Name,
 			env:   l.copyEnv(l.env),
 		})
+	} else {
+		loop.breakEdges = append(loop.breakEdges, loopEdge{
+			block: l.block.Name,
+			env:   l.copyEnv(l.env),
+		})
 	}
 	l.emitCleanups(l.cleanupsFrom(loop.deferDepth))
 	l.block.Terminator = Terminator{Op: "jump", Target: target}
@@ -337,6 +343,31 @@ func (l *lowerer) finishLoopPhis(
 			}
 		}
 		l.env[name] = phi.Result
+	}
+}
+
+// finishLoopExitPhis merges condition-false exits with explicit break edges.
+func (l *lowerer) finishLoopExitPhis(
+	exit *Block,
+	phis map[string]*Instr,
+	header string,
+	breakEdges []loopEdge,
+) {
+	if len(breakEdges) == 0 {
+		return
+	}
+	for name, phi := range phis {
+		incoming := []Incoming{{Block: header, Value: phi.Result}}
+		for _, edge := range breakEdges {
+			value, ok := edge.env[name]
+			if ok {
+				incoming = append(incoming, Incoming{Block: edge.block, Value: value})
+			}
+		}
+		if len(incoming) == 1 {
+			continue
+		}
+		l.env[name] = l.addPhi(exit, phi.Result.Type, incoming)
 	}
 }
 

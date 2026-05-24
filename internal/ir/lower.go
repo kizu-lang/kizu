@@ -32,6 +32,7 @@ type loopContext struct {
 	breakTo       string
 	continueTo    string
 	deferDepth    int
+	breakEdges    []loopEdge
 	continueEdges []loopEdge
 }
 

@@ -188,6 +188,27 @@ fn main() {
 	}
 }
 
+// TestLowerWhileBreakAssignmentsFeedExitPhis keeps values assigned before an
+// explicit break visible after the loop.
+func TestLowerWhileBreakAssignmentsFeedExitPhis(t *testing.T) {
+	module := lowerSource(t, `fn main() {
+    var index = 0;
+    var found = false;
+    while index < 3 {
+        if index == 1 {
+            found = true;
+            break;
+        }
+        index = index + 1;
+    }
+    print(found);
+}`)
+	exit := findTestBlock(t, module.Functions[0], "while.end.3")
+	if !blockHasPhiIncomingFrom(exit, "bool", "if.then.4") {
+		t.Fatalf("missing break phi incoming in:\n%s", Dump(module))
+	}
+}
+
 // TestLowerSkipsGenericDeclarations keeps the non-monomorphized backend from
 // lowering unused generic wrapper bodies.
 func TestLowerSkipsGenericDeclarations(t *testing.T) {
