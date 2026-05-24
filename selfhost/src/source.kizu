@@ -1,4 +1,5 @@
 import selfhost::lexer;
+import selfhost::source::manifest;
 
 pub enum SourceKind {
     Manifest,
@@ -58,12 +59,12 @@ pub fn load_selfhost_sources(
     let manifest_bytes = manifest_path.as_bytes();
     let manifest_text = try std::fs::read_file(io, manifest_bytes);
     manifest_path.deinit();
-    if !is_manifest_text(manifest_text) {
+    if !manifest::is_manifest_text(manifest_text) {
         return error("invalid manifest");
     }
-    let package_name = try manifest_package_name(manifest_text);
-    try validate_manifest_module_root(allocator, io, root, manifest_text);
-    let module_root = try manifest_module_root(manifest_text);
+    let package_name = try manifest::package_name(manifest_text);
+    try manifest::validate_module_root(allocator, io, root, manifest_text);
+    let module_root = try manifest::module_root(manifest_text);
     try files.append(source_file(
         0,
         SourceKind::Manifest,
@@ -104,12 +105,12 @@ pub fn load_package_sources(
     let manifest_bytes = manifest_path.as_bytes();
     let manifest_text = try std::fs::read_file(io, manifest_bytes);
     manifest_path.deinit();
-    if !is_manifest_text(manifest_text) {
+    if !manifest::is_manifest_text(manifest_text) {
         return error("invalid manifest");
     }
-    let package_name = try manifest_package_name(manifest_text);
-    try validate_manifest_module_root(allocator, io, root, manifest_text);
-    let module_root = try manifest_module_root(manifest_text);
+    let package_name = try manifest::package_name(manifest_text);
+    try manifest::validate_module_root(allocator, io, root, manifest_text);
+    let module_root = try manifest::module_root(manifest_text);
     try files.append(source_file(
         0,
         SourceKind::Manifest,
@@ -494,7 +495,7 @@ fn append_manifest_package_source_dirs(
     next_id: i64,
     package_name: []u8
 ) -> !i64 {
-    let paths_start = manifest_paths_array_start(manifest_text);
+    let paths_start = manifest::paths_array_start(manifest_text);
     if paths_start < 0 {
         return try append_package_source_dir(
             allocator,
@@ -576,21 +577,13 @@ fn append_manifest_path_array_source_dirs(
                 return error("invalid manifest");
             }
         } else {
-            if !manifest_path_array_separator_byte(manifest_text[index]) {
+            if !manifest::path_array_separator_byte(manifest_text[index]) {
                 return error("invalid manifest");
             }
             index = index + 1;
         }
     }
     return error("invalid manifest");
-}
-
-fn manifest_path_array_separator_byte(byte: u8) -> bool {
-    return byte == cast<u8>(32) or
-        byte == cast<u8>(9) or
-        byte == cast<u8>(10) or
-        byte == cast<u8>(13) or
-        byte == cast<u8>(44);
 }
 
 fn append_package_source_dir(
@@ -855,73 +848,7 @@ fn source_file(
 }
 
 pub fn is_manifest_text(text: []u8) -> bool {
-    return std::mem::starts_with(text, "[package]");
-}
-
-fn manifest_package_name(text: []u8) -> ![]u8 borrows text {
-    return try manifest_quoted_marker_value(text, "name = ");
-}
-
-fn manifest_module_root(text: []u8) -> ![]u8 borrows text {
-    let root = try manifest_quoted_marker_value(text, "root = ");
-    if std::mem::len(root) < 1 {
-        return error("invalid manifest");
-    }
-    return root;
-}
-
-fn manifest_paths_array_start(text: []u8) -> i64 {
-    let marker = "paths = [";
-    let marker_len = std::mem::len(marker);
-    var index = 0;
-    while index + marker_len <= std::mem::len(text) {
-        if std::mem::equal_bytes(text[index..index + marker_len], marker) {
-            return index + marker_len;
-        }
-        index = index + 1;
-    }
-    return -1;
-}
-
-fn validate_manifest_module_root(
-    allocator: Allocator,
-    io: Io,
-    root: []u8,
-    manifest_text: []u8
-) -> !void {
-    let module_root = try manifest_module_root(manifest_text);
-    var root_path = try std::path::join(allocator, root, module_root);
-    let root_path_bytes = root_path.as_bytes();
-    let root_exists = try std::fs::exists(io, root_path_bytes);
-    root_path.deinit();
-    if !root_exists {
-        return error("missing module root");
-    }
-    return;
-}
-
-fn manifest_quoted_marker_value(text: []u8, marker: []u8) -> ![]u8 borrows text {
-    let marker_len = std::mem::len(marker);
-    var index = 0;
-    while index + marker_len <= std::mem::len(text) {
-        if std::mem::equal_bytes(text[index..index + marker_len], marker) {
-            let quote = index + marker_len;
-            if quote >= std::mem::len(text) or text[quote] != cast<u8>(34) {
-                return error("invalid manifest");
-            }
-            let start = quote + 1;
-            var end = start;
-            while end < std::mem::len(text) {
-                if text[end] == cast<u8>(34) {
-                    return text[start..end];
-                }
-                end = end + 1;
-            }
-            return error("invalid manifest");
-        }
-        index = index + 1;
-    }
-    return error("invalid manifest");
+    return manifest::is_manifest_text(text);
 }
 
 fn module_start_for(kind: SourceKind, path: []u8) -> i64 {
