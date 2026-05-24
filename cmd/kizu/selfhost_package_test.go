@@ -1107,6 +1107,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"fn append_cli_moved_value_name_function(",
 	},
+	"../../selfhost/src/backend/cli_executable_main_llvm.kizu": {
+		"pub fn append_functions(",
+		"fn append_cli_main_name_end_function(",
+		"fn append_cli_run_main_body_start_function(",
+		"fn append_cli_test_main_body_start_function(",
+	},
 	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn append_cli_run_executable_function(",

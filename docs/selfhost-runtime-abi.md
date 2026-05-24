@@ -528,16 +528,18 @@ derived from that string payload. The hosted emitter escapes backslash bytes as
 LLVM C string hex escapes while keeping the runtime stdout length derived from
 the original payload. Files containing exactly the newline-terminated
 `fn main() { let value = ; }` source return the existing parse diagnostic
-without emitting an artifact. The original, alias, custom string, and backslash
-rows in `run-parity.tsv` prove those branches are not bound to one fixture path,
-one fixed artifact stem, or the `hello, kizu` source literal. Broader expression
-lowering remains outside this slice.
+without emitting an artifact. The original, alias, helper-before-main, custom
+string, and backslash rows in `run-parity.tsv` prove those branches are not
+bound to one fixture path, one fixed artifact stem, the first declaration being
+`main`, or the `hello, kizu` source literal. Broader expression lowering remains
+outside this slice.
 
 For #590, the first `test <file>` expect-ok and expect-failure dispatch paths are
 also source-driven. Files containing exactly the newline-terminated expect-ok or
 expect-failure source emit
-`target/selfhost/test/<basename-without-extension>.ll`. The original and alias
-rows in `test-parity.tsv` prove those branches are not bound to one fixture path
+`target/selfhost/test/<basename-without-extension>.ll`. The original, alias, and
+helper-before-main rows in `test-parity.tsv` prove those branches are not bound
+to one fixture path
 or one fixed artifact stem. Test discovery remains outside this slice.
 
 The first #531 parity gate may execute the emitted program/test artifact outside

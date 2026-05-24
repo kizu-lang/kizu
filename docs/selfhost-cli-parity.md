@@ -122,6 +122,7 @@ selfhost/tests/cli/run-parity.tsv
 # Columns: name command fixture exit stdout_golden stderr_golden artifact_mode artifact_stem
 run_hello run selfhost/tests/cli/run_hello.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello
 run_hello_alias run selfhost/tests/cli/run_hello_alias.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello_alias
+run_helper_before_main run selfhost/tests/cli/run_helper_before_main.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_helper_before_main
 run_print_custom run selfhost/tests/cli/run_print_custom.kizu 0 selfhost/tests/cli/golden/run_print_custom.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_print_custom
 run_return run selfhost/tests/cli/run_return.kizu 0 selfhost/tests/cli/golden/run_hello.stderr selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_return
 run_if_unsupported run selfhost/tests/cli/run_if_unsupported.kizu 64 selfhost/tests/cli/golden/run_hello.stderr selfhost/tests/cli/golden/usage.stderr hosted-artifact -
@@ -138,6 +139,9 @@ fn main() {
 ```
 
 Its golden output is stdout `hello, kizu\n`, empty stderr, and exit code `0`.
+`run_helper_before_main.kizu` proves the hosted compiler scans leading function
+declarations before lowering `main`, matching the bounded AST lowering path for
+that declaration-order case.
 `run_print_custom.kizu` uses a different string literal so the hosted backend
 must derive the emitted stdout payload from source rather than from a fixed
 `hello, kizu` artifact template.
@@ -156,6 +160,7 @@ selfhost/tests/cli/test-parity.tsv
 # Columns: name command fixture exit stdout_golden stderr_golden artifact_mode artifact_stem
 test_expect_ok test selfhost/tests/cli/test_expect_ok.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_ok
 test_expect_ok_alias test selfhost/tests/cli/test_expect_ok_alias.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_ok_alias
+test_helper_before_main test selfhost/tests/cli/test_helper_before_main.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_helper_before_main
 test_expect_failure test selfhost/tests/cli/test_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure
 test_expect_failure_alias test selfhost/tests/cli/test_expect_failure_alias.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure_alias
 test_if_unsupported test selfhost/tests/cli/test_if_unsupported.kizu 64 selfhost/tests/cli/golden/test_expect_ok.stderr selfhost/tests/cli/golden/usage.stderr hosted-artifact -
@@ -171,6 +176,8 @@ fn main() -> !void {
 ```
 
 Its golden output is stdout `test: ok\n`, empty stderr, and exit code `0`.
+`test_helper_before_main.kizu` covers the same leading-declaration scan for the
+bounded test executable path.
 `test_expect_failure.kizu` uses `std::testing::expect(false)` and must produce
 empty stdout, a deterministic assertion diagnostic containing
 `expected condition to be true`, and exit code `1`.
