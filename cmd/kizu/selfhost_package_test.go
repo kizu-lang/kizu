@@ -722,24 +722,24 @@ func assertSelfhostCheckEntryDropsOldDiagnosticWrappers(t *testing.T, content st
 // TestSelfhostRunTestReuseCheckedAST keeps run/test on one parsed frontend path.
 func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 	main := readSelfhostFile(t, "../../selfhost/src/main.kizu")
-	runSmoke := readSelfhostFile(t, "../../selfhost/src/cli/run_smoke.kizu")
+	execute := readSelfhostFile(t, "../../selfhost/src/cli/execute.kizu")
 	check := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
 	if !strings.Contains(check, "pub fn fast_diagnostics_ast_node(") {
 		t.Fatal("check module does not expose parsed-AST fast diagnostics")
 	}
 	for _, fragment := range []string{
-		"run_smoke::run_smoke_file_cli(",
-		"run_smoke::test_smoke_file_cli(",
+		"execute::run_file_cli(",
+		"execute::test_file_cli(",
 	} {
 		if !strings.Contains(main, fragment) {
-			t.Fatalf("main dispatch missing smoke module call %q", fragment)
+			t.Fatalf("main dispatch missing execute module call %q", fragment)
 		}
 	}
 	for _, signature := range []string{
-		"pub fn run_smoke_file_cli(",
-		"pub fn test_smoke_file_cli(",
+		"pub fn run_file_cli(",
+		"pub fn test_file_cli(",
 	} {
-		body := selfhostKizuFunctionBody(t, runSmoke, signature)
+		body := selfhostKizuFunctionBody(t, execute, signature)
 		required := []string{
 			"parser::validate_diagnostic_file(allocator, path, file_text)",
 			"let validation_ok = parsed_validation.ok",
@@ -762,6 +762,16 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		}
 		if count := strings.Count(body, "parser::parse_validated_file("); count != 1 {
 			t.Fatalf("%s parses validated source %d times, want 1", signature, count)
+		}
+	}
+	for _, fragment := range []string{
+		"fn lower_run_executable(",
+		"fn lower_test_executable(",
+		"backend::emit_run_executable_artifact(",
+		"backend::emit_test_executable_artifact(",
+	} {
+		if !strings.Contains(execute, fragment) {
+			t.Fatalf("execute module missing bounded executable path %q", fragment)
 		}
 	}
 }
@@ -999,7 +1009,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn render_host_metadata(",
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
-		"pub fn emit_run_print_artifact(",
+		"pub fn emit_run_executable_artifact(",
 		"fn render_test_expect_ok_llvm(",
 	},
 	"../../selfhost/src/backend/llvm.kizu": {
@@ -1058,6 +1068,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn file_cli(",
 		"pub fn fast_diagnostics(",
 		"pub fn fast_diagnostics_ast_node(",
+	},
+	"../../selfhost/src/cli/execute.kizu": {
+		"pub fn run_file_cli(",
+		"pub fn test_file_cli(",
+		"fn lower_run_executable(",
+		"fn lower_test_executable(",
 	},
 }
 
