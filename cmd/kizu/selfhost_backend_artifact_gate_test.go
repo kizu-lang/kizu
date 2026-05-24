@@ -255,6 +255,12 @@ func requiredLLVMRuntimeFragments() []string {
 
 // requiredLLVMCLIFragments returns mandatory hosted CLI helper fragments.
 func requiredLLVMCLIFragments() []string {
+	fragments := requiredLLVMCLIRunTestFragments()
+	return append(fragments, requiredLLVMCLICheckFragments()...)
+}
+
+// requiredLLVMCLIRunTestFragments returns hosted run/test CLI fragments.
+func requiredLLVMCLIRunTestFragments() []string {
 	return []string{
 		"define i1 @kizu_selfhost__slice_equal",
 		"define i1 @kizu_selfhost__slice_starts_with_dash",
@@ -265,6 +271,7 @@ func requiredLLVMCLIFragments() []string {
 		"define %kizu.error.slice.u8 @kizu_selfhost__i64_decimal",
 		"define %kizu.error.slice.u8 @kizu_selfhost__artifact_path",
 		"define i64 @kizu_selfhost__parse_buffer_append",
+		"define i64 @kizu_selfhost__parse_next_semantic_token_index",
 		"define %kizu.error.slice.u8 @kizu_selfhost__parse_format_alloc",
 		"define i1 @kizu_selfhost__parse_format_write",
 		"define i1 @kizu_selfhost__parse_format_file_write",
@@ -307,6 +314,12 @@ func requiredLLVMCLIFragments() []string {
 		"%test_ok_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%test_failure_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
 		"%test_failure_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
+	}
+}
+
+// requiredLLVMCLICheckFragments returns hosted check diagnostic fragments.
+func requiredLLVMCLICheckFragments() []string {
+	return []string{
 		"%parse_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
 		"%parse_missing_assign_index = call i64 @kizu_selfhost__parse_missing_assign_index",
 		"%check_missing_index = call i64 @kizu_selfhost__parse_missing_expr_index",
