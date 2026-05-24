@@ -81,7 +81,9 @@ func countSelfhostIRArtifactFileFailures(t *testing.T) int {
 func requiredSelfhostIRContractFragments() []string {
 	return []string{
 		"ir-contract selfhost-checked-package-v1\n",
-		"checked-entry main::smoke\n",
+		"module selfhost\n",
+		"entry selfhost::cli_main\n",
+		"checked-entry selfhost::cli_main\n",
 		"hosted-entry @kizu_selfhost__cli_main\n",
 		"hosted-smoke @kizu_selfhost__smoke\n",
 		"frontend-executable-lowering checked-ast-bounded\n",

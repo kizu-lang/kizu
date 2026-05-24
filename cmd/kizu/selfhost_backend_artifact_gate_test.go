@@ -374,6 +374,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"go-stdprim-host none\n",
 		"linker-process deferred issue-459\n",
 		"backend-input ir-contract selfhost-checked-package-v1\n",
+		"backend-input checked-entry selfhost::cli_main\n",
 		"backend-input hosted-entry @kizu_selfhost__cli_main\n",
 		"backend-input hosted-smoke @kizu_selfhost__smoke\n",
 		"backend-input executable-lowering executable-result-bounded\n",

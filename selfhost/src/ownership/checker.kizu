@@ -30,12 +30,34 @@ pub fn check_package(
     files: &std::array::Array<source::SourceFile>,
     typed: model::TypeSummary
 ) -> !data::CheckedPackage {
-    let summary = try check_source_summary(allocator, files, typed);
-    let module = try first_checked_module(files);
+    var summary = ownership_summary(typed.symbols, typed.typed_nodes, 0, typed.diagnostics);
+    var checked_module = try first_checked_module(files);
+    var checked_entry = entry_function_ref();
+    var checked_entry_rank = 0;
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if source::is_frontend_source(file.kind) {
+            let result = try parser::parse_checked_file(allocator, file.path, file.text);
+            summary = merge_ownership_summaries(
+                summary,
+                try check_ownership_ast_node(allocator, file, result.ast, result.root)
+            );
+            let entry = try find_package_entry_function(file, result.ast, result.root);
+            let entry_rank = package_entry_rank(&entry);
+            if entry_rank > checked_entry_rank {
+                checked_module = checked_module_ref(file);
+                checked_entry = entry;
+                checked_entry_rank = entry_rank;
+            }
+            result.deinit();
+        }
+        index = index + 1;
+    }
     return checked_package_from_refs(
         summary,
-        module,
-        entry_function_ref(),
+        checked_module,
+        checked_entry,
         package_root_fact()
     );
 }
@@ -129,6 +151,16 @@ fn entry_function_ref() -> data::CheckedFunctionRef {
     };
 }
 
+fn package_entry_rank(entry: &data::CheckedFunctionRef) -> i64 {
+    if std::mem::equal_bytes(entry.name, "cli_main") {
+        return 2;
+    }
+    if std::mem::equal_bytes(entry.name, "main") {
+        return 1;
+    }
+    return 0;
+}
+
 fn package_root_fact() -> data::OwnershipFact {
     return data::OwnershipFact {
         name: "selfhost package",
@@ -150,6 +182,81 @@ fn check_file_ownership_ast(
     );
     result.deinit();
     return summary;
+}
+
+fn find_package_entry_function(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !data::CheckedFunctionRef {
+    let node = ast.get(node_id);
+    return match node.data {
+        Program(program) => try find_package_entry_in_range(file, ast, program.declarations),
+        _ => entry_function_ref(),
+    };
+}
+
+fn find_package_entry_in_range(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !data::CheckedFunctionRef {
+    var index = 0;
+    var best = entry_function_ref();
+    var best_rank = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let node = ast.get(child);
+        let candidate = match node.data {
+            FnDecl(fn_decl) => checked_function_ref(file, ast, fn_decl.name),
+            _ => entry_function_ref(),
+        };
+        let candidate_rank = package_entry_rank(&candidate);
+        if candidate_rank > best_rank {
+            best = candidate;
+            best_rank = candidate_rank;
+        }
+        index = index + 1;
+    }
+    return best;
+}
+
+fn checked_module_ref(file: &source::SourceFile) -> data::CheckedModuleRef {
+    return data::CheckedModuleRef {
+        source_id: file.id,
+        kind: file.kind,
+        module_start: file.module_start,
+        module_end: file.module_end,
+        path: file.path
+    };
+}
+
+fn checked_function_ref(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId
+) -> data::CheckedFunctionRef {
+    let node = ast.get(name);
+    return data::CheckedFunctionRef {
+        module: checked_function_module(file),
+        name: kind::ast_node_text(file, ast, name),
+        span_start: node.span.start,
+        span_end: node.span.end
+    };
+}
+
+fn checked_function_module(file: &source::SourceFile) -> []u8 {
+    let module = source::module_path(file);
+    if std::mem::len(module) > 0 {
+        return module;
+    }
+    if std::mem::len(file.package_name) > 0 {
+        return file.package_name;
+    }
+    if file.kind == source::SourceKind::Std {
+        return "std";
+    }
+    return "main";
 }
 
 fn check_ownership_ast_node(
