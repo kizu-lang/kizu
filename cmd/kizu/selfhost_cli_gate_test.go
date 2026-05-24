@@ -34,6 +34,7 @@ type selfhostCLIFrontendFixtures struct {
 	runCustom            string
 	runBackslash         string
 	runReturn            string
+	runExplicitVoid      string
 	movedSource          string
 	unknownSource        string
 	unknownStd           string
@@ -52,6 +53,7 @@ type selfhostCLIFrontendFixtures struct {
 	returningIf          string
 	missingReturn        string
 	ifMissingReturn      string
+	missingErrorVoid     string
 	matchMissing         string
 	invalidSource        string
 	missingSemicolon     string
@@ -76,6 +78,7 @@ type selfhostCLIFrontendFixtures struct {
 	missingColon         string
 	missingType          string
 	expectOK             string
+	expectVoidOK         string
 	expectFail           string
 	missingExpr          string
 	movedValue           string
@@ -231,8 +234,16 @@ exit-code
 		},
 	}
 	cases = append(cases, selfhostCLIFrontendRunHappyCases(fixtures)...)
-	cases = append(cases,
-		selfhostCLIFrontendCase{
+	cases = append(cases, selfhostCLIFrontendTestHappyCases(fixtures)...)
+	return cases
+}
+
+// selfhostCLIFrontendTestHappyCases returns successful test artifact cases.
+func selfhostCLIFrontendTestHappyCases(
+	fixtures selfhostCLIFrontendFixtures,
+) []selfhostCLIFrontendCase {
+	return []selfhostCLIFrontendCase{
+		{
 			name:    "test_temp_expect_ok",
 			args:    []string{"test", fixtures.expectOK},
 			wantOut: "exit-code\n0\n",
@@ -242,7 +253,17 @@ exit-code
 				"selfhost/tests/cli/test_expect_ok.kizu",
 			),
 		},
-		selfhostCLIFrontendCase{
+		{
+			name:    "test_temp_expect_void_ok",
+			args:    []string{"test", fixtures.expectVoidOK},
+			wantOut: "exit-code\n0\n",
+			wantFiles: selfhostTestArtifactExpectations(
+				fixtures.expectVoidOK,
+				selfhostArtifactStem(fixtures.expectVoidOK),
+				"selfhost/tests/cli/test_expect_ok.kizu",
+			),
+		},
+		{
 			name:    "test_temp_expect_failure",
 			args:    []string{"test", fixtures.expectFail},
 			wantOut: "exit-code\n0\n",
@@ -252,8 +273,7 @@ exit-code
 				"selfhost/tests/cli/test_expect_failure.kizu",
 			),
 		},
-	)
-	return cases
+	}
 }
 
 // selfhostCLIFrontendRunHappyCases returns successful run artifact cases.
@@ -301,6 +321,17 @@ func selfhostCLIFrontendRunHappyCases(
 			wantFiles: selfhostRunReturnArtifactExpectations(
 				fixtures.runReturn,
 				selfhostArtifactStem(fixtures.runReturn),
+				"selfhost/tests/cli/run_hello.kizu",
+			),
+		},
+		{
+			name:    "run_temp_explicit_void_no_return",
+			args:    []string{"run", fixtures.runExplicitVoid},
+			wantOut: "exit-code\n0\n",
+			wantFiles: selfhostRunArtifactExpectations(
+				fixtures.runExplicitVoid,
+				selfhostArtifactStem(fixtures.runExplicitVoid),
+				"hello, kizu",
 				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
@@ -723,6 +754,12 @@ func selfhostCLIFrontendTypeSemanticFailureCases(
 			wantErr: "error: type error: function `bad` must return i64\n",
 		},
 		{
+			name:    "check_temp_missing_error_union_void_return",
+			args:    []string{"check", fixtures.missingErrorVoid},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: type error: function `bad` must return !void\n",
+		},
+		{
 			name:    "check_temp_match_non_exhaustive",
 			args:    []string{"check", fixtures.matchMissing},
 			wantOut: "exit-code\n1\n",
@@ -955,7 +992,8 @@ func selfhostCLIFrontendCheckAggregateParseFailureCases(
 func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures {
 	t.Helper()
 
-	tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn :=
+	tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn,
+		tempRunExplicitVoid :=
 		writeSelfhostCLIHappyFrontendFixtures(t)
 	tempPackageRoot, tempPackageManifest := writeSelfhostCLIPackageFrontendFixture(t)
 	tempMovedSource, tempMovedValue, tempUnknownSource, tempUnknownStd, tempAritySource,
@@ -965,10 +1003,11 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 	tempAssignmentMismatch, tempImmutableAssignment, tempInvalidAssignment :=
 		writeSelfhostCLIAssignmentFrontendFixtures(t)
 	tempReturnMismatch, tempReturnMatchMismatch, tempReturningIf,
-		tempMissingReturn, tempIfMissingReturn :=
+		tempMissingReturn, tempIfMissingReturn, tempMissingErrorVoid :=
 		writeSelfhostCLIReturnFrontendFixtures(t)
 	tempMatchMissing := writeSelfhostCLIMatchFrontendFixtures(t)
-	tempExpectOK, tempExpectFail := writeSelfhostCLIExpectFrontendFixtures(t)
+	tempExpectOK, tempExpectVoidOK, tempExpectFail :=
+		writeSelfhostCLIExpectFrontendFixtures(t)
 
 	fixtures := selfhostCLIFrontendFixtures{
 		source:              tempSource,
@@ -978,6 +1017,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		runCustom:           tempRunCustom,
 		runBackslash:        tempRunBackslash,
 		runReturn:           tempRunReturn,
+		runExplicitVoid:     tempRunExplicitVoid,
 		movedSource:         tempMovedSource,
 		unknownSource:       tempUnknownSource,
 		unknownStd:          tempUnknownStd,
@@ -996,8 +1036,10 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		returningIf:         tempReturningIf,
 		missingReturn:       tempMissingReturn,
 		ifMissingReturn:     tempIfMissingReturn,
+		missingErrorVoid:    tempMissingErrorVoid,
 		matchMissing:        tempMatchMissing,
 		expectOK:            tempExpectOK,
+		expectVoidOK:        tempExpectVoidOK,
 		expectFail:          tempExpectFail,
 		movedValue:          tempMovedValue,
 	}
@@ -1086,7 +1128,9 @@ func writeSelfhostCLIInvalidFrontendFixtureFields(
 }
 
 // writeSelfhostCLIHappyFrontendFixtures writes successful frontend inputs.
-func writeSelfhostCLIHappyFrontendFixtures(t *testing.T) (string, string, string, string, string) {
+func writeSelfhostCLIHappyFrontendFixtures(
+	t *testing.T,
+) (string, string, string, string, string, string) {
 	t.Helper()
 
 	tempSource := writeTempKizuSource(
@@ -1127,7 +1171,18 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 `
 	tempRunReturn := writeTempKizuSource(t, "frontend_run_return.kizu", runReturn)
 
-	return tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn
+	const runExplicitVoid = `fn main() -> void {
+    print("hello, kizu");
+}
+`
+	tempRunExplicitVoid := writeTempKizuSource(
+		t,
+		"frontend_run_explicit_void_no_return.kizu",
+		runExplicitVoid,
+	)
+
+	return tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn,
+		tempRunExplicitVoid
 }
 
 // writeSelfhostCLISemanticFrontendFixtures writes semantic-check inputs.
@@ -1236,7 +1291,9 @@ func writeSelfhostCLIAssignmentFrontendFixtures(t *testing.T) (string, string, s
 }
 
 // writeSelfhostCLIReturnFrontendFixtures writes return-check semantic inputs.
-func writeSelfhostCLIReturnFrontendFixtures(t *testing.T) (string, string, string, string, string) {
+func writeSelfhostCLIReturnFrontendFixtures(
+	t *testing.T,
+) (string, string, string, string, string, string) {
 	t.Helper()
 
 	const returnMismatch = `fn bad() -> i64 {
@@ -1277,6 +1334,17 @@ fn choose(flag: Flag) -> i64 {
 `
 	tempReturningIf := writeTempKizuSource(t, "frontend_returning_if.kizu", returningIf)
 
+	tempMissingReturn, tempIfMissingReturn, tempMissingErrorVoid :=
+		writeSelfhostCLIMissingReturnFrontendFixtures(t)
+
+	return tempReturnMismatch, tempReturnMatchMismatch, tempReturningIf,
+		tempMissingReturn, tempIfMissingReturn, tempMissingErrorVoid
+}
+
+// writeSelfhostCLIMissingReturnFrontendFixtures writes missing-return inputs.
+func writeSelfhostCLIMissingReturnFrontendFixtures(t *testing.T) (string, string, string) {
+	t.Helper()
+
 	const missingReturn = `fn bad() -> i64 {
     1;
 }
@@ -1295,8 +1363,17 @@ fn choose(flag: Flag) -> i64 {
 		ifMissingReturn,
 	)
 
-	return tempReturnMismatch, tempReturnMatchMismatch, tempReturningIf,
-		tempMissingReturn, tempIfMissingReturn
+	const missingErrorVoid = `fn bad() -> !void {
+    print("done");
+}
+`
+	tempMissingErrorVoid := writeTempKizuSource(
+		t,
+		"frontend_missing_error_union_void_return.kizu",
+		missingErrorVoid,
+	)
+
+	return tempMissingReturn, tempIfMissingReturn, tempMissingErrorVoid
 }
 
 // writeSelfhostCLIMatchFrontendFixtures writes match-check semantic inputs.
@@ -1639,7 +1716,7 @@ func writeSelfhostCLIInvalidAggregateFrontendFixtures(
 }
 
 // writeSelfhostCLIExpectFrontendFixtures writes std::testing frontend inputs.
-func writeSelfhostCLIExpectFrontendFixtures(t *testing.T) (string, string) {
+func writeSelfhostCLIExpectFrontendFixtures(t *testing.T) (string, string, string) {
 	t.Helper()
 
 	const expectOKSource = `fn main() -> !void {
@@ -1649,6 +1726,16 @@ func writeSelfhostCLIExpectFrontendFixtures(t *testing.T) (string, string) {
 `
 	tempExpectOK := writeTempKizuSource(t, "frontend_expect_ok.kizu", expectOKSource)
 
+	const expectVoidOKSource = `fn main() -> void {
+    std::testing::expect(true);
+}
+`
+	tempExpectVoidOK := writeTempKizuSource(
+		t,
+		"frontend_expect_void_ok.kizu",
+		expectVoidOKSource,
+	)
+
 	const expectFailSource = `fn main() -> !void {
     std::testing::expect(false);
     return;
@@ -1656,7 +1743,7 @@ func writeSelfhostCLIExpectFrontendFixtures(t *testing.T) (string, string) {
 `
 	tempExpectFail := writeTempKizuSource(t, "frontend_expect_failure.kizu", expectFailSource)
 
-	return tempExpectOK, tempExpectFail
+	return tempExpectOK, tempExpectVoidOK, tempExpectFail
 }
 
 // writeTempKizuSource writes one temporary Kizu source fixture.
