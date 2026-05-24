@@ -1,0 +1,77 @@
+pub fn is_manifest_text(text: []u8) -> bool {
+    return std::mem::starts_with(text, "[package]");
+}
+
+pub fn package_name(text: []u8) -> ![]u8 borrows text {
+    return try quoted_marker_value(text, "name = ");
+}
+
+pub fn module_root(text: []u8) -> ![]u8 borrows text {
+    let root = try quoted_marker_value(text, "root = ");
+    if std::mem::len(root) < 1 {
+        return error("invalid manifest");
+    }
+    return root;
+}
+
+pub fn paths_array_start(text: []u8) -> i64 {
+    let marker = "paths = [";
+    let marker_len = std::mem::len(marker);
+    var index = 0;
+    while index + marker_len <= std::mem::len(text) {
+        if std::mem::equal_bytes(text[index..index + marker_len], marker) {
+            return index + marker_len;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+pub fn validate_module_root(
+    allocator: Allocator,
+    io: Io,
+    root: []u8,
+    manifest_text: []u8
+) -> !void {
+    let module_root_text = try module_root(manifest_text);
+    var root_path = try std::path::join(allocator, root, module_root_text);
+    let root_path_bytes = root_path.as_bytes();
+    let root_exists = try std::fs::exists(io, root_path_bytes);
+    root_path.deinit();
+    if !root_exists {
+        return error("missing module root");
+    }
+    return;
+}
+
+pub fn path_array_separator_byte(byte: u8) -> bool {
+    return byte == cast<u8>(32) or
+        byte == cast<u8>(9) or
+        byte == cast<u8>(10) or
+        byte == cast<u8>(13) or
+        byte == cast<u8>(44);
+}
+
+fn quoted_marker_value(text: []u8, marker: []u8) -> ![]u8 borrows text {
+    let marker_len = std::mem::len(marker);
+    var index = 0;
+    while index + marker_len <= std::mem::len(text) {
+        if std::mem::equal_bytes(text[index..index + marker_len], marker) {
+            let quote = index + marker_len;
+            if quote >= std::mem::len(text) or text[quote] != cast<u8>(34) {
+                return error("invalid manifest");
+            }
+            let start = quote + 1;
+            var end = start;
+            while end < std::mem::len(text) {
+                if text[end] == cast<u8>(34) {
+                    return text[start..end];
+                }
+                end = end + 1;
+            }
+            return error("invalid manifest");
+        }
+        index = index + 1;
+    }
+    return error("invalid manifest");
+}
