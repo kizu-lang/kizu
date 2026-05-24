@@ -176,17 +176,21 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	}
 	l.block.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
 	l.block = body
-	l.pushLoop(stmt.Label, exit.Name, header.Name)
+	loop := l.pushLoop(stmt.Label, exit.Name, header.Name)
 	if err := l.lowerBlock(stmt.Body); err != nil {
 		return err
 	}
 	l.popLoop()
-	bodyEnd := l.block.Name
+	bodyEnd := ""
+	bodyEnv := map[string]Value{}
 	if l.block.Terminator.Op == "" {
+		bodyEnd = l.block.Name
+		bodyEnv = l.copyEnv(l.env)
 		l.block.Terminator = Terminator{Op: "jump", Target: header.Name}
 	}
-	l.finishLoopPhis(phis, bodyEnd)
+	l.finishLoopPhis(phis, bodyEnd, bodyEnv, loop.continueEdges)
 	l.block = exit
+	l.finishLoopExitPhis(exit, phis, header.Name, loop.breakEdges)
 	return nil
 }
 
@@ -260,6 +264,15 @@ func (l *lowerer) lowerLoopBranch(kind string, label string) error {
 	target := loop.breakTo
 	if kind == "continue" {
 		target = loop.continueTo
+		loop.continueEdges = append(loop.continueEdges, loopEdge{
+			block: l.block.Name,
+			env:   l.copyEnv(l.env),
+		})
+	} else {
+		loop.breakEdges = append(loop.breakEdges, loopEdge{
+			block: l.block.Name,
+			env:   l.copyEnv(l.env),
+		})
 	}
 	l.emitCleanups(l.cleanupsFrom(loop.deferDepth))
 	l.block.Terminator = Terminator{Op: "jump", Target: target}
@@ -267,10 +280,12 @@ func (l *lowerer) lowerLoopBranch(kind string, label string) error {
 }
 
 // pushLoop records the current loop branch targets.
-func (l *lowerer) pushLoop(label string, breakTo string, continueTo string) {
-	l.loops = append(l.loops, loopContext{
+func (l *lowerer) pushLoop(label string, breakTo string, continueTo string) *loopContext {
+	loop := &loopContext{
 		label: label, breakTo: breakTo, continueTo: continueTo, deferDepth: len(l.deferFrames),
-	})
+	}
+	l.loops = append(l.loops, loop)
+	return loop
 }
 
 // popLoop removes the innermost loop branch target.
@@ -279,14 +294,14 @@ func (l *lowerer) popLoop() {
 }
 
 // findLoop resolves an unlabeled or labeled loop branch target.
-func (l *lowerer) findLoop(label string) (loopContext, bool) {
+func (l *lowerer) findLoop(label string) (*loopContext, bool) {
 	for idx := len(l.loops) - 1; idx >= 0; idx-- {
 		loop := l.loops[idx]
 		if label == "" || loop.label == label {
 			return loop, true
 		}
 	}
-	return loopContext{}, false
+	return nil, false
 }
 
 // createLoopPhis creates header phi nodes for assigned loop variables.
@@ -309,12 +324,50 @@ func (l *lowerer) createLoopPhis(block *Block, assigned map[string]bool) map[str
 	return phis
 }
 
-// finishLoopPhis adds back-edge values to loop phi nodes.
-func (l *lowerer) finishLoopPhis(phis map[string]*Instr, bodyEnd string) {
+// finishLoopPhis adds fallthrough and explicit continue back-edges to loop phi nodes.
+func (l *lowerer) finishLoopPhis(
+	phis map[string]*Instr,
+	bodyEnd string,
+	bodyEnv map[string]Value,
+	continueEdges []loopEdge,
+) {
 	for name, phi := range phis {
-		value := l.env[name]
-		phi.Incoming = append(phi.Incoming, Incoming{Block: bodyEnd, Value: value})
+		if bodyEnd != "" {
+			value := bodyEnv[name]
+			phi.Incoming = append(phi.Incoming, Incoming{Block: bodyEnd, Value: value})
+		}
+		for _, edge := range continueEdges {
+			value, ok := edge.env[name]
+			if ok {
+				phi.Incoming = append(phi.Incoming, Incoming{Block: edge.block, Value: value})
+			}
+		}
 		l.env[name] = phi.Result
+	}
+}
+
+// finishLoopExitPhis merges condition-false exits with explicit break edges.
+func (l *lowerer) finishLoopExitPhis(
+	exit *Block,
+	phis map[string]*Instr,
+	header string,
+	breakEdges []loopEdge,
+) {
+	if len(breakEdges) == 0 {
+		return
+	}
+	for name, phi := range phis {
+		incoming := []Incoming{{Block: header, Value: phi.Result}}
+		for _, edge := range breakEdges {
+			value, ok := edge.env[name]
+			if ok {
+				incoming = append(incoming, Incoming{Block: edge.block, Value: value})
+			}
+		}
+		if len(incoming) == 1 {
+			continue
+		}
+		l.env[name] = l.addPhi(exit, phi.Result.Type, incoming)
 	}
 }
 
@@ -348,6 +401,21 @@ func collectAssigned(stmt ast.Statement, names map[string]bool) {
 		}
 	case *ast.WhileStmt:
 		collectBlockAssigned(s.Body, names)
+	case *ast.ForStmt:
+		collectBlockAssigned(s.Body, names)
+	case *ast.MatchStmt:
+		for _, arm := range s.Arms {
+			collectAssigned(arm.Body, names)
+		}
+	case *ast.UnsafeStmt:
+		collectBlockAssigned(s.Body, names)
+	case *ast.ComptimeIfStmt:
+		collectBlockAssigned(s.Consequence, names)
+		if s.Alternative != nil {
+			collectBlockAssigned(s.Alternative, names)
+		}
+	case *ast.BlockStmt:
+		collectBlockAssigned(s, names)
 	}
 }
 
