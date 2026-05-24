@@ -49,7 +49,6 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 		want   string
 	}{
 		{name: "arena", source: arenaSource, want: "`arena.new` is not supported"},
-		{name: "error union slice", source: errorUnionSliceSource, want: "success type `[]u8`"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -218,9 +217,49 @@ func TestEmitErrorUnionFailure(t *testing.T) {
 	}
 	for _, want := range []string{
 		"define %kizu.error.i64 @read()",
-		"%kizu.2 = insertvalue %kizu.error.i64 %kizu.2.base, %kizu.slice.u8 %kizu.slice.1, 2",
+		"%kizu.2 = insertvalue %kizu.error.i64 %kizu.2.base, %kizu.slice.u8 %kizu.1, 2",
 		"ret %kizu.error.i64 %kizu.2",
 		"try.err.2:\n  ret i32 1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
+// TestEmitErrorUnionSliceSuccess checks ![]u8 carries the full slice value.
+func TestEmitErrorUnionSliceSuccess(t *testing.T) {
+	module := lowerSource(t, errorUnionSliceSource)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }",
+		"%kizu.2 = insertvalue %kizu.error.slice.u8 %kizu.2.ok, %kizu.slice.u8 %kizu.1, 1",
+		"%kizu.2 = extractvalue %kizu.error.slice.u8 %kizu.1, 1",
+		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.3, i64 %kizu.print.slice.len.4)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
+// TestEmitSliceFunctionABI checks []u8 is passed and returned as a slice value.
+func TestEmitSliceFunctionABI(t *testing.T) {
+	module := lowerSource(t, sliceFunctionSource)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"%kizu.slice.u8 = type { ptr, i64 }",
+		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %value)",
+		"ret %kizu.slice.u8 %value",
+		"define %kizu.slice.u8 @message()",
+		"%kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 5, 1",
+		"%kizu.2 = call %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.1)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -419,7 +458,18 @@ fn main() -> !void {
     return;
 }`
 
+const sliceFunctionSource = `fn identity(value: []u8) -> []u8 {
+    return value;
+}
+fn message() -> []u8 {
+    return "hello";
+}
+fn main() {
+    print(identity(message()));
+}`
+
 const helloLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
 @.str.0 = private unnamed_addr constant [12 x i8] c"hello, kizu\00"
 
 declare void @kizu_print_string(ptr, i64)
@@ -428,8 +478,12 @@ declare void @kizu_print_bool(i1)
 
 define i32 @main() {
 entry:
-  %kizu.1 = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %kizu.1, i64 11)
+  %kizu.1.ptr = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
+  %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+  %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 11, 1
+  %kizu.print.slice.ptr.1 = extractvalue %kizu.slice.u8 %kizu.1, 0
+  %kizu.print.slice.len.2 = extractvalue %kizu.slice.u8 %kizu.1, 1
+  call void @kizu_print_string(ptr %kizu.print.slice.ptr.1, i64 %kizu.print.slice.len.2)
   ret i32 0
 }`
 
@@ -452,6 +506,7 @@ entry:
 }`
 
 const variablesLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
 @.str.0 = private unnamed_addr constant [6 x i8] c"alice\00"
 
 declare void @kizu_print_string(ptr, i64)
@@ -460,14 +515,19 @@ declare void @kizu_print_bool(i1)
 
 define i32 @main() {
 entry:
-  %kizu.1 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %kizu.1.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
+  %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 5, 1
   %kizu.4 = add i64 30, 1
-  call void @kizu_print_string(ptr %kizu.1, i64 5)
+  %kizu.print.slice.ptr.1 = extractvalue %kizu.slice.u8 %kizu.1, 0
+  %kizu.print.slice.len.2 = extractvalue %kizu.slice.u8 %kizu.1, 1
+  call void @kizu_print_string(ptr %kizu.print.slice.ptr.1, i64 %kizu.print.slice.len.2)
   call void @kizu_print_int(i64 %kizu.4)
   ret i32 0
 }`
 
 const ifLLVM = `; Kizu LLVM IR
+%kizu.slice.u8 = type { ptr, i64 }
 @.str.0 = private unnamed_addr constant [6 x i8] c"adult\00"
 @.str.1 = private unnamed_addr constant [6 x i8] c"minor\00"
 
@@ -480,12 +540,20 @@ entry:
   %kizu.3 = icmp sge i64 20, 20
   br i1 %kizu.3, label %if.then.1, label %if.else.2
 if.then.1:
-  %kizu.4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
-  call void @kizu_print_string(ptr %kizu.4, i64 5)
+  %kizu.4.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %kizu.4.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.4.ptr, 0
+  %kizu.4 = insertvalue %kizu.slice.u8 %kizu.4.base, i64 5, 1
+  %kizu.print.slice.ptr.1 = extractvalue %kizu.slice.u8 %kizu.4, 0
+  %kizu.print.slice.len.2 = extractvalue %kizu.slice.u8 %kizu.4, 1
+  call void @kizu_print_string(ptr %kizu.print.slice.ptr.1, i64 %kizu.print.slice.len.2)
   br label %if.end.3
 if.else.2:
-  %kizu.6 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
-  call void @kizu_print_string(ptr %kizu.6, i64 5)
+  %kizu.6.ptr = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+  %kizu.6.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.6.ptr, 0
+  %kizu.6 = insertvalue %kizu.slice.u8 %kizu.6.base, i64 5, 1
+  %kizu.print.slice.ptr.3 = extractvalue %kizu.slice.u8 %kizu.6, 0
+  %kizu.print.slice.len.4 = extractvalue %kizu.slice.u8 %kizu.6, 1
+  call void @kizu_print_string(ptr %kizu.print.slice.ptr.3, i64 %kizu.print.slice.len.4)
   br label %if.end.3
 if.end.3:
   ret i32 0
