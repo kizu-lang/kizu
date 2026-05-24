@@ -1178,7 +1178,7 @@ func countHostedCompilerCLIRealSourceParseFailures(t *testing.T, exePath string)
 			code, stdout, stderr)
 		return 1
 	}
-	for _, fragment := range []string{"parse_file_cli", "check::fast_diagnostics"} {
+	for _, fragment := range []string{"parse_file_cli", "check::file_cli"} {
 		if !strings.Contains(stdout, fragment) {
 			t.Errorf("hosted compiler real source parse missing %q:\n%s", fragment, stdout)
 			return 1

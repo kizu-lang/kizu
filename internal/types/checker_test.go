@@ -744,6 +744,76 @@ fn main() -> void {
 	}
 }
 
+// TestCheckAcceptsExplicitFieldBorrowProjection checks call-scoped direct field borrows.
+func TestCheckAcceptsExplicitFieldBorrowProjection(t *testing.T) {
+	source := `struct Facts {
+    type_kinds: std::map::Map<[]u8, i64>,
+    type_arities: std::map::Map<[]u8, i64>,
+    values: std::array::Array<i64>,
+}
+fn collect(
+    type_kinds: &var std::map::Map<[]u8, i64>,
+    type_arities: &var std::map::Map<[]u8, i64>,
+    values: &var std::array::Array<i64>
+) -> void {
+    print(0);
+}
+fn run(facts: &var Facts) -> void {
+    collect(&var facts.type_kinds, &var facts.type_arities, &var facts.values);
+}
+fn main() -> void {
+    return;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsInvalidFieldBorrowProjection keeps field projection call-scoped.
+func TestCheckRejectsInvalidFieldBorrowProjection(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "immutable base",
+			source: `struct Facts { value: i64 }
+fn bump(value: &var i64) -> void { print(value); }
+fn main() -> void {
+    let facts = Facts { value: 1 };
+    bump(&var facts.value);
+}`,
+			want: "&var argument `facts` must be mutable",
+		},
+		{
+			name: "return projected field borrow",
+			source: `struct Facts { value: i64 }
+fn borrow_value(facts: &var Facts) -> &var i64 borrows facts {
+    return &var facts.value;
+}`,
+			want: "return expects &var i64, got i64",
+		},
+		{
+			name: "store projected field borrow",
+			source: `struct Holder { value: &var i64 }
+fn main() -> void {}`,
+			want: "borrow field `Holder.value` cannot store borrow",
+		},
+		{
+			name: "projected borrow to owner",
+			source: `struct Facts { value: i64 }
+fn take(value: i64) -> void { print(value); }
+fn main() -> void {
+    var facts = Facts { value: 1 };
+    take(&facts.value);
+}`,
+			want: "borrow argument cannot be passed to owning parameter",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsSharedBorrowForwarding rejects shared-to-mutable reborrows.
 func TestCheckRejectsSharedBorrowForwarding(t *testing.T) {
 	source := `struct User { name: []u8 }

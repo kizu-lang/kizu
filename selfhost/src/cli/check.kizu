@@ -73,6 +73,43 @@ fn package_diagnostics_loaded(
     return checked.diagnostics;
 }
 
+struct FastDiagnosticContext {
+    function_arities: std::map::Map<[]u8, i64>,
+    type_kinds: std::map::Map<[]u8, model::TypeKind>,
+    type_arities: std::map::Map<[]u8, i64>,
+    copyable_types: std::map::Map<[]u8, bool>,
+    borrow_params: std::map::Map<[]u8, bool>,
+}
+
+fn FastDiagnosticContext(allocator: Allocator) -> FastDiagnosticContext {
+    return FastDiagnosticContext {
+        function_arities: std::map::Map<[]u8, i64>(allocator),
+        type_kinds: std::map::Map<[]u8, model::TypeKind>(allocator),
+        type_arities: std::map::Map<[]u8, i64>(allocator),
+        copyable_types: std::map::Map<[]u8, bool>(allocator),
+        borrow_params: std::map::Map<[]u8, bool>(allocator)
+    };
+}
+
+impl FastDiagnosticContext {
+    fn deinit(self: FastDiagnosticContext) -> void {
+        self.function_arities.deinit();
+        self.type_kinds.deinit();
+        self.type_arities.deinit();
+        self.copyable_types.deinit();
+        self.borrow_params.deinit();
+    }
+}
+
+fn seed_fast_diagnostic_context(facts: &var FastDiagnosticContext) -> !void {
+    try type_refs::seed_builtin_types(
+        &var facts.type_kinds,
+        &var facts.type_arities,
+        &var facts.copyable_types
+    );
+    return;
+}
+
 fn package_fast_diagnostics(
     allocator: Allocator,
     io: Io,
@@ -80,23 +117,16 @@ fn package_fast_diagnostics(
 ) -> !bool {
     var parsed_sources = std::array::Array<std::kizu::ast::ParseResult>(allocator);
     var parsed_file_indexes = std::array::Array<i64>(allocator);
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var type_kinds = std::map::Map<[]u8, model::TypeKind>(allocator);
-    var type_arities = std::map::Map<[]u8, i64>(allocator);
-    var copyable_types = std::map::Map<[]u8, bool>(allocator);
-    var borrow_params = std::map::Map<[]u8, bool>(allocator);
-    try type_refs::seed_builtin_types(type_kinds, type_arities, copyable_types);
+    var facts = FastDiagnosticContext(allocator);
+    defer facts.deinit();
+    try seed_fast_diagnostic_context(&var facts);
     var ok = try parse_package_fast_diagnostic_sources(
         allocator,
         io,
         files,
         parsed_sources,
         parsed_file_indexes,
-        function_arities,
-        type_kinds,
-        type_arities,
-        copyable_types,
-        borrow_params
+        &var facts
     );
     var index = 0;
     while ok and index < parsed_sources.len() {
@@ -111,11 +141,7 @@ fn package_fast_diagnostics(
                 file,
                 parsed.ast,
                 parsed.root,
-                type_kinds,
-                type_arities,
-                copyable_types,
-                borrow_params,
-                function_arities,
+                &var facts,
                 true
             )) {
                 ok = false;
@@ -129,11 +155,6 @@ fn package_fast_diagnostics(
     }
     parsed_sources.deinit();
     parsed_file_indexes.deinit();
-    type_kinds.deinit();
-    type_arities.deinit();
-    copyable_types.deinit();
-    borrow_params.deinit();
-    function_arities.deinit();
     return ok;
 }
 
@@ -143,11 +164,7 @@ fn parse_package_fast_diagnostic_sources(
     files: &std::array::Array<source::SourceFile>,
     parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
     parsed_file_indexes: &var std::array::Array<i64>,
-    function_arities: &var std::map::Map<[]u8, i64>,
-    type_kinds: &var std::map::Map<[]u8, model::TypeKind>,
-    type_arities: &var std::map::Map<[]u8, i64>,
-    copyable_types: &var std::map::Map<[]u8, bool>,
-    borrow_params: &var std::map::Map<[]u8, bool>
+    facts: &var FastDiagnosticContext
 ) -> !bool {
     var index = 0;
     while index < files.len() {
@@ -160,11 +177,7 @@ fn parse_package_fast_diagnostic_sources(
                 index,
                 parsed_sources,
                 parsed_file_indexes,
-                function_arities,
-                type_kinds,
-                type_arities,
-                copyable_types,
-                borrow_params
+                facts
             )) {
                 return false;
             }
@@ -181,11 +194,7 @@ fn parse_package_fast_diagnostic_source(
     file_index: i64,
     parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
     parsed_file_indexes: &var std::array::Array<i64>,
-    function_arities: &var std::map::Map<[]u8, i64>,
-    type_kinds: &var std::map::Map<[]u8, model::TypeKind>,
-    type_arities: &var std::map::Map<[]u8, i64>,
-    copyable_types: &var std::map::Map<[]u8, bool>,
-    borrow_params: &var std::map::Map<[]u8, bool>
+    facts: &var FastDiagnosticContext
 ) -> !bool {
     if source::is_frontend_source(file.kind) {
         let parsed_validation = try parser::validate_diagnostic_file(
@@ -210,11 +219,7 @@ fn parse_package_fast_diagnostic_source(
             parsed,
             parsed_sources,
             parsed_file_indexes,
-            function_arities,
-            type_kinds,
-            type_arities,
-            copyable_types,
-            borrow_params
+            facts
         );
         return true;
     }
@@ -230,11 +235,7 @@ fn parse_package_fast_diagnostic_source(
         parsed,
         parsed_sources,
         parsed_file_indexes,
-        function_arities,
-        type_kinds,
-        type_arities,
-        copyable_types,
-        borrow_params
+        facts
     );
     return true;
 }
@@ -246,34 +247,30 @@ fn append_package_fast_diagnostic_source(
     parsed: std::kizu::ast::ParseResult,
     parsed_sources: &var std::array::Array<std::kizu::ast::ParseResult>,
     parsed_file_indexes: &var std::array::Array<i64>,
-    function_arities: &var std::map::Map<[]u8, i64>,
-    type_kinds: &var std::map::Map<[]u8, model::TypeKind>,
-    type_arities: &var std::map::Map<[]u8, i64>,
-    copyable_types: &var std::map::Map<[]u8, bool>,
-    borrow_params: &var std::map::Map<[]u8, bool>
+    facts: &var FastDiagnosticContext
 ) -> !void {
     try type_refs::collect_declared_types_from_ast(
         allocator,
         file,
         parsed.ast,
         parsed.root,
-        type_kinds,
-        type_arities,
-        copyable_types
+        &var facts.type_kinds,
+        &var facts.type_arities,
+        &var facts.copyable_types
     );
     try ownership::collect_borrow_param_keys(
         allocator,
         file,
         parsed.ast,
         parsed.root,
-        borrow_params
+        &var facts.borrow_params
     );
     try function_calls::collect_function_arities_from_ast(
         allocator,
         file,
         &parsed.ast,
         parsed.root,
-        function_arities
+        &var facts.function_arities
     );
     try parsed_sources.append(parsed);
     try parsed_file_indexes.append(file_index);
@@ -313,70 +310,35 @@ pub fn fast_diagnostics_ast_node(
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId
 ) -> !bool {
-    var function_arities = std::map::Map<[]u8, i64>(allocator);
-    defer function_arities.deinit();
-    return try fast_diagnostics_ast_node_with_arities(
-        allocator,
-        io,
-        files,
-        file,
-        ast,
-        root,
-        function_arities,
-        false
-    );
-}
-
-fn fast_diagnostics_ast_node_with_arities(
-    allocator: Allocator,
-    io: Io,
-    files: &std::array::Array<source::SourceFile>,
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId,
-    function_arities: &std::map::Map<[]u8, i64>,
-    use_cached_arities: bool
-) -> !bool {
-    var type_kinds = std::map::Map<[]u8, model::TypeKind>(allocator);
-    var type_arities = std::map::Map<[]u8, i64>(allocator);
-    var copyable_types = std::map::Map<[]u8, bool>(allocator);
-    var borrow_params = std::map::Map<[]u8, bool>(allocator);
-    try type_refs::seed_builtin_types(type_kinds, type_arities, copyable_types);
+    var facts = FastDiagnosticContext(allocator);
+    defer facts.deinit();
+    try seed_fast_diagnostic_context(&var facts);
     try type_refs::collect_declared_types_from_ast(
         allocator,
         file,
         ast,
         root,
-        type_kinds,
-        type_arities,
-        copyable_types
+        &var facts.type_kinds,
+        &var facts.type_arities,
+        &var facts.copyable_types
     );
     try ownership::collect_borrow_param_keys(
         allocator,
         file,
         ast,
         root,
-        borrow_params
+        &var facts.borrow_params
     );
-    let ok = try fast_diagnostics_ast_node_with_context(
+    return try fast_diagnostics_ast_node_with_context(
         allocator,
         io,
         files,
         file,
         ast,
         root,
-        type_kinds,
-        type_arities,
-        copyable_types,
-        borrow_params,
-        function_arities,
-        use_cached_arities
+        &var facts,
+        false
     );
-    type_kinds.deinit();
-    type_arities.deinit();
-    copyable_types.deinit();
-    borrow_params.deinit();
-    return ok;
 }
 
 fn fast_diagnostics_ast_node_with_context(
@@ -386,11 +348,7 @@ fn fast_diagnostics_ast_node_with_context(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId,
-    type_kinds: &var std::map::Map<[]u8, model::TypeKind>,
-    type_arities: &var std::map::Map<[]u8, i64>,
-    copyable_types: &var std::map::Map<[]u8, bool>,
-    borrow_params: &std::map::Map<[]u8, bool>,
-    function_arities: &std::map::Map<[]u8, i64>,
+    facts: &var FastDiagnosticContext,
     use_cached_arities: bool
 ) -> !bool {
     let duplicate = try resolver::first_duplicate_declaration_ast_node(
@@ -410,9 +368,9 @@ fn fast_diagnostics_ast_node_with_context(
         file,
         ast,
         root,
-        type_kinds,
-        type_arities,
-        copyable_types
+        &var facts.type_kinds,
+        &var facts.type_arities,
+        &var facts.copyable_types
     );
     if !(try write_check_diagnostic(allocator, io, file.text, &pre_move)) {
         return false;
@@ -423,7 +381,7 @@ fn fast_diagnostics_ast_node_with_context(
         file,
         ast,
         root,
-        borrow_params
+        &facts.borrow_params
     );
     if !std::mem::equal_bytes(moved_name, "") {
         try diagnostics::move_error(allocator, io, moved_name);
@@ -445,7 +403,7 @@ fn fast_diagnostics_ast_node_with_context(
         file,
         &ast,
         root,
-        function_arities
+        &facts.function_arities
     )) {
         return false;
     }

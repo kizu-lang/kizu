@@ -211,7 +211,7 @@ func parseParityGuardCases() []parseParityGuardCase {
 			name:           "real_source_target",
 			args:           []string{"parse", "selfhost/src/main.kizu"},
 			exitCode:       0,
-			stdoutContains: []string{"parse_file_cli", "check::fast_diagnostics"},
+			stdoutContains: []string{"parse_file_cli", "check::file_cli"},
 		},
 		{
 			name:     "unsupported_command",

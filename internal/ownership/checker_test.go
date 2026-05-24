@@ -170,6 +170,81 @@ fn main() {
 	}
 }
 
+// TestCheckAcceptsFieldBorrowProjection checks call-scoped field borrow arguments.
+func TestCheckAcceptsFieldBorrowProjection(t *testing.T) {
+	source := `struct Pair { left: i64, right: i64 }
+fn touch(left: &var i64, right: &var i64) {
+    print(left);
+    print(right);
+}
+fn main() {
+    var pair = Pair { left: 1, right: 2 };
+    touch(&var pair.left, &var pair.right);
+    print(pair.left);
+    print(pair.right);
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsFieldBorrowProjectionConflicts keeps projected borrows call-scoped.
+func TestCheckRejectsFieldBorrowProjectionConflicts(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "same field twice",
+			source: `struct Pair { left: i64, right: i64 }
+fn touch(left: &var i64, right: &var i64) {
+    print(left);
+    print(right);
+}
+fn main() {
+    var pair = Pair { left: 1, right: 2 };
+    touch(&var pair.left, &var pair.left);
+}`,
+			want: "field `pair.left` cannot be borrowed while mutably borrowed",
+		},
+		{
+			name: "moved base",
+			source: `struct Pair { left: i64, right: i64 }
+fn touch(left: &var i64) { print(left); }
+fn main() {
+    var pair = Pair { left: 1, right: 2 };
+    let moved = pair;
+    touch(&var pair.left);
+    print(moved.left);
+}`,
+			want: "moved value `pair` was borrowed",
+		},
+		{
+			name: "deinitialized field",
+			source: `struct User { name: []u8 }
+struct Registry { users: std::arena::Arena<User> }
+fn touch(users: &var std::arena::Arena<User>) {
+    print(0);
+}
+impl Registry {
+    fn deinit(self: Registry) -> void {
+        self.users.deinit();
+        touch(&var self.users);
+        return;
+    }
+}
+fn main() {
+    let allocator = std::builtin::mem_page_allocator();
+    let registry = Registry { users: std::arena::Arena<User>(allocator) };
+    registry.deinit();
+}`,
+			want: "field `self.users` was deinitialized",
+		},
+	}
+	runErrorCases(t, cases)
+}
+
 // TestCheckRejectsMutableBorrowForwardingAlias checks reborrows stay exclusive.
 func TestCheckRejectsMutableBorrowForwardingAlias(t *testing.T) {
 	source := `struct User { name: []u8 }

@@ -272,12 +272,19 @@ fn first_use_after_move_in_function(
 ) -> ![]u8 {
     var states = std::map::Map<[]u8, data::OwnershipState>(allocator);
     var kinds = std::map::Map<[]u8, data::ResourceKind>(allocator);
+    var resources = std::array::Array<[]u8>(allocator);
     var param_index = 0;
     while param_index < params.len {
         let param_child = try ast.child_at(params, param_index);
         let param_name = kind::param_binding_name(file, ast, param_child);
         if !std::mem::equal_bytes(param_name, "") {
-            try state::declare_resource(states, kinds, param_name, kind::param_resource_kind(file, ast, param_child));
+            try state::declare_tracked_resource(
+                states,
+                kinds,
+                resources,
+                param_name,
+                kind::param_resource_kind(file, ast, param_child)
+            );
         }
         param_index = param_index + 1;
     }
@@ -293,12 +300,14 @@ fn first_use_after_move_in_function(
             statement,
             states,
             kinds,
+            resources,
             borrow_params
         );
         statement_index = statement_index + 1;
     }
     states.deinit();
     kinds.deinit();
+    resources.deinit();
     return result;
 }
 
@@ -308,6 +317,7 @@ fn first_use_after_move_statement(
     statement: std::kizu::ast::NodeId,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>
 ) -> ![]u8 {
     let node = ast.get(statement);
@@ -319,6 +329,7 @@ fn first_use_after_move_statement(
             let_node.value,
             states,
             kinds,
+            resources,
             borrow_params
         ),
         ExprStmt(expr_stmt) => try first_use_after_move_expr(
@@ -327,6 +338,7 @@ fn first_use_after_move_statement(
             expr_stmt.expr,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -336,6 +348,7 @@ fn first_use_after_move_statement(
             assign_node.value,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -345,6 +358,7 @@ fn first_use_after_move_statement(
             return_node.value,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -354,6 +368,7 @@ fn first_use_after_move_statement(
             defer_node.expr,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -363,6 +378,7 @@ fn first_use_after_move_statement(
             block.statements,
             states,
             kinds,
+            resources,
             borrow_params
         ),
         If(if_node) => try first_use_after_move_if(
@@ -373,16 +389,17 @@ fn first_use_after_move_statement(
             if_node.else_block,
             states,
             kinds,
+            resources,
             borrow_params
         ),
-        While(while_node) => try first_use_after_move_if(
+        While(while_node) => try first_use_after_move_while(
             file,
             ast,
             while_node.condition,
             while_node.body,
-            ast.add_empty(0),
             states,
             kinds,
+            resources,
             borrow_params
         ),
         Program(program) => "",
@@ -429,6 +446,7 @@ fn first_use_after_move_statement_range(
     range: std::kizu::ast::ChildRange,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>
 ) -> ![]u8 {
     var index = 0;
@@ -440,6 +458,7 @@ fn first_use_after_move_statement_range(
             statement,
             states,
             kinds,
+            resources,
             borrow_params
         );
         if !std::mem::equal_bytes(name, "") {
@@ -458,6 +477,7 @@ fn first_use_after_move_if(
     else_block: std::kizu::ast::NodeId,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>
 ) -> ![]u8 {
     let condition_name = try first_use_after_move_expr(
@@ -466,31 +486,103 @@ fn first_use_after_move_if(
         condition,
         states,
         kinds,
+        resources,
         borrow_params,
         false
     );
     if !std::mem::equal_bytes(condition_name, "") {
         return condition_name;
     }
+
+    var then_states = std::map::Map<[]u8, data::OwnershipState>(std::mem::page_allocator());
+    var then_kinds = std::map::Map<[]u8, data::ResourceKind>(std::mem::page_allocator());
+    var then_resources = std::array::Array<[]u8>(std::mem::page_allocator());
+    try state::fork_resources(states, kinds, resources, then_states, then_kinds, then_resources);
     let then_name = try first_use_after_move_statement(
         file,
         ast,
         then_block,
-        states,
-        kinds,
+        then_states,
+        then_kinds,
+        then_resources,
         borrow_params
     );
-    if !std::mem::equal_bytes(then_name, "") {
-        return then_name;
+
+    var else_states = std::map::Map<[]u8, data::OwnershipState>(std::mem::page_allocator());
+    var else_kinds = std::map::Map<[]u8, data::ResourceKind>(std::mem::page_allocator());
+    var else_resources = std::array::Array<[]u8>(std::mem::page_allocator());
+    try state::fork_resources(states, kinds, resources, else_states, else_kinds, else_resources);
+    var result = then_name;
+    if std::mem::equal_bytes(result, "") {
+        result = try first_use_after_move_statement(
+            file,
+            ast,
+            else_block,
+            else_states,
+            else_kinds,
+            else_resources,
+            borrow_params
+        );
     }
-    return try first_use_after_move_statement(
+
+    if std::mem::equal_bytes(result, "") {
+        try state::merge_branch_moves(states, resources, then_states);
+        try state::merge_branch_moves(states, resources, else_states);
+    }
+    then_states.deinit();
+    then_kinds.deinit();
+    then_resources.deinit();
+    else_states.deinit();
+    else_kinds.deinit();
+    else_resources.deinit();
+    return result;
+}
+
+fn first_use_after_move_while(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    states: &var std::map::Map<[]u8, data::OwnershipState>,
+    kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
+    borrow_params: &std::map::Map<[]u8, bool>
+) -> ![]u8 {
+    let condition_name = try first_use_after_move_expr(
         file,
         ast,
-        else_block,
+        condition,
         states,
         kinds,
+        resources,
+        borrow_params,
+        false
+    );
+    if !std::mem::equal_bytes(condition_name, "") {
+        return condition_name;
+    }
+
+    var body_states = std::map::Map<[]u8, data::OwnershipState>(std::mem::page_allocator());
+    var body_kinds = std::map::Map<[]u8, data::ResourceKind>(std::mem::page_allocator());
+    var body_resources = std::array::Array<[]u8>(std::mem::page_allocator());
+    try state::fork_resources(states, kinds, resources, body_states, body_kinds, body_resources);
+    let body_name = try first_use_after_move_statement(
+        file,
+        ast,
+        body,
+        body_states,
+        body_kinds,
+        body_resources,
         borrow_params
     );
+
+    if std::mem::equal_bytes(body_name, "") {
+        try state::merge_branch_moves(states, resources, body_states);
+    }
+    body_states.deinit();
+    body_kinds.deinit();
+    body_resources.deinit();
+    return body_name;
 }
 
 fn first_use_after_move_let(
@@ -500,6 +592,7 @@ fn first_use_after_move_let(
     value: std::kizu::ast::NodeId,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>
 ) -> ![]u8 {
     let used = try first_use_after_move_expr(
@@ -508,6 +601,7 @@ fn first_use_after_move_let(
         value,
         states,
         kinds,
+        resources,
         borrow_params,
         true
     );
@@ -517,7 +611,7 @@ fn first_use_after_move_let(
     let name_text = kind::ast_node_text(file, ast, name);
     if !std::mem::equal_bytes(name_text, "") and !states.contains(name_text) {
         let kind = try move_check_initializer_kind(file, ast, value, kinds);
-        try state::declare_resource(states, kinds, name_text, kind);
+        try state::declare_tracked_resource(states, kinds, resources, name_text, kind);
     }
     return "";
 }
@@ -528,6 +622,7 @@ fn first_use_after_move_expr(
     expr: std::kizu::ast::NodeId,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>,
     move_direct: bool
 ) -> ![]u8 {
@@ -547,6 +642,7 @@ fn first_use_after_move_expr(
             field_expr.receiver,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -557,6 +653,7 @@ fn first_use_after_move_expr(
             call_node.args,
             states,
             kinds,
+            resources,
             borrow_params
         ),
         StructLiteralExpr(struct_literal) => try first_use_after_move_expr_range(
@@ -565,6 +662,7 @@ fn first_use_after_move_expr(
             struct_literal.fields,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -574,6 +672,7 @@ fn first_use_after_move_expr(
             field_init.value,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -583,6 +682,7 @@ fn first_use_after_move_expr(
             prefix_node.right,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -593,6 +693,7 @@ fn first_use_after_move_expr(
             binary.right,
             states,
             kinds,
+            resources,
             borrow_params
         ),
         TypeApplyExpr(type_apply) => try first_use_after_move_expr(
@@ -601,6 +702,7 @@ fn first_use_after_move_expr(
             type_apply.callee,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -610,6 +712,7 @@ fn first_use_after_move_expr(
             try_expr_node.value,
             states,
             kinds,
+            resources,
             borrow_params,
             move_direct
         ),
@@ -619,6 +722,7 @@ fn first_use_after_move_expr(
             comptime_expr_node.value,
             states,
             kinds,
+            resources,
             borrow_params,
             move_direct
         ),
@@ -628,6 +732,7 @@ fn first_use_after_move_expr(
             deref_expr.receiver,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -639,6 +744,7 @@ fn first_use_after_move_expr(
             index_expr.end,
             states,
             kinds,
+            resources,
             borrow_params
         ),
         Program(program) => "",
@@ -658,6 +764,7 @@ fn first_use_after_move_expr(
             cast_expr.value,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -667,6 +774,7 @@ fn first_use_after_move_expr(
             arena_new.allocator,
             states,
             kinds,
+            resources,
             borrow_params,
             false
         ),
@@ -676,6 +784,7 @@ fn first_use_after_move_expr(
             block.statements,
             states,
             kinds,
+            resources,
             borrow_params
         ),
         If(if_node) => try first_use_after_move_if(
@@ -686,6 +795,7 @@ fn first_use_after_move_expr(
             if_node.else_block,
             states,
             kinds,
+            resources,
             borrow_params
         ),
         Let(let_node) => "",
@@ -714,6 +824,7 @@ fn first_use_after_move_call(
     args: std::kizu::ast::ChildRange,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>
 ) -> ![]u8 {
     let callee_name = try first_use_after_move_expr(
@@ -722,6 +833,7 @@ fn first_use_after_move_call(
         callee,
         states,
         kinds,
+        resources,
         borrow_params,
         false
     );
@@ -744,6 +856,7 @@ fn first_use_after_move_call(
             child,
             states,
             kinds,
+            resources,
             borrow_params,
             move_direct
         );
@@ -761,6 +874,7 @@ fn first_use_after_move_expr_range(
     range: std::kizu::ast::ChildRange,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>,
     move_direct: bool
 ) -> ![]u8 {
@@ -773,6 +887,7 @@ fn first_use_after_move_expr_range(
             child,
             states,
             kinds,
+            resources,
             borrow_params,
             move_direct
         );
@@ -791,6 +906,7 @@ fn first_use_after_move_two_exprs(
     right: std::kizu::ast::NodeId,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>
 ) -> ![]u8 {
     let left_name = try first_use_after_move_expr(
@@ -799,6 +915,7 @@ fn first_use_after_move_two_exprs(
         left,
         states,
         kinds,
+        resources,
         borrow_params,
         false
     );
@@ -811,6 +928,7 @@ fn first_use_after_move_two_exprs(
         right,
         states,
         kinds,
+        resources,
         borrow_params,
         false
     );
@@ -824,6 +942,7 @@ fn first_use_after_move_index(
     end: std::kizu::ast::NodeId,
     states: &var std::map::Map<[]u8, data::OwnershipState>,
     kinds: &var std::map::Map<[]u8, data::ResourceKind>,
+    resources: &var std::array::Array<[]u8>,
     borrow_params: &std::map::Map<[]u8, bool>
 ) -> ![]u8 {
     let target_name = try first_use_after_move_expr(
@@ -832,6 +951,7 @@ fn first_use_after_move_index(
         target,
         states,
         kinds,
+        resources,
         borrow_params,
         false
     );
@@ -845,6 +965,7 @@ fn first_use_after_move_index(
         end,
         states,
         kinds,
+        resources,
         borrow_params
     );
 }

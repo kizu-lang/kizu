@@ -4041,20 +4041,29 @@ func (c *Checker) checkGenericUserArg(
 	unsafe bool,
 ) error {
 	want := substituteTypeParams(fn.params[idx], subst)
+	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
+	if err != nil {
+		return err
+	}
+	if fn.mutBorrowParams[idx] {
+		if err := requireMutableBorrowArg(checkedArg, env); err != nil {
+			return err
+		}
+	}
 	if want == typeFunction && fn.comptimeParams[idx] {
-		return c.checkGenericFunctionNameArg(name, fn, subst, idx, arg)
+		return c.checkGenericFunctionNameArg(name, fn, subst, idx, checkedArg)
 	}
 	if name == "std.sync.Mutex" {
-		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
+		if err := c.rejectThreadBoundaryArg(checkedArg, env, unsafe); err != nil {
 			return err
 		}
 	}
 	if name == "std.thread.scoped" && idx == 2 {
-		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
+		if err := c.rejectThreadBoundaryArg(checkedArg, env, unsafe); err != nil {
 			return err
 		}
 	}
-	got, err := c.checkContextualExpr(arg, want, env, unsafe)
+	got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
 	if err != nil {
 		return err
 	}
@@ -4159,24 +4168,28 @@ func (c *Checker) checkUserCallArg(
 	env *scope,
 	unsafe bool,
 ) error {
+	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
+	if err != nil {
+		return err
+	}
 	if fn.mutBorrowParams[idx] {
-		if err := requireMutableBorrowArg(arg, env); err != nil {
+		if err := requireMutableBorrowArg(checkedArg, env); err != nil {
 			return err
 		}
 	}
 	if fn.params[idx] == typeFunction && fn.comptimeParams[idx] {
-		return c.checkFunctionNameParam(name, fn, idx, arg)
+		return c.checkFunctionNameParam(name, fn, idx, checkedArg)
 	}
-	got, err := c.checkExpr(arg, env, unsafe)
+	got, err := c.checkExpr(checkedArg, env, unsafe)
 	if err != nil {
 		return err
 	}
-	got, err = c.coerceContextualIntegerLiteral(arg, fn.params[idx], got)
+	got, err = c.coerceContextualIntegerLiteral(checkedArg, fn.params[idx], got)
 	if err != nil {
 		return err
 	}
 	if fn.comptimeParams[idx] {
-		if _, err := c.evalComptime(arg); err != nil {
+		if _, err := c.evalComptime(checkedArg); err != nil {
 			return err
 		}
 	}
@@ -5855,12 +5868,21 @@ func (c *Checker) checkMethodArgs(
 	}
 	for idx, arg := range args {
 		want := method.params[idx+1]
+		checkedArg, err := prepareBorrowArgument(
+			arg,
+			method.borrowParams[idx+1],
+			method.mutBorrowParams[idx+1],
+			env,
+		)
+		if err != nil {
+			return "", err
+		}
 		if method.mutBorrowParams[idx+1] {
-			if err := requireMutableBorrowArg(arg, env); err != nil {
+			if err := requireMutableBorrowArg(checkedArg, env); err != nil {
 				return "", err
 			}
 		}
-		got, err := c.checkContextualExpr(arg, want, env, unsafe)
+		got, err := c.checkContextualExpr(checkedArg, want, env, unsafe)
 		if err != nil {
 			return "", err
 		}
@@ -5889,10 +5911,41 @@ func requireMutableBorrowArg(expr ast.Expression, env *scope) error {
 	if !ok {
 		return fmt.Errorf("type error: &var argument must be a mutable local binding")
 	}
-	if env.isMutable(ident.Name) {
+	if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
 		return nil
 	}
 	return fmt.Errorf("type error: &var argument `%s` must be mutable", ident.Name)
+}
+
+// prepareBorrowArgument unwraps explicit &/&var syntax only for borrowed parameters.
+func prepareBorrowArgument(
+	arg ast.Expression,
+	wantBorrow bool,
+	wantMutable bool,
+	env *scope,
+) (ast.Expression, error) {
+	prefix, ok := borrowPrefix(arg)
+	if !ok {
+		return arg, nil
+	}
+	if !wantBorrow {
+		return nil, fmt.Errorf("type error: borrow argument cannot be passed to owning parameter")
+	}
+	if err := checkBorrowTargetShape(prefix.Right); err != nil {
+		return nil, err
+	}
+	if prefix.Operator == "&var" && !wantMutable {
+		return nil, fmt.Errorf("type error: argument expects &T, got &var")
+	}
+	if prefix.Operator == "&" && wantMutable {
+		return nil, fmt.Errorf("type error: argument expects &var T, got &T")
+	}
+	if wantMutable {
+		if err := requireMutableBorrowArg(prefix.Right, env); err != nil {
+			return nil, err
+		}
+	}
+	return prefix.Right, nil
 }
 
 // borrowPrefix reports whether an expression is &T or &var T syntax.

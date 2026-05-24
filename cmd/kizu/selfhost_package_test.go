@@ -620,8 +620,7 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 // selfhostFastDiagnosticsCoreBody extracts the shared parsed-AST diagnostic core.
 func selfhostFastDiagnosticsCoreBody(t *testing.T, content string) string {
 	t.Helper()
-	return selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_arities(") +
-		selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_context(")
+	return selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_context(")
 }
 
 // TestSelfhostCheckEntrySharesDiagnosticPasses keeps per-file checks grouped by phase.
@@ -723,15 +722,24 @@ func assertSelfhostCheckEntryDropsOldDiagnosticWrappers(t *testing.T, content st
 // TestSelfhostRunTestReuseCheckedAST keeps run/test on one parsed frontend path.
 func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 	main := readSelfhostFile(t, "../../selfhost/src/main.kizu")
+	runSmoke := readSelfhostFile(t, "../../selfhost/src/cli/run_smoke.kizu")
 	check := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
 	if !strings.Contains(check, "pub fn fast_diagnostics_ast_node(") {
 		t.Fatal("check module does not expose parsed-AST fast diagnostics")
 	}
-	for _, signature := range []string{
-		"fn run_file_cli(",
-		"fn test_file_cli(",
+	for _, fragment := range []string{
+		"run_smoke::run_smoke_file_cli(",
+		"run_smoke::test_smoke_file_cli(",
 	} {
-		body := selfhostKizuFunctionBody(t, main, signature)
+		if !strings.Contains(main, fragment) {
+			t.Fatalf("main dispatch missing smoke module call %q", fragment)
+		}
+	}
+	for _, signature := range []string{
+		"pub fn run_smoke_file_cli(",
+		"pub fn test_smoke_file_cli(",
+	} {
+		body := selfhostKizuFunctionBody(t, runSmoke, signature)
 		required := []string{
 			"parser::validate_diagnostic_file(allocator, path, file_text)",
 			"let validation_ok = parsed_validation.ok",
@@ -1255,8 +1263,8 @@ func TestSelfhostPackageFastDiagnosticsReuseParsedAST(t *testing.T) {
 	body := selfhostKizuFunctionBody(t, content, "fn package_fast_diagnostics(")
 	required := []string{
 		"parse_package_fast_diagnostic_sources(",
-		"var function_arities = std::map::Map<[]u8, i64>(allocator)",
-		"fast_diagnostics_ast_node_with_arities(",
+		"var facts = FastDiagnosticContext(allocator)",
+		"fast_diagnostics_ast_node_with_context(",
 		"write_cached_package_function_call_diagnostic(",
 	}
 	for _, fragment := range required {

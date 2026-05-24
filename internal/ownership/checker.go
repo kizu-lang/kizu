@@ -74,6 +74,12 @@ type directFieldReceiver struct {
 	path     string
 }
 
+type temporaryBorrow struct {
+	value   *binding
+	field   string
+	mutable bool
+}
+
 // New creates an empty ownership checker.
 func New() *Checker {
 	return &Checker{
@@ -828,6 +834,10 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 		if value.moved {
 			return nil, "", fmt.Errorf("borrow error: moved value `%s` was borrowed", ident.Name)
 		}
+		if value.fieldDeinit[target.Name] {
+			return nil, "", fmt.Errorf("move error: field `%s.%s` was deinitialized",
+				ident.Name, target.Name)
+		}
 		return value, target.Name, nil
 	default:
 		return nil, "", fmt.Errorf("borrow error: borrow target must be a local binding or direct field")
@@ -1538,7 +1548,7 @@ func (c *Checker) checkUserCall(
 	if err != nil {
 		return "", err
 	}
-	defer releaseBorrows(borrowed)
+	defer releaseTemporaryBorrows(borrowed)
 	for idx, arg := range args {
 		if fn.params[idx].typeName == "Function" && fn.params[idx].comptime {
 			if err := c.checkFunctionNameParam(name, fn, idx, arg); err != nil {
@@ -4725,7 +4735,7 @@ func (c *Checker) checkImplMethodArgs(
 	if err != nil {
 		return err
 	}
-	defer releaseBorrows(borrowed)
+	defer releaseTemporaryBorrows(borrowed)
 	for idx, arg := range args {
 		if err := c.checkImplMethodArg(method, idx+1, arg, env); err != nil {
 			return err
@@ -4888,38 +4898,62 @@ func (c *Checker) activateBorrowArgs(
 	fn *functionInfo,
 	args []ast.Expression,
 	env *scope,
-) ([]*binding, error) {
-	borrowed := []*binding{}
+) ([]temporaryBorrow, error) {
+	borrowed := []temporaryBorrow{}
 	for idx, arg := range args {
 		if !fn.params[idx].borrow {
 			continue
 		}
-		value, err := borrowedIdent(arg, env)
+		value, field, err := c.callBorrowTarget(arg, env)
 		if err != nil {
-			releaseBorrows(borrowed)
+			releaseTemporaryBorrows(borrowed)
 			return nil, err
+		}
+		if value == nil && fn.params[idx].mutBorrow {
+			releaseTemporaryBorrows(borrowed)
+			return nil, fmt.Errorf(
+				"borrow error: mutable borrow argument must be a local binding or direct field",
+			)
 		}
 		if value != nil {
 			if fn.params[idx].mutBorrow && value.borrowedParam && !value.mutBorrow {
-				releaseBorrows(borrowed)
+				releaseTemporaryBorrows(borrowed)
 				return nil, fmt.Errorf(
 					"borrow error: shared borrow `%s` cannot be forwarded as mutable",
 					value.name,
 				)
 			}
-			if err := checkBorrowConflict(value, fn.params[idx].mutBorrow); err != nil {
-				releaseBorrows(borrowed)
+			mutable := fn.params[idx].mutBorrow
+			if err := checkBorrowConflictForField(value, field, mutable); err != nil {
+				releaseTemporaryBorrows(borrowed)
 				return nil, err
 			}
-			if fn.params[idx].mutBorrow {
-				value.activeMutBorrows++
-			} else {
-				value.activeBorrows++
-			}
-			borrowed = append(borrowed, value)
+			c.activateBorrow(value, field, mutable)
+			borrowed = append(borrowed, temporaryBorrow{
+				value: value, field: field, mutable: mutable,
+			})
 		}
 	}
 	return borrowed, nil
+}
+
+// callBorrowTarget resolves call-scoped borrowable places and ignores non-place shared values.
+func (c *Checker) callBorrowTarget(
+	arg ast.Expression,
+	env *scope,
+) (*binding, string, error) {
+	if prefix, ok := borrowPrefix(arg); ok {
+		return c.borrowTarget(prefix.Right, env)
+	}
+	if field, ok := arg.(*ast.FieldExpr); ok && field.Namespace {
+		return nil, "", nil
+	}
+	switch arg.(type) {
+	case *ast.IdentExpr, *ast.FieldExpr:
+		return c.borrowTarget(arg, env)
+	default:
+		return nil, "", nil
+	}
 }
 
 // checkBorrowConflict rejects aliasing that would overlap a mutable borrow.
@@ -4980,29 +5014,35 @@ func checkBorrowConflictForField(value *binding, field string, mutable bool) err
 	return nil
 }
 
-// borrowedIdent resolves an identifier borrow target when the argument is a name.
-func borrowedIdent(expr ast.Expression, env *scope) (*binding, error) {
-	ident, ok := expr.(*ast.IdentExpr)
-	if !ok {
-		return nil, nil
+// releaseTemporaryBorrows clears temporary borrow state for a completed call.
+func releaseTemporaryBorrows(values []temporaryBorrow) {
+	for _, borrow := range values {
+		releaseTemporaryBorrow(borrow)
 	}
-	value, exists := env.lookup(ident.Name)
-	if !exists {
-		return nil, fmt.Errorf("borrow error: undefined variable `%s`", ident.Name)
-	}
-	if value.moved {
-		return nil, fmt.Errorf("borrow error: moved value `%s` was borrowed", ident.Name)
-	}
-	return value, nil
 }
 
-// releaseBorrows clears temporary borrow state for a completed call.
-func releaseBorrows(values []*binding) {
-	for _, value := range values {
-		if value.activeMutBorrows > 0 {
+// releaseTemporaryBorrow clears one call-scoped whole-value or field borrow.
+func releaseTemporaryBorrow(borrow temporaryBorrow) {
+	value := borrow.value
+	if borrow.field == "" {
+		if borrow.mutable && value.activeMutBorrows > 0 {
 			value.activeMutBorrows--
-		} else {
+		} else if !borrow.mutable && value.activeBorrows > 0 {
 			value.activeBorrows--
+		}
+		return
+	}
+	if borrow.mutable && value.fieldMutBorrows[borrow.field] > 0 {
+		value.fieldMutBorrows[borrow.field]--
+		if value.fieldMutBorrows[borrow.field] == 0 {
+			delete(value.fieldMutBorrows, borrow.field)
+		}
+		return
+	}
+	if !borrow.mutable && value.fieldBorrows[borrow.field] > 0 {
+		value.fieldBorrows[borrow.field]--
+		if value.fieldBorrows[borrow.field] == 0 {
+			delete(value.fieldBorrows, borrow.field)
 		}
 	}
 }
