@@ -24,6 +24,7 @@ func TestEmitSnapshots(t *testing.T) {
 		{name: "variables", source: variablesSource, want: variablesLLVM},
 		{name: "if", source: ifSource, want: ifLLVM},
 		{name: "while", source: whileSource, want: whileLLVM},
+		{name: "struct", source: structSource, want: structLLVM},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -46,7 +47,6 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 		source string
 		want   string
 	}{
-		{name: "struct", source: structSource, want: "`struct.new` is not supported"},
 		{name: "arena", source: arenaSource, want: "`arena.new` is not supported"},
 		{name: "error union", source: errorUnionSource, want: "`error.try` is not supported"},
 	}
@@ -64,8 +64,8 @@ func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
 	}
 }
 
-// TestEmitRejectsUnsupportedFieldInstruction checks field lowering is not faked.
-func TestEmitRejectsUnsupportedFieldInstruction(t *testing.T) {
+// TestEmitRejectsUnknownFieldInstruction checks malformed IR is not guessed.
+func TestEmitRejectsUnknownFieldInstruction(t *testing.T) {
 	module := &ir.Module{Functions: []*ir.Function{{
 		Name:   "main",
 		Return: "void",
@@ -83,7 +83,127 @@ func TestEmitRejectsUnsupportedFieldInstruction(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected emit to reject field instruction")
 	}
-	if !strings.Contains(err.Error(), "`field.age` is not supported") {
+	if !strings.Contains(err.Error(), "unknown struct type `User`") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestEmitRejectsMalformedStructNew checks aggregate construction is explicit.
+func TestEmitRejectsMalformedStructNew(t *testing.T) {
+	module := &ir.Module{
+		Structs: map[string]ir.Struct{
+			"User": {
+				Name: "User",
+				Fields: []ir.Field{{
+					Name: "age",
+					Type: "i64",
+				}},
+			},
+		},
+		Functions: []*ir.Function{{
+			Name:   "main",
+			Return: "void",
+			Blocks: []*ir.Block{{
+				Name: "entry",
+				Instrs: []*ir.Instr{{
+					Result: ir.Value{Name: "%1", Type: "User"},
+					Op:     "struct.new",
+					Fields: []ir.FieldArg{{
+						Name:  "name",
+						Value: ir.Value{Name: "0", Type: "i64"},
+					}},
+				}},
+				Terminator: ir.Terminator{
+					Op:    "return",
+					Value: ir.Value{Name: "void", Type: "void"},
+				},
+			}},
+		}},
+	}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject malformed struct.new")
+	}
+	if !strings.Contains(err.Error(), "unknown struct field `User.name`") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestEmitRejectsMismatchedStructFieldValue prevents invalid insertvalue IR.
+func TestEmitRejectsMismatchedStructFieldValue(t *testing.T) {
+	module := &ir.Module{
+		Structs: map[string]ir.Struct{
+			"User": {
+				Name: "User",
+				Fields: []ir.Field{{
+					Name: "age",
+					Type: "i64",
+				}},
+			},
+		},
+		Functions: []*ir.Function{{
+			Name:   "main",
+			Return: "void",
+			Blocks: []*ir.Block{{
+				Name: "entry",
+				Instrs: []*ir.Instr{{
+					Result: ir.Value{Name: "%1", Type: "User"},
+					Op:     "struct.new",
+					Fields: []ir.FieldArg{{
+						Name:  "age",
+						Value: ir.Value{Name: "true", Type: "bool"},
+					}},
+				}},
+				Terminator: ir.Terminator{
+					Op:    "return",
+					Value: ir.Value{Name: "void", Type: "void"},
+				},
+			}},
+		}},
+	}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject mismatched struct field value")
+	}
+	if !strings.Contains(err.Error(), "struct field `User.age` expects i64, got bool") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestEmitRejectsMismatchedFieldResult prevents invalid downstream value use.
+func TestEmitRejectsMismatchedFieldResult(t *testing.T) {
+	module := &ir.Module{
+		Structs: map[string]ir.Struct{
+			"User": {
+				Name: "User",
+				Fields: []ir.Field{{
+					Name: "age",
+					Type: "i64",
+				}},
+			},
+		},
+		Functions: []*ir.Function{{
+			Name:   "main",
+			Return: "void",
+			Blocks: []*ir.Block{{
+				Name: "entry",
+				Instrs: []*ir.Instr{{
+					Result: ir.Value{Name: "%1", Type: "bool"},
+					Op:     "field.age",
+					Args:   []ir.Value{{Name: "%user", Type: "User"}},
+				}},
+				Terminator: ir.Terminator{
+					Op:    "return",
+					Value: ir.Value{Name: "void", Type: "void"},
+				},
+			}},
+		}},
+	}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject mismatched field result")
+	}
+	if !strings.Contains(err.Error(), "field `User.age` returns i64, got bool") {
 		t.Fatalf("got %q", err.Error())
 	}
 }
@@ -143,7 +263,7 @@ const whileSource = `fn main() {
 const structSource = `struct User { age: i64, }
 fn main() {
     let user = User { age: 30 };
-    print(1);
+    print(user.age);
 }`
 
 const arenaSource = `struct User { age: i64, }
@@ -250,5 +370,20 @@ while.body.2:
   %kizu.7 = add i64 %kizu.2, 1
   br label %while.header.1
 while.end.3:
+  ret i32 0
+}`
+
+const structLLVM = `; Kizu LLVM IR
+%kizu.struct.User = type { i64 }
+
+declare void @kizu_print_string(ptr, i64)
+declare void @kizu_print_int(i64)
+declare void @kizu_print_bool(i1)
+
+define i32 @main() {
+entry:
+  %kizu.2 = insertvalue %kizu.struct.User zeroinitializer, i64 30, 0
+  %kizu.3 = extractvalue %kizu.struct.User %kizu.2, 0
+  call void @kizu_print_int(i64 %kizu.3)
   ret i32 0
 }`

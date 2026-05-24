@@ -10,8 +10,8 @@ func localName(name string) string {
 	return name
 }
 
-// llvmType maps Kizu IR types to LLVM IR types.
-func llvmType(typ string) string {
+// llvmPrimitiveType maps scalar and runtime-view Kizu IR types to LLVM IR types.
+func llvmPrimitiveType(typ string) string {
 	switch typ {
 	case "void":
 		return "void"
@@ -24,6 +24,14 @@ func llvmType(typ string) string {
 	default:
 		return "ptr"
 	}
+}
+
+// llvmType maps Kizu IR types to LLVM IR types.
+func (e *emitter) llvmType(typ string) string {
+	if _, ok := e.module.Structs[typ]; ok {
+		return llvmStructTypeName(typ)
+	}
+	return llvmPrimitiveType(typ)
 }
 
 // integerLLVMType maps Kizu integer spellings to LLVM integer widths.
@@ -84,6 +92,23 @@ func llvmBool(value string) string {
 		return "true"
 	}
 	return "false"
+}
+
+// llvmStructTypeName returns a stable named LLVM type for a declared struct.
+func llvmStructTypeName(name string) string {
+	var out strings.Builder
+	out.WriteString("%kizu.struct.")
+	for _, ch := range []byte(name) {
+		if ch == '_' ||
+			(ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') {
+			out.WriteByte(ch)
+			continue
+		}
+		out.WriteByte('_')
+	}
+	return out.String()
 }
 
 // escapeString emits a minimal LLVM string literal escape.

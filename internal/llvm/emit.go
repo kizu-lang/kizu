@@ -69,6 +69,7 @@ func (e *emitter) collectStrings() {
 // writeHeader writes globals and runtime declarations.
 func (e *emitter) writeHeader() {
 	e.out.WriteString("; Kizu LLVM IR\n")
+	e.writeStructTypes()
 	for _, lit := range e.sortedStringLiterals() {
 		name := e.strings[lit]
 		unquoted, _ := strconv.Unquote(lit)
@@ -83,6 +84,23 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_print_bool(i1)\n\n")
 }
 
+// writeStructTypes writes named LLVM aggregate definitions for declared structs.
+func (e *emitter) writeStructTypes() {
+	names := e.sortedStructNames()
+	for _, name := range names {
+		st := e.module.Structs[name]
+		fields := make([]string, 0, len(st.Fields))
+		for _, field := range st.Fields {
+			fields = append(fields, e.llvmType(field.Type))
+		}
+		fmt.Fprintf(&e.out, "%s = type { %s }\n",
+			llvmStructTypeName(name), strings.Join(fields, ", "))
+	}
+	if len(names) > 0 {
+		e.out.WriteByte('\n')
+	}
+}
+
 // sortedStringLiterals returns string constants in global-name order.
 func (e *emitter) sortedStringLiterals() []string {
 	literals := make([]string, 0, len(e.strings))
@@ -95,15 +113,25 @@ func (e *emitter) sortedStringLiterals() []string {
 	return literals
 }
 
+// sortedStructNames returns declared structs in stable order.
+func (e *emitter) sortedStructNames() []string {
+	names := make([]string, 0, len(e.module.Structs))
+	for name := range e.module.Structs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // writeFunction writes one LLVM function.
 func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, llvmType(param.Type)+" "+param.Name)
+		params = append(params, e.llvmType(param.Type)+" "+param.Name)
 		e.values[param.Name] = valueInfo{typ: param.Type, operand: param.Name}
 	}
-	returnType := llvmType(fn.Return)
+	returnType := e.llvmType(fn.Return)
 	e.mainReturnsInt = fn.Name == "main" && fn.Return == "void"
 	if e.mainReturnsInt {
 		returnType = "i32"
@@ -143,8 +171,10 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeCast(instr)
 	case instr.Op == "phi":
 		return e.writePhi(instr)
-	case instr.Op == "struct.new", strings.HasPrefix(instr.Op, "field."):
-		return e.unsupported(instr)
+	case instr.Op == "struct.new":
+		return e.writeStructNew(instr)
+	case strings.HasPrefix(instr.Op, "field."):
+		return e.writeField(instr)
 	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
 		instr.Op == "arena.get" || instr.Op == "arena.deinit":
 		return e.unsupported(instr)
@@ -208,9 +238,14 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	args := make([]string, 0, len(instr.Args))
 	for _, arg := range instr.Args {
 		value := e.value(arg)
-		args = append(args, llvmType(arg.Type)+" "+value.operand)
+		args = append(args, e.llvmType(arg.Type)+" "+value.operand)
 	}
-	call := fmt.Sprintf("call %s @%s(%s)", llvmType(instr.Result.Type), name, strings.Join(args, ", "))
+	call := fmt.Sprintf(
+		"call %s @%s(%s)",
+		e.llvmType(instr.Result.Type),
+		name,
+		strings.Join(args, ", "),
+	)
 	if instr.Result.Type == "void" {
 		fmt.Fprintf(&e.out, "  %s\n", call)
 		return nil
@@ -228,6 +263,87 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 	}
 	value := e.value(instr.Args[0])
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+	return nil
+}
+
+// writeStructNew lowers a checked struct literal to an LLVM aggregate value.
+func (e *emitter) writeStructNew(instr *ir.Instr) error {
+	st, ok := e.module.Structs[instr.Result.Type]
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct type `%s`", instr.Result.Type)
+	}
+	values := map[string]ir.Value{}
+	for _, field := range instr.Fields {
+		if _, ok := structFieldIndex(st, field.Name); !ok {
+			return fmt.Errorf("llvm error: unknown struct field `%s.%s`", st.Name, field.Name)
+		}
+		if _, exists := values[field.Name]; exists {
+			return fmt.Errorf("llvm error: duplicate struct field `%s.%s`", st.Name, field.Name)
+		}
+		values[field.Name] = field.Value
+	}
+	structType := e.llvmType(instr.Result.Type)
+	aggregate := "zeroinitializer"
+	resultName := localName(instr.Result.Name)
+	for index, field := range st.Fields {
+		value, ok := values[field.Name]
+		if !ok {
+			return fmt.Errorf("llvm error: missing struct field `%s.%s`", st.Name, field.Name)
+		}
+		if value.Type != field.Type {
+			return fmt.Errorf(
+				"llvm error: struct field `%s.%s` expects %s, got %s",
+				st.Name,
+				field.Name,
+				field.Type,
+				value.Type,
+			)
+		}
+		fieldValue := e.value(value)
+		name := fmt.Sprintf("%s.field%d", resultName, index)
+		if index == len(st.Fields)-1 {
+			name = resultName
+		}
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
+			name, structType, aggregate, e.llvmType(field.Type), fieldValue.operand, index)
+		aggregate = name
+	}
+	if len(st.Fields) == 0 {
+		resultName = "zeroinitializer"
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeField lowers a checked struct field read to an LLVM aggregate extraction.
+func (e *emitter) writeField(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: field read expects 1 arg")
+	}
+	receiver := instr.Args[0]
+	st, ok := e.module.Structs[receiver.Type]
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct type `%s`", receiver.Type)
+	}
+	fieldName := strings.TrimPrefix(instr.Op, "field.")
+	index, ok := structFieldIndex(st, fieldName)
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct field `%s.%s`", st.Name, fieldName)
+	}
+	if instr.Result.Type != st.Fields[index].Type {
+		return fmt.Errorf(
+			"llvm error: field `%s.%s` returns %s, got %s",
+			st.Name,
+			fieldName,
+			st.Fields[index].Type,
+			instr.Result.Type,
+		)
+	}
+	value := e.value(receiver)
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		name, e.llvmType(receiver.Type), value.operand, index)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 
@@ -260,7 +376,7 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 	}
 	name := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = phi %s %s\n",
-		name, llvmType(instr.Result.Type), strings.Join(parts, ", "))
+		name, e.llvmType(instr.Result.Type), strings.Join(parts, ", "))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
@@ -283,7 +399,7 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 			return nil
 		}
 		value := e.value(term.Value)
-		fmt.Fprintf(&e.out, "  ret %s %s\n", llvmType(term.Value.Type), value.operand)
+		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(term.Value.Type), value.operand)
 	case "jump":
 		fmt.Fprintf(&e.out, "  br label %%%s\n", term.Target)
 	case "branch":
@@ -294,6 +410,16 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 		return fmt.Errorf("llvm error: unsupported terminator `%s`", term.Op)
 	}
 	return nil
+}
+
+// structFieldIndex resolves a field offset in a declared struct.
+func structFieldIndex(st ir.Struct, name string) (int, bool) {
+	for index, field := range st.Fields {
+		if field.Name == name {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 // value resolves an SSA value to a LLVM operand.

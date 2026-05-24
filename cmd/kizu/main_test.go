@@ -1061,6 +1061,34 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildEmitLLVMStructCommandSmoke checks struct values reach LLVM lowering.
+func TestBuildEmitLLVMStructCommandSmoke(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "struct.kizu")
+	code := []byte(`struct User { age: i64, }
+fn main() {
+    let user = User { age: 30 };
+    print(user.age);
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"%kizu.struct.User = type { i64 }",
+		"insertvalue %kizu.struct.User zeroinitializer, i64 30, 0",
+		"extractvalue %kizu.struct.User",
+		"call void @kizu_print_int(i64",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
 // TestBuildEmitLLVMOptCommandSmoke checks LLVM build can use optimized IR.
 func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
@@ -1206,11 +1234,11 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 
 // TestBuildTargetNativeRejectsUnsupportedFeature checks native build fails before clang.
 func TestBuildTargetNativeRejectsUnsupportedFeature(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "struct.kizu")
+	source := filepath.Join(t.TempDir(), "arena.kizu")
 	code := []byte(`struct User { age: i64, }
-fn main() {
-    let user = User { age: 30 };
-    print(user.age);
+fn main(allocator: Allocator) {
+    let users = std::arena::Arena<User>(allocator);
+    print(1);
 }`)
 	if err := os.WriteFile(source, code, 0o644); err != nil {
 		t.Fatal(err)
@@ -1220,7 +1248,7 @@ fn main() {
 	if err == nil {
 		t.Fatalf("expected native build to fail\n%s", out)
 	}
-	want := "llvm error: `struct.new` is not supported by the LLVM backend yet"
+	want := "llvm error: `arena.new` is not supported by the LLVM backend yet"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
 	}
