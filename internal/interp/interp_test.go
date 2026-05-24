@@ -93,6 +93,24 @@ fn main() -> void {
 	}
 }
 
+// TestRunBorrowedSliceIntoValueParam checks implicit reads through local borrows.
+func TestRunBorrowedSliceIntoValueParam(t *testing.T) {
+	got := runSource(t, `fn bytes_len(bytes: []u8) -> i64 {
+    return std::mem::len(bytes);
+}
+fn forward(bytes: &[]u8) -> i64 {
+    return bytes_len(bytes);
+}
+fn main() -> void {
+    let bytes = "hello";
+    print(forward(bytes));
+}`)
+	want := "5\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunControlFlow checks if/else and while execution.
 func TestRunControlFlow(t *testing.T) {
 	got := runSource(t, `fn main() {

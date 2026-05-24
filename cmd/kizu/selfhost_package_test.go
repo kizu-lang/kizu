@@ -1073,8 +1073,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
 		"pub fn emit_run_executable_artifact(",
-		"fn render_run_return_llvm(",
-		"fn render_test_expect_ok_llvm(",
+		"fn lower_run_hosted_executable(",
+		"fn lower_test_hosted_executable(",
+		"fn render_hosted_llvm(",
 	},
 	"../../selfhost/src/backend/llvm.kizu": {
 		"pub fn emit_llvm_artifact(",
