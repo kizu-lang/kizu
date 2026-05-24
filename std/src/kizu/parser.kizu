@@ -150,7 +150,12 @@ fn parse_decl_with_visibility(
         Struct => return std::kizu::parser::parse_struct_decl(allocator, ast, text, token, public);,
         Enum => return std::kizu::parser::parse_enum_decl(allocator, ast, text, token, public);,
         Union => return std::kizu::parser::parse_union_decl(allocator, ast, text, token, public);,
-        Ident => return std::kizu::parser::parse_ident_top_level_decl(ast, text, token);,
+        Ident => return std::kizu::parser::parse_ident_top_level_decl(
+            allocator,
+            ast,
+            text,
+            token
+        );,
         Eof => return error("expected declaration");,
         Return => return error("expected declaration");,
         Defer => return error("expected declaration");,
@@ -206,17 +211,77 @@ fn parse_decl_with_visibility(
 }
 
 fn parse_ident_top_level_decl(
+    allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
     if try std::kizu::parser::is_token_text(text, token, "impl") {
-        return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
+        return std::kizu::parser::parse_impl_decl(allocator, ast, text, token);
     }
     if try std::kizu::parser::is_token_text(text, token, "contract") {
         return std::kizu::parser::parse_skipped_top_level_block(ast, text, token);
     }
     return error("expected declaration");
+}
+
+fn parse_impl_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    impl_token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let type_token = std::kizu::lexer::next_token(text, impl_token);
+    if !std::kizu::parser::is_ident_kind(type_token) {
+        return error("expected impl type name");
+    }
+    let type_node = ast.add_var(
+        std::kizu::ast::span(type_token.start, type_token.end),
+        std::kizu::ast::symbol_id(type_token.start)
+    );
+    let open = std::kizu::lexer::next_token(text, type_token);
+    if try std::kizu::parser::is_token_text(text, open, "for") {
+        return error("contract impl outside std parser subset");
+    }
+    if !std::kizu::parser::is_left_brace_token(open) {
+        return error("expected left brace");
+    }
+    var methods = std::array::Array<std::kizu::ast::NodeId>(allocator);
+    defer methods.deinit();
+    var current = std::kizu::lexer::next_token(text, open);
+    while !std::kizu::parser::is_right_brace_token(current) {
+        if std::kizu::parser::is_eof_token(current) {
+            return error("expected right brace");
+        }
+        if !std::mem::equal_bytes(text[current.start..current.end], "fn") {
+            return error("expected impl method");
+        }
+        let method = try std::kizu::parser::parse_fn_decl(
+            allocator,
+            ast,
+            text,
+            current,
+            false,
+            false,
+            ast.add_empty(current.start),
+            true
+        );
+        try methods.append(method.node);
+        current = method.next;
+    }
+    let child_start = ast.begin_children();
+    var index = 0;
+    while index < methods.len() {
+        try ast.add_child(try methods.get(index));
+        index = index + 1;
+    }
+    let range = ast.finish_children(child_start);
+    let root = ast.add_impl_decl(
+        std::kizu::ast::span(impl_token.start, current.end),
+        type_node,
+        range
+    );
+    return std::kizu::parser::parse_node(root, std::kizu::lexer::next_token(text, current));
 }
 
 fn parse_skipped_top_level_block(

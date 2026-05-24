@@ -105,6 +105,7 @@ fn dump_node(
         StructDecl(struct_decl) => try dump_struct_decl(source, ast, struct_decl);,
         EnumDecl(enum_decl) => try dump_enum_decl(source, ast, enum_decl);,
         UnionDecl(union_decl) => try dump_union_decl(source, ast, union_decl);,
+        ImplDecl(impl_decl) => try dump_impl_decl(source, ast, impl_decl);,
         UnionVariant(union_variant) => try dump_union_variant(source, ast, union_variant);,
         Match(match_node) => try dump_match(source, ast, match_node);,
         MatchArm(match_arm) => try dump_match_arm(source, ast, match_arm);,
@@ -216,6 +217,17 @@ fn dump_union_decl(
     try dump_node(source, ast, union_decl.name);
     try dump_range(source, ast, union_decl.type_params);
     try dump_range(source, ast, union_decl.variants);
+    return;
+}
+
+fn dump_impl_decl(
+    source: []u8,
+    ast: std::kizu::ast::Ast,
+    impl_decl: std::kizu::ast::ImplDeclNode
+) -> !void {
+    print("ImplDecl");
+    try dump_node(source, ast, impl_decl.type_name);
+    try dump_range(source, ast, impl_decl.methods);
     return;
 }
 
@@ -1092,7 +1104,7 @@ func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
 	}
 }
 
-// summarizeImplDeclSubset mirrors the std parser's current top-level impl skip.
+// summarizeImplDeclSubset summarizes inherent impl methods in the shared subset.
 func summarizeImplDeclSubset(decl *kizuast.ImplDecl) ([]string, string) {
 	if decl.ContractName != "" {
 		return nil, "non-selfhost contract declaration outside std parser subset"
@@ -1100,7 +1112,15 @@ func summarizeImplDeclSubset(decl *kizuast.ImplDecl) ([]string, string) {
 	if !isStdParserIdent(decl.TypeName) {
 		return nil, "identifier outside std parser subset"
 	}
-	return []string{"Empty"}, ""
+	lines := []string{"ImplDecl", "Var", decl.TypeName, "Range", strconv.Itoa(len(decl.Methods))}
+	for _, method := range decl.Methods {
+		next, reason := summarizeFunctionSubset(method)
+		if reason != "" {
+			return nil, reason
+		}
+		lines = append(lines, next...)
+	}
+	return lines, ""
 }
 
 // summarizeImportDeclSubset summarizes one explicit import declaration.
