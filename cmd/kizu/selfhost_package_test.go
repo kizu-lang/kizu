@@ -1102,6 +1102,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
 		"pub fn emit_run_executable_artifact(",
+		"fn ensure_hosted_artifact_dir(",
 		"fn lower_run_hosted_executable(",
 		"fn lower_test_hosted_executable(",
 		"fn render_hosted_llvm(",
@@ -1148,10 +1149,18 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_run_main_body_start_function(",
 		"fn append_cli_test_main_body_start_function(",
 	},
-	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
+	"../../selfhost/src/backend/cli_executable_ast_llvm.kizu": {
 		"pub fn append_functions(",
+		"fn append_cli_parse_run_executable_ast_function(",
+		"fn append_cli_parse_test_executable_ast_function(",
+		"fn append_cli_lower_run_executable_ast_function(",
+		"fn append_cli_lower_test_executable_ast_function(",
 		"fn append_cli_run_executable_function(",
 		"fn append_cli_test_executable_function(",
+	},
+	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
+		"pub fn append_functions(",
+		"cli_executable_ast_llvm::append_functions(",
 		"fn append_cli_run_print_payload_function(",
 		"fn append_cli_run_return_ok_function(",
 		"fn append_cli_test_expect_value_function(",
@@ -1210,6 +1219,16 @@ func assertSelfhostSplitFiles(t *testing.T) {
 			if !strings.Contains(content, fragment) {
 				t.Fatalf("%s missing split responsibility %q", filepath.Clean(path), fragment)
 			}
+		}
+	}
+	match := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu")
+	for _, fragment := range []string{
+		"fn append_cli_parse_run_executable_ast_function(",
+		"fn append_cli_lower_run_executable_ast_function(",
+		"fn append_cli_run_executable_function(",
+	} {
+		if strings.Contains(match, fragment) {
+			t.Fatalf("executable match module still owns AST/lowering renderer %q", fragment)
 		}
 	}
 }
