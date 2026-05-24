@@ -29,16 +29,7 @@ pub fn file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
         validation_ok
     );
     defer parsed.deinit();
-    if !(try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
-        return std::process::exit_code(1);
-    }
-
-    let resolved = try resolver::resolve_sources(allocator, files);
-    let typed = try types::check_sources(allocator, files, resolved);
-    let checked = try ownership::check_package(allocator, files, typed);
-
-    if checked.diagnostics != 0 {
-        try output::error_line(allocator, io, "error: check failed");
+    if !(try checked_ast_node(allocator, io, files, file, parsed.ast, parsed.root)) {
         return std::process::exit_code(1);
     }
     try output::line(allocator, io, "check: ok");
@@ -340,6 +331,35 @@ pub fn fast_diagnostics_ast_node(
         &var facts,
         false
     );
+}
+
+pub fn checked_ast_node(
+    allocator: Allocator,
+    io: Io,
+    files: &std::array::Array<source::SourceFile>,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !bool {
+    if !(try fast_diagnostics_ast_node(allocator, io, files, file, ast, root)) {
+        return false;
+    }
+    return try full_static_diagnostics_loaded(allocator, io, files);
+}
+
+fn full_static_diagnostics_loaded(
+    allocator: Allocator,
+    io: Io,
+    files: &std::array::Array<source::SourceFile>
+) -> !bool {
+    let resolved = try resolver::resolve_sources(allocator, files);
+    let typed = try types::check_sources(allocator, files, resolved);
+    let checked = try ownership::check_package(allocator, files, typed);
+    if checked.diagnostics != 0 {
+        try output::error_line(allocator, io, "error: check failed");
+        return false;
+    }
+    return true;
 }
 
 fn fast_diagnostics_ast_node_with_context(

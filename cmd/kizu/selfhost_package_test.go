@@ -733,6 +733,9 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 	if !strings.Contains(check, "pub fn fast_diagnostics_ast_node(") {
 		t.Fatal("check module does not expose parsed-AST fast diagnostics")
 	}
+	if !strings.Contains(check, "pub fn checked_ast_node(") {
+		t.Fatal("check module does not expose parsed-AST full static diagnostics")
+	}
 	for _, fragment := range []string{
 		"execute::run_file_cli(",
 		"execute::test_file_cli(",
@@ -753,7 +756,7 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 			"let file = try files.at(0)",
 			"let parsed = try parser::parse_validated_file(",
 			"validation_ok",
-			"check::fast_diagnostics_ast_node(",
+			"check::checked_ast_node(",
 		}
 		for _, fragment := range required {
 			if !strings.Contains(body, fragment) {
@@ -1117,6 +1120,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn file_cli(",
 		"pub fn fast_diagnostics(",
 		"pub fn fast_diagnostics_ast_node(",
+		"pub fn checked_ast_node(",
 	},
 	"../../selfhost/src/cli/execute.kizu": {
 		"pub fn run_file_cli(",
