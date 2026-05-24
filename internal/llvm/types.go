@@ -52,6 +52,13 @@ func (e *emitter) llvmType(typ string) string {
 	return llvmPrimitiveType(typ)
 }
 
+// usesIndirectStructParamABI reports whether module-local functions pass a
+// value through an explicit byval pointer instead of target aggregate lowering.
+func (e *emitter) usesIndirectStructParamABI(typ string) bool {
+	_, ok := e.module.Structs[typ]
+	return ok
+}
+
 // derefLLVMType returns T for borrowed Kizu types &T and &var T.
 func derefLLVMType(typ string) string {
 	if strings.HasPrefix(typ, "&var ") {

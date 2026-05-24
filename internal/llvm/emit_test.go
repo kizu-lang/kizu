@@ -260,6 +260,102 @@ func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
 	}
 }
 
+// TestEmitStructParamsUseByValPointerABI keeps module-local struct arguments
+// out of target-dependent aggregate register/stack lowering.
+func TestEmitStructParamsUseByValPointerABI(t *testing.T) {
+	got := emitTestModule(t, structParamABIModule())
+	for _, want := range []string{
+		"define i64 @read(ptr byval(%kizu.struct.Big) %kizu.big.addr, " +
+			"ptr byval(%kizu.struct.Id) %kizu.id.addr)",
+		"%kizu.big = load %kizu.struct.Big, ptr %kizu.big.addr",
+		"%kizu.id = load %kizu.struct.Id, ptr %kizu.id.addr",
+		"%kizu.arg.0.",
+		"store %kizu.struct.Big %kizu.big, ptr %kizu.arg.0.",
+		"call i64 @read(ptr byval(%kizu.struct.Big) %kizu.arg.0.",
+		"ptr byval(%kizu.struct.Id) %kizu.arg.1.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
+// structParamABIModule returns IR with module-local struct parameters and a call.
+func structParamABIModule() *ir.Module {
+	return &ir.Module{
+		Structs:   structParamABIStructs(),
+		Functions: []*ir.Function{structParamABIReadFunction(), structParamABIMainFunction()},
+	}
+}
+
+// structParamABIStructs returns the structs used by structParamABIModule.
+func structParamABIStructs() map[string]ir.Struct {
+	return map[string]ir.Struct{
+		"Big": {
+			Name: "Big",
+			Fields: []ir.Field{
+				{Name: "a", Type: "i64"},
+				{Name: "b", Type: "i64"},
+				{Name: "c", Type: "i64"},
+			},
+		},
+		"Id": {
+			Name:   "Id",
+			Fields: []ir.Field{{Name: "raw", Type: "i64"}},
+		},
+	}
+}
+
+// structParamABIReadFunction returns the callee that extracts a struct field.
+func structParamABIReadFunction() *ir.Function {
+	return &ir.Function{
+		Name:   "read",
+		Params: structParamABIParams(),
+		Return: "i64",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%raw", Type: "i64"},
+				Op:     "field.raw",
+				Args:   []ir.Value{{Name: "%id", Type: "Id"}},
+			}},
+			Terminator: ir.Terminator{
+				Op:    "return",
+				Value: ir.Value{Name: "%raw", Type: "i64"},
+			},
+		}},
+	}
+}
+
+// structParamABIMainFunction returns the caller that forwards struct params.
+func structParamABIMainFunction() *ir.Function {
+	return &ir.Function{
+		Name:   "main",
+		Params: structParamABIParams(),
+		Return: "i64",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%value", Type: "i64"},
+				Op:     "call.read",
+				Args:   structParamABIParams(),
+			}},
+			Terminator: ir.Terminator{
+				Op:    "return",
+				Value: ir.Value{Name: "%value", Type: "i64"},
+			},
+		}},
+	}
+}
+
+// structParamABIParams returns one Big and one Id parameter list.
+func structParamABIParams() []ir.Value {
+	return []ir.Value{
+		{Name: "%big", Type: "Big"},
+		{Name: "%id", Type: "Id"},
+	}
+}
+
 // TestEmitTrySuccessLabelFeedsFollowingPhi keeps phi predecessors aligned when
 // an error.try pseudo-branch feeds a later loop/header block.
 func TestEmitTrySuccessLabelFeedsFollowingPhi(t *testing.T) {

@@ -24,15 +24,18 @@ func Emit(module *ir.Module) (string, error) {
 }
 
 type emitter struct {
-	module         *ir.Module
-	out            bytes.Buffer
-	strings        map[string]string
-	values         map[string]valueInfo
-	currentReturn  string
-	mainReturnsInt bool
-	nextLabel      int
-	currentBlock   string
-	blockExitLabel map[string]string
+	module          *ir.Module
+	out             bytes.Buffer
+	strings         map[string]string
+	values          map[string]valueInfo
+	functionNames   map[string]bool
+	currentReturn   string
+	mainReturnsInt  bool
+	nextLabel       int
+	currentBlock    string
+	blockExitLabel  map[string]string
+	entryParamLoads []string
+	wroteParamLoads bool
 }
 
 type valueInfo struct {
@@ -42,6 +45,7 @@ type valueInfo struct {
 
 // emit writes declarations and function definitions.
 func (e *emitter) emit() error {
+	e.collectFunctionNames()
 	e.collectStrings()
 	if err := e.validateModuleTypes(); err != nil {
 		return err
@@ -53,6 +57,14 @@ func (e *emitter) emit() error {
 		}
 	}
 	return nil
+}
+
+// collectFunctionNames records module-local functions before call emission.
+func (e *emitter) collectFunctionNames() {
+	e.functionNames = map[string]bool{}
+	for _, fn := range e.module.Functions {
+		e.functionNames[fn.Name] = true
+	}
 }
 
 // collectStrings assigns stable global names to string constants.
@@ -420,20 +432,23 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.nextLabel = 0
 	e.currentBlock = ""
 	e.blockExitLabel = map[string]string{}
+	e.entryParamLoads = nil
+	e.wroteParamLoads = false
 	e.precomputeBlockExitLabels(fn)
-	params := make([]string, 0, len(fn.Params))
-	for _, param := range fn.Params {
-		params = append(params, e.llvmType(param.Type)+" "+localName(param.Name))
-		e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
-	}
-	e.registerFunctionConstants(fn)
 	returnType := e.llvmType(fn.Return)
 	_, returnsErrorUnion := errorUnionSuccessType(fn.Return)
 	e.mainReturnsInt = fn.Name == "main" && (fn.Return == "void" || returnsErrorUnion)
+	params := make([]string, 0, len(fn.Params))
 	if e.mainReturnsInt {
 		returnType = "i32"
 		params = []string{"i32 %kizu.argc", "ptr %kizu.argv"}
+	} else {
+		for _, param := range fn.Params {
+			params = append(params, e.functionParamABI(param))
+			e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
+		}
 	}
+	e.registerFunctionConstants(fn)
 	fmt.Fprintf(&e.out,
 		"define %s @%s(%s) {\n",
 		returnType,
@@ -450,7 +465,24 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.mainReturnsInt = false
 	e.currentReturn = ""
 	e.currentBlock = ""
+	e.entryParamLoads = nil
+	e.wroteParamLoads = false
 	return nil
+}
+
+// functionParamABI returns the LLVM ABI parameter spelling for one Kizu value.
+func (e *emitter) functionParamABI(param ir.Value) string {
+	paramType := e.llvmType(param.Type)
+	paramName := localName(param.Name)
+	if !e.usesIndirectStructParamABI(param.Type) {
+		return paramType + " " + paramName
+	}
+	addrName := paramName + ".addr"
+	e.entryParamLoads = append(
+		e.entryParamLoads,
+		fmt.Sprintf("  %s = load %s, ptr %s\n", paramName, paramType, addrName),
+	)
+	return fmt.Sprintf("ptr byval(%s) %s", paramType, addrName)
 }
 
 // registerFunctionConstants makes scalar constants available to phi nodes even
@@ -503,6 +535,12 @@ func validateErrorUnionType(typ string) error {
 func (e *emitter) writeBlock(block *ir.Block) error {
 	fmt.Fprintf(&e.out, "%s:\n", block.Name)
 	e.currentBlock = block.Name
+	if !e.wroteParamLoads {
+		for _, load := range e.entryParamLoads {
+			e.out.WriteString(load)
+		}
+		e.wroteParamLoads = true
+	}
 	if e.mainReturnsInt && block.Name == "entry" {
 		e.out.WriteString("  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)\n")
 	}
@@ -693,6 +731,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if e.usesHostedRuntimeABI(name, instr) {
 		return e.writeHostedRuntimeCall(name, instr)
 	}
+	if e.functionNames[name] {
+		return e.writeInternalCall(name, instr)
+	}
 	args := make([]string, 0, len(instr.Args))
 	for _, arg := range instr.Args {
 		value := e.value(arg)
@@ -712,6 +753,46 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// writeInternalCall adapts module-local struct values to Kizu's explicit
+// byval pointer ABI, avoiding target-dependent aggregate argument lowering.
+func (e *emitter) writeInternalCall(name string, instr *ir.Instr) error {
+	args := make([]string, 0, len(instr.Args))
+	for index, arg := range instr.Args {
+		callArg, err := e.internalCallArg(arg, index)
+		if err != nil {
+			return err
+		}
+		args = append(args, callArg)
+	}
+	call := fmt.Sprintf(
+		"call %s @%s(%s)",
+		e.llvmType(instr.Result.Type),
+		llvmFunctionName(name),
+		strings.Join(args, ", "),
+	)
+	if instr.Result.Type == "void" {
+		fmt.Fprintf(&e.out, "  %s\n", call)
+		return nil
+	}
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// internalCallArg returns one module-local call argument in functionParamABI form.
+func (e *emitter) internalCallArg(arg ir.Value, index int) (string, error) {
+	value := e.value(arg)
+	argType := e.llvmType(arg.Type)
+	if !e.usesIndirectStructParamABI(arg.Type) {
+		return argType + " " + value.operand, nil
+	}
+	slotName := "%" + e.nextSyntheticValue(fmt.Sprintf("arg.%d", index))
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", slotName, argType)
+	fmt.Fprintf(&e.out, "  store %s %s, ptr %s\n", argType, value.operand, slotName)
+	return fmt.Sprintf("ptr byval(%s) %s", argType, slotName), nil
 }
 
 // usesHostedRuntimeABI reports whether a std hosted runtime call uses the
