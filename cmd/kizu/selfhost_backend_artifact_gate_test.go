@@ -388,7 +388,18 @@ func forbiddenLLVMFragments() []string {
 // countLLVMMetadataValidationFailures validates artifact metadata for stage comparison.
 func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 	t.Helper()
-	requiredMeta := []string{
+	for _, fragment := range requiredLLVMMetadataFragments() {
+		if !strings.Contains(metaContent, fragment) {
+			t.Errorf("LLVM artifact metadata missing %q:\n%s", fragment, metaContent)
+			return 1
+		}
+	}
+	return countForbiddenCLIMetadataFailures(t, metaContent)
+}
+
+// requiredLLVMMetadataFragments returns mandatory backend artifact metadata.
+func requiredLLVMMetadataFragments() []string {
+	return []string{
 		"kizu-llvm-artifact-v0\n",
 		"abi selfhost-abi-v0\n",
 		"ir target/selfhost/selfhost.ir\n",
@@ -409,9 +420,17 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"backend-input checked-entry selfhost::cli_main\n",
 		"backend-input hosted-entry @kizu_selfhost__cli_main\n",
 		"backend-input hosted-smoke @kizu_selfhost__smoke\n",
-		"backend-input executable-ast bounded-main-body\n",
-		"backend-input executable-lowering executable-result-bounded\n",
-		"backend-input executable-main-scan leading-functions\n",
+		"backend-input executable-ast executable-ast-rules-v1\n",
+		"backend-input executable-ast-rule MainScan LeadingFunctions\n",
+		"backend-input executable-ast-rule RunPrintCall MainPrintString\n",
+		"backend-input executable-ast-rule RunReturnVoid MainReturnVoid\n",
+		"backend-input executable-ast-rule TestExpectTrue MainExpectTrue\n",
+		"backend-input executable-ast-rule TestExpectFalse MainExpectFalse\n",
+		"backend-input executable-lowering executable-ir-rules-v1\n",
+		"backend-input executable-lowering-rule RunPrintCall RunPrintString\n",
+		"backend-input executable-lowering-rule RunReturnVoid RunReturnVoid\n",
+		"backend-input executable-lowering-rule TestExpectTrue TestExpectOk\n",
+		"backend-input executable-lowering-rule TestExpectFalse TestExpectFailure\n",
 		"entry @kizu_selfhost__cli_main\n",
 		"cli-command check selfhost\n",
 		"cli-command stage selfhost\n",
@@ -450,13 +469,6 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"unsupported-policy blocker\n",
 		"deferred tagged-union-payload issue-495\n",
 	}
-	for _, fragment := range requiredMeta {
-		if !strings.Contains(metaContent, fragment) {
-			t.Errorf("LLVM artifact metadata missing %q:\n%s", fragment, metaContent)
-			return 1
-		}
-	}
-	return countForbiddenCLIMetadataFailures(t, metaContent)
 }
 
 // countForbiddenCLIMetadataFailures rejects stale fixed-path CLI metadata.

@@ -1163,6 +1163,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"fn append_cli_parse_run_executable_ast_function(",
 		"fn append_cli_parse_test_executable_ast_function(",
+		"fn append_cli_lower_executable_ast_functions(",
 		"fn append_cli_lower_run_executable_ast_function(",
 		"fn append_cli_lower_test_executable_ast_function(",
 		"fn append_cli_run_executable_function(",
@@ -1170,10 +1171,15 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
 		"pub fn append_functions(",
+		"fn require_executable_ast_rules(",
 		"cli_executable_ast_llvm::append_functions(",
 		"fn append_cli_run_print_payload_function(",
 		"fn append_cli_run_return_ok_function(",
 		"fn append_cli_test_expect_value_function(",
+	},
+	"../../selfhost/src/backend/ir_contract.kizu": {
+		"pub fn require_fact(",
+		"pub fn contains(",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1239,6 +1245,69 @@ func assertSelfhostSplitFiles(t *testing.T) {
 	} {
 		if strings.Contains(match, fragment) {
 			t.Fatalf("executable match module still owns AST/lowering renderer %q", fragment)
+		}
+	}
+}
+
+// TestSelfhostHostedExecutableRulesUseIRContract keeps hosted executable
+// recognition and lowering tied to the checked package IR contract.
+func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
+	ir := readSelfhostFile(t, "../../selfhost/src/ir.kizu")
+	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
+	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	match := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu")
+	ast := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu")
+	astRules := []string{
+		"hosted-executable-ast executable-ast-rules-v1",
+		"executable-ast-rule MainScan LeadingFunctions",
+		"executable-ast-rule RunPrintCall MainPrintString",
+		"executable-ast-rule RunReturnVoid MainReturnVoid",
+		"executable-ast-rule TestExpectTrue MainExpectTrue",
+		"executable-ast-rule TestExpectFalse MainExpectFalse",
+	}
+	loweringRules := []string{
+		"executable-lowering-rule RunPrintCall RunPrintString",
+		"executable-lowering-rule RunReturnVoid RunReturnVoid",
+		"executable-lowering-rule TestExpectTrue TestExpectOk",
+		"executable-lowering-rule TestExpectFalse TestExpectFailure",
+	}
+	for _, rule := range append(astRules, loweringRules...) {
+		if !strings.Contains(ir, rule) {
+			t.Fatalf("IR artifact does not publish executable rule %q", rule)
+		}
+		if !strings.Contains(llvm, `ir_contract::require_fact(bytes, "`+rule+`")`) {
+			t.Fatalf("backend IR validation does not require %q", rule)
+		}
+	}
+	for _, rule := range astRules {
+		if !strings.Contains(match, `"`+rule+`"`) {
+			t.Fatalf("hosted executable matcher renderer does not consume %q", rule)
+		}
+	}
+	for _, rule := range loweringRules {
+		if !strings.Contains(ast, `"`+rule+`"`) {
+			t.Fatalf("hosted executable lowerer renderer does not consume %q", rule)
+		}
+	}
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: "matcher", content: match},
+		{name: "lowerer", content: ast},
+	} {
+		if !strings.Contains(file.content, `ir_contract::require_fact(`) {
+			t.Fatalf("hosted executable %s renderer does not require IR facts", file.name)
+		}
+	}
+	for _, fragment := range []string{
+		"try cli_llvm::append_functions(out, ir_bytes)",
+		"try cli_executable_match_llvm::append_functions(out, ir_bytes)",
+		"try cli_executable_ast_llvm::append_functions(out, ir_bytes)",
+	} {
+		combined := llvm + cli + match
+		if !strings.Contains(combined, fragment) {
+			t.Fatalf("IR bytes are not threaded to hosted executable lowerer with %q", fragment)
 		}
 	}
 }
