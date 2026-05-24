@@ -22,6 +22,9 @@ func llvmPrimitiveType(typ string) string {
 	case "[]u8":
 		return "%kizu.slice.u8"
 	default:
+		if isArenaHandleType(typ) {
+			return "i64"
+		}
 		return "ptr"
 	}
 }
@@ -31,10 +34,33 @@ func (e *emitter) llvmType(typ string) string {
 	if _, ok := errorUnionSuccessType(typ); ok {
 		return llvmErrorUnionTypeName(typ)
 	}
+	if strings.HasPrefix(typ, "std::arena::Handle<") {
+		return "i64"
+	}
+	if strings.HasPrefix(typ, "std::arena::Arena<") {
+		return "ptr"
+	}
 	if _, ok := e.module.Structs[typ]; ok {
 		return llvmStructTypeName(typ)
 	}
+	if _, ok := e.module.Enums[typ]; ok {
+		return "i64"
+	}
+	if _, ok := e.module.Unions[typ]; ok {
+		return llvmUnionTypeName(typ)
+	}
 	return llvmPrimitiveType(typ)
+}
+
+// derefLLVMType returns T for borrowed Kizu types &T and &var T.
+func derefLLVMType(typ string) string {
+	if strings.HasPrefix(typ, "&var ") {
+		return strings.TrimPrefix(typ, "&var ")
+	}
+	if strings.HasPrefix(typ, "&") {
+		return strings.TrimPrefix(typ, "&")
+	}
+	return typ
 }
 
 // integerLLVMType maps Kizu integer spellings to LLVM integer widths.
@@ -49,6 +75,27 @@ func integerLLVMType(typ string) string {
 	default:
 		return "i64"
 	}
+}
+
+// integerBitWidth reports the LLVM integer width for scalar Kizu integers.
+func integerBitWidth(typ string) (int, bool) {
+	switch typ {
+	case "i8", "u8":
+		return 8, true
+	case "i16", "u16":
+		return 16, true
+	case "i32", "u32":
+		return 32, true
+	case "i64", "u64", "usize", "isize":
+		return 64, true
+	default:
+		return 0, false
+	}
+}
+
+// isUnsignedIntegerType reports whether comparisons and widening should be unsigned.
+func isUnsignedIntegerType(typ string) bool {
+	return strings.HasPrefix(typ, "u") || typ == "usize"
 }
 
 // llvmBinaryOp maps a Kizu binary operator to an LLVM integer instruction.
@@ -89,6 +136,25 @@ func llvmPredicate(op string) string {
 	}
 }
 
+// llvmTypedPredicate maps a Kizu comparison to a predicate for one integer type.
+func llvmTypedPredicate(op string, typ string) string {
+	if op == "==" || op == "!=" || !isUnsignedIntegerType(typ) {
+		return llvmPredicate(op)
+	}
+	switch op {
+	case "<":
+		return "ult"
+	case "<=":
+		return "ule"
+	case ">":
+		return "ugt"
+	case ">=":
+		return "uge"
+	default:
+		return llvmPredicate(op)
+	}
+}
+
 // llvmBool maps Kizu bool constants to LLVM constants.
 func llvmBool(value string) string {
 	if value == "true" {
@@ -119,6 +185,21 @@ func llvmErrorUnionTypeName(name string) string {
 	}
 	out.WriteString(llvmNamePart(success))
 	return out.String()
+}
+
+// llvmUnionTypeName returns a stable named LLVM type for a tagged union.
+func llvmUnionTypeName(name string) string {
+	return "%kizu.union." + llvmNamePart(name)
+}
+
+// llvmFunctionName returns a stable LLVM symbol for a Kizu function name.
+func llvmFunctionName(name string) string {
+	return llvmNamePart(name)
+}
+
+// isArenaHandleType reports whether typ is std::arena::Handle<T>.
+func isArenaHandleType(typ string) bool {
+	return strings.HasPrefix(typ, "std::arena::Handle<") && strings.HasSuffix(typ, ">")
 }
 
 // llvmNamePart keeps generated LLVM type names deterministic and readable.
@@ -160,15 +241,7 @@ func errorUnionParts(typ string) (string, string, bool) {
 
 // isLowerableErrorUnionSuccess reports whether the current backend can carry T.
 func isLowerableErrorUnionSuccess(typ string) bool {
-	switch typ {
-	case "void", "bool", "[]u8",
-		"i8", "i16", "i32", "i64",
-		"u8", "u16", "u32", "u64",
-		"usize", "isize":
-		return true
-	default:
-		return false
-	}
+	return typ != ""
 }
 
 // escapeString emits a minimal LLVM string literal escape.

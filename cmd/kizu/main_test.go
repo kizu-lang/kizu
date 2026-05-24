@@ -1061,6 +1061,54 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	}
 }
 
+// TestBuildEmitLLVMPackageCommandSmoke checks package graphs can reach LLVM lowering.
+func TestBuildEmitLLVMPackageCommandSmoke(t *testing.T) {
+	root := t.TempDir()
+	manifest := []byte(
+		"[package]\nname = \"app\"\n\n[modules]\nroot = \"src/main.kizu\"\npaths = [\"src\"]\n",
+	)
+	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := filepath.Join(root, "src")
+	if err := os.Mkdir(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mainSource := []byte(`import app::math;
+
+pub fn main() -> void {
+    print(math::answer());
+    return;
+}
+`)
+	if err := os.WriteFile(filepath.Join(srcDir, "main.kizu"), mainSource, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	helperSource := []byte(`pub fn answer() -> i64 {
+    return 42;
+}
+`)
+	if err := os.WriteFile(filepath.Join(srcDir, "math.kizu"), helperSource, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", root)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"define i64 @app__math__answer()",
+		"define void @app__main()",
+		"call i64 @app__math__answer()",
+		"call void @kizu_print_int(i64",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
 // TestBuildEmitLLVMStructCommandSmoke checks struct values reach LLVM lowering.
 func TestBuildEmitLLVMStructCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "struct.kizu")
@@ -1109,10 +1157,10 @@ fn main() -> !void {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
-		"%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }",
+		"%kizu.error.i64 = type { i8, i64, %kizu.slice.u8 }",
 		"define %kizu.error.i64 @read()",
-		"insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0",
-		"br i1 %kizu.2.ok, label %try.ok.1, label %try.err.2",
+		"insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0",
+		"br i1 %kizu.2.ok.bool, label %try.ok.1, label %try.err.2",
 		"try.err.2:\n  ret i32 1",
 		"call void @kizu_print_int(i64 %kizu.2)",
 		"ret i32 %kizu.main.code",
@@ -1150,8 +1198,8 @@ fn main() -> !void {
 	}
 	for _, want := range []string{
 		"%kizu.slice.u8 = type { ptr, i64 }",
-		"%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }",
-		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %value)",
+		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, %kizu.slice.u8 }",
+		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.value)",
 		"define %kizu.error.slice.u8 @read()",
 		"call %kizu.slice.u8 @identity(%kizu.slice.u8",
 		"insertvalue %kizu.error.slice.u8",
@@ -1378,25 +1426,40 @@ func assertNativeMetadata(t *testing.T, path string, output string) {
 	}
 }
 
-// TestBuildTargetNativeRejectsUnsupportedFeature checks native build fails before clang.
-func TestBuildTargetNativeRejectsUnsupportedFeature(t *testing.T) {
+// TestBuildTargetNativeArenaCommandSmoke checks native builds can lower arena storage.
+func TestBuildTargetNativeArenaCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
 	source := filepath.Join(t.TempDir(), "arena.kizu")
 	code := []byte(`struct User { age: i64, }
-fn main(allocator: Allocator) {
+fn main() {
+    let allocator = std::mem::page_allocator();
     let users = std::arena::Arena<User>(allocator);
-    print(1);
+    let alice = users.add(User { age: 41 });
+    print(users.get(alice).age);
+    users.deinit();
 }`)
 	if err := os.WriteFile(source, code, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", ".", "build", "--target", "native", source)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected native build to fail\n%s", out)
+	output := filepath.Join(t.TempDir(), "arena")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
 	}
-	want := "llvm error: `arena.new` is not supported by the LLVM backend yet"
-	if !strings.Contains(string(out), want) {
-		t.Fatalf("got %q, want substring %q", out, want)
+	run := exec.Command(output)
+	runOut, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, runOut)
+	}
+	if got := string(runOut); got != "41\n" {
+		t.Fatalf("got %q", got)
 	}
 }
 

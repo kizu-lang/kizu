@@ -431,6 +431,19 @@ func buildFile(args []string) error {
 
 // emitLLVMFile lowers a checked source file to LLVM IR text.
 func emitLLVMFile(path string, opt bool) error {
+	if isPackageRoot(path) {
+		module, err := lowerPackage(path, opt)
+		if err != nil {
+			return err
+		}
+		output, err := llvm.Emit(module)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Println(output)
+		return nil
+	}
+
 	cache, err := buildcache.New()
 	if err != nil {
 		return err
@@ -491,7 +504,12 @@ func emitNativeFile(args []string) error {
 	if err != nil {
 		return err
 	}
-	module, err := lowerFile(options.Path, options.Opt)
+	var module *ir.Module
+	if isPackageRoot(options.Path) {
+		module, err = lowerPackage(options.Path, options.Opt)
+	} else {
+		module, err = lowerFile(options.Path, options.Opt)
+	}
 	if err != nil {
 		return err
 	}
@@ -706,6 +724,61 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 		ir.Optimize(module)
 	}
 	return module, nil
+}
+
+// lowerPackage resolves a package graph and lowers its qualified program to typed SSA IR.
+func lowerPackage(path string, opt bool) (*ir.Module, error) {
+	graph, program, err := loadPackageProgram(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkProgram(program); err != nil {
+		return nil, err
+	}
+	module, err := ir.Lower(program)
+	if err != nil {
+		return nil, err
+	}
+	if opt {
+		ir.Optimize(module)
+	}
+	addPackageMain(module, graph.Root+"::cli_main")
+	return module, nil
+}
+
+// addPackageMain exposes a package CLI entry as the native executable entrypoint.
+func addPackageMain(module *ir.Module, entry string) {
+	if moduleFunction(module, "main") != nil {
+		return
+	}
+	entryFn := moduleFunction(module, entry)
+	if entryFn == nil || len(entryFn.Params) != 0 || entryFn.Return != "!i64" {
+		return
+	}
+	result := ir.Value{Name: "%1", Type: entryFn.Return}
+	mainFn := &ir.Function{
+		Name:   "main",
+		Return: entryFn.Return,
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: result,
+				Op:     "call." + entry,
+			}},
+			Terminator: ir.Terminator{Op: "return", Value: result},
+		}},
+	}
+	module.Functions = append(module.Functions, mainFn)
+}
+
+// moduleFunction returns the lowered function with the requested symbol.
+func moduleFunction(module *ir.Module, name string) *ir.Function {
+	for _, fn := range module.Functions {
+		if fn.Name == name {
+			return fn
+		}
+	}
+	return nil
 }
 
 // checkProgram runs static checks required before compilation or execution.
@@ -1176,11 +1249,19 @@ func qualifyStdTypeName(module string, typ string) string {
 		}
 		return base + "<" + strings.Join(args, ", ") + ">"
 	}
-	if module == "string" && typ == "String" {
-		return "std::string::String"
+	if qualified, ok := qualifyStdSimpleType(module, typ); ok {
+		return qualified
 	}
-	if module == "fs" && typ == "DirEntry" {
-		return "std::fs::DirEntry"
+	return typ
+}
+
+// qualifyStdSimpleType maps one non-generic std-local type name.
+func qualifyStdSimpleType(module string, typ string) (string, bool) {
+	if module == "string" && typ == "String" {
+		return "std::string::String", true
+	}
+	if module == "fs" && (typ == "DirEntry" || typ == "Metadata") {
+		return "std::fs::" + typ, true
 	}
 	if module == "kizu::ast" {
 		switch typ {
@@ -1196,22 +1277,22 @@ func qualifyStdTypeName(module string, typ string) string {
 			"ImplDeclNode", "UnionVariantNode", "MatchNode", "MatchArmNode", "UnsafeNode", "ComptimeIfNode",
 			"FnDeclNode",
 			"ParseResult":
-			return "std::kizu::ast::" + typ
+			return "std::kizu::ast::" + typ, true
 		}
 	}
 	if module == "kizu::lexer" {
 		switch typ {
 		case "TokenKind", "Token", "Position":
-			return "std::kizu::lexer::" + typ
+			return "std::kizu::lexer::" + typ, true
 		}
 	}
 	if module == "kizu::diagnostic" {
 		switch typ {
 		case "FileSpan", "RelatedSpan", "Diagnostic":
-			return "std::kizu::diagnostic::" + typ
+			return "std::kizu::diagnostic::" + typ, true
 		}
 	}
-	return typ
+	return "", false
 }
 
 // splitStdGenericType extracts base and raw arguments from a simple type string.

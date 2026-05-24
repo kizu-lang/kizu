@@ -43,24 +43,24 @@ func TestEmitSnapshots(t *testing.T) {
 
 // TestEmitRejectsUnsupportedLoweredInstructions avoids invalid placeholder IR.
 func TestEmitRejectsUnsupportedLoweredInstructions(t *testing.T) {
-	cases := []struct {
-		name   string
-		source string
-		want   string
-	}{
-		{name: "arena", source: arenaSource, want: "`arena.new` is not supported"},
+	module := &ir.Module{Functions: []*ir.Function{{
+		Name:   "main",
+		Return: "void",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{{
+				Result: ir.Value{Name: "%1", Type: "i64"},
+				Op:     "unknown.runtime",
+			}},
+			Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
+		}},
+	}}}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject unsupported instruction")
 	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			module := lowerSource(t, tt.source)
-			_, err := Emit(module)
-			if err == nil {
-				t.Fatal("expected emit to reject unsupported instruction")
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("got %q, want substring %q", err.Error(), tt.want)
-			}
-		})
+	if !strings.Contains(err.Error(), "unsupported instruction `unknown.runtime`") {
+		t.Fatalf("got %q", err.Error())
 	}
 }
 
@@ -208,6 +208,58 @@ func TestEmitRejectsMismatchedFieldResult(t *testing.T) {
 	}
 }
 
+// TestEmitHostedRuntimeErrorCallUsesOutPointerABI keeps hosted C runtime
+// recoverable results off the platform aggregate return ABI.
+func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
+	module := &ir.Module{Functions: []*ir.Function{{
+		Name:   "main",
+		Return: "!void",
+		Blocks: []*ir.Block{{
+			Name: "entry",
+			Instrs: []*ir.Instr{
+				{
+					Result: ir.Value{Name: "%io", Type: "ptr"},
+					Op:     "call.std_builtin_io_blocking",
+				},
+				{
+					Result:    ir.Value{Name: "%message", Type: "[]u8"},
+					Op:        "const",
+					Immediate: `"hello"`,
+				},
+				{
+					Result: ir.Value{Name: "%write", Type: "!void"},
+					Op:     "call.std_builtin_io_write_stdout",
+					Args: []ir.Value{
+						{Name: "%io", Type: "ptr"},
+						{Name: "%message", Type: "[]u8"},
+					},
+				},
+			},
+			Terminator: ir.Terminator{
+				Op:    "return",
+				Value: ir.Value{Name: "%write", Type: "!void"},
+			},
+		}},
+	}}}
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"declare void @std_builtin_io_write_stdout(ptr, ptr, ptr)",
+		"%kizu.write.slot = alloca %kizu.error.void",
+		"%kizu.write.arg.1 = alloca %kizu.slice.u8",
+		"store %kizu.slice.u8 %kizu.message, ptr %kizu.write.arg.1",
+		"call void @std_builtin_io_write_stdout(ptr %kizu.write.slot, " +
+			"ptr %kizu.io, ptr %kizu.write.arg.1)",
+		"%kizu.write = load %kizu.error.void, ptr %kizu.write.slot",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
 // TestEmitErrorUnionFailure checks error("message") lowers to failed !T.
 func TestEmitErrorUnionFailure(t *testing.T) {
 	module := lowerSource(t, errorUnionFailureSource)
@@ -235,7 +287,7 @@ func TestEmitErrorUnionSliceSuccess(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }",
+		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, %kizu.slice.u8 }",
 		"%kizu.2 = insertvalue %kizu.error.slice.u8 %kizu.2.ok, %kizu.slice.u8 %kizu.1, 1",
 		"%kizu.2 = extractvalue %kizu.error.slice.u8 %kizu.1, 1",
 		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.3, i64 %kizu.print.slice.len.4)",
@@ -255,11 +307,34 @@ func TestEmitSliceFunctionABI(t *testing.T) {
 	}
 	for _, want := range []string{
 		"%kizu.slice.u8 = type { ptr, i64 }",
-		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %value)",
-		"ret %kizu.slice.u8 %value",
+		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.value)",
+		"ret %kizu.slice.u8 %kizu.value",
 		"define %kizu.slice.u8 @message()",
 		"%kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 5, 1",
 		"%kizu.2 = call %kizu.slice.u8 @identity(%kizu.slice.u8 %kizu.1)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring %q", got, want)
+		}
+	}
+}
+
+// TestEmitCheckedSliceAccess lowers indexing and slicing with bounds traps.
+func TestEmitCheckedSliceAccess(t *testing.T) {
+	module := lowerSource(t, sliceAccessSource)
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	for _, want := range []string{
+		"declare void @llvm.trap()",
+		"br i1 %kizu.3.index.bad, label %slice.index.oob.1, label %slice.index.ok.2",
+		"slice.index.oob.1:\n  call void @llvm.trap()\n  unreachable",
+		"%kizu.3 = load i8, ptr %kizu.3.elem.ptr",
+		"br i1 %kizu.6.bad, label %slice.slice.oob.3, label %slice.slice.ok.4",
+		"%kizu.6 = insertvalue %kizu.slice.u8 %kizu.6.base, i64 %kizu.6.len, 1",
+		"%kizu.print.int.5 = zext i8 %kizu.3 to i64",
+		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.6, i64 %kizu.print.slice.len.7)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -275,11 +350,11 @@ func TestEmitErrorUnionPropagatesMessage(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"%kizu.try.err.message.3 = extractvalue %kizu.error.i64 %kizu.1, 2",
-		"%kizu.try.err.4.base = insertvalue %kizu.error.void zeroinitializer, i1 false, 0",
-		"%kizu.try.err.4 = insertvalue %kizu.error.void %kizu.try.err.4.base, " +
-			"%kizu.slice.u8 %kizu.try.err.message.3, 1",
-		"ret %kizu.error.void %kizu.try.err.4",
+		"= extractvalue %kizu.error.i64 %kizu.1, 2",
+		"= insertvalue %kizu.error.void zeroinitializer, i8 0, 0",
+		"= insertvalue %kizu.error.void %kizu.try.err.",
+		"%kizu.slice.u8 %kizu.try.err.",
+		"ret %kizu.error.void %kizu.try.err.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -287,7 +362,7 @@ func TestEmitErrorUnionPropagatesMessage(t *testing.T) {
 	}
 }
 
-// TestEmitTypedErrorCast adapts untyped !T into typed Error!T explicitly.
+// TestEmitTypedErrorCast adapts untyped !T into a concrete typed Error!T payload.
 func TestEmitTypedErrorCast(t *testing.T) {
 	module := lowerSource(t, typedErrorCastSource)
 	got, err := Emit(module)
@@ -295,10 +370,11 @@ func TestEmitTypedErrorCast(t *testing.T) {
 		t.Fatalf("emit failed: %v", err)
 	}
 	for _, want := range []string{
-		"%kizu.error.CompileError.i64 = type { i1, i64, %kizu.slice.u8 }",
-		"%kizu.2.message = extractvalue %kizu.error.i64 %kizu.1, 2",
+		"%kizu.error.CompileError.i64 = type { i8, i64, %kizu.union.CompileError }",
+		"%kizu.2.failure.extracted = extractvalue %kizu.error.i64 %kizu.1, 2",
+		"%kizu.2.failure.typed.box = call ptr @kizu_union_box",
 		"%kizu.2 = insertvalue %kizu.error.CompileError.i64 %kizu.2.value.base, " +
-			"%kizu.slice.u8 %kizu.2.message, 2",
+			"%kizu.union.CompileError %kizu.2.failure.typed, 2",
 		"ret %kizu.error.CompileError.i64 %kizu.4",
 	} {
 		if !strings.Contains(got, want) {
@@ -393,12 +469,6 @@ fn main() {
     print(user.age);
 }`
 
-const arenaSource = `struct User { age: i64, }
-fn main(allocator: Allocator) {
-    let users = std::arena::Arena<User>(allocator);
-    print(1);
-}`
-
 const errorUnionSource = `fn read() -> !i64 {
     return 1;
 }
@@ -468,6 +538,14 @@ fn main() {
     print(identity(message()));
 }`
 
+const sliceAccessSource = `fn main() {
+    let bytes = "hello";
+    let byte = bytes[1];
+    let part = bytes[1..4];
+    print(byte);
+    print(part);
+}`
+
 const helloLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
 @.str.0 = private unnamed_addr constant [12 x i8] c"hello, kizu\00"
@@ -476,8 +554,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define i32 @main() {
+declare void @kizu_runtime_init_args(i32, ptr)
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 entry:
+  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.1.ptr = getelementptr inbounds [12 x i8], ptr @.str.0, i64 0, i64 0
   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 11, 1
@@ -492,14 +573,17 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define i64 @add(i64 %a, i64 %b) {
+declare void @kizu_runtime_init_args(i32, ptr)
+
+define i64 @add(i64 %kizu.a, i64 %kizu.b) {
 entry:
-  %kizu.1 = add i64 %a, %b
+  %kizu.1 = add i64 %kizu.a, %kizu.b
   ret i64 %kizu.1
 }
 
-define i32 @main() {
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 entry:
+  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.3 = call i64 @add(i64 1, i64 2)
   call void @kizu_print_int(i64 %kizu.3)
   ret i32 0
@@ -513,8 +597,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define i32 @main() {
+declare void @kizu_runtime_init_args(i32, ptr)
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 entry:
+  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.1.ptr = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
   %kizu.1.base = insertvalue %kizu.slice.u8 poison, ptr %kizu.1.ptr, 0
   %kizu.1 = insertvalue %kizu.slice.u8 %kizu.1.base, i64 5, 1
@@ -535,8 +622,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define i32 @main() {
+declare void @kizu_runtime_init_args(i32, ptr)
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 entry:
+  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.3 = icmp sge i64 20, 20
   br i1 %kizu.3, label %if.then.1, label %if.else.2
 if.then.1:
@@ -564,8 +654,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define i32 @main() {
+declare void @kizu_runtime_init_args(i32, ptr)
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 entry:
+  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   br label %while.header.1
 while.header.1:
   %kizu.2 = phi i64 [ 0, %entry ], [ %kizu.7, %while.body.2 ]
@@ -586,8 +679,11 @@ declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
-define i32 @main() {
+declare void @kizu_runtime_init_args(i32, ptr)
+
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 entry:
+  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.2 = insertvalue %kizu.struct.User zeroinitializer, i64 30, 0
   %kizu.3 = extractvalue %kizu.struct.User %kizu.2, 0
   call void @kizu_print_int(i64 %kizu.3)
@@ -596,32 +692,37 @@ entry:
 
 const errorUnionLLVM = `; Kizu LLVM IR
 %kizu.slice.u8 = type { ptr, i64 }
-%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }
-%kizu.error.void = type { i1, %kizu.slice.u8 }
+%kizu.error.i64 = type { i8, i64, %kizu.slice.u8 }
+%kizu.error.void = type { i8, %kizu.slice.u8 }
 
 declare void @kizu_print_string(ptr, i64)
 declare void @kizu_print_int(i64)
 declare void @kizu_print_bool(i1)
 
+declare void @kizu_runtime_init_args(i32, ptr)
+
 define %kizu.error.i64 @read() {
 entry:
-  %kizu.2.ok = insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0
+  %kizu.2.ok = insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0
   %kizu.2 = insertvalue %kizu.error.i64 %kizu.2.ok, i64 1, 1
   ret %kizu.error.i64 %kizu.2
 }
 
-define i32 @main() {
+define i32 @main(i32 %kizu.argc, ptr %kizu.argv) {
 entry:
+  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)
   %kizu.1 = call %kizu.error.i64 @read()
   %kizu.2.ok = extractvalue %kizu.error.i64 %kizu.1, 0
-  br i1 %kizu.2.ok, label %try.ok.1, label %try.err.2
+  %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
+  br i1 %kizu.2.ok.bool, label %try.ok.1, label %try.err.2
 try.err.2:
   ret i32 1
 try.ok.1:
   %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
   call void @kizu_print_int(i64 %kizu.2)
-  %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i1 true, 0
+  %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
   %kizu.main.ok.3 = extractvalue %kizu.error.void %kizu.4, 0
-  %kizu.main.code.4 = select i1 %kizu.main.ok.3, i32 0, i32 1
+  %kizu.main.ok.3.bool = icmp ne i8 %kizu.main.ok.3, 0
+  %kizu.main.code.4 = select i1 %kizu.main.ok.3.bool, i32 0, i32 1
   ret i32 %kizu.main.code.4
 }`

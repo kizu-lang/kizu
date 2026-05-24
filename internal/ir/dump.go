@@ -62,6 +62,12 @@ func formatGenericInstr(instr *Instr) string {
 		}
 		args += instr.Immediate
 	}
+	if len(instr.Cleanups) > 0 {
+		if args != "" {
+			args += ", "
+		}
+		args += "cleanup " + formatCleanups(instr.Cleanups)
+	}
 	if instr.Result.Type == "void" {
 		return fmt.Sprintf("%s %s", instr.Op, args)
 	}
@@ -69,6 +75,15 @@ func formatGenericInstr(instr *Instr) string {
 		return fmt.Sprintf("%s = %s", instr.Result.String(), instr.Op)
 	}
 	return fmt.Sprintf("%s = %s %s", instr.Result.String(), instr.Op, args)
+}
+
+// formatCleanups formats deferred cleanups attached to a fallible instruction.
+func formatCleanups(cleanups []Cleanup) string {
+	parts := make([]string, 0, len(cleanups))
+	for _, cleanup := range cleanups {
+		parts = append(parts, fmt.Sprintf("%s %s", cleanup.Op, formatValues(cleanup.Args)))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // formatTerminator formats one block terminator.
@@ -80,6 +95,8 @@ func formatTerminator(term Terminator) string {
 		return "jump " + term.Target
 	case "branch":
 		return fmt.Sprintf("branch %s, %s, %s", term.Cond.String(), term.Target, term.Else)
+	case "unreachable":
+		return "unreachable"
 	default:
 		return term.Op
 	}

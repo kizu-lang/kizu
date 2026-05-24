@@ -6,6 +6,12 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 )
 
+type branchResult struct {
+	env       map[string]Value
+	end       string
+	reachable bool
+}
+
 // lowerIfStmt lowers if/else into branches and a merge block.
 func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	cond, err := l.lowerExpr(stmt.Condition)
@@ -18,7 +24,7 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	l.block.Terminator = Terminator{
 		Op: "branch", Cond: cond, Target: thenBlock.Name, Else: elseBlock.Name,
 	}
-	thenEnv, thenEnd, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name)
+	thenResult, err := l.lowerBranchBlock(thenBlock, stmt.Consequence, mergeBlock.Name)
 	if err != nil {
 		return err
 	}
@@ -26,12 +32,21 @@ func (l *lowerer) lowerIfStmt(stmt *ast.IfStmt) error {
 	if elseBody == nil {
 		elseBody = &ast.BlockStmt{}
 	}
-	elseEnv, elseEnd, err := l.lowerBranchBlock(elseBlock, elseBody, mergeBlock.Name)
+	elseResult, err := l.lowerBranchBlock(elseBlock, elseBody, mergeBlock.Name)
 	if err != nil {
 		return err
 	}
 	l.block = mergeBlock
-	l.env = l.mergeEnvs(mergeBlock, thenEnd, thenEnv, elseEnd, elseEnv)
+	switch {
+	case thenResult.reachable && elseResult.reachable:
+		l.env = l.mergeEnvs(mergeBlock, thenResult.end, thenResult.env, elseResult.end, elseResult.env)
+	case thenResult.reachable:
+		l.env = thenResult.env
+	case elseResult.reachable:
+		l.env = elseResult.env
+	default:
+		mergeBlock.Terminator = Terminator{Op: "unreachable"}
+	}
 	return nil
 }
 
@@ -101,20 +116,21 @@ func (l *lowerer) lowerBranchBlock(
 	block *Block,
 	body *ast.BlockStmt,
 	target string,
-) (map[string]Value, string, error) {
+) (branchResult, error) {
 	saved := l.copyEnv(l.env)
 	l.env = l.copyEnv(saved)
 	l.block = block
 	if err := l.lowerBlock(body); err != nil {
-		return nil, "", err
+		return branchResult{}, err
 	}
 	end := l.block.Name
-	if l.block.Terminator.Op == "" {
+	reachable := l.block.Terminator.Op == ""
+	if reachable {
 		l.block.Terminator = Terminator{Op: "jump", Target: target}
 	}
 	out := l.copyEnv(l.env)
 	l.env = saved
-	return out, end, nil
+	return branchResult{env: out, end: end, reachable: reachable}, nil
 }
 
 // mergeEnvs creates phi nodes for values that differ across branches.
@@ -158,7 +174,7 @@ func (l *lowerer) lowerWhileStmt(stmt *ast.WhileStmt) error {
 	if err != nil {
 		return err
 	}
-	header.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
+	l.block.Terminator = Terminator{Op: "branch", Cond: cond, Target: body.Name, Else: exit.Name}
 	l.block = body
 	l.pushLoop(stmt.Label, exit.Name, header.Name)
 	if err := l.lowerBlock(stmt.Body); err != nil {
@@ -245,6 +261,7 @@ func (l *lowerer) lowerLoopBranch(kind string, label string) error {
 	if kind == "continue" {
 		target = loop.continueTo
 	}
+	l.emitCleanups(l.cleanupsFrom(loop.deferDepth))
 	l.block.Terminator = Terminator{Op: "jump", Target: target}
 	return nil
 }
@@ -252,7 +269,7 @@ func (l *lowerer) lowerLoopBranch(kind string, label string) error {
 // pushLoop records the current loop branch targets.
 func (l *lowerer) pushLoop(label string, breakTo string, continueTo string) {
 	l.loops = append(l.loops, loopContext{
-		label: label, breakTo: breakTo, continueTo: continueTo,
+		label: label, breakTo: breakTo, continueTo: continueTo, deferDepth: len(l.deferFrames),
 	})
 }
 
