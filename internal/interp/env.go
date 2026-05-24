@@ -28,6 +28,10 @@ type binding struct {
 type Env struct {
 	parent     *Env
 	bindings   map[string]*binding
+	cache      map[string]*binding
+	inline     [8]binding
+	cells      []binding
+	pooled     []*binding
 	hasBorrows bool
 }
 
@@ -44,6 +48,14 @@ func NewEnvWithCapacity(capacity int) *Env {
 	if env.bindings == nil {
 		env.bindings = make(map[string]*binding, capacity)
 	}
+	if capacity <= len(env.inline) {
+		env.cells = env.inline[:0]
+	} else if cap(env.cells) < capacity {
+		env.cells = make([]binding, 0, capacity)
+	} else {
+		env.cells = env.cells[:0]
+	}
+	env.pooled = env.pooled[:0]
 	return env
 }
 
@@ -59,10 +71,25 @@ func (e *Env) Define(name string, value Value, mutable bool) error {
 	if _, ok := e.bindings[name]; ok {
 		return fmt.Errorf("runtime error: `%s` is already defined", name)
 	}
-	next := bindingPool.Get().(*binding)
+	if e.cache != nil {
+		delete(e.cache, name)
+	}
+	next := e.nextBinding()
 	*next = binding{value: value, mutable: mutable}
 	e.bindings[name] = next
 	return nil
+}
+
+// nextBinding returns stable storage for one binding in this environment.
+func (e *Env) nextBinding() *binding {
+	if len(e.cells) < cap(e.cells) {
+		index := len(e.cells)
+		e.cells = e.cells[:index+1]
+		return &e.cells[index]
+	}
+	next := bindingPool.Get().(*binding)
+	e.pooled = append(e.pooled, next)
+	return next
 }
 
 // Release returns an unborrowed environment and its bindings to reusable pools.
@@ -70,11 +97,20 @@ func (e *Env) Release() {
 	if e == nil || e.hasBorrows {
 		return
 	}
-	for name, cell := range e.bindings {
+	for name := range e.bindings {
 		delete(e.bindings, name)
+	}
+	for name := range e.cache {
+		delete(e.cache, name)
+	}
+	for index := range e.cells {
+		e.cells[index] = binding{}
+	}
+	for _, cell := range e.pooled {
 		*cell = binding{}
 		bindingPool.Put(cell)
 	}
+	e.pooled = e.pooled[:0]
 	e.parent = nil
 	envPool.Put(e)
 }
@@ -96,9 +132,32 @@ func (e *Env) Get(name string) (Value, bool) {
 		return b.value, true
 	}
 	if e.parent != nil {
-		return e.parent.Get(name)
+		if b, ok := e.cache[name]; ok {
+			return b.value, true
+		}
+		if b, ok := e.parent.resolve(name); ok {
+			if e.cache == nil {
+				e.cache = make(map[string]*binding, 4)
+			}
+			e.cache[name] = b
+			return b.value, true
+		}
 	}
 	return voidValue(), false
+}
+
+// resolve returns a binding from this environment or an ancestor without side effects.
+func (e *Env) resolve(name string) (*binding, bool) {
+	if b, ok := e.bindings[name]; ok {
+		return b, true
+	}
+	if e.parent != nil {
+		if b, ok := e.cache[name]; ok {
+			return b, true
+		}
+		return e.parent.resolve(name)
+	}
+	return nil, false
 }
 
 // Binding returns the mutable storage cell for a local name.
