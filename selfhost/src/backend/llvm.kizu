@@ -1,5 +1,6 @@
 import selfhost::backend::cli_llvm;
 import selfhost::backend::data;
+import selfhost::backend::ir_contract;
 import selfhost::backend::runtime;
 
 pub fn consume_ir_artifact(io: Io, path: &[]u8) -> !data::BackendSummary {
@@ -22,7 +23,7 @@ pub fn emit_llvm_artifact(
     let manifest_bytes = try std::fs::read_file(io, manifest_path);
     try validate_shape_manifest(manifest_bytes);
 
-    var module = try render_llvm_module(allocator, ir_path);
+    var module = try render_llvm_module(allocator, ir_bytes, ir_path);
     let module_view = module.as_bytes();
     let module_len = try write_backend_bytes(
         io,
@@ -108,25 +109,26 @@ fn validate_ir_artifact(bytes: []u8) -> !void {
     if !std::mem::starts_with(bytes, "kizu-ir-v0") {
         return error("invalid IR artifact");
     }
-    if !bytes_contains(bytes, "package selfhost") {
+    if !ir_contract::contains(bytes, "package selfhost") {
         return error("unsupported IR artifact package");
     }
-    try require_ir_fact(bytes, "ir-contract selfhost-checked-package-v1");
-    try require_ir_fact(bytes, "checked-entry selfhost::cli_main");
-    try require_ir_fact(bytes, "hosted-entry @kizu_selfhost__cli_main");
-    try require_ir_fact(bytes, "hosted-smoke @kizu_selfhost__smoke");
-    try require_ir_fact(bytes, "frontend-executable-lowering checked-ast-bounded");
-    try require_ir_fact(bytes, "hosted-executable-ast bounded-main-body");
-    try require_ir_fact(bytes, "hosted-executable-lowering executable-result-bounded");
-    try require_ir_fact(bytes, "hosted-executable-main-scan leading-functions");
-    try require_ir_fact(bytes, "checked-diagnostics 0");
-    return;
-}
-
-fn require_ir_fact(bytes: []u8, fact: []u8) -> !void {
-    if !bytes_contains(bytes, fact) {
-        return error("unsupported IR artifact contract");
-    }
+    try ir_contract::require_fact(bytes, "ir-contract selfhost-checked-package-v1");
+    try ir_contract::require_fact(bytes, "checked-entry selfhost::cli_main");
+    try ir_contract::require_fact(bytes, "hosted-entry @kizu_selfhost__cli_main");
+    try ir_contract::require_fact(bytes, "hosted-smoke @kizu_selfhost__smoke");
+    try ir_contract::require_fact(bytes, "frontend-executable-lowering checked-ast-bounded");
+    try ir_contract::require_fact(bytes, "hosted-executable-ast executable-ast-rules-v1");
+    try ir_contract::require_fact(bytes, "executable-ast-rule MainScan LeadingFunctions");
+    try ir_contract::require_fact(bytes, "executable-ast-rule RunPrintCall MainPrintString");
+    try ir_contract::require_fact(bytes, "executable-ast-rule RunReturnVoid MainReturnVoid");
+    try ir_contract::require_fact(bytes, "executable-ast-rule TestExpectTrue MainExpectTrue");
+    try ir_contract::require_fact(bytes, "executable-ast-rule TestExpectFalse MainExpectFalse");
+    try ir_contract::require_fact(bytes, "hosted-executable-lowering executable-ir-rules-v1");
+    try ir_contract::require_fact(bytes, "executable-lowering-rule RunPrintCall RunPrintString");
+    try ir_contract::require_fact(bytes, "executable-lowering-rule RunReturnVoid RunReturnVoid");
+    try ir_contract::require_fact(bytes, "executable-lowering-rule TestExpectTrue TestExpectOk");
+    try ir_contract::require_fact(bytes, "executable-lowering-rule TestExpectFalse TestExpectFailure");
+    try ir_contract::require_fact(bytes, "checked-diagnostics 0");
     return;
 }
 
@@ -173,7 +175,7 @@ fn validate_shape_manifest(bytes: []u8) -> !void {
 }
 
 fn require_shape(bytes: []u8, shape: []u8) -> !void {
-    if !bytes_contains(bytes, shape) {
+    if !ir_contract::contains(bytes, shape) {
         return error("unsupported IR shape manifest");
     }
     return;
@@ -191,6 +193,7 @@ fn write_backend_bytes(
 
 fn render_llvm_module(
     allocator: Allocator,
+    ir_bytes: []u8,
     ir_path: []u8
 ) -> !std::string::String {
     var out = std::string::String(allocator);
@@ -250,7 +253,7 @@ fn render_llvm_module(
     try append_line(out, "declare i64 @kizu_selfhost__runtime_storage_smoke()");
     try append_line(out, "declare i64 @kizu_selfhost__host_capability_smoke()");
     try append_line(out, "");
-    try cli_llvm::append_functions(out);
+    try cli_llvm::append_functions(out, ir_bytes);
     try append_line(out, "");
     try append_line(out, "define i64 @kizu_selfhost__smoke() {");
     try append_line(out, "entry:");
@@ -285,9 +288,17 @@ fn render_llvm_metadata(
     try append_line(out, "backend-input checked-entry selfhost::cli_main");
     try append_line(out, "backend-input hosted-entry @kizu_selfhost__cli_main");
     try append_line(out, "backend-input hosted-smoke @kizu_selfhost__smoke");
-    try append_line(out, "backend-input executable-ast bounded-main-body");
-    try append_line(out, "backend-input executable-lowering executable-result-bounded");
-    try append_line(out, "backend-input executable-main-scan leading-functions");
+    try append_line(out, "backend-input executable-ast executable-ast-rules-v1");
+    try append_line(out, "backend-input executable-ast-rule MainScan LeadingFunctions");
+    try append_line(out, "backend-input executable-ast-rule RunPrintCall MainPrintString");
+    try append_line(out, "backend-input executable-ast-rule RunReturnVoid MainReturnVoid");
+    try append_line(out, "backend-input executable-ast-rule TestExpectTrue MainExpectTrue");
+    try append_line(out, "backend-input executable-ast-rule TestExpectFalse MainExpectFalse");
+    try append_line(out, "backend-input executable-lowering executable-ir-rules-v1");
+    try append_line(out, "backend-input executable-lowering-rule RunPrintCall RunPrintString");
+    try append_line(out, "backend-input executable-lowering-rule RunReturnVoid RunReturnVoid");
+    try append_line(out, "backend-input executable-lowering-rule TestExpectTrue TestExpectOk");
+    try append_line(out, "backend-input executable-lowering-rule TestExpectFalse TestExpectFailure");
     try append_line(out, "entry @kizu_selfhost__cli_main");
     try append_line(out, "cli-command check selfhost");
     try append_line(out, "cli-command stage selfhost");
@@ -343,37 +354,4 @@ fn append_line(out: &var std::string::String, text: []u8) -> !void {
     try out.append_bytes(text);
     try out.append_byte(cast<u8>(10));
     return;
-}
-
-fn bytes_contains(bytes: []u8, needle: []u8) -> bool {
-    let byte_len = std::mem::len(bytes);
-    let needle_len = std::mem::len(needle);
-    if needle_len == 0 {
-        return true;
-    }
-    if needle_len > byte_len {
-        return false;
-    }
-
-    var index = 0;
-    let last_start = byte_len - needle_len;
-    while index <= last_start {
-        if bytes_match_at(bytes, needle, index) {
-            return true;
-        }
-        index = index + 1;
-    }
-    return false;
-}
-
-fn bytes_match_at(bytes: []u8, needle: []u8, start: i64) -> bool {
-    var index = 0;
-    let needle_len = std::mem::len(needle);
-    while index < needle_len {
-        if bytes[start + index] != needle[index] {
-            return false;
-        }
-        index = index + 1;
-    }
-    return true;
 }
