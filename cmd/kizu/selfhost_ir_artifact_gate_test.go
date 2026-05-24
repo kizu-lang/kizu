@@ -87,6 +87,7 @@ func requiredSelfhostIRContractFragments() []string {
 		"hosted-entry @kizu_selfhost__cli_main\n",
 		"hosted-smoke @kizu_selfhost__smoke\n",
 		"frontend-executable-lowering checked-ast-bounded\n",
+		"hosted-executable-ast bounded-main-body\n",
 		"hosted-executable-lowering executable-result-bounded\n",
 		"hosted-executable-main-scan leading-functions\n",
 		"checked-nodes ",
