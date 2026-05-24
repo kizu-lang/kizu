@@ -23,15 +23,21 @@ type lowerer struct {
 	env         map[string]Value
 	nextValue   int
 	nextBlock   int
-	loops       []loopContext
+	loops       []*loopContext
 	deferFrames [][]Cleanup
 }
 
 type loopContext struct {
-	label      string
-	breakTo    string
-	continueTo string
-	deferDepth int
+	label         string
+	breakTo       string
+	continueTo    string
+	deferDepth    int
+	continueEdges []loopEdge
+}
+
+type loopEdge struct {
+	block string
+	env   map[string]Value
 }
 
 // newLowerer prepares lookup tables used during lowering.

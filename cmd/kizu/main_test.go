@@ -1463,6 +1463,51 @@ fn main() {
 	}
 }
 
+// TestBuildTargetNativeWhileContinuePhiCommandSmoke keeps explicit continue
+// edges wired into loop phi nodes before LLVM verification.
+func TestBuildTargetNativeWhileContinuePhiCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	source := filepath.Join(t.TempDir(), "while_continue_phi.kizu")
+	if err := os.WriteFile(source, []byte(nativeWhileContinuePhiSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "while_continue_phi")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	runOut, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, runOut)
+	}
+	if got := string(runOut); got != "true\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+const nativeWhileContinuePhiSource = `fn main() {
+    var index = 0;
+    var in_string = false;
+    while index < 3 {
+        if in_string {
+            in_string = false;
+            index = index + 1;
+            continue;
+        }
+        in_string = true;
+        index = index + 1;
+    }
+    print(in_string);
+}`
+
 // TestCacheCommands checks cache status, why-rebuild, and prune.
 func TestCacheCommands(t *testing.T) {
 	cacheDir := t.TempDir()

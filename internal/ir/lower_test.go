@@ -135,6 +135,59 @@ func TestLowerByteSliceAccess(t *testing.T) {
 	}
 }
 
+// TestLowerWhileContinueFeedsLoopPhis keeps assignments before nested continue
+// edges visible to the next loop iteration.
+func TestLowerWhileContinueFeedsLoopPhis(t *testing.T) {
+	module := lowerSource(t, `fn main() {
+    var index = 0;
+    var in_string = false;
+    while index < 3 {
+        if in_string {
+            in_string = false;
+            index = index + 1;
+            continue;
+        }
+        in_string = true;
+        index = index + 1;
+    }
+    print(in_string);
+}`)
+	header := findTestBlock(t, module.Functions[0], "while.header.1")
+	for _, want := range []Incoming{
+		{Block: "if.end.6", Value: Value{Name: "%10", Type: "bool"}},
+		{Block: "if.then.4", Value: Value{Name: "%7", Type: "bool"}},
+	} {
+		if !blockHasPhiIncoming(header, "bool", want) {
+			t.Fatalf("missing bool phi incoming %#v in:\n%s", want, Dump(module))
+		}
+	}
+}
+
+// TestLowerWhileMatchAssignmentsFeedLoopPhis keeps loop-carried variables
+// updated when the assignment happens inside a match arm.
+func TestLowerWhileMatchAssignmentsFeedLoopPhis(t *testing.T) {
+	module := lowerSource(t, `enum Step {
+    Advance,
+    Stop,
+}
+
+fn main() {
+    var current = 0;
+    let step = Step::Advance;
+    while current < 2 {
+        match step {
+            Advance => current = current + 1;,
+            Stop => current = 2;,
+        }
+    }
+    print(current);
+}`)
+	header := findTestBlock(t, module.Functions[0], "while.header.1")
+	if !blockHasPhiIncomingFrom(header, "i64", "match.end.4") {
+		t.Fatalf("missing loop phi incoming from match end in:\n%s", Dump(module))
+	}
+}
+
 // TestLowerSkipsGenericDeclarations keeps the non-monomorphized backend from
 // lowering unused generic wrapper bodies.
 func TestLowerSkipsGenericDeclarations(t *testing.T) {
@@ -162,6 +215,49 @@ func TestLowerSkipsGenericDeclarations(t *testing.T) {
 	if len(module.Functions) != 1 || module.Functions[0].Name != "main" {
 		t.Fatalf("got functions %#v, want only main", module.Functions)
 	}
+}
+
+// findTestBlock returns a named block from a lowered test function.
+func findTestBlock(t *testing.T, fn *Function, name string) *Block {
+	t.Helper()
+	for _, block := range fn.Blocks {
+		if block.Name == name {
+			return block
+		}
+	}
+	t.Fatalf("missing block %s in:\n%s", name, Dump(&Module{Functions: []*Function{fn}}))
+	return nil
+}
+
+// blockHasPhiIncoming reports whether block has a phi incoming edge.
+func blockHasPhiIncoming(block *Block, typ string, incoming Incoming) bool {
+	for _, instr := range block.Instrs {
+		if instr.Op != "phi" || instr.Result.Type != typ {
+			continue
+		}
+		for _, found := range instr.Incoming {
+			if found.Block == incoming.Block && sameValue(found.Value, incoming.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// blockHasPhiIncomingFrom reports whether a phi of typ has an incoming edge
+// from the given predecessor block.
+func blockHasPhiIncomingFrom(block *Block, typ string, incomingBlock string) bool {
+	for _, instr := range block.Instrs {
+		if instr.Op != "phi" || instr.Result.Type != typ {
+			continue
+		}
+		for _, found := range instr.Incoming {
+			if found.Block == incomingBlock {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // lowerSource parses, checks, and lowers a source snippet.
