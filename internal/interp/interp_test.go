@@ -126,6 +126,25 @@ fn main() -> void {
 	}
 }
 
+// TestRunStdMemHelpers checks accelerated std::mem helpers preserve source semantics.
+func TestRunStdMemHelpers(t *testing.T) {
+	got := runSource(t, `fn main() -> !void {
+    print(std::mem::len("  hello  "));
+    print(std::mem::equal_bytes("hello", "hello"));
+    print(std::mem::equal_bytes("hello", "world"));
+    print(std::mem::starts_with("hello", "he"));
+    print(try std::mem::byte_at("hello", 1));
+    print(try std::mem::slice("hello", 1, 4));
+    print(std::mem::trim_ascii("  hello  "));
+    print(std::mem::is_ascii_space(cast<u8>(32)));
+    return;
+}`)
+	want := "9\ntrue\nfalse\ntrue\n101\nell\nhello\ntrue\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunLoopControl checks break, continue, labels, and bounded for loops.
 func TestRunLoopControl(t *testing.T) {
 	got := runSource(t, `fn main() -> void {

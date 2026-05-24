@@ -21,9 +21,16 @@ type Interpreter struct {
 	impls       map[string]map[string]*ast.FunctionDecl
 	enums       map[string]map[string]bool
 	unions      map[string]map[string]string
+	structs     map[string]*StructLayout
+	literals    map[*ast.StructLiteralExpr]*StructLayout
 	typeArgs    map[string]string
 	qualified   map[ast.Expression]string
 	processArgs []string
+	blockScopes map[*ast.BlockStmt]bool
+}
+
+var typeArgFramePool = sync.Pool{
+	New: func() any { return map[string]string{} },
 }
 
 type trySignal struct {
@@ -58,9 +65,12 @@ func NewWithProcessArgs(out io.Writer, args []string) *Interpreter {
 		impls:       map[string]map[string]*ast.FunctionDecl{},
 		enums:       map[string]map[string]bool{},
 		unions:      map[string]map[string]string{},
+		structs:     map[string]*StructLayout{},
+		literals:    map[*ast.StructLiteralExpr]*StructLayout{},
 		typeArgs:    map[string]string{},
 		qualified:   map[ast.Expression]string{},
 		processArgs: append([]string{}, args...),
+		blockScopes: map[*ast.BlockStmt]bool{},
 	}
 }
 
@@ -104,6 +114,8 @@ func (i *Interpreter) runEntryValue(program *ast.Program, entry string) (Value, 
 			i.enums[d.Name] = enumTags(d.Tags)
 		case *ast.UnionDecl:
 			i.unions[d.Name] = unionVariants(d.Variants)
+		case *ast.StructDecl:
+			i.structs[d.Name] = newStructLayout(structFieldNames(d.Fields))
 		case *ast.FunctionDecl:
 			if d.ExternABI != "" {
 				continue
@@ -120,13 +132,13 @@ func (i *Interpreter) runEntryValue(program *ast.Program, entry string) (Value, 
 
 // errorUnionMessage extracts a readable message from an unhandled !T value.
 func errorUnionMessage(value Value) string {
-	if value.errUnion == nil {
+	if value.errUnionPayload() == nil {
 		return "error"
 	}
-	if value.errUnion.payload != nil {
-		return value.errUnion.payload.String()
+	if value.errUnionPayload().payload != nil {
+		return value.errUnionPayload().payload.String()
 	}
-	return value.errUnion.message
+	return value.errUnionPayload().message
 }
 
 // registerImpl records concrete methods for runtime dispatch.
@@ -157,6 +169,28 @@ func unionVariants(variants []ast.UnionVariant) map[string]string {
 		out[variant.Name] = variant.Payload
 	}
 	return out
+}
+
+// structFieldNames returns declared struct field names in source order.
+func structFieldNames(fields []ast.Field) []string {
+	names := make([]string, len(fields))
+	for idx, field := range fields {
+		names[idx] = field.Name
+	}
+	return names
+}
+
+// newStructLayout builds a reusable field-name index for runtime struct values.
+func newStructLayout(names []string) *StructLayout {
+	index := make(map[string]int, len(names))
+	copied := make([]string, len(names))
+	copy(copied, names)
+	for idx, name := range copied {
+		index[name] = idx
+	}
+	sorted := append([]string(nil), copied...)
+	sort.Strings(sorted)
+	return &StructLayout{names: copied, index: index, sorted: sorted}
 }
 
 // callFunction invokes a declared function by name.
@@ -201,7 +235,7 @@ func wrapTypedErrorReturn(returnType string, value Value) Value {
 	if !ok || errorType == "" || value.kind != kindUnion {
 		return value
 	}
-	if value.union.typeName != errorType {
+	if value.unionPayload().typeName != errorType {
 		return value
 	}
 	return typedErrorUnionValue(value)
@@ -230,6 +264,55 @@ func (i *Interpreter) callFunctionExpr(
 			env.SetMutable(param.Name)
 		}
 	}
+	result, returned, err := i.evalBlock(fn.Body, env)
+	if err != nil || returned {
+		return wrapTypedErrorReturn(fn.ReturnType, result), err
+	}
+	return voidValue(), nil
+}
+
+// callFunctionWithReceiverExpr invokes a method wrapper without allocating an arg slice.
+func (i *Interpreter) callFunctionWithReceiverExpr(
+	displayName string,
+	fn *ast.FunctionDecl,
+	receiver Value,
+	args []ast.Expression,
+	caller *Env,
+) (Value, error) {
+	if len(args)+1 != len(fn.Params) {
+		return voidValue(), fmt.Errorf(
+			"runtime error: `%s` expected %d args", displayName, len(fn.Params),
+		)
+	}
+	if len(fn.TypeParams) > 0 && !i.hasTypeArguments(fn) {
+		return voidValue(), fmt.Errorf(
+			"runtime error: `%s` requires explicit static arguments", displayName,
+		)
+	}
+	env := NewEnvWithCapacity(len(fn.Params))
+	defer env.Release()
+
+	first := fn.Params[0]
+	if err := env.Define(first.Name, receiver, false); err != nil {
+		return voidValue(), err
+	}
+	if first.MutBorrow {
+		env.SetMutable(first.Name)
+	}
+
+	for idx, param := range fn.Params[1:] {
+		value, err := i.evalCallArg(param, args[idx], caller)
+		if err != nil {
+			return voidValue(), err
+		}
+		if err := env.Define(param.Name, value, false); err != nil {
+			return voidValue(), err
+		}
+		if param.MutBorrow {
+			env.SetMutable(param.Name)
+		}
+	}
+
 	result, returned, err := i.evalBlock(fn.Body, env)
 	if err != nil || returned {
 		return wrapTypedErrorReturn(fn.ReturnType, result), err
@@ -302,6 +385,32 @@ func (i *Interpreter) evalBlock(block *ast.BlockStmt, env *Env) (Value, bool, er
 	return result, false, nil
 }
 
+// evalScopedBlock creates a child scope only when the block declares locals.
+func (i *Interpreter) evalScopedBlock(block *ast.BlockStmt, env *Env) (Value, bool, error) {
+	if !i.blockNeedsScope(block) {
+		return i.evalBlock(block, env)
+	}
+	child := env.Child()
+	value, returned, err := i.evalBlock(block, child)
+	child.Release()
+	return value, returned, err
+}
+
+// blockNeedsScope reports whether direct local declarations must be scoped.
+func (i *Interpreter) blockNeedsScope(block *ast.BlockStmt) bool {
+	if needs, ok := i.blockScopes[block]; ok {
+		return needs
+	}
+	for _, stmt := range block.Statements {
+		if _, ok := stmt.(*ast.LetStmt); ok {
+			i.blockScopes[block] = true
+			return true
+		}
+	}
+	i.blockScopes[block] = false
+	return false
+}
+
 // runDeferredCleanups executes block-exit cleanups in reverse registration order.
 func (i *Interpreter) runDeferredCleanups(defers []ast.Expression, env *Env) error {
 	for idx := len(defers) - 1; idx >= 0; idx-- {
@@ -345,10 +454,7 @@ func (i *Interpreter) evalStmt(stmt ast.Statement, env *Env) (Value, bool, error
 	case *ast.MatchStmt:
 		return i.evalMatchStmt(s, env)
 	case *ast.UnsafeStmt:
-		child := env.Child()
-		value, returned, err := i.evalBlock(s.Body, child)
-		child.Release()
-		return value, returned, err
+		return i.evalScopedBlock(s.Body, env)
 	case *ast.ComptimeIfStmt:
 		return i.evalComptimeIfStmt(s, env)
 	default:
@@ -422,7 +528,8 @@ func (i *Interpreter) assignCallTarget(expr *ast.CallExpr, value Value, env *Env
 	if target.kind != kindPartitionSlot {
 		return fmt.Errorf("runtime error: invalid assignment target `%s`", expr.String())
 	}
-	target.slot.partition.values[target.slot.index] = value
+	slot := target.slotPayload()
+	slot.partition.values[slot.index] = value
 	return nil
 }
 
@@ -439,7 +546,7 @@ func (i *Interpreter) assignField(expr *ast.FieldExpr, value Value, env *Env) er
 		if base.kind != kindRef {
 			return fmt.Errorf("runtime error: `%s` is not a borrow", receiver.Receiver.String())
 		}
-		return assignStructField(&base.ref.value, expr.Name, value)
+		return assignStructField(&base.refPayload().value, expr.Name, value)
 	default:
 		return fmt.Errorf("runtime error: invalid field assignment target `%s`", expr.String())
 	}
@@ -455,7 +562,7 @@ func assignBindingField(name string, field string, value Value, env *Env) error 
 		return fmt.Errorf("runtime error: cannot assign field of immutable binding `%s`", name)
 	}
 	if binding.value.kind == kindRef {
-		return assignRefField(binding.value.ref, field, value)
+		return assignRefField(binding.value.refPayload(), field, value)
 	}
 	return assignStructField(&binding.value, field, value)
 }
@@ -465,10 +572,9 @@ func assignStructField(target *Value, field string, value Value) error {
 	if target.kind != kindStruct {
 		return fmt.Errorf("runtime error: field assignment expects struct")
 	}
-	if _, ok := target.fields[field]; !ok {
+	if !target.setStructField(field, value) {
 		return fmt.Errorf("runtime error: unknown field `%s`", field)
 	}
-	target.fields[field] = value
 	return nil
 }
 
@@ -478,7 +584,7 @@ func assignRefField(ref *binding, field string, value Value) error {
 		return err
 	}
 	if ref.fieldParent != nil {
-		ref.fieldParent.value.fields[ref.fieldName] = ref.value
+		ref.fieldParent.value.setStructField(ref.fieldName, ref.value)
 	}
 	return nil
 }
@@ -488,22 +594,22 @@ func assignRef(target Value, value Value) error {
 	if target.kind != kindRef {
 		return fmt.Errorf("runtime error: assignment target is not a borrow")
 	}
-	if target.ref.fieldParent != nil {
-		target.ref.fieldParent.value.fields[target.ref.fieldName] = value
-		target.ref.value = value
+	if target.refPayload().fieldParent != nil {
+		target.refPayload().fieldParent.value.setStructField(target.refPayload().fieldName, value)
+		target.refPayload().value = value
 		return nil
 	}
-	if target.ref.arrayParent != nil {
-		target.ref.arrayParent.values[target.ref.arrayIndex] = value
-		target.ref.value = value
+	if target.refPayload().arrayParent != nil {
+		target.refPayload().arrayParent.values[target.refPayload().arrayIndex] = value
+		target.refPayload().value = value
 		return nil
 	}
-	if target.ref.boxParent != nil {
-		target.ref.boxParent.value = value
-		target.ref.value = value
+	if target.refPayload().boxParent != nil {
+		target.refPayload().boxParent.value = value
+		target.refPayload().value = value
 		return nil
 	}
-	target.ref.value = value
+	target.refPayload().value = value
 	return nil
 }
 
@@ -517,16 +623,10 @@ func (i *Interpreter) evalIfStmt(stmt *ast.IfStmt, env *Env) (Value, bool, error
 		return voidValue(), false, fmt.Errorf("runtime error: if condition must be bool")
 	}
 	if cond.b {
-		child := env.Child()
-		value, returned, err := i.evalBlock(stmt.Consequence, child)
-		child.Release()
-		return value, returned, err
+		return i.evalScopedBlock(stmt.Consequence, env)
 	}
 	if stmt.Alternative != nil {
-		child := env.Child()
-		value, returned, err := i.evalBlock(stmt.Alternative, child)
-		child.Release()
-		return value, returned, err
+		return i.evalScopedBlock(stmt.Alternative, env)
 	}
 	return voidValue(), false, nil
 }
@@ -544,9 +644,7 @@ func (i *Interpreter) evalWhileStmt(stmt *ast.WhileStmt, env *Env) (Value, bool,
 		if !cond.b {
 			return voidValue(), false, nil
 		}
-		child := env.Child()
-		result, returned, err := i.evalBlock(stmt.Body, child)
-		child.Release()
+		result, returned, err := i.evalScopedBlock(stmt.Body, env)
 		if signal, ok := err.(loopSignal); ok {
 			if handledLoopSignal(signal, stmt.Label) {
 				if signal.kind == "continue" {
@@ -632,25 +730,50 @@ func (i *Interpreter) evalMatchStmt(stmt *ast.MatchStmt, env *Env) (Value, bool,
 	}
 	for _, arm := range stmt.Arms {
 		if arm.Tag == matchArmTag(value) || arm.IsWildcard() {
-			child := env.Child()
-			if err := bindUnionPayload(value, arm, child); err != nil {
-				child.Release()
-				return voidValue(), false, err
-			}
-			result, returned, err := i.evalStmt(arm.Body, child)
-			child.Release()
-			return result, returned, err
+			return i.evalMatchArm(value, arm, env)
 		}
 	}
 	return voidValue(), false, fmt.Errorf("runtime error: no match arm for `%s`", value.String())
 }
 
+// evalMatchArm creates an arm scope only for payload bindings or local declarations.
+func (i *Interpreter) evalMatchArm(value Value, arm ast.MatchArm, env *Env) (Value, bool, error) {
+	if !matchArmNeedsScope(value, arm) && !i.stmtNeedsScope(arm.Body) {
+		return i.evalStmt(arm.Body, env)
+	}
+	child := env.Child()
+	if err := bindUnionPayload(value, arm, child); err != nil {
+		child.Release()
+		return voidValue(), false, err
+	}
+	result, returned, err := i.evalStmt(arm.Body, child)
+	child.Release()
+	return result, returned, err
+}
+
+// matchArmNeedsScope reports whether a match arm introduces a payload binding.
+func matchArmNeedsScope(value Value, arm ast.MatchArm) bool {
+	return value.kind == kindUnion && arm.Binding != "" && !arm.IsWildcard()
+}
+
+// stmtNeedsScope reports whether evaluating a statement directly would leak a local.
+func (i *Interpreter) stmtNeedsScope(stmt ast.Statement) bool {
+	switch s := stmt.(type) {
+	case *ast.LetStmt:
+		return true
+	case *ast.BlockStmt:
+		return i.blockNeedsScope(s)
+	default:
+		return false
+	}
+}
+
 // matchArmTag returns the active tag for a matchable runtime value.
 func matchArmTag(value Value) string {
 	if value.kind == kindEnum {
-		return value.enum.tag
+		return value.enumPayload().tag
 	}
-	return value.union.tag
+	return value.unionPayload().tag
 }
 
 // bindUnionPayload binds a tagged union payload into a matching arm scope.
@@ -658,11 +781,11 @@ func bindUnionPayload(value Value, arm ast.MatchArm, env *Env) error {
 	if value.kind != kindUnion || arm.Binding == "" || arm.IsWildcard() {
 		return nil
 	}
-	if value.union.payload == nil {
+	if value.unionPayload().payload == nil {
 		return fmt.Errorf("runtime error: union variant `%s::%s` has no payload",
-			value.union.typeName, value.union.tag)
+			value.unionPayload().typeName, value.unionPayload().tag)
 	}
-	return env.Define(arm.Binding, *value.union.payload, false)
+	return env.Define(arm.Binding, *value.unionPayload().payload, false)
 }
 
 // evalComptimeIfStmt executes the branch selected by a compile-time condition.
@@ -675,16 +798,10 @@ func (i *Interpreter) evalComptimeIfStmt(stmt *ast.ComptimeIfStmt, env *Env) (Va
 		return voidValue(), false, fmt.Errorf("runtime error: comptime if condition must be bool")
 	}
 	if cond.b {
-		child := env.Child()
-		value, returned, err := i.evalBlock(stmt.Consequence, child)
-		child.Release()
-		return value, returned, err
+		return i.evalScopedBlock(stmt.Consequence, env)
 	}
 	if stmt.Alternative != nil {
-		child := env.Child()
-		value, returned, err := i.evalBlock(stmt.Alternative, child)
-		child.Release()
-		return value, returned, err
+		return i.evalScopedBlock(stmt.Alternative, env)
 	}
 	return voidValue(), false, nil
 }
@@ -753,13 +870,13 @@ func (i *Interpreter) evalCastExpr(expr *ast.CastExpr, env *Env) (Value, error) 
 		return voidValue(), err
 	}
 	errorType, _, ok := errorUnionParts(expr.TargetType)
-	if !ok || errorType == "" || value.kind != kindErrorUnion || value.errUnion == nil {
+	if !ok || errorType == "" || value.kind != kindErrorUnion || value.errUnionPayload() == nil {
 		return value, nil
 	}
-	if value.errUnion.payload != nil {
+	if value.errUnionPayload().payload != nil {
 		return value, nil
 	}
-	payload := stringValue(value.errUnion.message)
+	payload := stringValue(value.errUnionPayload().message)
 	wrapped := unionValue(errorType, "Message", &payload)
 	return typedErrorUnionValue(wrapped), nil
 }
@@ -954,12 +1071,12 @@ func (i *Interpreter) evalFieldBorrow(
 	}
 	parent := ownerBinding
 	for parent.value.kind == kindRef {
-		parent = parent.value.ref
+		parent = parent.value.refPayload()
 	}
 	if parent.value.kind != kindStruct {
 		return voidValue(), fmt.Errorf("runtime error: field borrow expects struct")
 	}
-	fieldValue, ok := parent.value.fields[target.Name]
+	fieldValue, ok := parent.value.getStructField(target.Name)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", target.Name)
 	}
@@ -1046,9 +1163,9 @@ func valuesEqual(left Value, right Value) bool {
 	case kindType:
 		return left.typeName == right.typeName
 	case kindHandle:
-		return left.handle == right.handle
+		return left.handlePayload() == right.handlePayload()
 	case kindEnum:
-		return left.enum == right.enum
+		return left.enumPayload() == right.enumPayload()
 	default:
 		return false
 	}
@@ -1164,6 +1281,9 @@ func (i *Interpreter) evalQualifiedUserCall(
 	if !ok {
 		return voidValue(), false, nil
 	}
+	if value, ok, err := i.evalStdMemSourceBuiltin(name, args, env); ok || err != nil {
+		return value, ok, err
+	}
 	fn, ok := i.functions[name]
 	if !ok {
 		return voidValue(), false, nil
@@ -1173,6 +1293,39 @@ func (i *Interpreter) evalQualifiedUserCall(
 	}
 	value, err := i.callFunctionExpr(fn, args, env)
 	return value, true, err
+}
+
+// evalStdMemSourceBuiltin accelerates pure std::mem helpers used in hot selfhost paths.
+func (i *Interpreter) evalStdMemSourceBuiltin(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (Value, bool, error) {
+	switch name {
+	case "std.mem.len":
+		value, err := i.evalMemLen(args, env)
+		return value, true, err
+	case "std.mem.equal_bytes":
+		value, err := i.evalMemEqualBytes(args, env)
+		return value, true, err
+	case "std.mem.starts_with":
+		value, err := i.evalMemStartsWith(args, env)
+		return value, true, err
+	case "std.mem.byte_at":
+		value, err := i.evalMemByteAt(args, env)
+		return value, true, err
+	case "std.mem.slice":
+		value, err := i.evalMemSlice(args, env)
+		return value, true, err
+	case "std.mem.trim_ascii":
+		value, err := i.evalMemTrimASCII(args, env)
+		return value, true, err
+	case "std.mem.is_ascii_space":
+		value, err := i.evalMemIsASCIISpace(args, env)
+		return value, true, err
+	default:
+		return voidValue(), false, nil
+	}
 }
 
 // evalQualifiedBuiltin evaluates std:: namespace prototype calls without a module system.
@@ -1274,6 +1427,80 @@ func (i *Interpreter) evalMemLen(args []ast.Expression, env *Env) (Value, error)
 	return intValue(int64(len(bytes))), nil
 }
 
+// evalMemEqualBytes compares two byte slices without interpreting the Kizu loop.
+func (i *Interpreter) evalMemEqualBytes(args []ast.Expression, env *Env) (Value, error) {
+	left, right, err := i.evalMemTwoBytes("std::mem::equal_bytes", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return boolValue(left == right), nil
+}
+
+// evalMemStartsWith checks a byte-slice prefix without interpreting the Kizu loop.
+func (i *Interpreter) evalMemStartsWith(args []ast.Expression, env *Env) (Value, error) {
+	bytes, prefix, err := i.evalMemTwoBytes("std::mem::starts_with", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return boolValue(strings.HasPrefix(bytes, prefix)), nil
+}
+
+// evalMemByteAt returns one checked byte as a recoverable error-union value.
+func (i *Interpreter) evalMemByteAt(args []ast.Expression, env *Env) (Value, error) {
+	bytes, index, err := i.evalMemBytesIndex("std::mem::byte_at", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	if index < 0 || index >= int64(len(bytes)) {
+		return errorUnionValue("index out of bounds"), nil
+	}
+	return intValue(int64(bytes[int(index)])), nil
+}
+
+// evalMemSlice returns one checked sub-slice as a recoverable error-union value.
+func (i *Interpreter) evalMemSlice(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 3 {
+		return voidValue(), fmt.Errorf("runtime error: std::mem::slice expects 3 args")
+	}
+	bytes, err := i.evalMemArg(args[0], env, "std::mem::slice")
+	if err != nil {
+		return voidValue(), err
+	}
+	start, err := i.evalI64Arg(args[1], env, "std::mem::slice")
+	if err != nil {
+		return voidValue(), err
+	}
+	end, err := i.evalI64Arg(args[2], env, "std::mem::slice")
+	if err != nil {
+		return voidValue(), err
+	}
+	if start < 0 || end < start || end > int64(len(bytes)) {
+		return errorUnionValue("slice range out of bounds"), nil
+	}
+	return stringValue(bytes[int(start):int(end)]), nil
+}
+
+// evalMemTrimASCII trims ASCII whitespace without interpreting the Kizu loop.
+func (i *Interpreter) evalMemTrimASCII(args []ast.Expression, env *Env) (Value, error) {
+	bytes, err := i.evalMemOneBytes("std::mem::trim_ascii", args, env)
+	if err != nil {
+		return voidValue(), err
+	}
+	return stringValue(strings.Trim(bytes, " \t\n\r\v\f")), nil
+}
+
+// evalMemIsASCIISpace reports whether an integer byte is ASCII whitespace.
+func (i *Interpreter) evalMemIsASCIISpace(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 1 {
+		return voidValue(), fmt.Errorf("runtime error: std::mem::is_ascii_space expects 1 arg")
+	}
+	byte, err := i.evalI64Arg(args[0], env, "std::mem::is_ascii_space")
+	if err != nil {
+		return voidValue(), err
+	}
+	return boolValue(isASCIISpace(byte)), nil
+}
+
 // evalMemOneBytes evaluates one []u8 argument.
 func (i *Interpreter) evalMemOneBytes(
 	name string,
@@ -1291,6 +1518,80 @@ func (i *Interpreter) evalMemOneBytes(
 		return "", fmt.Errorf("runtime error: %s expects []u8", name)
 	}
 	return bytes.s, nil
+}
+
+// evalMemTwoBytes evaluates two []u8 arguments.
+func (i *Interpreter) evalMemTwoBytes(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (string, string, error) {
+	if len(args) != 2 {
+		return "", "", fmt.Errorf("runtime error: %s expects 2 args", name)
+	}
+	left, err := i.evalMemArg(args[0], env, name)
+	if err != nil {
+		return "", "", err
+	}
+	right, err := i.evalMemArg(args[1], env, name)
+	if err != nil {
+		return "", "", err
+	}
+	return left, right, nil
+}
+
+// evalMemBytesIndex evaluates a []u8 and i64 index pair.
+func (i *Interpreter) evalMemBytesIndex(
+	name string,
+	args []ast.Expression,
+	env *Env,
+) (string, int64, error) {
+	if len(args) != 2 {
+		return "", 0, fmt.Errorf("runtime error: %s expects 2 args", name)
+	}
+	bytes, err := i.evalMemArg(args[0], env, name)
+	if err != nil {
+		return "", 0, err
+	}
+	index, err := i.evalI64Arg(args[1], env, name)
+	if err != nil {
+		return "", 0, err
+	}
+	return bytes, index, nil
+}
+
+// evalMemArg evaluates one []u8 expression.
+func (i *Interpreter) evalMemArg(expr ast.Expression, env *Env, name string) (string, error) {
+	bytes, err := i.evalExpr(expr, env)
+	if err != nil {
+		return "", err
+	}
+	if bytes.kind != kindString {
+		return "", fmt.Errorf("runtime error: %s expects []u8", name)
+	}
+	return bytes.s, nil
+}
+
+// evalI64Arg evaluates one i64 expression.
+func (i *Interpreter) evalI64Arg(expr ast.Expression, env *Env, name string) (int64, error) {
+	value, err := i.evalExpr(expr, env)
+	if err != nil {
+		return 0, err
+	}
+	if value.kind != kindInt {
+		return 0, fmt.Errorf("runtime error: %s expects i64", name)
+	}
+	return value.i, nil
+}
+
+// isASCIISpace reports whether byte is one of std::mem's ASCII whitespace bytes.
+func isASCIISpace(byte int64) bool {
+	switch byte {
+	case 32, 9, 10, 13, 11, 12:
+		return true
+	default:
+		return false
+	}
 }
 
 // evalFsBuiltin evaluates filesystem host primitives with explicit Io.
@@ -1516,11 +1817,12 @@ func (i *Interpreter) evalFsReadDir(args []ast.Expression, env *Env) (Value, err
 	}
 	out := arrayValue("std::fs::DirEntry")
 	for _, entry := range entries {
-		out.array.values = append(out.array.values, structValue("std::fs::DirEntry", map[string]Value{
+		next := structValue("std::fs::DirEntry", map[string]Value{
 			"name":   stringValue(entry.Name()),
 			"path":   stringValue(filepath.Join(target, entry.Name())),
 			"is_dir": boolValue(entry.IsDir()),
-		}))
+		})
+		out.arrayPayload().values = append(out.arrayPayload().values, next)
 	}
 	return out, nil
 }
@@ -2013,13 +2315,51 @@ func (i *Interpreter) callTypeApplyFunction(
 	args []ast.Expression,
 	caller *Env,
 ) (Value, error) {
-	previous := i.typeArgs
-	i.typeArgs = map[string]string{}
-	for idx, param := range fn.TypeParams {
-		i.typeArgs[param] = typeArgs[idx]
+	previous, frame, err := i.pushTypeArgFrame(fn.TypeParams, typeArgs, false)
+	if err != nil {
+		return voidValue(), err
 	}
-	defer func() { i.typeArgs = previous }()
+	defer i.popTypeArgFrame(previous, frame)
 	return i.callFunctionExpr(fn, args, caller)
+}
+
+// pushTypeArgFrame installs one call-scoped static type-argument frame.
+func (i *Interpreter) pushTypeArgFrame(
+	params []string,
+	args []string,
+	allowMissing bool,
+) (map[string]string, map[string]string, error) {
+	previous := i.typeArgs
+	if len(params) == 0 {
+		i.typeArgs = nil
+		return previous, nil, nil
+	}
+
+	frame := typeArgFramePool.Get().(map[string]string)
+	clear(frame)
+	for idx, param := range params {
+		if idx >= len(args) {
+			if allowMissing {
+				continue
+			}
+			clear(frame)
+			typeArgFramePool.Put(frame)
+			i.typeArgs = previous
+			return previous, nil, fmt.Errorf("runtime error: missing static argument `%s`", param)
+		}
+		frame[param] = args[idx]
+	}
+	i.typeArgs = frame
+	return previous, frame, nil
+}
+
+// popTypeArgFrame restores the previous static type-argument frame.
+func (i *Interpreter) popTypeArgFrame(previous map[string]string, frame map[string]string) {
+	if frame != nil {
+		clear(frame)
+		typeArgFramePool.Put(frame)
+	}
+	i.typeArgs = previous
 }
 
 // evalStdMethodWrapper invokes a Kizu std method wrapper with an explicit receiver.
@@ -2034,20 +2374,12 @@ func (i *Interpreter) evalStdMethodWrapper(
 	if fn == nil {
 		return voidValue(), false, nil
 	}
-	values, err := i.evalArgs(args, env)
+	previous, frame, err := i.pushTypeArgFrame(fn.TypeParams, typeArgs, true)
 	if err != nil {
 		return voidValue(), true, err
 	}
-	callArgs := append([]Value{receiver}, values...)
-	previous := i.typeArgs
-	i.typeArgs = map[string]string{}
-	for idx, param := range fn.TypeParams {
-		if idx < len(typeArgs) {
-			i.typeArgs[param] = typeArgs[idx]
-		}
-	}
-	defer func() { i.typeArgs = previous }()
-	value, err := i.callFunction(name, callArgs)
+	defer i.popTypeArgFrame(previous, frame)
+	value, err := i.callFunctionWithReceiverExpr(name, fn, receiver, args, env)
 	return value, true, err
 }
 
@@ -2080,15 +2412,48 @@ func (i *Interpreter) evalTryExpr(expr *ast.TryExpr, env *Env) (Value, error) {
 
 // evalStructLiteralExpr evaluates each field initializer into a struct value.
 func (i *Interpreter) evalStructLiteralExpr(expr *ast.StructLiteralExpr, env *Env) (Value, error) {
-	fields := map[string]Value{}
+	layout := i.structLayoutForLiteral(expr)
+	result := structLayoutValue(expr.TypeName, layout)
 	for _, field := range expr.Fields {
 		value, err := i.evalExpr(field.Value, env)
 		if err != nil {
 			return voidValue(), err
 		}
-		fields[field.Name] = value
+		if !result.setStructField(field.Name, value) {
+			return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", field.Name)
+		}
 	}
-	return structValue(expr.TypeName, fields), nil
+	return result, nil
+}
+
+// structLayoutForLiteral reuses declared or per-AST field indexes for struct literals.
+func (i *Interpreter) structLayoutForLiteral(expr *ast.StructLiteralExpr) *StructLayout {
+	if layout := i.structs[expr.TypeName]; layout != nil && layout.acceptsLiteralFields(expr.Fields) {
+		return layout
+	}
+	if layout := i.literals[expr]; layout != nil {
+		return layout
+	}
+	names := make([]string, len(expr.Fields))
+	for idx, field := range expr.Fields {
+		names[idx] = field.Name
+	}
+	layout := newStructLayout(names)
+	i.literals[expr] = layout
+	return layout
+}
+
+// acceptsLiteralFields reports whether a declared layout covers exactly this literal shape.
+func (layout *StructLayout) acceptsLiteralFields(fields []ast.FieldValue) bool {
+	if len(fields) != len(layout.names) {
+		return false
+	}
+	for _, field := range fields {
+		if _, ok := layout.index[field.Name]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // evalFieldExpr reads a field from a struct value.
@@ -2114,7 +2479,7 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 	if receiver.kind != kindStruct {
 		return voidValue(), fmt.Errorf("runtime error: field access expects struct")
 	}
-	value, ok := receiver.fields[expr.Name]
+	value, ok := receiver.getStructField(expr.Name)
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", expr.Name)
 	}
@@ -2124,7 +2489,7 @@ func (i *Interpreter) evalFieldExpr(expr *ast.FieldExpr, env *Env) (Value, error
 // unwrapRefValue follows local borrow references to the current stored value.
 func unwrapRefValue(value Value) Value {
 	for value.kind == kindRef {
-		value = value.ref.value
+		value = value.refPayload().value
 	}
 	return value
 }
@@ -2166,7 +2531,7 @@ func (i *Interpreter) evalDerefExpr(expr *ast.DerefExpr, env *Env) (Value, error
 	if value.kind != kindRef {
 		return voidValue(), fmt.Errorf("runtime error: `%s` is not a borrow", value.String())
 	}
-	return value.ref.value, nil
+	return value.refPayload().value, nil
 }
 
 // evalUnionConstructor evaluates Union.Variant(payload) construction.
@@ -2230,16 +2595,16 @@ func (i *Interpreter) evalMethodCallExpr(
 	if receiver.kind != kindArena {
 		return i.evalNonArenaMethod(receiver, field.Name, args, env)
 	}
-	if receiver.arena.deinit {
+	if receiver.arenaPayload().deinit {
 		return voidValue(), fmt.Errorf("runtime error: Arena was deinitialized")
 	}
 	switch field.Name {
 	case "add":
-		return i.evalArenaAdd(receiver.arena, args, env)
+		return i.evalArenaAdd(receiver.arenaPayload(), args, env)
 	case "get":
-		return i.evalArenaGet(receiver.arena, args, env)
+		return i.evalArenaGet(receiver.arenaPayload(), args, env)
 	case "deinit":
-		return i.evalArenaDeinit(receiver.arena, args)
+		return i.evalArenaDeinit(receiver.arenaPayload(), args)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: unknown arena method `%s`", field.Name)
 	}
@@ -2310,7 +2675,7 @@ func (i *Interpreter) evalBoxRuntimeMethod(
 	if box.kind != kindBox {
 		return voidValue(), fmt.Errorf("runtime error: Box method expects Box receiver")
 	}
-	if box.box.deinit {
+	if box.boxPayload().deinit {
 		return voidValue(), fmt.Errorf("runtime error: Box was deinitialized")
 	}
 	if len(args) != 0 {
@@ -2319,13 +2684,13 @@ func (i *Interpreter) evalBoxRuntimeMethod(
 	switch name {
 	case "borrow", "borrow_mut":
 		return refValue(&binding{
-			value: box.box.value, mutable: name == "borrow_mut", boxParent: box.box,
+			value: box.boxPayload().value, mutable: name == "borrow_mut", boxParent: box.boxPayload(),
 		}), nil
 	case "deinit":
-		if err := i.deinitValue(box.box.value); err != nil {
+		if err := i.deinitValue(box.boxPayload().value); err != nil {
 			return voidValue(), err
 		}
-		box.box.deinit = true
+		box.boxPayload().deinit = true
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Box has no method `%s`", name)
@@ -2366,12 +2731,12 @@ func (i *Interpreter) evalQueueEnqueue(
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: queue.enqueue expects function name")
 	}
-	values, err := i.evalArgs(args[2:], env)
+	callArgs, err := i.evalArgsWithPrefix(ioValue, args[2:], env)
 	if err != nil {
 		return voidValue(), err
 	}
-	callArgs := append([]Value{ioValue}, values...)
-	queue.queue.jobs = append(queue.queue.jobs, QueuedJob{name: target.Name, args: callArgs})
+	queuePayload := queue.queuePayload()
+	queuePayload.jobs = append(queuePayload.jobs, QueuedJob{name: target.Name, args: callArgs})
 	return voidValue(), nil
 }
 
@@ -2380,9 +2745,9 @@ func (i *Interpreter) evalQueueDrain(queue Value, args []ast.Expression) (Value,
 	if len(args) != 0 {
 		return voidValue(), fmt.Errorf("runtime error: queue.drain expects 0 args")
 	}
-	for len(queue.queue.jobs) > 0 {
-		job := queue.queue.jobs[0]
-		queue.queue.jobs = queue.queue.jobs[1:]
+	for len(queue.queuePayload().jobs) > 0 {
+		job := queue.queuePayload().jobs[0]
+		queue.queuePayload().jobs = queue.queuePayload().jobs[1:]
 		if _, err := i.callFunction(job.name, job.args); err != nil {
 			return voidValue(), err
 		}
@@ -2486,7 +2851,7 @@ func (i *Interpreter) evalParallelMap(args []ast.Expression, env *Env) (Value, e
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: parallel_map expects function name")
 	}
-	return i.fillPartition(partition.partition, start, end, worker)
+	return i.fillPartition(partition.partitionPayload(), start, end, worker)
 }
 
 // evalFunctionNameArg resolves direct function names and forwarded Function parameters.
@@ -2656,9 +3021,9 @@ func runtimeGenericValueMatchesType(value Value, typeName string) bool {
 func runtimeNamedValueMatchesType(value Value, typeName string) bool {
 	switch value.kind {
 	case kindEnum:
-		return value.enum.typeName == typeName
+		return value.enumPayload().typeName == typeName
 	case kindUnion:
-		return value.union.typeName == typeName
+		return value.unionPayload().typeName == typeName
 	case kindStruct:
 		return value.typeName == typeName
 	default:
@@ -2733,12 +3098,11 @@ func (i *Interpreter) evalTaskGroupMethod(
 	if !ok {
 		return voidValue(), fmt.Errorf("runtime error: TaskGroup.spawn expects function name")
 	}
-	values, err := i.evalArgs(args[1:], env)
+	callArgs, err := i.evalArgsWithPrefix(group.taskGroupPayload().io, args[1:], env)
 	if err != nil {
 		return voidValue(), err
 	}
-	callArgs := append([]Value{group.taskGroup.io}, values...)
-	return i.spawnTask(group.taskGroup.io, target.Name, callArgs), nil
+	return i.spawnTask(group.taskGroupPayload().io, target.Name, callArgs), nil
 }
 
 // spawnTask executes a task according to the group's Io implementation.
@@ -2762,24 +3126,24 @@ func evalTaskMethod(task Value, name string, args []ast.Expression) (Value, erro
 	}
 	switch name {
 	case "await":
-		if task.task.state == taskCanceled {
+		if task.taskPayload().state == taskCanceled {
 			return voidValue(), fmt.Errorf("runtime error: task was canceled")
 		}
-		if task.task.state == taskAwaited {
+		if task.taskPayload().state == taskAwaited {
 			return voidValue(), fmt.Errorf("runtime error: task was already awaited")
 		}
-		value, err := finishTask(task.task)
-		task.task.state = taskAwaited
+		value, err := finishTask(task.taskPayload())
+		task.taskPayload().state = taskAwaited
 		return value, err
 	case "cancel":
-		if task.task.state == taskCanceled {
+		if task.taskPayload().state == taskCanceled {
 			return voidValue(), fmt.Errorf("runtime error: task was already canceled")
 		}
-		if task.task.state == taskAwaited {
+		if task.taskPayload().state == taskAwaited {
 			return voidValue(), fmt.Errorf("runtime error: task was already awaited")
 		}
-		waitTask(task.task)
-		task.task.state = taskCanceled
+		waitTask(task.taskPayload())
+		task.taskPayload().state = taskCanceled
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Task has no method `%s`", name)
@@ -2836,23 +3200,23 @@ func (i *Interpreter) evalChannelRuntimeMethod(
 		if err != nil {
 			return voidValue(), err
 		}
-		channel.channel.values = append(channel.channel.values, value)
+		channel.channelPayload().values = append(channel.channelPayload().values, value)
 		return voidValue(), nil
 	case "recv":
 		if len(args) != 0 {
 			return voidValue(), fmt.Errorf("runtime error: channel.recv expects 0 args")
 		}
-		if len(channel.channel.values) == 0 {
+		if len(channel.channelPayload().values) == 0 {
 			return voidValue(), fmt.Errorf("runtime error: channel is empty")
 		}
-		value := channel.channel.values[0]
-		channel.channel.values = channel.channel.values[1:]
+		value := channel.channelPayload().values[0]
+		channel.channelPayload().values = channel.channelPayload().values[1:]
 		return value, nil
 	case "close":
 		if len(args) != 0 {
 			return voidValue(), fmt.Errorf("runtime error: channel.close expects 0 args")
 		}
-		channel.channel.closed = true
+		channel.channelPayload().closed = true
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Channel has no method `%s`", name)
@@ -2876,10 +3240,11 @@ func (i *Interpreter) evalPartitionMethod(
 	if err != nil {
 		return voidValue(), err
 	}
-	if index.kind != kindInt || index.i < 0 || int(index.i) >= len(partition.partition.values) {
+	partitionPayload := partition.partitionPayload()
+	if index.kind != kindInt || index.i < 0 || int(index.i) >= len(partitionPayload.values) {
 		return voidValue(), fmt.Errorf("runtime error: partition index out of bounds")
 	}
-	return partitionSlotValue(partition.partition, int(index.i)), nil
+	return partitionSlotValue(partitionPayload, int(index.i)), nil
 }
 
 // evalLocalBufferMethod returns one worker-local scratch value by index.
@@ -2899,10 +3264,11 @@ func (i *Interpreter) evalLocalBufferMethod(
 	if err != nil {
 		return voidValue(), err
 	}
-	if index.kind != kindInt || index.i < 0 || int(index.i) >= len(buffer.localBuf.values) {
+	bufferPayload := buffer.localBufferPayload()
+	if index.kind != kindInt || index.i < 0 || int(index.i) >= len(bufferPayload.values) {
 		return voidValue(), fmt.Errorf("runtime error: LocalBuffer index out of bounds")
 	}
-	return buffer.localBuf.values[int(index.i)], nil
+	return bufferPayload.values[int(index.i)], nil
 }
 
 // evalArrayMethod dispatches public Array methods through Kizu std wrappers.
@@ -2930,7 +3296,7 @@ func (i *Interpreter) evalArrayRuntimeMethod(
 	args []ast.Expression,
 	env *Env,
 ) (Value, error) {
-	if array.array.deinit {
+	if array.arrayPayload().deinit {
 		return voidValue(), fmt.Errorf("runtime error: Array was deinitialized")
 	}
 	if value, ok, err := i.evalArrayMutationRuntimeMethod(array, name, args, env); ok || err != nil {
@@ -2979,9 +3345,10 @@ func (i *Interpreter) evalArrayReadRuntimeMethod(
 ) (Value, bool, error) {
 	switch name {
 	case "len":
-		return intValue(int64(len(array.array.values))), true, requireNoArgs("Array.len", args)
+		return intValue(int64(len(array.arrayPayload().values))), true, requireNoArgs("Array.len", args)
 	case "capacity":
-		return intValue(int64(cap(array.array.values))), true, requireNoArgs("Array.capacity", args)
+		capacity := int64(cap(array.arrayPayload().values))
+		return intValue(capacity), true, requireNoArgs("Array.capacity", args)
 	case "as_bytes":
 		value, err := evalArrayAsBytes(array, args)
 		return value, true, err
@@ -3013,20 +3380,20 @@ func (i *Interpreter) evalArrayCleanupRuntimeMethod(
 		if err := requireNoArgs("Array.clear", args); err != nil {
 			return voidValue(), err
 		}
-		if err := i.deinitValues(array.array.values); err != nil {
+		if err := i.deinitValues(array.arrayPayload().values); err != nil {
 			return voidValue(), err
 		}
-		array.array.values = array.array.values[:0]
+		array.arrayPayload().values = array.arrayPayload().values[:0]
 		return voidValue(), nil
 	case "deinit":
 		if err := requireNoArgs("Array.deinit", args); err != nil {
 			return voidValue(), err
 		}
-		if err := i.deinitValues(array.array.values); err != nil {
+		if err := i.deinitValues(array.arrayPayload().values); err != nil {
 			return voidValue(), err
 		}
-		array.array.values = nil
-		array.array.deinit = true
+		array.arrayPayload().values = nil
+		array.arrayPayload().deinit = true
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Array has no method `%s`", name)
@@ -3046,7 +3413,7 @@ func (i *Interpreter) evalArrayReserve(
 	if additional < 0 {
 		return errorUnionValue("Array.reserve expects non-negative i64"), nil
 	}
-	ensureArrayCapacity(array.array, len(array.array.values)+additional)
+	ensureArrayCapacity(array.arrayPayload(), len(array.arrayPayload().values)+additional)
 	return voidValue(), nil
 }
 
@@ -3060,13 +3427,13 @@ func (i *Interpreter) evalArrayTruncate(
 	if err != nil {
 		return voidValue(), err
 	}
-	if length < 0 || length > len(array.array.values) {
+	if length < 0 || length > len(array.arrayPayload().values) {
 		return errorUnionValue("Array.truncate length out of bounds"), nil
 	}
-	if err := i.deinitValues(array.array.values[length:]); err != nil {
+	if err := i.deinitValues(array.arrayPayload().values[length:]); err != nil {
 		return voidValue(), err
 	}
-	array.array.values = array.array.values[:length]
+	array.arrayPayload().values = array.arrayPayload().values[:length]
 	return voidValue(), nil
 }
 
@@ -3078,8 +3445,8 @@ func evalArrayAsBytes(array Value, args []ast.Expression) (Value, error) {
 	if array.typeName != "u8" {
 		return voidValue(), fmt.Errorf("runtime error: Array.as_bytes requires Array<u8>")
 	}
-	bytes := make([]byte, 0, len(array.array.values))
-	for _, value := range array.array.values {
+	bytes := make([]byte, 0, len(array.arrayPayload().values))
+	for _, value := range array.arrayPayload().values {
 		if value.kind != kindInt || value.i < 0 || value.i > 255 {
 			return voidValue(), fmt.Errorf("runtime error: Array.as_bytes requires u8 elements")
 		}
@@ -3099,13 +3466,13 @@ func (i *Interpreter) evalArrayAt(
 	if err != nil {
 		return voidValue(), err
 	}
-	if index < 0 || index >= len(array.array.values) {
+	if index < 0 || index >= len(array.arrayPayload().values) {
 		return errorUnionValue("Array.at index out of bounds"), nil
 	}
 	cell := &binding{
-		value:       array.array.values[index],
+		value:       array.arrayPayload().values[index],
 		mutable:     mutable,
-		arrayParent: array.array,
+		arrayParent: array.arrayPayload(),
 		arrayIndex:  index,
 	}
 	return refValue(cell), nil
@@ -3120,7 +3487,7 @@ func (i *Interpreter) evalArraySet(array Value, args []ast.Expression, env *Env)
 	if err != nil {
 		return voidValue(), err
 	}
-	if index < 0 || index >= len(array.array.values) {
+	if index < 0 || index >= len(array.arrayPayload().values) {
 		return errorUnionValue("Array.set index out of bounds"), nil
 	}
 	value, err := i.evalExpr(args[1], env)
@@ -3130,10 +3497,10 @@ func (i *Interpreter) evalArraySet(array Value, args []ast.Expression, env *Env)
 	if !runtimeValueMatchesType(value, array.typeName) {
 		return errorUnionValue("Array.set element type mismatch"), nil
 	}
-	if err := i.deinitValue(array.array.values[index]); err != nil {
+	if err := i.deinitValue(array.arrayPayload().values[index]); err != nil {
 		return voidValue(), err
 	}
-	array.array.values[index] = value
+	array.arrayPayload().values[index] = value
 	return voidValue(), nil
 }
 
@@ -3149,7 +3516,7 @@ func (i *Interpreter) evalArrayAppend(array Value, args []ast.Expression, env *E
 	if !runtimeValueMatchesType(value, array.typeName) {
 		return errorUnionValue("Array.append element type mismatch"), nil
 	}
-	array.array.values = append(array.array.values, value)
+	array.arrayPayload().values = append(array.arrayPayload().values, value)
 	return voidValue(), nil
 }
 
@@ -3158,13 +3525,13 @@ func (i *Interpreter) evalArrayPop(array Value, args []ast.Expression) (Value, e
 	if len(args) != 0 {
 		return voidValue(), fmt.Errorf("runtime error: Array.pop expects 0 args")
 	}
-	if len(array.array.values) == 0 {
+	if len(array.arrayPayload().values) == 0 {
 		return errorUnionValue("Array.pop empty array"), nil
 	}
-	index := len(array.array.values) - 1
-	value := array.array.values[index]
-	array.array.values[index] = voidValue()
-	array.array.values = array.array.values[:index]
+	index := len(array.arrayPayload().values) - 1
+	value := array.arrayPayload().values[index]
+	array.arrayPayload().values[index] = voidValue()
+	array.arrayPayload().values = array.arrayPayload().values[:index]
 	return value, nil
 }
 
@@ -3184,10 +3551,10 @@ func (i *Interpreter) evalArrayGet(array Value, args []ast.Expression, env *Env)
 	if err != nil {
 		return voidValue(), err
 	}
-	if index < 0 || index >= len(array.array.values) {
+	if index < 0 || index >= len(array.arrayPayload().values) {
 		return errorUnionValue("Array.get index out of bounds"), nil
 	}
-	return array.array.values[index], nil
+	return array.arrayPayload().values[index], nil
 }
 
 // evalArrayGetOrPanic reads one element or traps on an invalid test-time index.
@@ -3200,10 +3567,10 @@ func (i *Interpreter) evalArrayGetOrPanic(
 	if err != nil {
 		return voidValue(), err
 	}
-	if index < 0 || index >= len(array.array.values) {
+	if index < 0 || index >= len(array.arrayPayload().values) {
 		return voidValue(), fmt.Errorf("runtime error: Array.get_or_panic index out of bounds")
 	}
-	return array.array.values[index], nil
+	return array.arrayPayload().values[index], nil
 }
 
 // deinitValues drops owned values in reverse storage order.
@@ -3225,13 +3592,13 @@ func (i *Interpreter) deinitValue(value Value) error {
 	case kindUnion:
 		return i.deinitUnionValue(value)
 	case kindArena:
-		return deinitArenaValue(value.arena)
+		return deinitArenaValue(value.arenaPayload())
 	case kindArray:
-		return i.deinitArrayValue(value.array)
+		return i.deinitArrayValue(value.arrayPayload())
 	case kindMap:
-		return i.deinitMapValue(value.mapValue)
+		return i.deinitMapValue(value.mapPayload())
 	case kindBox:
-		return i.deinitBoxValue(value.box)
+		return i.deinitBoxValue(value.boxPayload())
 	}
 	return nil
 }
@@ -3242,15 +3609,15 @@ func (i *Interpreter) deinitStructValue(value Value) error {
 		_, err := i.callMethod(method, []Value{value})
 		return err
 	}
-	return i.deinitStructFields(value.fields)
+	return i.deinitStructFields(value)
 }
 
 // deinitUnionValue drops the active union payload when it owns one.
 func (i *Interpreter) deinitUnionValue(value Value) error {
-	if value.union.payload == nil {
+	if value.unionPayload().payload == nil {
 		return nil
 	}
-	return i.deinitValue(*value.union.payload)
+	return i.deinitValue(*value.unionPayload().payload)
 }
 
 // deinitArenaValue releases arena storage without recursively dropping payloads.
@@ -3302,14 +3669,17 @@ func (i *Interpreter) deinitBoxValue(box *Box) error {
 }
 
 // deinitStructFields drops fields deterministically when no explicit deinit exists.
-func (i *Interpreter) deinitStructFields(fields map[string]Value) error {
-	names := make([]string, 0, len(fields))
-	for name := range fields {
-		names = append(names, name)
+func (i *Interpreter) deinitStructFields(value Value) error {
+	if value.object == nil {
+		return nil
 	}
-	sort.Strings(names)
+	names := value.structFieldNames()
 	for index := len(names) - 1; index >= 0; index-- {
-		if err := i.deinitValue(fields[names[index]]); err != nil {
+		field, ok := value.getStructField(names[index])
+		if !ok {
+			continue
+		}
+		if err := i.deinitValue(field); err != nil {
 			return err
 		}
 	}
@@ -3348,7 +3718,7 @@ func (i *Interpreter) evalMapMethod(
 	env *Env,
 ) (Value, error) {
 	if value, ok, err := i.evalStdMethodWrapper(
-		"std.map."+name, []string{mapVal.mapValue.valueType}, mapVal, args, env,
+		"std.map."+name, []string{mapVal.mapPayload().valueType}, mapVal, args, env,
 	); ok || err != nil {
 		return value, err
 	}
@@ -3362,7 +3732,7 @@ func (i *Interpreter) evalMapRuntimeMethod(
 	args []ast.Expression,
 	env *Env,
 ) (Value, error) {
-	if mapVal.mapValue.deinit {
+	if mapVal.mapPayload().deinit {
 		return voidValue(), fmt.Errorf("runtime error: Map was deinitialized")
 	}
 	switch name {
@@ -3373,16 +3743,16 @@ func (i *Interpreter) evalMapRuntimeMethod(
 	case "contains":
 		return i.evalMapContains(mapVal, args, env)
 	case "len":
-		return intValue(int64(len(mapVal.mapValue.entries))), requireNoArgs("Map.len", args)
+		return intValue(int64(len(mapVal.mapPayload().entries))), requireNoArgs("Map.len", args)
 	case "deinit":
 		if err := requireNoArgs("Map.deinit", args); err != nil {
 			return voidValue(), err
 		}
-		if err := i.deinitMapEntries(mapVal.mapValue); err != nil {
+		if err := i.deinitMapEntries(mapVal.mapPayload()); err != nil {
 			return voidValue(), err
 		}
-		mapVal.mapValue.entries = nil
-		mapVal.mapValue.deinit = true
+		mapVal.mapPayload().entries = nil
+		mapVal.mapPayload().deinit = true
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Map has no method `%s`", name)
@@ -3398,15 +3768,15 @@ func (i *Interpreter) evalMapInsert(mapVal Value, args []ast.Expression, env *En
 	if err != nil {
 		return voidValue(), err
 	}
-	if !runtimeValueMatchesType(value, mapVal.mapValue.valueType) {
+	if !runtimeValueMatchesType(value, mapVal.mapPayload().valueType) {
 		return errorUnionValue("Map.insert value type mismatch"), nil
 	}
-	if old, ok := mapVal.mapValue.entries[key.s]; ok {
+	if old, ok := mapVal.mapPayload().entries[key.s]; ok {
 		if err := i.deinitValue(old); err != nil {
 			return voidValue(), err
 		}
 	}
-	mapVal.mapValue.entries[key.s] = value
+	mapVal.mapPayload().entries[key.s] = value
 	return voidValue(), nil
 }
 
@@ -3416,7 +3786,7 @@ func (i *Interpreter) evalMapGet(mapVal Value, args []ast.Expression, env *Env) 
 	if err != nil {
 		return voidValue(), err
 	}
-	value, exists := mapVal.mapValue.entries[key]
+	value, exists := mapVal.mapPayload().entries[key]
 	if !exists {
 		return errorUnionValue("Map.get key not found"), nil
 	}
@@ -3433,7 +3803,7 @@ func (i *Interpreter) evalMapContains(
 	if err != nil {
 		return voidValue(), err
 	}
-	_, exists := mapVal.mapValue.entries[key]
+	_, exists := mapVal.mapPayload().entries[key]
 	return boolValue(exists), nil
 }
 
@@ -3581,7 +3951,7 @@ func (i *Interpreter) evalAtomicRuntimeMethod(
 		if len(args) != 0 {
 			return voidValue(), fmt.Errorf("runtime error: atomic.load expects 0 args")
 		}
-		return atomic.atomic.value, nil
+		return atomic.atomicPayload().value, nil
 	case "store":
 		if len(args) != 1 {
 			return voidValue(), fmt.Errorf("runtime error: atomic.store expects 1 arg")
@@ -3593,7 +3963,7 @@ func (i *Interpreter) evalAtomicRuntimeMethod(
 		if !runtimeValueMatchesType(value, atomic.typeName) {
 			return voidValue(), fmt.Errorf("runtime error: atomic.store expects %s", atomic.typeName)
 		}
-		atomic.atomic.value = value
+		atomic.atomicPayload().value = value
 		return voidValue(), nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Atomic has no method `%s`", name)
@@ -3642,7 +4012,7 @@ func (i *Interpreter) evalMutexRuntimeMethod(
 		if len(args) != 0 {
 			return voidValue(), fmt.Errorf("runtime error: mutex.get expects 0 args")
 		}
-		return mutex.mutex.value, nil
+		return mutex.mutexPayload().value, nil
 	default:
 		return voidValue(), fmt.Errorf("runtime error: Mutex has no method `%s`", name)
 	}
@@ -3659,12 +4029,7 @@ func (i *Interpreter) evalImplMethod(
 	if methods == nil || methods[name] == nil {
 		return voidValue(), fmt.Errorf("runtime error: `%s` has no method `%s`", receiver.typeName, name)
 	}
-	values, err := i.evalArgs(args, env)
-	if err != nil {
-		return voidValue(), err
-	}
-	callArgs := append([]Value{receiver}, values...)
-	return i.callMethod(methods[name], callArgs)
+	return i.callFunctionWithReceiverExpr(methods[name].Name, methods[name], receiver, args, env)
 }
 
 // callMethod invokes an impl method declaration.
@@ -3714,13 +4079,13 @@ func (i *Interpreter) evalArenaGet(arena *Arena, args []ast.Expression, env *Env
 	if err != nil {
 		return voidValue(), err
 	}
-	if handle.kind != kindHandle || handle.handle.arena != arena {
+	if handle.kind != kindHandle || handle.handlePayload().arena != arena {
 		return voidValue(), fmt.Errorf("runtime error: handle does not belong to arena")
 	}
-	if handle.handle.index < 0 || handle.handle.index >= len(arena.values) {
+	if handle.handlePayload().index < 0 || handle.handlePayload().index >= len(arena.values) {
 		return voidValue(), fmt.Errorf("runtime error: invalid arena handle")
 	}
-	return arena.values[handle.handle.index], nil
+	return arena.values[handle.handlePayload().index], nil
 }
 
 // evalArenaDeinit releases an arena at an explicit cleanup boundary.
@@ -3735,13 +4100,31 @@ func (i *Interpreter) evalArenaDeinit(arena *Arena, args []ast.Expression) (Valu
 
 // evalArgs evaluates call arguments from left to right.
 func (i *Interpreter) evalArgs(exprs []ast.Expression, env *Env) ([]Value, error) {
-	args := make([]Value, 0, len(exprs))
-	for _, expr := range exprs {
+	args := make([]Value, len(exprs))
+	for idx, expr := range exprs {
 		value, err := i.evalExpr(expr, env)
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, value)
+		args[idx] = value
+	}
+	return args, nil
+}
+
+// evalArgsWithPrefix evaluates call arguments into one slice prefixed by a receiver value.
+func (i *Interpreter) evalArgsWithPrefix(
+	prefix Value,
+	exprs []ast.Expression,
+	env *Env,
+) ([]Value, error) {
+	args := make([]Value, 1+len(exprs))
+	args[0] = prefix
+	for idx, expr := range exprs {
+		value, err := i.evalExpr(expr, env)
+		if err != nil {
+			return nil, err
+		}
+		args[idx+1] = value
 	}
 	return args, nil
 }
