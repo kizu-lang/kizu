@@ -29,10 +29,12 @@ The current hosted stage2 artifact supports these command slices:
 | `parse <missing-assign source file>` | #646 negative binding source-shape slice; manifest covers the original and alias fixtures | `just selfhost-parse-parity-gate` |
 | `fmt <source file>` | #648/#650 stdout formatter slice routed through the hosted selfhost formatter path | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
 | `fmt --write <source file>` | #629 bounded formatter mutation slice using the same hosted formatter bytes and `fs_write_file` | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
-| `run <print-string source file>` | #588 positive source-shape slice via canonical emitted artifact with derived stdout payload and LLVM C string escaping | `just selfhost-run-parity-gate` |
+| `run <top-level main print-string source file>` | #588/#752 positive source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
-| `test <expect-ok source file>` | #590 positive source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
-| `test <expect-failure source file>` | #590 assertion-failure source-shape slice via canonical emitted artifact | `just selfhost-test-parity-gate` |
+| `run <control-flow print source file>` | #752 unsupported branch-control source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
+| `test <top-level expect-ok source file>` | #590/#752 positive source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
+| `test <top-level expect-failure source file>` | #590/#752 assertion-failure source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-test-parity-gate` |
+| `test <control-flow expect source file>` | #752 unsupported branch-control source-shape slice, no artifact execution | `just selfhost-test-parity-gate` |
 
 `selfhost/tests/cli/parse-parity.tsv` is the
 #525/#579/#586/#594/#598/#600/#646 parse parity manifest. It records command
@@ -62,23 +64,27 @@ path. The fast
 `target/selfhost/stage2/selfhost` artifact and records `go.cmd-kizu-fallback
 none`; it does not bootstrap from scratch by default.
 
-`selfhost/tests/cli/run-parity.tsv` is the #569/#588 run parity manifest. It
+`selfhost/tests/cli/run-parity.tsv` is the #569/#588/#752 run parity manifest. It
 records command args, fixture paths, expected exit codes, checked-in
 stdout/stderr golden paths, hosted artifact mode, and the canonical artifact
 stem for the bounded `run <file>` slice. The positive print-hello and negative
 missing-expression rows each include the original fixture plus an alias fixture
 with the same source bytes, proving the hosted dispatch paths are no longer
-bound to one fixed path. The hosted compiler emits fixture artifacts under
+bound to one fixed path. The #752 branch-control row proves the hosted run path
+does not search for `print` inside non-top-level control flow and then emit a
+fake artifact. The hosted compiler emits fixture artifacts under
 `target/selfhost/run/`; the gate links and executes those artifacts with the
 explicit selfhost host runtime and records `go.cmd-kizu-fallback none`.
 
-`selfhost/tests/cli/test-parity.tsv` is the #570/#590 single-file test parity
+`selfhost/tests/cli/test-parity.tsv` is the #570/#590/#752 single-file test parity
 manifest. It records command args, fixture paths, expected exit codes,
 checked-in stdout/stderr golden paths, hosted artifact mode, and the canonical
 artifact stem for the bounded `test <file>` slice. The expect-ok and
 expect-failure rows each include the original fixture plus an alias fixture with
 the same source bytes, proving the hosted dispatch paths are no longer bound to
-one fixed path. The hosted compiler emits fixture artifacts under
+one fixed path. The #752 branch-control row proves the hosted test path does not
+search for `std::testing::expect` inside non-top-level control flow and then
+emit a fake artifact. The hosted compiler emits fixture artifacts under
 `target/selfhost/test/`; the gate links and executes those artifacts with the
 explicit selfhost host runtime, records `go.cmd-kizu-fallback none`, and does not
 claim general test discovery.
@@ -114,6 +120,7 @@ selfhost/tests/cli/run-parity.tsv
 run_hello run selfhost/tests/cli/run_hello.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello
 run_hello_alias run selfhost/tests/cli/run_hello_alias.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello_alias
 run_print_custom run selfhost/tests/cli/run_print_custom.kizu 0 selfhost/tests/cli/golden/run_print_custom.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_print_custom
+run_if_unsupported run selfhost/tests/cli/run_if_unsupported.kizu 64 selfhost/tests/cli/golden/run_hello.stderr selfhost/tests/cli/golden/usage.stderr hosted-artifact -
 run_invalid_missing_expr run selfhost/tests/cli/run_invalid_missing_expr.kizu 1 selfhost/tests/cli/golden/run_invalid_missing_expr.stdout selfhost/tests/cli/golden/run_invalid_missing_expr.stderr hosted-artifact -
 run_invalid_missing_expr_alias run selfhost/tests/cli/run_invalid_missing_expr_alias.kizu 1 selfhost/tests/cli/golden/run_invalid_missing_expr.stdout selfhost/tests/cli/golden/run_invalid_missing_expr.stderr hosted-artifact -
 ```
@@ -147,6 +154,7 @@ test_expect_ok test selfhost/tests/cli/test_expect_ok.kizu 0 selfhost/tests/cli/
 test_expect_ok_alias test selfhost/tests/cli/test_expect_ok_alias.kizu 0 selfhost/tests/cli/golden/test_expect_ok.stdout selfhost/tests/cli/golden/test_expect_ok.stderr hosted-artifact test_expect_ok_alias
 test_expect_failure test selfhost/tests/cli/test_expect_failure.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure
 test_expect_failure_alias test selfhost/tests/cli/test_expect_failure_alias.kizu 1 selfhost/tests/cli/golden/test_expect_failure.stdout selfhost/tests/cli/golden/test_expect_failure.stderr hosted-artifact test_expect_failure_alias
+test_if_unsupported test selfhost/tests/cli/test_if_unsupported.kizu 64 selfhost/tests/cli/golden/test_expect_ok.stderr selfhost/tests/cli/golden/usage.stderr hosted-artifact -
 ```
 
 `test_expect_ok.kizu` is the first positive fixture:

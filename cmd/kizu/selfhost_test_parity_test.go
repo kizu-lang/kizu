@@ -135,9 +135,45 @@ func runTestParityCase(
 		t.Errorf("test parity %s unsupported artifact mode %q", item.name, item.artifactMode)
 		return result, 1
 	}
+	if item.artifactStem == "-" {
+		return result, compareTestCompilerResult(t, item, result.compiler, expectedOut, expectedErr) +
+			countUnexpectedTestArtifacts(t, item)
+	}
 	linkFailures := linkAndRunTestParityArtifact(t, clang, item, &result)
 	checkFailures := compareTestProgramResult(t, item, result, expectedOut, expectedErr)
 	return result, linkFailures + checkFailures
+}
+
+// countUnexpectedTestArtifacts rejects artifact emission after unsupported test lowering.
+func countUnexpectedTestArtifacts(t *testing.T, item runParityCase) int {
+	t.Helper()
+	failures := 0
+	for _, path := range []string{
+		filepath.Join("target/selfhost/test", item.name+".ll"),
+		filepath.Join("target/selfhost/test", item.name+".ll.meta"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("test parity %s emitted unexpected artifact %s", item.name, path)
+			failures++
+		}
+	}
+	return failures
+}
+
+// compareTestCompilerResult checks unsupported test command output.
+func compareTestCompilerResult(
+	t *testing.T,
+	item runParityCase,
+	result bootstrapCommandResult,
+	expectedOut string,
+	expectedErr string,
+) int {
+	t.Helper()
+	if result.code != item.exitCode || result.stdout != expectedOut || result.stderr != expectedErr {
+		t.Errorf("test parity %s compiler mismatch", item.name)
+		return 1
+	}
+	return 0
 }
 
 // linkAndRunTestParityArtifact links the emitted LLVM and captures execution.
@@ -310,6 +346,10 @@ func appendTestParityResult(
 	fmt.Fprintf(out, "case.%s.compiler.exit %d\n", item.name, result.compiler.code)
 	appendTestParityCompilerResult(out, item, result)
 	appendRunParityArtifactResult(out, item, result)
+	if result.llPath == "" {
+		fmt.Fprintf(out, "case.%s.program.executed false\n", item.name)
+		return
+	}
 	fmt.Fprintf(out, "case.%s.program.executed true\n", item.name)
 	fmt.Fprintf(out, "case.%s.program.exit.expected %d\n", item.name, item.exitCode)
 	fmt.Fprintf(out, "case.%s.program.exit %d\n", item.name, result.program.code)
