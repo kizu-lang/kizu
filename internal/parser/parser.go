@@ -926,7 +926,7 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 			p.nextToken()
 			left = p.parseIndexExpr(left)
 		case token.LT:
-			if !canTypeApply(left) {
+			if !p.shouldParseTypeApply(left) {
 				p.nextToken()
 				left = p.parseBinaryExpr(left)
 				continue
@@ -1476,13 +1476,50 @@ func startsUpper(name string) bool {
 	return len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z'
 }
 
-// canTypeApply reports whether expr may be followed by a static type argument.
-func canTypeApply(expr ast.Expression) bool {
+// shouldParseTypeApply reports whether `<...>` is a static call argument list.
+func (p *Parser) shouldParseTypeApply(expr ast.Expression) bool {
+	if !canTypeApplyTarget(expr) {
+		return false
+	}
+	return p.typeApplyLooksLikeCall()
+}
+
+// typeApplyLooksLikeCall scans ahead for `<...>(` without committing tokens.
+func (p *Parser) typeApplyLooksLikeCall() bool {
+	cur := p.cur
+	peek := p.peek
+	lexerState := *p.l
+	errorCount := len(p.errors)
+	defer func() {
+		p.cur = cur
+		p.peek = peek
+		*p.l = lexerState
+		p.errors = p.errors[:errorCount]
+	}()
+
+	p.nextToken()
+	depth := 1
+	for depth > 0 {
+		p.nextToken()
+		switch p.cur.Type {
+		case token.EOF, token.Semicolon, token.LBrace, token.RBrace:
+			return false
+		case token.LT:
+			depth++
+		case token.GT:
+			depth--
+		}
+	}
+	return p.peek.Type == token.LParen
+}
+
+// canTypeApplyTarget reports whether expr may receive static call arguments.
+func canTypeApplyTarget(expr ast.Expression) bool {
 	switch e := expr.(type) {
 	case *ast.FieldExpr:
 		return e.Namespace
 	case *ast.IdentExpr:
-		return startsUpper(e.Name)
+		return e.Name != ""
 	default:
 		return false
 	}

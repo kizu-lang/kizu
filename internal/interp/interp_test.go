@@ -418,8 +418,8 @@ fn main() {
 
 // TestRunMinimalGenerics checks explicit instantiation and type-value branches.
 func TestRunMinimalGenerics(t *testing.T) {
-	got := runSource(t, `fn Identity<T>(value: T) -> T { return value; }
-fn IsI64<T>(value: T) -> bool {
+	got := runSource(t, `fn identity<T>(value: T) -> T { return value; }
+fn is_i64<T>(value: T) -> bool {
     comptime if T == type<i64> {
         return true;
     } else {
@@ -427,10 +427,10 @@ fn IsI64<T>(value: T) -> bool {
     }
 }
 fn main() {
-    print(Identity<i64>(7));
-    print(Identity<[]u8>("kizu"));
-    print(IsI64<i64>(1));
-    print(IsI64<bool>(false));
+    print(identity<i64>(7));
+    print(identity<[]u8>("kizu"));
+    print(is_i64<i64>(1));
+    print(is_i64<bool>(false));
 }`)
 	want := "7\nkizu\ntrue\nfalse\n"
 	if got != want {
