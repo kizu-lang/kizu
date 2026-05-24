@@ -7,6 +7,7 @@ import selfhost::types::diagnostic_summary;
 import selfhost::types::expression_infer;
 import selfhost::types::function_call_scan_ast;
 import selfhost::types::function_calls;
+import selfhost::types::function_params;
 import selfhost::types::local_facts;
 import selfhost::types::model;
 import selfhost::types::return_diagnostics;
@@ -27,17 +28,6 @@ struct MatchArmScanSummary {
     diagnostic_kind: i64,
     diagnostic_name: []u8,
     diagnostic_tag: []u8,
-}
-
-struct FunctionParamType {
-    function_name: []u8,
-    index: i64,
-    type_name: []u8,
-}
-
-struct FunctionParamLookup {
-    found: bool,
-    type_name: []u8,
 }
 
 pub fn check(resolved: resolver::ResolveSummary) -> model::TypeSummary {
@@ -261,10 +251,10 @@ pub fn first_post_move_check_diagnostic_ast_node(
 ) -> !model::CheckDiagnosticSummary {
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
     var function_arities = std::map::Map<[]u8, i64>(allocator);
-    var local_function_param_types = std::array::Array<FunctionParamType>(allocator);
+    var local_function_param_types = std::array::Array<function_params::FunctionParamType>(allocator);
     try collect_function_returns_from_ast(allocator, file, ast, root, function_returns);
     try function_calls::collect_function_arities_from_ast(allocator, file, &ast, root, function_arities);
-    try collect_local_function_param_types(
+    try function_params::collect_local_function_param_types(
         allocator,
         file,
         ast,
@@ -348,141 +338,6 @@ pub fn first_post_move_check_diagnostic_ast_node(
     function_arities.deinit();
     function_returns.deinit();
     return diagnostic;
-}
-
-fn collect_local_function_param_types(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId,
-    param_types: &var std::array::Array<FunctionParamType>
-) -> !void {
-    let node = ast.get(node_id);
-    match node.data {
-        Program(program) => return collect_local_function_param_types_in_range(
-            allocator,
-            file,
-            ast,
-            program.declarations,
-            param_types
-        );,
-        FnDecl(fn_decl) => return collect_function_param_types(
-            allocator,
-            file,
-            ast,
-            ast_text::ast_node_text(file, ast, fn_decl.name),
-            fn_decl.params,
-            param_types
-        );,
-        _ => return;,
-    }
-}
-
-fn collect_local_function_param_types_in_range(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    declarations: std::kizu::ast::ChildRange,
-    param_types: &var std::array::Array<FunctionParamType>
-) -> !void {
-    var index = 0;
-    while index < declarations.len {
-        let child = try ast.child_at(declarations, index);
-        try collect_local_function_param_types(allocator, file, ast, child, param_types);
-        index = index + 1;
-    }
-    return;
-}
-
-fn collect_function_param_types(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    function_name: []u8,
-    params: std::kizu::ast::ChildRange,
-    param_types: &var std::array::Array<FunctionParamType>
-) -> !void {
-    var index = 0;
-    while index < params.len {
-        let child = try ast.child_at(params, index);
-        try collect_function_param_type(file, ast, function_name, child, index, param_types);
-        index = index + 1;
-    }
-    return;
-}
-
-fn collect_function_param_type(
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    function_name: []u8,
-    node_id: std::kizu::ast::NodeId,
-    param_index: i64,
-    param_types: &var std::array::Array<FunctionParamType>
-) -> !void {
-    let node = ast.get(node_id);
-    match node.data {
-        Param(param_node) => return collect_function_param_node_type(
-            file,
-            ast,
-            function_name,
-            param_node.type_node,
-            param_index,
-            param_types
-        );,
-        _ => return;,
-    }
-}
-
-fn collect_function_param_node_type(
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    function_name: []u8,
-    type_node: std::kizu::ast::NodeId,
-    param_index: i64,
-    param_types: &var std::array::Array<FunctionParamType>
-) -> !void {
-    try param_types.append(function_param_type(
-        function_name,
-        param_index,
-        ast_text::ast_return_type_text(file, ast, type_node)
-    ));
-    return;
-}
-
-fn function_param_type(
-    function_name: []u8,
-    index: i64,
-    type_name: []u8
-) -> FunctionParamType {
-    return FunctionParamType {
-        function_name: function_name,
-        index: index,
-        type_name: type_name
-    };
-}
-
-fn function_param_lookup(found: bool, type_name: []u8) -> FunctionParamLookup {
-    return FunctionParamLookup {
-        found: found,
-        type_name: type_name
-    };
-}
-
-fn lookup_function_param_type(
-    param_types: &std::array::Array<FunctionParamType>,
-    function_name: []u8,
-    param_index: i64
-) -> !FunctionParamLookup {
-    var index = 0;
-    while index < param_types.len() {
-        let param_type = try param_types.at(index);
-        if std::mem::equal_bytes(param_type.function_name, function_name) and
-            param_type.index == param_index {
-            return function_param_lookup(true, param_type.type_name);
-        }
-        index = index + 1;
-    }
-    return function_param_lookup(false, "");
 }
 
 fn collect_function_returns_from_ast(
@@ -725,7 +580,7 @@ fn first_argument_type_mismatch_node(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let node = ast.get(node_id);
@@ -764,7 +619,7 @@ fn first_argument_type_mismatch_in_declarations(
     file: &source::SourceFile,
     ast: std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     var index = 0;
@@ -792,7 +647,7 @@ fn first_argument_type_mismatch_in_function(
     ast: std::kizu::ast::Ast,
     params: std::kizu::ast::ChildRange,
     body: std::kizu::ast::NodeId,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     var local_types = std::map::Map<[]u8, []u8>(allocator);
@@ -827,7 +682,7 @@ fn first_argument_type_mismatch_in_statement(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let node = ast.get(node_id);
@@ -968,7 +823,7 @@ fn first_argument_type_mismatch_in_statement_range(
     ast: std::kizu::ast::Ast,
     statements: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     var index = 0;
@@ -997,7 +852,7 @@ fn first_argument_type_mismatch_in_expression_range(
     ast: std::kizu::ast::Ast,
     expressions: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     var index = 0;
@@ -1026,7 +881,7 @@ fn first_argument_type_mismatch_in_expression(
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let node = ast.get(node_id);
@@ -1172,7 +1027,7 @@ fn first_argument_type_mismatch_in_call(
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let call_found = try argument_type_mismatch_for_call(
@@ -1218,7 +1073,7 @@ fn argument_type_mismatch_for_call(
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let callee_text = ast_text::ast_node_text(file, ast, callee);
@@ -1231,7 +1086,7 @@ fn argument_type_mismatch_for_call(
     var index = 0;
     while index < args.len {
         let arg = try ast.child_at(args, index);
-        let expected = try lookup_function_param_type(function_param_types, callee_text, index);
+        let expected = try function_params::lookup_function_param_type(function_param_types, callee_text, index);
         if !expected.found {
             return diagnostic_summary::no_argument_type_mismatch();
         }
@@ -1265,7 +1120,7 @@ fn first_argument_type_mismatch_in_two_expressions(
     first: std::kizu::ast::NodeId,
     second: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let first_found = try first_argument_type_mismatch_in_expression(
@@ -1299,7 +1154,7 @@ fn first_argument_type_mismatch_in_if(
     then_block: std::kizu::ast::NodeId,
     else_block: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let condition_found = try first_argument_type_mismatch_in_expression(
@@ -1344,7 +1199,7 @@ fn first_argument_type_mismatch_in_loop(
     condition: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let condition_found = try first_argument_type_mismatch_in_expression(
@@ -1378,7 +1233,7 @@ fn first_argument_type_mismatch_in_for(
     end: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let range_found = try first_argument_type_mismatch_in_two_expressions(
@@ -1412,7 +1267,7 @@ fn first_argument_type_mismatch_in_match(
     value: std::kizu::ast::NodeId,
     arms: std::kizu::ast::ChildRange,
     local_types: &std::map::Map<[]u8, []u8>,
-    function_param_types: &std::array::Array<FunctionParamType>,
+    function_param_types: &std::array::Array<function_params::FunctionParamType>,
     function_returns: &std::map::Map<[]u8, []u8>
 ) -> !model::ArgumentTypeSummary {
     let value_found = try first_argument_type_mismatch_in_expression(
