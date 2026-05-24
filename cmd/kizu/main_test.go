@@ -383,6 +383,150 @@ func TestCheckCommandAcceptsSelfhostASTPayloadFields(t *testing.T) {
 	}
 }
 
+// TestCheckBranchMoveAllowsSiblingUse keeps branch state isolated while checking arms.
+func TestCheckBranchMoveAllowsSiblingUse(t *testing.T) {
+	path := writeTempKizuSource(t, "branch_sibling_use.kizu", `struct Name {
+    value: []u8,
+}
+
+fn take(name: Name) {
+    print(name.value);
+}
+
+fn main() {
+    let name = Name { value: "alice" };
+    if true {
+        take(name);
+    } else {
+        print(name.value);
+    }
+}
+`)
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{path})
+	if runErr != nil {
+		t.Fatalf("check failed: %v\n%s", runErr, out)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+}
+
+// TestCheckBranchMoveRejectsPostIfUse checks moves from one arm escape the branch.
+func TestCheckBranchMoveRejectsPostIfUse(t *testing.T) {
+	path := writeTempKizuSource(t, "branch_one_arm_move.kizu", `struct Name {
+    value: []u8,
+}
+
+fn take(name: Name) {
+    print(name.value);
+}
+
+fn main() {
+    let name = Name { value: "alice" };
+    if true {
+        take(name);
+    } else {
+        print("kept");
+    }
+    print(name.value);
+}
+`)
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{path})
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	want := "error: move error: moved value `name` was used\n"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestCheckBranchMoveRejectsPostIfUseAfterBothArms checks both-arm moves remain moved.
+func TestCheckBranchMoveRejectsPostIfUseAfterBothArms(t *testing.T) {
+	path := writeTempKizuSource(t, "branch_both_arm_move.kizu", `struct Name {
+    value: []u8,
+}
+
+fn take(name: Name) {
+    print(name.value);
+}
+
+fn main() {
+    let name = Name { value: "alice" };
+    if true {
+        take(name);
+    } else {
+        take(name);
+    }
+    print(name.value);
+}
+`)
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{path})
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	want := "error: move error: moved value `name` was used\n"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestCheckBranchMoveKeepsUnmovedValueUsable checks unaffected values survive branches.
+func TestCheckBranchMoveKeepsUnmovedValueUsable(t *testing.T) {
+	path := writeTempKizuSource(t, "branch_unmoved_use.kizu", `struct Name {
+    value: []u8,
+}
+
+fn main() {
+    let name = Name { value: "alice" };
+    if true {
+        print("then");
+    } else {
+        print("else");
+    }
+    print(name.value);
+}
+`)
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{path})
+	if runErr != nil {
+		t.Fatalf("check failed: %v\n%s", runErr, out)
+	}
+	if out != "" {
+		t.Fatalf("got stderr %q, want empty", out)
+	}
+}
+
+// TestCheckWhileMoveRejectsPostLoopUse keeps loop body moves conservative.
+func TestCheckWhileMoveRejectsPostLoopUse(t *testing.T) {
+	path := writeTempKizuSource(t, "while_move.kizu", `struct Name {
+    value: []u8,
+}
+
+fn take(name: Name) {
+    print(name.value);
+}
+
+fn main() {
+    let name = Name { value: "alice" };
+    while false {
+        take(name);
+    }
+    print(name.value);
+}
+`)
+	out, runErr := runDispatchCaptureStderr(t, "check", []string{path})
+	var status exitStatus
+	if !errors.As(runErr, &status) || status.code != 1 {
+		t.Fatalf("got error %v, want exit status 1", runErr)
+	}
+	want := "error: move error: moved value `name` was used\n"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestCheckPackageCommandRejectsInvalidManifestPaths avoids silent path fallback.
 func TestCheckPackageCommandRejectsInvalidManifestPaths(t *testing.T) {
 	root := t.TempDir()
