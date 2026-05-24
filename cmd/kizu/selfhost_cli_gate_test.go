@@ -33,6 +33,7 @@ type selfhostCLIFrontendFixtures struct {
 	runSource            string
 	runCustom            string
 	runBackslash         string
+	runReturn            string
 	movedSource          string
 	unknownSource        string
 	unknownStd           string
@@ -293,6 +294,16 @@ func selfhostCLIFrontendRunHappyCases(
 				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
+		{
+			name:    "run_temp_return_source",
+			args:    []string{"run", fixtures.runReturn},
+			wantOut: "exit-code\n0\n",
+			wantFiles: selfhostRunReturnArtifactExpectations(
+				fixtures.runReturn,
+				selfhostArtifactStem(fixtures.runReturn),
+				"selfhost/tests/cli/run_hello.kizu",
+			),
+		},
 	}
 }
 
@@ -329,6 +340,32 @@ func selfhostRunArtifactExpectations(
 				`c"` + stdoutPayload + `\0A"`,
 			},
 			rejects: []string{rejectedSourcePath},
+		},
+		{
+			path: filepath.Join("target", "selfhost", "run", stem+".ll.meta"),
+			contains: []string{
+				"source " + sourcePath + "\n",
+				"output " + filepath.ToSlash(filepath.Join("target", "selfhost", "run", stem+".ll")) + "\n",
+			},
+			rejects: []string{rejectedSourcePath},
+		},
+	}
+}
+
+// selfhostRunReturnArtifactExpectations returns no-output run artifact checks.
+func selfhostRunReturnArtifactExpectations(
+	sourcePath string,
+	stem string,
+	rejectedSourcePath string,
+) []selfhostCLIArtifactExpectation {
+	return []selfhostCLIArtifactExpectation{
+		{
+			path: filepath.Join("target", "selfhost", "run", stem+".ll"),
+			contains: []string{
+				`source_filename = "` + sourcePath + `"`,
+				"define i64 @kizu_run_main()",
+			},
+			rejects: []string{rejectedSourcePath, "@.kizu.run.stdout"},
 		},
 		{
 			path: filepath.Join("target", "selfhost", "run", stem+".ll.meta"),
@@ -918,7 +955,7 @@ func selfhostCLIFrontendCheckAggregateParseFailureCases(
 func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures {
 	t.Helper()
 
-	tempSource, tempRunSource, tempRunCustom, tempRunBackslash :=
+	tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn :=
 		writeSelfhostCLIHappyFrontendFixtures(t)
 	tempPackageRoot, tempPackageManifest := writeSelfhostCLIPackageFrontendFixture(t)
 	tempMovedSource, tempMovedValue, tempUnknownSource, tempUnknownStd, tempAritySource,
@@ -940,6 +977,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		runSource:           tempRunSource,
 		runCustom:           tempRunCustom,
 		runBackslash:        tempRunBackslash,
+		runReturn:           tempRunReturn,
 		movedSource:         tempMovedSource,
 		unknownSource:       tempUnknownSource,
 		unknownStd:          tempUnknownStd,
@@ -1048,7 +1086,7 @@ func writeSelfhostCLIInvalidFrontendFixtureFields(
 }
 
 // writeSelfhostCLIHappyFrontendFixtures writes successful frontend inputs.
-func writeSelfhostCLIHappyFrontendFixtures(t *testing.T) (string, string, string, string) {
+func writeSelfhostCLIHappyFrontendFixtures(t *testing.T) (string, string, string, string, string) {
 	t.Helper()
 
 	tempSource := writeTempKizuSource(
@@ -1082,7 +1120,14 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 		"frontend_run_backslash.kizu",
 		runBackslash,
 	)
-	return tempSource, tempRunSource, tempRunCustom, tempRunBackslash
+
+	const runReturn = `fn main() {
+    return;
+}
+`
+	tempRunReturn := writeTempKizuSource(t, "frontend_run_return.kizu", runReturn)
+
+	return tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn
 }
 
 // writeSelfhostCLISemanticFrontendFixtures writes semantic-check inputs.
