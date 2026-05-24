@@ -213,6 +213,7 @@ func countTextualLLVMValidationFailures(t *testing.T, llContent string, metaCont
 func requiredLLVMFragments() []string {
 	fragments := requiredLLVMRuntimeFragments()
 	fragments = append(fragments, requiredLLVMCLIFragments()...)
+	fragments = append(fragments, requiredLLVMExecutableFragments()...)
 	return fragments
 }
 
@@ -285,9 +286,6 @@ func requiredLLVMCLIFragments() []string {
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
 		"define i1 @kizu_selfhost__cli_run_return_ok",
 		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
-		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_executable = call %kizu.selfhost.executable " +
 			"@kizu_selfhost__cli_run_executable",
@@ -321,6 +319,22 @@ func requiredLLVMCLIFragments() []string {
 		"br i1 %test_check_has_moved_name, label %test_check_move_error, label %test_match_source",
 		"define i64 @kizu_selfhost__cli_main() {\n",
 		"define i64 @kizu_selfhost__smoke() {\n",
+	}
+}
+
+// requiredLLVMExecutableFragments returns mandatory hosted executable fragments.
+func requiredLLVMExecutableFragments() []string {
+	return []string{
+		"%kizu.selfhost.executable.ast = type { i64, %kizu.slice.u8 }",
+		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
+		"define %kizu.selfhost.executable.ast " +
+			"@kizu_selfhost__cli_parse_run_executable_ast",
+		"define %kizu.selfhost.executable.ast " +
+			"@kizu_selfhost__cli_parse_test_executable_ast",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_run_executable_ast",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_executable_ast",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
 	}
 }
 
@@ -377,6 +391,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"backend-input checked-entry selfhost::cli_main\n",
 		"backend-input hosted-entry @kizu_selfhost__cli_main\n",
 		"backend-input hosted-smoke @kizu_selfhost__smoke\n",
+		"backend-input executable-ast bounded-main-body\n",
 		"backend-input executable-lowering executable-result-bounded\n",
 		"backend-input executable-main-scan leading-functions\n",
 		"entry @kizu_selfhost__cli_main\n",
