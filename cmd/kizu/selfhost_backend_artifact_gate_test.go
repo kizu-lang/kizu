@@ -285,7 +285,14 @@ func requiredLLVMCLIFragments() []string {
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
 		"define i1 @kizu_selfhost__cli_run_return_ok",
 		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
+		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
+		"%run_executable = call %kizu.selfhost.executable " +
+			"@kizu_selfhost__cli_run_executable",
+		"%test_executable = call %kizu.selfhost.executable " +
+			"@kizu_selfhost__cli_test_executable",
 		"%run_print_payload_llvm_result = call %kizu.error.slice.u8 " +
 			"@kizu_selfhost__cli_run_payload_llvm_c_string",
 		"define i64 @kizu_selfhost__cli_test_expect_value",
