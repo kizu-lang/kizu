@@ -38,6 +38,7 @@ selfhost-cli-gate:
 # Run the selfhost production switch review gate.
 selfhost-switch-gate:
     just selfhost-production-from-scratch
+    just selfhost-native-source-gate
     go test ./cmd/kizu -run 'TestSelfhostPackageSkeletonChecks$' -v
     go test ./internal/project ./internal/types ./internal/ownership
 
@@ -107,6 +108,10 @@ selfhost-test-parity-gate:
 selfhost-test-parity-gate-from-scratch:
     just selfhost-bootstrap
     just selfhost-test-parity-gate
+
+# Build selfhost from source as a native executable and run checked-AST executable artifacts.
+selfhost-native-source-gate:
+    KIZU_RUN_SELFHOST_NATIVE_SOURCE=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostNativeSourceExecutableGate$' -count=1 -v
 
 # Install local git hooks.
 hooks:

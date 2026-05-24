@@ -1184,6 +1184,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn require_fact(",
 		"pub fn contains(",
 	},
+	"../../selfhost/src/ir/executable_contract.kizu": {
+		"pub fn append_facts(",
+		"fn append_enum_kind_facts(",
+		"fn require_struct_fields(",
+		"fn require_function(",
+	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_parse_blocks(",
@@ -1256,6 +1262,7 @@ func assertSelfhostSplitFiles(t *testing.T) {
 // recognition and lowering tied to the checked package IR contract.
 func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	ir := readSelfhostFile(t, "../../selfhost/src/ir.kizu")
+	contract := readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu")
 	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	match := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu")
@@ -1277,11 +1284,66 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		"executable-lowering-rule TestExpectFalse TestExpectFailure",
 	}
 	abiFacts := hostedExecutableABIFacts()
-	assertExecutableFactsPublishedAndValidated(t, ir, llvm, append(astRules, loweringRules...))
-	assertExecutableFactsPublishedAndValidated(t, ir, llvm, abiFacts)
+	irFacts := ir + contract
+	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, append(astRules, loweringRules...))
+	assertExecutableFactsValidated(t, llvm, abiFacts)
+	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm)
 	assertExecutableRuleConsumers(t, match, ast, astRules, loweringRules)
 	assertExecutableABIConsumers(t, ast, run, test, abiFacts)
 	assertExecutableIRThreading(t, llvm, cli, match)
+}
+
+// assertExecutableContractFactsComeFromCheckedAST keeps executable facts tied to
+// selfhost source declarations instead of hardcoded in the IR root.
+func assertExecutableContractFactsComeFromCheckedAST(
+	t *testing.T,
+	ir string,
+	contract string,
+	llvm string,
+) {
+	t.Helper()
+	for _, fragment := range []string{
+		`"executable-ast-kind Unsupported 0"`,
+		`"executable-kind RunPrintString 1"`,
+	} {
+		if strings.Contains(ir, fragment) {
+			t.Fatalf("IR root still hardcodes executable ABI fact %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"parser::parse_checked_file(",
+		"append_enum_kind_facts(",
+		"append_enum_tag_facts(",
+		"require_struct_fields(",
+		"require_function(",
+		"ExecutableAstKind",
+		"ExecutableKind",
+		"executable-contract-source data selfhost::backend::data",
+		"executable-contract-source lowering selfhost::backend::executable",
+	} {
+		if !strings.Contains(contract, fragment) {
+			t.Fatalf("executable contract does not derive checked AST fact with %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"executable-contract-source data selfhost::backend::data",
+		"executable-contract-source lowering selfhost::backend::executable",
+	} {
+		if !strings.Contains(llvm, fragment) {
+			t.Fatalf("backend validation/metadata does not require source fact %q", fragment)
+		}
+	}
+}
+
+// assertExecutableFactsValidated checks backend IR validation requires facts that
+// may be derived rather than present as complete string literals in source.
+func assertExecutableFactsValidated(t *testing.T, llvm string, facts []string) {
+	t.Helper()
+	for _, fact := range facts {
+		if !strings.Contains(llvm, `"`+fact+`"`) {
+			t.Fatalf("backend IR validation does not require %q", fact)
+		}
+	}
 }
 
 // assertExecutableRuleConsumers checks generated matcher/lowerer IR fact use.

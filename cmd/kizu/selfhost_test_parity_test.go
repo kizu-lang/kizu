@@ -242,7 +242,22 @@ func prepareTestParityDir() error {
 
 // linkTestParityExecutable links one emitted test artifact with the host runtime.
 func linkTestParityExecutable(clang string, llPath string, exePath string) error {
-	harnessPath := filepath.Join("target/selfhost/test", "hosted_test_main.c")
+	return linkTestParityExecutableWithHost(
+		clang,
+		llPath,
+		"target/selfhost/stage2/selfhost.host.ll",
+		exePath,
+	)
+}
+
+// linkTestParityExecutableWithHost links one emitted test artifact with a host runtime.
+func linkTestParityExecutableWithHost(
+	clang string,
+	llPath string,
+	hostLLPath string,
+	exePath string,
+) error {
+	harnessPath := filepath.Join(filepath.Dir(exePath), "hosted_test_main.c")
 	if err := os.WriteFile(harnessPath, []byte(hostedTestHarnessSource), 0o644); err != nil {
 		return err
 	}
@@ -250,7 +265,7 @@ func linkTestParityExecutable(clang string, llPath string, exePath string) error
 		clang,
 		"-Wno-override-module",
 		llPath,
-		"target/selfhost/stage2/selfhost.host.ll",
+		hostLLPath,
 		"selfhost/runtime/selfhost.hosted.c",
 		harnessPath,
 		"-o",

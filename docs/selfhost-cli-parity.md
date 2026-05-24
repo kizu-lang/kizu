@@ -78,6 +78,11 @@ path does not search for `print` inside non-top-level control flow and then emit
 a fake artifact. The hosted compiler emits fixture artifacts under
 `target/selfhost/run/`; the gate links and executes those artifacts with the
 explicit selfhost host runtime and records `go.cmd-kizu-fallback none`.
+The separate `just selfhost-native-source-gate` builds the selfhost source
+package as a native executable and verifies representative run artifacts are
+produced through `selfhost::backend::executable` checked-AST lowering. That gate
+is source-path evidence for #752; the hosted stage2 parity gate remains the
+release surface until the generated matcher is removed.
 
 `selfhost/tests/cli/test-parity.tsv` is the #570/#590/#752 single-file test parity
 manifest. It records command args, fixture paths, expected exit codes,
@@ -91,6 +96,9 @@ emit a fake artifact. The hosted compiler emits fixture artifacts under
 `target/selfhost/test/`; the gate links and executes those artifacts with the
 explicit selfhost host runtime, records `go.cmd-kizu-fallback none`, and does not
 claim general test discovery.
+The native source gate also covers expect-ok and expect-failure artifacts through
+the Kizu-owned checked-AST lowering path and requires the metadata marker
+`executable_lowering selfhost::backend::executable checked-ast`.
 
 Unsupported commands, wrong arity, and arguments beginning with `-` remain
 deterministic usage/unsupported paths with exit code `64`.

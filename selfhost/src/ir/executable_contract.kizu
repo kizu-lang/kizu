@@ -1,0 +1,495 @@
+import selfhost::parser;
+import selfhost::source;
+
+pub fn append_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    files: &std::array::Array<source::SourceFile>
+) -> !void {
+    var data_found = false;
+    var executable_found = false;
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if file.kind == source::SourceKind::Selfhost {
+            let module = source::module_path(file);
+            if std::mem::equal_bytes(module, "backend/data") {
+                try append_backend_data_facts(allocator, out, file);
+                data_found = true;
+            }
+            if std::mem::equal_bytes(module, "backend/executable") {
+                try append_backend_executable_facts(allocator, out, file);
+                executable_found = true;
+            }
+        }
+        index = index + 1;
+    }
+    if !data_found {
+        return error("missing executable ABI data source");
+    }
+    if !executable_found {
+        return error("missing executable lowering source");
+    }
+    return;
+}
+
+fn append_backend_data_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+
+    try require_struct_fields(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "ExecutableAst",
+        "kind",
+        "ExecutableAstKind",
+        "payload",
+        "[]u8"
+    );
+    try require_struct_fields(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "Executable",
+        "kind",
+        "ExecutableKind",
+        "stdout_payload",
+        "[]u8"
+    );
+
+    try append_line(out, "executable-contract-source data selfhost::backend::data");
+    try append_line(out, "hosted-executable-abi executable-result-layout-v1");
+    try append_line(out, "executable-ast-layout kind:i64 payload:[]u8");
+    try append_line(out, "executable-layout kind:i64 stdout_payload:[]u8");
+    try append_enum_kind_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "ExecutableAstKind",
+        "executable-ast-kind "
+    );
+    try append_enum_kind_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "ExecutableKind",
+        "executable-kind "
+    );
+    return;
+}
+
+fn append_backend_executable_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+
+    try require_function(file.text, parsed.ast, parsed.root, "lower_run_executable");
+    try require_function(file.text, parsed.ast, parsed.root, "parse_run_executable_ast");
+    try require_function(file.text, parsed.ast, parsed.root, "lower_run_executable_ast");
+    try require_function(file.text, parsed.ast, parsed.root, "lower_test_executable");
+    try require_function(file.text, parsed.ast, parsed.root, "parse_test_executable_ast");
+    try require_function(file.text, parsed.ast, parsed.root, "lower_test_executable_ast");
+
+    try append_line(out, "executable-contract-source lowering selfhost::backend::executable");
+    try append_line(out, "frontend-executable-lowering checked-ast-bounded");
+    try append_line(out, "hosted-executable-ast executable-ast-rules-v1");
+    try append_line(out, "executable-ast-rule MainScan LeadingFunctions");
+    try append_line(out, "executable-ast-rule RunPrintCall MainPrintString");
+    try append_line(out, "executable-ast-rule RunReturnVoid MainReturnVoid");
+    try append_line(out, "executable-ast-rule TestExpectTrue MainExpectTrue");
+    try append_line(out, "executable-ast-rule TestExpectFalse MainExpectFalse");
+    try append_line(out, "hosted-executable-lowering executable-ir-rules-v1");
+    try append_line(out, "executable-lowering-rule RunPrintCall RunPrintString");
+    try append_line(out, "executable-lowering-rule RunReturnVoid RunReturnVoid");
+    try append_line(out, "executable-lowering-rule TestExpectTrue TestExpectOk");
+    try append_line(out, "executable-lowering-rule TestExpectFalse TestExpectFailure");
+    return;
+}
+
+fn append_enum_kind_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    enum_name: []u8,
+    fact_prefix: []u8
+) -> !void {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return append_enum_kind_facts_for_program(
+            out,
+            text,
+            ast,
+            program.declarations,
+            enum_name,
+            fact_prefix
+        );,
+        _ => return error("missing executable enum");,
+    }
+}
+
+fn append_enum_kind_facts_for_program(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    enum_name: []u8,
+    fact_prefix: []u8
+) -> !void {
+    if try append_enum_kind_facts_in_range(
+        out,
+        text,
+        ast,
+        declarations,
+        enum_name,
+        fact_prefix
+    ) {
+        return;
+    }
+    return error("missing executable enum");
+}
+
+fn append_enum_kind_facts_in_range(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    enum_name: []u8,
+    fact_prefix: []u8
+) -> !bool {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if try append_enum_decl_kind_facts_from_node(
+            out,
+            text,
+            ast,
+            child,
+            enum_name,
+            fact_prefix
+        ) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn append_enum_decl_kind_facts_from_node(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    enum_name: []u8,
+    fact_prefix: []u8
+) -> !bool {
+    let node = ast.get(node_id);
+    match node.data {
+        EnumDecl(enum_decl) => return try append_enum_decl_kind_facts(
+            out,
+            text,
+            ast,
+            enum_decl.name,
+            enum_decl.tags,
+            enum_name,
+            fact_prefix
+        );,
+        _ => return false;,
+    }
+}
+
+fn append_enum_decl_kind_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    tags: std::kizu::ast::ChildRange,
+    enum_name: []u8,
+    fact_prefix: []u8
+) -> !bool {
+    if std::mem::equal_bytes(ast_node_text(text, ast, name), enum_name) {
+        try append_enum_tag_facts(out, text, ast, tags, fact_prefix);
+        return true;
+    }
+    return false;
+}
+
+fn append_enum_tag_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    tags: std::kizu::ast::ChildRange,
+    fact_prefix: []u8
+) -> !void {
+    var index = 0;
+    while index < tags.len {
+        let tag = try ast.child_at(tags, index);
+        try out.append_bytes(fact_prefix);
+        try out.append_bytes(ast_node_text(text, ast, tag));
+        try out.append_bytes(" ");
+        try std::fmt::append_i64(out, index);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
+fn require_struct_fields(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    struct_name: []u8,
+    first_name: []u8,
+    first_type: []u8,
+    second_name: []u8,
+    second_type: []u8
+) -> !void {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return require_struct_fields_in_program(
+            text,
+            ast,
+            program.declarations,
+            struct_name,
+            first_name,
+            first_type,
+            second_name,
+            second_type
+        );,
+        _ => return error("invalid executable ABI struct");,
+    }
+}
+
+fn require_struct_fields_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    struct_name: []u8,
+    first_name: []u8,
+    first_type: []u8,
+    second_name: []u8,
+    second_type: []u8
+) -> !void {
+    if try struct_fields_match(
+        text,
+        ast,
+        declarations,
+        struct_name,
+        first_name,
+        first_type,
+        second_name,
+        second_type
+    ) {
+        return;
+    }
+    return error("invalid executable ABI struct");
+}
+
+fn struct_fields_match(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    struct_name: []u8,
+    first_name: []u8,
+    first_type: []u8,
+    second_name: []u8,
+    second_type: []u8
+) -> !bool {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if try struct_fields_match_node(
+            text,
+            ast,
+            child,
+            struct_name,
+            first_name,
+            first_type,
+            second_name,
+            second_type
+        ) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn struct_fields_match_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    struct_name: []u8,
+    first_name: []u8,
+    first_type: []u8,
+    second_name: []u8,
+    second_type: []u8
+) -> !bool {
+    let node = ast.get(node_id);
+    match node.data {
+        StructDecl(struct_decl) => return try struct_decl_fields_match(
+            text,
+            ast,
+            struct_decl.name,
+            struct_decl.fields,
+            struct_name,
+            first_name,
+            first_type,
+            second_name,
+            second_type
+        );,
+        _ => return false;,
+    }
+}
+
+fn struct_decl_fields_match(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    fields: std::kizu::ast::ChildRange,
+    struct_name: []u8,
+    first_name: []u8,
+    first_type: []u8,
+    second_name: []u8,
+    second_type: []u8
+) -> !bool {
+    if std::mem::equal_bytes(ast_node_text(text, ast, name), struct_name) {
+        return try struct_field_range_matches(
+            text,
+            ast,
+            fields,
+            first_name,
+            first_type,
+            second_name,
+            second_type
+        );
+    }
+    return false;
+}
+
+fn struct_field_range_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    fields: std::kizu::ast::ChildRange,
+    first_name: []u8,
+    first_type: []u8,
+    second_name: []u8,
+    second_type: []u8
+) -> !bool {
+    if fields.len != 2 {
+        return false;
+    }
+    let first = try ast.child_at(fields, 0);
+    let second = try ast.child_at(fields, 1);
+    return field_matches(text, ast, first, first_name, first_type) and
+        field_matches(text, ast, second, second_name, second_type);
+}
+
+fn field_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field_id: std::kizu::ast::NodeId,
+    expected_name: []u8,
+    expected_type: []u8
+) -> bool {
+    let node = ast.get(field_id);
+    return match node.data {
+        Field(field_node) => std::mem::equal_bytes(
+            ast_node_text(text, ast, field_node.name),
+            expected_name
+        ) and std::mem::equal_bytes(
+            ast_node_text(text, ast, field_node.type_node),
+            expected_type
+        ),
+        _ => false,
+    };
+}
+
+fn require_function(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    name: []u8
+) -> !void {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return require_function_in_program(
+            text,
+            ast,
+            program.declarations,
+            name
+        );,
+        _ => return error("missing executable lowering function");,
+    }
+}
+
+fn require_function_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !void {
+    if try function_exists(text, ast, declarations, name) {
+        return;
+    }
+    return error("missing executable lowering function");
+}
+
+fn function_exists(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    name: []u8
+) -> !bool {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if function_node_matches(text, ast, child, name) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn function_node_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        FnDecl(fn_decl) => std::mem::equal_bytes(
+            ast_node_text(text, ast, fn_decl.name),
+            name
+        ),
+        _ => false,
+    };
+}
+
+fn ast_node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
+}
+
+fn append_line(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
