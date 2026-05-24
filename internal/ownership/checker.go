@@ -3816,6 +3816,12 @@ func (c *Checker) checkAstAddDeclMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
+	case "add_impl_decl":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::ChildRange",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
 	case "add_fn_decl":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "bool", "bool",
@@ -5285,8 +5291,8 @@ func astNodeIDMethod(name string) bool {
 		"add_comptime_expr", "add_block", "add_if", "add_let", "add_assign",
 		"add_return", "add_defer", "add_expr_stmt", "add_while", "add_for", "add_break",
 		"add_continue", "add_program", "add_param", "add_import_decl", "add_field",
-		"add_struct_decl", "add_enum_decl", "add_union_decl", "add_union_variant", "add_match",
-		"add_match_arm", "add_unsafe", "add_comptime_if",
+		"add_struct_decl", "add_enum_decl", "add_union_decl", "add_impl_decl",
+		"add_union_variant", "add_match", "add_match_arm", "add_unsafe", "add_comptime_if",
 		"add_fn_decl", "add_empty",
 		"child_at":
 		return true
@@ -5652,6 +5658,7 @@ func isAstScalarType(typeName string) bool {
 		"StructDeclNode", "std::kizu::ast::StructDeclNode",
 		"EnumDeclNode", "std::kizu::ast::EnumDeclNode",
 		"UnionDeclNode", "std::kizu::ast::UnionDeclNode",
+		"ImplDeclNode", "std::kizu::ast::ImplDeclNode",
 		"UnionVariantNode", "std::kizu::ast::UnionVariantNode",
 		"MatchNode", "std::kizu::ast::MatchNode",
 		"MatchArmNode", "std::kizu::ast::MatchArmNode",
