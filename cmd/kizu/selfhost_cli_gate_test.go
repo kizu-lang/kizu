@@ -34,6 +34,7 @@ type selfhostCLIFrontendFixtures struct {
 	runCustom            string
 	runBackslash         string
 	runReturn            string
+	runPrintReturn       string
 	movedSource          string
 	unknownSource        string
 	unknownStd           string
@@ -301,6 +302,17 @@ func selfhostCLIFrontendRunHappyCases(
 			wantFiles: selfhostRunReturnArtifactExpectations(
 				fixtures.runReturn,
 				selfhostArtifactStem(fixtures.runReturn),
+				"selfhost/tests/cli/run_hello.kizu",
+			),
+		},
+		{
+			name:    "run_temp_print_return_source",
+			args:    []string{"run", fixtures.runPrintReturn},
+			wantOut: "exit-code\n0\n",
+			wantFiles: selfhostRunArtifactExpectations(
+				fixtures.runPrintReturn,
+				selfhostArtifactStem(fixtures.runPrintReturn),
+				"with return",
 				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
@@ -955,7 +967,8 @@ func selfhostCLIFrontendCheckAggregateParseFailureCases(
 func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures {
 	t.Helper()
 
-	tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn :=
+	tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn,
+		tempRunPrintReturn :=
 		writeSelfhostCLIHappyFrontendFixtures(t)
 	tempPackageRoot, tempPackageManifest := writeSelfhostCLIPackageFrontendFixture(t)
 	tempMovedSource, tempMovedValue, tempUnknownSource, tempUnknownStd, tempAritySource,
@@ -978,6 +991,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		runCustom:           tempRunCustom,
 		runBackslash:        tempRunBackslash,
 		runReturn:           tempRunReturn,
+		runPrintReturn:      tempRunPrintReturn,
 		movedSource:         tempMovedSource,
 		unknownSource:       tempUnknownSource,
 		unknownStd:          tempUnknownStd,
@@ -1086,7 +1100,9 @@ func writeSelfhostCLIInvalidFrontendFixtureFields(
 }
 
 // writeSelfhostCLIHappyFrontendFixtures writes successful frontend inputs.
-func writeSelfhostCLIHappyFrontendFixtures(t *testing.T) (string, string, string, string, string) {
+func writeSelfhostCLIHappyFrontendFixtures(
+	t *testing.T,
+) (string, string, string, string, string, string) {
 	t.Helper()
 
 	tempSource := writeTempKizuSource(
@@ -1127,7 +1143,19 @@ fn main(values:std::array::Array<Name>){let count=values.len();print(count);valu
 `
 	tempRunReturn := writeTempKizuSource(t, "frontend_run_return.kizu", runReturn)
 
-	return tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn
+	const runPrintReturn = `fn main() {
+    print("with return");
+    return;
+}
+`
+	tempRunPrintReturn := writeTempKizuSource(
+		t,
+		"frontend_run_print_return.kizu",
+		runPrintReturn,
+	)
+
+	return tempSource, tempRunSource, tempRunCustom, tempRunBackslash, tempRunReturn,
+		tempRunPrintReturn
 }
 
 // writeSelfhostCLISemanticFrontendFixtures writes semantic-check inputs.

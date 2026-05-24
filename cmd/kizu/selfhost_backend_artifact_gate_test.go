@@ -1324,6 +1324,14 @@ func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 		"define i64 @kizu_run_main()",
 		"@.kizu.run.stdout",
 	)
+	failures += countHostedCompilerCLIRunSourceFailures(
+		t,
+		exePath,
+		"hosted_run_print_return.kizu",
+		"hosted_run_print_return",
+		"fn main(){print(\"from return\");return;}\n",
+		`c"from return\0A"`,
+	)
 	return failures
 }
 

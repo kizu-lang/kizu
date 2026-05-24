@@ -1042,6 +1042,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_match_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn append_cli_run_print_payload_function(",
+		"fn append_run_print_tail_checks(",
 		"fn append_cli_run_return_ok_function(",
 		"fn append_cli_test_expect_value_function(",
 		"fn append_cli_moved_value_name_function(",

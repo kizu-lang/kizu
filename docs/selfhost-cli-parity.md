@@ -30,6 +30,7 @@ The current hosted stage2 artifact supports these command slices:
 | `fmt <source file>` | #648/#650 stdout formatter slice routed through the hosted selfhost formatter path | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
 | `fmt --write <source file>` | #629 bounded formatter mutation slice using the same hosted formatter bytes and `fs_write_file` | `KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostBackendArtifactGate -count=1 -v` |
 | `run <top-level main print-string source file>` | #588/#752 positive source-shape slice lowered to the bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
+| `run <top-level main print-string plus return source file>` | #752 positive two-statement source-shape slice lowered to the same bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
 | `run <top-level main return-only source file>` | #752 positive no-output executable slice lowered to the same bounded executable model before canonical artifact emission | `just selfhost-run-parity-gate` |
 | `run <missing-expression source file>` | #588 negative source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
 | `run <control-flow print source file>` | #752 unsupported branch-control source-shape slice, no artifact execution | `just selfhost-run-parity-gate` |
@@ -71,11 +72,14 @@ stdout/stderr golden paths, hosted artifact mode, and the canonical artifact
 stem for the bounded `run <file>` slice. The positive print-hello and negative
 missing-expression rows each include the original fixture plus an alias fixture
 with the same source bytes, proving the hosted dispatch paths are no longer
-bound to one fixed path. The #752 return-only row proves the executable model
-can emit a successful no-output artifact instead of assuming every supported
-`run` shape is a stdout write. The #752 branch-control row proves the hosted run
-path does not search for `print` inside non-top-level control flow and then emit
-a fake artifact. The hosted compiler emits fixture artifacts under
+bound to one fixed path. The #752 print-plus-return row proves the executable
+model supports a bounded statement sequence instead of requiring the main body
+to be exactly one print statement. The #752 return-only row proves the
+executable model can emit a successful no-output artifact instead of assuming
+every supported `run` shape is a stdout write. The #752 branch-control row
+proves the hosted run path does not search for `print` inside non-top-level
+control flow and then emit a fake artifact. The hosted compiler emits fixture
+artifacts under
 `target/selfhost/run/`; the gate links and executes those artifacts with the
 explicit selfhost host runtime and records `go.cmd-kizu-fallback none`.
 
@@ -123,7 +127,10 @@ selfhost/tests/cli/run-parity.tsv
 run_hello run selfhost/tests/cli/run_hello.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello
 run_hello_alias run selfhost/tests/cli/run_hello_alias.kizu 0 selfhost/tests/cli/golden/run_hello.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_hello_alias
 run_print_custom run selfhost/tests/cli/run_print_custom.kizu 0 selfhost/tests/cli/golden/run_print_custom.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_print_custom
+run_print_backslash run selfhost/tests/cli/run_print_backslash.kizu 0 selfhost/tests/cli/golden/run_print_backslash.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_print_backslash
 run_return run selfhost/tests/cli/run_return.kizu 0 selfhost/tests/cli/golden/run_hello.stderr selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_return
+run_print_return run selfhost/tests/cli/run_print_return.kizu 0 selfhost/tests/cli/golden/run_print_return.stdout selfhost/tests/cli/golden/run_hello.stderr hosted-artifact run_print_return
+run_double_return_unsupported run selfhost/tests/cli/run_double_return_unsupported.kizu 64 selfhost/tests/cli/golden/run_hello.stderr selfhost/tests/cli/golden/usage.stderr hosted-artifact -
 run_if_unsupported run selfhost/tests/cli/run_if_unsupported.kizu 64 selfhost/tests/cli/golden/run_hello.stderr selfhost/tests/cli/golden/usage.stderr hosted-artifact -
 run_invalid_missing_expr run selfhost/tests/cli/run_invalid_missing_expr.kizu 1 selfhost/tests/cli/golden/run_invalid_missing_expr.stdout selfhost/tests/cli/golden/run_invalid_missing_expr.stderr hosted-artifact -
 run_invalid_missing_expr_alias run selfhost/tests/cli/run_invalid_missing_expr_alias.kizu 1 selfhost/tests/cli/golden/run_invalid_missing_expr.stdout selfhost/tests/cli/golden/run_invalid_missing_expr.stderr hosted-artifact -
