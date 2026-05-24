@@ -302,7 +302,8 @@ func (e *emitter) writeArrayOptionalLoadResult(
 ) {
 	success, _ := errorUnionSuccessType(instr.Result.Type)
 	resultName := localName(instr.Result.Name)
-	failLabel, okLabel, joinLabel := e.arrayResultLabels("array.result")
+	failLabel, okLabel, joinLabel := arrayResultLabels(instr.Result.Name, "array")
+	e.markCurrentBlockExit(joinLabel)
 	nullName := resultName + ".is_null"
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
@@ -336,7 +337,8 @@ func (e *emitter) writeArrayOptionalPointerResult(
 ) {
 	success, _ := errorUnionSuccessType(instr.Result.Type)
 	resultName := localName(instr.Result.Name)
-	failLabel, okLabel, joinLabel := e.arrayResultLabels("array.ref")
+	failLabel, okLabel, joinLabel := arrayResultLabels(instr.Result.Name, "array.ref")
+	e.markCurrentBlockExit(joinLabel)
 	nullName := resultName + ".is_null"
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, failLabel, okLabel)
@@ -425,8 +427,9 @@ func (e *emitter) writeErrorFailureValue(
 // writeNullTrap branches to llvm.trap when pointer is null and continues otherwise.
 func (e *emitter) writeNullTrap(ptrName string, prefix string) {
 	nullName := "%" + e.nextSyntheticValue(prefix+".is_null")
-	trapLabel := e.nextSyntheticLabel(prefix + ".null")
-	okLabel := e.nextSyntheticLabel(prefix + ".ok")
+	trapLabel := helperLabel(ptrName, prefix+".null")
+	okLabel := helperLabel(ptrName, "ok")
+	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  %s = icmp eq ptr %s, null\n", nullName, ptrName)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", nullName, trapLabel, okLabel)
 	e.writeTrapBlock(trapLabel)
@@ -462,10 +465,10 @@ func (e *emitter) writeStaticStringSlice(resultName string, global string, lengt
 }
 
 // arrayResultLabels creates fail, success, and join labels for checked Array operations.
-func (e *emitter) arrayResultLabels(prefix string) (string, string, string) {
-	failLabel := e.nextSyntheticLabel(prefix + ".fail")
-	okLabel := e.nextSyntheticLabel(prefix + ".ok")
-	joinLabel := e.nextSyntheticLabel(prefix + ".join")
+func arrayResultLabels(result string, prefix string) (string, string, string) {
+	failLabel := helperLabel(result, prefix+".fail")
+	okLabel := helperLabel(result, prefix+".ok")
+	joinLabel := helperLabel(result, prefix+".join")
 	return failLabel, okLabel, joinLabel
 }
 

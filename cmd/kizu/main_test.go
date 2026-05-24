@@ -1160,8 +1160,8 @@ fn main() -> !void {
 		"%kizu.error.i64 = type { i8, i64, %kizu.slice.u8 }",
 		"define %kizu.error.i64 @read()",
 		"insertvalue %kizu.error.i64 zeroinitializer, i8 1, 0",
-		"br i1 %kizu.2.ok.bool, label %try.ok.1, label %try.err.2",
-		"try.err.2:\n  ret i32 1",
+		"br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err",
+		"kizu.2.try.err:\n  ret i32 1",
 		"call void @kizu_print_int(i64 %kizu.2)",
 		"ret i32 %kizu.main.code",
 	} {

@@ -260,6 +260,243 @@ func TestEmitHostedRuntimeErrorCallUsesOutPointerABI(t *testing.T) {
 	}
 }
 
+// TestEmitTrySuccessLabelFeedsFollowingPhi keeps phi predecessors aligned when
+// an error.try pseudo-branch feeds a later loop/header block.
+func TestEmitTrySuccessLabelFeedsFollowingPhi(t *testing.T) {
+	got := emitTestModule(t, trySuccessPhiModule())
+	want := "%kizu.loop = phi i64 [ %kizu.value, %kizu.value.try.ok ], [ %kizu.next, %body ]"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got:\n%s\nwant substring %q", got, want)
+	}
+}
+
+// TestEmitCheckedSliceLabelFeedsFollowingPhi keeps short-circuit phi inputs
+// aligned after bounds-check helper labels are emitted inside an IR block.
+func TestEmitCheckedSliceLabelFeedsFollowingPhi(t *testing.T) {
+	got := emitTestModule(t, checkedSlicePhiModule())
+	want := "%kizu.result = phi i1 [ %kizu.ok, %kizu.byte.index.ok ], [ false, %logical.const ]"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got:\n%s\nwant substring %q", got, want)
+	}
+}
+
+// TestEmitMapGetLabelFeedsFollowingPhi keeps Map.get helper labels visible to
+// later phi predecessors because selfhost package diagnostics use maps heavily.
+func TestEmitMapGetLabelFeedsFollowingPhi(t *testing.T) {
+	got := emitTestModule(t, mapGetPhiModule())
+	want := "%kizu.result = phi %kizu.error.i64 [ %kizu.found, %kizu.found.array.join ], " +
+		"[ %kizu.fallback, %alt ]"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got:\n%s\nwant substring %q", got, want)
+	}
+}
+
+// emitTestModule emits LLVM IR or fails the current test.
+func emitTestModule(t *testing.T, module *ir.Module) string {
+	t.Helper()
+	got, err := Emit(module)
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	return got
+}
+
+// trySuccessPhiModule returns IR where error.try feeds a later phi predecessor.
+func trySuccessPhiModule() *ir.Module {
+	return &ir.Module{Functions: []*ir.Function{readOkFunction(), tryPhiMainFunction()}}
+}
+
+// readOkFunction returns a small fallible helper for try/phi tests.
+func readOkFunction() *ir.Function {
+	return &ir.Function{Name: "read", Return: "!i64", Blocks: []*ir.Block{{
+		Name: "entry",
+		Instrs: []*ir.Instr{
+			{Result: ir.Value{Name: "%zero", Type: "i64"}, Op: "const", Immediate: "0"},
+			{
+				Result: ir.Value{Name: "%ok", Type: "!i64"},
+				Op:     "error.ok",
+				Args:   []ir.Value{{Name: "%zero", Type: "i64"}},
+			},
+		},
+		Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%ok", Type: "!i64"}},
+	}}}
+}
+
+// tryPhiMainFunction returns a main function with a try before a loop phi.
+func tryPhiMainFunction() *ir.Function {
+	return &ir.Function{Name: "main", Return: "!i64", Blocks: []*ir.Block{
+		tryPhiEntryBlock(),
+		tryPhiHeaderBlock(),
+		tryPhiBodyBlock(),
+		{Name: "exit", Terminator: ir.Terminator{
+			Op: "return", Value: ir.Value{Name: "%loop", Type: "i64"},
+		}},
+	}}
+}
+
+// tryPhiEntryBlock returns the fallible predecessor block.
+func tryPhiEntryBlock() *ir.Block {
+	return &ir.Block{Name: "entry", Instrs: []*ir.Instr{
+		{Result: ir.Value{Name: "%read", Type: "!i64"}, Op: "call.read"},
+		{
+			Result: ir.Value{Name: "%value", Type: "i64"},
+			Op:     "error.try",
+			Args:   []ir.Value{{Name: "%read", Type: "!i64"}},
+		},
+	}, Terminator: ir.Terminator{Op: "jump", Target: "header"}}
+}
+
+// tryPhiHeaderBlock returns the loop header phi block.
+func tryPhiHeaderBlock() *ir.Block {
+	return &ir.Block{Name: "header", Instrs: []*ir.Instr{{
+		Result: ir.Value{Name: "%loop", Type: "i64"},
+		Op:     "phi",
+		Incoming: []ir.Incoming{
+			{Block: "entry", Value: ir.Value{Name: "%value", Type: "i64"}},
+			{Block: "body", Value: ir.Value{Name: "%next", Type: "i64"}},
+		},
+	}}, Terminator: ir.Terminator{
+		Op: "branch", Cond: ir.Value{Name: "false", Type: "bool"}, Target: "body", Else: "exit",
+	}}
+}
+
+// tryPhiBodyBlock returns the loop backedge block.
+func tryPhiBodyBlock() *ir.Block {
+	return &ir.Block{Name: "body", Instrs: []*ir.Instr{
+		{Result: ir.Value{Name: "%one", Type: "i64"}, Op: "const", Immediate: "1"},
+		{
+			Result: ir.Value{Name: "%next", Type: "i64"},
+			Op:     "binary.+",
+			Args: []ir.Value{
+				{Name: "%loop", Type: "i64"},
+				{Name: "%one", Type: "i64"},
+			},
+		},
+	}, Terminator: ir.Terminator{Op: "jump", Target: "header"}}
+}
+
+// checkedSlicePhiModule returns IR where slice bounds labels feed a phi.
+func checkedSlicePhiModule() *ir.Module {
+	return &ir.Module{Functions: []*ir.Function{{
+		Name:   "is_word_at",
+		Params: checkedSlicePhiParams(),
+		Return: "bool",
+		Blocks: []*ir.Block{
+			checkedSlicePhiEntryBlock(),
+			checkedSlicePhiRightBlock(),
+			{Name: "logical.const", Terminator: ir.Terminator{Op: "jump", Target: "logical.end"}},
+			checkedSlicePhiEndBlock(),
+		},
+	}}}
+}
+
+// checkedSlicePhiParams returns parameters for checkedSlicePhiModule.
+func checkedSlicePhiParams() []ir.Value {
+	return []ir.Value{
+		{Name: "%source", Type: "[]u8"},
+		{Name: "%index", Type: "i64"},
+		{Name: "%target", Type: "u8"},
+	}
+}
+
+// checkedSlicePhiEntryBlock returns the short-circuit entry block.
+func checkedSlicePhiEntryBlock() *ir.Block {
+	return &ir.Block{Name: "entry", Terminator: ir.Terminator{
+		Op:     "branch",
+		Cond:   ir.Value{Name: "true", Type: "bool"},
+		Target: "logical.right",
+		Else:   "logical.const",
+	}}
+}
+
+// checkedSlicePhiRightBlock returns the block that emits a slice bounds check.
+func checkedSlicePhiRightBlock() *ir.Block {
+	return &ir.Block{Name: "logical.right", Instrs: []*ir.Instr{
+		{
+			Result: ir.Value{Name: "%byte", Type: "u8"},
+			Op:     "slice.index",
+			Args: []ir.Value{
+				{Name: "%source", Type: "[]u8"},
+				{Name: "%index", Type: "i64"},
+			},
+		},
+		{
+			Result: ir.Value{Name: "%ok", Type: "bool"},
+			Op:     "binary.==",
+			Args: []ir.Value{
+				{Name: "%byte", Type: "u8"},
+				{Name: "%target", Type: "u8"},
+			},
+		},
+	}, Terminator: ir.Terminator{Op: "jump", Target: "logical.end"}}
+}
+
+// checkedSlicePhiEndBlock returns the merge phi block.
+func checkedSlicePhiEndBlock() *ir.Block {
+	return &ir.Block{Name: "logical.end", Instrs: []*ir.Instr{{
+		Result: ir.Value{Name: "%result", Type: "bool"},
+		Op:     "phi",
+		Incoming: []ir.Incoming{
+			{Block: "logical.right", Value: ir.Value{Name: "%ok", Type: "bool"}},
+			{Block: "logical.const", Value: ir.Value{Name: "false", Type: "bool"}},
+		},
+	}}, Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%result", Type: "bool"}}}
+}
+
+// mapGetPhiModule returns IR where Map.get emits a helper join before a phi.
+func mapGetPhiModule() *ir.Module {
+	mapType := "std::map::Map<[]u8,i64>"
+	return &ir.Module{Functions: []*ir.Function{{
+		Name:   "lookup",
+		Params: []ir.Value{{Name: "%map", Type: mapType}},
+		Return: "!i64",
+		Blocks: []*ir.Block{
+			mapGetPhiEntryBlock(mapType),
+			mapGetPhiAltBlock(),
+			mapGetPhiMergeBlock(),
+		},
+	}}}
+}
+
+// mapGetPhiEntryBlock returns the map lookup predecessor block.
+func mapGetPhiEntryBlock(mapType string) *ir.Block {
+	return &ir.Block{Name: "entry", Instrs: []*ir.Instr{
+		{Result: ir.Value{Name: "%key", Type: "[]u8"}, Op: "const", Immediate: `"answer"`},
+		{
+			Result: ir.Value{Name: "%found", Type: "!i64"},
+			Op:     "map.get",
+			Args: []ir.Value{
+				{Name: "%map", Type: mapType},
+				{Name: "%key", Type: "[]u8"},
+			},
+		},
+	}, Terminator: ir.Terminator{Op: "jump", Target: "merge"}}
+}
+
+// mapGetPhiAltBlock returns an ordinary fallback predecessor block.
+func mapGetPhiAltBlock() *ir.Block {
+	return &ir.Block{Name: "alt", Instrs: []*ir.Instr{
+		{Result: ir.Value{Name: "%zero", Type: "i64"}, Op: "const", Immediate: "0"},
+		{
+			Result: ir.Value{Name: "%fallback", Type: "!i64"},
+			Op:     "error.ok",
+			Args:   []ir.Value{{Name: "%zero", Type: "i64"}},
+		},
+	}, Terminator: ir.Terminator{Op: "jump", Target: "merge"}}
+}
+
+// mapGetPhiMergeBlock returns the merge block that consumes Map.get output.
+func mapGetPhiMergeBlock() *ir.Block {
+	return &ir.Block{Name: "merge", Instrs: []*ir.Instr{{
+		Result: ir.Value{Name: "%result", Type: "!i64"},
+		Op:     "phi",
+		Incoming: []ir.Incoming{
+			{Block: "entry", Value: ir.Value{Name: "%found", Type: "!i64"}},
+			{Block: "alt", Value: ir.Value{Name: "%fallback", Type: "!i64"}},
+		},
+	}}, Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "%result", Type: "!i64"}}}
+}
+
 // TestEmitErrorUnionFailure checks error("message") lowers to failed !T.
 func TestEmitErrorUnionFailure(t *testing.T) {
 	module := lowerSource(t, errorUnionFailureSource)
@@ -271,7 +508,7 @@ func TestEmitErrorUnionFailure(t *testing.T) {
 		"define %kizu.error.i64 @read()",
 		"%kizu.2 = insertvalue %kizu.error.i64 %kizu.2.base, %kizu.slice.u8 %kizu.1, 2",
 		"ret %kizu.error.i64 %kizu.2",
-		"try.err.2:\n  ret i32 1",
+		"kizu.2.try.err:\n  ret i32 1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -290,7 +527,7 @@ func TestEmitErrorUnionSliceSuccess(t *testing.T) {
 		"%kizu.error.slice.u8 = type { i8, %kizu.slice.u8, %kizu.slice.u8 }",
 		"%kizu.2 = insertvalue %kizu.error.slice.u8 %kizu.2.ok, %kizu.slice.u8 %kizu.1, 1",
 		"%kizu.2 = extractvalue %kizu.error.slice.u8 %kizu.1, 1",
-		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.3, i64 %kizu.print.slice.len.4)",
+		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -328,13 +565,13 @@ func TestEmitCheckedSliceAccess(t *testing.T) {
 	}
 	for _, want := range []string{
 		"declare void @llvm.trap()",
-		"br i1 %kizu.3.index.bad, label %slice.index.oob.1, label %slice.index.ok.2",
-		"slice.index.oob.1:\n  call void @llvm.trap()\n  unreachable",
+		"br i1 %kizu.3.index.bad, label %kizu.3.index.oob, label %kizu.3.index.ok",
+		"kizu.3.index.oob:\n  call void @llvm.trap()\n  unreachable",
 		"%kizu.3 = load i8, ptr %kizu.3.elem.ptr",
-		"br i1 %kizu.6.bad, label %slice.slice.oob.3, label %slice.slice.ok.4",
+		"br i1 %kizu.6.bad, label %kizu.6.slice.oob, label %kizu.6.slice.ok",
 		"%kizu.6 = insertvalue %kizu.slice.u8 %kizu.6.base, i64 %kizu.6.len, 1",
-		"%kizu.print.int.5 = zext i8 %kizu.3 to i64",
-		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.6, i64 %kizu.print.slice.len.7)",
+		"= zext i8 %kizu.3 to i64",
+		"call void @kizu_print_string(ptr %kizu.print.slice.ptr.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("got:\n%s\nwant substring %q", got, want)
@@ -714,15 +951,15 @@ entry:
   %kizu.1 = call %kizu.error.i64 @read()
   %kizu.2.ok = extractvalue %kizu.error.i64 %kizu.1, 0
   %kizu.2.ok.bool = icmp ne i8 %kizu.2.ok, 0
-  br i1 %kizu.2.ok.bool, label %try.ok.1, label %try.err.2
-try.err.2:
+  br i1 %kizu.2.ok.bool, label %kizu.2.try.ok, label %kizu.2.try.err
+kizu.2.try.err:
   ret i32 1
-try.ok.1:
+kizu.2.try.ok:
   %kizu.2 = extractvalue %kizu.error.i64 %kizu.1, 1
   call void @kizu_print_int(i64 %kizu.2)
   %kizu.4 = insertvalue %kizu.error.void zeroinitializer, i8 1, 0
-  %kizu.main.ok.3 = extractvalue %kizu.error.void %kizu.4, 0
-  %kizu.main.ok.3.bool = icmp ne i8 %kizu.main.ok.3, 0
-  %kizu.main.code.4 = select i1 %kizu.main.ok.3.bool, i32 0, i32 1
-  ret i32 %kizu.main.code.4
+  %kizu.main.ok.1 = extractvalue %kizu.error.void %kizu.4, 0
+  %kizu.main.ok.1.bool = icmp ne i8 %kizu.main.ok.1, 0
+  %kizu.main.code.2 = select i1 %kizu.main.ok.1.bool, i32 0, i32 1
+  ret i32 %kizu.main.code.2
 }`

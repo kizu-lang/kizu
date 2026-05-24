@@ -108,8 +108,9 @@ func (e *emitter) writeArenaDeinit(instr *ir.Instr) error {
 
 // writeBoolTrapInverse traps when badOperand is true.
 func (e *emitter) writeBoolTrapInverse(badOperand string, prefix string) {
-	trapLabel := e.nextSyntheticLabel(prefix + ".fail")
-	okLabel := e.nextSyntheticLabel(prefix + ".ok")
+	trapLabel := helperLabel(badOperand, prefix+".fail")
+	okLabel := helperLabel(badOperand, "ok")
+	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badOperand, trapLabel, okLabel)
 	e.writeTrapBlock(trapLabel)
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)

@@ -82,8 +82,9 @@ func (e *emitter) writeTestExpectEqual(instr *ir.Instr) error {
 
 // writeBoolTrap traps unless okOperand is true.
 func (e *emitter) writeBoolTrap(okOperand string, prefix string) {
-	trapLabel := e.nextSyntheticLabel(prefix + ".fail")
-	okLabel := e.nextSyntheticLabel(prefix + ".ok")
+	trapLabel := helperLabel(okOperand, prefix+".fail")
+	okLabel := helperLabel(okOperand, "ok")
+	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okOperand, okLabel, trapLabel)
 	e.writeTrapBlock(trapLabel)
 	fmt.Fprintf(&e.out, "%s:\n", okLabel)
