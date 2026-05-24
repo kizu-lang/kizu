@@ -55,9 +55,16 @@ func countSelfhostIRArtifactFileFailures(t *testing.T) int {
 		t.Errorf("read IR manifest: %v", err)
 		return 1
 	}
-	if !strings.Contains(string(irBytes), "kizu-ir-v0\npackage selfhost\n") {
+	irContent := string(irBytes)
+	if !strings.Contains(irContent, "kizu-ir-v0\npackage selfhost\n") {
 		t.Errorf("IR artifact missing deterministic header:\n%s", irBytes)
 		return 1
+	}
+	for _, fragment := range requiredSelfhostIRContractFragments() {
+		if !strings.Contains(irContent, fragment) {
+			t.Errorf("IR artifact missing contract fragment %q:\n%s", fragment, irBytes)
+			return 1
+		}
 	}
 	if !strings.Contains(string(manifestBytes), "kizu-ir-shape-v0\n") {
 		t.Errorf("IR manifest missing deterministic header:\n%s", manifestBytes)
@@ -68,6 +75,23 @@ func countSelfhostIRArtifactFileFailures(t *testing.T) int {
 		return 1
 	}
 	return 0
+}
+
+// requiredSelfhostIRContractFragments returns facts the hosted backend requires.
+func requiredSelfhostIRContractFragments() []string {
+	return []string{
+		"ir-contract selfhost-checked-package-v1\n",
+		"checked-entry main::smoke\n",
+		"hosted-entry @kizu_selfhost__cli_main\n",
+		"hosted-smoke @kizu_selfhost__smoke\n",
+		"frontend-executable-lowering checked-ast-bounded\n",
+		"hosted-executable-lowering executable-result-bounded\n",
+		"hosted-executable-main-scan leading-functions\n",
+		"checked-nodes ",
+		"checked-resources ",
+		"checked-borrows ",
+		"checked-diagnostics 0\n",
+	}
 }
 
 // runSelfhostIRArtifactGate loads the selfhost package and runs its artifact smoke.
