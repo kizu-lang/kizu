@@ -259,7 +259,6 @@ func TestSelfhostFirstTypeReferenceDiagnosticUsesParsedAST(t *testing.T) {
 		"pub fn first_type_error_in_ast(",
 		"fn first_type_error_in_type_node_ast(",
 		"fn first_type_error_in_type_text(",
-		"fn observed_type_arity_text(",
 	}
 	for _, fragment := range requiredTypeRefs {
 		if !strings.Contains(typeRefs, fragment) {
@@ -305,14 +304,16 @@ func TestSelfhostTypeReferenceSummaryUsesParsedAST(t *testing.T) {
 	checker := readSelfhostFile(t, "../../selfhost/src/types/checker.kizu")
 	typeRefs := readSelfhostFile(t, "../../selfhost/src/types/type_refs.kizu")
 	typeRefAST := readSelfhostFile(t, "../../selfhost/src/types/type_ref_ast.kizu")
+	typeRefNames := readSelfhostFile(t, "../../selfhost/src/types/type_ref_names.kizu")
 	scan := readSelfhostFile(t, "../../selfhost/src/types/type_ref_scan_ast.kizu")
 	required := []string{
 		"type_ref_scan_ast::check_file_type_references_from_ast(",
 		"pub fn check_file_type_references_from_ast(",
-		"type_ref_ast::type_error_for_name_text_with_imports(",
+		"type_ref_names::type_error_for_name_text_with_imports(",
 		"pub fn type_error_for_name_text(",
+		"fn observed_type_arity_text(",
 	}
-	content := checker + typeRefs + typeRefAST + scan
+	content := checker + typeRefs + typeRefAST + typeRefNames + scan
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("selfhost type reference AST scan missing %q", fragment)
@@ -1009,6 +1010,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/types/type_ref_ast.kizu": {
 		"pub fn first_type_error_in_ast(",
 		"fn first_type_error_in_type_node_ast(",
+	},
+	"../../selfhost/src/types/type_ref_names.kizu": {
+		"pub fn type_error_for_name_text(",
+		"pub fn no_type_reference_error(",
 	},
 	"../../selfhost/src/types/type_ref_scan_ast.kizu": {
 		"pub fn check_file_type_references_from_ast(",
