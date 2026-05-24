@@ -28,6 +28,9 @@ func llvmPrimitiveType(typ string) string {
 
 // llvmType maps Kizu IR types to LLVM IR types.
 func (e *emitter) llvmType(typ string) string {
+	if _, ok := errorUnionSuccessType(typ); ok {
+		return llvmErrorUnionTypeName(typ)
+	}
 	if _, ok := e.module.Structs[typ]; ok {
 		return llvmStructTypeName(typ)
 	}
@@ -98,6 +101,29 @@ func llvmBool(value string) string {
 func llvmStructTypeName(name string) string {
 	var out strings.Builder
 	out.WriteString("%kizu.struct.")
+	out.WriteString(llvmNamePart(name))
+	return out.String()
+}
+
+// llvmErrorUnionTypeName returns a stable named LLVM type for a recoverable result.
+func llvmErrorUnionTypeName(name string) string {
+	errorName, success, ok := errorUnionParts(name)
+	if !ok {
+		return "%kizu.error.unknown"
+	}
+	var out strings.Builder
+	out.WriteString("%kizu.error.")
+	if errorName != "" {
+		out.WriteString(llvmNamePart(errorName))
+		out.WriteByte('.')
+	}
+	out.WriteString(llvmNamePart(success))
+	return out.String()
+}
+
+// llvmNamePart keeps generated LLVM type names deterministic and readable.
+func llvmNamePart(name string) string {
+	var out strings.Builder
 	for _, ch := range []byte(name) {
 		if ch == '_' ||
 			(ch >= 'a' && ch <= 'z') ||
@@ -109,6 +135,34 @@ func llvmStructTypeName(name string) string {
 		out.WriteByte('_')
 	}
 	return out.String()
+}
+
+// errorUnionSuccessType returns T for !T or Error!T.
+func errorUnionSuccessType(typ string) (string, bool) {
+	_, success, ok := errorUnionParts(typ)
+	return success, ok
+}
+
+// errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
+func errorUnionParts(typ string) (string, string, bool) {
+	if strings.HasPrefix(typ, "!") && len(typ) > 1 {
+		return "", strings.TrimPrefix(typ, "!"), true
+	}
+	idx := strings.Index(typ, "!")
+	if idx <= 0 || idx == len(typ)-1 {
+		return "", "", false
+	}
+	return typ[:idx], typ[idx+1:], true
+}
+
+// isLowerableErrorUnionSuccess reports whether the current backend can carry T.
+func isLowerableErrorUnionSuccess(typ string) bool {
+	switch typ {
+	case "void", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
+		return true
+	default:
+		return false
+	}
 }
 
 // escapeString emits a minimal LLVM string literal escape.

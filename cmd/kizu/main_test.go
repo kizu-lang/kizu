@@ -1089,6 +1089,40 @@ fn main() {
 	}
 }
 
+// TestBuildEmitLLVMErrorUnionCommandSmoke checks scalar !T values reach LLVM lowering.
+func TestBuildEmitLLVMErrorUnionCommandSmoke(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "error_union.kizu")
+	code := []byte(`fn read() -> !i64 {
+    return 1;
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"%kizu.error.i64 = type { i1, i64, %kizu.slice.u8 }",
+		"define %kizu.error.i64 @read()",
+		"insertvalue %kizu.error.i64 zeroinitializer, i1 true, 0",
+		"br i1 %kizu.2.ok, label %try.ok.1, label %try.err.2",
+		"try.err.2:\n  ret i32 1",
+		"call void @kizu_print_int(i64 %kizu.2)",
+		"ret i32 %kizu.main.code",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
 // TestBuildEmitLLVMOptCommandSmoke checks LLVM build can use optimized IR.
 func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")
@@ -1146,6 +1180,77 @@ func TestBuildTargetNativeCommandSmoke(t *testing.T) {
 	}
 	if string(out) != "hello, kizu\n" {
 		t.Fatalf("got %q", out)
+	}
+}
+
+// TestBuildTargetNativeErrorUnionCommandSmoke checks native builds preserve try control flow.
+func TestBuildTargetNativeErrorUnionCommandSmoke(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is required for native build smoke")
+	}
+	source := filepath.Join(t.TempDir(), "error_union.kizu")
+	code := []byte(`fn read() -> !i64 {
+    return 7;
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "error_union")
+	build := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", output, source,
+	)
+	out, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native build failed: %v\n%s", err, out)
+	}
+	run := exec.Command(output)
+	runOut, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("native executable failed: %v\n%s", err, runOut)
+	}
+	if got := string(runOut); got != "7\n" {
+		t.Fatalf("got %q", got)
+	}
+
+	failSource := filepath.Join(t.TempDir(), "error_union_fail.kizu")
+	failCode := []byte(`fn read() -> !i64 {
+    return error("bad");
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return;
+}`)
+	if err := os.WriteFile(failSource, failCode, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	failOutput := filepath.Join(t.TempDir(), "error_union_fail")
+	failBuild := exec.Command(
+		"go", "run", ".", "build", "--target", "native",
+		"--libc", "on", "--runtime", "hosted", "--emit", "exe",
+		"-o", failOutput, failSource,
+	)
+	if failOut, err := failBuild.CombinedOutput(); err != nil {
+		t.Fatalf("native failure build failed: %v\n%s", err, failOut)
+	}
+	failRun := exec.Command(failOutput)
+	failRunOut, err := failRun.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected native executable to fail, got output %q", failRunOut)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("got err=%v output=%q, want exit 1", err, failRunOut)
+	}
+	if len(failRunOut) != 0 {
+		t.Fatalf("got unexpected output %q", failRunOut)
 	}
 }
 
