@@ -1120,6 +1120,14 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_functions(",
+		"cli_artifact_dir_llvm::append_globals(",
+		"cli_artifact_dir_llvm::append_functions(",
+	},
+	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+		"fn append_ensure_artifact_dir_function(",
+		"@kizu_selfhost__ensure_artifact_dir",
 	},
 	"../../selfhost/src/backend/cli_artifact_path_llvm.kizu": {
 		"pub fn append_functions(",
@@ -1133,11 +1141,13 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_cli_run_blocks(",
 		"fn append_run_print_emit_block(",
 		"fn append_run_return_emit_block(",
+		"@kizu_selfhost__ensure_artifact_dir",
 	},
 	"../../selfhost/src/backend/cli_test_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_test_blocks(",
 		"fn append_test_ok_emit_block(",
+		"@kizu_selfhost__ensure_artifact_dir",
 	},
 	"../../selfhost/src/backend/cli_match_llvm.kizu": {
 		"pub fn append_functions(",
