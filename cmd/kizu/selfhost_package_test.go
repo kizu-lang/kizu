@@ -605,11 +605,11 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 		content,
 		"fn write_package_function_call_diagnostic(",
 	)
-	if strings.Contains(diagnosticBody, "source::load_file_sources(") {
+	if strings.Contains(diagnosticBody, "loader::load_file_sources(") {
 		t.Fatal("check entry package call diagnostic reloads the source table")
 	}
 	fileCliBody := selfhostKizuFunctionBody(t, content, "pub fn file_cli(")
-	if count := strings.Count(fileCliBody, "source::load_file_sources("); count != 1 {
+	if count := strings.Count(fileCliBody, "loader::load_file_sources("); count != 1 {
 		t.Fatalf("check file_cli loads source table %d times, want 1", count)
 	}
 	if strings.Contains(content, "types::first_function_call_error(allocator, files, path)") {
@@ -644,7 +644,7 @@ func assertSelfhostFastDiagnosticsWrapper(t *testing.T, wrapperBody string) {
 	wrapperRequired := []string{
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
 		"let validation_ok = parsed_validation.ok",
-		"var files = try source::load_file_sources(allocator, io, path, file_text)",
+		"var files = try loader::load_file_sources(allocator, io, path, file_text)",
 		"let parsed = try parser::parse_validated_file(",
 		"validation_ok",
 		"return try fast_diagnostics_ast_node(allocator, io, files, file, parsed.ast, parsed.root)",
@@ -743,7 +743,7 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		required := []string{
 			"parser::validate_diagnostic_file(allocator, path, file_text)",
 			"let validation_ok = parsed_validation.ok",
-			"var files = try source::load_file_sources(allocator, io, path, file_text)",
+			"var files = try loader::load_file_sources(allocator, io, path, file_text)",
 			"let file = try files.at(0)",
 			"let parsed = try parser::parse_validated_file(",
 			"validation_ok",
@@ -1228,9 +1228,9 @@ func TestSelfhostCheckManifestTargetUsesContent(t *testing.T) {
 
 // TestSelfhostPackageSourceLoaderUsesManifestPaths rejects fixed package roots.
 func TestSelfhostPackageSourceLoaderUsesManifestPaths(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/source.kizu")
+	bytes, err := os.ReadFile("../../selfhost/src/source/loader.kizu")
 	if err != nil {
-		t.Fatalf("read selfhost source: %v", err)
+		t.Fatalf("read selfhost source loader: %v", err)
 	}
 	body := selfhostKizuFunctionBody(t, string(bytes), "pub fn load_package_sources(")
 	if strings.Contains(body, "std::path::join(allocator, root, \"src\")") {
