@@ -399,7 +399,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 
 // requiredLLVMMetadataFragments returns mandatory backend artifact metadata.
 func requiredLLVMMetadataFragments() []string {
-	return []string{
+	fragments := []string{
 		"kizu-llvm-artifact-v0\n",
 		"abi selfhost-abi-v0\n",
 		"ir target/selfhost/selfhost.ir\n",
@@ -431,6 +431,9 @@ func requiredLLVMMetadataFragments() []string {
 		"backend-input executable-lowering-rule RunReturnVoid RunReturnVoid\n",
 		"backend-input executable-lowering-rule TestExpectTrue TestExpectOk\n",
 		"backend-input executable-lowering-rule TestExpectFalse TestExpectFailure\n",
+	}
+	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
+	fragments = append(fragments, []string{
 		"entry @kizu_selfhost__cli_main\n",
 		"cli-command check selfhost\n",
 		"cli-command stage selfhost\n",
@@ -445,6 +448,17 @@ func requiredLLVMMetadataFragments() []string {
 		"cli-parity-manifest selfhost/tests/cli/test-parity.tsv\n",
 		"cli-hosted-smoke no-go\n",
 		"validation go test ./cmd/kizu -run TestSelfhostBackendArtifactGate\n",
+	}...)
+	fragments = append(fragments, requiredLLVMMetadataExternalFragments()...)
+	return append(fragments, []string{
+		"unsupported-policy blocker\n",
+		"deferred tagged-union-payload issue-495\n",
+	}...)
+}
+
+// requiredLLVMMetadataExternalFragments returns runtime symbols the artifact declares.
+func requiredLLVMMetadataExternalFragments() []string {
+	return []string{
 		"external @kizu_rt_mem_page_allocator\n",
 		"external @kizu_rt_io_blocking\n",
 		"external @kizu_rt_fs_exists\n",
@@ -466,8 +480,25 @@ func requiredLLVMMetadataFragments() []string {
 		"external @kizu_rt_alloc\n",
 		"external @kizu_rt_free\n",
 		"external @llvm.memcpy.p0.p0.i64\n",
-		"unsupported-policy blocker\n",
-		"deferred tagged-union-payload issue-495\n",
+	}
+}
+
+// requiredLLVMMetadataExecutableABIFragments returns executable layout metadata facts.
+func requiredLLVMMetadataExecutableABIFragments() []string {
+	return []string{
+		"backend-input hosted-executable-abi executable-result-layout-v1\n",
+		"backend-input executable-ast-layout kind:i64 payload:[]u8\n",
+		"backend-input executable-layout kind:i64 stdout_payload:[]u8\n",
+		"backend-input executable-ast-kind Unsupported 0\n",
+		"backend-input executable-ast-kind RunPrintCall 1\n",
+		"backend-input executable-ast-kind RunReturnVoid 2\n",
+		"backend-input executable-ast-kind TestExpectTrue 3\n",
+		"backend-input executable-ast-kind TestExpectFalse 4\n",
+		"backend-input executable-kind Unsupported 0\n",
+		"backend-input executable-kind RunPrintString 1\n",
+		"backend-input executable-kind RunReturnVoid 2\n",
+		"backend-input executable-kind TestExpectOk 3\n",
+		"backend-input executable-kind TestExpectFailure 4\n",
 	}
 }
 
