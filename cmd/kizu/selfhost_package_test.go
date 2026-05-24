@@ -1038,6 +1038,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn first_use_after_move_name_ast_node(",
 		"fn first_use_after_move_ast_node(",
 	},
+	"../../selfhost/src/ownership/borrow_param_keys.kizu": {
+		"pub fn collect_borrow_param_keys(",
+		"pub fn function_param_key(",
+	},
 	"../../selfhost/src/backend/runtime.kizu": {
 		"pub fn load_storage_module(",
 		"pub fn render_host_metadata(",

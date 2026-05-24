@@ -1,4 +1,5 @@
 import selfhost::source;
+import selfhost::ownership::borrow_param_keys;
 import selfhost::ownership::data;
 import selfhost::ownership::kind;
 import selfhost::ownership::state;
@@ -10,7 +11,7 @@ pub fn first_use_after_move_name_ast_node(
     root: std::kizu::ast::NodeId
 ) -> ![]u8 {
     var borrow_params = std::map::Map<[]u8, bool>(allocator);
-    try collect_borrow_param_keys(allocator, file, ast, root, borrow_params);
+    try borrow_param_keys::collect_borrow_param_keys(allocator, file, ast, root, borrow_params);
     let result = try first_use_after_move_ast_node(
         allocator,
         file,
@@ -105,150 +106,6 @@ fn first_use_after_move_ast_node(
         Unsafe(unsafe_node) => "",
         ComptimeIf(comptime_if_node) => "",
     };
-}
-
-pub fn collect_borrow_param_keys(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId,
-    borrow_params: &var std::map::Map<[]u8, bool>
-) -> !void {
-    let node = ast.get(node_id);
-    match node.data {
-        Program(program) => return collect_borrow_param_keys_in_range(
-            allocator,
-            file,
-            ast,
-            program.declarations,
-            borrow_params
-        );,
-        FnDecl(fn_decl) => return collect_function_borrow_param_keys(
-            allocator,
-            file,
-            ast,
-            fn_decl.name,
-            fn_decl.params,
-            borrow_params
-        );,
-        ImplDecl(impl_decl) => return collect_borrow_param_keys_in_range(
-            allocator,
-            file,
-            ast,
-            impl_decl.methods,
-            borrow_params
-        );,
-        _ => return;,
-    }
-}
-
-fn collect_borrow_param_keys_in_range(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    range: std::kizu::ast::ChildRange,
-    borrow_params: &var std::map::Map<[]u8, bool>
-) -> !void {
-    var index = 0;
-    while index < range.len {
-        let child = try ast.child_at(range, index);
-        try collect_borrow_param_keys(allocator, file, ast, child, borrow_params);
-        index = index + 1;
-    }
-    return;
-}
-
-fn collect_function_borrow_param_keys(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    ast: std::kizu::ast::Ast,
-    name: std::kizu::ast::NodeId,
-    params: std::kizu::ast::ChildRange,
-    borrow_params: &var std::map::Map<[]u8, bool>
-) -> !void {
-    let function_name = kind::ast_node_text(file, ast, name);
-    var index = 0;
-    while index < params.len {
-        let child = try ast.child_at(params, index);
-        if kind::param_resource_kind(file, ast, child) == data::ResourceKind::BorrowedView {
-            try insert_borrow_param_key_variants(allocator, file, function_name, index, borrow_params);
-        }
-        index = index + 1;
-    }
-    return;
-}
-
-fn insert_borrow_param_key_variants(
-    allocator: Allocator,
-    file: &source::SourceFile,
-    function_name: []u8,
-    index: i64,
-    borrow_params: &var std::map::Map<[]u8, bool>
-) -> !void {
-    try insert_borrow_param_key(allocator, function_name, index, borrow_params);
-    var qualified = std::string::String(allocator);
-    try source::append_qualified_module_name(qualified, file);
-    if qualified.len() > 0 {
-        try qualified.append_bytes("::");
-        try qualified.append_bytes(function_name);
-        try qualified.append_bytes("::");
-        try std::fmt::append_i64(qualified, index);
-        let qualified_bytes = qualified.as_bytes();
-        try borrow_params.insert(qualified_bytes, true);
-    }
-    qualified.deinit();
-
-    let module = source::module_path(file);
-    let alias = last_module_segment(module);
-    if !std::mem::equal_bytes(alias, "") {
-        var alias_name = std::string::String(allocator);
-        try alias_name.append_bytes(alias);
-        try alias_name.append_bytes("::");
-        try alias_name.append_bytes(function_name);
-        try alias_name.append_bytes("::");
-        try std::fmt::append_i64(alias_name, index);
-        let alias_bytes = alias_name.as_bytes();
-        try borrow_params.insert(alias_bytes, true);
-        alias_name.deinit();
-    }
-    return;
-}
-
-fn insert_borrow_param_key(
-    allocator: Allocator,
-    function_name: []u8,
-    index: i64,
-    borrow_params: &var std::map::Map<[]u8, bool>
-) -> !void {
-    var key = try function_param_key(allocator, function_name, index);
-    let key_bytes = key.as_bytes();
-    try borrow_params.insert(key_bytes, true);
-    key.deinit();
-    return;
-}
-
-fn last_module_segment(module: []u8) -> []u8 {
-    var start = 0;
-    var index = 0;
-    while index < std::mem::len(module) {
-        if module[index] == cast<u8>(47) {
-            start = index + 1;
-        }
-        index = index + 1;
-    }
-    return module[start..std::mem::len(module)];
-}
-
-fn function_param_key(
-    allocator: Allocator,
-    function_name: []u8,
-    index: i64
-) -> !std::string::String {
-    var key = std::string::String(allocator);
-    try key.append_bytes(function_name);
-    try key.append_bytes("::");
-    try std::fmt::append_i64(key, index);
-    return key;
 }
 
 fn first_use_after_move_in_decl_range(
@@ -1077,7 +934,7 @@ fn call_arg_moves_direct(
     if std::mem::equal_bytes(text, "print") or std::mem::equal_bytes(text, "std::testing::expect") {
         return false;
     }
-    var key = try function_param_key(std::mem::page_allocator(), text, arg_index);
+    var key = try borrow_param_keys::function_param_key(std::mem::page_allocator(), text, arg_index);
     let key_bytes = key.as_bytes();
     let borrows = borrow_params.contains(key_bytes);
     key.deinit();
