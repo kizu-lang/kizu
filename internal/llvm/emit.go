@@ -31,6 +31,8 @@ type emitter struct {
 	currentReturn  string
 	mainReturnsInt bool
 	nextLabel      int
+	currentBlock   string
+	blockExitLabel map[string]string
 }
 
 type valueInfo struct {
@@ -416,6 +418,9 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.values = map[string]valueInfo{}
 	e.currentReturn = fn.Return
 	e.nextLabel = 0
+	e.currentBlock = ""
+	e.blockExitLabel = map[string]string{}
+	e.precomputeBlockExitLabels(fn)
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
 		params = append(params, e.llvmType(param.Type)+" "+localName(param.Name))
@@ -444,6 +449,7 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.out.WriteString("}\n\n")
 	e.mainReturnsInt = false
 	e.currentReturn = ""
+	e.currentBlock = ""
 	return nil
 }
 
@@ -496,6 +502,7 @@ func validateErrorUnionType(typ string) error {
 // writeBlock writes one LLVM basic block.
 func (e *emitter) writeBlock(block *ir.Block) error {
 	fmt.Fprintf(&e.out, "%s:\n", block.Name)
+	e.currentBlock = block.Name
 	if e.mainReturnsInt && block.Name == "entry" {
 		e.out.WriteString("  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)\n")
 	}
@@ -1053,8 +1060,9 @@ func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
 	negName := resultName + ".index.neg"
 	highName := resultName + ".index.high"
 	badName := resultName + ".index.bad"
-	badLabel := e.nextSyntheticLabel("slice.index.oob")
-	okLabel := e.nextSyntheticLabel("slice.index.ok")
+	badLabel := helperLabel(instr.Result.Name, "index.oob")
+	okLabel := helperLabel(instr.Result.Name, "index.ok")
+	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", negName, index.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp sge i64 %s, %s\n", highName, index.operand, lenName)
@@ -1091,8 +1099,9 @@ func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
 	endHighName := resultName + ".end.high"
 	badLowerName := resultName + ".bad.lower"
 	badName := resultName + ".bad"
-	badLabel := e.nextSyntheticLabel("slice.slice.oob")
-	okLabel := e.nextSyntheticLabel("slice.slice.ok")
+	badLabel := helperLabel(instr.Result.Name, "slice.oob")
+	okLabel := helperLabel(instr.Result.Name, "slice.ok")
+	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", startNegName, start.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, %s\n", endBeforeName, end.operand, start.operand)
@@ -1289,8 +1298,9 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	sourceType := e.llvmType(source.Type)
 	okValue := localName(instr.Result.Name) + ".ok"
 	okBool := okValue + ".bool"
-	okLabel := e.nextSyntheticLabel("try.ok")
-	errLabel := e.nextSyntheticLabel("try.err")
+	okLabel := helperLabel(instr.Result.Name, "try.ok")
+	errLabel := helperLabel(instr.Result.Name, "try.err")
+	e.markCurrentBlockExit(okLabel)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okValue, sourceType, sourceValue.operand)
 	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBool, okValue)
 	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
@@ -1370,13 +1380,92 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 	parts := make([]string, 0, len(instr.Incoming))
 	for _, incoming := range instr.Incoming {
 		value := e.value(incoming.Value)
-		parts = append(parts, fmt.Sprintf("[ %s, %%%s ]", value.operand, incoming.Block))
+		parts = append(parts, fmt.Sprintf(
+			"[ %s, %%%s ]",
+			value.operand,
+			e.incomingBlockLabel(incoming.Block),
+		))
 	}
 	name := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = phi %s %s\n",
 		name, e.llvmType(instr.Result.Type), strings.Join(parts, ", "))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
+}
+
+// incomingBlockLabel returns the concrete LLVM label that reaches a successor.
+func (e *emitter) incomingBlockLabel(block string) string {
+	if label, ok := e.blockExitLabel[block]; ok {
+		return label
+	}
+	return block
+}
+
+// precomputeBlockExitLabels records helper labels before phi nodes are emitted.
+func (e *emitter) precomputeBlockExitLabels(fn *ir.Function) {
+	for _, block := range fn.Blocks {
+		if label, ok := e.computeBlockExitLabel(block); ok {
+			e.blockExitLabel[block.Name] = label
+		}
+	}
+}
+
+// computeBlockExitLabel returns the final helper label that continues one IR block.
+func (e *emitter) computeBlockExitLabel(block *ir.Block) (string, bool) {
+	label := ""
+	for _, instr := range block.Instrs {
+		if next, ok := continuationLabel(instr); ok {
+			label = next
+		}
+	}
+	if label == "" {
+		return "", false
+	}
+	return label, true
+}
+
+// continuationLabel reports helper labels introduced by instruction expansion.
+func continuationLabel(instr *ir.Instr) (string, bool) {
+	switch instr.Op {
+	case "error.try":
+		return helperLabel(instr.Result.Name, "try.ok"), true
+	case "slice.index":
+		return helperLabel(instr.Result.Name, "index.ok"), true
+	case "slice.slice":
+		return helperLabel(instr.Result.Name, "slice.ok"), true
+	case "array.pop", "array.get", "map.get":
+		return helperLabel(instr.Result.Name, "array.join"), true
+	case "array.at", "array.at_mut":
+		return helperLabel(instr.Result.Name, "array.ref.join"), true
+	case "array.get_or_panic", "arena.get":
+		return helperLabel(localName(instr.Result.Name)+".ptr", "ok"), true
+	case "arena.add":
+		return helperLabel(localName(instr.Result.Name)+".bad", "ok"), true
+	case "test.expect_equal":
+		return helperLabel(localName(instr.Result.Name)+".ok", "ok"), true
+	default:
+		return "", false
+	}
+}
+
+// markCurrentBlockExit records the concrete label where the current IR block continues.
+func (e *emitter) markCurrentBlockExit(label string) {
+	if e.currentBlock != "" {
+		e.blockExitLabel[e.currentBlock] = label
+	}
+}
+
+// helperLabel derives a deterministic local label from an SSA value or operand.
+func helperLabel(base string, suffix string) string {
+	label := base
+	if strings.HasPrefix(label, "%kizu.") {
+		label = strings.TrimPrefix(label, "%")
+	} else if strings.HasPrefix(label, "%") {
+		label = strings.TrimPrefix(localName(base), "%")
+	} else {
+		label = strings.TrimPrefix(label, "%")
+	}
+	return label + "." + suffix
 }
 
 // writeTerminator writes one LLVM terminator.
@@ -1555,12 +1644,6 @@ func (e *emitter) errorUnionFailureLLVMType(typ string) string {
 		return e.llvmType(errorName)
 	}
 	return "%kizu.slice.u8"
-}
-
-// nextSyntheticLabel returns a unique helper label inside the current function.
-func (e *emitter) nextSyntheticLabel(prefix string) string {
-	e.nextLabel++
-	return fmt.Sprintf("%s.%d", prefix, e.nextLabel)
 }
 
 // nextSyntheticValue returns a unique helper value name without a leading percent.
