@@ -5,6 +5,8 @@ import "fmt"
 // Module is a lowered Kizu source file.
 type Module struct {
 	Structs   map[string]Struct
+	Enums     map[string]Enum
+	Unions    map[string]Union
 	Functions []*Function
 }
 
@@ -12,6 +14,25 @@ type Module struct {
 type Struct struct {
 	Name   string
 	Fields []Field
+}
+
+// Enum is the IR view of a declared tag enum.
+type Enum struct {
+	Name string
+	Tags map[string]int
+}
+
+// Union is the IR view of a tagged union declaration.
+type Union struct {
+	Name     string
+	Variants map[string]UnionVariant
+}
+
+// UnionVariant stores one union tag and optional payload type.
+type UnionVariant struct {
+	Name    string
+	Index   int
+	Payload string
 }
 
 // Field is a typed struct field.
@@ -58,6 +79,13 @@ type Instr struct {
 	Immediate string
 	Fields    []FieldArg
 	Incoming  []Incoming
+	Cleanups  []Cleanup
+}
+
+// Cleanup is a deferred void instruction that must run before a scope exits.
+type Cleanup struct {
+	Op   string
+	Args []Value
 }
 
 // FieldArg connects a struct field name to a value.

@@ -77,7 +77,10 @@ func (e *emitter) writeHeader() {
 		e.out.WriteString("%kizu.slice.u8 = type { ptr, i64 }\n")
 	}
 	e.writeErrorUnionTypes()
+	e.writeUnionTypes()
 	e.writeStructTypes()
+	e.writeArrayRuntimeGlobals()
+	e.writeMapRuntimeGlobals()
 	for _, lit := range e.sortedStringLiterals() {
 		name := e.strings[lit]
 		unquoted, _ := strconv.Unquote(lit)
@@ -90,24 +93,106 @@ func (e *emitter) writeHeader() {
 	e.out.WriteString("declare void @kizu_print_string(ptr, i64)\n")
 	e.out.WriteString("declare void @kizu_print_int(i64)\n")
 	e.out.WriteString("declare void @kizu_print_bool(i1)\n\n")
+	e.out.WriteString("declare void @kizu_runtime_init_args(i32, ptr)\n\n")
+	e.writeArrayRuntimeDecls()
+	e.writeMapRuntimeDecls()
+	e.writeArenaRuntimeDecls()
+	e.writeUnionRuntimeDecls()
+	e.writeTestRuntimeDecls()
+	e.writeExternalCallDecls()
+	if e.usesBoundsTrap() {
+		e.out.WriteString("declare void @llvm.trap()\n\n")
+	}
 }
 
 // writeErrorUnionTypes writes named recoverable-result ABI definitions.
 func (e *emitter) writeErrorUnionTypes() {
 	names := e.sortedErrorUnionNames()
 	for _, name := range names {
-		success, _ := errorUnionSuccessType(name)
+		errorName, success, _ := errorUnionParts(name)
+		failureType := "%kizu.slice.u8"
+		if errorName != "" {
+			failureType = e.llvmType(errorName)
+		}
 		if success == "void" {
-			fmt.Fprintf(&e.out, "%s = type { i1, %%kizu.slice.u8 }\n",
-				llvmErrorUnionTypeName(name))
+			fmt.Fprintf(&e.out, "%s = type { i8, %s }\n",
+				llvmErrorUnionTypeName(name), failureType)
 			continue
 		}
-		fmt.Fprintf(&e.out, "%s = type { i1, %s, %%kizu.slice.u8 }\n",
-			llvmErrorUnionTypeName(name), e.llvmType(success))
+		fmt.Fprintf(&e.out, "%s = type { i8, %s, %s }\n",
+			llvmErrorUnionTypeName(name), e.llvmType(success), failureType)
 	}
 	if len(names) > 0 {
 		e.out.WriteByte('\n')
 	}
+}
+
+// writeExternalCallDecls declares runtime calls that are not defined in the module.
+func (e *emitter) writeExternalCallDecls() {
+	decls := e.externalCallDecls()
+	for _, decl := range decls {
+		e.out.WriteString(decl)
+		e.out.WriteByte('\n')
+	}
+	if len(decls) > 0 {
+		e.out.WriteByte('\n')
+	}
+}
+
+// externalCallDecls returns stable declarations for external call instructions.
+func (e *emitter) externalCallDecls() []string {
+	defined := map[string]bool{}
+	for _, fn := range e.module.Functions {
+		defined[fn.Name] = true
+	}
+	seen := map[string]string{}
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if !strings.HasPrefix(instr.Op, "call.") {
+					continue
+				}
+				name := strings.TrimPrefix(instr.Op, "call.")
+				if name == "print" || defined[name] {
+					continue
+				}
+				seen[name] = e.externalCallDecl(name, instr)
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	decls := make([]string, 0, len(names))
+	for _, name := range names {
+		decls = append(decls, seen[name])
+	}
+	return decls
+}
+
+// externalCallDecl formats one external call declaration from typed IR operands.
+func (e *emitter) externalCallDecl(name string, instr *ir.Instr) string {
+	if e.usesHostedRuntimeABI(name, instr) {
+		params := []string{"ptr"}
+		params = append(params, e.hostedRuntimeParamTypes(instr.Args)...)
+		return fmt.Sprintf(
+			"declare void @%s(%s)",
+			llvmFunctionName(name),
+			strings.Join(params, ", "),
+		)
+	}
+	params := make([]string, 0, len(instr.Args))
+	for _, arg := range instr.Args {
+		params = append(params, e.llvmType(arg.Type))
+	}
+	return fmt.Sprintf(
+		"declare %s @%s(%s)",
+		e.llvmType(instr.Result.Type),
+		llvmFunctionName(name),
+		strings.Join(params, ", "),
+	)
 }
 
 // writeStructTypes writes named LLVM aggregate definitions for declared structs.
@@ -121,6 +206,17 @@ func (e *emitter) writeStructTypes() {
 		}
 		fmt.Fprintf(&e.out, "%s = type { %s }\n",
 			llvmStructTypeName(name), strings.Join(fields, ", "))
+	}
+	if len(names) > 0 {
+		e.out.WriteByte('\n')
+	}
+}
+
+// writeUnionTypes writes named LLVM layouts for tagged unions.
+func (e *emitter) writeUnionTypes() {
+	names := e.sortedUnionNames()
+	for _, name := range names {
+		fmt.Fprintf(&e.out, "%s = type { i64, ptr }\n", llvmUnionTypeName(name))
 	}
 	if len(names) > 0 {
 		e.out.WriteByte('\n')
@@ -143,6 +239,16 @@ func (e *emitter) sortedStringLiterals() []string {
 func (e *emitter) sortedStructNames() []string {
 	names := make([]string, 0, len(e.module.Structs))
 	for name := range e.module.Structs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// sortedUnionNames returns declared unions in stable order.
+func (e *emitter) sortedUnionNames() []string {
+	names := make([]string, 0, len(e.module.Unions))
+	for name := range e.module.Unions {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -225,6 +331,23 @@ func instrHasSliceType(instr *ir.Instr) bool {
 	return false
 }
 
+// usesBoundsTrap reports whether checked slice access can trap on invalid bounds.
+func (e *emitter) usesBoundsTrap() bool {
+	for _, fn := range e.module.Functions {
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				if instr.Op == "slice.index" || instr.Op == "slice.slice" ||
+					instr.Op == "array.get_or_panic" ||
+					instr.Op == "arena.add" || instr.Op == "arena.get" ||
+					instr.Op == "test.fail" || instr.Op == "test.expect_equal" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // isSliceType reports whether a lowered IR type is the byte-slice value type.
 func isSliceType(typ string) bool {
 	return typ == "[]u8"
@@ -295,25 +418,51 @@ func (e *emitter) writeFunction(fn *ir.Function) error {
 	e.nextLabel = 0
 	params := make([]string, 0, len(fn.Params))
 	for _, param := range fn.Params {
-		params = append(params, e.llvmType(param.Type)+" "+param.Name)
-		e.values[param.Name] = valueInfo{typ: param.Type, operand: param.Name}
+		params = append(params, e.llvmType(param.Type)+" "+localName(param.Name))
+		e.values[param.Name] = valueInfo{typ: param.Type, operand: localName(param.Name)}
 	}
+	e.registerFunctionConstants(fn)
 	returnType := e.llvmType(fn.Return)
 	_, returnsErrorUnion := errorUnionSuccessType(fn.Return)
 	e.mainReturnsInt = fn.Name == "main" && (fn.Return == "void" || returnsErrorUnion)
 	if e.mainReturnsInt {
 		returnType = "i32"
+		params = []string{"i32 %kizu.argc", "ptr %kizu.argv"}
 	}
-	fmt.Fprintf(&e.out, "define %s @%s(%s) {\n", returnType, fn.Name, strings.Join(params, ", "))
+	fmt.Fprintf(&e.out,
+		"define %s @%s(%s) {\n",
+		returnType,
+		llvmFunctionName(fn.Name),
+		strings.Join(params, ", "),
+	)
 	for _, block := range fn.Blocks {
 		if err := e.writeBlock(block); err != nil {
-			return err
+			return fmt.Errorf("llvm error: function `%s` block `%s`: %w",
+				fn.Name, block.Name, err)
 		}
 	}
 	e.out.WriteString("}\n\n")
 	e.mainReturnsInt = false
 	e.currentReturn = ""
 	return nil
+}
+
+// registerFunctionConstants makes scalar constants available to phi nodes even
+// when a merge block is emitted before its predecessor block.
+func (e *emitter) registerFunctionConstants(fn *ir.Function) {
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			if instr.Op != "const" {
+				continue
+			}
+			switch instr.Result.Type {
+			case "i64":
+				e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: instr.Immediate}
+			case "bool":
+				e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: llvmBool(instr.Immediate)}
+			}
+		}
+	}
 }
 
 // validateFunctionTypes rejects ABI shapes this backend cannot lower faithfully.
@@ -347,12 +496,18 @@ func validateErrorUnionType(typ string) error {
 // writeBlock writes one LLVM basic block.
 func (e *emitter) writeBlock(block *ir.Block) error {
 	fmt.Fprintf(&e.out, "%s:\n", block.Name)
+	if e.mainReturnsInt && block.Name == "entry" {
+		e.out.WriteString("  call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)\n")
+	}
 	for _, instr := range block.Instrs {
 		if err := e.writeInstr(instr); err != nil {
-			return err
+			return fmt.Errorf("llvm error: block `%s`: %w", block.Name, err)
 		}
 	}
-	return e.writeTerminator(block.Terminator)
+	if err := e.writeTerminator(block.Terminator); err != nil {
+		return fmt.Errorf("llvm error: block `%s`: %w", block.Name, err)
+	}
+	return nil
 }
 
 // writeInstr writes one LLVM instruction.
@@ -362,6 +517,8 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 		return e.writeConst(instr)
 	case strings.HasPrefix(instr.Op, "binary."):
 		return e.writeBinary(instr)
+	case strings.HasPrefix(instr.Op, "unary."):
+		return e.writeUnary(instr)
 	case strings.HasPrefix(instr.Op, "call."):
 		return e.writeCall(instr)
 	case instr.Op == "cast":
@@ -371,23 +528,76 @@ func (e *emitter) writeInstr(instr *ir.Instr) error {
 	case instr.Op == "struct.new":
 		return e.writeStructNew(instr)
 	case strings.HasPrefix(instr.Op, "field."):
-		return e.writeField(instr)
-	case instr.Op == "error.ok":
-		return e.writeErrorOK(instr)
-	case instr.Op == "error.error":
-		return e.writeErrorError(instr)
-	case instr.Op == "error.try":
-		return e.writeErrorTry(instr)
-	case instr.Op == "arena.new" || instr.Op == "arena.add" ||
-		instr.Op == "arena.get" || instr.Op == "arena.deinit":
-		return e.unsupported(instr)
+		return e.writeFieldInstr(instr)
+	default:
+		return e.writeRuntimeInstr(instr)
+	}
+}
+
+// writeRuntimeInstr dispatches instructions backed by hosted runtime helpers.
+func (e *emitter) writeRuntimeInstr(instr *ir.Instr) error {
+	switch {
+	case strings.HasPrefix(instr.Op, "array."):
+		return e.writeArrayInstr(instr)
+	case strings.HasPrefix(instr.Op, "map."):
+		return e.writeMapInstr(instr)
+	case strings.HasPrefix(instr.Op, "arena."):
+		return e.writeArenaInstr(instr)
+	case strings.HasPrefix(instr.Op, "union."):
+		return e.writeUnionInstr(instr)
+	case strings.HasPrefix(instr.Op, "test."):
+		return e.writeTestInstr(instr)
+	case strings.HasPrefix(instr.Op, "slice."):
+		return e.writeSliceInstr(instr)
+	case strings.HasPrefix(instr.Op, "error."):
+		return e.writeErrorInstr(instr)
 	default:
 		return fmt.Errorf("llvm error: unsupported instruction `%s`", instr.Op)
 	}
 }
 
+// writeFieldInstr dispatches struct field reads.
+func (e *emitter) writeFieldInstr(instr *ir.Instr) error {
+	if strings.HasPrefix(instr.Op, "field.ref.") {
+		return e.writeFieldRef(instr)
+	}
+	return e.writeField(instr)
+}
+
+// writeErrorInstr dispatches recoverable-result operations.
+func (e *emitter) writeErrorInstr(instr *ir.Instr) error {
+	switch instr.Op {
+	case "error.ok":
+		return e.writeErrorOK(instr)
+	case "error.error":
+		return e.writeErrorError(instr)
+	case "error.try":
+		return e.writeErrorTry(instr)
+	default:
+		return fmt.Errorf("llvm error: unsupported error instruction `%s`", instr.Op)
+	}
+}
+
+// writeSliceInstr dispatches checked byte-slice operations.
+func (e *emitter) writeSliceInstr(instr *ir.Instr) error {
+	switch instr.Op {
+	case "slice.len":
+		return e.writeSliceLen(instr)
+	case "slice.index":
+		return e.writeSliceIndex(instr)
+	case "slice.slice":
+		return e.writeSliceSlice(instr)
+	default:
+		return fmt.Errorf("llvm error: unsupported slice instruction `%s`", instr.Op)
+	}
+}
+
 // writeConst writes scalar and string constants.
 func (e *emitter) writeConst(instr *ir.Instr) error {
+	if _, ok := e.module.Enums[instr.Result.Type]; ok {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: instr.Immediate}
+		return nil
+	}
 	switch instr.Result.Type {
 	case "i64":
 		e.values[instr.Result.Name] = valueInfo{typ: "i64", operand: instr.Immediate}
@@ -421,15 +631,48 @@ func (e *emitter) writeBinary(instr *ir.Instr) error {
 	right := e.value(instr.Args[1])
 	op := strings.TrimPrefix(instr.Op, "binary.")
 	if instr.Result.Type == "bool" {
-		pred := llvmPredicate(op)
+		if e.llvmType(instr.Args[0].Type) != e.llvmType(instr.Args[1].Type) {
+			return fmt.Errorf(
+				"llvm error: binary %s operand type mismatch: %s and %s",
+				op,
+				instr.Args[0].Type,
+				instr.Args[1].Type,
+			)
+		}
+		pred := llvmTypedPredicate(op, instr.Args[0].Type)
 		name := localName(instr.Result.Name)
-		fmt.Fprintf(&e.out, "  %s = icmp %s i64 %s, %s\n",
-			name, pred, left.operand, right.operand)
+		fmt.Fprintf(&e.out, "  %s = icmp %s %s %s, %s\n",
+			name, pred, e.llvmType(instr.Args[0].Type), left.operand, right.operand)
 		e.values[instr.Result.Name] = valueInfo{typ: "bool", operand: name}
 		return nil
 	}
 	name := localName(instr.Result.Name)
-	fmt.Fprintf(&e.out, "  %s = %s i64 %s, %s\n", name, llvmBinaryOp(op), left.operand, right.operand)
+	fmt.Fprintf(&e.out, "  %s = %s %s %s, %s\n",
+		name, llvmBinaryOp(op), e.llvmType(instr.Result.Type), left.operand, right.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeUnary writes boolean and integer unary operations.
+func (e *emitter) writeUnary(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: unary expects 1 arg")
+	}
+	value := e.value(instr.Args[0])
+	name := localName(instr.Result.Name)
+	op := strings.TrimPrefix(instr.Op, "unary.")
+	switch op {
+	case "!":
+		if instr.Result.Type != "bool" {
+			return fmt.Errorf("llvm error: unary ! expects bool")
+		}
+		fmt.Fprintf(&e.out, "  %s = xor i1 %s, true\n", name, value.operand)
+	case "-":
+		fmt.Fprintf(&e.out, "  %s = sub %s 0, %s\n",
+			name, e.llvmType(instr.Result.Type), value.operand)
+	default:
+		return fmt.Errorf("llvm error: unsupported unary `%s`", op)
+	}
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
@@ -440,6 +683,9 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	if name == "print" {
 		return e.writePrint(instr.Args)
 	}
+	if e.usesHostedRuntimeABI(name, instr) {
+		return e.writeHostedRuntimeCall(name, instr)
+	}
 	args := make([]string, 0, len(instr.Args))
 	for _, arg := range instr.Args {
 		value := e.value(arg)
@@ -448,7 +694,7 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	call := fmt.Sprintf(
 		"call %s @%s(%s)",
 		e.llvmType(instr.Result.Type),
-		name,
+		llvmFunctionName(name),
 		strings.Join(args, ", "),
 	)
 	if instr.Result.Type == "void" {
@@ -457,6 +703,56 @@ func (e *emitter) writeCall(instr *ir.Instr) error {
 	}
 	resultName := localName(instr.Result.Name)
 	fmt.Fprintf(&e.out, "  %s = %s\n", resultName, call)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// usesHostedRuntimeABI reports whether a std hosted runtime call uses the
+// explicit out-pointer ABI instead of the platform C aggregate return ABI.
+func (e *emitter) usesHostedRuntimeABI(name string, instr *ir.Instr) bool {
+	if !strings.HasPrefix(llvmFunctionName(name), "std_builtin_") {
+		return false
+	}
+	_, ok := errorUnionSuccessType(instr.Result.Type)
+	return ok
+}
+
+// hostedRuntimeParamTypes returns the lowered parameter ABI for hosted runtime calls.
+func (e *emitter) hostedRuntimeParamTypes(args []ir.Value) []string {
+	params := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg.Type == "[]u8" {
+			params = append(params, "ptr")
+			continue
+		}
+		params = append(params, e.llvmType(arg.Type))
+	}
+	return params
+}
+
+// writeHostedRuntimeCall adapts Kizu aggregate values to the narrow hosted C ABI.
+func (e *emitter) writeHostedRuntimeCall(name string, instr *ir.Instr) error {
+	resultName := localName(instr.Result.Name)
+	resultType := e.llvmType(instr.Result.Type)
+	resultSlot := resultName + ".slot"
+	fmt.Fprintf(&e.out, "  %s = alloca %s\n", resultSlot, resultType)
+	args := []string{"ptr " + resultSlot}
+	for index, arg := range instr.Args {
+		value := e.value(arg)
+		if arg.Type == "[]u8" {
+			argSlot := fmt.Sprintf("%s.arg.%d", resultName, index)
+			fmt.Fprintf(&e.out, "  %s = alloca %%kizu.slice.u8\n", argSlot)
+			fmt.Fprintf(&e.out, "  store %%kizu.slice.u8 %s, ptr %s\n", value.operand, argSlot)
+			args = append(args, "ptr "+argSlot)
+			continue
+		}
+		args = append(args, e.llvmType(arg.Type)+" "+value.operand)
+	}
+	fmt.Fprintf(&e.out, "  call void @%s(%s)\n",
+		llvmFunctionName(name),
+		strings.Join(args, ", "),
+	)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", resultName, resultType, resultSlot)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
 }
@@ -484,16 +780,49 @@ func (e *emitter) writeCast(instr *ir.Instr) error {
 			instr.Result.Type,
 		)
 	}
+	if _, ok := integerBitWidth(source.Type); ok {
+		if _, targetOK := integerBitWidth(instr.Result.Type); targetOK {
+			return e.writeIntegerCast(instr)
+		}
+	}
 	value := e.value(instr.Args[0])
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+	return nil
+}
+
+// writeIntegerCast emits explicit truncate/extend casts between scalar integer widths.
+func (e *emitter) writeIntegerCast(instr *ir.Instr) error {
+	source := instr.Args[0]
+	sourceWidth, _ := integerBitWidth(source.Type)
+	targetWidth, _ := integerBitWidth(instr.Result.Type)
+	value := e.value(source)
+	if sourceWidth == targetWidth {
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: value.operand}
+		return nil
+	}
+	name := localName(instr.Result.Name)
+	sourceType := e.llvmType(source.Type)
+	targetType := e.llvmType(instr.Result.Type)
+	if sourceWidth > targetWidth {
+		fmt.Fprintf(&e.out, "  %s = trunc %s %s to %s\n",
+			name, sourceType, value.operand, targetType)
+	} else {
+		op := "sext"
+		if isUnsignedIntegerType(source.Type) {
+			op = "zext"
+		}
+		fmt.Fprintf(&e.out, "  %s = %s %s %s to %s\n",
+			name, op, sourceType, value.operand, targetType)
+	}
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
 }
 
 // writeErrorUnionCast copies ok/value/message fields between compatible !T shapes.
 func (e *emitter) writeErrorUnionCast(instr *ir.Instr) error {
 	source := instr.Args[0]
-	sourceSuccess, _ := errorUnionSuccessType(source.Type)
-	targetSuccess, _ := errorUnionSuccessType(instr.Result.Type)
+	sourceError, sourceSuccess, _ := errorUnionParts(source.Type)
+	targetError, targetSuccess, _ := errorUnionParts(instr.Result.Type)
 	if sourceSuccess != targetSuccess {
 		return fmt.Errorf(
 			"llvm error: cannot cast %s to %s",
@@ -514,7 +843,7 @@ func (e *emitter) writeErrorUnionCast(instr *ir.Instr) error {
 	okName := resultName + ".ok"
 	baseName := resultName + ".base"
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, sourceType, sourceInfo.operand)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i1 %s, 0\n",
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 %s, 0\n",
 		baseName, targetType, okName)
 	aggregate := baseName
 	if sourceSuccess != "void" {
@@ -526,13 +855,58 @@ func (e *emitter) writeErrorUnionCast(instr *ir.Instr) error {
 			valueBaseName, targetType, aggregate, e.llvmType(sourceSuccess), valueName)
 		aggregate = valueBaseName
 	}
-	messageName := resultName + ".message"
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
-		messageName, sourceType, sourceInfo.operand, errorUnionMessageIndex(source.Type))
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %%kizu.slice.u8 %s, %d\n",
-		resultName, targetType, aggregate, messageName, errorUnionMessageIndex(instr.Result.Type))
+	failureName, failureType, err := e.convertFailurePayload(
+		resultName+".failure",
+		source.Type,
+		sourceType,
+		sourceInfo.operand,
+		sourceError,
+		targetError,
+	)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
+		resultName,
+		targetType,
+		aggregate,
+		failureType,
+		failureName,
+		errorUnionFailureIndex(instr.Result.Type),
+	)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// convertFailurePayload extracts and adapts an error-union failure payload.
+func (e *emitter) convertFailurePayload(
+	resultName string,
+	sourceResultType string,
+	sourceLLVMType string,
+	sourceOperand string,
+	sourceError string,
+	targetError string,
+) (string, string, error) {
+	extractedName := resultName + ".extracted"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
+		extractedName,
+		sourceLLVMType,
+		sourceOperand,
+		errorUnionFailureIndex(sourceResultType),
+	)
+	if sourceError == targetError {
+		return extractedName, e.errorUnionFailureLLVMType(sourceResultType), nil
+	}
+	if sourceError == "" && targetError != "" {
+		messageValue := ir.Value{Name: extractedName, Type: "[]u8"}
+		e.values[messageValue.Name] = valueInfo{typ: "[]u8", operand: extractedName}
+		payloadName := resultName + ".typed"
+		if err := e.writeTypedMessageErrorPayload(payloadName, targetError, messageValue); err != nil {
+			return "", "", err
+		}
+		return payloadName, e.llvmType(targetError), nil
+	}
+	return "", "", fmt.Errorf("llvm error: cannot convert failure payload to `%s`", targetError)
 }
 
 // writeStructNew lowers a checked struct literal to an LLVM aggregate value.
@@ -616,6 +990,141 @@ func (e *emitter) writeField(instr *ir.Instr) error {
 	return nil
 }
 
+// writeFieldRef lowers a field read through a borrowed struct pointer.
+func (e *emitter) writeFieldRef(instr *ir.Instr) error {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: borrowed field read expects 1 arg")
+	}
+	receiver := instr.Args[0]
+	structType := derefLLVMType(receiver.Type)
+	st, ok := e.module.Structs[structType]
+	if !ok {
+		return fmt.Errorf("llvm error: unknown borrowed struct type `%s`", receiver.Type)
+	}
+	fieldName := strings.TrimPrefix(instr.Op, "field.ref.")
+	index, ok := structFieldIndex(st, fieldName)
+	if !ok {
+		return fmt.Errorf("llvm error: unknown struct field `%s.%s`", st.Name, fieldName)
+	}
+	if instr.Result.Type != st.Fields[index].Type {
+		return fmt.Errorf(
+			"llvm error: borrowed field `%s.%s` returns %s, got %s",
+			st.Name,
+			fieldName,
+			st.Fields[index].Type,
+			instr.Result.Type,
+		)
+	}
+	value := e.value(receiver)
+	ptrName := localName(instr.Result.Name) + ".ptr"
+	name := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n",
+		ptrName, e.llvmType(structType), value.operand, index)
+	fmt.Fprintf(&e.out, "  %s = load %s, ptr %s\n", name, e.llvmType(instr.Result.Type), ptrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
+	return nil
+}
+
+// writeSliceLen extracts the byte length from a []u8 value.
+func (e *emitter) writeSliceLen(instr *ir.Instr) error {
+	if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" || instr.Result.Type != "i64" {
+		return fmt.Errorf("llvm error: slice.len expects []u8 -> i64")
+	}
+	slice := e.value(instr.Args[0])
+	resultName := localName(instr.Result.Name)
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n",
+		resultName, slice.operand)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeSliceIndex lowers checked byte indexing and traps before invalid memory access.
+func (e *emitter) writeSliceIndex(instr *ir.Instr) error {
+	if len(instr.Args) != 2 ||
+		instr.Args[0].Type != "[]u8" ||
+		instr.Args[1].Type != "i64" ||
+		instr.Result.Type != "u8" {
+		return fmt.Errorf("llvm error: slice.index expects []u8, i64 -> u8")
+	}
+	slice := e.value(instr.Args[0])
+	index := e.value(instr.Args[1])
+	resultName := localName(instr.Result.Name)
+	lenName := resultName + ".len"
+	negName := resultName + ".index.neg"
+	highName := resultName + ".index.high"
+	badName := resultName + ".index.bad"
+	badLabel := e.nextSyntheticLabel("slice.index.oob")
+	okLabel := e.nextSyntheticLabel("slice.index.ok")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", negName, index.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp sge i64 %s, %s\n", highName, index.operand, lenName)
+	fmt.Fprintf(&e.out, "  %s = or i1 %s, %s\n", badName, negName, highName)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badName, badLabel, okLabel)
+	e.writeTrapBlock(badLabel)
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+	ptrName := resultName + ".ptr"
+	elemPtrName := resultName + ".elem.ptr"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
+	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n",
+		elemPtrName, ptrName, index.operand)
+	fmt.Fprintf(&e.out, "  %s = load i8, ptr %s\n", resultName, elemPtrName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeSliceSlice lowers checked byte slicing and traps before invalid memory access.
+func (e *emitter) writeSliceSlice(instr *ir.Instr) error {
+	if len(instr.Args) != 3 ||
+		instr.Args[0].Type != "[]u8" ||
+		instr.Args[1].Type != "i64" ||
+		instr.Args[2].Type != "i64" ||
+		instr.Result.Type != "[]u8" {
+		return fmt.Errorf("llvm error: slice.slice expects []u8, i64, i64 -> []u8")
+	}
+	slice := e.value(instr.Args[0])
+	start := e.value(instr.Args[1])
+	end := e.value(instr.Args[2])
+	resultName := localName(instr.Result.Name)
+	lenName := resultName + ".source.len"
+	startNegName := resultName + ".start.neg"
+	endBeforeName := resultName + ".end.before.start"
+	endHighName := resultName + ".end.high"
+	badLowerName := resultName + ".bad.lower"
+	badName := resultName + ".bad"
+	badLabel := e.nextSyntheticLabel("slice.slice.oob")
+	okLabel := e.nextSyntheticLabel("slice.slice.ok")
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n", lenName, slice.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, 0\n", startNegName, start.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp slt i64 %s, %s\n", endBeforeName, end.operand, start.operand)
+	fmt.Fprintf(&e.out, "  %s = icmp sgt i64 %s, %s\n", endHighName, end.operand, lenName)
+	fmt.Fprintf(&e.out, "  %s = or i1 %s, %s\n", badLowerName, startNegName, endBeforeName)
+	fmt.Fprintf(&e.out, "  %s = or i1 %s, %s\n", badName, badLowerName, endHighName)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", badName, badLabel, okLabel)
+	e.writeTrapBlock(badLabel)
+	fmt.Fprintf(&e.out, "%s:\n", okLabel)
+	ptrName := resultName + ".source.ptr"
+	slicePtrName := resultName + ".ptr"
+	baseName := resultName + ".base"
+	sliceLenName := resultName + ".len"
+	fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n", ptrName, slice.operand)
+	fmt.Fprintf(&e.out, "  %s = getelementptr i8, ptr %s, i64 %s\n",
+		slicePtrName, ptrName, start.operand)
+	fmt.Fprintf(&e.out, "  %s = sub i64 %s, %s\n", sliceLenName, end.operand, start.operand)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
+		baseName, slicePtrName)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %s, 1\n",
+		resultName, baseName, sliceLenName)
+	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+	return nil
+}
+
+// writeTrapBlock emits an immediate trap for failed checked slice bounds.
+func (e *emitter) writeTrapBlock(label string) {
+	fmt.Fprintf(&e.out, "%s:\n", label)
+	e.out.WriteString("  call void @llvm.trap()\n")
+	e.out.WriteString("  unreachable\n")
+}
+
 // writeErrorOK builds a successful error-union value.
 func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 	success, ok := errorUnionSuccessType(instr.Result.Type)
@@ -631,7 +1140,7 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 		if len(instr.Args) != 0 {
 			return fmt.Errorf("llvm error: error.ok !void expects 0 args")
 		}
-		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i1 true, 0\n",
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
 			resultName, unionType)
 		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 		return nil
@@ -645,7 +1154,7 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 	}
 	okName := resultName + ".ok"
 	argInfo := e.value(value)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i1 true, 0\n",
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
 		okName, unionType)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
 		resultName, unionType, okName, e.llvmType(success), argInfo.operand)
@@ -655,28 +1164,98 @@ func (e *emitter) writeErrorOK(instr *ir.Instr) error {
 
 // writeErrorError builds a failed error-union value.
 func (e *emitter) writeErrorError(instr *ir.Instr) error {
-	if _, ok := errorUnionSuccessType(instr.Result.Type); !ok {
+	errorName, _, ok := errorUnionParts(instr.Result.Type)
+	if !ok {
 		return fmt.Errorf("llvm error: error.error result must be !T, got %s", instr.Result.Type)
 	}
 	if err := validateErrorUnionType(instr.Result.Type); err != nil {
 		return err
 	}
-	if len(instr.Args) != 1 || instr.Args[0].Type != "[]u8" {
+	if len(instr.Args) != 1 {
+		return fmt.Errorf("llvm error: error.error expects one failure payload")
+	}
+	resultName := localName(instr.Result.Name)
+	unionType := e.llvmType(instr.Result.Type)
+	if errorName != "" {
+		arg := instr.Args[0]
+		if arg.Type == errorName {
+			payload := e.value(arg)
+			e.writeErrorFailurePayloadValue(
+				resultName,
+				instr.Result.Type,
+				payload.operand,
+				e.llvmType(errorName),
+			)
+			e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+			return nil
+		}
+		if arg.Type != "[]u8" {
+			return fmt.Errorf(
+				"llvm error: error.error for %s expects %s or []u8, got %s",
+				instr.Result.Type,
+				errorName,
+				arg.Type,
+			)
+		}
+		payloadName := resultName + ".payload"
+		if err := e.writeTypedMessageErrorPayload(payloadName, errorName, arg); err != nil {
+			return err
+		}
+		e.writeErrorFailurePayloadValue(resultName, instr.Result.Type, payloadName, e.llvmType(errorName))
+		e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
+		return nil
+	}
+	if instr.Args[0].Type != "[]u8" {
 		return fmt.Errorf("llvm error: error.error expects one []u8 message")
 	}
 	message, err := e.sliceValue(instr.Args[0])
 	if err != nil {
 		return err
 	}
-	resultName := localName(instr.Result.Name)
-	unionType := e.llvmType(instr.Result.Type)
 	baseName := resultName + ".base"
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i1 false, 0\n",
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
 		baseName, unionType)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %%kizu.slice.u8 %s, %d\n",
-		resultName, unionType, baseName, message, errorUnionMessageIndex(instr.Result.Type))
+		resultName, unionType, baseName, message, errorUnionFailureIndex(instr.Result.Type))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// writeTypedMessageErrorPayload builds Error::Message([]u8) for typed error unions.
+func (e *emitter) writeTypedMessageErrorPayload(
+	resultName string,
+	errorName string,
+	message ir.Value,
+) error {
+	_, variant, ok := e.unionVariant(errorName, "Message")
+	if !ok || variant.Payload != "[]u8" {
+		return fmt.Errorf("llvm error: typed error `%s` cannot be built from []u8", errorName)
+	}
+	slot := e.writeStackValue(resultName+".message", message)
+	boxName := resultName + ".box"
+	fmt.Fprintf(&e.out, "  %s = call ptr @kizu_union_box(i64 %s, ptr %s)\n",
+		boxName, e.elementSizeOperand(message.Type), slot)
+	tagName := resultName + ".tag"
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s poison, i64 %d, 0\n",
+		tagName, e.llvmType(errorName), variant.Index)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, ptr %s, 1\n",
+		resultName, e.llvmType(errorName), tagName, boxName)
+	return nil
+}
+
+// writeErrorFailurePayloadValue builds a failed error union from an error payload.
+func (e *emitter) writeErrorFailurePayloadValue(
+	resultName string,
+	resultType string,
+	payloadName string,
+	payloadType string,
+) {
+	unionType := e.llvmType(resultType)
+	baseName := resultName + ".base"
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 0, 0\n",
+		baseName, unionType)
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, %d\n",
+		resultName, unionType, baseName, payloadType, payloadName, errorUnionFailureIndex(resultType))
 }
 
 // writeErrorTry unwraps success or returns failure from the current function.
@@ -709,11 +1288,18 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	sourceValue := e.value(source)
 	sourceType := e.llvmType(source.Type)
 	okValue := localName(instr.Result.Name) + ".ok"
+	okBool := okValue + ".bool"
 	okLabel := e.nextSyntheticLabel("try.ok")
 	errLabel := e.nextSyntheticLabel("try.err")
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okValue, sourceType, sourceValue.operand)
-	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okValue, okLabel, errLabel)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBool, okValue)
+	fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n", okBool, okLabel, errLabel)
 	fmt.Fprintf(&e.out, "%s:\n", errLabel)
+	for _, cleanup := range instr.Cleanups {
+		if err := e.writeCleanup(cleanup); err != nil {
+			return err
+		}
+	}
 	if err := e.writeErrorFailureReturn(source); err != nil {
 		return err
 	}
@@ -725,6 +1311,16 @@ func (e *emitter) writeErrorTry(instr *ir.Instr) error {
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", resultName, sourceType, sourceValue.operand)
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: resultName}
 	return nil
+}
+
+// writeCleanup emits one deferred void cleanup inside an already-open block.
+func (e *emitter) writeCleanup(cleanup ir.Cleanup) error {
+	instr := &ir.Instr{
+		Result: ir.Value{Name: "%" + e.nextSyntheticValue("cleanup"), Type: "void"},
+		Op:     cleanup.Op,
+		Args:   cleanup.Args,
+	}
+	return e.writeInstr(instr)
 }
 
 // writePrint writes calls to the Kizu runtime print ABI.
@@ -744,13 +1340,29 @@ func (e *emitter) writePrint(args []ir.Value) error {
 		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %s)\n",
 			ptrName, lenName)
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
-		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", value.operand)
+		operand := e.printIntegerOperand(args[0].Type, value.operand)
+		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", operand)
 	case "bool":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_bool(i1 %s)\n", value.operand)
 	default:
 		fmt.Fprintf(&e.out, "  ; unsupported print type %s\n", args[0].Type)
 	}
 	return nil
+}
+
+// printIntegerOperand widens narrow integer values to the runtime print ABI.
+func (e *emitter) printIntegerOperand(typ string, operand string) string {
+	sourceType := e.llvmType(typ)
+	if sourceType == "i64" {
+		return operand
+	}
+	name := "%" + e.nextSyntheticValue("print.int")
+	op := "sext"
+	if strings.HasPrefix(typ, "u") {
+		op = "zext"
+	}
+	fmt.Fprintf(&e.out, "  %s = %s %s %s to i64\n", name, op, sourceType, operand)
+	return name
 }
 
 // writePhi writes an LLVM phi instruction.
@@ -765,11 +1377,6 @@ func (e *emitter) writePhi(instr *ir.Instr) error {
 		name, e.llvmType(instr.Result.Type), strings.Join(parts, ", "))
 	e.values[instr.Result.Name] = valueInfo{typ: instr.Result.Type, operand: name}
 	return nil
-}
-
-// unsupported rejects checked IR that has no concrete LLVM representation yet.
-func (e *emitter) unsupported(instr *ir.Instr) error {
-	return fmt.Errorf("llvm error: `%s` is not supported by the LLVM backend yet", instr.Op)
 }
 
 // writeTerminator writes one LLVM terminator.
@@ -795,6 +1402,8 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 		cond := e.value(term.Cond)
 		fmt.Fprintf(&e.out, "  br i1 %s, label %%%s, label %%%s\n",
 			cond.operand, term.Target, term.Else)
+	case "unreachable":
+		e.out.WriteString("  unreachable\n")
 	default:
 		return fmt.Errorf("llvm error: unsupported terminator `%s`", term.Op)
 	}
@@ -803,6 +1412,7 @@ func (e *emitter) writeTerminator(term ir.Terminator) error {
 
 // writeErrorUnionReturn emits a return from a function declared as !T.
 func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
+	errorName, _, _ := errorUnionParts(e.currentReturn)
 	if e.mainReturnsInt {
 		if value.Type == e.currentReturn {
 			return e.writeMainErrorUnionReturn(value)
@@ -822,6 +1432,13 @@ func (e *emitter) writeErrorUnionReturn(value ir.Value, success string) error {
 		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(value.Type), valueInfo.operand)
 		return nil
 	}
+	if errorName != "" && value.Type == errorName {
+		valueInfo := e.value(value)
+		name := "%" + e.nextSyntheticValue("return.err")
+		e.writeErrorFailurePayloadValue(name, e.currentReturn, valueInfo.operand, e.llvmType(value.Type))
+		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), name)
+		return nil
+	}
 	if value.Type == success || value.Type == "void" && success == "void" {
 		return e.writeImplicitErrorOKReturn(value)
 	}
@@ -833,14 +1450,14 @@ func (e *emitter) writeImplicitErrorOKReturn(value ir.Value) error {
 	name := "%" + e.nextSyntheticValue("return.ok")
 	unionType := e.llvmType(e.currentReturn)
 	if value.Type == "void" {
-		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i1 true, 0\n",
+		fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
 			name, unionType)
 		fmt.Fprintf(&e.out, "  ret %s %s\n", unionType, name)
 		return nil
 	}
 	okName := "%" + e.nextSyntheticValue("return.ok.flag")
 	valueInfo := e.value(value)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i1 true, 0\n",
+	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i8 1, 0\n",
 		okName, unionType)
 	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %s %s, 1\n",
 		name, unionType, okName, e.llvmType(value.Type), valueInfo.operand)
@@ -853,9 +1470,22 @@ func (e *emitter) writeMainErrorUnionReturn(value ir.Value) error {
 	valueInfo := e.value(value)
 	unionType := e.llvmType(value.Type)
 	okName := "%" + e.nextSyntheticValue("main.ok")
+	okBoolName := okName + ".bool"
 	codeName := "%" + e.nextSyntheticValue("main.code")
+	errorName, success, _ := errorUnionParts(value.Type)
 	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 0\n", okName, unionType, valueInfo.operand)
-	fmt.Fprintf(&e.out, "  %s = select i1 %s, i32 0, i32 1\n", codeName, okName)
+	fmt.Fprintf(&e.out, "  %s = icmp ne i8 %s, 0\n", okBoolName, okName)
+	if errorName == "" && success == "i64" {
+		successName := "%" + e.nextSyntheticValue("main.success")
+		code64Name := "%" + e.nextSyntheticValue("main.code64")
+		fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, 1\n", successName, unionType, valueInfo.operand)
+		fmt.Fprintf(&e.out, "  %s = select i1 %s, i64 %s, i64 1\n",
+			code64Name, okBoolName, successName)
+		fmt.Fprintf(&e.out, "  %s = trunc i64 %s to i32\n", codeName, code64Name)
+		fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
+		return nil
+	}
+	fmt.Fprintf(&e.out, "  %s = select i1 %s, i32 0, i32 1\n", codeName, okBoolName)
 	fmt.Fprintf(&e.out, "  ret i32 %s\n", codeName)
 	return nil
 }
@@ -871,21 +1501,22 @@ func (e *emitter) writeErrorFailureReturn(source ir.Value) error {
 		fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(source.Type), sourceInfo.operand)
 		return nil
 	}
-	messageName := "%" + e.nextSyntheticValue("try.err.message")
-	fmt.Fprintf(&e.out, "  %s = extractvalue %s %s, %d\n",
-		messageName,
+	sourceError, _, _ := errorUnionParts(source.Type)
+	targetError, _, _ := errorUnionParts(e.currentReturn)
+	name := "%" + e.nextSyntheticValue("try.err")
+	payloadName, payloadType, err := e.convertFailurePayload(
+		name+".payload",
+		source.Type,
 		e.llvmType(source.Type),
 		sourceInfo.operand,
-		errorUnionMessageIndex(source.Type),
+		sourceError,
+		targetError,
 	)
-	name := "%" + e.nextSyntheticValue("try.err")
-	unionType := e.llvmType(e.currentReturn)
-	baseName := name + ".base"
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s zeroinitializer, i1 false, 0\n",
-		baseName, unionType)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %s %s, %%kizu.slice.u8 %s, %d\n",
-		name, unionType, baseName, messageName, errorUnionMessageIndex(e.currentReturn))
-	fmt.Fprintf(&e.out, "  ret %s %s\n", unionType, name)
+	if err != nil {
+		return err
+	}
+	e.writeErrorFailurePayloadValue(name, e.currentReturn, payloadName, payloadType)
+	fmt.Fprintf(&e.out, "  ret %s %s\n", e.llvmType(e.currentReturn), name)
 	return nil
 }
 
@@ -908,13 +1539,22 @@ func structFieldIndex(st ir.Struct, name string) (int, bool) {
 	return 0, false
 }
 
-// errorUnionMessageIndex returns the field index of the failure message.
-func errorUnionMessageIndex(typ string) int {
+// errorUnionFailureIndex returns the field index of the failure payload.
+func errorUnionFailureIndex(typ string) int {
 	success, ok := errorUnionSuccessType(typ)
 	if ok && success == "void" {
 		return 1
 	}
 	return 2
+}
+
+// errorUnionFailureLLVMType returns the LLVM type carried on failure.
+func (e *emitter) errorUnionFailureLLVMType(typ string) string {
+	errorName, _, ok := errorUnionParts(typ)
+	if ok && errorName != "" {
+		return e.llvmType(errorName)
+	}
+	return "%kizu.slice.u8"
 }
 
 // nextSyntheticLabel returns a unique helper label inside the current function.

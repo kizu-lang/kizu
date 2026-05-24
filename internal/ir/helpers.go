@@ -69,6 +69,106 @@ func (l *lowerer) fieldType(structName string, fieldName string) string {
 	return "unknown"
 }
 
+// arrayElementType returns T for std::array::Array<T>.
+func arrayElementType(name string) (string, bool) {
+	const prefix = "std::array::Array<"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(name, prefix), ">"), true
+}
+
+// mapValueType returns V for the supported std::map::Map<[]u8, V> shape.
+func mapValueType(name string) (string, bool) {
+	const prefix = "std::map::Map<"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ">") {
+		return "", false
+	}
+	args := splitTopLevelTypeArgs(strings.TrimSuffix(strings.TrimPrefix(name, prefix), ">"))
+	if len(args) != 2 || args[0] != "[]u8" {
+		return "", false
+	}
+	return args[1], true
+}
+
+// splitTopLevelTypeArgs splits comma-separated type arguments without recursing into generics.
+func splitTopLevelTypeArgs(args string) []string {
+	out := []string{}
+	depth := 0
+	start := 0
+	for index, ch := range args {
+		switch ch {
+		case '<':
+			depth++
+		case '>':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				out = append(out, strings.TrimSpace(args[start:index]))
+				start = index + 1
+			}
+		}
+	}
+	out = append(out, strings.TrimSpace(args[start:]))
+	return out
+}
+
+// mapTypeName returns std::map::Map<[]u8, V>.
+func mapTypeName(typeArg string) (string, string, bool) {
+	args := splitTopLevelTypeArgs(typeArg)
+	if len(args) != 2 || args[0] != "[]u8" {
+		return "", "", false
+	}
+	valueType := args[1]
+	return "std::map::Map<[]u8, " + valueType + ">", valueType, true
+}
+
+// isReferenceType reports whether a type is a local borrow.
+func isReferenceType(name string) bool {
+	return strings.HasPrefix(name, "&") || strings.HasPrefix(name, "&var ")
+}
+
+// derefType returns T for &T and &var T.
+func derefType(name string) string {
+	if strings.HasPrefix(name, "&var ") {
+		return strings.TrimPrefix(name, "&var ")
+	}
+	if strings.HasPrefix(name, "&") {
+		return strings.TrimPrefix(name, "&")
+	}
+	return name
+}
+
+// implMethodName returns the symbol used for a concrete impl method.
+func implMethodName(typeName string, method string) string {
+	return typeName + "." + method
+}
+
+// runtimeBuiltinReturnType records checked host-runtime builtin result types.
+func runtimeBuiltinReturnType(name string) (string, bool) {
+	switch name {
+	case "std.builtin.io_blocking", "std.builtin.io_threaded", "std.builtin.io_failing":
+		return "Io", true
+	case "std.builtin.fs_read_file":
+		return "![]u8", true
+	case "std.builtin.fs_write_file",
+		"std.builtin.fs_create_dir",
+		"std.builtin.fs_remove_dir",
+		"std.builtin.fs_remove_file":
+		return "!void", true
+	case "std.builtin.fs_exists":
+		return "!bool", true
+	case "std.builtin.fs_metadata":
+		return "!std::fs::Metadata", true
+	case "std.builtin.fs_read_dir":
+		return "!std::array::Array<std::fs::DirEntry>", true
+	default:
+		return "", false
+	}
+}
+
 // handleType returns std::arena::Handle<T> for std::arena::Arena<T>.
 func handleType(arena string) string {
 	elem := arenaElementType(arena)
@@ -98,12 +198,18 @@ func errorUnionElementType(result string) string {
 
 // errorUnionSuccessType returns T for !T or Error!T.
 func errorUnionSuccessType(result string) (string, bool) {
+	_, success, ok := errorUnionParts(result)
+	return success, ok
+}
+
+// errorUnionParts returns Error and T for Error!T, or empty Error and T for !T.
+func errorUnionParts(result string) (string, string, bool) {
 	if strings.HasPrefix(result, "!") && len(result) > 1 {
-		return strings.TrimPrefix(result, "!"), true
+		return "", strings.TrimPrefix(result, "!"), true
 	}
 	idx := strings.Index(result, "!")
 	if idx <= 0 || idx == len(result)-1 {
-		return "", false
+		return "", "", false
 	}
-	return result[idx+1:], true
+	return result[:idx], result[idx+1:], true
 }

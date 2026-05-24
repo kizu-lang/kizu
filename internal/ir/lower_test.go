@@ -2,8 +2,10 @@ package ir
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
@@ -66,6 +68,99 @@ entry:
 }`
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestLowerNamespaceQualifiedFunctionCall keeps std-style namespace calls from
+// being lowered as field or method access on a local `std` value.
+func TestLowerNamespaceQualifiedFunctionCall(t *testing.T) {
+	program := &ast.Program{Decls: []ast.Decl{
+		&ast.FunctionDecl{
+			Name:       "std.mem.len",
+			Params:     []ast.Param{{Name: "bytes", TypeName: "[]u8"}},
+			ReturnType: "i64",
+			Body: &ast.BlockStmt{Statements: []ast.Statement{
+				&ast.ReturnStmt{Value: &ast.IntExpr{Value: "1"}},
+			}},
+		},
+		&ast.FunctionDecl{
+			Name:       "main",
+			ReturnType: "i64",
+			Body: &ast.BlockStmt{Statements: []ast.Statement{
+				&ast.ReturnStmt{Value: &ast.CallExpr{
+					Callee: &ast.FieldExpr{
+						Receiver: &ast.FieldExpr{
+							Receiver:  &ast.IdentExpr{Name: "std"},
+							Name:      "mem",
+							Namespace: true,
+						},
+						Name:      "len",
+						Namespace: true,
+					},
+					Args: []ast.Expression{&ast.StringExpr{Value: "abc"}},
+				}},
+			}},
+		},
+	}}
+	module, err := Lower(program)
+	if err != nil {
+		t.Fatalf("lower failed: %v", err)
+	}
+	got := Dump(module)
+	want := "  %2: i64 = call.std.mem.len %1: []u8\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+	}
+}
+
+// TestLowerByteSliceAccess emits explicit checked slice operations.
+func TestLowerByteSliceAccess(t *testing.T) {
+	module := lowerSource(t, `fn main() {
+    let bytes = "hello";
+    let byte = bytes[1];
+    let part = bytes[1..4];
+    print(byte);
+    print(part);
+}`)
+	got := Dump(module)
+	for _, want := range []string{
+		"  %3: u8 = slice.index %1: []u8, %2: i64\n",
+		"  %6: []u8 = slice.slice %1: []u8, %4: i64, %5: i64\n",
+		"  call.print %3: u8\n",
+		"  call.print %6: []u8\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("got:\n%s\nwant substring:\n%s", got, want)
+		}
+	}
+}
+
+// TestLowerSkipsGenericDeclarations keeps the non-monomorphized backend from
+// lowering unused generic wrapper bodies.
+func TestLowerSkipsGenericDeclarations(t *testing.T) {
+	program := &ast.Program{Decls: []ast.Decl{
+		&ast.FunctionDecl{
+			Name:       "unused",
+			TypeParams: []string{"T"},
+			Params:     []ast.Param{{Name: "value", TypeName: "T"}},
+			ReturnType: "T",
+			Body: &ast.BlockStmt{Statements: []ast.Statement{
+				&ast.ReturnStmt{Value: &ast.IdentExpr{Name: "value"}},
+			}},
+		},
+		&ast.FunctionDecl{
+			Name: "main",
+			Body: &ast.BlockStmt{Statements: []ast.Statement{
+				&ast.ReturnStmt{},
+			}},
+		},
+	}}
+	module, err := Lower(program)
+	if err != nil {
+		t.Fatalf("lower failed: %v", err)
+	}
+	if len(module.Functions) != 1 || module.Functions[0].Name != "main" {
+		t.Fatalf("got functions %#v, want only main", module.Functions)
 	}
 }
 
