@@ -415,7 +415,7 @@ func runParityGuardCases() []runParityGuardCase {
 		},
 		{
 			name:     "unsupported_target",
-			args:     []string{"run", "selfhost/tests/cli/parse_ok_minimal.kizu"},
+			args:     []string{"run", "selfhost/tests/cli/test_expect_ok.kizu"},
 			exitCode: 64,
 			stderr:   selfhostUsageStderr(),
 		},

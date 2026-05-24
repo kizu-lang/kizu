@@ -28,6 +28,12 @@ pub fn append_globals(out: &var std::string::String) -> !void {
     );
     try append_llvm_constant(
         out,
+        "run_return_ll_suffix",
+        "156",
+        "\22\0A\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_run_main() {\0Aentry:\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A"
+    );
+    try append_llvm_constant(
+        out,
         "run_meta_prefix",
         "39",
         "kizu-run-artifact-v0\0Aissue #569\0Asource "
@@ -67,8 +73,13 @@ pub fn append_cli_run_blocks(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %run_payload = call %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload(%kizu.slice.u8 %run_bytes)");
     try append_line(out, "  %run_payload_ok = extractvalue %kizu.error.slice.u8 %run_payload, 0");
-    try append_line(out, "  br i1 %run_payload_ok, label %run_print_emit, label %usage");
+    try append_line(out, "  br i1 %run_payload_ok, label %run_print_emit, label %run_match_return");
+    try append_line(out, "run_match_return:");
+    try append_line(out,
+        "  %run_return_ok = call i1 @kizu_selfhost__cli_run_return_ok(%kizu.slice.u8 %run_bytes)");
+    try append_line(out, "  br i1 %run_return_ok, label %run_return_emit, label %usage");
     try append_run_print_emit_block(out);
+    try append_run_return_emit_block(out);
     return;
 }
 
@@ -138,6 +149,55 @@ fn append_run_print_emit_block(out: &var std::string::String) -> !void {
     try append_line(out,
         "  %run_print_meta_ok = extractvalue %kizu.error.void %run_print_meta_write, 0");
     try append_line(out, "  br i1 %run_print_meta_ok, label %exit_zero, label %check_failed");
+    return;
+}
+
+fn append_run_return_emit_block(out: &var std::string::String) -> !void {
+    try append_line(out, "run_return_emit:");
+    try append_global_slice(out, "run_return", "dir", "run_dir", "19");
+    try append_line(out,
+        "  %run_return_mkdir = call %kizu.error.void @kizu_rt_fs_create_dir(%kizu.owned %run_io, %kizu.slice.u8 %run_return_dir_slice)");
+    try append_line(out, "  %run_return_mkdir_ok = extractvalue %kizu.error.void %run_return_mkdir, 0");
+    try append_line(out,
+        "  br i1 %run_return_mkdir_ok, label %run_return_write_ll, label %check_failed");
+    try append_line(out, "run_return_write_ll:");
+    try append_global_slice(out, "run_return", "path_prefix", "run_path_prefix", "20");
+    try append_global_slice(out, "run_return", "ll_ext", "ll_suffix", "3");
+    try append_line(out,
+        "  %run_return_ll_path_result = call %kizu.error.slice.u8 @kizu_selfhost__artifact_path(%kizu.slice.u8 %target, %kizu.slice.u8 %run_return_path_prefix_slice, %kizu.slice.u8 %run_return_ll_ext_slice)");
+    try append_line(out,
+        "  %run_return_ll_path_ok = extractvalue %kizu.error.slice.u8 %run_return_ll_path_result, 0");
+    try append_line(out,
+        "  br i1 %run_return_ll_path_ok, label %run_return_write_ll_body, label %check_failed");
+    try append_line(out, "run_return_write_ll_body:");
+    try append_line(out,
+        "  %run_return_ll_path_slice = extractvalue %kizu.error.slice.u8 %run_return_ll_path_result, 1");
+    try append_global_slice(out, "run_return", "ll_prefix_source", "run_print_ll_prefix_source", "45");
+    try append_global_slice(out, "run_return", "ll_suffix", "run_return_ll_suffix", "156");
+    try append_line(out,
+        "  %run_return_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3(%kizu.owned %run_io, %kizu.slice.u8 %run_return_ll_path_slice, %kizu.slice.u8 %run_return_ll_prefix_source_slice, %kizu.slice.u8 %target, %kizu.slice.u8 %run_return_ll_suffix_slice)");
+    try append_line(out, "  %run_return_ll_ok = extractvalue %kizu.error.void %run_return_ll_write, 0");
+    try append_line(out,
+        "  br i1 %run_return_ll_ok, label %run_return_write_meta, label %check_failed");
+    try append_line(out, "run_return_write_meta:");
+    try append_global_slice(out, "run_return", "meta_ext", "meta_suffix", "8");
+    try append_line(out,
+        "  %run_return_meta_path_result = call %kizu.error.slice.u8 @kizu_selfhost__artifact_path(%kizu.slice.u8 %target, %kizu.slice.u8 %run_return_path_prefix_slice, %kizu.slice.u8 %run_return_meta_ext_slice)");
+    try append_line(out,
+        "  %run_return_meta_path_ok = extractvalue %kizu.error.slice.u8 %run_return_meta_path_result, 0");
+    try append_line(out,
+        "  br i1 %run_return_meta_path_ok, label %run_return_write_meta_body, label %check_failed");
+    try append_line(out, "run_return_write_meta_body:");
+    try append_line(out,
+        "  %run_return_meta_path_slice = extractvalue %kizu.error.slice.u8 %run_return_meta_path_result, 1");
+    try append_global_slice(out, "run_return", "meta_prefix", "run_meta_prefix", "39");
+    try append_global_slice(out, "run_return", "meta_output_prefix", "artifact_output_prefix", "8");
+    try append_global_slice(out, "run_return", "meta_body_suffix", "run_meta_suffix", "146");
+    try append_line(out,
+        "  %run_return_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5(%kizu.owned %run_io, %kizu.slice.u8 %run_return_meta_path_slice, %kizu.slice.u8 %run_return_meta_prefix_slice, %kizu.slice.u8 %target, %kizu.slice.u8 %run_return_meta_output_prefix_slice, %kizu.slice.u8 %run_return_ll_path_slice, %kizu.slice.u8 %run_return_meta_body_suffix_slice)");
+    try append_line(out,
+        "  %run_return_meta_ok = extractvalue %kizu.error.void %run_return_meta_write, 0");
+    try append_line(out, "  br i1 %run_return_meta_ok, label %exit_zero, label %check_failed");
     return;
 }
 

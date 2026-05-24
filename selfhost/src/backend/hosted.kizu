@@ -20,13 +20,13 @@ pub fn emit_run_executable_artifact(
         source_path,
         ".ll.meta"
     );
-    let artifact = try write_run_print_artifact(
+    let artifact = try write_run_artifact(
         allocator,
         io,
         source_path,
-        executable.stdout_payload,
         ll_path,
-        metadata_path
+        metadata_path,
+        executable
     );
     ll_path.deinit();
     metadata_path.deinit();
@@ -66,17 +66,22 @@ pub fn emit_test_executable_artifact(
     return artifact;
 }
 
-fn write_run_print_artifact(
+fn write_run_artifact(
     allocator: Allocator,
     io: Io,
     source_path: []u8,
-    stdout_payload: []u8,
     ll_path: &std::string::String,
-    metadata_path: &std::string::String
+    metadata_path: &std::string::String,
+    executable: data::RunExecutable
 ) -> !data::RunArtifact {
     let ll_path_view = ll_path.as_bytes();
     let metadata_path_view = metadata_path.as_bytes();
-    var module = try render_run_print_llvm(allocator, source_path, stdout_payload);
+    var module = std::string::String(allocator);
+    if executable.writes_stdout {
+        module = try render_run_print_llvm(allocator, source_path, executable.stdout_payload);
+    } else {
+        module = try render_run_return_llvm(allocator, source_path);
+    }
     let module_view = module.as_bytes();
     let module_len = try write_backend_bytes(
         io,
@@ -239,6 +244,28 @@ fn render_run_print_llvm(
     try out.append_byte(cast<u8>(10));
     try append_line(out,
         "  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)");
+    try append_line(out, "  %code = call i64 @kizu_rt_process_exit_code(i64 0)");
+    try append_line(out, "  ret i64 %code");
+    try append_line(out, "}");
+    return out;
+}
+
+fn render_run_return_llvm(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    var out = std::string::String(allocator);
+    try append_line(out, "; kizu run artifact ll v0");
+    try out.append_bytes("source_filename = ");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes(source_path);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "");
+    try append_line(out, "declare i64 @kizu_rt_process_exit_code(i64)");
+    try append_line(out, "");
+    try append_line(out, "define i64 @kizu_run_main() {");
+    try append_line(out, "entry:");
     try append_line(out, "  %code = call i64 @kizu_rt_process_exit_code(i64 0)");
     try append_line(out, "  ret i64 %code");
     try append_line(out, "}");

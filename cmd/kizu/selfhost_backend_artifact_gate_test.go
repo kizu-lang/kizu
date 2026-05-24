@@ -283,6 +283,7 @@ func requiredLLVMCLIFragments() []string {
 		"dispatch_fmt_write:",
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
+		"define i1 @kizu_selfhost__cli_run_return_ok",
 		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_print_payload_llvm_result = call %kizu.error.slice.u8 " +
@@ -290,6 +291,8 @@ func requiredLLVMCLIFragments() []string {
 		"define i64 @kizu_selfhost__cli_test_expect_value",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
+		"%run_return_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
+		"%run_return_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
 		"%test_ok_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
 		"%test_failure_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
@@ -365,7 +368,7 @@ func countLLVMMetadataValidationFailures(t *testing.T, metaContent string) int {
 		"cli-command check file source\n",
 		"cli-command parse file source\n",
 		"cli-command fmt file source\n",
-		"cli-command run file executable top-level-print\n",
+		"cli-command run file executable top-level-print-or-return\n",
 		"cli-command test file executable top-level-expect\n",
 		"cli-parity-manifest selfhost/tests/cli/parse-parity.tsv\n",
 		"cli-parity-manifest selfhost/tests/cli/check-parity.tsv\n",
@@ -1312,6 +1315,15 @@ func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 		"fn main(){print(\"path\\value\");}\n",
 		`c"path\5Cvalue\0A"`,
 	)
+	failures += countHostedCompilerCLIRunSourceFailures(
+		t,
+		exePath,
+		"hosted_run_return.kizu",
+		"hosted_run_return",
+		"fn main(){return;}\n",
+		"define i64 @kizu_run_main()",
+		"@.kizu.run.stdout",
+	)
 	return failures
 }
 
@@ -1323,6 +1335,7 @@ func countHostedCompilerCLIRunSourceFailures(
 	stem string,
 	source string,
 	expectedLLFragment string,
+	rejectedLLFragments ...string,
 ) int {
 	t.Helper()
 	sourcePath := filepath.Join(t.TempDir(), name)
@@ -1362,6 +1375,19 @@ func countHostedCompilerCLIRunSourceFailures(
 			llContent,
 		)
 		failures++
+	}
+	if readFailures == 0 {
+		for _, rejected := range rejectedLLFragments {
+			if strings.Contains(llContent, rejected) {
+				t.Errorf(
+					"hosted compiler run artifact %s kept rejected %q:\n%s",
+					llPath,
+					rejected,
+					llContent,
+				)
+				failures++
+			}
+		}
 	}
 	return failures
 }
