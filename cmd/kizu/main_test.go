@@ -712,6 +712,32 @@ func TestFmtCommandSelfhostSourceParses(t *testing.T) {
 	}
 }
 
+// TestFmtCommandSortsLeadingImports keeps the public formatter import block canonical.
+func TestFmtCommandSortsLeadingImports(t *testing.T) {
+	path := writeTempKizuSource(t, "imports.kizu", `import selfhost::parser;
+import selfhost;
+import selfhost::lexer;
+fn main(){return;}
+`)
+	got, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{path})
+	if runErr != nil {
+		t.Fatalf("fmt failed: %v\n%s", runErr, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+	want := "import selfhost;\n" +
+		"import selfhost::lexer;\n" +
+		"import selfhost::parser;\n" +
+		"\n" +
+		"fn main() {\n" +
+		"    return;\n" +
+		"}\n"
+	if got != want {
+		t.Fatalf("fmt imports:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // fmtRepresentativeFixtures returns sources that exercise stable formatter shapes.
 func fmtRepresentativeFixtures() []struct {
 	name   string

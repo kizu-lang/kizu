@@ -2002,9 +2002,10 @@ kizu test
 
 `kizu fmt` は現時点では token-based canonical formatter output です。
 `--write` / `-w` は file を in-place rewrite します。
-完全な source-preserving formatter ではなく、comment trivia preservation と
-import order normalization は後続で扱います。
-comment trivia preservation までは、`--write` は line comment を含む file を拒否します。
+完全な source-preserving formatter ではありません。
+先頭の連続 `import` block は comment を含まない場合に辞書順へ正規化します。
+comment trivia preservation の残りは後続で扱います。
+comment trivia preservation までは、`--write` は full-line ではない line comment を含む file を拒否します。
 `kizu test` は v0.2 では discovery なしの single-file runner です。
 
 experimental tooling:

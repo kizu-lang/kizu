@@ -15,8 +15,28 @@ pub fn format_source(
     var cursor = 0;
     var depth = 0;
     var previous = "";
+    var last_top_level_decl = "";
     var last = cast<u8>(0);
     var at_line_start = true;
+    let leading_imports = try leading_import_indices(
+        allocator,
+        source,
+        &format_tokens
+    );
+    if leading_imports.len() > 1 {
+        let next_index = try index_after_leading_imports(&format_tokens);
+        let last_import = try format_tokens.get(next_index - 1);
+        if !has_line_comment_between(source, 0, last_import.end) {
+            try append_sorted_imports(out, source, &format_tokens, &leading_imports);
+            index = next_index;
+            cursor = last_import.end;
+            previous = ";";
+            last_top_level_decl = "import";
+            last = cast<u8>(10);
+            at_line_start = true;
+        }
+    }
+    leading_imports.deinit();
     while index < format_tokens.len() {
         let token = try format_tokens.get(index);
         let state = try append_preserved_line_comments(
@@ -59,8 +79,10 @@ pub fn format_source(
                         at_line_start = true;
                     }
                 } else {
+                    let consecutive_import = std::mem::equal_bytes(text, "import") and
+                        std::mem::equal_bytes(last_top_level_decl, "import");
                     if depth == 0 and out.len() > 0 and std::mem::len(previous) > 0 and
-                        starts_new_top_level_decl(previous, text) {
+                        starts_new_top_level_decl(previous, text) and !consecutive_import {
                         if !at_line_start {
                             try out.append_byte(cast<u8>(10));
                             last = cast<u8>(10);
@@ -71,6 +93,9 @@ pub fn format_source(
                                 last = cast<u8>(10);
                             }
                         }
+                    }
+                    if depth == 0 and at_line_start and is_top_level_decl_start(text) {
+                        last_top_level_decl = text;
                     }
                     if at_line_start {
                         try append_indent(out, depth);
@@ -104,6 +129,152 @@ pub fn format_source(
     }
     format_tokens.deinit();
     return out;
+}
+
+fn leading_import_indices(
+    allocator: Allocator,
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !std::array::Array<i64> {
+    var indices = std::array::Array<i64>(allocator);
+    var index = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        if !is_import_token(token) {
+            index = tokens.len();
+        } else {
+            try indices.append(index);
+            index = try index_after_import(tokens, index);
+        }
+    }
+    try sort_import_indices(source, tokens, &var indices);
+    return indices;
+}
+
+fn sort_import_indices(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    indices: &var std::array::Array<i64>
+) -> !void {
+    var index = 1;
+    while index < indices.len() {
+        var cursor = index;
+        var scanning = true;
+        while scanning and cursor > 0 {
+            let left = try indices.get(cursor - 1);
+            let right = try indices.get(cursor);
+            if try import_path_less(source, tokens, right, left) {
+                try indices.set(cursor - 1, right);
+                try indices.set(cursor, left);
+                cursor = cursor - 1;
+            } else {
+                scanning = false;
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_sorted_imports(
+    out: &var std::string::String,
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    indices: &std::array::Array<i64>
+) -> !void {
+    var index = 0;
+    while index < indices.len() {
+        let import_index = try indices.get(index);
+        try append_import_decl(out, source, tokens, import_index);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_import_decl(
+    out: &var std::string::String,
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    import_index: i64
+) -> !void {
+    try out.append_bytes("import ");
+    var index = import_index + 1;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        let text = token_text(source, token);
+        if is_semicolon_token(token) {
+            try out.append_bytes(";");
+            return;
+        }
+        if is_ident_token(token) or is_double_colon_token(token) {
+            try out.append_bytes(text);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn index_after_leading_imports(
+    tokens: &std::array::Array<std::kizu::lexer::Token>
+) -> !i64 {
+    var index = 0;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        if !is_import_token(token) {
+            return index;
+        }
+        index = try index_after_import(tokens, index);
+    }
+    return index;
+}
+
+fn index_after_import(
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    import_index: i64
+) -> !i64 {
+    var index = import_index;
+    while index < tokens.len() {
+        let token = try tokens.get(index);
+        if is_semicolon_token(token) {
+            return index + 1;
+        }
+        if lexer::is_eof(token) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return index;
+}
+
+fn import_path_less(
+    source: []u8,
+    tokens: &std::array::Array<std::kizu::lexer::Token>,
+    left: i64,
+    right: i64
+) -> !bool {
+    var left_index = left + 1;
+    var right_index = right + 1;
+    while left_index < tokens.len() and right_index < tokens.len() {
+        let left_token = try tokens.get(left_index);
+        let right_token = try tokens.get(right_index);
+        if is_semicolon_token(left_token) {
+            return !is_semicolon_token(right_token);
+        }
+        if is_semicolon_token(right_token) {
+            return false;
+        }
+        let comparison = compare_bytes(token_text(source, left_token), token_text(source, right_token));
+        if comparison < 0 {
+            return true;
+        }
+        if comparison > 0 {
+            return false;
+        }
+        left_index = left_index + 1;
+        right_index = right_index + 1;
+    }
+    return false;
 }
 
 pub fn has_unsupported_line_comment(source: []u8) -> bool {
@@ -188,6 +359,17 @@ fn has_unsupported_line_comment_after(source: []u8, start: i64) -> bool {
     return false;
 }
 
+fn has_line_comment_between(source: []u8, start: i64, end: i64) -> bool {
+    var index = start;
+    while index + 1 < end {
+        if source[index] == cast<u8>(47) and source[index + 1] == cast<u8>(47) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
 fn line_comment_is_full_line(source: []u8, comment_start: i64) -> bool {
     var index = comment_start;
     while index > 0 {
@@ -239,6 +421,56 @@ fn is_horizontal_space(byte: u8) -> bool {
 
 fn is_line_break(byte: u8) -> bool {
     return byte == cast<u8>(10) or byte == cast<u8>(13);
+}
+
+fn is_import_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Import => true,
+        _ => false,
+    };
+}
+
+fn is_ident_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Ident => true,
+        _ => false,
+    };
+}
+
+fn is_double_colon_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        DoubleColon => true,
+        _ => false,
+    };
+}
+
+fn is_semicolon_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        Semicolon => true,
+        _ => false,
+    };
+}
+
+fn compare_bytes(left: []u8, right: []u8) -> i64 {
+    var index = 0;
+    let left_len = std::mem::len(left);
+    let right_len = std::mem::len(right);
+    while index < left_len and index < right_len {
+        if left[index] < right[index] {
+            return 0 - 1;
+        }
+        if left[index] > right[index] {
+            return 1;
+        }
+        index = index + 1;
+    }
+    if left_len < right_len {
+        return 0 - 1;
+    }
+    if left_len > right_len {
+        return 1;
+    }
+    return 0;
 }
 
 fn next_token_text_equals(
