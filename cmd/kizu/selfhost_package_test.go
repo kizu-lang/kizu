@@ -1139,6 +1139,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
+		"fn require_run_executable_kind_tags(",
 		"fn append_run_print_emit_block(",
 		"fn append_run_return_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
@@ -1146,6 +1147,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_test_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_test_blocks(",
+		"fn require_test_executable_kind_tags(",
 		"fn append_test_ok_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
 	},
@@ -1161,6 +1163,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_ast_llvm.kizu": {
 		"pub fn append_functions(",
+		"fn require_executable_abi(",
 		"fn append_cli_parse_run_executable_ast_function(",
 		"fn append_cli_parse_test_executable_ast_function(",
 		"fn append_cli_lower_executable_ast_functions(",
@@ -1257,6 +1260,8 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	match := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu")
 	ast := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu")
+	run := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
+	test := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu")
 	astRules := []string{
 		"hosted-executable-ast executable-ast-rules-v1",
 		"executable-ast-rule MainScan LeadingFunctions",
@@ -1271,14 +1276,23 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		"executable-lowering-rule TestExpectTrue TestExpectOk",
 		"executable-lowering-rule TestExpectFalse TestExpectFailure",
 	}
-	for _, rule := range append(astRules, loweringRules...) {
-		if !strings.Contains(ir, rule) {
-			t.Fatalf("IR artifact does not publish executable rule %q", rule)
-		}
-		if !strings.Contains(llvm, `ir_contract::require_fact(bytes, "`+rule+`")`) {
-			t.Fatalf("backend IR validation does not require %q", rule)
-		}
-	}
+	abiFacts := hostedExecutableABIFacts()
+	assertExecutableFactsPublishedAndValidated(t, ir, llvm, append(astRules, loweringRules...))
+	assertExecutableFactsPublishedAndValidated(t, ir, llvm, abiFacts)
+	assertExecutableRuleConsumers(t, match, ast, astRules, loweringRules)
+	assertExecutableABIConsumers(t, ast, run, test, abiFacts)
+	assertExecutableIRThreading(t, llvm, cli, match)
+}
+
+// assertExecutableRuleConsumers checks generated matcher/lowerer IR fact use.
+func assertExecutableRuleConsumers(
+	t *testing.T,
+	match string,
+	ast string,
+	astRules []string,
+	loweringRules []string,
+) {
+	t.Helper()
 	for _, rule := range astRules {
 		if !strings.Contains(match, `"`+rule+`"`) {
 			t.Fatalf("hosted executable matcher renderer does not consume %q", rule)
@@ -1289,12 +1303,54 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 			t.Fatalf("hosted executable lowerer renderer does not consume %q", rule)
 		}
 	}
+}
+
+// assertExecutableABIConsumers checks generated executable ABI fact use.
+func assertExecutableABIConsumers(
+	t *testing.T,
+	ast string,
+	run string,
+	test string,
+	abiFacts []string,
+) {
+	t.Helper()
+	for _, fact := range abiFacts {
+		if !strings.Contains(ast, `"`+fact+`"`) {
+			t.Fatalf("hosted executable AST renderer does not consume ABI fact %q", fact)
+		}
+	}
+	for _, fact := range []string{
+		"executable-kind RunPrintString 1",
+		"executable-kind RunReturnVoid 2",
+	} {
+		if !strings.Contains(run, `"`+fact+`"`) {
+			t.Fatalf("hosted run dispatch does not consume executable ABI fact %q", fact)
+		}
+	}
+	for _, fact := range []string{
+		"executable-kind TestExpectOk 3",
+		"executable-kind TestExpectFailure 4",
+	} {
+		if !strings.Contains(test, `"`+fact+`"`) {
+			t.Fatalf("hosted test dispatch does not consume executable ABI fact %q", fact)
+		}
+	}
+}
+
+// assertExecutableIRThreading checks IR bytes reach hosted executable renderers.
+func assertExecutableIRThreading(t *testing.T, llvm string, cli string, match string) {
+	t.Helper()
+	ast := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu")
+	run := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
+	test := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu")
 	for _, file := range []struct {
 		name    string
 		content string
 	}{
 		{name: "matcher", content: match},
 		{name: "lowerer", content: ast},
+		{name: "run", content: run},
+		{name: "test", content: test},
 	} {
 		if !strings.Contains(file.content, `ir_contract::require_fact(`) {
 			t.Fatalf("hosted executable %s renderer does not require IR facts", file.name)
@@ -1304,10 +1360,49 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		"try cli_llvm::append_functions(out, ir_bytes)",
 		"try cli_executable_match_llvm::append_functions(out, ir_bytes)",
 		"try cli_executable_ast_llvm::append_functions(out, ir_bytes)",
+		"try cli_test_llvm::append_cli_test_blocks(out, ir_bytes)",
+		"try cli_run_llvm::append_cli_run_blocks(out, ir_bytes)",
 	} {
 		combined := llvm + cli + match
 		if !strings.Contains(combined, fragment) {
 			t.Fatalf("IR bytes are not threaded to hosted executable lowerer with %q", fragment)
+		}
+	}
+}
+
+// hostedExecutableABIFacts returns the hosted executable layout/tag contract.
+func hostedExecutableABIFacts() []string {
+	return []string{
+		"hosted-executable-abi executable-result-layout-v1",
+		"executable-ast-layout kind:i64 payload:[]u8",
+		"executable-layout kind:i64 stdout_payload:[]u8",
+		"executable-ast-kind Unsupported 0",
+		"executable-ast-kind RunPrintCall 1",
+		"executable-ast-kind RunReturnVoid 2",
+		"executable-ast-kind TestExpectTrue 3",
+		"executable-ast-kind TestExpectFalse 4",
+		"executable-kind Unsupported 0",
+		"executable-kind RunPrintString 1",
+		"executable-kind RunReturnVoid 2",
+		"executable-kind TestExpectOk 3",
+		"executable-kind TestExpectFailure 4",
+	}
+}
+
+// assertExecutableFactsPublishedAndValidated checks IR/backend contract coupling.
+func assertExecutableFactsPublishedAndValidated(
+	t *testing.T,
+	ir string,
+	llvm string,
+	facts []string,
+) {
+	t.Helper()
+	for _, fact := range facts {
+		if !strings.Contains(ir, fact) {
+			t.Fatalf("IR artifact does not publish executable fact %q", fact)
+		}
+		if !strings.Contains(llvm, `ir_contract::require_fact(bytes, "`+fact+`")`) {
+			t.Fatalf("backend IR validation does not require %q", fact)
 		}
 	}
 }
