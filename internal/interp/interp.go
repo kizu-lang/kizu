@@ -252,6 +252,12 @@ func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env)
 	if !param.Borrow {
 		return i.evalExpr(arg, env)
 	}
+	if prefix, ok := arg.(*ast.PrefixExpr); ok {
+		return i.evalBorrowPrefix(prefix, env)
+	}
+	if field, ok := arg.(*ast.FieldExpr); ok && !field.Namespace {
+		return i.evalFieldBorrow(field, param.MutBorrow, env)
+	}
 	ident, ok := arg.(*ast.IdentExpr)
 	if !ok {
 		if param.MutBorrow {
@@ -926,29 +932,42 @@ func (i *Interpreter) evalBorrowPrefix(expr *ast.PrefixExpr, env *Env) (Value, e
 		}
 		return refValue(binding), nil
 	case *ast.FieldExpr:
-		ident, ok := target.Receiver.(*ast.IdentExpr)
-		if !ok {
-			return voidValue(), fmt.Errorf("runtime error: v0.1 field borrow only supports one direct field")
-		}
-		ownerBinding, ok := env.Binding(ident.Name)
-		if !ok {
-			return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", ident.Name)
-		}
-		if ownerBinding.value.kind != kindStruct {
-			return voidValue(), fmt.Errorf("runtime error: field borrow expects struct")
-		}
-		fieldValue, ok := ownerBinding.value.fields[target.Name]
-		if !ok {
-			return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", target.Name)
-		}
-		cell := &binding{
-			value: fieldValue, mutable: expr.Operator == "&var",
-			fieldParent: ownerBinding, fieldName: target.Name,
-		}
-		return refValue(cell), nil
+		return i.evalFieldBorrow(target, expr.Operator == "&var", env)
 	default:
 		return voidValue(), fmt.Errorf("runtime error: borrow target must be local")
 	}
+}
+
+// evalFieldBorrow creates a local borrow for one direct field of a struct owner.
+func (i *Interpreter) evalFieldBorrow(
+	target *ast.FieldExpr,
+	mutable bool,
+	env *Env,
+) (Value, error) {
+	ident, ok := target.Receiver.(*ast.IdentExpr)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: v0.1 field borrow only supports one direct field")
+	}
+	ownerBinding, ok := env.Binding(ident.Name)
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: undefined binding `%s`", ident.Name)
+	}
+	parent := ownerBinding
+	for parent.value.kind == kindRef {
+		parent = parent.value.ref
+	}
+	if parent.value.kind != kindStruct {
+		return voidValue(), fmt.Errorf("runtime error: field borrow expects struct")
+	}
+	fieldValue, ok := parent.value.fields[target.Name]
+	if !ok {
+		return voidValue(), fmt.Errorf("runtime error: unknown field `%s`", target.Name)
+	}
+	cell := &binding{
+		value: fieldValue, mutable: mutable,
+		fieldParent: parent, fieldName: target.Name,
+	}
+	return refValue(cell), nil
 }
 
 // evalBinaryExpr evaluates arithmetic, logical, equality, and comparison operators.

@@ -69,6 +69,30 @@ fn main() -> void {
 	}
 }
 
+// TestRunExplicitFieldBorrowProjection checks call-scoped field borrows at runtime.
+func TestRunExplicitFieldBorrowProjection(t *testing.T) {
+	got := runSource(t, `struct Pair {
+    left: i64,
+    right: i64,
+}
+fn set(value: &var i64) -> void {
+    value.* = 5;
+}
+fn forward(pair: &var Pair) -> void {
+    set(&var pair.left);
+}
+fn main() -> void {
+    var pair = Pair { left: 1, right: 2 };
+    forward(&var pair);
+    print(pair.left);
+    print(pair.right);
+}`)
+	want := "5\n2\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestRunControlFlow checks if/else and while execution.
 func TestRunControlFlow(t *testing.T) {
 	got := runSource(t, `fn main() {
