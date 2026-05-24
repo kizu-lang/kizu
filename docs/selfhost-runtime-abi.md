@@ -578,6 +578,15 @@ the validation command, each unresolved external, and the blocker policy for
 unsupported shapes. This metadata is a stable input for the #459 stage
 comparison.
 
+The backend consumes only IR artifacts that declare the checked selfhost package
+contract. The required facts include the `selfhost-checked-package-v1` contract,
+the hosted CLI and smoke entries, the bounded frontend and hosted executable
+lowering facts, the leading-function hosted main scan fact, and
+`checked-diagnostics 0`.
+This keeps `target/selfhost/selfhost.ll` tied to a successful selfhost frontend
+check instead of accepting any file with a `kizu-ir-v0` header and `package
+selfhost`.
+
 For #456 the Kizu backend performs cheap header validation before copying the
 runtime storage template. The same Go gate checks
 `target/selfhost/selfhost.storage.ll` and `target/selfhost/selfhost.storage.ll.meta`.
