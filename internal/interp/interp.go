@@ -333,7 +333,11 @@ func (i *Interpreter) evalCallArg(param ast.Param, arg ast.Expression, env *Env)
 		return functionNameValue(target.Name), nil
 	}
 	if !param.Borrow {
-		return i.evalExpr(arg, env)
+		value, err := i.evalExpr(arg, env)
+		if err != nil {
+			return voidValue(), err
+		}
+		return unwrapRefValue(value), nil
 	}
 	if prefix, ok := arg.(*ast.PrefixExpr); ok {
 		return i.evalBorrowPrefix(prefix, env)
