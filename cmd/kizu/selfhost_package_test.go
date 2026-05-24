@@ -1189,6 +1189,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_enum_kind_facts(",
 		"fn require_struct_fields(",
 		"fn require_function(",
+		"fn append_executable_lowering_rule_facts(",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1285,9 +1286,10 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	}
 	abiFacts := hostedExecutableABIFacts()
 	irFacts := ir + contract
-	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, append(astRules, loweringRules...))
+	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, astRules)
+	assertExecutableFactsValidated(t, llvm, loweringRules)
 	assertExecutableFactsValidated(t, llvm, abiFacts)
-	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm)
+	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, loweringRules)
 	assertExecutableRuleConsumers(t, match, ast, astRules, loweringRules)
 	assertExecutableABIConsumers(t, ast, run, test, abiFacts)
 	assertExecutableIRThreading(t, llvm, cli, match)
@@ -1300,6 +1302,7 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	ir string,
 	contract string,
 	llvm string,
+	loweringRules []string,
 ) {
 	t.Helper()
 	for _, fragment := range []string{
@@ -1316,6 +1319,9 @@ func assertExecutableContractFactsComeFromCheckedAST(
 		"append_enum_tag_facts(",
 		"require_struct_fields(",
 		"require_function(",
+		"append_executable_lowering_rule_facts(",
+		"append_executable_lowering_rule_fact_from_binary(",
+		"executable_kind_node_from_struct_literal(",
 		"ExecutableAstKind",
 		"ExecutableKind",
 		"executable-contract-source data selfhost::backend::data",
@@ -1331,6 +1337,11 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	} {
 		if !strings.Contains(llvm, fragment) {
 			t.Fatalf("backend validation/metadata does not require source fact %q", fragment)
+		}
+	}
+	for _, fact := range loweringRules {
+		if strings.Contains(contract, `"`+fact+`"`) {
+			t.Fatalf("executable contract still hardcodes lowering rule %q", fact)
 		}
 	}
 }
