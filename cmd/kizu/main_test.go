@@ -585,6 +585,49 @@ func runDispatchCaptureStderr(t *testing.T, command string, args []string) (stri
 	return string(out), runErr
 }
 
+// runDispatchCaptureOutput runs dispatch with process-global stdout/stderr captured.
+func runDispatchCaptureOutput(t *testing.T, command string, args []string) (string, string, error) {
+	t.Helper()
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = stdoutReader.Close()
+		_ = stderrReader.Close()
+	}()
+	runErr := func() error {
+		os.Stdout = stdoutWriter
+		os.Stderr = stderrWriter
+		defer func() {
+			os.Stdout = oldStdout
+			os.Stderr = oldStderr
+		}()
+		return dispatch(command, args)
+	}()
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stderrWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := io.ReadAll(stdoutReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := io.ReadAll(stderrReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(stdout), string(stderr), runErr
+}
+
 // TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
 func TestFmtCommandSmoke(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "fmt", "../../examples/hello.kizu")
@@ -595,6 +638,115 @@ func TestFmtCommandSmoke(t *testing.T) {
 	want := "fn main() {\n    print(\"hello, kizu\");\n}\n"
 	if string(out) != want {
 		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestFmtCommandIsIdempotent keeps token formatting stable on representative sources.
+func TestFmtCommandIsIdempotent(t *testing.T) {
+	for _, tt := range fmtRepresentativeFixtures() {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempKizuSource(t, tt.name+".kizu", tt.source)
+			first, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{path})
+			if runErr != nil {
+				t.Fatalf("first fmt failed: %v\n%s", runErr, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("got stderr %q, want empty", stderr)
+			}
+			formattedPath := writeTempKizuSource(t, tt.name+"_formatted.kizu", first)
+			second, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{formattedPath})
+			if runErr != nil {
+				t.Fatalf("second fmt failed: %v\n%s", runErr, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("got stderr %q, want empty", stderr)
+			}
+			if second != first {
+				t.Fatalf("fmt is not idempotent\n--- first ---\n%s\n--- second ---\n%s", first, second)
+			}
+		})
+	}
+}
+
+// TestFmtCommandOutputParses checks formatting preserves parseability.
+func TestFmtCommandOutputParses(t *testing.T) {
+	for _, tt := range fmtRepresentativeFixtures() {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempKizuSource(t, tt.name+".kizu", tt.source)
+			formatted, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{path})
+			if runErr != nil {
+				t.Fatalf("fmt failed: %v\n%s", runErr, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("got stderr %q, want empty", stderr)
+			}
+			formattedPath := writeTempKizuSource(t, tt.name+"_formatted.kizu", formatted)
+			_, stderr, runErr = runDispatchCaptureOutput(t, "parse", []string{formattedPath})
+			if runErr != nil {
+				t.Fatalf("parse after fmt failed: %v\n%s", runErr, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("got stderr %q, want empty", stderr)
+			}
+		})
+	}
+}
+
+// TestFmtCommandSelfhostSourceParses checks a real frontend source remains parseable.
+func TestFmtCommandSelfhostSourceParses(t *testing.T) {
+	path := filepath.Join("..", "..", "selfhost", "src", "parser", "format.kizu")
+	formatted, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{path})
+	if runErr != nil {
+		t.Fatalf("fmt failed: %v\n%s", runErr, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+	formattedPath := writeTempKizuSource(t, "selfhost_format_formatted.kizu", formatted)
+	_, stderr, runErr = runDispatchCaptureOutput(t, "parse", []string{formattedPath})
+	if runErr != nil {
+		t.Fatalf("parse after fmt failed: %v\n%s", runErr, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+}
+
+// fmtRepresentativeFixtures returns sources that exercise stable formatter shapes.
+func fmtRepresentativeFixtures() []struct {
+	name   string
+	source string
+} {
+	return []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "simple_function",
+			source: `fn main(){print("hello, kizu");}
+`,
+		},
+		{
+			name: "imports_and_top_level_decls",
+			source: `import std::testing;
+
+pub struct User { name: []u8, }
+
+pub fn make_user() -> User { return User { name: "alice" }; }
+
+fn main(){let user = make_user(); print(user.name);}
+`,
+		},
+		{
+			name: "struct_literal_and_match_arms",
+			source: `pub union Value { Text([]u8), Count(i64), }
+
+fn main() {
+    let value = Value::Count(1);
+    match value { Text(text) => print(text), Count(count) => print(count), }
+}
+`,
+		},
 	}
 }
 
