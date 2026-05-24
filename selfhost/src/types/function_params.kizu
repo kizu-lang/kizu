@@ -1,0 +1,148 @@
+import selfhost::source;
+import selfhost::types::ast_text;
+
+pub struct FunctionParamType {
+    pub function_name: []u8,
+    pub index: i64,
+    pub type_name: []u8,
+}
+
+pub struct FunctionParamLookup {
+    pub found: bool,
+    pub type_name: []u8,
+}
+
+pub fn collect_local_function_param_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return collect_local_function_param_types_in_range(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            param_types
+        );,
+        FnDecl(fn_decl) => return collect_function_param_types(
+            allocator,
+            file,
+            ast,
+            ast_text::ast_node_text(file, ast, fn_decl.name),
+            fn_decl.params,
+            param_types
+        );,
+        _ => return;,
+    }
+}
+
+pub fn lookup_function_param_type(
+    param_types: &std::array::Array<FunctionParamType>,
+    function_name: []u8,
+    param_index: i64
+) -> !FunctionParamLookup {
+    var index = 0;
+    while index < param_types.len() {
+        let param_type = try param_types.at(index);
+        if std::mem::equal_bytes(param_type.function_name, function_name) and
+            param_type.index == param_index {
+            return function_param_lookup(true, param_type.type_name);
+        }
+        index = index + 1;
+    }
+    return function_param_lookup(false, "");
+}
+
+fn collect_local_function_param_types_in_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        try collect_local_function_param_types(allocator, file, ast, child, param_types);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_param_types(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    params: std::kizu::ast::ChildRange,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    var index = 0;
+    while index < params.len {
+        let child = try ast.child_at(params, index);
+        try collect_function_param_type(file, ast, function_name, child, index, param_types);
+        index = index + 1;
+    }
+    return;
+}
+
+fn collect_function_param_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    node_id: std::kizu::ast::NodeId,
+    param_index: i64,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Param(param_node) => return collect_function_param_node_type(
+            file,
+            ast,
+            function_name,
+            param_node.type_node,
+            param_index,
+            param_types
+        );,
+        _ => return;,
+    }
+}
+
+fn collect_function_param_node_type(
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    type_node: std::kizu::ast::NodeId,
+    param_index: i64,
+    param_types: &var std::array::Array<FunctionParamType>
+) -> !void {
+    try param_types.append(function_param_type(
+        function_name,
+        param_index,
+        ast_text::ast_return_type_text(file, ast, type_node)
+    ));
+    return;
+}
+
+fn function_param_type(
+    function_name: []u8,
+    index: i64,
+    type_name: []u8
+) -> FunctionParamType {
+    return FunctionParamType {
+        function_name: function_name,
+        index: index,
+        type_name: type_name
+    };
+}
+
+fn function_param_lookup(found: bool, type_name: []u8) -> FunctionParamLookup {
+    return FunctionParamLookup {
+        found: found,
+        type_name: type_name
+    };
+}

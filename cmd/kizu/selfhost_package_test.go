@@ -479,11 +479,15 @@ func TestSelfhostTypeLocalsUseParsedAST(t *testing.T) {
 
 // TestSelfhostArgumentTypesUseParsedParams rejects param-source re-lexing.
 func TestSelfhostArgumentTypesUseParsedParams(t *testing.T) {
-	bytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
+	checkerBytes, err := os.ReadFile("../../selfhost/src/types/checker.kizu")
 	if err != nil {
 		t.Fatalf("read selfhost types: %v", err)
 	}
-	content := string(bytes)
+	paramBytes, err := os.ReadFile("../../selfhost/src/types/function_params.kizu")
+	if err != nil {
+		t.Fatalf("read selfhost function params: %v", err)
+	}
+	content := string(checkerBytes) + string(paramBytes)
 	forbidden := []string{
 		"collect_local_function_param_sources(",
 		"function_param_type_at(",
@@ -946,6 +950,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn collect_function_statement_locals(",
 		"pub fn function_statement_return_type(",
 		"fn collect_let_statement_local(",
+	},
+	"../../selfhost/src/types/function_params.kizu": {
+		"pub struct FunctionParamType",
+		"pub fn collect_local_function_param_types(",
+		"pub fn lookup_function_param_type(",
 	},
 	"../../selfhost/src/types/return_diagnostics.kizu": {
 		"pub fn first_return_type_mismatch_node(",
