@@ -1000,6 +1000,10 @@ func parserParityDeclarationSeedCases() []parserParityCase {
 		{name: "seed/union_decl", source: "union Shape { Point, Circle(i64), }"},
 		{name: "seed/extern_fn", source: `extern "c" fn puts(s: ptr<const u8>) -> i32`},
 		{name: "seed/unsafe_fn", source: "unsafe fn poke() {}"},
+		{
+			name:   "seed/inherent_impl_decl",
+			source: "impl User { fn deinit(self: User) -> void { return; } }",
+		},
 	}
 	return seeds
 }
@@ -1079,11 +1083,24 @@ func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
 		return summarizeEnumDeclSubset(node)
 	case *kizuast.UnionDecl:
 		return summarizeUnionDeclSubset(node)
-	case *kizuast.ContractDecl, *kizuast.ImplDecl:
+	case *kizuast.ImplDecl:
+		return summarizeImplDeclSubset(node)
+	case *kizuast.ContractDecl:
 		return nil, "non-selfhost contract declaration outside std parser subset"
 	default:
 		return nil, "top-level declaration outside std parser subset"
 	}
+}
+
+// summarizeImplDeclSubset mirrors the std parser's current top-level impl skip.
+func summarizeImplDeclSubset(decl *kizuast.ImplDecl) ([]string, string) {
+	if decl.ContractName != "" {
+		return nil, "non-selfhost contract declaration outside std parser subset"
+	}
+	if !isStdParserIdent(decl.TypeName) {
+		return nil, "identifier outside std parser subset"
+	}
+	return []string{"Empty"}, ""
 }
 
 // summarizeImportDeclSubset summarizes one explicit import declaration.

@@ -204,13 +204,15 @@ type lexerParityStats struct {
 }
 
 var lexerParityTokenKinds = map[token.Type]string{
-	token.Function:    "Fn",
-	token.Import:      "Import",
-	token.Public:      "Pub",
-	token.Struct:      "Struct",
-	token.Enum:        "Enum",
-	token.Union:       "Union",
-	token.Extern:      "Extern",
+	token.Function: "Fn",
+	token.Import:   "Import",
+	token.Public:   "Pub",
+	token.Struct:   "Struct",
+	token.Enum:     "Enum",
+	token.Union:    "Union",
+	token.Extern:   "Extern",
+	// The std Kizu parser currently skips top-level impl blocks by identifier text.
+	token.Impl:        "Ident",
 	token.Let:         "Let",
 	token.Var:         "Var",
 	token.Return:      "Return",
@@ -399,7 +401,8 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 			name: "seed/declaration_tokens",
 			source: "import app::lexer; pub struct User { pub name: []u8, } " +
 				"enum Color { Red, Blue, } union Shape { Point, Circle(i64), } " +
-				"extern \"c\" fn puts(s: ptr<const u8>) -> i32",
+				"extern \"c\" fn puts(s: ptr<const u8>) -> i32 " +
+				"impl User { fn deinit(self: User) -> void { return; } }",
 		},
 	}
 	for index := range seeds {

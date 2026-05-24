@@ -620,8 +620,7 @@ func TestSelfhostCheckEntryRunsPackageCallDiagnostics(t *testing.T) {
 // selfhostFastDiagnosticsCoreBody extracts the shared parsed-AST diagnostic core.
 func selfhostFastDiagnosticsCoreBody(t *testing.T, content string) string {
 	t.Helper()
-	return selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_arities(") +
-		selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_context(")
+	return selfhostKizuFunctionBody(t, content, "fn fast_diagnostics_ast_node_with_context(")
 }
 
 // TestSelfhostCheckEntrySharesDiagnosticPasses keeps per-file checks grouped by phase.
@@ -1264,8 +1263,8 @@ func TestSelfhostPackageFastDiagnosticsReuseParsedAST(t *testing.T) {
 	body := selfhostKizuFunctionBody(t, content, "fn package_fast_diagnostics(")
 	required := []string{
 		"parse_package_fast_diagnostic_sources(",
-		"var function_arities = std::map::Map<[]u8, i64>(allocator)",
-		"fast_diagnostics_ast_node_with_arities(",
+		"var facts = FastDiagnosticContext(allocator)",
+		"fast_diagnostics_ast_node_with_context(",
 		"write_cached_package_function_call_diagnostic(",
 	}
 	for _, fragment := range required {
