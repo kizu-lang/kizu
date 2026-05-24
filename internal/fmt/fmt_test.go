@@ -48,6 +48,24 @@ func TestFormatTopLevelBlankLineSeparator(t *testing.T) {
 	}
 }
 
+// TestFormatSortsLeadingImports keeps the import block canonical without blank lines inside it.
+func TestFormatSortsLeadingImports(t *testing.T) {
+	src := `import selfhost::parser;
+import selfhost;
+import selfhost::lexer;
+fn main(){return;}`
+	want := "import selfhost;\n" +
+		"import selfhost::lexer;\n" +
+		"import selfhost::parser;\n" +
+		"\n" +
+		"fn main() {\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(imports):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatTrailingCommaDroppedBeforeClose checks that `,}` becomes `}`.
 func TestFormatTrailingCommaDroppedBeforeClose(t *testing.T) {
 	src := "struct Point {\n    x: i64,\n    y: i64,\n}\n"

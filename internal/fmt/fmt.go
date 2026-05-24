@@ -6,6 +6,7 @@
 package fmt
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -18,8 +19,9 @@ const indentUnit = "    "
 // Format returns a canonical formatting of source.
 func Format(source string) string {
 	tokens := tokenize(source)
+	tokens = normalizeLeadingImports(tokens)
 	generic := detectGenericBrackets(tokens)
-	b := &builder{generic: generic}
+	b := &builder{atLineStart: true, generic: generic}
 	for i := 0; i < len(tokens); i++ {
 		t := tokens[i]
 		if t.Type == token.EOF {
@@ -93,6 +95,61 @@ func tokenize(source string) []token.Token {
 	}
 }
 
+type importRange struct {
+	start int
+	end   int
+}
+
+// normalizeLeadingImports sorts the initial contiguous import block. Later
+// imports are left untouched because moving them across declarations would
+// change the source structure rather than formatting it.
+func normalizeLeadingImports(tokens []token.Token) []token.Token {
+	ranges := leadingImportRanges(tokens)
+	if len(ranges) < 2 {
+		return tokens
+	}
+	sorted := append([]importRange(nil), ranges...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return importPathKey(tokens, sorted[i]) < importPathKey(tokens, sorted[j])
+	})
+	out := make([]token.Token, 0, len(tokens))
+	for _, r := range sorted {
+		out = append(out, tokens[r.start:r.end]...)
+	}
+	out = append(out, tokens[ranges[len(ranges)-1].end:]...)
+	return out
+}
+
+// leadingImportRanges returns token ranges for the initial contiguous import block.
+func leadingImportRanges(tokens []token.Token) []importRange {
+	var ranges []importRange
+	for i := 0; i < len(tokens) && tokens[i].Type == token.Import; {
+		start := i
+		for i < len(tokens) && tokens[i].Type != token.Semicolon && tokens[i].Type != token.EOF {
+			i++
+		}
+		if i < len(tokens) && tokens[i].Type == token.Semicolon {
+			i++
+		}
+		ranges = append(ranges, importRange{start: start, end: i})
+	}
+	return ranges
+}
+
+// importPathKey returns the canonical import path used for sort order.
+func importPathKey(tokens []token.Token, r importRange) string {
+	var b strings.Builder
+	for i := r.start + 1; i < r.end; i++ {
+		switch tokens[i].Type {
+		case token.Ident:
+			b.WriteString(tokens[i].Literal)
+		case token.DoubleColon:
+			b.WriteString("::")
+		}
+	}
+	return b.String()
+}
+
 // isTrailingCommaBeforeClose drops a trailing `,` that immediately precedes `}` or `)` or `]`.
 func isTrailingCommaBeforeClose(tokens []token.Token, i int) bool {
 	if tokens[i].Type != token.Comma {
@@ -119,6 +176,7 @@ type builder struct {
 	index       int
 	generic     []bool
 	sourceLine  int
+	lastTopDecl token.Type
 }
 
 // emit appends a token using current layout state.
@@ -142,11 +200,15 @@ func (b *builder) emit(t token.Token, next token.Token) {
 // maybeBlankLineForTopLevel emits a blank line before each top-level declaration after the first.
 func (b *builder) maybeBlankLineForTopLevel(t token.Token) {
 	if !(b.hasPrev && b.depth == 0 && b.atLineStart && isTopLevelDeclStart(t) && b.out.Len() > 0) {
+		if b.depth == 0 && b.atLineStart && isTopLevelDeclStart(t) {
+			b.lastTopDecl = t.Type
+		}
 		return
 	}
-	if !endsWithBlankLine(&b.out) {
+	if !(t.Type == token.Import && b.lastTopDecl == token.Import) && !endsWithBlankLine(&b.out) {
 		b.out.WriteByte('\n')
 	}
+	b.lastTopDecl = t.Type
 }
 
 // maybePreserveSourceLineBreak inserts a newline when the source had one between tokens.
