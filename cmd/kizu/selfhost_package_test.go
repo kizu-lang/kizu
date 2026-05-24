@@ -808,8 +808,12 @@ func assertSelfhostExecutableLoweringSplit(
 	for _, fragment := range []string{
 		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
-		"fn lower_run_print_call(",
-		"fn lower_expect_call(",
+		"pub fn parse_run_executable_ast(",
+		"pub fn parse_test_executable_ast(",
+		"pub fn lower_run_executable_ast(",
+		"pub fn lower_test_executable_ast(",
+		"fn parse_run_print_call_ast(",
+		"fn parse_expect_call_ast(",
 	} {
 		if !strings.Contains(executable, fragment) {
 			t.Fatalf("executable module missing AST executable lowering %q", fragment)
@@ -822,6 +826,31 @@ func assertSelfhostExecutableLoweringSplit(
 	} {
 		if strings.Contains(execute, fragment) {
 			t.Fatalf("execute module still owns executable lowering %q", fragment)
+		}
+	}
+	assertSelfhostExecutableLoweringUsesBoundedAST(t, executable)
+}
+
+// assertSelfhostExecutableLoweringUsesBoundedAST keeps source AST matching
+// separate from executable artifact lowering.
+func assertSelfhostExecutableLoweringUsesBoundedAST(t *testing.T, executable string) {
+	t.Helper()
+	runBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_run_executable(")
+	testBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_test_executable(")
+	for _, fragment := range []string{
+		"let executable_ast = try parse_run_executable_ast(text, ast, root)",
+		"return lower_run_executable_ast(executable_ast)",
+	} {
+		if !strings.Contains(runBody, fragment) {
+			t.Fatalf("run executable wrapper missing bounded AST step %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"let executable_ast = try parse_test_executable_ast(text, ast, root)",
+		"return lower_test_executable_ast(executable_ast)",
+	} {
+		if !strings.Contains(testBody, fragment) {
+			t.Fatalf("test executable wrapper missing bounded AST step %q", fragment)
 		}
 	}
 }
@@ -1077,6 +1106,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn lower_test_hosted_executable(",
 		"fn render_hosted_llvm(",
 	},
+	"../../selfhost/src/backend/data.kizu": {
+		"pub enum ExecutableAstKind",
+		"pub struct ExecutableAst",
+		"pub enum ExecutableKind",
+		"pub struct Executable",
+	},
 	"../../selfhost/src/backend/llvm.kizu": {
 		"pub fn emit_llvm_artifact(",
 		"fn render_llvm_module(",
@@ -1157,8 +1192,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/executable.kizu": {
 		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
-		"fn lower_run_print_call(",
-		"fn lower_expect_call(",
+		"pub fn parse_run_executable_ast(",
+		"pub fn parse_test_executable_ast(",
+		"pub fn lower_run_executable_ast(",
+		"pub fn lower_test_executable_ast(",
+		"fn parse_run_print_call_ast(",
+		"fn parse_expect_call_ast(",
 	},
 }
 
