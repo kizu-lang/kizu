@@ -1123,6 +1123,47 @@ fn main() -> !void {
 	}
 }
 
+// TestBuildEmitLLVMSliceCommandSmoke checks []u8 values use the slice ABI.
+func TestBuildEmitLLVMSliceCommandSmoke(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "slice.kizu")
+	code := []byte(`fn identity(value: []u8) -> []u8 {
+    return value;
+}
+fn message() -> []u8 {
+    return "hello";
+}
+fn read() -> ![]u8 {
+    return identity(message());
+}
+fn main() -> !void {
+    let value = try read();
+    print(value);
+    return;
+}`)
+	if err := os.WriteFile(source, code, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", ".", "build", "--emit-llvm", source)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"%kizu.slice.u8 = type { ptr, i64 }",
+		"%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }",
+		"define %kizu.slice.u8 @identity(%kizu.slice.u8 %value)",
+		"define %kizu.error.slice.u8 @read()",
+		"call %kizu.slice.u8 @identity(%kizu.slice.u8",
+		"insertvalue %kizu.error.slice.u8",
+		"extractvalue %kizu.slice.u8 %kizu.2, 0",
+		"call void @kizu_print_string(ptr",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
+	}
+}
+
 // TestBuildEmitLLVMOptCommandSmoke checks LLVM build can use optimized IR.
 func TestBuildEmitLLVMOptCommandSmoke(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "main.kizu")

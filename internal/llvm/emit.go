@@ -34,10 +34,8 @@ type emitter struct {
 }
 
 type valueInfo struct {
-	typ         string
-	operand     string
-	length      int
-	lengthKnown bool
+	typ     string
+	operand string
 }
 
 // emit writes declarations and function definitions.
@@ -75,7 +73,7 @@ func (e *emitter) collectStrings() {
 // writeHeader writes globals and runtime declarations.
 func (e *emitter) writeHeader() {
 	e.out.WriteString("; Kizu LLVM IR\n")
-	if e.usesErrorUnionABI() {
+	if e.usesSliceABI() {
 		e.out.WriteString("%kizu.slice.u8 = type { ptr, i64 }\n")
 	}
 	e.writeErrorUnionTypes()
@@ -151,9 +149,85 @@ func (e *emitter) sortedStructNames() []string {
 	return names
 }
 
-// usesErrorUnionABI reports whether this module needs the recoverable-result ABI.
-func (e *emitter) usesErrorUnionABI() bool {
-	return len(e.sortedErrorUnionNames()) > 0
+// usesSliceABI reports whether this module needs the byte-slice value ABI.
+func (e *emitter) usesSliceABI() bool {
+	if len(e.sortedErrorUnionNames()) > 0 {
+		return true
+	}
+	return e.moduleHasSliceType()
+}
+
+// moduleHasSliceType reports whether any non-error-union value uses []u8.
+func (e *emitter) moduleHasSliceType() bool {
+	for _, st := range e.module.Structs {
+		for _, field := range st.Fields {
+			if isSliceType(field.Type) {
+				return true
+			}
+		}
+	}
+	for _, fn := range e.module.Functions {
+		if e.functionHasSliceType(fn) {
+			return true
+		}
+	}
+	return false
+}
+
+// functionHasSliceType reports whether a function body/signature mentions []u8.
+func (e *emitter) functionHasSliceType(fn *ir.Function) bool {
+	if isSliceType(fn.Return) {
+		return true
+	}
+	for _, param := range fn.Params {
+		if isSliceType(param.Type) {
+			return true
+		}
+	}
+	for _, block := range fn.Blocks {
+		if blockHasSliceType(block) {
+			return true
+		}
+	}
+	return false
+}
+
+// blockHasSliceType reports whether a block uses a []u8 value.
+func blockHasSliceType(block *ir.Block) bool {
+	for _, instr := range block.Instrs {
+		if instrHasSliceType(instr) {
+			return true
+		}
+	}
+	return isSliceType(block.Terminator.Value.Type) || isSliceType(block.Terminator.Cond.Type)
+}
+
+// instrHasSliceType reports whether one instruction uses a []u8 value.
+func instrHasSliceType(instr *ir.Instr) bool {
+	if isSliceType(instr.Result.Type) {
+		return true
+	}
+	for _, arg := range instr.Args {
+		if isSliceType(arg.Type) {
+			return true
+		}
+	}
+	for _, field := range instr.Fields {
+		if isSliceType(field.Value.Type) {
+			return true
+		}
+	}
+	for _, incoming := range instr.Incoming {
+		if isSliceType(incoming.Value.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSliceType reports whether a lowered IR type is the byte-slice value type.
+func isSliceType(typ string) bool {
+	return typ == "[]u8"
 }
 
 // sortedErrorUnionNames returns all error-union types referenced by this module.
@@ -323,11 +397,15 @@ func (e *emitter) writeConst(instr *ir.Instr) error {
 		unquoted, _ := strconv.Unquote(instr.Immediate)
 		global := e.strings[instr.Immediate]
 		name := localName(instr.Result.Name)
+		ptrName := name + ".ptr"
+		baseName := name + ".base"
 		fmt.Fprintf(&e.out, "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0\n",
-			name, len(unquoted)+1, global)
-		e.values[instr.Result.Name] = valueInfo{
-			typ: "[]u8", operand: name, length: len(unquoted), lengthKnown: true,
-		}
+			ptrName, len(unquoted)+1, global)
+		fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
+			baseName, ptrName)
+		fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1\n",
+			name, baseName, len(unquoted))
+		e.values[instr.Result.Name] = valueInfo{typ: "[]u8", operand: name}
 	default:
 		return fmt.Errorf("llvm error: unsupported const type `%s`", instr.Result.Type)
 	}
@@ -657,11 +735,14 @@ func (e *emitter) writePrint(args []ir.Value) error {
 	value := e.value(args[0])
 	switch args[0].Type {
 	case "[]u8":
-		if !value.lengthKnown {
-			return fmt.Errorf("llvm error: []u8 length is unavailable for print")
-		}
-		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %d)\n",
-			value.operand, value.length)
+		ptrName := "%" + e.nextSyntheticValue("print.slice.ptr")
+		lenName := "%" + e.nextSyntheticValue("print.slice.len")
+		fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 0\n",
+			ptrName, value.operand)
+		fmt.Fprintf(&e.out, "  %s = extractvalue %%kizu.slice.u8 %s, 1\n",
+			lenName, value.operand)
+		fmt.Fprintf(&e.out, "  call void @kizu_print_string(ptr %s, i64 %s)\n",
+			ptrName, lenName)
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		fmt.Fprintf(&e.out, "  call void @kizu_print_int(i64 %s)\n", value.operand)
 	case "bool":
@@ -814,16 +895,7 @@ func (e *emitter) sliceValue(value ir.Value) (string, error) {
 	if value.Type != "[]u8" {
 		return "", fmt.Errorf("llvm error: expected []u8, got %s", value.Type)
 	}
-	if !info.lengthKnown {
-		return "", fmt.Errorf("llvm error: []u8 length is unavailable for error message")
-	}
-	name := "%" + e.nextSyntheticValue("slice")
-	baseName := name + ".base"
-	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 poison, ptr %s, 0\n",
-		baseName, info.operand)
-	fmt.Fprintf(&e.out, "  %s = insertvalue %%kizu.slice.u8 %s, i64 %d, 1\n",
-		name, baseName, info.length)
-	return name, nil
+	return info.operand, nil
 }
 
 // structFieldIndex resolves a field offset in a declared struct.

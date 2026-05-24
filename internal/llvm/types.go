@@ -20,7 +20,7 @@ func llvmPrimitiveType(typ string) string {
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
 		return integerLLVMType(typ)
 	case "[]u8":
-		return "ptr"
+		return "%kizu.slice.u8"
 	default:
 		return "ptr"
 	}
@@ -123,6 +123,9 @@ func llvmErrorUnionTypeName(name string) string {
 
 // llvmNamePart keeps generated LLVM type names deterministic and readable.
 func llvmNamePart(name string) string {
+	if name == "[]u8" {
+		return "slice.u8"
+	}
 	var out strings.Builder
 	for _, ch := range []byte(name) {
 		if ch == '_' ||
@@ -158,7 +161,10 @@ func errorUnionParts(typ string) (string, string, bool) {
 // isLowerableErrorUnionSuccess reports whether the current backend can carry T.
 func isLowerableErrorUnionSuccess(typ string) bool {
 	switch typ {
-	case "void", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize":
+	case "void", "bool", "[]u8",
+		"i8", "i16", "i32", "i64",
+		"u8", "u16", "u32", "u64",
+		"usize", "isize":
 		return true
 	default:
 		return false
