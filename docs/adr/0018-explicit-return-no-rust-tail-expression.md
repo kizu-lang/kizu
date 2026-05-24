@@ -33,6 +33,7 @@ fn add(a: i64, b: i64) -> i64 {
 
 `void` 関数では `return` を省略できる。
 早期 return が必要な場合は `return` を書く。
+`!void` は error union として扱い、成功 path は `return;` で明示する。
 
 ```kizu
 fn log(message: []u8) -> void {

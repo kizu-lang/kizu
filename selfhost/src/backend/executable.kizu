@@ -230,7 +230,13 @@ fn parse_test_program_ast(
         let child = try ast.child_at(declarations, index);
         let node = ast.get(child);
         let executable_ast = match node.data {
-            FnDecl(fn_decl) => try parse_test_fn_ast(text, ast, fn_decl.name, fn_decl.body),
+            FnDecl(fn_decl) => try parse_test_fn_ast(
+                text,
+                ast,
+                fn_decl.name,
+                fn_decl.return_type,
+                fn_decl.body
+            ),
             _ => unsupported_executable_ast(text),
         };
         if executable_ast.kind != data::ExecutableAstKind::Unsupported {
@@ -245,6 +251,7 @@ fn parse_test_fn_ast(
     text: []u8,
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId
 ) -> !data::ExecutableAst {
     if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
@@ -252,7 +259,7 @@ fn parse_test_fn_ast(
     }
     let node = ast.get(body);
     return match node.data {
-        Block(block) => try parse_test_block_ast(text, ast, block.statements),
+        Block(block) => try parse_test_block_ast(text, ast, return_type, block.statements),
         _ => unsupported_executable_ast(text),
     };
 }
@@ -260,8 +267,13 @@ fn parse_test_fn_ast(
 fn parse_test_block_ast(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    return_type: std::kizu::ast::NodeId,
     statements: std::kizu::ast::ChildRange
 ) -> !data::ExecutableAst {
+    if statements.len == 1 and is_void_return_type(text, ast, return_type) {
+        let expect_statement = try ast.child_at(statements, 0);
+        return parse_test_expect_statement_ast(text, ast, expect_statement);
+    }
     if statements.len != 2 {
         return unsupported_executable_ast(text);
     }
@@ -270,10 +282,34 @@ fn parse_test_block_ast(
     if !is_empty_return(ast, return_statement) {
         return unsupported_executable_ast(text);
     }
+    return parse_test_expect_statement_ast(text, ast, expect_statement);
+}
+
+fn parse_test_expect_statement_ast(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expect_statement: std::kizu::ast::NodeId
+) -> !data::ExecutableAst {
     let node = ast.get(expect_statement);
     return match node.data {
         ExprStmt(expr_stmt) => try parse_expect_stmt_ast(text, ast, expr_stmt.expr),
         _ => unsupported_executable_ast(text),
+    };
+}
+
+fn is_void_return_type(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    return_type: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(return_type);
+    return match node.data {
+        Empty => true,
+        TypeName(type_name) => std::mem::equal_bytes(
+            ast_node_text(text, ast, return_type),
+            "void"
+        ),
+        _ => false,
     };
 }
 
