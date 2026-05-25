@@ -1198,6 +1198,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn named_i64_fact(",
 		"pub fn require_named_i64_fact(",
 		"pub fn sequence_fact_value(",
+		"pub fn body_child_sequence(",
 		"pub fn require_sequence_fact(",
 	},
 	"../../selfhost/src/ir/executable_contract.kizu": {
@@ -2292,13 +2293,26 @@ func assertExecutableParserConsumers(
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
 		"ir_contract::sequence_fact_value(",
+		"ir_contract::body_child_sequence(",
 		"ir_contract::require_sequence_fact(",
 		"body_field_expr_value(",
+		"lowering_case_ast_kind_name(",
+		"lowering_case_result_kind_name(",
 		`"body-field-expr "`,
 		`"executable-kind "`,
 	} {
 		if !strings.Contains(ast, fragment) {
 			t.Fatalf("hosted executable lowerer does not consume fact tags with %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"body_field_expr_value(ir_bytes, function_name, 6)",
+		"body_field_expr_value(ir_bytes, function_name, 19)",
+		"body_field_expr_value(ir_bytes, function_name, 35)",
+		"body_field_expr_value(ir_bytes, function_name, 48)",
+	} {
+		if strings.Contains(ast, fragment) {
+			t.Fatalf("hosted executable lowerer still uses fixed body sequence %q", fragment)
 		}
 	}
 }
