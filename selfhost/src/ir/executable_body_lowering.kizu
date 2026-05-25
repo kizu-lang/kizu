@@ -1,0 +1,132 @@
+pub fn append_run_lowering_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId
+) -> !void {
+    let function_name = "selfhost::backend::executable::lower_run_executable_ast";
+    try append_selected_body_lowering(out, function_name, "checked-run-executable");
+    try require_unsupported_return(text, ast, body);
+    try append_selected_body_unsupported(out, function_name);
+    return;
+}
+
+pub fn append_test_lowering_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId
+) -> !void {
+    let function_name = "selfhost::backend::executable::lower_test_executable_ast";
+    try append_selected_body_lowering(out, function_name, "checked-test-executable");
+    try require_unsupported_return(text, ast, body);
+    try append_selected_body_unsupported(out, function_name);
+    return;
+}
+
+fn append_selected_body_lowering(
+    out: &var std::string::String,
+    function_name: []u8,
+    role: []u8
+) -> !void {
+    try out.append_bytes("selected-body-lowering ");
+    try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(role);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_selected_body_unsupported(
+    out: &var std::string::String,
+    function_name: []u8
+) -> !void {
+    try out.append_bytes("selected-body-lowering-unsupported ");
+    try out.append_bytes(function_name);
+    try out.append_bytes(" unsupported_executable");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn require_unsupported_return(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId
+) -> !void {
+    if try body_contains_unsupported_return(text, ast, body) {
+        return;
+    }
+    return error("missing selected body unsupported executable return");
+}
+
+fn body_contains_unsupported_return(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !bool {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return try range_contains_unsupported_return(text, ast, block.statements);,
+        Return(return_node) => return return_calls_unsupported(text, ast, return_node.value);,
+        If(if_node) => return try if_contains_unsupported_return(
+            text,
+            ast,
+            if_node.then_block,
+            if_node.else_block
+        );,
+        _ => return false;,
+    }
+}
+
+fn if_contains_unsupported_return(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId
+) -> !bool {
+    if try body_contains_unsupported_return(text, ast, then_block) {
+        return true;
+    }
+    return try body_contains_unsupported_return(text, ast, else_block);
+}
+
+fn range_contains_unsupported_return(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    range: std::kizu::ast::ChildRange
+) -> !bool {
+    var index = 0;
+    while index < range.len {
+        let child = try ast.child_at(range, index);
+        if try body_contains_unsupported_return(text, ast, child) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn return_calls_unsupported(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> bool {
+    let node = ast.get(value);
+    return match node.data {
+        Call(call_node) => std::mem::equal_bytes(
+            ast_node_text(text, ast, call_node.callee),
+            "unsupported_executable"
+        ),
+        _ => false,
+    };
+}
+
+fn ast_node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
+}

@@ -58,34 +58,54 @@ pub fn require_named_i64_fact(bytes: []u8, prefix: []u8, name: []u8) -> !void {
     return;
 }
 
-pub fn mapped_i64_fact(
-    bytes: []u8,
-    rule_prefix: []u8,
-    source_name: []u8,
-    target_prefix: []u8
-) -> !i64 {
-    let target_start = try named_fact_value_start(bytes, rule_prefix, source_name);
-    let target_end = token_end(bytes, target_start);
-    return try named_i64_fact_range(bytes, target_prefix, target_start, target_end);
-}
-
-fn named_i64_fact_range(
+pub fn sequence_fact_value(
     bytes: []u8,
     prefix: []u8,
-    name_start: i64,
-    name_end: i64
+    name: []u8,
+    sequence: i64
+) -> ![]u8 borrows bytes {
+    let value_start = try sequence_fact_value_start(bytes, prefix, name, sequence);
+    let value_end = token_end(bytes, value_start);
+    return bytes[value_start..value_end];
+}
+
+pub fn require_sequence_fact(
+    bytes: []u8,
+    prefix: []u8,
+    name: []u8,
+    sequence: i64,
+    value: []u8
+) -> !void {
+    let actual = try sequence_fact_value(bytes, prefix, name, sequence);
+    if !std::mem::equal_bytes(actual, value) {
+        return error("invalid IR artifact fact");
+    }
+    return;
+}
+
+fn sequence_fact_value_start(
+    bytes: []u8,
+    prefix: []u8,
+    name: []u8,
+    sequence: i64
 ) -> !i64 {
     let byte_len = std::mem::len(bytes);
     let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(name);
     var index = 0;
-    while index + prefix_len < byte_len {
+    while index + prefix_len + name_len < byte_len {
         if is_line_start(bytes, index) and
             std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
-            let candidate_start = index + prefix_len;
-            let candidate_end = token_end(bytes, candidate_start);
-            if range_equal(bytes, candidate_start, candidate_end, name_start, name_end) {
-                let value_start = skip_spaces(bytes, candidate_end);
-                return try parse_i64_token(bytes, value_start);
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], name) and
+                is_space(bytes[name_end]) {
+                let sequence_start = skip_spaces(bytes, name_end);
+                let actual = try parse_i64_token(bytes, sequence_start);
+                let sequence_end = token_end(bytes, sequence_start);
+                if actual == sequence {
+                    return skip_spaces(bytes, sequence_end);
+                }
             }
         }
         index = index + 1;
@@ -162,19 +182,6 @@ fn skip_spaces(bytes: []u8, start: i64) -> i64 {
         index = index + 1;
     }
     return index;
-}
-
-fn range_equal(
-    bytes: []u8,
-    left_start: i64,
-    left_end: i64,
-    right_start: i64,
-    right_end: i64
-) -> bool {
-    if left_end - left_start != right_end - right_start {
-        return false;
-    }
-    return std::mem::equal_bytes(bytes[left_start..left_end], bytes[right_start..right_end]);
 }
 
 fn is_line_start(bytes: []u8, index: i64) -> bool {

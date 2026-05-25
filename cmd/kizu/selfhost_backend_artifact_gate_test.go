@@ -291,9 +291,9 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"dispatch_fmt_write_arg:",
 		"dispatch_fmt_write:",
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
-		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
-		"define i1 @kizu_selfhost__cli_run_return_ok",
-		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload",
+		"define i1 @kizu_selfhost__cli_parse_run_return_void_ok",
+		"define i1 @kizu_selfhost__cli_is_supported_run_print_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_executable = call %kizu.selfhost.executable " +
 			"@kizu_selfhost__cli_run_executable",
@@ -303,7 +303,7 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
-		"define i64 @kizu_selfhost__cli_test_expect_value",
+		"define i64 @kizu_selfhost__cli_parse_test_expect_value",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
@@ -422,20 +422,14 @@ func requiredLLVMMetadataFragments() []string {
 		"backend-input hosted-smoke @kizu_selfhost__smoke\n",
 		"backend-input executable-contract-source data selfhost::backend::data\n",
 		"backend-input executable-contract-source lowering selfhost::backend::executable\n",
-		"backend-input executable-ast executable-ast-rules-v1\n",
-		"backend-input executable-ast-rule MainScan LeadingFunctions\n",
-		"backend-input executable-ast-rule RunPrintCall MainPrintString\n",
-		"backend-input executable-ast-rule RunReturnVoid MainReturnVoid\n",
-		"backend-input executable-ast-rule TestExpectTrue MainExpectTrue\n",
-		"backend-input executable-ast-rule TestExpectFalse MainExpectFalse\n",
-		"backend-input executable-lowering executable-ir-rules-v1\n",
-		"backend-input executable-lowering-rule RunPrintCall RunPrintString\n",
-		"backend-input executable-lowering-rule RunReturnVoid RunReturnVoid\n",
-		"backend-input executable-lowering-rule TestExpectTrue TestExpectOk\n",
-		"backend-input executable-lowering-rule TestExpectFalse TestExpectFailure\n",
 	}
 	fragments = append(fragments, requiredLLVMMetadataSelectedFunctionFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedSignatureFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedHelperBodyFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataHostedArtifactPathFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
 	fragments = append(fragments, []string{
 		"entry @kizu_selfhost__cli_main\n",
@@ -485,6 +479,51 @@ func requiredLLVMMetadataSelectedFunctionFragments() []string {
 	}
 }
 
+// requiredLLVMMetadataSelectedSignatureFragments returns executable signature inputs.
+func requiredLLVMMetadataSelectedSignatureFragments() []string {
+	return []string{
+		"backend-input executable-selected-signatures checked-ast-signature-v1\n",
+		"backend-input selected-signature selfhost::cli::execute::" +
+			"run_file_cli checked-run-artifact\n",
+		"backend-input selected-signature selfhost::cli::execute::" +
+			"test_file_cli checked-test-artifact\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"lower_run_executable checked-run-wrapper\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper\n",
+		"backend-input selected-signature-param-count selfhost::cli::execute::" +
+			"run_file_cli 3\n",
+		"backend-input selected-signature-return selfhost::cli::execute::" +
+			"run_file_cli !i64\n",
+		"backend-input selected-signature-param selfhost::cli::execute::" +
+			"run_file_cli#0 allocator:runtime:Allocator\n",
+		"backend-input selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable !data::Executable\n",
+		"backend-input selected-signature-param selfhost::backend::executable::" +
+			"lower_run_executable#1 ast:runtime:std::kizu::ast::Ast\n",
+		"backend-input selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable_ast data::Executable\n",
+		"backend-input selected-signature-return selfhost::backend::executable::" +
+			"parse_run_program_ast !data::ExecutableAst\n",
+		"backend-input selected-signature-param selfhost::backend::executable::" +
+			"parse_run_print_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"backend-input selected-signature-param selfhost::backend::executable::" +
+			"parse_expect_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"backend-input selected-signature-return selfhost::backend::hosted::" +
+			"emit_run_executable_artifact !data::RunArtifact\n",
+		"backend-input selected-signature-param selfhost::backend::hosted::" +
+			"emit_run_executable_artifact#3 executable:runtime:data::Executable\n",
+	}
+}
+
 // requiredLLVMMetadataSelectedBodyFragments returns executable body IR facts.
 func requiredLLVMMetadataSelectedBodyFragments() []string {
 	return []string{
@@ -509,6 +548,117 @@ func requiredLLVMMetadataSelectedBodyFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"backend-input selected-function-body selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
+	}
+}
+
+// requiredLLVMMetadataSelectedHelperBodyFragments returns executable helper body inputs.
+func requiredLLVMMetadataSelectedHelperBodyFragments() []string {
+	return []string{
+		"backend-input executable-selected-helper-body-ir checked-ast-helper-body-v1\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_fn_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_block_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_return_stmt_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_stmt_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"run_string_literal_payload checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"run_payload_from_literal checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_supported_run_print_payload checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_program_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_fn_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_block_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_expect_statement_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_void_return_type checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_stmt_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_empty_return checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"expect_bool_value checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"bool_value_as_i64 checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_empty_node checked-executable-shared-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable_ast checked-executable-shared-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable checked-executable-shared-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"ast_node_text checked-executable-shared-helper\n",
+	}
+}
+
+// requiredLLVMMetadataSelectedBodyParsingFragments returns body parser inputs.
+func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
+	return []string{
+		"backend-input executable-selected-body-parsing checked-ast-body-parsing-v1\n",
+		"backend-input selected-body-parsing selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"backend-input selected-body-parsing selfhost::backend::executable::" +
+			"parse_test_executable_ast checked-test-ast\n",
+	}
+}
+
+// requiredLLVMMetadataSelectedBodyLoweringFragments returns body lowering inputs.
+func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
+	return []string{
+		"backend-input executable-selected-body-lowering checked-ast-body-lowering-v1\n",
+		"backend-input selected-body-lowering selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"backend-input selected-body-lowering selfhost::backend::executable::" +
+			"lower_test_executable_ast checked-test-executable\n",
+		"backend-input selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_run_executable_ast unsupported_executable\n",
+		"backend-input selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_test_executable_ast unsupported_executable\n",
+	}
+}
+
+// requiredLLVMMetadataHostedArtifactPathFragments returns selected hosted
+// artifact path facts consumed by the backend.
+func requiredLLVMMetadataHostedArtifactPathFragments() []string {
+	return []string{
+		"backend-input executable-hosted-artifact-paths checked-ast-hosted-artifact-v1\n",
+		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run\n",
+		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll\n",
+		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll.meta\n",
+		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_run_executable_artifact write_run_artifact\n",
+		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test\n",
+		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll\n",
+		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll.meta\n",
+		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_test_executable_artifact write_test_artifact\n",
 	}
 }
 

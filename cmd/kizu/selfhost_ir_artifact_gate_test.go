@@ -90,20 +90,14 @@ func requiredSelfhostIRContractFragments() []string {
 		"executable-contract-source lowering selfhost::backend::executable\n",
 	}
 	fragments = append(fragments, requiredSelfhostIRSelectedFunctionFragments()...)
+	fragments = append(fragments, requiredSelfhostIRSelectedSignatureFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyFragments()...)
+	fragments = append(fragments, requiredSelfhostIRSelectedHelperBodyFragments()...)
+	fragments = append(fragments, requiredSelfhostIRSelectedBodyParsingFragments()...)
+	fragments = append(fragments, requiredSelfhostIRSelectedBodyLoweringFragments()...)
+	fragments = append(fragments, requiredSelfhostIRHostedArtifactPathFragments()...)
 	return append(fragments, []string{
-		"frontend-executable-lowering checked-ast-bounded\n",
-		"hosted-executable-ast executable-ast-rules-v1\n",
-		"executable-ast-rule MainScan LeadingFunctions\n",
-		"executable-ast-rule RunPrintCall MainPrintString\n",
-		"executable-ast-rule RunReturnVoid MainReturnVoid\n",
-		"executable-ast-rule TestExpectTrue MainExpectTrue\n",
-		"executable-ast-rule TestExpectFalse MainExpectFalse\n",
-		"hosted-executable-lowering executable-ir-rules-v1\n",
-		"executable-lowering-rule RunPrintCall RunPrintString\n",
-		"executable-lowering-rule RunReturnVoid RunReturnVoid\n",
-		"executable-lowering-rule TestExpectTrue TestExpectOk\n",
-		"executable-lowering-rule TestExpectFalse TestExpectFailure\n",
+		"frontend-executable-lowering checked-ast-selected-body-ir\n",
 		"hosted-executable-abi executable-result-layout-v1\n",
 		"executable-ast-layout kind:i64 payload:[]u8\n",
 		"executable-layout kind:i64 stdout_payload:[]u8\n",
@@ -149,6 +143,47 @@ func requiredSelfhostIRSelectedFunctionFragments() []string {
 	}
 }
 
+// requiredSelfhostIRSelectedSignatureFragments returns selected executable signatures.
+func requiredSelfhostIRSelectedSignatureFragments() []string {
+	return []string{
+		"executable-selected-signatures checked-ast-signature-v1\n",
+		"selected-signature selfhost::cli::execute::run_file_cli checked-run-artifact\n",
+		"selected-signature selfhost::cli::execute::test_file_cli checked-test-artifact\n",
+		"selected-signature selfhost::backend::executable::" +
+			"lower_run_executable checked-run-wrapper\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"selected-signature selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper\n",
+		"selected-signature-param-count selfhost::cli::execute::run_file_cli 3\n",
+		"selected-signature-return selfhost::cli::execute::run_file_cli !i64\n",
+		"selected-signature-param selfhost::cli::execute::run_file_cli#0 " +
+			"allocator:runtime:Allocator\n",
+		"selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable !data::Executable\n",
+		"selected-signature-param selfhost::backend::executable::" +
+			"lower_run_executable#1 ast:runtime:std::kizu::ast::Ast\n",
+		"selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable_ast data::Executable\n",
+		"selected-signature-return selfhost::backend::executable::" +
+			"parse_run_program_ast !data::ExecutableAst\n",
+		"selected-signature-param selfhost::backend::executable::" +
+			"parse_run_print_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"selected-signature-param selfhost::backend::executable::" +
+			"parse_expect_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"selected-signature-return selfhost::backend::hosted::" +
+			"emit_run_executable_artifact !data::RunArtifact\n",
+		"selected-signature-param selfhost::backend::hosted::" +
+			"emit_run_executable_artifact#3 executable:runtime:data::Executable\n",
+	}
+}
+
 // requiredSelfhostIRSelectedBodyFragments returns checked AST body IR facts.
 func requiredSelfhostIRSelectedBodyFragments() []string {
 	return []string{
@@ -171,21 +206,140 @@ func requiredSelfhostIRSelectedBodyFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"selected-function-body selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
-		"body-call selfhost::cli::execute::run_file_cli check::checked_ast_node 6\n",
-		"body-call selfhost::cli::execute::run_file_cli backend::lower_run_executable 3\n",
-		"body-call selfhost::cli::execute::test_file_cli backend::lower_test_executable 3\n",
+		"body-call selfhost::cli::execute::run_file_cli 82 check::checked_ast_node 6\n",
+		"body-call selfhost::cli::execute::run_file_cli 109 backend::lower_run_executable 3\n",
+		"body-call selfhost::cli::execute::test_file_cli 109 backend::lower_test_executable 3\n",
 		"body-call selfhost::backend::executable::lower_run_executable " +
-			"parse_run_executable_ast 3\n",
+			"4 parse_run_executable_ast 3\n",
 		"body-call selfhost::backend::executable::lower_test_executable " +
-			"parse_test_executable_ast 3\n",
+			"4 parse_test_executable_ast 3\n",
 		"body-struct-literal selfhost::backend::executable::" +
-			"lower_run_executable_ast data::Executable\n",
+			"lower_run_executable_ast 13 data::Executable\n",
 		"body-struct-literal selfhost::backend::executable::" +
-			"lower_test_executable_ast data::Executable\n",
+			"lower_test_executable_ast 13 data::Executable\n",
 		"body-call selfhost::backend::hosted::emit_run_executable_artifact " +
-			"write_run_artifact 6\n",
+			"28 write_run_artifact 6\n",
 		"body-call selfhost::backend::hosted::emit_test_executable_artifact " +
-			"write_test_artifact 6\n",
+			"28 write_test_artifact 6\n",
+	}
+}
+
+// requiredSelfhostIRSelectedHelperBodyFragments returns checked helper body IR facts.
+func requiredSelfhostIRSelectedHelperBodyFragments() []string {
+	return []string{
+		"executable-selected-helper-body-ir checked-ast-helper-body-v1\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_fn_ast checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_block_ast checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_return_stmt_ast checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_stmt_ast checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"run_string_literal_payload checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"run_payload_from_literal checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_supported_run_print_payload checked-run-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_program_ast checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_fn_ast checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_block_ast checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_expect_statement_ast checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_void_return_type checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_stmt_ast checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_empty_return checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"expect_bool_value checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"bool_value_as_i64 checked-test-ast-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_empty_node checked-executable-shared-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable_ast checked-executable-shared-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable checked-executable-shared-helper\n",
+		"selected-helper-body selfhost::backend::executable::" +
+			"ast_node_text checked-executable-shared-helper\n",
+		"body-call selfhost::backend::executable::parse_run_program_ast " +
+			"39 parse_run_fn_ast 4\n",
+		"body-call selfhost::backend::executable::parse_test_program_ast " +
+			"39 parse_test_fn_ast 5\n",
+		"body-call selfhost::backend::executable::parse_run_print_call_ast " +
+			"38 run_string_literal_payload 3\n",
+		"body-call selfhost::backend::executable::parse_expect_call_ast " +
+			"38 expect_bool_value 2\n",
+	}
+}
+
+// requiredSelfhostIRSelectedBodyParsingFragments returns checked AST parser facts.
+func requiredSelfhostIRSelectedBodyParsingFragments() []string {
+	return []string{
+		"executable-selected-body-parsing checked-ast-body-parsing-v1\n",
+		"selected-body-parsing selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"selected-body-parsing selfhost::backend::executable::" +
+			"parse_test_executable_ast checked-test-ast\n",
+	}
+}
+
+// requiredSelfhostIRSelectedBodyLoweringFragments returns selected body lowering facts.
+func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
+	return []string{
+		"executable-selected-body-lowering checked-ast-body-lowering-v1\n",
+		"selected-body-lowering selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"selected-body-lowering selfhost::backend::executable::" +
+			"lower_test_executable_ast checked-test-executable\n",
+		"selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_run_executable_ast unsupported_executable\n",
+		"selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_test_executable_ast unsupported_executable\n",
+	}
+}
+
+// requiredSelfhostIRHostedArtifactPathFragments returns selected hosted
+// artifact path facts derived from backend::hosted writer bodies.
+func requiredSelfhostIRHostedArtifactPathFragments() []string {
+	return []string{
+		"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1\n",
+		"hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run\n",
+		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll\n",
+		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll.meta\n",
+		"hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_run_executable_artifact write_run_artifact\n",
+		"hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test\n",
+		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll\n",
+		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll.meta\n",
+		"hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_test_executable_artifact write_test_artifact\n",
 	}
 }
 

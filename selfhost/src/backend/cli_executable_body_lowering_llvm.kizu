@@ -1,0 +1,240 @@
+import selfhost::backend::ir_contract;
+
+pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    try require_selected_body_lowering(ir_bytes);
+    try append_cli_lower_run_executable_ast_function(out, ir_bytes);
+    try append_cli_lower_test_executable_ast_function(out, ir_bytes);
+    return;
+}
+
+fn require_selected_body_lowering(ir_bytes: []u8) -> !void {
+    let run_function = "selfhost::backend::executable::lower_run_executable_ast";
+    let test_function = "selfhost::backend::executable::lower_test_executable_ast";
+    try ir_contract::require_named_fact(
+        ir_bytes,
+        "selected-body-lowering ",
+        run_function,
+        "checked-run-executable"
+    );
+    try ir_contract::require_named_fact(
+        ir_bytes,
+        "selected-body-lowering ",
+        test_function,
+        "checked-test-executable"
+    );
+    try ir_contract::require_named_fact(
+        ir_bytes,
+        "selected-body-lowering-unsupported ",
+        run_function,
+        "unsupported_executable"
+    );
+    try ir_contract::require_named_fact(
+        ir_bytes,
+        "selected-body-lowering-unsupported ",
+        test_function,
+        "unsupported_executable"
+    );
+    try require_lowering_body_shape(ir_bytes, run_function);
+    try require_lowering_body_shape(ir_bytes, test_function);
+    return;
+}
+
+fn append_cli_lower_run_executable_ast_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let function_name = "selfhost::backend::executable::lower_run_executable_ast";
+    let unsupported = try executable_kind_tag(ir_bytes, "Unsupported");
+    let run_print_ast_name = try body_field_expr_value(ir_bytes, function_name, 6);
+    let run_print_ast = try executable_ast_tag(ir_bytes, run_print_ast_name);
+    let run_print_kind_name = try body_field_expr_value(ir_bytes, function_name, 19);
+    let run_print_kind = try executable_kind_tag(ir_bytes, run_print_kind_name);
+    let run_return_ast_name = try body_field_expr_value(ir_bytes, function_name, 35);
+    let run_return_ast = try executable_ast_tag(ir_bytes, run_return_ast_name);
+    let run_return_kind_name = try body_field_expr_value(ir_bytes, function_name, 48);
+    let run_return_kind = try executable_kind_tag(ir_bytes, run_return_kind_name);
+    try append_line(out,
+        "define %kizu.selfhost.executable @kizu_selfhost__cli_lower_run_executable_ast(");
+    try append_line(out, "  %kizu.selfhost.executable.ast %ast");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %ast_kind = extractvalue %kizu.selfhost.executable.ast %ast, 0");
+    try append_line(out, "  %payload = extractvalue %kizu.selfhost.executable.ast %ast, 1");
+    try append_ast_kind_compare(out, "is_print", run_print_ast);
+    try append_line(out, "  br i1 %is_print, label %run_print, label %check_return");
+    try append_line(out, "run_print:");
+    try append_executable_return(out, "run_print", run_print_kind, "payload");
+    try append_line(out, "check_return:");
+    try append_ast_kind_compare(out, "is_return", run_return_ast);
+    try append_line(out, "  br i1 %is_return, label %run_return, label %unsupported");
+    try append_line(out, "run_return:");
+    try append_executable_return(out, "run_return", run_return_kind, "payload");
+    try append_line(out, "unsupported:");
+    try append_executable_return(out, "unsupported", unsupported, "payload");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_cli_lower_test_executable_ast_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let function_name = "selfhost::backend::executable::lower_test_executable_ast";
+    let unsupported = try executable_kind_tag(ir_bytes, "Unsupported");
+    let test_ok_ast_name = try body_field_expr_value(ir_bytes, function_name, 6);
+    let test_ok_ast = try executable_ast_tag(ir_bytes, test_ok_ast_name);
+    let test_ok_kind_name = try body_field_expr_value(ir_bytes, function_name, 19);
+    let test_ok_kind = try executable_kind_tag(ir_bytes, test_ok_kind_name);
+    let test_failure_ast_name = try body_field_expr_value(ir_bytes, function_name, 35);
+    let test_failure_ast = try executable_ast_tag(ir_bytes, test_failure_ast_name);
+    let test_failure_kind_name = try body_field_expr_value(ir_bytes, function_name, 48);
+    let test_failure_kind = try executable_kind_tag(ir_bytes, test_failure_kind_name);
+    try append_line(out,
+        "define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_executable_ast(");
+    try append_line(out, "  %kizu.selfhost.executable.ast %ast");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %ast_kind = extractvalue %kizu.selfhost.executable.ast %ast, 0");
+    try append_line(out, "  %payload = extractvalue %kizu.selfhost.executable.ast %ast, 1");
+    try append_ast_kind_compare(out, "is_ok", test_ok_ast);
+    try append_line(out, "  br i1 %is_ok, label %test_ok, label %check_failure");
+    try append_line(out, "test_ok:");
+    try append_executable_return(out, "test_ok", test_ok_kind, "payload");
+    try append_line(out, "check_failure:");
+    try append_ast_kind_compare(out, "is_failure", test_failure_ast);
+    try append_line(out, "  br i1 %is_failure, label %test_failure, label %unsupported");
+    try append_line(out, "test_failure:");
+    try append_executable_return(out, "test_failure", test_failure_kind, "payload");
+    try append_line(out, "unsupported:");
+    try append_executable_return(out, "unsupported", unsupported, "payload");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_executable_return(
+    out: &var std::string::String,
+    suffix: []u8,
+    kind: i64,
+    payload: []u8
+) -> !void {
+    try out.append_bytes("  %kinded_");
+    try out.append_bytes(suffix);
+    try out.append_bytes(" = insertvalue %kizu.selfhost.executable zeroinitializer, i64 ");
+    try std::fmt::append_i64(out, kind);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %result_");
+    try out.append_bytes(suffix);
+    try out.append_bytes(" = insertvalue %kizu.selfhost.executable %kinded_");
+    try out.append_bytes(suffix);
+    try out.append_bytes(", %kizu.slice.u8 %");
+    try out.append_bytes(payload);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.selfhost.executable %result_");
+    try out.append_bytes(suffix);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_ast_kind_compare(
+    out: &var std::string::String,
+    result: []u8,
+    kind: i64
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(result);
+    try out.append_bytes(" = icmp eq i64 %ast_kind, ");
+    try std::fmt::append_i64(out, kind);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn executable_ast_tag(ir_bytes: []u8, name: []u8) -> !i64 {
+    return try ir_contract::named_i64_fact(ir_bytes, "executable-ast-kind ", name);
+}
+
+fn executable_kind_tag(ir_bytes: []u8, name: []u8) -> !i64 {
+    return try ir_contract::named_i64_fact(ir_bytes, "executable-kind ", name);
+}
+
+fn body_field_expr_value(
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64
+) -> ![]u8 borrows ir_bytes {
+    return try ir_contract::sequence_fact_value(
+        ir_bytes,
+        "body-field-expr ",
+        function_name,
+        sequence
+    );
+}
+
+fn require_lowering_body_shape(ir_bytes: []u8, function_name: []u8) -> !void {
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-field-expr ",
+        function_name,
+        3,
+        "kind"
+    );
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-struct-literal ",
+        function_name,
+        13,
+        "data::Executable"
+    );
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-field-init ",
+        function_name,
+        17,
+        "kind"
+    );
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-field-init ",
+        function_name,
+        24,
+        "stdout_payload"
+    );
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-field-expr ",
+        function_name,
+        32,
+        "kind"
+    );
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-struct-literal ",
+        function_name,
+        42,
+        "data::Executable"
+    );
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-field-init ",
+        function_name,
+        46,
+        "kind"
+    );
+    try ir_contract::require_sequence_fact(
+        ir_bytes,
+        "body-field-init ",
+        function_name,
+        53,
+        "stdout_payload"
+    );
+    return;
+}
+
+fn append_line(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}

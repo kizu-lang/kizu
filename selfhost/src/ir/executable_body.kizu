@@ -6,14 +6,58 @@ pub fn append_function_body_ir(
     role: []u8,
     body: std::kizu::ast::NodeId
 ) -> !void {
-    try out.append_bytes("selected-function-body ");
+    try append_body_ir(
+        out,
+        text,
+        ast,
+        function_name,
+        role,
+        body,
+        "selected-function-body ",
+        "selected-function-body-end "
+    );
+    return;
+}
+
+pub fn append_helper_body_ir(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    role: []u8,
+    body: std::kizu::ast::NodeId
+) -> !void {
+    try append_body_ir(
+        out,
+        text,
+        ast,
+        function_name,
+        role,
+        body,
+        "selected-helper-body ",
+        "selected-helper-body-end "
+    );
+    return;
+}
+
+fn append_body_ir(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    role: []u8,
+    body: std::kizu::ast::NodeId,
+    start_prefix: []u8,
+    end_prefix: []u8
+) -> !void {
+    try out.append_bytes(start_prefix);
     try out.append_bytes(function_name);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(role);
     try out.append_byte(cast<u8>(10));
 
     let node_count = try append_body_node_ir(out, text, ast, function_name, body, 0, 0);
-    try out.append_bytes("selected-function-body-end ");
+    try out.append_bytes(end_prefix);
     try out.append_bytes(function_name);
     try out.append_byte(cast<u8>(32));
     try std::fmt::append_i64(out, node_count);
@@ -32,7 +76,7 @@ fn append_body_node_ir(
 ) -> !i64 {
     let node = ast.get(node_id);
     try append_body_node_fact(out, function_name, sequence, depth, node_id, ast);
-    try append_body_detail_fact(out, text, ast, function_name, node_id);
+    try append_body_detail_fact(out, text, ast, function_name, sequence, node_id);
 
     let next = sequence + 1;
     match node.data {
@@ -685,6 +729,7 @@ fn append_body_detail_fact(
     text: []u8,
     ast: std::kizu::ast::Ast,
     function_name: []u8,
+    sequence: i64,
     node_id: std::kizu::ast::NodeId
 ) -> !void {
     let node = ast.get(node_id);
@@ -693,6 +738,7 @@ fn append_body_detail_fact(
             out,
             "body-let ",
             function_name,
+            sequence,
             text,
             ast,
             let_node.name
@@ -702,6 +748,7 @@ fn append_body_detail_fact(
             text,
             ast,
             function_name,
+            sequence,
             call_node.callee,
             call_node.args.len
         );,
@@ -709,6 +756,7 @@ fn append_body_detail_fact(
             out,
             "body-return ",
             function_name,
+            sequence,
             ast,
             return_node.value
         );,
@@ -716,6 +764,7 @@ fn append_body_detail_fact(
             out,
             "body-struct-literal ",
             function_name,
+            sequence,
             text,
             ast,
             struct_literal.type_name
@@ -724,6 +773,7 @@ fn append_body_detail_fact(
             out,
             "body-field-init ",
             function_name,
+            sequence,
             text,
             ast,
             field_init.name
@@ -733,6 +783,7 @@ fn append_body_detail_fact(
             text,
             ast,
             function_name,
+            sequence,
             field_expr.name,
             field_expr.namespace
         );,
@@ -741,6 +792,7 @@ fn append_body_detail_fact(
             text,
             ast,
             function_name,
+            sequence,
             type_apply.callee,
             type_apply.type_args.len
         );,
@@ -748,18 +800,21 @@ fn append_body_detail_fact(
             out,
             "body-binary ",
             function_name,
+            sequence,
             binary_op_text(binary.op)
         );,
         Prefix(prefix_node) => return try append_body_op_fact(
             out,
             "body-prefix ",
             function_name,
+            sequence,
             prefix_op_text(prefix_node.op)
         );,
         TryExpr(try_expr) => return try append_body_kind_ref_fact(
             out,
             "body-try ",
             function_name,
+            sequence,
             ast,
             try_expr.value
         );,
@@ -767,6 +822,7 @@ fn append_body_detail_fact(
             out,
             "body-token ",
             function_name,
+            sequence,
             text,
             ast,
             node_id
@@ -775,6 +831,7 @@ fn append_body_detail_fact(
             out,
             "body-token ",
             function_name,
+            sequence,
             text,
             ast,
             node_id
@@ -783,6 +840,7 @@ fn append_body_detail_fact(
             out,
             "body-token ",
             function_name,
+            sequence,
             text,
             ast,
             node_id
@@ -791,12 +849,13 @@ fn append_body_detail_fact(
             out,
             "body-token ",
             function_name,
+            sequence,
             text,
             ast,
             node_id
         );,
         Bool(bool_node) => return try append_body_named_node_fact(
-            out, "body-token ", function_name, text, ast, node_id
+            out, "body-token ", function_name, sequence, text, ast, node_id
         );,
         _ => return;,
     }
@@ -807,11 +866,14 @@ fn append_body_call_fact(
     text: []u8,
     ast: std::kizu::ast::Ast,
     function_name: []u8,
+    sequence: i64,
     callee: std::kizu::ast::NodeId,
     arg_count: i64
 ) -> !void {
     try out.append_bytes("body-call ");
     try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, sequence);
     try out.append_byte(cast<u8>(32));
     try append_body_node_text_token(out, text, ast, callee);
     try out.append_byte(cast<u8>(32));
@@ -824,12 +886,15 @@ fn append_body_named_node_fact(
     out: &var std::string::String,
     prefix: []u8,
     function_name: []u8,
+    sequence: i64,
     text: []u8,
     ast: std::kizu::ast::Ast,
     value: std::kizu::ast::NodeId
 ) -> !void {
     try out.append_bytes(prefix);
     try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, sequence);
     try out.append_byte(cast<u8>(32));
     try append_body_node_text_token(out, text, ast, value);
     try out.append_byte(cast<u8>(10));
@@ -840,11 +905,14 @@ fn append_body_kind_ref_fact(
     out: &var std::string::String,
     prefix: []u8,
     function_name: []u8,
+    sequence: i64,
     ast: std::kizu::ast::Ast,
     value: std::kizu::ast::NodeId
 ) -> !void {
     try out.append_bytes(prefix);
     try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, sequence);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(body_node_kind(ast, value));
     try out.append_byte(cast<u8>(10));
@@ -856,11 +924,14 @@ fn append_body_field_expr_fact(
     text: []u8,
     ast: std::kizu::ast::Ast,
     function_name: []u8,
+    sequence: i64,
     name: std::kizu::ast::NodeId,
     namespace: bool
 ) -> !void {
     try out.append_bytes("body-field-expr ");
     try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, sequence);
     try out.append_byte(cast<u8>(32));
     try append_body_node_text_token(out, text, ast, name);
     try out.append_byte(cast<u8>(32));
@@ -877,10 +948,13 @@ fn append_body_op_fact(
     out: &var std::string::String,
     prefix: []u8,
     function_name: []u8,
+    sequence: i64,
     op: []u8
 ) -> !void {
     try out.append_bytes(prefix);
     try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, sequence);
     try out.append_byte(cast<u8>(32));
     try out.append_bytes(op);
     try out.append_byte(cast<u8>(10));
