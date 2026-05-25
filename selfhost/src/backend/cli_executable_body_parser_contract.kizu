@@ -58,6 +58,72 @@ fn require_run_parser_body_shape(ir_bytes: []u8) -> !void {
         "selfhost::backend::executable::run_payload_from_literal",
         "is_supported_run_print_payload"
     );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_executable_ast",
+        "Program",
+        "parse_run_program_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_executable_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_fn_ast",
+        "Block",
+        "parse_run_block_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_fn_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_block_ast",
+        "ExprStmt",
+        "parse_run_print_stmt_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_block_ast",
+        "Return",
+        "parse_run_return_stmt_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_block_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_print_stmt_ast",
+        "Call",
+        "parse_run_print_call_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_run_print_stmt_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::run_string_literal_payload",
+        "String",
+        "run_payload_from_literal"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::run_string_literal_payload",
+        "_",
+        "unsupported_executable_ast"
+    );
     return;
 }
 
@@ -112,12 +178,136 @@ fn require_test_parser_body_shape(ir_bytes: []u8) -> !void {
         "selfhost::backend::executable::expect_bool_value",
         "bool_value_as_i64"
     );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_test_executable_ast",
+        "Program",
+        "parse_test_program_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_test_executable_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_test_fn_ast",
+        "Block",
+        "parse_test_block_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_test_fn_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_test_expect_statement_ast",
+        "ExprStmt",
+        "parse_expect_stmt_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_test_expect_statement_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_expect_stmt_ast",
+        "Call",
+        "parse_expect_call_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::parse_expect_stmt_ast",
+        "_",
+        "unsupported_executable_ast"
+    );
+    try require_match_arm_dispatch(
+        ir_bytes,
+        "selfhost::backend::executable::expect_bool_value",
+        "Bool",
+        "bool_value_as_i64"
+    );
     return;
 }
 
 fn require_parser_body_call(ir_bytes: []u8, function_name: []u8, callee: []u8) -> !void {
     try ir_contract::require_body_call(ir_bytes, function_name, callee);
     return;
+}
+
+fn require_match_arm_dispatch(
+    ir_bytes: []u8,
+    function_name: []u8,
+    pattern: []u8,
+    callee: []u8
+) -> !void {
+    let arm = try find_match_arm_with_pattern(ir_bytes, function_name, pattern);
+    let body = try ir_contract::body_child_sequence(ir_bytes, function_name, arm, "body", 0);
+    if try match_arm_body_calls(ir_bytes, function_name, body, callee) {
+        return;
+    }
+    return error("missing IR artifact fact");
+}
+
+fn find_match_arm_with_pattern(
+    ir_bytes: []u8,
+    function_name: []u8,
+    pattern: []u8
+) -> !i64 {
+    return try ir_contract::body_parent_with_child_token(
+        ir_bytes,
+        function_name,
+        "pattern",
+        0,
+        pattern
+    );
+}
+
+fn match_arm_body_calls(
+    ir_bytes: []u8,
+    function_name: []u8,
+    body: i64,
+    callee: []u8
+) -> !bool {
+    let body_kind = try ir_contract::body_node_kind(ir_bytes, function_name, body);
+    if std::mem::equal_bytes(body_kind, "ExprStmt") {
+        let expr = try ir_contract::body_child_sequence(ir_bytes, function_name, body, "expr", 0);
+        return try expression_calls(ir_bytes, function_name, expr, callee);
+    }
+    return try expression_calls(ir_bytes, function_name, body, callee);
+}
+
+fn expression_calls(
+    ir_bytes: []u8,
+    function_name: []u8,
+    expression: i64,
+    callee: []u8
+) -> !bool {
+    let expression_kind = try ir_contract::body_node_kind(ir_bytes, function_name, expression);
+    if std::mem::equal_bytes(expression_kind, "Call") {
+        return try call_matches(ir_bytes, function_name, expression, callee);
+    }
+    if std::mem::equal_bytes(expression_kind, "TryExpr") {
+        let value = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            expression,
+            "value",
+            0
+        );
+        return try expression_calls(ir_bytes, function_name, value, callee);
+    }
+    return false;
+}
+
+fn call_matches(ir_bytes: []u8, function_name: []u8, call: i64, callee: []u8) -> !bool {
+    let actual = try ir_contract::body_call_callee_or_empty(ir_bytes, function_name, call);
+    return std::mem::equal_bytes(actual, callee);
 }
 
 fn require_parser_source_tokens(ir_bytes: []u8) -> !void {

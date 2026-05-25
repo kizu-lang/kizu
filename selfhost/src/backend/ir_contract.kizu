@@ -119,6 +119,39 @@ pub fn sequence_fact_second_value(
     return bytes[second_start..second_end];
 }
 
+pub fn sequence_fact_value_or_empty(
+    bytes: []u8,
+    prefix: []u8,
+    name: []u8,
+    sequence: i64
+) -> ![]u8 borrows bytes {
+    let byte_len = std::mem::len(bytes);
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(name);
+    var index = 0;
+    while index + prefix_len + name_len < byte_len {
+        if is_line_start(bytes, index) and
+            std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], name) and
+                is_space(bytes[name_end]) {
+                let value_start = try sequence_fact_value_start_in_line(
+                    bytes,
+                    name_end,
+                    sequence
+                );
+                if value_start >= 0 {
+                    let value_end = token_end(bytes, value_start);
+                    return bytes[value_start..value_end];
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return bytes[0..0];
+}
+
 pub fn sequence_fact_exists(
     bytes: []u8,
     prefix: []u8,
@@ -146,6 +179,59 @@ pub fn sequence_fact_exists(
         index = index + 1;
     }
     return false;
+}
+
+pub fn body_token_or_empty(
+    bytes: []u8,
+    function_name: []u8,
+    sequence: i64
+) -> ![]u8 borrows bytes {
+    return try sequence_fact_value_or_empty(bytes, "body-token ", function_name, sequence);
+}
+
+pub fn body_call_callee_or_empty(
+    bytes: []u8,
+    function_name: []u8,
+    sequence: i64
+) -> ![]u8 borrows bytes {
+    return try sequence_fact_value_or_empty(bytes, "body-call ", function_name, sequence);
+}
+
+pub fn body_parent_with_child_token(
+    bytes: []u8,
+    function_name: []u8,
+    edge: []u8,
+    ordinal: i64,
+    token: []u8
+) -> !i64 {
+    let byte_len = std::mem::len(bytes);
+    let prefix = "body-edge ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    var index = 0;
+    while index + prefix_len + name_len < byte_len {
+        if is_line_start(bytes, index) and
+            std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], function_name) and
+                is_space(bytes[name_end]) {
+                let parent = try body_edge_line_parent_with_child_token(
+                    bytes,
+                    function_name,
+                    name_end,
+                    edge,
+                    ordinal,
+                    token
+                );
+                if parent >= 0 {
+                    return parent;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("missing IR artifact fact");
 }
 
 pub fn sequence_fact_count(bytes: []u8, prefix: []u8, name: []u8) -> !i64 {
@@ -303,6 +389,39 @@ fn body_child_sequence_in_line(
     return try parse_i64_token(bytes, child_start);
 }
 
+fn body_edge_line_parent_with_child_token(
+    bytes: []u8,
+    function_name: []u8,
+    name_end: i64,
+    edge: []u8,
+    ordinal: i64,
+    token: []u8
+) -> !i64 {
+    let parent_start = skip_spaces(bytes, name_end);
+    let parent = try parse_i64_token(bytes, parent_start);
+    let parent_end = token_end(bytes, parent_start);
+    let edge_start = skip_spaces(bytes, parent_end);
+    let edge_end = token_end(bytes, edge_start);
+    if !std::mem::equal_bytes(bytes[edge_start..edge_end], edge) {
+        return -1;
+    }
+
+    let ordinal_start = skip_spaces(bytes, edge_end);
+    let actual_ordinal = try parse_i64_token(bytes, ordinal_start);
+    if actual_ordinal != ordinal {
+        return -1;
+    }
+
+    let ordinal_end = token_end(bytes, ordinal_start);
+    let child_start = skip_spaces(bytes, ordinal_end);
+    let child = try parse_i64_token(bytes, child_start);
+    let actual = try body_token_or_empty(bytes, function_name, child);
+    if std::mem::equal_bytes(actual, token) {
+        return parent;
+    }
+    return -1;
+}
+
 fn body_call_line_matches(bytes: []u8, name_end: i64, callee: []u8) -> bool {
     let sequence_start = skip_spaces(bytes, name_end);
     let sequence_end = token_end(bytes, sequence_start);
@@ -339,6 +458,16 @@ fn sequence_fact_value_start(
         index = index + 1;
     }
     return error("missing IR artifact fact");
+}
+
+fn sequence_fact_value_start_in_line(bytes: []u8, name_end: i64, sequence: i64) -> !i64 {
+    let sequence_start = skip_spaces(bytes, name_end);
+    let actual = try parse_i64_token(bytes, sequence_start);
+    let sequence_end = token_end(bytes, sequence_start);
+    if actual == sequence {
+        return skip_spaces(bytes, sequence_end);
+    }
+    return -1;
 }
 
 fn body_node_kind_start(bytes: []u8, function_name: []u8, sequence: i64) -> !i64 {
