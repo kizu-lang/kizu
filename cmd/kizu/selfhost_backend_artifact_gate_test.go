@@ -431,6 +431,7 @@ func requiredLLVMMetadataFragments() []string {
 	}
 	fragments = append(fragments, requiredLLVMMetadataSelectedFunctionFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
 	fragments = append(fragments, []string{
@@ -505,6 +506,22 @@ func requiredLLVMMetadataSelectedBodyFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"backend-input selected-function-body selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
+	}
+}
+
+// requiredLLVMMetadataSelectedBodyParsingFragments returns body parser inputs.
+func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
+	return []string{
+		"backend-input executable-selected-body-parsing checked-ast-body-parsing-v1\n",
+		"backend-input selected-body-parsing selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"backend-input selected-body-parsing selfhost::backend::executable::" +
+			"parse_test_executable_ast checked-test-ast\n",
+		"backend-input selected-body-parser-rule MainScan LeadingFunctions\n",
+		"backend-input selected-body-parser-rule RunPrintCall MainPrintString\n",
+		"backend-input selected-body-parser-rule RunReturnVoid MainReturnVoid\n",
+		"backend-input selected-body-parser-rule TestExpectTrue MainExpectTrue\n",
+		"backend-input selected-body-parser-rule TestExpectFalse MainExpectFalse\n",
 	}
 }
 

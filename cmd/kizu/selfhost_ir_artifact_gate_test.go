@@ -91,6 +91,7 @@ func requiredSelfhostIRContractFragments() []string {
 	}
 	fragments = append(fragments, requiredSelfhostIRSelectedFunctionFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyFragments()...)
+	fragments = append(fragments, requiredSelfhostIRSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyLoweringFragments()...)
 	return append(fragments, []string{
 		"frontend-executable-lowering checked-ast-bounded\n",
@@ -182,6 +183,22 @@ func requiredSelfhostIRSelectedBodyFragments() []string {
 			"write_run_artifact 6\n",
 		"body-call selfhost::backend::hosted::emit_test_executable_artifact " +
 			"write_test_artifact 6\n",
+	}
+}
+
+// requiredSelfhostIRSelectedBodyParsingFragments returns checked AST parser facts.
+func requiredSelfhostIRSelectedBodyParsingFragments() []string {
+	return []string{
+		"executable-selected-body-parsing checked-ast-body-parsing-v1\n",
+		"selected-body-parsing selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"selected-body-parsing selfhost::backend::executable::" +
+			"parse_test_executable_ast checked-test-ast\n",
+		"selected-body-parser-rule MainScan LeadingFunctions\n",
+		"selected-body-parser-rule RunPrintCall MainPrintString\n",
+		"selected-body-parser-rule RunReturnVoid MainReturnVoid\n",
+		"selected-body-parser-rule TestExpectTrue MainExpectTrue\n",
+		"selected-body-parser-rule TestExpectFalse MainExpectFalse\n",
 	}
 }
 
