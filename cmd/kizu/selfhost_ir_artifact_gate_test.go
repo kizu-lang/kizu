@@ -121,7 +121,6 @@ func requiredSelfhostIRContractFragments() []string {
 // requiredSelfhostIRSelectedSignatureFragments returns selected executable signatures.
 func requiredSelfhostIRSelectedSignatureFragments() []string {
 	return []string{
-		"executable-selected-signatures checked-ast-signature-v1\n",
 		"selected-signature-param-count selfhost::cli::execute::run_file_cli 3\n",
 		"selected-signature-return selfhost::cli::execute::run_file_cli !i64\n",
 		"selected-signature-param selfhost::cli::execute::run_file_cli#0 " +
@@ -148,21 +147,23 @@ func requiredSelfhostIRSelectedSignatureFragments() []string {
 // requiredSelfhostIRSelectedBodyFragments returns checked AST body IR facts.
 func requiredSelfhostIRSelectedBodyFragments() []string {
 	return []string{
-		"executable-selected-body-ir checked-ast-body-v1\n",
+		"body-call selfhost::cli::execute::run_file_cli ",
+		"body-call selfhost::backend::hosted::emit_run_executable_artifact ",
+		"selected-function-body-end selfhost::backend::executable::lower_run_executable_ast ",
 	}
 }
 
 // requiredSelfhostIRSelectedHelperBodyFragments returns checked helper body IR facts.
 func requiredSelfhostIRSelectedHelperBodyFragments() []string {
 	return []string{
-		"executable-selected-helper-body-ir checked-ast-helper-body-v1\n",
+		"selected-helper-body-end selfhost::backend::executable::parse_run_program_ast ",
+		"selected-helper-body-end selfhost::backend::executable::parse_test_program_ast ",
 	}
 }
 
 // requiredSelfhostIRSelectedBodyParsingFragments returns checked AST parser facts.
 func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 	return []string{
-		"executable-selected-body-parsing checked-ast-body-parsing-v1\n",
 		"selected-body-parsing-token syntax-fn fn\n",
 		"selected-body-parsing-token syntax-test test\n",
 		"selected-body-parsing-token syntax-return return\n",
@@ -180,7 +181,8 @@ func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 // requiredSelfhostIRSelectedBodyLoweringFragments returns the selected body lowering gate fact.
 func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
 	return []string{
-		"executable-selected-body-lowering checked-ast-body-lowering-v1\n",
+		"selected-function-body-end selfhost::backend::executable::lower_run_executable_ast ",
+		"selected-function-body-end selfhost::backend::executable::lower_test_executable_ast ",
 	}
 }
 
@@ -188,7 +190,6 @@ func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
 // artifact path facts derived from backend::hosted writer bodies.
 func requiredSelfhostIRHostedArtifactPathFragments() []string {
 	return []string{
-		"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1\n",
 		"hosted-artifact-dir selfhost::backend::hosted::" +
 			"emit_run_executable_artifact target/selfhost/run\n",
 		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
@@ -247,7 +248,6 @@ func requiredSelfhostIRHostedArtifactPathFragments() []string {
 // behavior facts derived from backend::hosted lowering bodies.
 func requiredSelfhostIRHostedLoweringFragments() []string {
 	return []string{
-		"executable-hosted-lowering checked-ast-hosted-lowering-v1\n",
 		"hosted-lowering-case-count selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 2\n",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +

@@ -1264,7 +1264,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_selected_signature_param(",
 		"fn require_function_body_fragment(",
 		"fn function_node(",
-		"executable-selected-signatures checked-ast-signature-v1",
 		"executable_body::append_function_body_ir(",
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
@@ -1415,13 +1414,13 @@ func assertHostedExecutableBackendInputs(
 ) {
 	t.Helper()
 	llvm := sources.llvm
+	assertExecutableStageMarkersRemoved(t, sources)
 	assertExecutableSelectedSignaturesValidated(
 		t,
 		llvm,
 		facts.selectedSignatureDetails,
 	)
 	assertExecutableSelectedBodiesValidated(t, llvm)
-	assertExecutableSelectedHelperBodiesValidated(t, llvm)
 	assertExecutableSelectedBodyParsingValidated(
 		t,
 		llvm,
@@ -1627,6 +1626,35 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 	}
 }
 
+// assertExecutableStageMarkersRemoved keeps the executable contract tied to
+// concrete facts instead of role-only stage markers.
+func assertExecutableStageMarkersRemoved(t *testing.T, sources hostedExecutableContractSources) {
+	t.Helper()
+	markers := []string{
+		"executable-selected-signatures checked-ast-signature-v1",
+		"executable-selected-body-ir checked-ast-body-v1",
+		"executable-selected-helper-body-ir checked-ast-helper-body-v1",
+		"executable-selected-body-parsing checked-ast-body-parsing-v1",
+		"executable-selected-body-lowering checked-ast-body-lowering-v1",
+		"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1",
+		"executable-hosted-lowering checked-ast-hosted-lowering-v1",
+	}
+	files := map[string]string{
+		"ir root":           sources.ir,
+		"selected facts":    sources.selected,
+		"backend llvm":      sources.llvm,
+		"parser contract":   sources.parser,
+		"lowering contract": sources.loweringContract,
+	}
+	for name, content := range files {
+		for _, marker := range markers {
+			if strings.Contains(content, marker) {
+				t.Fatalf("%s still depends on executable stage marker %q", name, marker)
+			}
+		}
+	}
+}
+
 // assertExecutableSelectedSignaturesValidated keeps selected executable ABI
 // shape tied to checked source signatures before direct rendering can use it.
 func assertExecutableSelectedSignaturesValidated(
@@ -1635,15 +1663,6 @@ func assertExecutableSelectedSignaturesValidated(
 	details []string,
 ) {
 	t.Helper()
-	if !strings.Contains(llvm, `"executable-selected-signatures checked-ast-signature-v1"`) {
-		t.Fatal("backend IR validation does not require selected executable signatures")
-	}
-	if !strings.Contains(
-		llvm,
-		`"backend-input executable-selected-signatures checked-ast-signature-v1"`,
-	) {
-		t.Fatal("backend metadata does not record selected executable signatures")
-	}
 	for _, fact := range details {
 		assertExecutableSignatureDetailConsumer(t, llvm, fact)
 	}
@@ -1664,12 +1683,6 @@ func assertExecutableSignatureDetailConsumer(t *testing.T, llvm string, fact str
 // AST body facts, not only selected function names.
 func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string) {
 	t.Helper()
-	if !strings.Contains(llvm, `"executable-selected-body-ir checked-ast-body-v1"`) {
-		t.Fatal("backend IR validation does not require selected executable body IR")
-	}
-	if !strings.Contains(llvm, `"backend-input executable-selected-body-ir checked-ast-body-v1"`) {
-		t.Fatal("backend metadata does not record selected executable body IR")
-	}
 	for _, fragment := range hostedExecutableBodyContractFragments() {
 		if !strings.Contains(llvm, fragment) {
 			t.Fatalf("backend IR validation does not require body semantic fragment %q", fragment)
@@ -1682,21 +1695,6 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string) {
 	}
 }
 
-// assertExecutableSelectedHelperBodiesValidated keeps private executable helper
-// body IR required before generated parser code can be accepted.
-func assertExecutableSelectedHelperBodiesValidated(t *testing.T, llvm string) {
-	t.Helper()
-	if !strings.Contains(llvm, `"executable-selected-helper-body-ir checked-ast-helper-body-v1"`) {
-		t.Fatal("backend IR validation does not require selected executable helper body IR")
-	}
-	if !strings.Contains(
-		llvm,
-		`"backend-input executable-selected-helper-body-ir checked-ast-helper-body-v1"`,
-	) {
-		t.Fatal("backend metadata does not record selected executable helper body IR")
-	}
-}
-
 // assertExecutableSelectedBodyParsingValidated keeps parser facts tied to
 // selected checked AST bodies before hosted parser rendering consumes them.
 func assertExecutableSelectedBodyParsingValidated(
@@ -1706,25 +1704,7 @@ func assertExecutableSelectedBodyParsingValidated(
 	facts []string,
 ) {
 	t.Helper()
-	if !strings.Contains(
-		parser,
-		`"executable-selected-body-parsing checked-ast-body-parsing-v1"`,
-	) {
-		t.Fatal("backend IR validation does not require selected body parsing facts")
-	}
-	if !strings.Contains(
-		llvm,
-		`"backend-input executable-selected-body-parsing checked-ast-body-parsing-v1"`,
-	) {
-		t.Fatal("backend metadata does not record selected body parsing facts")
-	}
 	for _, fact := range facts {
-		if fact == "executable-selected-body-parsing checked-ast-body-parsing-v1" {
-			if !strings.Contains(parser, `"`+fact+`"`) {
-				t.Fatalf("backend selected-body-parsing validation missing %q", fact)
-			}
-			continue
-		}
 		if strings.HasPrefix(fact, "selected-body-parsing-token ") {
 			assertNamedFactConsumer(t, parser, "backend selected-body-parsing validation", fact)
 			continue
@@ -1742,15 +1722,6 @@ func assertExecutableSelectedBodyParsingValidated(
 // contract validation required before the hosted lowerer can consume body IR.
 func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string) {
 	t.Helper()
-	if !strings.Contains(llvm, `"executable-selected-body-lowering checked-ast-body-lowering-v1"`) {
-		t.Fatal("backend IR validation does not require selected body lowering facts")
-	}
-	if !strings.Contains(
-		llvm,
-		`"backend-input executable-selected-body-lowering checked-ast-body-lowering-v1"`,
-	) {
-		t.Fatal("backend metadata does not record selected body lowering facts")
-	}
 	for _, fragment := range []string{
 		"cli_executable_body_lowering_contract::require(",
 	} {
@@ -1764,18 +1735,6 @@ func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string) {
 // to the selected hosted writer bodies instead of renderer-local constants.
 func assertExecutableHostedArtifactPathsValidated(t *testing.T, llvm string, facts []string) {
 	t.Helper()
-	if !strings.Contains(
-		llvm,
-		`"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1"`,
-	) {
-		t.Fatal("backend IR validation does not require hosted artifact path facts")
-	}
-	if !strings.Contains(
-		llvm,
-		`"backend-input executable-hosted-artifact-paths checked-ast-hosted-artifact-v1"`,
-	) {
-		t.Fatal("backend metadata does not record hosted artifact path facts")
-	}
 	for _, fact := range facts {
 		assertNamedFactConsumer(t, llvm, "backend hosted artifact path validation", fact)
 	}
@@ -1785,15 +1744,6 @@ func assertExecutableHostedArtifactPathsValidated(t *testing.T, llvm string, fac
 // required by the backend before stage2 dispatch can consume them.
 func assertExecutableHostedLoweringValidated(t *testing.T, llvm string, facts []string) {
 	t.Helper()
-	if !strings.Contains(llvm, `"executable-hosted-lowering checked-ast-hosted-lowering-v1"`) {
-		t.Fatal("backend IR validation does not require hosted lowering facts")
-	}
-	if !strings.Contains(
-		llvm,
-		`"backend-input executable-hosted-lowering checked-ast-hosted-lowering-v1"`,
-	) {
-		t.Fatal("backend metadata does not record hosted lowering facts")
-	}
 	for _, fact := range facts {
 		if strings.HasPrefix(fact, "hosted-lowering-case-count ") {
 			assertNamedI64FactConsumer(t, llvm, "backend hosted lowering validation", fact)
@@ -3154,7 +3104,6 @@ func hostedExecutableTestHostedLoweringFacts() []string {
 // from the selected executable AST parser implementation.
 func hostedExecutableSelectedBodyParsingFacts() []string {
 	facts := []string{
-		"executable-selected-body-parsing checked-ast-body-parsing-v1",
 		"selected-body-parsing-token syntax-fn fn",
 		"selected-body-parsing-token syntax-test test",
 		"selected-body-parsing-token syntax-return return",
