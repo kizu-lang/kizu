@@ -1918,6 +1918,12 @@ func countHostedCompilerCLIArtifactSourceFailures(
 		t.Errorf("hosted compiler artifact %s missing %q:\n%s", metaPath, expectedOutput, metaContent)
 		return 1
 	}
+	expectedLowering := "executable_lowering selfhost::backend::executable checked-ast\n"
+	if !strings.Contains(metaContent, expectedLowering) {
+		t.Errorf("hosted compiler artifact %s missing %q:\n%s",
+			metaPath, expectedLowering, metaContent)
+		return 1
+	}
 	if strings.Contains(llContent, rejectedSourcePath) {
 		t.Errorf("hosted compiler artifact %s kept rejected source %q:\n%s",
 			llPath, rejectedSourcePath, llContent)
