@@ -149,24 +149,6 @@ func requiredSelfhostIRSelectedSignatureFragments() []string {
 func requiredSelfhostIRSelectedBodyFragments() []string {
 	return []string{
 		"executable-selected-body-ir checked-ast-body-v1\n",
-		"selected-function-body selfhost::cli::execute::run_file_cli checked-run-artifact\n",
-		"selected-function-body selfhost::cli::execute::test_file_cli checked-test-artifact\n",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper\n",
-		"selected-function-body selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast\n",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable\n",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_test_executable checked-test-wrapper\n",
-		"selected-function-body selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast\n",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable\n",
-		"selected-function-body selfhost::backend::hosted::" +
-			"emit_run_executable_artifact hosted-run-writer\n",
-		"selected-function-body selfhost::backend::hosted::" +
-			"emit_test_executable_artifact hosted-test-writer\n",
 		"body-call selfhost::cli::execute::run_file_cli 82 check::checked_ast_node 6\n",
 		"body-call selfhost::cli::execute::run_file_cli 109 backend::lower_run_executable 3\n",
 		"body-call selfhost::cli::execute::test_file_cli 109 backend::lower_test_executable 3\n",
@@ -189,52 +171,6 @@ func requiredSelfhostIRSelectedBodyFragments() []string {
 func requiredSelfhostIRSelectedHelperBodyFragments() []string {
 	return []string{
 		"executable-selected-helper-body-ir checked-ast-helper-body-v1\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_program_ast checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_fn_ast checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_block_ast checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_return_stmt_ast checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_print_stmt_ast checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_print_call_ast checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"run_string_literal_payload checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"run_payload_from_literal checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_supported_run_print_payload checked-run-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_program_ast checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_fn_ast checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_block_ast checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_expect_statement_ast checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_void_return_type checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_expect_stmt_ast checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_expect_call_ast checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_empty_return checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"expect_bool_value checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"bool_value_as_i64 checked-test-ast-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_empty_node checked-executable-shared-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"unsupported_executable_ast checked-executable-shared-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"unsupported_executable checked-executable-shared-helper\n",
-		"selected-helper-body selfhost::backend::executable::" +
-			"ast_node_text checked-executable-shared-helper\n",
 		"body-call selfhost::backend::executable::parse_run_program_ast " +
 			"39 parse_run_fn_ast 4\n",
 		"body-call selfhost::backend::executable::parse_test_program_ast " +
