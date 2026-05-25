@@ -2096,15 +2096,7 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 	for _, fact := range facts {
 		assertSelectedBodyParsingFactOrigin(t, emitter, llvm, fact)
 	}
-	for _, fragment := range []string{
-		"ir_contract::require_body_call(",
-		"parse_run_executable_ast",
-		"parse_test_executable_ast",
-	} {
-		if !strings.Contains(parser, fragment) {
-			t.Fatalf("selected body parsing contract missing body-call validation %q", fragment)
-		}
-	}
+	assertExecutableSelectedBodyParsingParserContract(t, parser)
 	for _, content := range []string{bodyParsing, parser, llvm} {
 		if strings.Contains(content, `"selected-body-parsing `) {
 			t.Fatal("selected body parsing still depends on dedicated named facts")
@@ -2116,6 +2108,33 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 	} {
 		if strings.Contains(bodyParsing, fragment) {
 			t.Fatalf("selected body parsing still uses source substring validation %q", fragment)
+		}
+	}
+}
+
+// assertExecutableSelectedBodyParsingParserContract checks the hosted parser
+// renderer is gated by generic body IR shape, not only broad call presence.
+func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"ir_contract::require_body_call(",
+		"require_match_arm_dispatch(",
+		"find_match_arm_with_pattern(",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_parent_with_child_token(",
+		"ir_contract::body_call_callee_or_empty(",
+		"parse_run_executable_ast",
+		"parse_test_executable_ast",
+		`"Program"`,
+		`"Block"`,
+		`"ExprStmt"`,
+		`"Return"`,
+		`"Call"`,
+		`"String"`,
+		`"Bool"`,
+	} {
+		if !strings.Contains(parser, fragment) {
+			t.Fatalf("selected body parsing contract missing body-call validation %q", fragment)
 		}
 	}
 }
@@ -2645,6 +2664,8 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"ir_contract::require_named_fact(",
 		"ir_contract::named_fact_value(",
 		"ir_contract::require_body_call(",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_parent_with_child_token(",
 		"executable-parser-token ",
 		"parser_source_token(",
 	} {
@@ -2669,11 +2690,10 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		}
 	}
 	for _, fragment := range []string{
-		"ir_contract::body_child_sequence(",
 		"ir_contract::require_sequence_fact(",
 	} {
 		if strings.Contains(parser, fragment) {
-			t.Fatalf("hosted executable parser still traverses body facts with %q", fragment)
+			t.Fatalf("hosted executable parser still depends on exact body facts with %q", fragment)
 		}
 	}
 }
