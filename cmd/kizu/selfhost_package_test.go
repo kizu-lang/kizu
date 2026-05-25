@@ -1141,11 +1141,15 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn prefix_size(",
 		"pub fn append_output_prefix_constant(",
 		"pub fn output_prefix_size(",
+		"pub fn append_suffix_constant(",
+		"pub fn suffix_size(",
 		"fn metadata_fact(",
+		"fn common_metadata_fact(",
 		"fn llvm_c_decoded_len(",
 		"hosted-artifact-metadata-title ",
 		"hosted-artifact-metadata-source-prefix ",
 		"hosted-artifact-metadata-output-prefix ",
+		"hosted-artifact-metadata-fallback-line ",
 	},
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2318,6 +2322,13 @@ func assertExecutableHostedArtifactPathsComeFromCheckedAST(
 		"hosted-artifact-metadata-issue ",
 		"hosted-artifact-metadata-source-prefix ",
 		"hosted-artifact-metadata-output-prefix ",
+		"hosted-artifact-metadata-abi-line ",
+		"hosted-artifact-metadata-entry-prefix ",
+		"hosted-artifact-metadata-runtime-line ",
+		"hosted-artifact-metadata-lowering-line ",
+		"hosted-artifact-metadata-fallback-line ",
+		"hosted-artifact-metadata-mode-line ",
+		"hosted-artifact-metadata-discovery-line ",
 	} {
 		if !strings.Contains(hostedPaths, fragment) {
 			t.Fatalf("hosted artifact path facts are not checked AST-derived via %q", fragment)
@@ -2446,6 +2457,11 @@ func assertExecutableHostedArtifactGlobalConsumers(
 		`"hosted-artifact-metadata-issue "`,
 		`"hosted-artifact-metadata-source-prefix "`,
 		`"hosted-artifact-metadata-output-prefix "`,
+		`"hosted-artifact-metadata-abi-line "`,
+		`"hosted-artifact-metadata-entry-prefix "`,
+		`"hosted-artifact-metadata-fallback-line "`,
+		`"hosted-artifact-metadata-mode-line "`,
+		`"hosted-artifact-metadata-discovery-line "`,
 	} {
 		if !strings.Contains(metadata, fragment) {
 			t.Fatalf("hosted metadata globals do not consume IR fact %q", fragment)
@@ -2468,6 +2484,8 @@ func assertExecutableHostedArtifactGlobalConsumers(
 			"cli_hosted_metadata_llvm::append_prefix_constant(",
 			"cli_hosted_metadata_llvm::prefix_size(",
 			"cli_hosted_metadata_llvm::output_prefix_size(",
+			"cli_hosted_metadata_llvm::append_suffix_constant(",
+			"cli_hosted_metadata_llvm::suffix_size(",
 			"metadata_path_prefix",
 			"metadata_path_suffix",
 		} {
@@ -2506,6 +2524,31 @@ func assertExecutableHostedMetadataPrefixNotRendererLocal(t *testing.T, run stri
 			name:     "test",
 			content:  test,
 			fragment: `append_llvm_constant(out, "test_meta_prefix"`,
+		},
+		{
+			name:     "run",
+			content:  run,
+			fragment: `fn append_hosted_meta_suffix_constant(`,
+		},
+		{
+			name:     "test",
+			content:  test,
+			fragment: `fn append_hosted_meta_suffix_constant(`,
+		},
+		{
+			name:     "run",
+			content:  run,
+			fragment: `go.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact`,
+		},
+		{
+			name:     "test",
+			content:  test,
+			fragment: `go.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact`,
+		},
+		{
+			name:     "test",
+			content:  test,
+			fragment: `discovery none\0A`,
 		},
 	} {
 		if strings.Contains(forbidden.content, forbidden.fragment) {
@@ -2587,7 +2630,7 @@ func assertHostedLoweringSliceSizesUseFacts(t *testing.T, run string, test strin
 		"run_dynamic_body_prefix_size(",
 		"run_dynamic_body_suffix_size(",
 		"hosted_return_body_suffix_size(",
-		"hosted_meta_suffix_size(",
+		"cli_hosted_metadata_llvm::suffix_size(",
 		`"run_return_ll_prefix_source"`,
 		`"run_return_meta_suffix"`,
 	} {
@@ -2599,7 +2642,7 @@ func assertHostedLoweringSliceSizesUseFacts(t *testing.T, run string, test strin
 		"hosted_artifact_fact_len(",
 		"hosted_prefix_source_size(",
 		"test_case_ll_suffix_size(",
-		"hosted_meta_suffix_size(",
+		"cli_hosted_metadata_llvm::suffix_size(",
 		`"test_ok_ll_prefix"`,
 		`"test_failure_ll_prefix"`,
 	} {
@@ -3219,6 +3262,21 @@ func hostedExecutableHostedArtifactPathFacts() []string {
 			"append_common_metadata source\\20",
 		"hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
 			"append_common_metadata output\\20",
+		"hosted-artifact-metadata-abi-line selfhost::backend::hosted::" +
+			"append_common_metadata abi\\20selfhost-abi-v0",
+		"hosted-artifact-metadata-entry-prefix selfhost::backend::hosted::" +
+			"append_common_metadata entry\\20@",
+		"hosted-artifact-metadata-runtime-line selfhost::backend::hosted::" +
+			"append_common_metadata runtime\\20target/selfhost/selfhost.host.ll",
+		"hosted-artifact-metadata-lowering-line selfhost::backend::hosted::" +
+			"append_common_metadata executable_lowering\\20selfhost::backend::" +
+			"executable\\20checked-ast",
+		"hosted-artifact-metadata-fallback-line selfhost::backend::hosted::" +
+			"append_common_metadata go.cmd-kizu-fallback\\20none",
+		"hosted-artifact-metadata-mode-line selfhost::backend::hosted::" +
+			"append_common_metadata artifact_mode\\20hosted-artifact",
+		"hosted-artifact-metadata-discovery-line selfhost::backend::hosted::" +
+			"write_test_metadata discovery\\20none",
 	}
 }
 

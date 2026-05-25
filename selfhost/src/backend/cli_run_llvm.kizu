@@ -90,21 +90,23 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
         ir_bytes,
         metadata_function
     );
-    try append_hosted_meta_suffix_constant(
+    try cli_hosted_metadata_llvm::append_suffix_constant(
         out,
         "run_meta_suffix",
         ir_bytes,
         lowering_function,
         0,
-        false
+        false,
+        "runtime\20target/selfhost/stage2/selfhost.host.ll"
     );
-    try append_hosted_meta_suffix_constant(
+    try cli_hosted_metadata_llvm::append_suffix_constant(
         out,
         "run_return_meta_suffix",
         ir_bytes,
         lowering_function,
         1,
-        false
+        false,
+        "runtime\20target/selfhost/stage2/selfhost.host.ll"
     );
     return;
 }
@@ -323,36 +325,6 @@ fn append_hosted_return_body_suffix_constant(
     return;
 }
 
-fn append_hosted_meta_suffix_constant(
-    out: &var std::string::String,
-    name: []u8,
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64,
-    include_discovery: bool
-) -> !void {
-    let size = try hosted_meta_suffix_size(ir_bytes, function_name, index, include_discovery);
-    let entry = try hosted_lowering_case_token(
-        ir_bytes,
-        "hosted-lowering-case-entry ",
-        function_name,
-        index
-    );
-    let prefix = "\0Aabi selfhost-abi-v0\0Aentry @";
-    let runtime = "\0Aruntime target/selfhost/stage2/selfhost.host.ll\0A";
-    let suffix = "go.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0A";
-    try append_llvm_constant_header(out, name, size);
-    try out.append_bytes(prefix);
-    try out.append_bytes(entry);
-    try out.append_bytes(runtime);
-    try out.append_bytes(suffix);
-    if include_discovery {
-        try out.append_bytes("discovery none\0A");
-    }
-    try append_llvm_constant_footer(out);
-    return;
-}
-
 pub fn append_functions(out: &var std::string::String) -> !void {
     try append_cli_run_payload_llvm_c_string_function(out);
     return;
@@ -436,7 +408,13 @@ fn append_run_print_emit_block(
         "selfhost::backend::hosted::write_run_metadata"
     );
     let meta_output_prefix_size = try cli_hosted_metadata_llvm::output_prefix_size(ir_bytes);
-    let meta_suffix_size = try hosted_meta_suffix_size(ir_bytes, lowering_function, 0, false);
+    let meta_suffix_size = try cli_hosted_metadata_llvm::suffix_size(
+        ir_bytes,
+        lowering_function,
+        0,
+        false,
+        "runtime\20target/selfhost/stage2/selfhost.host.ll"
+    );
     try append_line(out, "run_print_emit:");
     try append_global_slice(out, "run", "dir", "run_dir", dir_size);
     try append_line(out,
@@ -587,7 +565,13 @@ fn append_run_return_emit_block(
         "selfhost::backend::hosted::write_run_metadata"
     );
     let meta_output_prefix_size = try cli_hosted_metadata_llvm::output_prefix_size(ir_bytes);
-    let meta_suffix_size = try hosted_meta_suffix_size(ir_bytes, lowering_function, 1, false);
+    let meta_suffix_size = try cli_hosted_metadata_llvm::suffix_size(
+        ir_bytes,
+        lowering_function,
+        1,
+        false,
+        "runtime\20target/selfhost/stage2/selfhost.host.ll"
+    );
     try append_line(out, "run_return_emit:");
     try append_global_slice(out, "run_return", "dir", "run_dir", dir_size);
     try append_line(out,
@@ -937,29 +921,6 @@ fn hosted_return_body_suffix_size(
     return llvm_c_decoded_len(header) + std::mem::len(entry_prefix) +
         std::mem::len(entry) + llvm_c_decoded_len(entry_suffix) +
         hosted_exit_decoded_len(exit_code);
-}
-
-fn hosted_meta_suffix_size(
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64,
-    include_discovery: bool
-) -> !i64 {
-    let entry = try hosted_lowering_case_token(
-        ir_bytes,
-        "hosted-lowering-case-entry ",
-        function_name,
-        index
-    );
-    let prefix = "\0Aabi selfhost-abi-v0\0Aentry @";
-    let runtime = "\0Aruntime target/selfhost/stage2/selfhost.host.ll\0A";
-    let suffix = "go.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0A";
-    var size = llvm_c_decoded_len(prefix) + std::mem::len(entry) +
-        llvm_c_decoded_len(runtime) + llvm_c_decoded_len(suffix);
-    if include_discovery {
-        size = size + llvm_c_decoded_len("discovery none\0A");
-    }
-    return size;
 }
 
 fn hosted_lowering_case_i64(

@@ -54,12 +54,107 @@ pub fn output_prefix_size(ir_bytes: []u8) -> !i64 {
     return output_prefix_size_from_token(output_prefix);
 }
 
+pub fn append_suffix_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    function_name: []u8,
+    index: i64,
+    include_discovery: bool,
+    runtime_line: []u8
+) -> !void {
+    let size = try suffix_size(ir_bytes, function_name, index, include_discovery, runtime_line);
+    let entry = try lowering_case_entry(ir_bytes, function_name, index);
+    let abi_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-abi-line ");
+    let entry_prefix = try common_metadata_fact(
+        ir_bytes,
+        "hosted-artifact-metadata-entry-prefix "
+    );
+    let fallback_line = try common_metadata_fact(
+        ir_bytes,
+        "hosted-artifact-metadata-fallback-line "
+    );
+    let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
+    try append_llvm_constant_header(out, name, size);
+    try out.append_bytes("\0A");
+    try append_line_token(out, abi_line);
+    try out.append_bytes(entry_prefix);
+    try out.append_bytes(entry);
+    try out.append_bytes("\0A");
+    try append_line_token(out, runtime_line);
+    try append_line_token(out, fallback_line);
+    try append_line_token(out, mode_line);
+    if include_discovery {
+        let discovery_line = try metadata_fact(
+            ir_bytes,
+            "hosted-artifact-metadata-discovery-line ",
+            "selfhost::backend::hosted::write_test_metadata"
+        );
+        try append_line_token(out, discovery_line);
+    }
+    try append_llvm_constant_footer(out);
+    return;
+}
+
+pub fn suffix_size(
+    ir_bytes: []u8,
+    function_name: []u8,
+    index: i64,
+    include_discovery: bool,
+    runtime_line: []u8
+) -> !i64 {
+    let entry = try lowering_case_entry(ir_bytes, function_name, index);
+    let abi_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-abi-line ");
+    let entry_prefix = try common_metadata_fact(
+        ir_bytes,
+        "hosted-artifact-metadata-entry-prefix "
+    );
+    let fallback_line = try common_metadata_fact(
+        ir_bytes,
+        "hosted-artifact-metadata-fallback-line "
+    );
+    let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
+    var size = 1 + line_token_size(abi_line) + llvm_c_decoded_len(entry_prefix) +
+        std::mem::len(entry) + 1 + line_token_size(runtime_line) +
+        line_token_size(fallback_line) + line_token_size(mode_line);
+    if include_discovery {
+        let discovery_line = try metadata_fact(
+            ir_bytes,
+            "hosted-artifact-metadata-discovery-line ",
+            "selfhost::backend::hosted::write_test_metadata"
+        );
+        size = size + line_token_size(discovery_line);
+    }
+    return size;
+}
+
 fn metadata_fact(
     ir_bytes: []u8,
     prefix: []u8,
     fact_name: []u8
 ) -> ![]u8 borrows ir_bytes {
     return try ir_contract::named_fact_value(ir_bytes, prefix, fact_name);
+}
+
+fn common_metadata_fact(ir_bytes: []u8, prefix: []u8) -> ![]u8 borrows ir_bytes {
+    return try metadata_fact(
+        ir_bytes,
+        prefix,
+        "selfhost::backend::hosted::append_common_metadata"
+    );
+}
+
+fn lowering_case_entry(
+    ir_bytes: []u8,
+    function_name: []u8,
+    index: i64
+) -> ![]u8 borrows ir_bytes {
+    return try ir_contract::sequence_fact_value(
+        ir_bytes,
+        "hosted-lowering-case-entry ",
+        function_name,
+        index
+    );
 }
 
 fn output_prefix_fact(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
@@ -77,6 +172,16 @@ fn prefix_decoded_size(title: []u8, issue: []u8, source_prefix: []u8) -> i64 {
 
 fn output_prefix_size_from_token(output_prefix: []u8) -> i64 {
     return 1 + llvm_c_decoded_len(output_prefix);
+}
+
+fn append_line_token(out: &var std::string::String, token: []u8) -> !void {
+    try out.append_bytes(token);
+    try out.append_bytes("\0A");
+    return;
+}
+
+fn line_token_size(token: []u8) -> i64 {
+    return llvm_c_decoded_len(token) + 1;
 }
 
 fn append_llvm_constant_header(
