@@ -67,6 +67,58 @@ pub fn append_facts(
     return;
 }
 
+pub fn append_metadata_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    qualified_name: []u8
+) -> !void {
+    let body = try function_body_node(text, ast, root, local_name);
+    let title_call = try call_from_statement(ast, body, 1);
+    let issue_call = try call_from_statement(ast, body, 2);
+    try append_named_call_llvm_string_arg_fact(
+        out,
+        "hosted-artifact-metadata-title ",
+        qualified_name,
+        text,
+        ast,
+        title_call,
+        1
+    );
+    try append_named_call_llvm_string_arg_fact(
+        out,
+        "hosted-artifact-metadata-issue ",
+        qualified_name,
+        text,
+        ast,
+        issue_call,
+        1
+    );
+    return;
+}
+
+pub fn append_common_metadata_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !void {
+    let body = try function_body_node(text, ast, root, "append_common_metadata");
+    let source_call = try call_from_statement(ast, body, 0);
+    try append_named_call_llvm_string_arg_fact(
+        out,
+        "hosted-artifact-metadata-source-prefix ",
+        "selfhost::backend::hosted::append_common_metadata",
+        text,
+        ast,
+        source_call,
+        1
+    );
+    return;
+}
+
 fn call_from_statement(
     ast: std::kizu::ast::Ast,
     body: std::kizu::ast::NodeId,
@@ -152,6 +204,22 @@ fn append_named_call_string_arg_fact(
     return;
 }
 
+fn append_named_call_llvm_string_arg_fact(
+    out: &var std::string::String,
+    prefix: []u8,
+    name: []u8,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    call: std::kizu::ast::NodeId,
+    index: i64
+) -> !void {
+    let arg = try call_arg(ast, call, index);
+    try append_named_fact_start(out, prefix, name);
+    try append_llvm_c_string_literal_value(out, text, ast, arg);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
 fn append_named_call_callee_fact(
     out: &var std::string::String,
     prefix: []u8,
@@ -215,6 +283,72 @@ fn append_string_literal_value_from_node(
         return error("unsupported selected hosted artifact path literal");
     }
     try out.append_bytes(value);
+    return;
+}
+
+fn append_llvm_c_string_literal_value(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        String(string_node) => return try append_llvm_c_string_literal_value_from_node(
+            out,
+            text,
+            ast,
+            node_id
+        );,
+        _ => return error("missing selected hosted artifact metadata source");,
+    }
+}
+
+fn append_llvm_c_string_literal_value_from_node(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let token = ast_node_text(text, ast, node_id);
+    let len = std::mem::len(token);
+    if len < 2 {
+        return error("invalid selected hosted artifact metadata source");
+    }
+    if token[0] != cast<u8>(34) or token[len - 1] != cast<u8>(34) {
+        return error("invalid selected hosted artifact metadata source");
+    }
+    let value = token[1..len - 1];
+    if bytes_contains_byte(value, cast<u8>(92)) or bytes_contains_byte(value, cast<u8>(10)) {
+        return error("unsupported selected hosted artifact metadata literal");
+    }
+    return try append_llvm_c_string_token(out, value);
+}
+
+fn append_llvm_c_string_token(out: &var std::string::String, value: []u8) -> !void {
+    var index = 0;
+    let len = std::mem::len(value);
+    while index < len {
+        let byte = value[index];
+        if byte == cast<u8>(32) {
+            try out.append_bytes("\20");
+        } else {
+            if byte == cast<u8>(34) {
+                try out.append_bytes("\22");
+            } else {
+                if byte == cast<u8>(92) {
+                    try out.append_bytes("\5C");
+                } else {
+                    if byte == cast<u8>(10) {
+                        try out.append_bytes("\0A");
+                    } else {
+                        try out.append_byte(byte);
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
     return;
 }
 

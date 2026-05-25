@@ -1,9 +1,11 @@
 import selfhost::backend::cli_check_gate_llvm;
+import selfhost::backend::cli_hosted_metadata_llvm;
 import selfhost::backend::ir_contract;
 
 pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
     let artifact_function = "selfhost::backend::hosted::emit_test_executable_artifact";
     let lowering_function = "selfhost::backend::hosted::lower_test_hosted_executable";
+    let metadata_function = "selfhost::backend::hosted::write_test_metadata";
     try append_llvm_fact_constant(
         out,
         "test_dir",
@@ -67,11 +69,11 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
         lowering_function,
         1
     );
-    try append_llvm_constant(
+    try cli_hosted_metadata_llvm::append_prefix_constant(
         out,
         "test_meta_prefix",
-        40,
-        "kizu-test-artifact-v0\0Aissue #570\0Asource "
+        ir_bytes,
+        metadata_function
     );
     try append_hosted_meta_suffix_constant(
         out,
@@ -364,6 +366,10 @@ fn append_test_ok_emit_block(
     );
     let ll_prefix_body_size = try hosted_prefix_source_size(ir_bytes, lowering_function, 0);
     let ll_suffix_body_size = try test_case_ll_suffix_size(ir_bytes, lowering_function, 0);
+    let meta_prefix_size = try cli_hosted_metadata_llvm::prefix_size(
+        ir_bytes,
+        "selfhost::backend::hosted::write_test_metadata"
+    );
     let meta_suffix_size = try hosted_meta_suffix_size(ir_bytes, lowering_function, 0, true);
     try append_line(out, "test_ok_emit:");
     try append_global_slice(out, "test_ok", "dir", "test_dir", dir_size);
@@ -415,7 +421,7 @@ fn append_test_ok_emit_block(
     try append_line(out, "test_ok_write_meta_body:");
     try append_line(out,
         "  %test_ok_meta_path_slice = extractvalue %kizu.error.slice.u8 %test_ok_meta_path_result, 1");
-    try append_global_slice(out, "test_ok", "meta_prefix", "test_meta_prefix", 40);
+    try append_global_slice(out, "test_ok", "meta_prefix", "test_meta_prefix", meta_prefix_size);
     try append_global_slice(out, "test_ok", "meta_output_prefix", "artifact_output_prefix", 8);
     try append_global_slice(out, "test_ok", "meta_body_suffix", "test_ok_meta_suffix", meta_suffix_size);
     try append_line(out,
@@ -459,6 +465,10 @@ fn append_test_failure_emit_block(
     );
     let ll_prefix_body_size = try hosted_prefix_source_size(ir_bytes, lowering_function, 1);
     let ll_suffix_body_size = try test_case_ll_suffix_size(ir_bytes, lowering_function, 1);
+    let meta_prefix_size = try cli_hosted_metadata_llvm::prefix_size(
+        ir_bytes,
+        "selfhost::backend::hosted::write_test_metadata"
+    );
     let meta_suffix_size = try hosted_meta_suffix_size(ir_bytes, lowering_function, 1, true);
     try append_line(out, "test_failure_emit:");
     try append_global_slice(out, "test_failure", "dir", "test_dir", dir_size);
@@ -524,7 +534,13 @@ fn append_test_failure_emit_block(
     try append_line(out, "test_failure_write_meta_body:");
     try append_line(out,
         "  %test_failure_meta_path_slice = extractvalue %kizu.error.slice.u8 %test_failure_meta_path_result, 1");
-    try append_global_slice(out, "test_failure", "meta_prefix", "test_meta_prefix", 40);
+    try append_global_slice(
+        out,
+        "test_failure",
+        "meta_prefix",
+        "test_meta_prefix",
+        meta_prefix_size
+    );
     try append_global_slice(out, "test_failure", "meta_output_prefix", "artifact_output_prefix", 8);
     try append_global_slice(
         out,
@@ -539,24 +555,6 @@ fn append_test_failure_emit_block(
         "  %test_failure_meta_ok = extractvalue %kizu.error.void %test_failure_meta_write, 0");
     try append_line(out,
         "  br i1 %test_failure_meta_ok, label %exit_zero, label %check_failed");
-    return;
-}
-
-fn append_llvm_constant(
-    out: &var std::string::String,
-    name: []u8,
-    size: i64,
-    text: []u8
-) -> !void {
-    try out.append_bytes("@.kizu.cli.");
-    try out.append_bytes(name);
-    try out.append_bytes(" = private unnamed_addr constant [");
-    try std::fmt::append_i64(out, size);
-    try out.append_bytes(" x i8] c");
-    try out.append_byte(cast<u8>(34));
-    try out.append_bytes(text);
-    try out.append_byte(cast<u8>(34));
-    try out.append_byte(cast<u8>(10));
     return;
 }
 
