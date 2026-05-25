@@ -155,16 +155,16 @@ fn append_hosted_prefix_source_constant(
     index: i64
 ) -> !void {
     let size = try hosted_prefix_source_size(ir_bytes, function_name, index);
-    let comment = try hosted_lowering_case_token(
+    let comment = try hosted_lowering_case_line(
         ir_bytes,
-        "hosted-lowering-case-comment-llvm ",
+        "hosted-lowering-case-comment ",
         function_name,
         index
     );
     let suffix = "\0Asource_filename = \22";
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("; ");
-    try out.append_bytes(comment);
+    try append_llvm_c_string_payload(out, comment);
     try out.append_bytes(suffix);
     try append_llvm_constant_footer(out);
     return;
@@ -203,9 +203,9 @@ fn append_test_case_ll_suffix_constant(
         function_name,
         index
     );
-    let payload = try hosted_lowering_case_token(
+    let payload = try hosted_lowering_case_line(
         ir_bytes,
-        "hosted-lowering-case-payload-llvm ",
+        "hosted-lowering-case-payload-literal ",
         function_name,
         index
     );
@@ -237,7 +237,7 @@ fn append_test_case_ll_suffix_constant(
     try out.append_bytes(global_middle);
     try std::fmt::append_i64(out, output_len);
     try out.append_bytes(global_suffix);
-    try out.append_bytes(payload);
+    try append_llvm_c_string_payload(out, payload);
     if append_newline {
         try out.append_bytes("\5C0A");
     }
@@ -674,15 +674,24 @@ fn hosted_lowering_case_token(
     return try ir_contract::sequence_fact_value(ir_bytes, prefix, function_name, index);
 }
 
+fn hosted_lowering_case_line(
+    ir_bytes: []u8,
+    prefix: []u8,
+    function_name: []u8,
+    index: i64
+) -> ![]u8 borrows ir_bytes {
+    return try ir_contract::sequence_fact_line_value(ir_bytes, prefix, function_name, index);
+}
+
 fn hosted_prefix_source_size(ir_bytes: []u8, function_name: []u8, index: i64) -> !i64 {
-    let comment = try hosted_lowering_case_token(
+    let comment = try hosted_lowering_case_line(
         ir_bytes,
-        "hosted-lowering-case-comment-llvm ",
+        "hosted-lowering-case-comment ",
         function_name,
         index
     );
     let suffix = "\0Asource_filename = \22";
-    return 2 + llvm_c_decoded_len(comment) + llvm_c_decoded_len(suffix);
+    return 2 + std::mem::len(comment) + llvm_c_decoded_len(suffix);
 }
 
 fn test_case_ll_suffix_size(
@@ -715,9 +724,9 @@ fn test_case_ll_suffix_size(
         function_name,
         index
     );
-    let payload = try hosted_lowering_case_token(
+    let payload = try hosted_lowering_case_line(
         ir_bytes,
-        "hosted-lowering-case-payload-llvm ",
+        "hosted-lowering-case-payload-literal ",
         function_name,
         index
     );
@@ -815,7 +824,7 @@ fn hosted_lowering_case_stream_name(
 }
 
 fn hosted_output_len(payload: []u8, append_newline: bool) -> i64 {
-    let length = llvm_c_decoded_len(payload);
+    let length = std::mem::len(payload);
     if append_newline {
         return length + 1;
     }
@@ -832,6 +841,29 @@ fn append_hosted_exit(out: &var std::string::String, exit_code: i64) -> !void {
 fn hosted_exit_decoded_len(exit_code: i64) -> i64 {
     return std::mem::len("  %code = call i64 @kizu_rt_process_exit_code(i64 ") +
         decimal_len_i64(exit_code) + llvm_c_decoded_len(")\0A  ret i64 %code\0A}\0A");
+}
+
+fn append_llvm_c_string_payload(out: &var std::string::String, payload: []u8) -> !void {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        if byte == cast<u8>(34) {
+            try out.append_bytes("\22");
+        } else {
+            if byte == cast<u8>(92) {
+                try out.append_bytes("\5C");
+            } else {
+                if byte == cast<u8>(10) {
+                    try out.append_bytes("\0A");
+                } else {
+                    try out.append_byte(byte);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
 }
 
 fn llvm_c_decoded_len(text: []u8) -> i64 {
