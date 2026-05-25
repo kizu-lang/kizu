@@ -87,6 +87,35 @@ fn main(value: token::Token) -> void {
 	}
 }
 
+// TestServerPackageDiagnosticsUseStdDecls checks package diagnostics share CLI std wrappers.
+func TestServerPackageDiagnosticsUseStdDecls(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace", "sub-app")
+	mainSource := `test "package test command" {
+    std::testing::expect(true);
+}
+`
+	writeLSPPackage(t, root, map[string]string{
+		"src/main.kizu": mainSource,
+	})
+	input := strings.Join([]string{
+		didOpenFrame(t, fileURI(filepath.Join(root, "src", "main.kizu")), mainSource),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 1 {
+		t.Fatalf("got %d messages, want 1", len(messages))
+	}
+	diagnostics := publishedDiagnostics(t, messages[0])
+	if len(diagnostics) != 0 {
+		t.Fatalf("got diagnostics %#v, want none", diagnostics)
+	}
+}
+
 // TestServerPackageDiagnosticsUseOpenBuffer checks unsaved edits override disk.
 func TestServerPackageDiagnosticsUseOpenBuffer(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace", "sub-app")
