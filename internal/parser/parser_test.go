@@ -297,6 +297,53 @@ fn main() {  }`
 	}
 }
 
+// TestParseTypeAndMemberDocComments checks docs attach to types and members.
+func TestParseTypeAndMemberDocComments(t *testing.T) {
+	input := `/// User record.
+pub struct User {
+    /// Display name.
+    pub name: []u8,
+}
+
+/// User state.
+enum State {
+    /// Active user.
+    Active,
+}
+
+/// User event.
+union Event {
+    /// Rename event.
+    Rename([]u8),
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	user, ok := program.Decls[0].(*ast.StructDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want struct", program.Decls[0])
+	}
+	if user.Doc != "User record." || user.Fields[0].Doc != "Display name." {
+		t.Fatalf("struct docs = %q field docs = %q", user.Doc, user.Fields[0].Doc)
+	}
+	state, ok := program.Decls[1].(*ast.EnumDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want enum", program.Decls[1])
+	}
+	if state.Doc != "User state." || state.TagDocs["Active"] != "Active user." {
+		t.Fatalf("enum docs = %q tag docs = %#v", state.Doc, state.TagDocs)
+	}
+	event, ok := program.Decls[2].(*ast.UnionDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want union", program.Decls[2])
+	}
+	if event.Doc != "User event." || event.Variants[0].Doc != "Rename event." {
+		t.Fatalf("union docs = %q variant docs = %q", event.Doc, event.Variants[0].Doc)
+	}
+}
+
 // TestParseContractImplDecl checks explicit contract implementation syntax.
 func TestParseContractImplDecl(t *testing.T) {
 	input := `contract Writer {

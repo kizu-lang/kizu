@@ -357,11 +357,20 @@ fn log(message: []u8) -> void {
 }
 ```
 
-#### 関数 doc comment
+#### doc comment
 
-関数や method の user-facing documentation は `///` line comment で書きます。
-`///` は通常の `//` comment とは区別され、直後の function declaration または
-impl method declaration に attached documentation として結びつきます。
+declaration や member の user-facing documentation は `///` line comment で書きます。
+`///` は通常の `//` comment とは区別され、直後の attachable item に
+attached documentation として結びつきます。
+
+v0.2 の attachable item は次です。
+
+* function declaration
+* impl method declaration
+* `struct` / `enum` / `union` declaration
+* struct field
+* enum tag
+* union variant
 
 ```kizu
 /// Parses one source file into an AST.
@@ -376,13 +385,24 @@ impl Parser {
         ...
     }
 }
+
+/// Token produced by the lexer.
+struct Token {
+    /// Token kind.
+    kind: TokenKind,
+}
+
+enum TokenKind {
+    /// Identifier token.
+    Ident,
+}
 ```
 
 attachment rule:
 
 * doc comment は declaration の直前にある連続した `///` 行だけを対象にします
 * 空行、通常の `//` comment、他の token が間にある場合は attach しません
-* `pub`、`unsafe`、`extern "c"` などの function modifier は declaration の一部として
+* `pub`、`unsafe`、`extern "c"` などの modifier は declaration の一部として
   扱い、その直前の `///` block を attach します
 * 1 行ごとに先頭の `///` と、直後に 1 つだけある空白を取り除き、
   改行で連結します

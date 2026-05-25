@@ -214,7 +214,7 @@ func (idx navigationIndex) scanFunction(
 	idx.functions[name] = navigationDeclaration{
 		name:          name,
 		detail:        tokenText(tokens[start:headerEnd]),
-		documentation: functionDocumentation(tokens, start),
+		documentation: declarationDocumentation(tokens, start),
 		uri:           src.uri,
 		rng:           tokenRange(tokens[start+1]),
 		kind:          symbolKindFunction,
@@ -235,11 +235,12 @@ func (idx navigationIndex) scanStruct(
 	}
 	name := tokens[nameIndex].Literal
 	idx.types[name] = navigationDeclaration{
-		name:   name,
-		detail: "struct " + name,
-		uri:    src.uri,
-		rng:    tokenRange(tokens[nameIndex]),
-		kind:   symbolKindStruct,
+		name:          name,
+		detail:        "struct " + name,
+		documentation: declarationDocumentation(tokens, start),
+		uri:           src.uri,
+		rng:           tokenRange(tokens[nameIndex]),
+		kind:          symbolKindStruct,
 	}
 	brace := findNextToken(tokens, nameIndex+1, token.LBrace)
 	if brace < 0 {
@@ -262,11 +263,12 @@ func (idx navigationIndex) scanEnum(
 	}
 	name := tokens[nameIndex].Literal
 	idx.types[name] = navigationDeclaration{
-		name:   name,
-		detail: "enum " + name,
-		uri:    src.uri,
-		rng:    tokenRange(tokens[nameIndex]),
-		kind:   symbolKindEnum,
+		name:          name,
+		detail:        "enum " + name,
+		documentation: declarationDocumentation(tokens, start),
+		uri:           src.uri,
+		rng:           tokenRange(tokens[nameIndex]),
+		kind:          symbolKindEnum,
 	}
 	variants, end := scanVariantDeclarations(src, tokens, nameIndex+1, name, "enum")
 	idx.enumVariants[name] = variants
@@ -285,11 +287,12 @@ func (idx navigationIndex) scanUnion(
 	}
 	name := tokens[nameIndex].Literal
 	idx.types[name] = navigationDeclaration{
-		name:   name,
-		detail: "union " + name,
-		uri:    src.uri,
-		rng:    tokenRange(tokens[nameIndex]),
-		kind:   symbolKindEnum,
+		name:          name,
+		detail:        "union " + name,
+		documentation: declarationDocumentation(tokens, start),
+		uri:           src.uri,
+		rng:           tokenRange(tokens[nameIndex]),
+		kind:          symbolKindEnum,
 	}
 	variants, end := scanVariantDeclarations(src, tokens, nameIndex+1, name, "union")
 	idx.unionVariants[name] = variants
@@ -308,11 +311,12 @@ func (idx navigationIndex) scanContract(
 	}
 	name := tokens[nameIndex].Literal
 	idx.types[name] = navigationDeclaration{
-		name:   name,
-		detail: "contract " + name,
-		uri:    src.uri,
-		rng:    tokenRange(tokens[nameIndex]),
-		kind:   symbolKindInterface,
+		name:          name,
+		detail:        "contract " + name,
+		documentation: declarationDocumentation(tokens, start),
+		uri:           src.uri,
+		rng:           tokenRange(tokens[nameIndex]),
+		kind:          symbolKindInterface,
 	}
 	return skipDeclarationBody(tokens, start+1)
 }
@@ -359,7 +363,7 @@ func readMethodDeclaration(
 	return navigationDeclaration{
 		name:          name,
 		detail:        tokenText(tokens[start:headerEnd]),
-		documentation: functionDocumentation(tokens, start),
+		documentation: declarationDocumentation(tokens, start),
 		uri:           src.uri,
 		rng:           tokenRange(tokens[start+1]),
 		kind:          symbolKindMethod,
@@ -407,12 +411,13 @@ func scanFieldDeclarations(
 		typ, next := readTypeUntil(tokens, fieldIndex+2, token.Comma, token.RBrace)
 		name := tokens[fieldIndex].Literal
 		fields[name] = navigationDeclaration{
-			name:      name,
-			detail:    typeName + "." + name + ": " + typ,
-			uri:       src.uri,
-			rng:       tokenRange(tokens[fieldIndex]),
-			kind:      symbolKindField,
-			container: typeName,
+			name:          name,
+			detail:        typeName + "." + name + ": " + typ,
+			documentation: declarationDocumentation(tokens, fieldIndex),
+			uri:           src.uri,
+			rng:           tokenRange(tokens[fieldIndex]),
+			kind:          symbolKindField,
+			container:     typeName,
 		}
 		i = next
 	}
@@ -441,12 +446,13 @@ func scanVariantDeclarations(
 		}
 		name := tokens[i].Literal
 		variants[name] = navigationDeclaration{
-			name:      name,
-			detail:    prefix + " " + typeName + "::" + name,
-			uri:       src.uri,
-			rng:       tokenRange(tokens[i]),
-			kind:      symbolKindEnumMember,
-			container: typeName,
+			name:          name,
+			detail:        prefix + " " + typeName + "::" + name,
+			documentation: declarationDocumentation(tokens, i),
+			uri:           src.uri,
+			rng:           tokenRange(tokens[i]),
+			kind:          symbolKindEnumMember,
+			container:     typeName,
 		}
 		if i+1 < len(tokens) && tokens[i+1].Type == token.LParen {
 			i = skipBalanced(tokens, i+1, token.LParen, token.RParen)

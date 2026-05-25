@@ -33,11 +33,16 @@ func TestHoverReturnsSymbolDetails(t *testing.T) {
 
 	local := server.hover(uri, positionIn(source, "trace.label", "trace"))
 	requireHoverContains(t, local, "trace: Trace")
+	traceType := server.hover(uri, positionIn(source, "Trace { label", "Trace"))
+	requireHoverContains(t, traceType, "Trace record.")
+	field := server.hover(uri, positionIn(source, "trace.label", "label"))
+	requireHoverContains(t, field, "Human-readable label.")
 	method := server.hover(uri, positionIn(source, "trace.rename", "rename"))
 	requireHoverContains(t, method, "fn rename")
 	requireHoverContains(t, method, "Renames the trace.")
 	variant := server.hover(uri, positionIn(source, "Color::Green;", "Green"))
 	requireHoverContains(t, variant, "enum Color::Green")
+	requireHoverContains(t, variant, "Secondary color.")
 	function := server.hover(uri, positionIn(source, "inspect(1)", "inspect"))
 	requireHoverContains(t, function, "Inspects a trace value.")
 }
@@ -89,12 +94,16 @@ fn main(value: token::Token) -> void {
 
 // navigationFixture returns source that exercises navigation features together.
 func navigationFixture() string {
-	return `enum Color {
+	return `/// Available colors.
+enum Color {
     Red,
+    /// Secondary color.
     Green,
 }
 
+/// Trace record.
 struct Trace {
+    /// Human-readable label.
     label: []u8,
     count: i64,
 }
