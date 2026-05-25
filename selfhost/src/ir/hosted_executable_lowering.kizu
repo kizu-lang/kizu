@@ -24,6 +24,13 @@ pub fn append_facts(
             index,
             try lowering_case_kind(text, ast, if_node)
         );
+        try append_case_llvm_c_string_fact(
+            out,
+            "hosted-lowering-case-comment-llvm ",
+            qualified_name,
+            index,
+            try struct_field_string_value(text, ast, struct_literal, "comment")
+        );
         try append_case_fact(
             out,
             "hosted-lowering-case-entry ",
@@ -59,13 +66,67 @@ pub fn append_facts(
             index,
             try struct_field_token_value(text, ast, struct_literal, "exit_code")
         );
+        let payload_kind = try struct_field_payload_kind(text, ast, struct_literal);
         try append_case_fact(
             out,
             "hosted-lowering-case-payload ",
             qualified_name,
             index,
-            try struct_field_payload_kind(text, ast, struct_literal)
+            payload_kind
         );
+        if std::mem::equal_bytes(payload_kind, "literal") {
+            try append_case_llvm_c_string_fact(
+                out,
+                "hosted-lowering-case-payload-llvm ",
+                qualified_name,
+                index,
+                try struct_field_payload_literal(text, ast, struct_literal)
+            );
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_case_llvm_c_string_fact(
+    out: &var std::string::String,
+    prefix: []u8,
+    function_name: []u8,
+    index: i64,
+    value: []u8
+) -> !void {
+    try out.append_bytes(prefix);
+    try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    try append_llvm_c_string_token(out, value);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_llvm_c_string_token(out: &var std::string::String, value: []u8) -> !void {
+    var index = 0;
+    let len = std::mem::len(value);
+    while index < len {
+        let byte = value[index];
+        if byte == cast<u8>(32) {
+            try out.append_bytes("\20");
+        } else {
+            if byte == cast<u8>(34) {
+                try out.append_bytes("\22");
+            } else {
+                if byte == cast<u8>(92) {
+                    try out.append_bytes("\5C");
+                } else {
+                    if byte == cast<u8>(10) {
+                        try out.append_bytes("\0A");
+                    } else {
+                        try out.append_byte(byte);
+                    }
+                }
+            }
+        }
         index = index + 1;
     }
     return;
@@ -341,6 +402,15 @@ fn struct_field_payload_kind(
         IndexExpr(index_expr) => return "empty-source-slice";,
         _ => return error("unsupported selected hosted lowering payload");,
     }
+}
+
+fn struct_field_payload_literal(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    struct_literal: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let value = try struct_field_value(ast, text, struct_literal, "output_payload");
+    return try string_literal_value(text, ast, value);
 }
 
 fn struct_field_value(

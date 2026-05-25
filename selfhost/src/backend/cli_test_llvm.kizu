@@ -2,59 +2,63 @@ import selfhost::backend::cli_check_gate_llvm;
 import selfhost::backend::ir_contract;
 
 pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
-    let function_name = "selfhost::backend::hosted::emit_test_executable_artifact";
+    let artifact_function = "selfhost::backend::hosted::emit_test_executable_artifact";
+    let lowering_function = "selfhost::backend::hosted::lower_test_hosted_executable";
     try append_llvm_fact_constant(
         out,
         "test_dir",
         ir_bytes,
         "hosted-artifact-dir ",
-        function_name
+        artifact_function
     );
     try append_llvm_fact_constant(
         out,
         "test_path_prefix",
         ir_bytes,
         "hosted-artifact-ll-prefix ",
-        function_name
+        artifact_function
     );
     try append_llvm_fact_constant(
         out,
         "test_ll_suffix",
         ir_bytes,
         "hosted-artifact-ll-suffix ",
-        function_name
+        artifact_function
     );
     try append_llvm_fact_constant(
         out,
         "test_metadata_path_prefix",
         ir_bytes,
         "hosted-artifact-metadata-prefix ",
-        function_name
+        artifact_function
     );
     try append_llvm_fact_constant(
         out,
         "test_metadata_path_suffix",
         ir_bytes,
         "hosted-artifact-metadata-suffix ",
-        function_name
+        artifact_function
     );
-    try append_llvm_constant(
+    try append_hosted_prefix_source_constant(
         out,
         "test_ll_prefix",
-        "46",
-        "; kizu test artifact ll v0\0Asource_filename = \22"
+        ir_bytes,
+        lowering_function,
+        0
     );
-    try append_llvm_constant(
+    try append_test_case_ll_suffix_constant(
         out,
         "test_ok_ll_suffix",
-        "793",
-        "\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.test.ok = private unnamed_addr constant [9 x i8] c\22test: ok\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_test_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [9 x i8], ptr @.kizu.test.ok, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 9, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stdout(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 0)\0A  ret i64 %code\0A}\0A"
+        ir_bytes,
+        lowering_function,
+        0
     );
-    try append_llvm_constant(
+    try append_test_case_ll_suffix_constant(
         out,
         "test_failure_ll_suffix",
-        "849",
-        "\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.kizu.test.failure = private unnamed_addr constant [52 x i8] c\22error: runtime error: expected condition to be true\5C0A\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0Adeclare %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0Adefine i64 @kizu_test_main() {\0Aentry:\0A  %io = call %kizu.owned @kizu_rt_io_blocking()\0A  %ptr = getelementptr inbounds [52 x i8], ptr @.kizu.test.failure, i64 0, i64 0\0A  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A  %slice = insertvalue %kizu.slice.u8 %base, i64 52, 1\0A  %write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %slice)\0A  %code = call i64 @kizu_rt_process_exit_code(i64 1)\0A  ret i64 %code\0A}\0A"
+        ir_bytes,
+        lowering_function,
+        1
     );
     try append_llvm_constant(
         out,
@@ -62,17 +66,21 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
         "40",
         "kizu-test-artifact-v0\0Aissue #570\0Asource "
     );
-    try append_llvm_constant(
+    try append_hosted_meta_suffix_constant(
         out,
         "test_ok_meta_suffix",
-        "162",
-        "\0Aabi selfhost-abi-v0\0Aentry @kizu_test_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0Adiscovery none\0A"
+        ir_bytes,
+        lowering_function,
+        0,
+        true
     );
-    try append_llvm_constant(
+    try append_hosted_meta_suffix_constant(
         out,
         "test_failure_meta_suffix",
-        "162",
-        "\0Aabi selfhost-abi-v0\0Aentry @kizu_test_main\0Aruntime target/selfhost/stage2/selfhost.host.ll\0Ago.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0Adiscovery none\0A"
+        ir_bytes,
+        lowering_function,
+        1,
+        true
     );
     return;
 }
@@ -103,6 +111,195 @@ fn append_llvm_constant_bytes(
     try out.append_bytes(text);
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_llvm_constant_header(
+    out: &var std::string::String,
+    name: []u8,
+    size: i64
+) -> !void {
+    try out.append_bytes("@.kizu.cli.");
+    try out.append_bytes(name);
+    try out.append_bytes(" = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, size);
+    try out.append_bytes(" x i8] c");
+    try out.append_byte(cast<u8>(34));
+    return;
+}
+
+fn append_llvm_constant_footer(out: &var std::string::String) -> !void {
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_hosted_prefix_source_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    function_name: []u8,
+    index: i64
+) -> !void {
+    let comment = try hosted_lowering_case_token(
+        ir_bytes,
+        "hosted-lowering-case-comment-llvm ",
+        function_name,
+        index
+    );
+    let suffix = "\0Asource_filename = \22";
+    let size = 2 + llvm_c_decoded_len(comment) + llvm_c_decoded_len(suffix);
+    try append_llvm_constant_header(out, name, size);
+    try out.append_bytes("; ");
+    try out.append_bytes(comment);
+    try out.append_bytes(suffix);
+    try append_llvm_constant_footer(out);
+    return;
+}
+
+fn append_test_case_ll_suffix_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    function_name: []u8,
+    index: i64
+) -> !void {
+    let entry = try hosted_lowering_case_token(
+        ir_bytes,
+        "hosted-lowering-case-entry ",
+        function_name,
+        index
+    );
+    let global = try hosted_lowering_case_token(
+        ir_bytes,
+        "hosted-lowering-case-global ",
+        function_name,
+        index
+    );
+    let stream = try hosted_lowering_case_stream_name(ir_bytes, function_name, index);
+    let append_newline = try hosted_lowering_case_bool(
+        ir_bytes,
+        "hosted-lowering-case-newline ",
+        function_name,
+        index
+    );
+    let exit_code = try hosted_lowering_case_i64(
+        ir_bytes,
+        "hosted-lowering-case-exit ",
+        function_name,
+        index
+    );
+    let payload = try hosted_lowering_case_token(
+        ir_bytes,
+        "hosted-lowering-case-payload-llvm ",
+        function_name,
+        index
+    );
+    let output_len = hosted_output_len(payload, append_newline);
+    let header =
+        "\22\0A\0A%kizu.slice.u8 = type { ptr, i64 }\0A%kizu.owned = type { ptr }\0A";
+    let global_prefix = "%kizu.error.void = type { i1, %kizu.slice.u8 }\0A\0A@.";
+    let global_middle = " = private unnamed_addr constant [";
+    let global_suffix = " x i8] c\22";
+    let declare_head = "\22\0A\0Adeclare %kizu.owned @kizu_rt_io_blocking()\0A";
+    let write_decl = "declare %kizu.error.void @kizu_rt_io_write_";
+    let declare_tail =
+        "(%kizu.owned, %kizu.slice.u8)\0Adeclare i64 @kizu_rt_process_exit_code(i64)\0A\0A";
+    let entry_prefix = "define i64 @";
+    let entry_suffix = "() {\0Aentry:\0A";
+    let io = "  %io = call %kizu.owned @kizu_rt_io_blocking()\0A";
+    let ptr_prefix = "  %ptr = getelementptr inbounds [";
+    let ptr_middle = " x i8], ptr @.";
+    let ptr_suffix = ", i64 0, i64 0\0A";
+    let base = "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0\0A";
+    let slice_prefix = "  %slice = insertvalue %kizu.slice.u8 %base, i64 ";
+    let slice_suffix = ", 1\0A";
+    let write_prefix = "  %write = call %kizu.error.void @kizu_rt_io_write_";
+    let write_suffix = "(%kizu.owned %io, %kizu.slice.u8 %slice)\0A";
+    var size = llvm_c_decoded_len(header) + llvm_c_decoded_len(global_prefix) +
+        std::mem::len(global) + std::mem::len(global_middle) +
+        decimal_len_i64(output_len) + llvm_c_decoded_len(global_suffix) +
+        llvm_c_decoded_len(payload) + llvm_c_decoded_len(declare_head) +
+        std::mem::len(write_decl) + std::mem::len(stream) +
+        llvm_c_decoded_len(declare_tail) + std::mem::len(entry_prefix) +
+        std::mem::len(entry) + llvm_c_decoded_len(entry_suffix) +
+        llvm_c_decoded_len(io) + std::mem::len(ptr_prefix) +
+        decimal_len_i64(output_len) + std::mem::len(ptr_middle) +
+        std::mem::len(global) + llvm_c_decoded_len(ptr_suffix) +
+        llvm_c_decoded_len(base) + std::mem::len(slice_prefix) +
+        decimal_len_i64(output_len) + llvm_c_decoded_len(slice_suffix) +
+        std::mem::len(write_prefix) + std::mem::len(stream) +
+        llvm_c_decoded_len(write_suffix) + hosted_exit_decoded_len(exit_code);
+    if append_newline {
+        size = size + llvm_c_decoded_len("\5C0A");
+    }
+    try append_llvm_constant_header(out, name, size);
+    try out.append_bytes(header);
+    try out.append_bytes(global_prefix);
+    try out.append_bytes(global);
+    try out.append_bytes(global_middle);
+    try std::fmt::append_i64(out, output_len);
+    try out.append_bytes(global_suffix);
+    try out.append_bytes(payload);
+    if append_newline {
+        try out.append_bytes("\5C0A");
+    }
+    try out.append_bytes(declare_head);
+    try out.append_bytes(write_decl);
+    try out.append_bytes(stream);
+    try out.append_bytes(declare_tail);
+    try out.append_bytes(entry_prefix);
+    try out.append_bytes(entry);
+    try out.append_bytes(entry_suffix);
+    try out.append_bytes(io);
+    try out.append_bytes(ptr_prefix);
+    try std::fmt::append_i64(out, output_len);
+    try out.append_bytes(ptr_middle);
+    try out.append_bytes(global);
+    try out.append_bytes(ptr_suffix);
+    try out.append_bytes(base);
+    try out.append_bytes(slice_prefix);
+    try std::fmt::append_i64(out, output_len);
+    try out.append_bytes(slice_suffix);
+    try out.append_bytes(write_prefix);
+    try out.append_bytes(stream);
+    try out.append_bytes(write_suffix);
+    try append_hosted_exit(out, exit_code);
+    try append_llvm_constant_footer(out);
+    return;
+}
+
+fn append_hosted_meta_suffix_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    function_name: []u8,
+    index: i64,
+    include_discovery: bool
+) -> !void {
+    let entry = try hosted_lowering_case_token(
+        ir_bytes,
+        "hosted-lowering-case-entry ",
+        function_name,
+        index
+    );
+    let prefix = "\0Aabi selfhost-abi-v0\0Aentry @";
+    let runtime = "\0Aruntime target/selfhost/stage2/selfhost.host.ll\0A";
+    let suffix = "go.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact\0A";
+    var size = llvm_c_decoded_len(prefix) + std::mem::len(entry) +
+        llvm_c_decoded_len(runtime) + llvm_c_decoded_len(suffix);
+    if include_discovery {
+        size = size + llvm_c_decoded_len("discovery none\0A");
+    }
+    try append_llvm_constant_header(out, name, size);
+    try out.append_bytes(prefix);
+    try out.append_bytes(entry);
+    try out.append_bytes(runtime);
+    try out.append_bytes(suffix);
+    if include_discovery {
+        try out.append_bytes("discovery none\0A");
+    }
+    try append_llvm_constant_footer(out);
     return;
 }
 
@@ -349,6 +546,132 @@ fn hosted_lowering_case_kind_tag(
         index
     );
     return try executable_kind_tag(ir_bytes, kind_name);
+}
+
+fn hosted_lowering_case_token(
+    ir_bytes: []u8,
+    prefix: []u8,
+    function_name: []u8,
+    index: i64
+) -> ![]u8 borrows ir_bytes {
+    return try ir_contract::sequence_fact_value(ir_bytes, prefix, function_name, index);
+}
+
+fn hosted_lowering_case_i64(
+    ir_bytes: []u8,
+    prefix: []u8,
+    function_name: []u8,
+    index: i64
+) -> !i64 {
+    let value = try hosted_lowering_case_token(ir_bytes, prefix, function_name, index);
+    if std::mem::equal_bytes(value, "0") {
+        return 0;
+    }
+    if std::mem::equal_bytes(value, "1") {
+        return 1;
+    }
+    return error("invalid IR artifact fact");
+}
+
+fn hosted_lowering_case_bool(
+    ir_bytes: []u8,
+    prefix: []u8,
+    function_name: []u8,
+    index: i64
+) -> !bool {
+    let value = try hosted_lowering_case_token(ir_bytes, prefix, function_name, index);
+    if std::mem::equal_bytes(value, "true") {
+        return true;
+    }
+    if std::mem::equal_bytes(value, "false") {
+        return false;
+    }
+    return error("invalid IR artifact fact");
+}
+
+fn hosted_lowering_case_stream_name(
+    ir_bytes: []u8,
+    function_name: []u8,
+    index: i64
+) -> ![]u8 {
+    let value = try hosted_lowering_case_token(
+        ir_bytes,
+        "hosted-lowering-case-stream ",
+        function_name,
+        index
+    );
+    if std::mem::equal_bytes(value, "Stdout") {
+        return "stdout";
+    }
+    if std::mem::equal_bytes(value, "Stderr") {
+        return "stderr";
+    }
+    return error("invalid IR artifact fact");
+}
+
+fn hosted_output_len(payload: []u8, append_newline: bool) -> i64 {
+    let length = llvm_c_decoded_len(payload);
+    if append_newline {
+        return length + 1;
+    }
+    return length;
+}
+
+fn append_hosted_exit(out: &var std::string::String, exit_code: i64) -> !void {
+    try out.append_bytes("  %code = call i64 @kizu_rt_process_exit_code(i64 ");
+    try std::fmt::append_i64(out, exit_code);
+    try out.append_bytes(")\0A  ret i64 %code\0A}\0A");
+    return;
+}
+
+fn hosted_exit_decoded_len(exit_code: i64) -> i64 {
+    return std::mem::len("  %code = call i64 @kizu_rt_process_exit_code(i64 ") +
+        decimal_len_i64(exit_code) + llvm_c_decoded_len(")\0A  ret i64 %code\0A}\0A");
+}
+
+fn llvm_c_decoded_len(text: []u8) -> i64 {
+    var len = 0;
+    var index = 0;
+    let byte_len = std::mem::len(text);
+    while index < byte_len {
+        if index + 2 < byte_len and
+            text[index] == cast<u8>(92) and
+            is_hex_digit(text[index + 1]) and
+            is_hex_digit(text[index + 2]) {
+            len = len + 1;
+            index = index + 3;
+        } else {
+            len = len + 1;
+            index = index + 1;
+        }
+    }
+    return len;
+}
+
+fn is_hex_digit(byte: u8) -> bool {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
+        return true;
+    }
+    return false;
+}
+
+fn decimal_len_i64(value: i64) -> i64 {
+    if value == 0 {
+        return 1;
+    }
+    var remaining = value;
+    var digits = 0;
+    while remaining > 0 {
+        remaining = remaining / 10;
+        digits = digits + 1;
+    }
+    return digits;
 }
 
 fn append_executable_kind_compare(
