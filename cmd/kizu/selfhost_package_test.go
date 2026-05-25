@@ -1761,8 +1761,7 @@ func assertExecutableSelectedBodyParsingValidated(
 			}
 			continue
 		}
-		if strings.HasPrefix(fact, "selected-body-parsing ") ||
-			strings.HasPrefix(fact, "selected-body-parsing-token ") {
+		if strings.HasPrefix(fact, "selected-body-parsing-token ") {
 			assertNamedFactConsumer(t, parser, "backend selected-body-parsing validation", fact)
 			continue
 		}
@@ -2202,7 +2201,6 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		"pub fn append_main_scan_fact(",
 		"pub fn append_run_parsing_facts(",
 		"pub fn append_test_parsing_facts(",
-		"fn append_selected_body_parsing(",
 		"fn require_function_body_fragment(",
 		"parse_run_program_ast",
 		"parse_run_print_call_ast",
@@ -2223,6 +2221,11 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("selected body parsing contract missing body-call validation %q", fragment)
+		}
+	}
+	for _, content := range []string{bodyParsing, parser, llvm} {
+		if strings.Contains(content, `"selected-body-parsing `) {
+			t.Fatal("selected body parsing still depends on dedicated named facts")
 		}
 	}
 }
@@ -3394,10 +3397,6 @@ func hostedExecutableTestHostedLoweringFacts() []string {
 func hostedExecutableSelectedBodyParsingFacts() []string {
 	facts := []string{
 		"executable-selected-body-parsing checked-ast-body-parsing-v1",
-		"selected-body-parsing selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast",
-		"selected-body-parsing selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast",
 		"selected-body-parsing-token syntax-fn fn",
 		"selected-body-parsing-token syntax-test test",
 		"selected-body-parsing-token syntax-return return",

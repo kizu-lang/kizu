@@ -290,10 +290,6 @@ func requiredSelfhostIRSelectedHelperBodyFragments() []string {
 func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 	return []string{
 		"executable-selected-body-parsing checked-ast-body-parsing-v1\n",
-		"selected-body-parsing selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast\n",
-		"selected-body-parsing selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast\n",
 		"selected-body-parsing-token syntax-fn fn\n",
 		"selected-body-parsing-token syntax-test test\n",
 		"selected-body-parsing-token syntax-return return\n",

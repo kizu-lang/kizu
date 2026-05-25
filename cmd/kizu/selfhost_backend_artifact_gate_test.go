@@ -609,10 +609,6 @@ func requiredLLVMMetadataSelectedHelperBodyFragments() []string {
 func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 	return []string{
 		"backend-input executable-selected-body-parsing checked-ast-body-parsing-v1\n",
-		"backend-input selected-body-parsing selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast\n",
-		"backend-input selected-body-parsing selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast\n",
 		"backend-input selected-body-parsing-token syntax-fn fn\n",
 		"backend-input selected-body-parsing-token syntax-test test\n",
 		"backend-input selected-body-parsing-token syntax-return return\n",
