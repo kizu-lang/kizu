@@ -279,6 +279,43 @@ pub fn make(kind: i64) -> Token {
 	}
 }
 
+// TestLoadProgramWithSourcesPrefersOverride checks editor buffers can replace disk source.
+func TestLoadProgramWithSourcesPrefersOverride(t *testing.T) {
+	root := moduleFixture(t, map[string]string{
+		"src/main.kizu": "let x = 1;\n",
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64,
+}
+`,
+	})
+	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ParseManifest(string(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph, err := ResolveModules(root, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProgram(graph); err == nil {
+		t.Fatal("LoadProgram should read the invalid disk source")
+	}
+	openMain := `import app::token;
+
+fn main(value: token::Token) -> void {
+    return;
+}
+`
+	if _, err := LoadProgramWithSources(graph, map[string]string{
+		filepath.Join(root, "src", "main.kizu"): openMain,
+	}); err != nil {
+		t.Fatalf("load with source override failed: %v", err)
+	}
+}
+
 // TestCheckGraphRejectsPrivateImportedFunction checks top-level visibility.
 func TestCheckGraphRejectsPrivateImportedFunction(t *testing.T) {
 	root := moduleFixture(t, map[string]string{

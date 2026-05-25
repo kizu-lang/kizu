@@ -137,13 +137,12 @@ func (s *Server) handleNotification(msg incomingMessage) (bool, error) {
 
 // publishDiagnostics analyzes the current document text and notifies the client.
 func (s *Server) publishDiagnostics(uri string) error {
-	source, ok := s.documents[uri]
-	if !ok {
+	if _, ok := s.documents[uri]; !ok {
 		return nil
 	}
 	return s.notify("textDocument/publishDiagnostics", publishDiagnosticsParams{
 		URI:         uri,
-		Diagnostics: Analyze(source),
+		Diagnostics: s.analyzeDocument(uri),
 	})
 }
 

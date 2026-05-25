@@ -3,6 +3,7 @@ package project
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -13,11 +14,17 @@ import (
 
 // LoadProgram parses every module in graph and returns a qualified package program.
 func LoadProgram(graph Graph) (*ast.Program, error) {
+	return LoadProgramWithSources(graph, nil)
+}
+
+// LoadProgramWithSources parses graph using source overrides keyed by module file path.
+func LoadProgramWithSources(graph Graph, sources map[string]string) (*ast.Program, error) {
 	checker := &graphChecker{
-		modules:     map[string]*moduleUnit{},
-		modulePaths: map[string]bool{},
-		types:       map[string]typeExport{},
-		functions:   map[string]functionExport{},
+		modules:         map[string]*moduleUnit{},
+		modulePaths:     map[string]bool{},
+		types:           map[string]typeExport{},
+		functions:       map[string]functionExport{},
+		sourceOverrides: cleanSourceOverrides(sources),
 	}
 	if err := checker.load(graph); err != nil {
 		return nil, err
@@ -41,10 +48,11 @@ func CheckGraph(graph Graph) error {
 }
 
 type graphChecker struct {
-	modules     map[string]*moduleUnit
-	modulePaths map[string]bool
-	types       map[string]typeExport
-	functions   map[string]functionExport
+	modules         map[string]*moduleUnit
+	modulePaths     map[string]bool
+	types           map[string]typeExport
+	functions       map[string]functionExport
+	sourceOverrides map[string]string
 }
 
 type moduleUnit struct {
@@ -66,7 +74,7 @@ type functionExport struct {
 // load parses every source file and indexes module paths.
 func (c *graphChecker) load(graph Graph) error {
 	for _, module := range graph.Modules {
-		program, err := parseModuleFile(module)
+		program, err := c.parseModule(module)
 		if err != nil {
 			return err
 		}
@@ -76,18 +84,43 @@ func (c *graphChecker) load(graph Graph) error {
 	return nil
 }
 
+// parseModule parses one graph module from an override or its source file.
+func (c *graphChecker) parseModule(module Module) (*ast.Program, error) {
+	if source, ok := c.sourceOverrides[filepath.Clean(module.File)]; ok {
+		return parseModuleSource(module.Path, source)
+	}
+	return parseModuleFile(module)
+}
+
 // parseModuleFile parses one graph module source.
 func parseModuleFile(module Module) (*ast.Program, error) {
 	source, err := os.ReadFile(module.File)
 	if err != nil {
 		return nil, err
 	}
-	p := parser.New(lexer.New(string(source)))
+	return parseModuleSource(module.Path, string(source))
+}
+
+// parseModuleSource parses one graph module source string.
+func parseModuleSource(modulePath string, source string) (*ast.Program, error) {
+	p := parser.New(lexer.New(source))
 	program := p.ParseProgram()
 	if len(p.Errors()) > 0 {
-		return nil, fmt.Errorf("parse error in module `%s`: %s", module.Path, p.Errors()[0])
+		return nil, fmt.Errorf("parse error in module `%s`: %s", modulePath, p.Errors()[0])
 	}
 	return program, nil
+}
+
+// cleanSourceOverrides normalizes source override file paths for graph lookups.
+func cleanSourceOverrides(sources map[string]string) map[string]string {
+	if len(sources) == 0 {
+		return nil
+	}
+	cleaned := make(map[string]string, len(sources))
+	for path, source := range sources {
+		cleaned[filepath.Clean(path)] = source
+	}
+	return cleaned
 }
 
 // collectTypes indexes user-declared module types before resolving references.
