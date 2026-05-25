@@ -21,6 +21,8 @@ const (
 	completionItemKindTypeParameter = 25
 
 	insertTextFormatSnippet = 2
+
+	inlayHintKindType = 1
 )
 
 type incomingMessage struct {
@@ -57,6 +59,7 @@ type serverCapabilities struct {
 	TextDocumentSync           int                `json:"textDocumentSync"`
 	DocumentFormattingProvider bool               `json:"documentFormattingProvider,omitempty"`
 	CompletionProvider         *completionOptions `json:"completionProvider,omitempty"`
+	InlayHintProvider          bool               `json:"inlayHintProvider,omitempty"`
 }
 
 type completionOptions struct {
@@ -100,6 +103,11 @@ type documentFormattingParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 }
 
+type inlayHintParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Range        Range                  `json:"range"`
+}
+
 type textDocumentPositionParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 	Position     Position               `json:"position"`
@@ -131,6 +139,12 @@ type completionItem struct {
 	InsertText       string              `json:"insertText,omitempty"`
 	InsertTextFormat int                 `json:"insertTextFormat,omitempty"`
 	TextEdit         *completionTextEdit `json:"textEdit,omitempty"`
+}
+
+type inlayHint struct {
+	Position Position `json:"position"`
+	Label    string   `json:"label"`
+	Kind     int      `json:"kind,omitempty"`
 }
 
 // Diagnostic is the LSP diagnostic shape emitted by the server.
