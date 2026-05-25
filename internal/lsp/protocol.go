@@ -87,7 +87,7 @@ type documentFormattingParams struct {
 
 type completionParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
-	Position     Position               `json:"position"`
+	Position     Position               `json:"position,omitempty"`
 }
 
 type textDocumentContentChangeEvent struct {

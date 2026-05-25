@@ -112,7 +112,7 @@ func (s *Server) handleCompletionRequest(msg incomingMessage) error {
 		return s.respond(msg.ID, []completionItem{})
 	}
 	graph, hasGraph := s.packageGraphForURI(params.TextDocument.URI)
-	return s.respond(msg.ID, CompletionItems(source, graph, hasGraph))
+	return s.respond(msg.ID, CompletionItems(source, params.Position, graph, hasGraph))
 }
 
 // handleNotification applies LSP notifications without sending request responses.
