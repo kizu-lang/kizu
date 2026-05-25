@@ -17,6 +17,7 @@ type Server struct {
 	reader    *bufio.Reader
 	writer    io.Writer
 	documents map[string]string
+	analysis  map[string]checkedDocument
 }
 
 // NewServer creates a Kizu language server over one JSON-RPC transport.
@@ -25,6 +26,7 @@ func NewServer(reader io.Reader, writer io.Writer) *Server {
 		reader:    bufio.NewReader(reader),
 		writer:    writer,
 		documents: map[string]string{},
+		analysis:  map[string]checkedDocument{},
 	}
 }
 
@@ -78,6 +80,15 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 				DefinitionProvider:     true,
 				HoverProvider:          true,
 				DocumentSymbolProvider: true,
+				ReferencesProvider:     true,
+				SignatureHelpProvider: &signatureOptions{
+					TriggerCharacters: []string{"(", ","},
+				},
+				SemanticTokensProvider: &semanticTokensOptions{
+					Legend: semanticTokenLegend(),
+					Full:   true,
+				},
+				WorkspaceSymbolProvider: true,
 			},
 			ServerInfo: serverInfo{Name: "kizu-lsp"},
 		})
@@ -95,6 +106,14 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 		return false, s.handleHoverRequest(msg)
 	case "textDocument/documentSymbol":
 		return false, s.handleDocumentSymbolRequest(msg)
+	case "textDocument/references":
+		return false, s.handleReferencesRequest(msg)
+	case "textDocument/signatureHelp":
+		return false, s.handleSignatureHelpRequest(msg)
+	case "textDocument/semanticTokens/full":
+		return false, s.handleSemanticTokensRequest(msg)
+	case "workspace/symbol":
+		return false, s.handleWorkspaceSymbolRequest(msg)
 	default:
 		return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
 	}
@@ -166,6 +185,46 @@ func (s *Server) handleDocumentSymbolRequest(msg incomingMessage) error {
 	return s.respond(msg.ID, DocumentSymbols(source))
 }
 
+// handleReferencesRequest returns locations that resolve to the cursor target.
+func (s *Server) handleReferencesRequest(msg incomingMessage) error {
+	var params referenceParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.references(
+		params.TextDocument.URI,
+		params.Position,
+		params.Context.IncludeDeclaration,
+	))
+}
+
+// handleSignatureHelpRequest returns call signature help for the cursor.
+func (s *Server) handleSignatureHelpRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.signatureHelp(params.TextDocument.URI, params.Position))
+}
+
+// handleSemanticTokensRequest returns whole-document semantic token data.
+func (s *Server) handleSemanticTokensRequest(msg incomingMessage) error {
+	var params semanticTokensParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.semanticTokens(params.TextDocument.URI))
+}
+
+// handleWorkspaceSymbolRequest returns package symbols matching a query.
+func (s *Server) handleWorkspaceSymbolRequest(msg incomingMessage) error {
+	var params workspaceSymbolParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.workspaceSymbols(params.Query))
+}
+
 // handleNotification applies LSP notifications without sending request responses.
 func (s *Server) handleNotification(msg incomingMessage) (bool, error) {
 	switch msg.Method {
@@ -179,6 +238,7 @@ func (s *Server) handleNotification(msg incomingMessage) (bool, error) {
 			return false, err
 		}
 		s.documents[params.TextDocument.URI] = params.TextDocument.Text
+		delete(s.analysis, params.TextDocument.URI)
 		return false, s.publishDiagnostics(params.TextDocument.URI)
 	case "textDocument/didChange":
 		var params didChangeTextDocumentParams
@@ -189,6 +249,7 @@ func (s *Server) handleNotification(msg incomingMessage) (bool, error) {
 			return false, nil
 		}
 		s.documents[params.TextDocument.URI] = params.ContentChanges[len(params.ContentChanges)-1].Text
+		delete(s.analysis, params.TextDocument.URI)
 		return false, s.publishDiagnostics(params.TextDocument.URI)
 	case "textDocument/didClose":
 		var params didCloseTextDocumentParams
@@ -196,6 +257,7 @@ func (s *Server) handleNotification(msg incomingMessage) (bool, error) {
 			return false, err
 		}
 		delete(s.documents, params.TextDocument.URI)
+		delete(s.analysis, params.TextDocument.URI)
 		return false, s.notify("textDocument/publishDiagnostics", publishDiagnosticsParams{
 			URI:         params.TextDocument.URI,
 			Diagnostics: []Diagnostic{},
@@ -212,7 +274,7 @@ func (s *Server) publishDiagnostics(uri string) error {
 	}
 	return s.notify("textDocument/publishDiagnostics", publishDiagnosticsParams{
 		URI:         uri,
-		Diagnostics: s.analyzeDocument(uri),
+		Diagnostics: s.checkedDocument(uri).Diagnostics,
 	})
 }
 

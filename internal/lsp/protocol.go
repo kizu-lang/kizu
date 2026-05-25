@@ -31,6 +31,7 @@ const (
 	symbolKindEnum       = 10
 	symbolKindInterface  = 11
 	symbolKindFunction   = 12
+	symbolKindVariable   = 13
 	symbolKindEnumMember = 22
 	symbolKindStruct     = 23
 )
@@ -66,17 +67,35 @@ type initializeResult struct {
 }
 
 type serverCapabilities struct {
-	TextDocumentSync           int                `json:"textDocumentSync"`
-	DocumentFormattingProvider bool               `json:"documentFormattingProvider,omitempty"`
-	CompletionProvider         *completionOptions `json:"completionProvider,omitempty"`
-	InlayHintProvider          bool               `json:"inlayHintProvider,omitempty"`
-	DefinitionProvider         bool               `json:"definitionProvider,omitempty"`
-	HoverProvider              bool               `json:"hoverProvider,omitempty"`
-	DocumentSymbolProvider     bool               `json:"documentSymbolProvider,omitempty"`
+	TextDocumentSync           int                    `json:"textDocumentSync"`
+	DocumentFormattingProvider bool                   `json:"documentFormattingProvider,omitempty"`
+	CompletionProvider         *completionOptions     `json:"completionProvider,omitempty"`
+	InlayHintProvider          bool                   `json:"inlayHintProvider,omitempty"`
+	DefinitionProvider         bool                   `json:"definitionProvider,omitempty"`
+	HoverProvider              bool                   `json:"hoverProvider,omitempty"`
+	DocumentSymbolProvider     bool                   `json:"documentSymbolProvider,omitempty"`
+	ReferencesProvider         bool                   `json:"referencesProvider,omitempty"`
+	SignatureHelpProvider      *signatureOptions      `json:"signatureHelpProvider,omitempty"`
+	SemanticTokensProvider     *semanticTokensOptions `json:"semanticTokensProvider,omitempty"`
+	WorkspaceSymbolProvider    bool                   `json:"workspaceSymbolProvider,omitempty"`
 }
 
 type completionOptions struct {
 	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
+}
+
+type signatureOptions struct {
+	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
+}
+
+type semanticTokensOptions struct {
+	Legend semanticTokensLegend `json:"legend"`
+	Full   bool                 `json:"full"`
+}
+
+type semanticTokensLegend struct {
+	TokenTypes     []string `json:"tokenTypes"`
+	TokenModifiers []string `json:"tokenModifiers"`
 }
 
 type serverInfo struct {
@@ -123,6 +142,24 @@ type inlayHintParams struct {
 
 type documentSymbolParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
+type referenceParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	Context      referenceContext       `json:"context"`
+}
+
+type referenceContext struct {
+	IncludeDeclaration bool `json:"includeDeclaration"`
+}
+
+type semanticTokensParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
+type workspaceSymbolParams struct {
+	Query string `json:"query"`
 }
 
 type textDocumentPositionParams struct {
@@ -186,6 +223,32 @@ type documentSymbol struct {
 	Range          Range            `json:"range"`
 	SelectionRange Range            `json:"selectionRange"`
 	Children       []documentSymbol `json:"children,omitempty"`
+}
+
+type signatureHelp struct {
+	Signatures      []signatureInformation `json:"signatures"`
+	ActiveSignature int                    `json:"activeSignature,omitempty"`
+	ActiveParameter int                    `json:"activeParameter,omitempty"`
+}
+
+type signatureInformation struct {
+	Label      string                 `json:"label"`
+	Parameters []parameterInformation `json:"parameters,omitempty"`
+}
+
+type parameterInformation struct {
+	Label string `json:"label"`
+}
+
+type semanticTokens struct {
+	Data []int `json:"data"`
+}
+
+type symbolInformation struct {
+	Name          string   `json:"name"`
+	Kind          int      `json:"kind"`
+	Location      location `json:"location"`
+	ContainerName string   `json:"containerName,omitempty"`
 }
 
 // Diagnostic is the LSP diagnostic shape emitted by the server.
