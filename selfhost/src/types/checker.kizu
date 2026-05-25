@@ -284,50 +284,61 @@ pub fn first_post_move_check_diagnostic_ast_node(
         if undefined.found {
             diagnostic = diagnostic_summary::from_undefined_variable(undefined);
         } else {
-            let argument = try first_argument_type_mismatch_node(
+            let binary_operand = try first_binary_operand_type_mismatch_node(
                 allocator,
                 file,
                 ast,
                 root,
-                local_function_param_types,
                 function_returns
             );
-            if argument.found {
-                diagnostic = diagnostic_summary::from_argument_type(argument);
+            if binary_operand.found {
+                diagnostic = diagnostic_summary::from_binary_operand_type(binary_operand);
             } else {
-                let immutable = try first_immutable_assignment_node(
+                let argument = try first_argument_type_mismatch_node(
                     allocator,
                     file,
                     ast,
                     root,
+                    local_function_param_types,
                     function_returns
                 );
-                if immutable.found {
-                    diagnostic = diagnostic_summary::from_immutable_assignment(
-                        immutable
-                    );
+                if argument.found {
+                    diagnostic = diagnostic_summary::from_argument_type(argument);
                 } else {
-                    let invalid = try first_invalid_assignment_target_node(
+                    let immutable = try first_immutable_assignment_node(
+                        allocator,
                         file,
                         ast,
-                        root
+                        root,
+                        function_returns
                     );
-                    if invalid.found {
-                        diagnostic = diagnostic_summary::from_invalid_assignment_target(
-                            invalid
+                    if immutable.found {
+                        diagnostic = diagnostic_summary::from_immutable_assignment(
+                            immutable
                         );
                     } else {
-                        let assignment = try first_assignment_type_mismatch_node(
-                            allocator,
+                        let invalid = try first_invalid_assignment_target_node(
                             file,
                             ast,
-                            root,
-                            function_returns
+                            root
                         );
-                        if assignment.found {
-                            diagnostic = diagnostic_summary::from_assignment_type(
-                                assignment
+                        if invalid.found {
+                            diagnostic = diagnostic_summary::from_invalid_assignment_target(
+                                invalid
                             );
+                        } else {
+                            let assignment = try first_assignment_type_mismatch_node(
+                                allocator,
+                                file,
+                                ast,
+                                root,
+                                function_returns
+                            );
+                            if assignment.found {
+                                diagnostic = diagnostic_summary::from_assignment_type(
+                                    assignment
+                                );
+                            }
                         }
                     }
                 }
@@ -1289,6 +1300,654 @@ fn first_argument_type_mismatch_in_match(
         arms,
         local_types,
         function_param_types,
+        function_returns
+    );
+}
+
+fn first_binary_operand_type_mismatch_node(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Program(program) => return first_binary_operand_type_mismatch_in_declarations(
+            allocator,
+            file,
+            ast,
+            program.declarations,
+            function_returns
+        );,
+        FnDecl(fn_decl) => return first_binary_operand_type_mismatch_in_function(
+            allocator,
+            file,
+            ast,
+            fn_decl.params,
+            fn_decl.body,
+            function_returns
+        );,
+        ImplDecl(impl_decl) => return first_binary_operand_type_mismatch_in_declarations(
+            allocator,
+            file,
+            ast,
+            impl_decl.methods,
+            function_returns
+        );,
+        _ => return diagnostic_summary::no_argument_type_mismatch();,
+    }
+}
+
+fn first_binary_operand_type_mismatch_in_declarations(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let found = try first_binary_operand_type_mismatch_node(
+            allocator,
+            file,
+            ast,
+            child,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_argument_type_mismatch();
+}
+
+fn first_binary_operand_type_mismatch_in_function(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var local_types = std::map::Map<[]u8, []u8>(allocator);
+    var local_mutability = std::map::Map<[]u8, bool>(allocator);
+    let locals = try local_facts::collect_function_statement_locals(
+        allocator,
+        file,
+        ast,
+        params,
+        body,
+        local_types,
+        local_mutability,
+        function_returns
+    );
+    let found = try first_binary_operand_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_returns
+    );
+    local_types.deinit();
+    local_mutability.deinit();
+    return found;
+}
+
+fn first_binary_operand_type_mismatch_in_statement(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Block(block) => return first_binary_operand_type_mismatch_in_statement_range(
+            allocator,
+            file,
+            ast,
+            block.statements,
+            local_types,
+            function_returns
+        );,
+        Let(let_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            let_node.value,
+            local_types,
+            function_returns
+        );,
+        Assign(assign_node) => return first_binary_operand_type_mismatch_in_two_expressions(
+            allocator,
+            file,
+            ast,
+            assign_node.target,
+            assign_node.value,
+            local_types,
+            function_returns
+        );,
+        Return(return_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            return_node.value,
+            local_types,
+            function_returns
+        );,
+        Defer(defer_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            defer_node.expr,
+            local_types,
+            function_returns
+        );,
+        ExprStmt(expr_stmt) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            expr_stmt.expr,
+            local_types,
+            function_returns
+        );,
+        If(if_node) => return first_binary_operand_type_mismatch_in_if(
+            allocator,
+            file,
+            ast,
+            if_node.condition,
+            if_node.then_block,
+            if_node.else_block,
+            local_types,
+            function_returns
+        );,
+        While(while_node) => return first_binary_operand_type_mismatch_in_loop(
+            allocator,
+            file,
+            ast,
+            while_node.condition,
+            while_node.body,
+            local_types,
+            function_returns
+        );,
+        For(for_node) => return first_binary_operand_type_mismatch_in_for(
+            allocator,
+            file,
+            ast,
+            for_node.start,
+            for_node.end,
+            for_node.body,
+            local_types,
+            function_returns
+        );,
+        Match(match_node) => return first_binary_operand_type_mismatch_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            function_returns
+        );,
+        MatchArm(match_arm) => return first_binary_operand_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            match_arm.body,
+            local_types,
+            function_returns
+        );,
+        Unsafe(unsafe_node) => return first_binary_operand_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            unsafe_node.body,
+            local_types,
+            function_returns
+        );,
+        ComptimeIf(comptime_if_node) => return first_binary_operand_type_mismatch_in_if(
+            allocator,
+            file,
+            ast,
+            comptime_if_node.condition,
+            comptime_if_node.then_block,
+            comptime_if_node.else_block,
+            local_types,
+            function_returns
+        );,
+        _ => return diagnostic_summary::no_argument_type_mismatch();,
+    }
+}
+
+fn first_binary_operand_type_mismatch_in_statement_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var index = 0;
+    while index < statements.len {
+        let child = try ast.child_at(statements, index);
+        let found = try first_binary_operand_type_mismatch_in_statement(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_argument_type_mismatch();
+}
+
+fn first_binary_operand_type_mismatch_in_expression_range(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    expressions: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    var index = 0;
+    while index < expressions.len {
+        let child = try ast.child_at(expressions, index);
+        let found = try first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            child,
+            local_types,
+            function_returns
+        );
+        if found.found {
+            return found;
+        }
+        index = index + 1;
+    }
+    return diagnostic_summary::no_argument_type_mismatch();
+}
+
+fn first_binary_operand_type_mismatch_in_expression(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let node = ast.get(node_id);
+    match node.data {
+        Call(call_node) => return first_binary_operand_type_mismatch_in_call(
+            allocator,
+            file,
+            ast,
+            call_node.callee,
+            call_node.args,
+            local_types,
+            function_returns
+        );,
+        Prefix(prefix_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            prefix_node.right,
+            local_types,
+            function_returns
+        );,
+        Binary(binary) => return binary_operand_type_mismatch(
+            allocator,
+            file,
+            ast,
+            binary.left,
+            binary.right,
+            local_types,
+            function_returns
+        );,
+        FieldExpr(field_expr_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            field_expr_node.receiver,
+            local_types,
+            function_returns
+        );,
+        DerefExpr(deref_expr_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            deref_expr_node.receiver,
+            local_types,
+            function_returns
+        );,
+        TypeApplyExpr(type_apply) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            type_apply.callee,
+            local_types,
+            function_returns
+        );,
+        CastExpr(cast_expr) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            cast_expr.value,
+            local_types,
+            function_returns
+        );,
+        IndexExpr(index_expr) => return first_binary_operand_type_mismatch_in_two_expressions(
+            allocator,
+            file,
+            ast,
+            index_expr.target,
+            index_expr.start,
+            local_types,
+            function_returns
+        );,
+        StructLiteralExpr(struct_literal) => return first_binary_operand_type_mismatch_in_expression_range(
+            allocator,
+            file,
+            ast,
+            struct_literal.fields,
+            local_types,
+            function_returns
+        );,
+        StructFieldInit(struct_field_init) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            struct_field_init.value,
+            local_types,
+            function_returns
+        );,
+        ArenaNewExpr(arena_new) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            arena_new.allocator,
+            local_types,
+            function_returns
+        );,
+        TryExpr(try_expr_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            try_expr_node.value,
+            local_types,
+            function_returns
+        );,
+        ComptimeExpr(comptime_expr_node) => return first_binary_operand_type_mismatch_in_expression(
+            allocator,
+            file,
+            ast,
+            comptime_expr_node.value,
+            local_types,
+            function_returns
+        );,
+        Match(match_node) => return first_binary_operand_type_mismatch_in_match(
+            allocator,
+            file,
+            ast,
+            match_node.value,
+            match_node.arms,
+            local_types,
+            function_returns
+        );,
+        _ => return diagnostic_summary::no_argument_type_mismatch();,
+    }
+}
+
+fn first_binary_operand_type_mismatch_in_call(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let callee_found = try first_binary_operand_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        callee,
+        local_types,
+        function_returns
+    );
+    if callee_found.found {
+        return callee_found;
+    }
+    return first_binary_operand_type_mismatch_in_expression_range(
+        allocator,
+        file,
+        ast,
+        args,
+        local_types,
+        function_returns
+    );
+}
+
+fn first_binary_operand_type_mismatch_in_two_expressions(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    first: std::kizu::ast::NodeId,
+    second: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let first_found = try first_binary_operand_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        first,
+        local_types,
+        function_returns
+    );
+    if first_found.found {
+        return first_found;
+    }
+    return first_binary_operand_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        second,
+        local_types,
+        function_returns
+    );
+}
+
+fn binary_operand_type_mismatch(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    left: std::kizu::ast::NodeId,
+    right: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let nested = try first_binary_operand_type_mismatch_in_two_expressions(
+        allocator,
+        file,
+        ast,
+        left,
+        right,
+        local_types,
+        function_returns
+    );
+    if nested.found {
+        return nested;
+    }
+    let left_type = try expression_infer::infer_expression_type(
+        allocator,
+        file,
+        ast,
+        left,
+        local_types,
+        function_returns
+    );
+    let right_type = try expression_infer::infer_expression_type(
+        allocator,
+        file,
+        ast,
+        right,
+        local_types,
+        function_returns
+    );
+    if expression_infer::known_binary_operand_type_mismatch(left_type, right_type) {
+        let right_node = ast.get(right);
+        return diagnostic_summary::argument_type_summary(
+            true,
+            right_node.span.start,
+            right_node.span.end,
+            left_type,
+            right_type
+        );
+    }
+    return diagnostic_summary::no_argument_type_mismatch();
+}
+
+fn first_binary_operand_type_mismatch_in_if(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    then_block: std::kizu::ast::NodeId,
+    else_block: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let condition_found = try first_binary_operand_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
+    );
+    if condition_found.found {
+        return condition_found;
+    }
+    let then_found = try first_binary_operand_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        then_block,
+        local_types,
+        function_returns
+    );
+    if then_found.found {
+        return then_found;
+    }
+    return first_binary_operand_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        else_block,
+        local_types,
+        function_returns
+    );
+}
+
+fn first_binary_operand_type_mismatch_in_loop(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let condition_found = try first_binary_operand_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        condition,
+        local_types,
+        function_returns
+    );
+    if condition_found.found {
+        return condition_found;
+    }
+    return first_binary_operand_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_returns
+    );
+}
+
+fn first_binary_operand_type_mismatch_in_for(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    start: std::kizu::ast::NodeId,
+    end: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let range_found = try first_binary_operand_type_mismatch_in_two_expressions(
+        allocator,
+        file,
+        ast,
+        start,
+        end,
+        local_types,
+        function_returns
+    );
+    if range_found.found {
+        return range_found;
+    }
+    return first_binary_operand_type_mismatch_in_statement(
+        allocator,
+        file,
+        ast,
+        body,
+        local_types,
+        function_returns
+    );
+}
+
+fn first_binary_operand_type_mismatch_in_match(
+    allocator: Allocator,
+    file: &source::SourceFile,
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId,
+    arms: std::kizu::ast::ChildRange,
+    local_types: &std::map::Map<[]u8, []u8>,
+    function_returns: &std::map::Map<[]u8, []u8>
+) -> !model::ArgumentTypeSummary {
+    let value_found = try first_binary_operand_type_mismatch_in_expression(
+        allocator,
+        file,
+        ast,
+        value,
+        local_types,
+        function_returns
+    );
+    if value_found.found {
+        return value_found;
+    }
+    return first_binary_operand_type_mismatch_in_statement_range(
+        allocator,
+        file,
+        ast,
+        arms,
+        local_types,
         function_returns
     );
 }
