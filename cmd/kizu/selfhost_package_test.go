@@ -1269,7 +1269,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
 		"executable_body_parsing::append_run_parsing_facts(",
-		"selected-function ",
 		"selected-signature ",
 		"selected-signature-param-count ",
 		"selected-signature-return ",
@@ -1388,7 +1387,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	sources := readHostedExecutableContractSources(t)
 	facts := hostedExecutableContractFacts{
 		abi:                      hostedExecutableABIFacts(),
-		selectedFunctions:        hostedExecutableSelectedFunctionFacts(),
 		selectedSignatures:       hostedExecutableSelectedSignatureFacts(),
 		selectedSignatureDetails: hostedExecutableSelectedSignatureDetailFacts(),
 		selectedBodies:           hostedExecutableSelectedBodyFacts(),
@@ -1406,7 +1404,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 // executable path contract assertions.
 type hostedExecutableContractFacts struct {
 	abi                      []string
-	selectedFunctions        []string
 	selectedSignatures       []string
 	selectedSignatureDetails []string
 	selectedBodies           []string
@@ -1425,7 +1422,6 @@ func assertHostedExecutableBackendInputs(
 ) {
 	t.Helper()
 	llvm := sources.llvm
-	assertExecutableSelectedFunctionsValidated(t, llvm, facts.selectedFunctions)
 	assertExecutableSelectedSignaturesValidated(
 		t,
 		llvm,
@@ -1465,7 +1461,6 @@ func assertHostedExecutableFactOrigins(
 		sources.ir,
 		sources.selected,
 		sources.llvm,
-		facts.selectedFunctions,
 	)
 	assertExecutableSelectedSignaturesComeFromCheckedAST(
 		t,
@@ -1640,21 +1635,6 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 			t,
 			"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu",
 		),
-	}
-}
-
-// assertExecutableSelectedFunctionsValidated keeps hosted backend input tied to
-// named selfhost executable path functions instead of untracked source matching.
-func assertExecutableSelectedFunctionsValidated(t *testing.T, llvm string, facts []string) {
-	t.Helper()
-	if !strings.Contains(llvm, `"executable-selected-functions checked-ast-path-v1"`) {
-		t.Fatal("backend IR validation does not require selected executable functions")
-	}
-	if !strings.Contains(llvm, `"backend-input executable-selected-functions checked-ast-path-v1"`) {
-		t.Fatal("backend metadata does not record selected executable functions")
-	}
-	for _, fact := range facts {
-		assertNamedFactConsumer(t, llvm, "backend selected-function validation", fact)
 	}
 }
 
@@ -1846,7 +1826,6 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 	ir string,
 	selected string,
 	llvm string,
-	facts []string,
 ) {
 	t.Helper()
 	if strings.Contains(ir, `"executable-selected-functions checked-ast-path-v1"`) {
@@ -1872,24 +1851,9 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 			t.Fatalf("selected executable function facts do not use checked AST with %q", fragment)
 		}
 	}
-	for _, fact := range facts {
-		if strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend hardcodes complete selected-function fact %q", fact)
-		}
-		parts := strings.Fields(fact)
-		if len(parts) != 3 {
-			t.Fatalf("invalid selected-function fixture %q", fact)
-		}
-		for _, fragment := range []string{
-			`"` + parts[0] + ` "`,
-			`"` + parts[1] + `"`,
-			`"` + parts[2] + `"`,
-			"append_selected_function(",
-			"require_function_body_fragment(",
-		} {
-			if !strings.Contains(selected, fragment) {
-				t.Fatalf("selected executable function emitter does not publish %q via %q", fact, fragment)
-			}
+	for _, content := range []string{selected, llvm} {
+		if strings.Contains(content, `"selected-function `) {
+			t.Fatal("executable path still depends on dedicated selected-function facts")
 		}
 	}
 }
@@ -3072,31 +3036,6 @@ func hostedExecutableABIFacts() []string {
 		"executable-kind RunReturnVoid 2",
 		"executable-kind TestExpectOk 3",
 		"executable-kind TestExpectFailure 4",
-	}
-}
-
-// hostedExecutableSelectedFunctionFacts returns selfhost functions that must be
-// available on the real hosted executable path before static matching is removable.
-func hostedExecutableSelectedFunctionFacts() []string {
-	return []string{
-		"selected-function selfhost::cli::execute::run_file_cli checked-run-artifact",
-		"selected-function selfhost::cli::execute::test_file_cli checked-test-artifact",
-		"selected-function selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper",
-		"selected-function selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast",
-		"selected-function selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable",
-		"selected-function selfhost::backend::executable::" +
-			"lower_test_executable checked-test-wrapper",
-		"selected-function selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast",
-		"selected-function selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable",
-		"selected-function selfhost::backend::hosted::" +
-			"emit_run_executable_artifact hosted-run-writer",
-		"selected-function selfhost::backend::hosted::" +
-			"emit_test_executable_artifact hosted-test-writer",
 	}
 }
 
