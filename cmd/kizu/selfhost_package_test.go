@@ -1150,6 +1150,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"hosted-artifact-metadata-source-prefix ",
 		"hosted-artifact-metadata-output-prefix ",
 		"hosted-artifact-metadata-fallback-line ",
+		"hosted-artifact-metadata-lowering-line ",
 	},
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2460,6 +2461,7 @@ func assertExecutableHostedArtifactGlobalConsumers(
 		`"hosted-artifact-metadata-abi-line "`,
 		`"hosted-artifact-metadata-entry-prefix "`,
 		`"hosted-artifact-metadata-fallback-line "`,
+		`"hosted-artifact-metadata-lowering-line "`,
 		`"hosted-artifact-metadata-mode-line "`,
 		`"hosted-artifact-metadata-discovery-line "`,
 	} {
