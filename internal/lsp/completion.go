@@ -42,6 +42,7 @@ type completionIndex struct {
 type functionCompletion struct {
 	name   string
 	params []string
+	detail string
 }
 
 type fieldCompletion struct {
@@ -579,15 +580,13 @@ func readFunction(tokens []token.Token, start int) (functionCompletion, int, boo
 		return functionCompletion{}, start, false
 	}
 	name := tokens[start+1].Literal
-	params, next := readFunctionParams(tokens, start)
-	paramNames := make([]string, 0, len(params))
-	for _, param := range params {
-		if param.name == "self" {
-			continue
-		}
-		paramNames = append(paramNames, param.name)
-	}
-	return functionCompletion{name: name, params: paramNames}, next, true
+	params, close := readFunctionParams(tokens, start)
+	returnType, next := readFunctionReturnType(tokens, close)
+	return functionCompletion{
+		name:   name,
+		params: callableParamNames(params),
+		detail: functionSignature(name, params, returnType),
+	}, next, true
 }
 
 // readFunctionParams reads a function parameter list.
@@ -613,6 +612,43 @@ func readFunctionParams(tokens []token.Token, start int) ([]localBinding, int) {
 		i = next
 	}
 	return params, close
+}
+
+// readFunctionReturnType reads an optional return type after a parameter list.
+func readFunctionReturnType(tokens []token.Token, close int) (string, int) {
+	if close+1 >= len(tokens) || tokens[close+1].Type != token.Arrow {
+		return "", close
+	}
+	return readTypeUntil(tokens, close+2, token.LBrace, token.Semicolon)
+}
+
+// callableParamNames returns snippet placeholders for explicit call arguments.
+func callableParamNames(params []localBinding) []string {
+	names := make([]string, 0, len(params))
+	for _, param := range params {
+		if param.name == "self" {
+			continue
+		}
+		names = append(names, param.name)
+	}
+	return names
+}
+
+// functionSignature renders a readable callable declaration for completion detail.
+func functionSignature(name string, params []localBinding, returnType string) string {
+	labels := make([]string, 0, len(params))
+	for _, param := range params {
+		if param.typ == "" {
+			labels = append(labels, param.name)
+			continue
+		}
+		labels = append(labels, param.name+": "+param.typ)
+	}
+	signature := "fn " + name + "(" + strings.Join(labels, ", ") + ")"
+	if returnType != "" {
+		signature += " -> " + returnType
+	}
+	return signature
 }
 
 // completionContextAt identifies whether completion is general, import, member, or namespace.
@@ -715,6 +751,9 @@ func localBindingType(bindings []localBinding, name string) string {
 
 // functionItem builds a call completion item for a function or method.
 func functionItem(name string, fn functionCompletion, kind int, detail string) completionItem {
+	if fn.detail != "" {
+		detail = fn.detail
+	}
 	item := completionItem{Label: name, Kind: kind, Detail: detail}
 	item.InsertText = callSnippet(name, fn.params)
 	item.InsertTextFormat = insertTextFormatSnippet

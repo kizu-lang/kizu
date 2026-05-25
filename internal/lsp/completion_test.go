@@ -139,9 +139,38 @@ fn main() {
 		deinit.TextEdit.NewText != "deinit()" {
 		t.Fatalf("deinit item = %#v, want method call snippet", deinit)
 	}
+	if deinit.Detail != "fn deinit(self: Trace) -> void" {
+		t.Fatalf("deinit detail = %q, want method signature", deinit.Detail)
+	}
 	rename := requireCompletion(t, items, "rename")
 	if rename.TextEdit == nil || rename.TextEdit.NewText != "rename(${1:name})" {
 		t.Fatalf("rename item = %#v, want parameter snippet", rename)
+	}
+	if rename.Detail != "fn rename(self: &var Trace, name: []u8) -> void" {
+		t.Fatalf("rename detail = %q, want method signature", rename.Detail)
+	}
+}
+
+// TestCompleteReturnsFunctionSignatureDetails checks callable completions are descriptive.
+func TestCompleteReturnsFunctionSignatureDetails(t *testing.T) {
+	source := `fn inspect(value: i64, name: []u8) -> bool {
+    return true;
+}
+
+fn main() {
+    insp
+}
+`
+	items := Complete(source, Position{Line: 5, Character: len("    insp")})
+	inspect := requireCompletion(t, items, "inspect")
+	if inspect.Kind != completionItemKindFunction {
+		t.Fatalf("kind = %d, want function", inspect.Kind)
+	}
+	if inspect.Detail != "fn inspect(value: i64, name: []u8) -> bool" {
+		t.Fatalf("detail = %q, want full function signature", inspect.Detail)
+	}
+	if inspect.InsertText != "inspect(${1:value}, ${2:name})" {
+		t.Fatalf("insertText = %q, want name-only snippet", inspect.InsertText)
 	}
 }
 
