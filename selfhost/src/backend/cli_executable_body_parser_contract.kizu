@@ -4,6 +4,7 @@ pub fn require_executable_body_parsing(ir_bytes: []u8) -> !void {
     try require_run_parser_body_shape(ir_bytes);
     try require_test_parser_body_shape(ir_bytes);
     try require_run_payload_byte_contract(ir_bytes);
+    try require_test_expect_value_contract(ir_bytes);
     try require_parser_source_tokens(ir_bytes);
     return;
 }
@@ -32,6 +33,21 @@ pub fn run_payload_max_byte(ir_bytes: []u8) -> !i64 {
 
 pub fn run_payload_forbidden_byte(ir_bytes: []u8) -> !i64 {
     return try payload_guard_byte_constant(ir_bytes, "eq");
+}
+
+pub fn test_expect_true_value(ir_bytes: []u8) -> !i64 {
+    return try bool_value_return_value(ir_bytes, true);
+}
+
+pub fn test_expect_false_value(ir_bytes: []u8) -> !i64 {
+    return try bool_value_return_value(ir_bytes, false);
+}
+
+pub fn test_expect_unsupported_value(ir_bytes: []u8) -> !i64 {
+    let function_name = "selfhost::backend::executable::expect_bool_value";
+    let arm = try find_match_arm_with_pattern(ir_bytes, function_name, "_");
+    let body = try ir_contract::body_child_sequence(ir_bytes, function_name, arm, "body", 0);
+    return try match_arm_i64_value(ir_bytes, function_name, body);
 }
 
 pub fn unsupported_ast_kind_name(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
@@ -108,6 +124,147 @@ fn require_run_payload_byte_contract(ir_bytes: []u8) -> !void {
         return error("invalid executable parser payload contract");
     }
     return;
+}
+
+fn require_test_expect_value_contract(ir_bytes: []u8) -> !void {
+    let true_value = try test_expect_true_value(ir_bytes);
+    let false_value = try test_expect_false_value(ir_bytes);
+    let unsupported = try test_expect_unsupported_value(ir_bytes);
+    if true_value == false_value or unsupported == true_value or unsupported == false_value {
+        return error("invalid executable parser expect contract");
+    }
+    return;
+}
+
+fn bool_value_return_value(ir_bytes: []u8, value: bool) -> !i64 {
+    let function_name = "selfhost::backend::executable::bool_value_as_i64";
+    let if_sequence = try bool_value_if_sequence(ir_bytes, function_name);
+    if value {
+        let then_block = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            if_sequence,
+            "then",
+            0
+        );
+        let statement = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            then_block,
+            "statement",
+            0
+        );
+        return try return_i64_value(ir_bytes, function_name, statement);
+    }
+    return try bool_value_fallback_return_value(ir_bytes, function_name, if_sequence);
+}
+
+fn bool_value_if_sequence(ir_bytes: []u8, function_name: []u8) -> !i64 {
+    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var sequence = 0;
+    while sequence < count {
+        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+        if std::mem::equal_bytes(kind, "If") {
+            let condition = try ir_contract::body_child_sequence(
+                ir_bytes,
+                function_name,
+                sequence,
+                "condition",
+                0
+            );
+            if try node_token_matches(ir_bytes, function_name, condition, "Var", "value") {
+                return sequence;
+            }
+        }
+        sequence = sequence + 1;
+    }
+    return error("missing IR artifact fact");
+}
+
+fn bool_value_fallback_return_value(
+    ir_bytes: []u8,
+    function_name: []u8,
+    if_sequence: i64
+) -> !i64 {
+    let root = 0;
+    var ordinal = 0;
+    while ordinal < 8 {
+        let statement = try ir_contract::body_child_sequence_or_minus_one(
+            ir_bytes,
+            function_name,
+            root,
+            "statement",
+            ordinal
+        );
+        if statement < 0 {
+            return error("missing IR artifact fact");
+        }
+        if statement != if_sequence {
+            let kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+            if std::mem::equal_bytes(kind, "Return") {
+                return try return_i64_value(ir_bytes, function_name, statement);
+            }
+        }
+        ordinal = ordinal + 1;
+    }
+    return error("missing IR artifact fact");
+}
+
+fn return_i64_value(ir_bytes: []u8, function_name: []u8, sequence: i64) -> !i64 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if !std::mem::equal_bytes(kind, "Return") {
+        return error("invalid executable parser payload contract");
+    }
+    let value = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        sequence,
+        "value",
+        0
+    );
+    return try expression_i64_value(ir_bytes, function_name, value);
+}
+
+fn match_arm_i64_value(ir_bytes: []u8, function_name: []u8, sequence: i64) -> !i64 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if std::mem::equal_bytes(kind, "ExprStmt") {
+        let expr = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            sequence,
+            "expr",
+            0
+        );
+        return try expression_i64_value(ir_bytes, function_name, expr);
+    }
+    return try expression_i64_value(ir_bytes, function_name, sequence);
+}
+
+fn expression_i64_value(ir_bytes: []u8, function_name: []u8, sequence: i64) -> !i64 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if std::mem::equal_bytes(kind, "Int") {
+        return try ir_contract::body_int_value(ir_bytes, function_name, sequence);
+    }
+    if std::mem::equal_bytes(kind, "Prefix") {
+        let op = try ir_contract::sequence_fact_value(
+            ir_bytes,
+            "body-prefix ",
+            function_name,
+            sequence
+        );
+        if std::mem::equal_bytes(op, "neg") {
+            let right = try ir_contract::body_child_sequence(
+                ir_bytes,
+                function_name,
+                sequence,
+                "right",
+                0
+            );
+            let value = try expression_i64_value(ir_bytes, function_name, right);
+            return 0 - value;
+        }
+    }
+    return error("invalid executable parser payload contract");
 }
 
 fn require_run_parser_body_shape(ir_bytes: []u8) -> !void {

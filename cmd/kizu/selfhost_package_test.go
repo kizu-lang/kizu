@@ -2116,6 +2116,16 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 // renderer is gated by generic body IR shape, not only broad call presence.
 func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser string) {
 	t.Helper()
+	assertExecutableSelectedBodyParsingContractFragments(t, parser)
+	assertExecutableSelectedBodyParserNoHardcodedResultTags(t, parser)
+	assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules(t, parser)
+	assertExecutableSelectedBodyParserNoHardcodedExpectValueRules(t, parser)
+}
+
+// assertExecutableSelectedBodyParsingContractFragments checks required body IR
+// contract helper use in the hosted executable parser path.
+func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"ir_contract::require_body_call(",
 		"require_match_arm_dispatch(",
@@ -2129,8 +2139,14 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 		"run_payload_min_byte(",
 		"run_payload_max_byte(",
 		"run_payload_forbidden_byte(",
+		"test_expect_true_value(",
+		"test_expect_false_value(",
+		"test_expect_unsupported_value(",
 		"payload_guard_byte_constant(",
 		"literal_boundary_quote_byte(",
+		"bool_value_return_value(",
+		"match_arm_i64_value(",
+		"expression_i64_value(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_parent_with_child_token(",
 		"ir_contract::body_struct_literal_of_type(",
@@ -2153,6 +2169,12 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 			t.Fatalf("selected body parsing contract missing body-call validation %q", fragment)
 		}
 	}
+}
+
+// assertExecutableSelectedBodyParserNoHardcodedResultTags rejects direct
+// executable AST result tag literals in the hosted parser renderer.
+func assertExecutableSelectedBodyParserNoHardcodedResultTags(t *testing.T, parser string) {
+	t.Helper()
 	for _, fragment := range []string{
 		`executable_ast_tag(ir_bytes, "RunPrintCall")`,
 		`executable_ast_tag(ir_bytes, "RunReturnVoid")`,
@@ -2163,6 +2185,12 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 			t.Fatalf("selected body parser hardcodes executable AST result tag %q", fragment)
 		}
 	}
+}
+
+// assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules rejects direct
+// payload byte rule literals in the hosted parser renderer.
+func assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules(t *testing.T, parser string) {
+	t.Helper()
 	for _, fragment := range []string{
 		`"  %min_ok = icmp uge i8 %byte, 32"`,
 		`"  %max_ok = icmp ule i8 %byte, 126"`,
@@ -2172,6 +2200,22 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 	} {
 		if strings.Contains(parser, fragment) {
 			t.Fatalf("selected body parser hardcodes payload byte rule %q", fragment)
+		}
+	}
+}
+
+// assertExecutableSelectedBodyParserNoHardcodedExpectValueRules rejects direct
+// expect value encoding literals in the hosted parser renderer.
+func assertExecutableSelectedBodyParserNoHardcodedExpectValueRules(t *testing.T, parser string) {
+	t.Helper()
+	for _, fragment := range []string{
+		`"  %is_ok = icmp eq i64 %expect, 1"`,
+		`"  %is_failure = icmp eq i64 %expect, 0"`,
+		`"  %expect_value = phi i64 [ 1, %bool_true_value ], [ 0, %bool_false_value ]"`,
+		`"  ret i64 -1"`,
+	} {
+		if strings.Contains(parser, fragment) {
+			t.Fatalf("selected body parser hardcodes expect value rule %q", fragment)
 		}
 	}
 }
