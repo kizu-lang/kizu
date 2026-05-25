@@ -1269,7 +1269,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
 		"executable_body_parsing::append_run_parsing_facts(",
-		"selected-signature ",
 		"selected-signature-param-count ",
 		"selected-signature-return ",
 		"selected-signature-param ",
@@ -1387,7 +1386,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	sources := readHostedExecutableContractSources(t)
 	facts := hostedExecutableContractFacts{
 		abi:                      hostedExecutableABIFacts(),
-		selectedSignatures:       hostedExecutableSelectedSignatureFacts(),
 		selectedSignatureDetails: hostedExecutableSelectedSignatureDetailFacts(),
 		selectedBodies:           hostedExecutableSelectedBodyFacts(),
 		selectedHelperBodies:     hostedExecutableSelectedHelperBodyFacts(),
@@ -1404,7 +1402,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 // executable path contract assertions.
 type hostedExecutableContractFacts struct {
 	abi                      []string
-	selectedSignatures       []string
 	selectedSignatureDetails []string
 	selectedBodies           []string
 	selectedHelperBodies     []string
@@ -1425,7 +1422,6 @@ func assertHostedExecutableBackendInputs(
 	assertExecutableSelectedSignaturesValidated(
 		t,
 		llvm,
-		facts.selectedSignatures,
 		facts.selectedSignatureDetails,
 	)
 	assertExecutableSelectedBodiesValidated(t, llvm, facts.selectedBodies)
@@ -1467,7 +1463,6 @@ func assertHostedExecutableFactOrigins(
 		sources.ir,
 		sources.selected,
 		sources.llvm,
-		facts.selectedSignatures,
 		facts.selectedSignatureDetails,
 	)
 	assertExecutableSelectedBodiesComeFromCheckedAST(
@@ -1643,7 +1638,6 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 func assertExecutableSelectedSignaturesValidated(
 	t *testing.T,
 	llvm string,
-	signatures []string,
 	details []string,
 ) {
 	t.Helper()
@@ -1655,9 +1649,6 @@ func assertExecutableSelectedSignaturesValidated(
 		`"backend-input executable-selected-signatures checked-ast-signature-v1"`,
 	) {
 		t.Fatal("backend metadata does not record selected executable signatures")
-	}
-	for _, fact := range signatures {
-		assertNamedFactConsumer(t, llvm, "backend selected-signature validation", fact)
 	}
 	for _, fact := range details {
 		assertExecutableSignatureDetailConsumer(t, llvm, fact)
@@ -1865,7 +1856,6 @@ func assertExecutableSelectedSignaturesComeFromCheckedAST(
 	ir string,
 	selected string,
 	llvm string,
-	signatures []string,
 	details []string,
 ) {
 	t.Helper()
@@ -1887,33 +1877,13 @@ func assertExecutableSelectedSignaturesComeFromCheckedAST(
 			t.Fatalf("selected executable signatures are not checked AST-derived via %q", fragment)
 		}
 	}
-	for _, fact := range signatures {
-		assertSelectedSignatureFactOrigin(t, selected, llvm, fact)
+	for _, content := range []string{selected, llvm} {
+		if strings.Contains(content, `"selected-signature `) {
+			t.Fatal("executable path still depends on dedicated selected-signature header facts")
+		}
 	}
 	for _, fact := range details {
 		assertSelectedSignatureDetailOrigin(t, selected, llvm, fact)
-	}
-}
-
-// assertSelectedSignatureFactOrigin checks role facts are emitted from the
-// selected source side and not copied as complete backend literals.
-func assertSelectedSignatureFactOrigin(t *testing.T, selected string, llvm string, fact string) {
-	t.Helper()
-	if strings.Contains(llvm, `"`+fact+`"`) {
-		t.Fatalf("backend hardcodes complete selected-signature fact %q", fact)
-	}
-	parts := strings.Fields(fact)
-	if len(parts) != 3 {
-		t.Fatalf("invalid selected-signature fixture %q", fact)
-	}
-	for _, fragment := range []string{
-		`"` + parts[0] + ` "`,
-		`"` + parts[1] + `"`,
-		`"` + parts[2] + `"`,
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected signature emitter does not publish %q via %q", fact, fragment)
-		}
 	}
 }
 
@@ -3036,41 +3006,6 @@ func hostedExecutableABIFacts() []string {
 		"executable-kind RunReturnVoid 2",
 		"executable-kind TestExpectOk 3",
 		"executable-kind TestExpectFailure 4",
-	}
-}
-
-// hostedExecutableSelectedSignatureFacts returns selected signatures that must
-// be available before generated executable functions can replace static matching.
-func hostedExecutableSelectedSignatureFacts() []string {
-	return []string{
-		"selected-signature selfhost::cli::execute::run_file_cli checked-run-artifact",
-		"selected-signature selfhost::cli::execute::test_file_cli checked-test-artifact",
-		"selected-signature selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast",
-		"selected-signature selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable",
-		"selected-signature selfhost::backend::executable::" +
-			"lower_test_executable checked-test-wrapper",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast",
-		"selected-signature selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable",
-		"selected-signature selfhost::backend::hosted::" +
-			"emit_run_executable_artifact hosted-run-writer",
-		"selected-signature selfhost::backend::hosted::" +
-			"emit_test_executable_artifact hosted-test-writer",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_run_program_ast checked-run-ast-helper",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_run_print_call_ast checked-run-ast-helper",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_test_program_ast checked-test-ast-helper",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_expect_call_ast checked-test-ast-helper",
-		"selected-signature selfhost::backend::executable::" +
-			"unsupported_executable checked-executable-shared-helper",
 	}
 }
 
