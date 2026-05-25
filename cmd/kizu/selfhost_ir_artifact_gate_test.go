@@ -149,21 +149,6 @@ func requiredSelfhostIRSelectedSignatureFragments() []string {
 func requiredSelfhostIRSelectedBodyFragments() []string {
 	return []string{
 		"executable-selected-body-ir checked-ast-body-v1\n",
-		"body-call selfhost::cli::execute::run_file_cli 82 check::checked_ast_node 6\n",
-		"body-call selfhost::cli::execute::run_file_cli 109 backend::lower_run_executable 3\n",
-		"body-call selfhost::cli::execute::test_file_cli 109 backend::lower_test_executable 3\n",
-		"body-call selfhost::backend::executable::lower_run_executable " +
-			"4 parse_run_executable_ast 3\n",
-		"body-call selfhost::backend::executable::lower_test_executable " +
-			"4 parse_test_executable_ast 3\n",
-		"body-struct-literal selfhost::backend::executable::" +
-			"lower_run_executable_ast 13 data::Executable\n",
-		"body-struct-literal selfhost::backend::executable::" +
-			"lower_test_executable_ast 13 data::Executable\n",
-		"body-call selfhost::backend::hosted::emit_run_executable_artifact " +
-			"28 write_run_artifact 6\n",
-		"body-call selfhost::backend::hosted::emit_test_executable_artifact " +
-			"28 write_test_artifact 6\n",
 	}
 }
 
@@ -171,14 +156,6 @@ func requiredSelfhostIRSelectedBodyFragments() []string {
 func requiredSelfhostIRSelectedHelperBodyFragments() []string {
 	return []string{
 		"executable-selected-helper-body-ir checked-ast-helper-body-v1\n",
-		"body-call selfhost::backend::executable::parse_run_program_ast " +
-			"39 parse_run_fn_ast 4\n",
-		"body-call selfhost::backend::executable::parse_test_program_ast " +
-			"39 parse_test_fn_ast 5\n",
-		"body-call selfhost::backend::executable::parse_run_print_call_ast " +
-			"38 run_string_literal_payload 3\n",
-		"body-call selfhost::backend::executable::parse_expect_call_ast " +
-			"38 expect_bool_value 2\n",
 	}
 }
 

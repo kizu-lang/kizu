@@ -1670,9 +1670,14 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string) {
 	if !strings.Contains(llvm, `"backend-input executable-selected-body-ir checked-ast-body-v1"`) {
 		t.Fatal("backend metadata does not record selected executable body IR")
 	}
-	for _, fact := range hostedExecutableSelectedBodySemanticFacts() {
-		if !strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend IR validation does not require body semantic fact %q", fact)
+	for _, fragment := range hostedExecutableBodyContractFragments() {
+		if !strings.Contains(llvm, fragment) {
+			t.Fatalf("backend IR validation does not require body semantic fragment %q", fragment)
+		}
+	}
+	for _, fragment := range hostedExecutableExactBodySequenceFragments() {
+		if strings.Contains(llvm, fragment) {
+			t.Fatalf("backend body validation still depends on exact body sequence %q", fragment)
 		}
 	}
 }
@@ -3165,25 +3170,40 @@ func hostedExecutableSelectedBodyParsingFacts() []string {
 	return facts
 }
 
-// hostedExecutableSelectedBodySemanticFacts returns representative checked body
-// facts the backend contract requires before accepting hosted executable IR.
-func hostedExecutableSelectedBodySemanticFacts() []string {
+// hostedExecutableBodyContractFragments returns representative generic body IR
+// contract fragments required before accepting hosted executable IR.
+func hostedExecutableBodyContractFragments() []string {
 	return []string{
-		"body-call selfhost::cli::execute::run_file_cli 82 check::checked_ast_node 6",
-		"body-call selfhost::cli::execute::run_file_cli 109 backend::lower_run_executable 3",
-		"body-call selfhost::cli::execute::test_file_cli 109 backend::lower_test_executable 3",
-		"body-call selfhost::backend::executable::lower_run_executable " +
-			"4 parse_run_executable_ast 3",
-		"body-call selfhost::backend::executable::lower_test_executable " +
-			"4 parse_test_executable_ast 3",
-		"body-struct-literal selfhost::backend::executable::" +
-			"lower_run_executable_ast 13 data::Executable",
-		"body-struct-literal selfhost::backend::executable::" +
-			"lower_test_executable_ast 13 data::Executable",
-		"body-call selfhost::backend::hosted::emit_run_executable_artifact " +
-			"28 write_run_artifact 6",
-		"body-call selfhost::backend::hosted::emit_test_executable_artifact " +
-			"28 write_test_artifact 6",
+		"ir_contract::require_body_call(",
+		`"selfhost::cli::execute::run_file_cli"`,
+		`"check::checked_ast_node"`,
+		`"backend::lower_run_executable"`,
+		`"selfhost::cli::execute::test_file_cli"`,
+		`"backend::lower_test_executable"`,
+		`"selfhost::backend::executable::lower_run_executable"`,
+		`"parse_run_executable_ast"`,
+		`"selfhost::backend::executable::lower_test_executable"`,
+		`"parse_test_executable_ast"`,
+		`"selfhost::backend::hosted::emit_run_executable_artifact"`,
+		`"write_run_artifact"`,
+		`"selfhost::backend::hosted::emit_test_executable_artifact"`,
+		`"write_test_artifact"`,
+	}
+}
+
+// hostedExecutableExactBodySequenceFragments returns the body facts that used
+// to make backend validation depend on AST sequence numbers.
+func hostedExecutableExactBodySequenceFragments() []string {
+	return []string{
+		`"body-call selfhost::cli::execute::run_file_cli 82`,
+		`"body-call selfhost::cli::execute::run_file_cli 109`,
+		`"body-call selfhost::cli::execute::test_file_cli 109`,
+		`"body-call selfhost::backend::executable::lower_run_executable 4`,
+		`"body-call selfhost::backend::executable::lower_test_executable 4`,
+		`"body-struct-literal selfhost::backend::executable::lower_run_executable_ast 13`,
+		`"body-struct-literal selfhost::backend::executable::lower_test_executable_ast 13`,
+		`"body-call selfhost::backend::hosted::emit_run_executable_artifact 28`,
+		`"body-call selfhost::backend::hosted::emit_test_executable_artifact 28`,
 	}
 }
 
