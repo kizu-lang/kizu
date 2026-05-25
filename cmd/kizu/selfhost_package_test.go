@@ -2120,8 +2120,16 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 		"ir_contract::require_body_call(",
 		"require_match_arm_dispatch(",
 		"find_match_arm_with_pattern(",
+		"executable_ast_result_kind_name(",
+		"run_print_ast_kind_name(",
+		"run_return_ast_kind_name(",
+		"test_ok_ast_kind_name(",
+		"test_failure_ast_kind_name(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_parent_with_child_token(",
+		"ir_contract::body_struct_literal_of_type(",
+		"ir_contract::body_struct_field_value(",
+		"ir_contract::body_field_expr_name(",
 		"ir_contract::body_call_callee_or_empty(",
 		"parse_run_executable_ast",
 		"parse_test_executable_ast",
@@ -2135,6 +2143,16 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("selected body parsing contract missing body-call validation %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`executable_ast_tag(ir_bytes, "RunPrintCall")`,
+		`executable_ast_tag(ir_bytes, "RunReturnVoid")`,
+		`executable_ast_tag(ir_bytes, "TestExpectTrue")`,
+		`executable_ast_tag(ir_bytes, "TestExpectFalse")`,
+	} {
+		if strings.Contains(parser, fragment) {
+			t.Fatalf("selected body parser hardcodes executable AST result tag %q", fragment)
 		}
 	}
 }
@@ -2666,6 +2684,9 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"ir_contract::require_body_call(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_parent_with_child_token(",
+		"ir_contract::body_struct_literal_of_type(",
+		"ir_contract::body_struct_field_value(",
+		"ir_contract::body_field_expr_name(",
 		"executable-parser-token ",
 		"parser_source_token(",
 	} {
