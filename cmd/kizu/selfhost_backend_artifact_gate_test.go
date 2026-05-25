@@ -730,6 +730,8 @@ func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 			"write_test_metadata issue\\20#570\n",
 		"backend-input hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
 			"append_common_metadata source\\20\n",
+		"backend-input hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
+			"append_common_metadata output\\20\n",
 	}
 }
 

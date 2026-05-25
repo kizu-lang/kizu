@@ -411,6 +411,8 @@ func requiredSelfhostIRHostedArtifactPathFragments() []string {
 			"write_test_metadata issue\\20#570\n",
 		"hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
 			"append_common_metadata source\\20\n",
+		"hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
+			"append_common_metadata output\\20\n",
 	}
 }
 
