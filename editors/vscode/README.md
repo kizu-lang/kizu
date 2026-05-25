@@ -4,7 +4,8 @@ This extension registers `.kizu` files, starts `kizu-lsp`, and lets VSCode use
 the language server for diagnostics and formatting.
 It also contributes `Kizu: Run File` and `Kizu: Test File` commands that run
 the active `.kizu` file in an integrated terminal. The same commands are shown
-in the editor title while a `.kizu` file is active.
+in the editor title while a `.kizu` file is active, and as CodeLens actions
+above `fn main` and top-level `test` blocks.
 
 ## Requirements
 
