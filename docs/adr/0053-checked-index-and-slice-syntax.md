@@ -60,7 +60,7 @@ Rules:
 - indexed borrow
 - multi-dimensional slicing such as `matrix[rows, cols]`
 - strided views and matrix views
-- unchecked indexing in `unsafe`
+- unchecked indexing in a future `@unsafe(unchecked_index)` capability
 
 ## Consequences
 

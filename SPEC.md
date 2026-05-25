@@ -16,8 +16,8 @@ Kizu はシステムプログラミング言語を目指します。
 型名や数値型の設計は Zig に近い、低レベル寄りの明示性を優先します。
 
 Kizu のメモリ安全性保証は safe Kizu に対して行います。
-`unsafe` を使うコードでは、memory safety obligation はプログラマが負います。
-ただし、`unsafe` は型検査、move check、borrow check を全面的に無効化するものではありません。
+`@unsafe` を使うコードでは、memory safety obligation はプログラマが負います。
+ただし、`@unsafe` は型検査、move check、borrow check を全面的に無効化するものではありません。
 safe Kizu の詳細な安全契約と regression coverage は
 [`docs/memory-safety.md`](docs/memory-safety.md) を正とします。
 
@@ -86,7 +86,7 @@ impl Contract for Type
 v0.1 に含める static / policy 機能:
 
 ```text
-unsafe boundary checks
+@unsafe capability boundary checks
 extern "c" fn declaration checks
 raw pointer type spelling
 nullable pointer type spelling
@@ -158,11 +158,11 @@ double move を許さない
 borrow 中の値の move を許さない
 borrow escape を許さない
 borrow を struct field に保存させない
-borrow を task / comptime / unsafe 境界で延命させない
+borrow を task / comptime / @unsafe 境界で延命させない
 arena.get(handle) は local borrow だけを返す
 別 arena の handle 使用を許さない
 handle を raw pointer として扱わせない
-unsafe 内でも type check / move check / borrow check を全面的に無効化しない
+@unsafe 内でも type check / move check / borrow check を全面的に無効化しない
 ```
 
 v0.1 release 前に、上記の各項目は checker test または `examples/negative/` で検証します。
@@ -402,7 +402,7 @@ attachment rule:
 
 * doc comment は declaration の直前にある連続した `///` 行だけを対象にします
 * 空行、通常の `//` comment、他の token が間にある場合は attach しません
-* `pub`、`unsafe`、`extern "c"` などの modifier は declaration の一部として
+* `pub`、`extern "c"` などの modifier は declaration の一部として
   扱い、その直前の `///` block を attach します
 * 1 行ごとに先頭の `///` と、直後に 1 つだけある空白を取り除き、
   改行で連結します
@@ -799,7 +799,7 @@ multi-line literal の値は連結後のバイト列 (`Usage: kizu <command>\n\n
 Kizu v0.1 では `Unit` という別名は導入しません。
 
 低レベル型として、次の明示幅整数、浮動小数点、raw pointer 型名を予約します。
-v0.1 では主に checker / unsafe / extern declaration のために扱います。
+v0.1 では主に checker / `@unsafe` / extern declaration のために扱います。
 interpreter 上の完全な fixed-width arithmetic、float literal、overflow semantics は後続 phase で扱います。
 
 ```text
@@ -924,11 +924,13 @@ pointer -> numeric
 pointer -> pointer
 ```
 
-raw pointer 間の cast は `unsafe` 内でのみ許可します。
+raw pointer 間の cast は `@unsafe(ptr_cast)` 内でのみ許可します。
+integer と raw pointer の変換は `cast<T>` では扱わず、専用 primitive を
+`@unsafe(ptr_int_cast)` 内に限定します。
 
 ```kizu
 fn write_as_mut(p: ptr<const u8>) {
-    unsafe {
+    @unsafe(ptr_cast, ptr_write) {
         let q = cast<ptr<u8>>(p);
         ptr_write(q, 1);
     }
@@ -936,7 +938,7 @@ fn write_as_mut(p: ptr<const u8>) {
 ```
 
 pointer cast の memory safety obligation はプログラマが負います。
-ただし、`unsafe` 内でも type check / move check / borrow check は無効化されません。
+ただし、`@unsafe` 内でも type check / move check / borrow check は無効化されません。
 
 type alias は v0.1 では導入しません。
 必要になった場合は、別 phase で syntax と ABI 上の扱いを決めます。
@@ -1031,7 +1033,7 @@ safe borrow binding は通常の field access 構文で field を読めます。
 `&var T` binding は通常の field assignment 構文で field を更新できます。
 safe borrow は実装上 pointer-like な表現を持ち得ますが、言語上は
 checker が lifetime、aliasing、move を検査する borrow capability です。
-raw pointer はこの省略対象ではなく、unsafe 境界で明示的に扱います。
+raw pointer はこの省略対象ではなく、`@unsafe` capability 境界で明示的に扱います。
 
 ```kizu
 fn show(user: &User) -> void {
@@ -1235,21 +1237,23 @@ fn main() -> ConfigError!void {
 
 ## 12. unsafe / C ABI
 
-`unsafe` は、コンパイラが memory safety を証明しない操作を明示する境界です。
+`@unsafe(capability, ...)` は、コンパイラが memory safety を証明しない操作を
+capability 単位で明示する境界です。
 
 ```kizu
-unsafe {
+@unsafe(ptr_write) {
     ptr_write(p, 20);
 }
 ```
 
-unsafe function も明示します。
+`@unsafe` は compiler directive statement です。user-defined function、
+attribute、通常の builtin call ではありません。これは `@` namespace の
+最小 subset であり、一般的な builtin / attribute 構文は別 issue で扱います。
 
-```kizu
-unsafe fn raw_write(p: ptr<u8>, value: u8) -> void {
-    ptr_write(p, value);
-}
-```
+`unsafe { ... }` と `unsafe fn` は採用しません。関数本体で unsafe operation を
+使う場合は、通常の `fn` の中で局所的に `@unsafe(...) { ... }` を書きます。
+呼び出し側に obligation を要求する関数 marker は、具体的な必要が出た時点で
+別 issue として再検討します。
 
 C ABI declaration は `extern "c" fn` で書きます。
 
@@ -1259,8 +1263,12 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 
 ルール:
 
-* raw pointer operation は `unsafe` 内でのみ使える
-* `extern "c" fn` の呼び出しは `unsafe` 内でのみ行える
+* unsafe operation は対応する `@unsafe` capability 内でのみ使える
+* `@unsafe` capability は compiler-reserved identifier だけを許可する
+* unknown capability は compile error
+* capability list は 1 個以上の identifier を comma-separated で書く
+* nested `@unsafe` は lexical に capability を追加する。revoke はしない
+* `extern "c" fn` の呼び出しは `@unsafe(extern_call)` 内でのみ行える
 * `ptr<T>` は non-null mutable raw pointer
 * `ptr<const T>` は non-null const raw pointer
 * `?ptr<T>` / `?ptr<const T>` は nullable raw pointer
@@ -1268,12 +1276,14 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * `p.*` は `ptr<T>` / `ptr<const T>` から `T` を読む
 * `p.* = value` は `ptr<T>` に `T` を書く
 * `p.*.field` は struct raw pointer の field read / assignment に使える
-* raw pointer dereference syntax は `unsafe` 内でのみ使える
+* raw pointer dereference syntax は `@unsafe(ptr_deref)` 内でのみ使える
 * `ptr<const T>` 経由の assignment は禁止
 * `?ptr<T>` / `?ptr<const T>` は直接 dereference できない
 * `p.field` のような raw pointer field access は禁止
-* `ptr_read(p)` は `ptr<T>` / `ptr<const T>` から `T` を読む
-* `ptr_write(p, value)` は `ptr<T>` に `T` を書く
+* `ptr_read(p)` は `ptr<T>` / `ptr<const T>` から `T` を読み、
+  `@unsafe(ptr_read)` を必要とする
+* `ptr_write(p, value)` は `ptr<T>` に `T` を書き、
+  `@unsafe(ptr_write)` を必要とする
 * `ptr_write` は `ptr<const T>` と nullable pointer には使えない
 
 ```kizu
@@ -1282,17 +1292,34 @@ struct Node {
 }
 
 fn update(node: ptr<Node>) -> void {
-    unsafe {
+    @unsafe(ptr_deref) {
         node.*.tag = 1;
         return;
     }
 }
 ```
 
-unsafe code の memory safety obligation はプログラマが負います。
-ただし、`unsafe` は compiler check を全面的に無効化するものではありません。
+初期 capability set:
 
-`unsafe` 内でも次は error のままです。
+| capability | 許可する operation |
+| --- | --- |
+| `ptr_read` | `ptr_read(p)` |
+| `ptr_write` | `ptr_write(p, value)` |
+| `ptr_deref` | `p.*` / `p.* = value` / `p.*.field` |
+| `ptr_cast` | raw pointer 間の `cast<ptr<...>>(value)` |
+| `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
+| `extern_call` | `extern "c" fn` call |
+| `volatile` | volatile read/write primitive |
+
+`unsafe_call`、`atomic`、`unchecked_index` は v0.1 では capability として採用しません。
+`unsafe_call` は caller-obligation function marker を再導入する場合に再検討します。
+`volatile` は compiler / CPU に対する通常の最適化抑制・順序制約を表す primitive であり、
+thread synchronization ではありません。atomic operation とは別の capability として扱います。
+
+unsafe code の memory safety obligation はプログラマが負います。
+ただし、`@unsafe` は compiler check を全面的に無効化するものではありません。
+
+`@unsafe` 内でも次は error のままです。
 
 * type mismatch
 * moved value の safe use
@@ -2265,7 +2292,7 @@ WASM target は interpreter より限定された subset だけを扱います�
 
 ### Milestone 12: unsafe / C ABI
 
-`unsafe`、raw pointer、`extern "c" fn` を扱えるようにします。
+`@unsafe` capability block、raw pointer、`extern "c" fn` を扱えるようにします。
 
 ### Milestone 13: comptime
 

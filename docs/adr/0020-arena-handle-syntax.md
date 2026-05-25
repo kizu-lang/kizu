@@ -73,6 +73,6 @@ local arena から作られた handle を関数から返すことは、arena よ
 
 - Phase 6 は full generics なしで arena / handle を実装できる
 - `std::arena::Arena<T>` / `std::arena::Handle<T>` は stdlib の PascalCase owned type naming と一致する
-- raw pointer は Phase 12 の unsafe 境界で扱い、`std::arena::Handle<T>` とは別物として扱う
+- raw pointer は Phase 12 の `@unsafe` capability 境界で扱い、`std::arena::Handle<T>` とは別物として扱う
 - ADR-0060 の「view return は provenance、graph identity は arena / handle」と整合する
 - ADR-0017 の safe Kizu メモリ安全性保証を支える

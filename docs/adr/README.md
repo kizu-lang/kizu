@@ -25,7 +25,7 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0004: ローカル束縛は let / var を使う](0004-let-var-bindings.md)
 - [ADR-0005: 実装フェーズは Markdown の TODO と受け入れ条件で管理する](0005-phase-documents.md)
 - [ADR-0006: comptime は採用候補とし、macro は採用しない](0006-comptime-without-macros.md)
-- [ADR-0007: unsafe は低レベル操作の明示境界にする](0007-unsafe-boundary.md)
+- [ADR-0007: unsafe は低レベル操作の明示境界にする](0007-unsafe-boundary.md) (置換)
 - [ADR-0008: C 親和性は ABI / FFI / layout / pointer で確保する](0008-c-interop.md)
 - [ADR-0009: compiler backend の前に Kizu IR を導入する](0009-kizu-ir-before-backends.md)
 - [ADR-0010: ビルド時間とキャッシュサイズの評価方法を早期に確立する](0010-build-performance-evaluation.md)
@@ -89,3 +89,4 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0068: safe borrow field access](0068-safe-borrow-field-access.md)
 - [ADR-0069: raw pointer dereference syntax](0069-raw-pointer-dereference-syntax.md)
 - [ADR-0070: package export surface](0070-package-export-surface.md)
+- [ADR-0071: unsafe capability blocks](0071-unsafe-capability-blocks.md)

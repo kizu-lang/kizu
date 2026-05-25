@@ -23,22 +23,24 @@ safe Kizu では次を保証する。
 - 別 arena の handle 使用を許さない
 - 初期化前の通常変数使用を許さない
 
-unsafe Kizu では、memory safety obligation はプログラマが負う。
+`@unsafe` Kizu では、memory safety obligation はプログラマが負う。
 
-unsafe Kizu に含まれるもの:
+`@unsafe` capability が必要なもの:
 
-- `unsafe { ... }`
-- `unsafe fn`
 - raw pointer dereference
 - pointer cast
-- unchecked indexing
 - C ABI call
-- allocator primitive
-- volatile / atomic primitive
+- volatile primitive
 
-ただし、`unsafe` は compiler check を全面的に無効化するものではない。
+unchecked indexing、allocator primitive、atomic primitive は safe Kizu の保証外に
+置くが、v0.1 の初期 capability set には含めない。採用する場合は個別の
+capability と安全規則を先に設計する。
 
-unsafe 内でも次は引き続き error にする。
+ただし、`@unsafe` は compiler check を全面的に無効化するものではない。
+`unsafe fn` は採用しない。呼び出し側に memory safety obligation を要求する
+function marker は、必要が出た時点で別 issue として再検討する。
+
+`@unsafe` 内でも次は引き続き error にする。
 
 - type mismatch
 - syntax error
@@ -49,6 +51,6 @@ unsafe 内でも次は引き続き error にする。
 ## 影響
 
 - Phase 4/5/6 は safe Kizu のメモリ安全性を支える
-- Phase 12 は unsafe の境界と責務を明示する
-- unsafe を含む API は safe wrapper を提供できるが、安全性の根拠を明確にする必要がある
+- Phase 12 は `@unsafe` の境界と責務を明示する
+- `@unsafe` を含む API は safe wrapper を提供できるが、安全性の根拠を明確にする必要がある
 - Kizu のドキュメントでは「memory safe」は safe Kizu の保証として説明する

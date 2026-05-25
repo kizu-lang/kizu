@@ -43,4 +43,4 @@ The original v0.1 rules were:
 Mutation originally remained visually explicit at borrow boundaries.
 ADR-0068 changes that tradeoff for safe borrow field access while keeping raw
 pointer behavior explicit. ADR-0069 keeps raw pointer dereference explicit with
-postfix `.*` inside `unsafe`.
+postfix `.*` inside `@unsafe(ptr_deref)`.

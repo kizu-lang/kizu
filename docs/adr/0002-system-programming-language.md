@@ -15,7 +15,7 @@ Kizu はシステムプログラミング言語を目指す。
 
 - 明示的な整数幅
 - C ABI との接続
-- raw pointer を扱える unsafe 境界
+- raw pointer を扱える `@unsafe` capability 境界
 - comptime
 - 読みやすい処理系
 - macro や build script に依存しない設計

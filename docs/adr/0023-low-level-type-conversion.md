@@ -23,9 +23,10 @@ safe code で許可する cast:
 
 - numeric type から numeric type
 
-unsafe が必要な cast:
+`@unsafe` capability が必要な cast:
 
 - `ptr<T>` / `ptr<const T>` / `?ptr<T>` / `?ptr<const T>` の raw pointer 間 cast
+  (`ptr_cast`)
 
 禁止する cast:
 
@@ -33,6 +34,9 @@ unsafe が必要な cast:
 - `bool` から numeric
 - numeric から raw pointer
 - raw pointer から numeric
+
+numeric と raw pointer の変換は `cast<T>` では扱わない。
+必要な場合は専用 primitive を `@unsafe(ptr_int_cast)` 内で使う。
 
 `void` は Kizu v0.1 の戻り値なし型として使う。
 `Unit` alias は導入しない。
@@ -42,6 +46,6 @@ type alias は v0.1 では導入しない。
 ## 影響
 
 - 型変換はコード上で見える
-- C ABI 境界で必要な危険な pointer cast は `unsafe` に閉じ込められる
+- C ABI 境界で必要な危険な pointer cast は `@unsafe(ptr_cast)` に閉じ込められる
 - 暗黙変換によるビルド差分や診断の複雑化を避ける
 - alias / typedef 的な機能は後続 phase で別途判断する

@@ -14,7 +14,7 @@ Safe Kizu means code that does not use operations whose safety cannot be proven 
 the compiler, such as raw pointer dereference, unchecked access, or actual C ABI
 calls.
 
-`unsafe` marks a trusted boundary. It does not disable type checking, move
+`@unsafe` marks a trusted boundary. It does not disable type checking, move
 checking, borrow checking, arena provenance checking, or structured concurrency
 rules.
 
@@ -131,18 +131,18 @@ policy.
 ### Unsafe and Raw Pointers
 
 - Raw pointer types are distinct from safe borrows.
-- Raw pointer operations require `unsafe`.
+- Raw pointer operations require an explicit `@unsafe` capability.
 - Nullable raw pointers cannot be read as non-null pointers without an explicit
   check or conversion policy.
-- `unsafe` code carries the memory-safety obligation for raw pointer operations,
+- `@unsafe` code carries the memory-safety obligation for raw pointer operations,
   C ABI calls, and unchecked operations.
-- `unsafe` does not permit moved values, borrow escape, or safe-borrow lifetime
+- `@unsafe` does not permit moved values, borrow escape, or safe-borrow lifetime
   extension.
 
-| Operation | Safe Kizu | `unsafe` Kizu |
+| Operation | Safe Kizu | `@unsafe` Kizu |
 | --- | --- | --- |
-| call `extern "c" fn` | rejected | allowed, caller owns ABI and memory obligation |
-| raw pointer read/write | rejected | allowed by explicit operation policy |
+| call `extern "c" fn` | rejected | allowed by `extern_call`, caller owns ABI and memory obligation |
+| raw pointer read/write | rejected | allowed by `ptr_read` / `ptr_write` / `ptr_deref` |
 | nullable raw pointer read as non-null | rejected | rejected until an explicit conversion policy exists |
 | use moved safe value | rejected | rejected |
 | return or store safe borrow | rejected | rejected |
@@ -261,8 +261,8 @@ memory-safety invariants to representative examples.
 | handles cannot outlive their arena | | `examples/negative/arena_handle_outlive.kizu` |
 | handle is not a raw pointer | | `examples/negative/handle_as_pointer.kizu` |
 | deferred cleanup is explicit and ownership-checked | `examples/defer_cleanup.kizu`, `examples/defer_order.kizu` | `examples/negative/defer_non_cleanup_expr.kizu`, `examples/negative/defer_invalid_statement.kizu`, `examples/negative/defer_after_move.kizu`, `examples/negative/defer_after_explicit_deinit.kizu`, `examples/negative/defer_cleanup_while_borrowed.kizu` |
-| unsafe is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
-| unsafe does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
+| `@unsafe` is explicit | `examples/unsafe_wrapper.kizu` | `examples/negative/unsafe_call.kizu`, `examples/negative/ptr_read_without_unsafe.kizu` |
+| `@unsafe` does not disable safe rules | | `examples/negative/unsafe_moved_value.kizu`, `examples/negative/unsafe_borrow_escape.kizu` |
 | nullable raw pointer reads are rejected | `examples/pointer_policy.kizu` | `examples/negative/nullable_ptr_read.kizu` |
 | runtime borrow cannot cross comptime | `examples/comptime.kizu` | `examples/negative/comptime_borrow_escape.kizu` |
 | task ownership is structured | `examples/task_group.kizu`, `examples/task_cancel.kizu` | `examples/negative/unawaited_task.kizu`, `examples/negative/task_move.kizu`, `examples/negative/task_borrow_capture.kizu`, `examples/negative/task_spawn_pointer.kizu`, `examples/negative/task_spawn_handle.kizu`, `examples/negative/task_spawn_arena.kizu`, `examples/negative/task_spawn_mutex.kizu`, `examples/negative/task_spawn_struct_pointer.kizu`, `examples/negative/task_await_error.kizu`, `examples/negative/task_await_after_cancel.kizu`, `examples/negative/task_cancel_after_await.kizu` |
@@ -271,7 +271,7 @@ memory-safety invariants to representative examples.
 | queued work cannot capture borrows or raw pointers | `examples/task_queue.kizu` | `examples/negative/queue_borrow_capture.kizu`, `examples/negative/queue_enqueue_pointer.kizu` |
 | structured data parallelism uses disjoint output | `examples/parallel_for.kizu` | `examples/negative/parallel_shared_mutable.kizu`, `examples/negative/parallel_map_wrong_worker.kizu`, `examples/negative/partition_mut_non_i64.kizu`, `examples/negative/parallel_for_error.kizu` |
 | partition and local buffer bounds are checked | `examples/parallel_for.kizu` | `examples/negative/partition_index_out_of_bounds.kizu`, `examples/negative/parallel_map_out_of_bounds.kizu`, `examples/negative/local_buffer_out_of_bounds.kizu` |
-| scoped thread boundary rejects unsafe boundary values | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu`, `examples/negative/thread_scoped_mutex.kizu` |
+| scoped thread boundary rejects `@unsafe` boundary values | `examples/thread_boundary.kizu` | `examples/negative/thread_borrow_capture.kizu`, `examples/negative/thread_scoped_pointer.kizu`, `examples/negative/thread_scoped_mutex.kizu` |
 | `Atomic<T>` is bool/i64-only and seq_cst-only | `examples/thread_boundary.kizu`, `examples/atomic_flag.kizu` | `examples/negative/atomic_store_wrong_type.kizu`, `examples/negative/atomic_old_name.kizu`, `examples/negative/atomic_untyped_constructor.kizu`, `examples/negative/atomic_unsupported_type.kizu` |
 | `Mutex<T>` rejects raw pointer and non-copy/non-matching payloads | `examples/thread_boundary.kizu` | `examples/negative/mutex_pointer.kizu`, `examples/negative/mutex_wrong_type.kizu`, `examples/negative/mutex_non_copy.kizu`, `examples/negative/mutex_untyped_constructor.kizu` |
 
@@ -284,8 +284,8 @@ Before declaring v0.1 memory-safe for safe Kizu:
 3. `go test ./cmd/kizu -run TestV01ConformanceManifest -count=1` must pass.
 4. Every invariant in this document must have regression coverage.
 5. New trusted std APIs must document their safe-side preconditions here.
-6. New `unsafe` capabilities must add negative tests proving safe checks remain
-   active around the unsafe boundary.
+6. New `@unsafe` capabilities must add negative tests proving safe checks remain
+   active around the `@unsafe` boundary.
 
 ## Open Risks
 

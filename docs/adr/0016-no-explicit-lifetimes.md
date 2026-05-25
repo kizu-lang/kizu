@@ -23,7 +23,7 @@ Kizu は明示 lifetime annotation を採用しない。
 - borrow を関数から返せない
 - borrow を lexical block の外へ escape できない
 - 長寿命の関係は `std::arena::Arena<T>` と `std::arena::Handle<T>` で表す
-- raw pointer は `unsafe` 境界で扱う
+- raw pointer は `@unsafe` capability 境界で扱う
 
 ## arena / handle
 
@@ -38,17 +38,17 @@ handle は borrow より長生きしてよいが、対応する arena より長�
 
 raw pointer は lifetime 管理の代替ではない。
 
-`unsafe` 内でも次は禁止する。
+`@unsafe` 内でも次は禁止する。
 
 - moved value の再利用
 - borrow escape
 - safe borrow の lifetime extension
 
-raw pointer の dereference は unsafe 操作とし、safe borrow とは別の検査境界で扱う。
+raw pointer の dereference は `@unsafe(ptr_deref)` 操作とし、safe borrow とは別の検査境界で扱う。
 
 ## 影響
 
 - Phase 5 は local borrow checker に限定する
 - Phase 6 は arena / handle の provenance 検査を扱う
-- Phase 12 は raw pointer と unsafe 境界を扱う
+- Phase 12 は raw pointer と `@unsafe` capability 境界を扱う
 - Rust 風の lifetime parameter は syntax として追加しない

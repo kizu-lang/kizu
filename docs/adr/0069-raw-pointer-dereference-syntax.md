@@ -16,11 +16,11 @@ ptr<const T>
 ```
 
 Before this ADR, raw pointer access was expressed only through `ptr_read` and
-`ptr_write`. That kept the unsafe boundary explicit, but it made struct pointer
+`ptr_write`. That kept the `@unsafe` boundary explicit, but it made struct pointer
 updates harder to read than the operation being performed:
 
 ```kizu
-unsafe {
+@unsafe(ptr_write) {
     ptr_write(node, updated_node);
 }
 ```
@@ -38,10 +38,10 @@ or nullability obligations.
 ## Decision
 
 Kizu supports explicit raw pointer dereference with postfix `.*`, only inside
-`unsafe`:
+`@unsafe(ptr_deref)`:
 
 ```kizu
-unsafe {
+@unsafe(ptr_deref) {
     let tag = node.*.tag;
     node.*.tag = 1;
     node.* = replacement;
@@ -50,11 +50,11 @@ unsafe {
 
 The rules are:
 
-- `ptr<T>` may be read with `p.*` inside `unsafe`
-- `ptr<T>` may be written with `p.* = value` inside `unsafe`
+- `ptr<T>` may be read with `p.*` inside `@unsafe(ptr_deref)`
+- `ptr<T>` may be written with `p.* = value` inside `@unsafe(ptr_deref)`
 - `ptr<T>` to a struct may use `p.*.field` for field read and assignment inside
-  `unsafe`
-- `ptr<const T>` may be read with `p.*` inside `unsafe`
+  `@unsafe(ptr_deref)`
+- `ptr<const T>` may be read with `p.*` inside `@unsafe(ptr_deref)`
 - assignment through `ptr<const T>` is rejected
 - nullable raw pointers, `?ptr<T>` and `?ptr<const T>`, cannot be directly
   dereferenced
@@ -62,8 +62,9 @@ The rules are:
   remains rejected
 - checked safe-borrow field access remains `borrow.field`
 
-`ptr_read` and `ptr_write` remain available as explicit unsafe builtins. The
-syntax does not introduce implicit pointer dereference.
+`ptr_read` and `ptr_write` remain available as explicit `@unsafe` builtins requiring
+`@unsafe(ptr_read)` and `@unsafe(ptr_write)`. The syntax does not introduce
+implicit pointer dereference.
 
 ## Consequences
 
@@ -71,10 +72,10 @@ syntax does not introduce implicit pointer dereference.
 
 ```text
 &T / &var T  -> borrow.field
-ptr<T>       -> unsafe { pointer.*.field }
+ptr<T>       -> @unsafe(ptr_deref) { pointer.*.field }
 ```
 
 - Low-level code can mutate a field through a struct pointer without rebuilding
   an entire struct value.
 - Raw pointer dereference remains visible at the use site and remains fenced by
-  `unsafe`.
+  `@unsafe(ptr_deref)`.

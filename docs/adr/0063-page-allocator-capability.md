@@ -51,7 +51,7 @@ metadata, or deallocation functions to safe Kizu.
 User-defined allocators, fixed-buffer allocators, and testing allocators are
 deferred to #549. They must not be added by widening `Allocator` implicitly; a
 future issue must define the interface, ownership rules, alignment behavior,
-failure diagnostics, and unsafe boundary before implementation.
+failure diagnostics, and `@unsafe` boundary before implementation.
 
 ## Consequences
 

@@ -28,7 +28,7 @@ expression statement
 match arm body の simple statement
 ```
 
-block statement、`if`、`while`、`for`、`match`、`unsafe`、`comptime if` 自体には
+block statement、`if`、`while`、`for`、`match`、`@unsafe`、`comptime if` 自体には
 終端 `;` を付けない。
 
 struct field、enum tag、union variant、match arm は list separator として `,` を使う。

@@ -1,6 +1,8 @@
 # ADR-0007: unsafe は低レベル操作の明示境界にする
 
-Status: 採用
+Status: 置換
+
+Replaced by [ADR-0071: unsafe capability blocks](0071-unsafe-capability-blocks.md).
 
 ## 背景
 

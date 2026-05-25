@@ -49,6 +49,6 @@ unsupported syntax は importer が読める error として返す。
 
 ## 影響
 
-- C ABI call は unsafe 境界に寄せる
+- C ABI call は `@unsafe(extern_call)` 境界に寄せる
 - safe wrapper を書けるようにする
 - `ptr<T>` は non-null、`?ptr<T>` は nullable pointer として検討する
