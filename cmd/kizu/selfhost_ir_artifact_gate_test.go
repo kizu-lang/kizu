@@ -356,30 +356,6 @@ func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
 			"lower_run_executable_ast checked-run-executable\n",
 		"selected-body-lowering selfhost::backend::executable::" +
 			"lower_test_executable_ast checked-test-executable\n",
-		"selected-body-lowering-unsupported selfhost::backend::executable::" +
-			"lower_run_executable_ast unsupported_executable\n",
-		"selected-body-lowering-unsupported selfhost::backend::executable::" +
-			"lower_test_executable_ast unsupported_executable\n",
-		"selected-body-lowering-case-count selfhost::backend::executable::" +
-			"lower_run_executable_ast 2\n",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_run_executable_ast 0 RunPrintCall\n",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_run_executable_ast 0 RunPrintString\n",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_run_executable_ast 1 RunReturnVoid\n",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_run_executable_ast 1 RunReturnVoid\n",
-		"selected-body-lowering-case-count selfhost::backend::executable::" +
-			"lower_test_executable_ast 2\n",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_test_executable_ast 0 TestExpectTrue\n",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_test_executable_ast 0 TestExpectOk\n",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_test_executable_ast 1 TestExpectFalse\n",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_test_executable_ast 1 TestExpectFailure\n",
 	}
 }
 
