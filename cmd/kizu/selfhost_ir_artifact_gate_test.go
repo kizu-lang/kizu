@@ -148,15 +148,15 @@ func requiredSelfhostIRSelectedBodyFragments() []string {
 	return []string{
 		"body-call selfhost::cli::execute::run_file_cli ",
 		"body-call selfhost::backend::hosted::emit_run_executable_artifact ",
-		"selected-function-body-end selfhost::backend::executable::lower_run_executable_ast ",
+		"body-node selfhost::backend::executable::lower_run_executable_ast 0 ",
 	}
 }
 
 // requiredSelfhostIRSelectedHelperBodyFragments returns checked helper body IR facts.
 func requiredSelfhostIRSelectedHelperBodyFragments() []string {
 	return []string{
-		"selected-helper-body-end selfhost::backend::executable::parse_run_program_ast ",
-		"selected-helper-body-end selfhost::backend::executable::parse_test_program_ast ",
+		"body-node selfhost::backend::executable::parse_run_program_ast 0 ",
+		"body-node selfhost::backend::executable::parse_test_program_ast 0 ",
 	}
 }
 
@@ -180,8 +180,8 @@ func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 // requiredSelfhostIRSelectedBodyLoweringFragments returns the selected body lowering gate fact.
 func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
 	return []string{
-		"selected-function-body-end selfhost::backend::executable::lower_run_executable_ast ",
-		"selected-function-body-end selfhost::backend::executable::lower_test_executable_ast ",
+		"body-node selfhost::backend::executable::lower_run_executable_ast 0 ",
+		"body-node selfhost::backend::executable::lower_test_executable_ast 0 ",
 	}
 }
 
