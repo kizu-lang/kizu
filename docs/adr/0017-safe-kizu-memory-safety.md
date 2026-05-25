@@ -30,6 +30,7 @@ safe Kizu では次を保証する。
 - raw pointer dereference
 - pointer cast
 - C ABI call
+- `@requires_unsafe() fn` call
 - volatile primitive
 
 unchecked indexing、allocator primitive、atomic primitive は safe Kizu の保証外に
@@ -38,7 +39,8 @@ capability と安全規則を先に設計する。
 
 ただし、`@unsafe` は compiler check を全面的に無効化するものではない。
 `unsafe fn` は採用しない。呼び出し側に memory safety obligation を要求する
-function marker は、必要が出た時点で別 issue として再検討する。
+関数は `@requires_unsafe() fn` で宣言し、呼び出しは `@unsafe(unsafe_call)`
+内でのみ許可する。
 
 `@unsafe` 内でも次は引き続き error にする。
 

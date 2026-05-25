@@ -78,17 +78,17 @@ func (p *Program) String() string {
 
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
-	Name         string
-	Doc          string
-	TypeParams   []string
-	Params       []Param
-	ReturnType   string
-	ReturnBorrow string
-	Body         *BlockStmt
-	Unsafe       bool
-	ExternABI    string
-	Public       bool
-	Std          bool
+	Name           string
+	Doc            string
+	TypeParams     []string
+	Params         []Param
+	ReturnType     string
+	ReturnBorrow   string
+	Body           *BlockStmt
+	RequiresUnsafe bool
+	ExternABI      string
+	Public         bool
+	Std            bool
 }
 
 // declNode marks FunctionDecl as a declaration node.
@@ -115,8 +115,8 @@ func (d *FunctionDecl) String() string {
 	if d.Public {
 		prefix += "pub "
 	}
-	if d.Unsafe {
-		prefix += "unsafe "
+	if d.RequiresUnsafe {
+		prefix += "@requires_unsafe() "
 	}
 	if d.ExternABI != "" {
 		return fmt.Sprintf("%sextern %q fn %s%s(%s)%s",
@@ -569,17 +569,18 @@ func (a MatchArm) String() string {
 	return fmt.Sprintf("%s => %s", a.Tag, body)
 }
 
-// UnsafeStmt represents an explicit unsafe block.
+// UnsafeStmt represents an explicit unsafe capability block.
 type UnsafeStmt struct {
-	Body *BlockStmt
+	Capabilities []string
+	Body         *BlockStmt
 }
 
 // statementNode marks UnsafeStmt as a statement node.
 func (*UnsafeStmt) statementNode() {}
 
-// String returns a compact debug representation of the unsafe block.
+// String returns a compact debug representation of the unsafe capability block.
 func (s *UnsafeStmt) String() string {
-	return "unsafe " + s.Body.String()
+	return "@unsafe(" + strings.Join(s.Capabilities, ", ") + ") " + s.Body.String()
 }
 
 // ComptimeIfStmt represents a branch selected during compilation.

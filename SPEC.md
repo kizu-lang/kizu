@@ -1252,13 +1252,27 @@ attribute、通常の builtin call ではありません。これは `@` namespa
 
 `unsafe { ... }` と `unsafe fn` は採用しません。関数本体で unsafe operation を
 使う場合は、通常の `fn` の中で局所的に `@unsafe(...) { ... }` を書きます。
-呼び出し側に obligation を要求する関数 marker は、具体的な必要が出た時点で
-別 issue として再検討します。
+呼び出し側に obligation を要求する関数は `@requires_unsafe() fn` で宣言し、
+呼び出しは `@unsafe(unsafe_call)` 内でのみ許可します。
 
 C ABI declaration は `extern "c" fn` で書きます。
 
 ```kizu
 extern "c" fn puts(s: ptr<const u8>) -> i32
+```
+
+```kizu
+@requires_unsafe() fn raw_write(p: ptr<u8>, value: u8) -> void {
+    @unsafe(ptr_write) {
+        ptr_write(p, value);
+    }
+}
+
+fn caller(p: ptr<u8>) -> void {
+    @unsafe(unsafe_call) {
+        raw_write(p, 1);
+    }
+}
 ```
 
 ルール:
@@ -1269,6 +1283,7 @@ extern "c" fn puts(s: ptr<const u8>) -> i32
 * capability list は 1 個以上の identifier を comma-separated で書く
 * nested `@unsafe` は lexical に capability を追加する。revoke はしない
 * `extern "c" fn` の呼び出しは `@unsafe(extern_call)` 内でのみ行える
+* `@requires_unsafe() fn` の呼び出しは `@unsafe(unsafe_call)` 内でのみ行える
 * `ptr<T>` は non-null mutable raw pointer
 * `ptr<const T>` は non-null const raw pointer
 * `?ptr<T>` / `?ptr<const T>` は nullable raw pointer
@@ -1309,10 +1324,10 @@ fn update(node: ptr<Node>) -> void {
 | `ptr_cast` | raw pointer 間の `cast<ptr<...>>(value)` |
 | `ptr_int_cast` | `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)` |
 | `extern_call` | `extern "c" fn` call |
+| `unsafe_call` | `@requires_unsafe() fn` call |
 | `volatile` | volatile read/write primitive |
 
-`unsafe_call`、`atomic`、`unchecked_index` は v0.1 では capability として採用しません。
-`unsafe_call` は caller-obligation function marker を再導入する場合に再検討します。
+`atomic`、`unchecked_index` は v0.1 では capability として採用しません。
 `volatile` は compiler / CPU に対する通常の最適化抑制・順序制約を表す primitive であり、
 thread synchronization ではありません。atomic operation とは別の capability として扱います。
 

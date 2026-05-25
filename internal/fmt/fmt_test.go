@@ -48,6 +48,19 @@ func TestFormatTopLevelBlankLineSeparator(t *testing.T) {
 	}
 }
 
+// TestFormatUnsafeDirectives keeps @ directives attached to their names.
+func TestFormatUnsafeDirectives(t *testing.T) {
+	src := `@requires_unsafe() fn raw(){@unsafe(ptr_read,unsafe_call){return;}}`
+	want := "@requires_unsafe() fn raw() {\n" +
+		"    @unsafe(ptr_read, unsafe_call) {\n" +
+		"        return;\n" +
+		"    }\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(@unsafe):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatPreservesFunctionLineComment keeps doc-style comments before functions.
 func TestFormatPreservesFunctionLineComment(t *testing.T) {
 	src := "// explain main\nfn main(){return;}\n"

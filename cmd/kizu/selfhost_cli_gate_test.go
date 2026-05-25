@@ -1618,12 +1618,12 @@ fn main(color: Color) { match color { Red => print("red"), Green => print("green
 `
 	tempTopLevelStmt := writeTempKizuSource(t, "frontend_top_level_stmt.kizu", topLevelStmtSource)
 
-	const invalidTokenSource = `@
+	const invalidTokenSource = `#
 `
 	tempInvalidToken := writeTempKizuSource(t, "frontend_invalid_token.kizu", invalidTokenSource)
 
 	const invalidExprSource = `fn main() {
-    print(@);
+    print(#);
 }
 `
 	tempInvalidExpr := writeTempKizuSource(t, "frontend_invalid_expr_token.kizu", invalidExprSource)

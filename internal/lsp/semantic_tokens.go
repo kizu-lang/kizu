@@ -160,7 +160,8 @@ func isOperatorToken(typ token.Type) bool {
 	case token.Assign, token.Plus, token.Minus, token.Bang, token.Question,
 		token.Amp, token.Asterisk, token.Slash, token.Percent, token.Eq,
 		token.FatArrow, token.NotEq, token.LT, token.LTE, token.GT,
-		token.GTE, token.Arrow, token.Dot, token.Range, token.DoubleColon:
+		token.GTE, token.Arrow, token.Dot, token.Range, token.DoubleColon,
+		token.At:
 		return true
 	default:
 		return false

@@ -74,6 +74,7 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         Continue => false,
         Match => false,
         Unsafe => false,
+        At => false,
         Comptime => false,
         Try => false,
         True => false,
@@ -138,6 +139,7 @@ fn dump_token(source: []u8, token: std::kizu::lexer::Token) -> !void {
         Continue => print("Continue");,
         Match => print("Match");,
         Unsafe => print("Unsafe");,
+        At => print("At");,
         Comptime => print("Comptime");,
         Try => print("Try");,
         True => print("True");,
@@ -225,6 +227,7 @@ var lexerParityTokenKinds = map[token.Type]string{
 	token.Continue:    "Continue",
 	token.Match:       "Match",
 	token.Unsafe:      "Unsafe",
+	token.At:          "At",
 	token.Comptime:    "Comptime",
 	token.Try:         "Try",
 	token.True:        "True",
@@ -393,7 +396,7 @@ func lexerParitySeedCases(t *testing.T) []lexerParityCase {
 			source: "fn main() { let x = true; var y = false; " +
 				"if x and !y { try step(); } else { y = y or false; } " +
 				"while y != true { break; continue; } for 0..3 |i| { print(i); } " +
-				"match x { Yes => print(\"yes\");, } unsafe { return; } " +
+				"match x { Yes => print(\"yes\");, } @unsafe(ptr_read) { return; } " +
 				"comptime if 1 <= 2 { return; } }",
 		},
 		{name: "seed/operator_tokens", source: "a = b - c / d % e != f <= g > h >= i.x .. j | k => l"},

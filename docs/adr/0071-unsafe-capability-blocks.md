@@ -39,10 +39,8 @@ Capability は compiler-reserved identifier です。未知の capability は co
 - `ptr_cast`: raw pointer 間の明示 cast
 - `ptr_int_cast`: `ptr_from_int<ptr<...>>(value)` / `int_from_ptr<usize>(value)`
 - `extern_call`: `extern "c" fn` call
+- `unsafe_call`: `@requires_unsafe() fn` call
 - `volatile`: volatile read/write primitive
-
-`unsafe_call` は採用しません。Caller-obligation function marker を再導入する場合だけ
-再検討します。
 
 `atomic` と `unchecked_index` は初期 capability set には含めません。
 `volatile` は atomic ではなく、thread synchronization を表しません。
@@ -52,13 +50,14 @@ Nested `@unsafe` は lexical に capability を追加します。Capability の 
 
 `@unsafe` 内でも type check、move check、borrow check は無効化しません。
 
-## unsafe fn
+## Caller Obligation
 
-`unsafe fn` は採用しません。
+`unsafe fn` は採用しません。呼び出し側に memory safety obligation を要求する
+関数は `@requires_unsafe() fn` で宣言します。
 
 関数本体で unsafe operation を使う場合は、通常の `fn` の中に局所的な
-`@unsafe(...) { ... }` を書きます。呼び出し側に obligation を要求する構文は、
-具体的な API が必要になった時点で別 ADR / Issue として設計します。
+`@unsafe(...) { ... }` を書きます。`@requires_unsafe() fn` の呼び出しは
+`@unsafe(unsafe_call)` 内でのみ許可します。
 
 ## 置き換える判断
 

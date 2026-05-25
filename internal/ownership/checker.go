@@ -2126,6 +2126,9 @@ func (c *Checker) checkTypeApplyCallExpr(
 		return "", fmt.Errorf("move error: unsupported type application `%s`", expr.String())
 	}
 	typeArg := c.instantiateTypeArgText(expr.TypeArg)
+	if name == "ptr_from_int" || name == "int_from_ptr" {
+		return c.checkPointerIntCastBuiltin(name, typeArg, args, env)
+	}
 	if name == "std.arena.Arena" {
 		return c.checkArenaTypeApply(typeArg, args, env)
 	}
@@ -2855,7 +2858,7 @@ func (c *Checker) checkBuiltinCall(
 	case "print":
 		result, err := c.checkPrintCall(expr, env)
 		return result, true, err
-	case "ptr_read", "ptr_write":
+	case "ptr_read", "ptr_write", "volatile_read", "volatile_write":
 		result, err := c.checkPointerBuiltin(expr, env)
 		return result, true, err
 	case "error":
@@ -2905,6 +2908,21 @@ func (c *Checker) checkPointerBuiltin(expr *ast.CallExpr, env *scope) (string, e
 		return "i64", nil
 	}
 	return "void", nil
+}
+
+// checkPointerIntCastBuiltin reads pointer/integer conversion arguments without moving values.
+func (c *Checker) checkPointerIntCastBuiltin(
+	_ string,
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+) (string, error) {
+	for _, arg := range args {
+		if _, err := c.readExpr(arg, env); err != nil {
+			return "", err
+		}
+	}
+	return typeArg, nil
 }
 
 // readStructLiteralExpr checks a literal without consuming field values.
@@ -3724,12 +3742,7 @@ func (c *Checker) checkAstAddStmtMethod(
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
-	case "add_return", "add_defer":
-		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
-		}, "std::kizu::ast::NodeId")
-		return result, true, err
-	case "add_expr_stmt":
+	case "add_return", "add_defer", "add_expr_stmt":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
 			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
@@ -3754,7 +3767,8 @@ func (c *Checker) checkAstAddStmtMethod(
 		return result, true, err
 	case "add_unsafe":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
-			"std::kizu::ast::Span", "std::kizu::ast::NodeId",
+			"std::kizu::ast::Span", "std::kizu::ast::ChildRange",
+			"std::kizu::ast::NodeId",
 		}, "std::kizu::ast::NodeId")
 		return result, true, err
 	case "add_comptime_if":

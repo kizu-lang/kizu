@@ -136,6 +136,25 @@ func TestDynToken(t *testing.T) {
 	}
 }
 
+// TestAtToken checks compiler directive punctuation.
+func TestAtToken(t *testing.T) {
+	l := New(`@unsafe`)
+	tests := []struct {
+		typ token.Type
+		lit string
+	}{
+		{token.At, "@"},
+		{token.Unsafe, "unsafe"},
+		{token.EOF, ""},
+	}
+	for i, tt := range tests {
+		tok := l.NextToken()
+		if tok.Type != tt.typ || tok.Literal != tt.lit {
+			t.Fatalf("token %d: got (%q, %q), want (%q, %q)", i, tok.Type, tok.Literal, tt.typ, tt.lit)
+		}
+	}
+}
+
 // TestDeferToken checks the block cleanup keyword.
 func TestDeferToken(t *testing.T) {
 	l := New(`defer values.deinit();`)

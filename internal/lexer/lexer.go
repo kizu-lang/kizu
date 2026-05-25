@@ -18,6 +18,7 @@ var singleCharTokens = map[rune]token.Type{
 	'&': token.Amp,
 	'*': token.Asterisk,
 	'%': token.Percent,
+	'@': token.At,
 	'?': token.Question,
 	'|': token.Pipe,
 	',': token.Comma,

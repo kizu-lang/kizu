@@ -142,6 +142,7 @@ policy.
 | Operation | Safe Kizu | `@unsafe` Kizu |
 | --- | --- | --- |
 | call `extern "c" fn` | rejected | allowed by `extern_call`, caller owns ABI and memory obligation |
+| call `@requires_unsafe() fn` | rejected | allowed by `unsafe_call`, caller owns API-specific obligation |
 | raw pointer read/write | rejected | allowed by `ptr_read` / `ptr_write` / `ptr_deref` |
 | nullable raw pointer read as non-null | rejected | rejected until an explicit conversion policy exists |
 | use moved safe value | rejected | rejected |
