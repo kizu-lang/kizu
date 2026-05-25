@@ -74,7 +74,7 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 				TextDocumentSync:           textDocumentSyncKindFull,
 				DocumentFormattingProvider: true,
 				CompletionProvider: &completionOptions{
-					TriggerCharacters: []string{":", "."},
+					TriggerCharacters: []string{":", ".", "@"},
 				},
 				InlayHintProvider:      true,
 				DefinitionProvider:     true,

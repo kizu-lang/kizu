@@ -91,6 +91,26 @@ var snippetCompletionItems = []completionItem{
 	snippet("type", "type expression", "type<${1:T}>"),
 }
 
+var directiveCompletionItems = []completionItem{
+	snippet("unsafe", "unsafe capability block", "unsafe(${1:ptr_read}) {\n    $0\n}"),
+	snippet(
+		"requires_unsafe",
+		"caller-obligation function",
+		"requires_unsafe() fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}",
+	),
+}
+
+var unsafeCapabilityCompletionItems = []completionItem{
+	unsafeCapability("extern_call", "extern function call"),
+	unsafeCapability("ptr_cast", "raw pointer cast"),
+	unsafeCapability("ptr_deref", "raw pointer dereference"),
+	unsafeCapability("ptr_int_cast", "integer and pointer conversion"),
+	unsafeCapability("ptr_read", "raw pointer read"),
+	unsafeCapability("ptr_write", "raw pointer write"),
+	unsafeCapability("unsafe_call", "caller-obligation function call"),
+	unsafeCapability("volatile", "volatile read or write"),
+}
+
 // snippet builds one static snippet completion item.
 func snippet(label string, detail string, insertText string) completionItem {
 	return completionItem{
@@ -100,4 +120,9 @@ func snippet(label string, detail string, insertText string) completionItem {
 		InsertText:       insertText,
 		InsertTextFormat: insertTextFormatSnippet,
 	}
+}
+
+// unsafeCapability builds one @unsafe capability completion item.
+func unsafeCapability(label string, detail string) completionItem {
+	return completionItem{Label: label, Kind: completionItemKindKeyword, Detail: detail}
 }

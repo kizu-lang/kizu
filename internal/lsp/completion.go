@@ -19,6 +19,8 @@ const (
 	completionContextNamespace
 	completionContextMember
 	completionContextImport
+	completionContextDirective
+	completionContextUnsafeCapability
 )
 
 type completionContext struct {
@@ -150,6 +152,10 @@ func completionItems(
 		index.addMemberItems(builder, context, inferLocalBindings(currentSource, position))
 	case completionContextImport:
 		index.addImportItems(builder, context)
+	case completionContextDirective:
+		addDirectiveItems(builder, context)
+	case completionContextUnsafeCapability:
+		addUnsafeCapabilityItems(builder, context)
 	default:
 		addStaticItems(builder)
 		index.addGeneralItems(builder)
@@ -175,6 +181,20 @@ func addStaticItems(builder *completionBuilder) {
 	}
 	for _, item := range primitiveTypeCompletionItems {
 		builder.add(item)
+	}
+}
+
+// addDirectiveItems adds compiler directive completions after @.
+func addDirectiveItems(builder *completionBuilder, context completionContext) {
+	for _, item := range directiveCompletionItems {
+		builder.add(contextualItem(context, item))
+	}
+}
+
+// addUnsafeCapabilityItems adds reserved capability names inside @unsafe(...).
+func addUnsafeCapabilityItems(builder *completionBuilder, context completionContext) {
+	for _, item := range unsafeCapabilityCompletionItems {
+		builder.add(contextualItem(context, item))
 	}
 }
 
@@ -727,6 +747,20 @@ func completionContextAt(source string, position Position) completionContext {
 	before := source[:offset]
 	lineStart := strings.LastIndexByte(before, '\n') + 1
 	linePrefix := before[lineStart:]
+	if start, ok := unsafeCapabilityStart(before); ok {
+		return completionContext{
+			kind:         completionContextUnsafeCapability,
+			replaceStart: positionFromOffset(source, start),
+			replaceEnd:   position,
+		}
+	}
+	if start, ok := directiveNameStart(linePrefix); ok {
+		return completionContext{
+			kind:         completionContextDirective,
+			replaceStart: positionFromOffset(source, lineStart+start),
+			replaceEnd:   position,
+		}
+	}
 	if start, ok := importPathStart(linePrefix); ok {
 		replaceStart := positionFromOffset(source, lineStart+start)
 		return completionContext{
@@ -752,6 +786,37 @@ func completionContextAt(source string, position Position) completionContext {
 		}
 	}
 	return completionContext{kind: completionContextGeneral}
+}
+
+// unsafeCapabilityStart reports the start of the current @unsafe capability token.
+func unsafeCapabilityStart(before string) (int, bool) {
+	start := strings.LastIndex(before, "@unsafe(")
+	if start < 0 {
+		return 0, false
+	}
+	args := before[start+len("@unsafe("):]
+	if strings.ContainsAny(args, "){};") {
+		return 0, false
+	}
+	return currentIdentStart(before), true
+}
+
+// directiveNameStart reports the start of a compiler directive name after @.
+func directiveNameStart(linePrefix string) (int, bool) {
+	at := strings.LastIndexByte(linePrefix, '@')
+	if at < 0 {
+		return 0, false
+	}
+	name := linePrefix[at+1:]
+	if name == "" {
+		return at + 1, true
+	}
+	for _, r := range name {
+		if !isIdentRune(r) {
+			return 0, false
+		}
+	}
+	return at + 1, true
 }
 
 // importPathStart reports where an import path starts on the current line.
@@ -794,6 +859,19 @@ func selectorContext(before string, separator string) (string, int) {
 		return "", 0
 	}
 	return receiver, i
+}
+
+// currentIdentStart returns the byte offset where the current identifier begins.
+func currentIdentStart(before string) int {
+	i := len(before)
+	for i > 0 {
+		r, size := utf8.DecodeLastRuneInString(before[:i])
+		if !isIdentRune(r) {
+			break
+		}
+		i -= size
+	}
+	return i
 }
 
 // isSelectorReceiverRune reports whether a rune may appear in a selector receiver.
