@@ -2119,6 +2119,7 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 	assertExecutableSelectedBodyParsingContractFragments(t, parser)
 	assertExecutableSelectedBodyParserNoHardcodedResultTags(t, parser)
 	assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules(t, parser)
+	assertExecutableSelectedBodyParserNoHardcodedSyntaxByteRules(t, parser)
 	assertExecutableSelectedBodyParserNoHardcodedExpectValueRules(t, parser)
 }
 
@@ -2214,6 +2215,24 @@ func assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules(t *testing.T,
 	} {
 		if strings.Contains(parser, fragment) {
 			t.Fatalf("selected body parser hardcodes payload byte rule %q", fragment)
+		}
+	}
+}
+
+// assertExecutableSelectedBodyParserNoHardcodedSyntaxByteRules rejects direct
+// source syntax byte rules in the hosted parser renderer.
+func assertExecutableSelectedBodyParserNoHardcodedSyntaxByteRules(t *testing.T, parser string) {
+	t.Helper()
+	for _, fragment := range []string{
+		`"40"`,
+		`"41"`,
+		`"58"`,
+		`"59"`,
+		`"125"`,
+		`i8 41)`,
+	} {
+		if strings.Contains(parser, fragment) {
+			t.Fatalf("selected body parser hardcodes source syntax byte rule %q", fragment)
 		}
 	}
 }
@@ -2766,6 +2785,9 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"ir_contract::body_field_expr_name(",
 		"executable-parser-token ",
 		"parser_source_token(",
+		"append_named_token_char_eq_call(",
+		"append_named_token_pair_eq_call(",
+		"token_byte_value(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
@@ -3244,6 +3266,14 @@ func hostedExecutableSelectedBodyParsingFacts() []string {
 	facts := []string{
 		"executable-parser-token syntax-fn fn",
 		"executable-parser-token syntax-test test",
+		"executable-parser-token syntax-lparen (",
+		"executable-parser-token syntax-rparen )",
+		"executable-parser-token syntax-lbrace {",
+		"executable-parser-token syntax-rbrace }",
+		"executable-parser-token syntax-semicolon ;",
+		"executable-parser-token syntax-colon-pair ::",
+		"executable-parser-token syntax-return-arrow ->",
+		"executable-parser-token syntax-bang !",
 		"executable-parser-token syntax-return return",
 		"executable-parser-token syntax-void void",
 		"executable-parser-token value-main main",
