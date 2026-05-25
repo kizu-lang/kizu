@@ -1261,17 +1261,22 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_executable_function_facts(",
 		"fn append_executable_helper_body_facts(",
 		"fn append_hosted_function_facts(",
-		"fn append_selected_function_signature(",
-		"fn append_selected_signature_param(",
+		"function_signature::append(",
 		"fn require_function_body_fragment(",
 		"fn function_node(",
 		"executable_body::append_function_body_ir(",
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
 		"executable_body_parsing::append_run_parsing_facts(",
-		"selected-signature-param-count ",
-		"selected-signature-return ",
-		"selected-signature-param ",
+	},
+	"../../selfhost/src/ir/function_signature.kizu": {
+		"pub fn append(",
+		"fn append_from_decl(",
+		"fn append_return(",
+		"fn append_param(",
+		"fn append_type_token(",
+		"function-signature-return ",
+		"function-signature-param ",
 	},
 	"../../selfhost/src/ir/hosted_artifact_paths.kizu": {
 		"pub fn append_facts(",
@@ -1587,9 +1592,10 @@ type hostedExecutableContractSources struct {
 func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractSources {
 	t.Helper()
 	return hostedExecutableContractSources{
-		ir:          readSelfhostFile(t, "../../selfhost/src/ir.kizu"),
-		contract:    readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu"),
-		selected:    readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu"),
+		ir:       readSelfhostFile(t, "../../selfhost/src/ir.kizu"),
+		contract: readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu"),
+		selected: readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu") +
+			readSelfhostFile(t, "../../selfhost/src/ir/function_signature.kizu"),
 		hostedPaths: readSelfhostFile(t, "../../selfhost/src/ir/hosted_artifact_paths.kizu"),
 		hostedLowering: readSelfhostFile(
 			t,
@@ -1656,8 +1662,8 @@ func assertExecutableStageMarkersRemoved(t *testing.T, sources hostedExecutableC
 	}
 }
 
-// assertExecutableSelectedSignaturesValidated keeps selected executable ABI
-// shape tied to checked source signatures before direct rendering can use it.
+// assertExecutableSelectedSignaturesValidated keeps executable ABI shape tied
+// to checked source signatures before direct rendering can use it.
 func assertExecutableSelectedSignaturesValidated(
 	t *testing.T,
 	llvm string,
@@ -1673,11 +1679,11 @@ func assertExecutableSelectedSignaturesValidated(
 // facts without hardcoding complete fact lines.
 func assertExecutableSignatureDetailConsumer(t *testing.T, llvm string, fact string) {
 	t.Helper()
-	if strings.HasPrefix(fact, "selected-signature-param-count ") {
-		assertNamedI64FactConsumer(t, llvm, "backend selected-signature validation", fact)
+	if strings.HasPrefix(fact, "function-signature-param ") {
+		assertSequenceFactConsumer(t, llvm, "backend function-signature validation", fact)
 		return
 	}
-	assertNamedFactConsumer(t, llvm, "backend selected-signature validation", fact)
+	assertNamedFactConsumer(t, llvm, "backend function-signature validation", fact)
 }
 
 // assertExecutableSelectedBodiesValidated keeps backend input tied to checked
@@ -1803,11 +1809,10 @@ func assertExecutableSelectedSignaturesComeFromCheckedAST(
 		t.Fatal("IR root hardcodes selected executable signature facts")
 	}
 	for _, fragment := range []string{
-		"append_selected_function_signature(",
-		"append_selected_function_signature_from_decl(",
-		"append_selected_signature_param_count(",
-		"append_selected_signature_return(",
-		"append_selected_signature_param(",
+		"function_signature::append(",
+		"fn append_from_decl(",
+		"fn append_return(",
+		"fn append_param(",
 		"append_type_token(",
 		"function_node(",
 		"function_body_from_node(",
@@ -1818,6 +1823,9 @@ func assertExecutableSelectedSignaturesComeFromCheckedAST(
 		}
 	}
 	for _, content := range []string{selected, llvm} {
+		if strings.Contains(content, `"selected-signature`) {
+			t.Fatal("executable path still depends on selected-signature facts")
+		}
 		if strings.Contains(content, `"selected-signature `) {
 			t.Fatal("executable path still depends on dedicated selected-signature header facts")
 		}
@@ -1832,21 +1840,16 @@ func assertExecutableSelectedSignaturesComeFromCheckedAST(
 func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm string, fact string) {
 	t.Helper()
 	if strings.Contains(llvm, `"`+fact+`"`) {
-		t.Fatalf("backend hardcodes complete selected-signature detail %q", fact)
+		t.Fatalf("backend hardcodes complete function-signature detail %q", fact)
 	}
 	parts := strings.Fields(fact)
-	if len(parts) != 3 {
-		t.Fatalf("invalid selected-signature detail fixture %q", fact)
+	if len(parts) != 3 && len(parts) != 4 {
+		t.Fatalf("invalid function-signature detail fixture %q", fact)
 	}
 	name := parts[1]
-	if strings.HasPrefix(fact, "selected-signature-param ") {
-		index := strings.Index(name, "#")
-		if index < 0 {
-			t.Fatalf("invalid selected-signature param fixture %q", fact)
-		}
-		name = name[:index]
+	if strings.HasPrefix(fact, "function-signature-param ") {
 		if !strings.Contains(selected, "try std::fmt::append_i64(out, index)") {
-			t.Fatalf("selected signature emitter does not derive param index for %q", fact)
+			t.Fatalf("function signature emitter does not derive param index for %q", fact)
 		}
 	}
 	for _, fragment := range []string{
@@ -1854,7 +1857,7 @@ func assertSelectedSignatureDetailOrigin(t *testing.T, selected string, llvm str
 		`"` + name + `"`,
 	} {
 		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected signature emitter does not publish %q via %q", fact, fragment)
+			t.Fatalf("function signature emitter does not publish %q via %q", fact, fragment)
 		}
 	}
 }
@@ -2806,30 +2809,6 @@ func assertNamedFactConsumer(t *testing.T, content string, owner string, fact st
 	}
 }
 
-// assertNamedI64FactConsumer checks numeric facts are read by prefix and key.
-func assertNamedI64FactConsumer(t *testing.T, content string, owner string, fact string) {
-	t.Helper()
-	if strings.Contains(content, `"`+fact+`"`) {
-		t.Fatalf("%s hardcodes complete executable numeric fact %q", owner, fact)
-	}
-	parts := strings.Fields(fact)
-	if len(parts) != 3 {
-		t.Fatalf("invalid executable numeric fact fixture %q", fact)
-	}
-	if !strings.Contains(content, "ir_contract::require_named_i64_fact(") &&
-		!strings.Contains(content, "ir_contract::named_i64_fact(") {
-		t.Fatalf("%s does not consume executable numeric fact %q through i64 fact APIs", owner, fact)
-	}
-	for _, fragment := range []string{
-		`"` + parts[0] + ` "`,
-		`"` + parts[1] + `"`,
-	} {
-		if !strings.Contains(content, fragment) {
-			t.Fatalf("%s does not consume executable numeric fact %q via %q", owner, fact, fragment)
-		}
-	}
-}
-
 // assertSequenceFactConsumer checks ordered facts are read by prefix, key, and
 // sequence rather than hardcoded as complete fact lines.
 func assertSequenceFactConsumer(t *testing.T, content string, owner string, fact string) {
@@ -2923,28 +2902,25 @@ func hostedExecutableABIFacts() []string {
 // signature details checked by the backend before direct executable lowering.
 func hostedExecutableSelectedSignatureDetailFacts() []string {
 	return []string{
-		"selected-signature-param-count selfhost::cli::execute::run_file_cli 3",
-		"selected-signature-return selfhost::cli::execute::run_file_cli !i64",
-		"selected-signature-param selfhost::cli::execute::run_file_cli#0 " +
+		"function-signature-return selfhost::cli::execute::run_file_cli !i64",
+		"function-signature-param selfhost::cli::execute::run_file_cli 0 " +
 			"allocator:runtime:Allocator",
-		"selected-signature-param-count selfhost::backend::executable::" +
-			"lower_run_executable 3",
-		"selected-signature-return selfhost::backend::executable::" +
+		"function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable !data::Executable",
-		"selected-signature-param selfhost::backend::executable::" +
-			"lower_run_executable#1 ast:runtime:std::kizu::ast::Ast",
-		"selected-signature-return selfhost::backend::executable::" +
+		"function-signature-param selfhost::backend::executable::" +
+			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast",
+		"function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable_ast data::Executable",
-		"selected-signature-return selfhost::backend::executable::" +
+		"function-signature-return selfhost::backend::executable::" +
 			"parse_run_program_ast !data::ExecutableAst",
-		"selected-signature-param selfhost::backend::executable::" +
-			"parse_run_print_call_ast#3 args:runtime:std::kizu::ast::ChildRange",
-		"selected-signature-param selfhost::backend::executable::" +
-			"parse_expect_call_ast#3 args:runtime:std::kizu::ast::ChildRange",
-		"selected-signature-return selfhost::backend::hosted::" +
+		"function-signature-param selfhost::backend::executable::" +
+			"parse_run_print_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
+		"function-signature-param selfhost::backend::executable::" +
+			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
+		"function-signature-return selfhost::backend::hosted::" +
 			"emit_run_executable_artifact !data::RunArtifact",
-		"selected-signature-param selfhost::backend::hosted::" +
-			"emit_run_executable_artifact#3 executable:runtime:data::Executable",
+		"function-signature-param selfhost::backend::hosted::" +
+			"emit_run_executable_artifact 3 executable:runtime:data::Executable",
 	}
 }
 
