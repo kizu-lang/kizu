@@ -423,7 +423,6 @@ func requiredLLVMMetadataFragments() []string {
 		"backend-input executable-contract-source data selfhost::backend::data\n",
 		"backend-input executable-contract-source lowering selfhost::backend::executable\n",
 	}
-	fragments = append(fragments, requiredLLVMMetadataSelectedFunctionFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedSignatureFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedHelperBodyFragments()...)
@@ -453,31 +452,6 @@ func requiredLLVMMetadataFragments() []string {
 		"unsupported-policy blocker\n",
 		"deferred tagged-union-payload issue-495\n",
 	}...)
-}
-
-// requiredLLVMMetadataSelectedFunctionFragments returns executable path facts.
-func requiredLLVMMetadataSelectedFunctionFragments() []string {
-	return []string{
-		"backend-input executable-selected-functions checked-ast-path-v1\n",
-		"backend-input selected-function selfhost::cli::execute::run_file_cli checked-run-artifact\n",
-		"backend-input selected-function selfhost::cli::execute::test_file_cli checked-test-artifact\n",
-		"backend-input selected-function selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper\n",
-		"backend-input selected-function selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast\n",
-		"backend-input selected-function selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable\n",
-		"backend-input selected-function selfhost::backend::executable::" +
-			"lower_test_executable checked-test-wrapper\n",
-		"backend-input selected-function selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast\n",
-		"backend-input selected-function selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable\n",
-		"backend-input selected-function selfhost::backend::hosted::" +
-			"emit_run_executable_artifact hosted-run-writer\n",
-		"backend-input selected-function selfhost::backend::hosted::" +
-			"emit_test_executable_artifact hosted-test-writer\n",
-	}
 }
 
 // requiredLLVMMetadataSelectedSignatureFragments returns executable signature inputs.

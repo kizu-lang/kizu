@@ -89,7 +89,6 @@ func requiredSelfhostIRContractFragments() []string {
 		"executable-contract-source data selfhost::backend::data\n",
 		"executable-contract-source lowering selfhost::backend::executable\n",
 	}
-	fragments = append(fragments, requiredSelfhostIRSelectedFunctionFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedSignatureFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedHelperBodyFragments()...)
@@ -117,31 +116,6 @@ func requiredSelfhostIRContractFragments() []string {
 		"checked-borrows ",
 		"checked-diagnostics 0\n",
 	}...)
-}
-
-// requiredSelfhostIRSelectedFunctionFragments returns selected executable path facts.
-func requiredSelfhostIRSelectedFunctionFragments() []string {
-	return []string{
-		"executable-selected-functions checked-ast-path-v1\n",
-		"selected-function selfhost::cli::execute::run_file_cli checked-run-artifact\n",
-		"selected-function selfhost::cli::execute::test_file_cli checked-test-artifact\n",
-		"selected-function selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper\n",
-		"selected-function selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast\n",
-		"selected-function selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable\n",
-		"selected-function selfhost::backend::executable::" +
-			"lower_test_executable checked-test-wrapper\n",
-		"selected-function selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast\n",
-		"selected-function selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable\n",
-		"selected-function selfhost::backend::hosted::" +
-			"emit_run_executable_artifact hosted-run-writer\n",
-		"selected-function selfhost::backend::hosted::" +
-			"emit_test_executable_artifact hosted-test-writer\n",
-	}
 }
 
 // requiredSelfhostIRSelectedSignatureFragments returns selected executable signatures.
