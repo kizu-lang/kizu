@@ -1177,10 +1177,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn require_selected_body_lowering(",
 		"fn append_cli_lower_run_executable_ast_function(",
 		"fn append_cli_lower_test_executable_ast_function(",
-		"fn run_executable_kind_for_ast_kind(",
-		"fn test_executable_kind_for_ast_kind(",
-		"selected-run-body-lowering-rule ",
-		"selected-test-body-lowering-rule ",
+		"fn selected_body_executable_kind(",
+		"selected-body-lowering-rule ",
 	},
 	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
 		"pub fn append_functions(",
@@ -1249,8 +1247,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_test_lowering_facts(",
 		"fn append_lowering_rule_facts_from_body(",
 		"fn append_lowering_rule_fact_from_if(",
-		"selected-run-body-lowering-rule ",
-		"selected-test-body-lowering-rule ",
+		"selected-body-lowering-rule ",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2139,6 +2136,18 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 			strings.HasPrefix(fact, "selected-body-lowering-unsupported ") {
 			requiredFragments = append(requiredFragments, `"`+parts[1]+`"`)
 		}
+		if strings.HasPrefix(fact, "selected-body-lowering-rule ") {
+			key := parts[1]
+			index := strings.Index(key, "#")
+			if index < 0 {
+				t.Fatalf("invalid selected-body-lowering-rule fixture %q", fact)
+			}
+			requiredFragments = append(
+				requiredFragments,
+				`"`+key[:index]+`"`,
+				"append_enum_suffix(",
+			)
+		}
 		for _, fragment := range requiredFragments {
 			if !strings.Contains(emitter, fragment) {
 				t.Fatalf("selected body lowering emitter does not publish %q via %q", fact, fragment)
@@ -2177,10 +2186,8 @@ func assertExecutableRuleConsumers(
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
 		"ir_contract::mapped_i64_fact(",
-		"run_executable_kind_for_ast_kind(",
-		"test_executable_kind_for_ast_kind(",
-		`"selected-run-body-lowering-rule "`,
-		`"selected-test-body-lowering-rule "`,
+		"selected_body_executable_kind(",
+		`"selected-body-lowering-rule "`,
 		`"executable-kind "`,
 	} {
 		if !strings.Contains(ast, fragment) {
@@ -2290,8 +2297,7 @@ func isExecutableTagFact(fact string) bool {
 // isExecutableRuleFact reports whether a contract fact maps one executable rule name to another.
 func isExecutableRuleFact(fact string) bool {
 	return strings.HasPrefix(fact, "executable-ast-rule ") ||
-		strings.HasPrefix(fact, "selected-run-body-lowering-rule ") ||
-		strings.HasPrefix(fact, "selected-test-body-lowering-rule ")
+		strings.HasPrefix(fact, "selected-body-lowering-rule ")
 }
 
 // assertNamedFactConsumer checks rule consumers read mapped facts by prefix and key.
@@ -2615,10 +2621,14 @@ func hostedExecutableSelectedBodyParsingRuleFacts() []string {
 // kind mappings that must be emitted from checked lowering bodies.
 func hostedExecutableSelectedBodyLoweringRuleFacts() []string {
 	return []string{
-		"selected-run-body-lowering-rule RunPrintCall RunPrintString",
-		"selected-run-body-lowering-rule RunReturnVoid RunReturnVoid",
-		"selected-test-body-lowering-rule TestExpectTrue TestExpectOk",
-		"selected-test-body-lowering-rule TestExpectFalse TestExpectFailure",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_run_executable_ast#RunPrintCall RunPrintString",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_run_executable_ast#RunReturnVoid RunReturnVoid",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_test_executable_ast#TestExpectTrue TestExpectOk",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_test_executable_ast#TestExpectFalse TestExpectFailure",
 	}
 }
 

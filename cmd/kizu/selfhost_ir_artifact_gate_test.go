@@ -314,10 +314,14 @@ func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
 			"lower_run_executable_ast checked-run-executable\n",
 		"selected-body-lowering selfhost::backend::executable::" +
 			"lower_test_executable_ast checked-test-executable\n",
-		"selected-run-body-lowering-rule RunPrintCall RunPrintString\n",
-		"selected-run-body-lowering-rule RunReturnVoid RunReturnVoid\n",
-		"selected-test-body-lowering-rule TestExpectTrue TestExpectOk\n",
-		"selected-test-body-lowering-rule TestExpectFalse TestExpectFailure\n",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_run_executable_ast#RunPrintCall RunPrintString\n",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_run_executable_ast#RunReturnVoid RunReturnVoid\n",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_test_executable_ast#TestExpectTrue TestExpectOk\n",
+		"selected-body-lowering-rule selfhost::backend::executable::" +
+			"lower_test_executable_ast#TestExpectFalse TestExpectFailure\n",
 		"selected-body-lowering-unsupported selfhost::backend::executable::" +
 			"lower_run_executable_ast unsupported_executable\n",
 		"selected-body-lowering-unsupported selfhost::backend::executable::" +
