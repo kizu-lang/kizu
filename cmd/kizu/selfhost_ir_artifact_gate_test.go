@@ -91,6 +91,7 @@ func requiredSelfhostIRContractFragments() []string {
 	}
 	fragments = append(fragments, requiredSelfhostIRSelectedFunctionFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyFragments()...)
+	fragments = append(fragments, requiredSelfhostIRSelectedBodyLoweringFragments()...)
 	return append(fragments, []string{
 		"frontend-executable-lowering checked-ast-bounded\n",
 		"hosted-executable-ast executable-ast-rules-v1\n",
@@ -99,11 +100,6 @@ func requiredSelfhostIRContractFragments() []string {
 		"executable-ast-rule RunReturnVoid MainReturnVoid\n",
 		"executable-ast-rule TestExpectTrue MainExpectTrue\n",
 		"executable-ast-rule TestExpectFalse MainExpectFalse\n",
-		"hosted-executable-lowering executable-ir-rules-v1\n",
-		"executable-lowering-rule RunPrintCall RunPrintString\n",
-		"executable-lowering-rule RunReturnVoid RunReturnVoid\n",
-		"executable-lowering-rule TestExpectTrue TestExpectOk\n",
-		"executable-lowering-rule TestExpectFalse TestExpectFailure\n",
 		"hosted-executable-abi executable-result-layout-v1\n",
 		"executable-ast-layout kind:i64 payload:[]u8\n",
 		"executable-layout kind:i64 stdout_payload:[]u8\n",
@@ -186,6 +182,25 @@ func requiredSelfhostIRSelectedBodyFragments() []string {
 			"write_run_artifact 6\n",
 		"body-call selfhost::backend::hosted::emit_test_executable_artifact " +
 			"write_test_artifact 6\n",
+	}
+}
+
+// requiredSelfhostIRSelectedBodyLoweringFragments returns selected body lowering facts.
+func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
+	return []string{
+		"executable-selected-body-lowering checked-ast-body-lowering-v1\n",
+		"selected-body-lowering selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"selected-body-lowering selfhost::backend::executable::" +
+			"lower_test_executable_ast checked-test-executable\n",
+		"selected-run-body-lowering-rule RunPrintCall RunPrintString\n",
+		"selected-run-body-lowering-rule RunReturnVoid RunReturnVoid\n",
+		"selected-test-body-lowering-rule TestExpectTrue TestExpectOk\n",
+		"selected-test-body-lowering-rule TestExpectFalse TestExpectFailure\n",
+		"selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_run_executable_ast unsupported_executable\n",
+		"selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_test_executable_ast unsupported_executable\n",
 	}
 }
 

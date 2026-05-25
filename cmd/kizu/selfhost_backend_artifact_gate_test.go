@@ -428,14 +428,10 @@ func requiredLLVMMetadataFragments() []string {
 		"backend-input executable-ast-rule RunReturnVoid MainReturnVoid\n",
 		"backend-input executable-ast-rule TestExpectTrue MainExpectTrue\n",
 		"backend-input executable-ast-rule TestExpectFalse MainExpectFalse\n",
-		"backend-input executable-lowering executable-ir-rules-v1\n",
-		"backend-input executable-lowering-rule RunPrintCall RunPrintString\n",
-		"backend-input executable-lowering-rule RunReturnVoid RunReturnVoid\n",
-		"backend-input executable-lowering-rule TestExpectTrue TestExpectOk\n",
-		"backend-input executable-lowering-rule TestExpectFalse TestExpectFailure\n",
 	}
 	fragments = append(fragments, requiredLLVMMetadataSelectedFunctionFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
 	fragments = append(fragments, []string{
 		"entry @kizu_selfhost__cli_main\n",
@@ -509,6 +505,25 @@ func requiredLLVMMetadataSelectedBodyFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"backend-input selected-function-body selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
+	}
+}
+
+// requiredLLVMMetadataSelectedBodyLoweringFragments returns body lowering inputs.
+func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
+	return []string{
+		"backend-input executable-selected-body-lowering checked-ast-body-lowering-v1\n",
+		"backend-input selected-body-lowering selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"backend-input selected-body-lowering selfhost::backend::executable::" +
+			"lower_test_executable_ast checked-test-executable\n",
+		"backend-input selected-run-body-lowering-rule RunPrintCall RunPrintString\n",
+		"backend-input selected-run-body-lowering-rule RunReturnVoid RunReturnVoid\n",
+		"backend-input selected-test-body-lowering-rule TestExpectTrue TestExpectOk\n",
+		"backend-input selected-test-body-lowering-rule TestExpectFalse TestExpectFailure\n",
+		"backend-input selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_run_executable_ast unsupported_executable\n",
+		"backend-input selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_test_executable_ast unsupported_executable\n",
 	}
 }
 

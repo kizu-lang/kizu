@@ -1168,11 +1168,19 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn require_executable_abi(",
 		"fn append_cli_parse_run_executable_ast_function(",
 		"fn append_cli_parse_test_executable_ast_function(",
-		"fn append_cli_lower_executable_ast_functions(",
-		"fn append_cli_lower_run_executable_ast_function(",
-		"fn append_cli_lower_test_executable_ast_function(",
+		"cli_executable_body_lowering_llvm::append_functions(",
 		"fn append_cli_run_executable_function(",
 		"fn append_cli_test_executable_function(",
+	},
+	"../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu": {
+		"pub fn append_functions(",
+		"fn require_selected_body_lowering(",
+		"fn append_cli_lower_run_executable_ast_function(",
+		"fn append_cli_lower_test_executable_ast_function(",
+		"fn run_executable_kind_for_ast_kind(",
+		"fn test_executable_kind_for_ast_kind(",
+		"selected-run-body-lowering-rule ",
+		"selected-test-body-lowering-rule ",
 	},
 	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
 		"pub fn append_functions(",
@@ -1196,7 +1204,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_enum_kind_facts(",
 		"fn require_struct_fields(",
 		"fn require_function(",
-		"fn append_executable_lowering_rule_facts(",
+		"fn append_executable_ast_rule_facts(",
 	},
 	"../../selfhost/src/ir/executable_functions.kizu": {
 		"pub fn append_facts(",
@@ -1205,6 +1213,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_hosted_function_facts(",
 		"fn require_function_body_fragment(",
 		"executable_body::append_function_body_ir(",
+		"executable_body_lowering::append_run_lowering_facts(",
 		"selected-function ",
 	},
 	"../../selfhost/src/ir/executable_body.kizu": {
@@ -1213,6 +1222,14 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_body_edge(",
 		"fn append_body_call_fact(",
 		"fn body_node_kind(",
+	},
+	"../../selfhost/src/ir/executable_body_lowering.kizu": {
+		"pub fn append_run_lowering_facts(",
+		"pub fn append_test_lowering_facts(",
+		"fn append_lowering_rule_facts_from_body(",
+		"fn append_lowering_rule_fact_from_if(",
+		"selected-run-body-lowering-rule ",
+		"selected-test-body-lowering-rule ",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1289,10 +1306,12 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	contract := readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu")
 	selected := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	body := readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu")
+	bodyLowering := readSelfhostFile(t, "../../selfhost/src/ir/executable_body_lowering.kizu")
 	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	match := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu")
 	ast := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu")
+	lowerer := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu")
 	run := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
 	test := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu")
 	astRules := []string{
@@ -1303,27 +1322,31 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		"executable-ast-rule TestExpectTrue MainExpectTrue",
 		"executable-ast-rule TestExpectFalse MainExpectFalse",
 	}
-	loweringRules := []string{
-		"executable-lowering-rule RunPrintCall RunPrintString",
-		"executable-lowering-rule RunReturnVoid RunReturnVoid",
-		"executable-lowering-rule TestExpectTrue TestExpectOk",
-		"executable-lowering-rule TestExpectFalse TestExpectFailure",
-	}
 	abiFacts := hostedExecutableABIFacts()
 	selectedFunctions := hostedExecutableSelectedFunctionFacts()
 	selectedBodies := hostedExecutableSelectedBodyFacts()
-	irFacts := ir + contract + selected + body
+	selectedBodyLoweringFacts := hostedExecutableSelectedBodyLoweringFacts()
+	selectedBodyLoweringRules := hostedExecutableSelectedBodyLoweringRuleFacts()
+	irFacts := ir + contract + selected + body + bodyLowering
 	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, astRules)
-	assertExecutableFactsValidated(t, llvm, loweringRules)
 	assertExecutableSelectedFunctionsValidated(t, llvm, selectedFunctions)
 	assertExecutableSelectedBodiesValidated(t, llvm, selectedBodies)
+	assertExecutableSelectedBodyLoweringValidated(t, llvm, selectedBodyLoweringFacts)
 	assertExecutableABIValidated(t, llvm, abiFacts)
-	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, astRules, loweringRules)
+	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, astRules)
 	assertExecutableSelectedFunctionsComeFromCheckedAST(t, ir, selected, llvm, selectedFunctions)
 	assertExecutableSelectedBodiesComeFromCheckedAST(t, ir, selected, body, llvm, selectedBodies)
-	assertExecutableRuleConsumers(t, match, ast, astRules, loweringRules)
-	assertExecutableABIConsumers(t, ast, run, test, abiFacts)
-	assertExecutableIRThreading(t, llvm, cli, match)
+	assertExecutableSelectedBodyLoweringComesFromCheckedAST(
+		t,
+		ir,
+		selected,
+		bodyLowering,
+		llvm,
+		selectedBodyLoweringFacts,
+	)
+	assertExecutableRuleConsumers(t, match, lowerer, astRules, selectedBodyLoweringRules)
+	assertExecutableABIConsumers(t, ast, lowerer, run, test, abiFacts)
+	assertExecutableIRThreading(t, llvm, cli, match, ast, lowerer)
 }
 
 // assertExecutableSelectedFunctionsValidated keeps hosted backend input tied to
@@ -1358,6 +1381,24 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string, facts []
 		if !strings.Contains(llvm, `"`+fact+`"`) {
 			t.Fatalf("backend IR validation does not require body semantic fact %q", fact)
 		}
+	}
+}
+
+// assertExecutableSelectedBodyLoweringValidated keeps selected body lowering
+// facts required by the backend before the hosted lowerer can consume them.
+func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string, facts []string) {
+	t.Helper()
+	if !strings.Contains(llvm, `"executable-selected-body-lowering checked-ast-body-lowering-v1"`) {
+		t.Fatal("backend IR validation does not require selected body lowering facts")
+	}
+	if !strings.Contains(
+		llvm,
+		`"backend-input executable-selected-body-lowering checked-ast-body-lowering-v1"`,
+	) {
+		t.Fatal("backend metadata does not record selected body lowering facts")
+	}
+	for _, fact := range facts {
+		assertNamedFactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
 	}
 }
 
@@ -1482,7 +1523,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	contract string,
 	llvm string,
 	astRules []string,
-	loweringRules []string,
 ) {
 	t.Helper()
 	for _, fragment := range []string{
@@ -1503,9 +1543,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 		"require_function_body_fragment(",
 		"append_executable_ast_rule_fact(",
 		"node_text_contains(",
-		"append_executable_lowering_rule_facts(",
-		"append_executable_lowering_rule_fact_from_binary(",
-		"executable_kind_node_from_struct_literal(",
 		"ExecutableAstKind",
 		"ExecutableKind",
 		"executable-contract-source data selfhost::backend::data",
@@ -1527,26 +1564,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 		if strings.HasPrefix(fact, "executable-ast-rule ") &&
 			strings.Contains(contract, `"`+fact+`"`) {
 			t.Fatalf("executable contract still hardcodes AST rule %q", fact)
-		}
-	}
-	for _, fact := range loweringRules {
-		if strings.Contains(contract, `"`+fact+`"`) {
-			t.Fatalf("executable contract still hardcodes lowering rule %q", fact)
-		}
-	}
-}
-
-// assertExecutableFactsValidated checks backend IR validation requires facts that
-// may be derived rather than present as complete string literals in source.
-func assertExecutableFactsValidated(t *testing.T, llvm string, facts []string) {
-	t.Helper()
-	for _, fact := range facts {
-		if isExecutableRuleFact(fact) {
-			assertNamedFactConsumer(t, llvm, "backend IR validation", fact)
-			continue
-		}
-		if !strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend IR validation does not require %q", fact)
 		}
 	}
 }
@@ -1579,6 +1596,66 @@ func assertExecutableABIValidated(t *testing.T, llvm string, facts []string) {
 	}
 }
 
+// assertExecutableSelectedBodyLoweringComesFromCheckedAST keeps lowering facts
+// tied to the checked AST body traversal instead of backend-side fixtures.
+func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
+	t *testing.T,
+	ir string,
+	selected string,
+	bodyLowering string,
+	llvm string,
+	facts []string,
+) {
+	t.Helper()
+	if strings.Contains(ir, `"executable-selected-body-lowering checked-ast-body-lowering-v1"`) {
+		t.Fatal("IR root hardcodes selected body lowering facts")
+	}
+	for _, fragment := range []string{
+		"executable_body_lowering::append_run_lowering_facts(",
+		"executable_body_lowering::append_test_lowering_facts(",
+		"function_body_node(",
+	} {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("selected body lowering is not rooted in checked AST via %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"pub fn append_run_lowering_facts(",
+		"pub fn append_test_lowering_facts(",
+		"fn append_lowering_rule_facts_from_body(",
+		"fn append_lowering_rule_fact_from_if(",
+		"ast.get(",
+		"ast.child_at(",
+		"data::ExecutableAstKind::",
+		"data::ExecutableKind::",
+		"unsupported_executable",
+	} {
+		if !strings.Contains(bodyLowering, fragment) {
+			t.Fatalf("selected body lowering emitter missing %q", fragment)
+		}
+	}
+	emitter := selected + bodyLowering
+	for _, fact := range facts {
+		if strings.Contains(llvm, `"`+fact+`"`) {
+			t.Fatalf("backend hardcodes complete selected body lowering fact %q", fact)
+		}
+		parts := strings.Fields(fact)
+		if len(parts) != 3 {
+			t.Fatalf("invalid selected-body-lowering fixture %q", fact)
+		}
+		requiredFragments := []string{`"` + parts[0] + ` "`}
+		if strings.HasPrefix(fact, "selected-body-lowering ") ||
+			strings.HasPrefix(fact, "selected-body-lowering-unsupported ") {
+			requiredFragments = append(requiredFragments, `"`+parts[1]+`"`)
+		}
+		for _, fragment := range requiredFragments {
+			if !strings.Contains(emitter, fragment) {
+				t.Fatalf("selected body lowering emitter does not publish %q via %q", fact, fragment)
+			}
+		}
+	}
+}
+
 // assertExecutableRuleConsumers checks generated matcher/lowerer IR fact use.
 func assertExecutableRuleConsumers(
 	t *testing.T,
@@ -1605,8 +1682,10 @@ func assertExecutableRuleConsumers(
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
 		"ir_contract::mapped_i64_fact(",
-		"executable_kind_tag_for_ast_kind(",
-		`"executable-lowering-rule "`,
+		"run_executable_kind_for_ast_kind(",
+		"test_executable_kind_for_ast_kind(",
+		`"selected-run-body-lowering-rule "`,
+		`"selected-test-body-lowering-rule "`,
 		`"executable-kind "`,
 	} {
 		if !strings.Contains(ast, fragment) {
@@ -1619,10 +1698,19 @@ func assertExecutableRuleConsumers(
 func assertExecutableABIConsumers(
 	t *testing.T,
 	ast string,
+	lowerer string,
 	run string,
 	test string,
 	abiFacts []string,
 ) {
+	t.Helper()
+	assertExecutableASTABIConsumers(t, ast, abiFacts)
+	assertExecutableLowererABIConsumers(t, lowerer)
+	assertExecutableDispatchABIConsumers(t, run, test)
+}
+
+// assertExecutableASTABIConsumers checks parse-AST rendering reads ABI facts.
+func assertExecutableASTABIConsumers(t *testing.T, ast string, abiFacts []string) {
 	t.Helper()
 	for _, fact := range abiFacts {
 		if isExecutableTagFact(fact) {
@@ -1638,7 +1726,6 @@ func assertExecutableABIConsumers(
 	for _, fragment := range []string{
 		"ir_contract::require_named_i64_fact(",
 		"executable_ast_tag(",
-		"executable_kind_tag(",
 		`"executable-ast-kind "`,
 		`"executable-kind "`,
 	} {
@@ -1646,6 +1733,24 @@ func assertExecutableABIConsumers(
 			t.Fatalf("hosted executable AST renderer does not consume tag facts with %q", fragment)
 		}
 	}
+}
+
+// assertExecutableLowererABIConsumers checks body lowerer rendering reads tag facts.
+func assertExecutableLowererABIConsumers(t *testing.T, lowerer string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"executable_kind_tag(",
+		`"executable-kind "`,
+	} {
+		if !strings.Contains(lowerer, fragment) {
+			t.Fatalf("hosted executable lowerer does not consume ABI tag facts with %q", fragment)
+		}
+	}
+}
+
+// assertExecutableDispatchABIConsumers checks run/test dispatch reads ABI facts.
+func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string) {
+	t.Helper()
 	for _, fact := range []string{
 		"executable-kind RunPrintString 1",
 		"executable-kind RunReturnVoid 2",
@@ -1690,7 +1795,8 @@ func isExecutableTagFact(fact string) bool {
 // isExecutableRuleFact reports whether a contract fact maps one executable rule name to another.
 func isExecutableRuleFact(fact string) bool {
 	return strings.HasPrefix(fact, "executable-ast-rule ") ||
-		strings.HasPrefix(fact, "executable-lowering-rule ")
+		strings.HasPrefix(fact, "selected-run-body-lowering-rule ") ||
+		strings.HasPrefix(fact, "selected-test-body-lowering-rule ")
 }
 
 // assertNamedFactConsumer checks rule consumers read mapped facts by prefix and key.
@@ -1719,9 +1825,15 @@ func assertNamedFactConsumer(t *testing.T, content string, owner string, fact st
 }
 
 // assertExecutableIRThreading checks IR bytes reach hosted executable renderers.
-func assertExecutableIRThreading(t *testing.T, llvm string, cli string, match string) {
+func assertExecutableIRThreading(
+	t *testing.T,
+	llvm string,
+	cli string,
+	match string,
+	ast string,
+	lowerer string,
+) {
 	t.Helper()
-	ast := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu")
 	run := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
 	test := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu")
 	for _, file := range []struct {
@@ -1729,7 +1841,8 @@ func assertExecutableIRThreading(t *testing.T, llvm string, cli string, match st
 		content string
 	}{
 		{name: "matcher", content: match},
-		{name: "lowerer", content: ast},
+		{name: "ast", content: ast},
+		{name: "lowerer", content: lowerer},
 		{name: "run", content: run},
 		{name: "test", content: test},
 	} {
@@ -1741,10 +1854,11 @@ func assertExecutableIRThreading(t *testing.T, llvm string, cli string, match st
 		"try cli_llvm::append_functions(out, ir_bytes)",
 		"try cli_executable_match_llvm::append_functions(out, ir_bytes)",
 		"try cli_executable_ast_llvm::append_functions(out, ir_bytes)",
+		"try cli_executable_body_lowering_llvm::append_functions(out, ir_bytes)",
 		"try cli_test_llvm::append_cli_test_blocks(out, ir_bytes)",
 		"try cli_run_llvm::append_cli_run_blocks(out, ir_bytes)",
 	} {
-		combined := llvm + cli + match
+		combined := llvm + cli + match + ast
 		if !strings.Contains(combined, fragment) {
 			t.Fatalf("IR bytes are not threaded to hosted executable lowerer with %q", fragment)
 		}
@@ -1817,6 +1931,33 @@ func hostedExecutableSelectedBodyFacts() []string {
 			"emit_run_executable_artifact hosted-run-writer",
 		"selected-function-body selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer",
+	}
+}
+
+// hostedExecutableSelectedBodyLoweringFacts returns checked body lowering facts
+// derived from the selected lowering function bodies.
+func hostedExecutableSelectedBodyLoweringFacts() []string {
+	facts := []string{
+		"selected-body-lowering selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable",
+		"selected-body-lowering selfhost::backend::executable::" +
+			"lower_test_executable_ast checked-test-executable",
+		"selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_run_executable_ast unsupported_executable",
+		"selected-body-lowering-unsupported selfhost::backend::executable::" +
+			"lower_test_executable_ast unsupported_executable",
+	}
+	return append(facts, hostedExecutableSelectedBodyLoweringRuleFacts()...)
+}
+
+// hostedExecutableSelectedBodyLoweringRuleFacts returns AST-kind to executable
+// kind mappings that must be emitted from checked lowering bodies.
+func hostedExecutableSelectedBodyLoweringRuleFacts() []string {
+	return []string{
+		"selected-run-body-lowering-rule RunPrintCall RunPrintString",
+		"selected-run-body-lowering-rule RunReturnVoid RunReturnVoid",
+		"selected-test-body-lowering-rule TestExpectTrue TestExpectOk",
+		"selected-test-body-lowering-rule TestExpectFalse TestExpectFailure",
 	}
 }
 
