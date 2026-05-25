@@ -1139,7 +1139,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
-		"fn require_run_executable_kind_tags(",
+		"fn executable_kind_tag(",
+		"fn append_executable_kind_compare(",
 		"fn append_run_print_emit_block(",
 		"fn append_run_return_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
@@ -1147,7 +1148,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_test_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_test_blocks(",
-		"fn require_test_executable_kind_tags(",
+		"fn executable_kind_tag(",
+		"fn append_executable_kind_compare(",
 		"fn append_test_ok_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
 	},
@@ -1183,6 +1185,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
 		"pub fn contains(",
+		"pub fn named_i64_fact(",
+		"pub fn require_named_i64_fact(",
+		"pub fn mapped_i64_fact(",
 	},
 	"../../selfhost/src/ir/executable_contract.kizu": {
 		"pub fn append_facts(",
@@ -1288,7 +1293,7 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	irFacts := ir + contract
 	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, astRules)
 	assertExecutableFactsValidated(t, llvm, loweringRules)
-	assertExecutableFactsValidated(t, llvm, abiFacts)
+	assertExecutableABIValidated(t, llvm, abiFacts)
 	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, loweringRules)
 	assertExecutableRuleConsumers(t, match, ast, astRules, loweringRules)
 	assertExecutableABIConsumers(t, ast, run, test, abiFacts)
@@ -1357,6 +1362,34 @@ func assertExecutableFactsValidated(t *testing.T, llvm string, facts []string) {
 	}
 }
 
+// assertExecutableABIValidated checks backend validation keeps layouts exact but
+// reads executable tag ordinals from the IR fact stream.
+func assertExecutableABIValidated(t *testing.T, llvm string, facts []string) {
+	t.Helper()
+	for _, fact := range facts {
+		if isExecutableTagFact(fact) {
+			if strings.Contains(llvm, `"`+fact+`"`) {
+				t.Fatalf("backend IR validation hardcodes executable tag fact %q", fact)
+			}
+			continue
+		}
+		if !strings.Contains(llvm, `"`+fact+`"`) {
+			t.Fatalf("backend IR validation does not require %q", fact)
+		}
+	}
+	for _, fragment := range []string{
+		"ir_contract::require_named_i64_fact(",
+		"append_backend_input_i64_fact(",
+		"ir_contract::named_i64_fact(",
+		`"executable-ast-kind "`,
+		`"executable-kind "`,
+	} {
+		if !strings.Contains(llvm, fragment) {
+			t.Fatalf("backend IR validation/metadata does not consume tag facts with %q", fragment)
+		}
+	}
+}
+
 // assertExecutableRuleConsumers checks generated matcher/lowerer IR fact use.
 func assertExecutableRuleConsumers(
 	t *testing.T,
@@ -1372,8 +1405,19 @@ func assertExecutableRuleConsumers(
 		}
 	}
 	for _, rule := range loweringRules {
-		if !strings.Contains(ast, `"`+rule+`"`) {
-			t.Fatalf("hosted executable lowerer renderer does not consume %q", rule)
+		if strings.Contains(ast, `"`+rule+`"`) {
+			t.Fatalf("hosted executable lowerer hardcodes complete rule %q", rule)
+		}
+	}
+	for _, fragment := range []string{
+		"ir_contract::named_i64_fact(",
+		"ir_contract::mapped_i64_fact(",
+		"executable_kind_tag_for_ast_kind(",
+		`"executable-lowering-rule "`,
+		`"executable-kind "`,
+	} {
+		if !strings.Contains(ast, fragment) {
+			t.Fatalf("hosted executable lowerer does not consume fact tags with %q", fragment)
 		}
 	}
 }
@@ -1388,26 +1432,66 @@ func assertExecutableABIConsumers(
 ) {
 	t.Helper()
 	for _, fact := range abiFacts {
+		if isExecutableTagFact(fact) {
+			if strings.Contains(ast, `"`+fact+`"`) {
+				t.Fatalf("hosted executable AST renderer hardcodes ABI tag fact %q", fact)
+			}
+			continue
+		}
 		if !strings.Contains(ast, `"`+fact+`"`) {
 			t.Fatalf("hosted executable AST renderer does not consume ABI fact %q", fact)
+		}
+	}
+	for _, fragment := range []string{
+		"ir_contract::require_named_i64_fact(",
+		"executable_ast_tag(",
+		"executable_kind_tag(",
+		`"executable-ast-kind "`,
+		`"executable-kind "`,
+	} {
+		if !strings.Contains(ast, fragment) {
+			t.Fatalf("hosted executable AST renderer does not consume tag facts with %q", fragment)
 		}
 	}
 	for _, fact := range []string{
 		"executable-kind RunPrintString 1",
 		"executable-kind RunReturnVoid 2",
 	} {
-		if !strings.Contains(run, `"`+fact+`"`) {
-			t.Fatalf("hosted run dispatch does not consume executable ABI fact %q", fact)
+		if strings.Contains(run, `"`+fact+`"`) {
+			t.Fatalf("hosted run dispatch hardcodes executable ABI fact %q", fact)
 		}
 	}
 	for _, fact := range []string{
 		"executable-kind TestExpectOk 3",
 		"executable-kind TestExpectFailure 4",
 	} {
-		if !strings.Contains(test, `"`+fact+`"`) {
-			t.Fatalf("hosted test dispatch does not consume executable ABI fact %q", fact)
+		if strings.Contains(test, `"`+fact+`"`) {
+			t.Fatalf("hosted test dispatch hardcodes executable ABI fact %q", fact)
 		}
 	}
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: "run", content: run},
+		{name: "test", content: test},
+	} {
+		for _, fragment := range []string{
+			"ir_contract::named_i64_fact(",
+			`"executable-kind "`,
+			"append_executable_kind_compare(",
+		} {
+			if !strings.Contains(file.content, fragment) {
+				t.Fatalf("hosted %s dispatch does not consume fact tags with %q", file.name, fragment)
+			}
+		}
+	}
+}
+
+// isExecutableTagFact reports whether a contract fact carries an executable tag ordinal.
+func isExecutableTagFact(fact string) bool {
+	return strings.HasPrefix(fact, "executable-ast-kind ") ||
+		strings.HasPrefix(fact, "executable-kind ")
 }
 
 // assertExecutableIRThreading checks IR bytes reach hosted executable renderers.
@@ -1425,7 +1509,7 @@ func assertExecutableIRThreading(t *testing.T, llvm string, cli string, match st
 		{name: "run", content: run},
 		{name: "test", content: test},
 	} {
-		if !strings.Contains(file.content, `ir_contract::require_fact(`) {
+		if !strings.Contains(file.content, `ir_contract::`) {
 			t.Fatalf("hosted executable %s renderer does not require IR facts", file.name)
 		}
 	}

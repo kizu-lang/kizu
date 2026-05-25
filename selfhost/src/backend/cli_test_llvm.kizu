@@ -44,7 +44,8 @@ pub fn append_globals(out: &var std::string::String) -> !void {
 }
 
 pub fn append_cli_test_blocks(out: &var std::string::String, ir_bytes: []u8) -> !void {
-    try require_test_executable_kind_tags(ir_bytes);
+    let test_ok_kind = try executable_kind_tag(ir_bytes, "TestExpectOk");
+    let test_failure_kind = try executable_kind_tag(ir_bytes, "TestExpectFailure");
     try append_line(out, "dispatch_test:");
     try append_line(out, "  %test_io = call %kizu.owned @kizu_rt_io_blocking()");
     try append_line(out,
@@ -66,19 +67,18 @@ pub fn append_cli_test_blocks(out: &var std::string::String, ir_bytes: []u8) -> 
         "  %test_executable = call %kizu.selfhost.executable @kizu_selfhost__cli_test_executable(%kizu.slice.u8 %test_bytes)");
     try append_line(out,
         "  %test_executable_kind = extractvalue %kizu.selfhost.executable %test_executable, 0");
-    try append_line(out, "  %test_ok_found = icmp eq i64 %test_executable_kind, 3");
+    try append_executable_kind_compare(out, "test_ok_found", "test_executable_kind", test_ok_kind);
     try append_line(out, "  br i1 %test_ok_found, label %test_ok_emit, label %maybe_test_failure");
     try append_line(out, "maybe_test_failure:");
-    try append_line(out, "  %test_failure_found = icmp eq i64 %test_executable_kind, 4");
+    try append_executable_kind_compare(
+        out,
+        "test_failure_found",
+        "test_executable_kind",
+        test_failure_kind
+    );
     try append_line(out, "  br i1 %test_failure_found, label %test_failure_emit, label %usage");
     try append_test_ok_emit_block(out);
     try append_test_failure_emit_block(out);
-    return;
-}
-
-fn require_test_executable_kind_tags(ir_bytes: []u8) -> !void {
-    try ir_contract::require_fact(ir_bytes, "executable-kind TestExpectOk 3");
-    try ir_contract::require_fact(ir_bytes, "executable-kind TestExpectFailure 4");
     return;
 }
 
@@ -239,6 +239,26 @@ fn append_global_slice(
     try out.append_bytes("_base, i64 ");
     try out.append_bytes(size);
     try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn executable_kind_tag(ir_bytes: []u8, name: []u8) -> !i64 {
+    return try ir_contract::named_i64_fact(ir_bytes, "executable-kind ", name);
+}
+
+fn append_executable_kind_compare(
+    out: &var std::string::String,
+    result: []u8,
+    value: []u8,
+    kind: i64
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(result);
+    try out.append_bytes(" = icmp eq i64 %");
+    try out.append_bytes(value);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, kind);
     try out.append_byte(cast<u8>(10));
     return;
 }
