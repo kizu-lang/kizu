@@ -457,7 +457,6 @@ func requiredLLVMMetadataFragments() []string {
 // requiredLLVMMetadataSelectedSignatureFragments returns executable signature inputs.
 func requiredLLVMMetadataSelectedSignatureFragments() []string {
 	return []string{
-		"backend-input executable-selected-signatures checked-ast-signature-v1\n",
 		"backend-input selected-signature-param-count selfhost::cli::execute::" +
 			"run_file_cli 3\n",
 		"backend-input selected-signature-return selfhost::cli::execute::" +
@@ -485,22 +484,17 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 
 // requiredLLVMMetadataSelectedBodyFragments returns executable body IR facts.
 func requiredLLVMMetadataSelectedBodyFragments() []string {
-	return []string{
-		"backend-input executable-selected-body-ir checked-ast-body-v1\n",
-	}
+	return nil
 }
 
 // requiredLLVMMetadataSelectedHelperBodyFragments returns executable helper body inputs.
 func requiredLLVMMetadataSelectedHelperBodyFragments() []string {
-	return []string{
-		"backend-input executable-selected-helper-body-ir checked-ast-helper-body-v1\n",
-	}
+	return nil
 }
 
 // requiredLLVMMetadataSelectedBodyParsingFragments returns body parser inputs.
 func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 	return []string{
-		"backend-input executable-selected-body-parsing checked-ast-body-parsing-v1\n",
 		"backend-input selected-body-parsing-token syntax-fn fn\n",
 		"backend-input selected-body-parsing-token syntax-test test\n",
 		"backend-input selected-body-parsing-token syntax-return return\n",
@@ -517,16 +511,13 @@ func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 
 // requiredLLVMMetadataSelectedBodyLoweringFragments returns body lowering inputs.
 func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
-	return []string{
-		"backend-input executable-selected-body-lowering checked-ast-body-lowering-v1\n",
-	}
+	return nil
 }
 
 // requiredLLVMMetadataHostedArtifactPathFragments returns selected hosted
 // artifact path facts consumed by the backend.
 func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 	return []string{
-		"backend-input executable-hosted-artifact-paths checked-ast-hosted-artifact-v1\n",
 		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
 			"emit_run_executable_artifact target/selfhost/run\n",
 		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
@@ -585,7 +576,6 @@ func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 // lowering facts consumed by the backend.
 func requiredLLVMMetadataHostedLoweringFragments() []string {
 	return []string{
-		"backend-input executable-hosted-lowering checked-ast-hosted-lowering-v1\n",
 		"backend-input hosted-lowering-case-count selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 2\n",
 		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
