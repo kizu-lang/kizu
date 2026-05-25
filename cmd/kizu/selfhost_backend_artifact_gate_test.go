@@ -430,6 +430,7 @@ func requiredLLVMMetadataFragments() []string {
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataHostedArtifactPathFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataHostedLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
 	fragments = append(fragments, []string{
 		"entry @kizu_selfhost__cli_main\n",
@@ -679,6 +680,54 @@ func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 			"emit_test_executable_artifact .ll.meta\n",
 		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
 			"emit_test_executable_artifact write_test_artifact\n",
+	}
+}
+
+// requiredLLVMMetadataHostedLoweringFragments returns selected hosted artifact
+// lowering facts consumed by the backend.
+func requiredLLVMMetadataHostedLoweringFragments() []string {
+	return []string{
+		"backend-input executable-hosted-lowering checked-ast-hosted-lowering-v1\n",
+		"backend-input hosted-lowering-case-count selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 2\n",
+		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 RunPrintString\n",
+		"backend-input hosted-lowering-case-entry selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 kizu_run_main\n",
+		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 kizu.run.stdout\n",
+		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 Stdout\n",
+		"backend-input hosted-lowering-case-newline selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 true\n",
+		"backend-input hosted-lowering-case-exit selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 0\n",
+		"backend-input hosted-lowering-case-payload selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 executable-field\n",
+		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 1 RunReturnVoid\n",
+		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 1 none\n",
+		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 1 None\n",
+		"backend-input hosted-lowering-case-payload selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 1 empty-source-slice\n",
+		"backend-input hosted-lowering-case-count selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 2\n",
+		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 TestExpectOk\n",
+		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 kizu.test.ok\n",
+		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 Stdout\n",
+		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 TestExpectFailure\n",
+		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 kizu.test.failure\n",
+		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 Stderr\n",
+		"backend-input hosted-lowering-case-exit selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 1\n",
 	}
 }
 
