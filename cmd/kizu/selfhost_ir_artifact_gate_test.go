@@ -96,7 +96,7 @@ func requiredSelfhostIRContractFragments() []string {
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyLoweringFragments()...)
 	return append(fragments, []string{
-		"frontend-executable-lowering checked-ast-bounded\n",
+		"frontend-executable-lowering checked-ast-selected-body-ir\n",
 		"hosted-executable-abi executable-result-layout-v1\n",
 		"executable-ast-layout kind:i64 payload:[]u8\n",
 		"executable-layout kind:i64 stdout_payload:[]u8\n",
@@ -292,18 +292,6 @@ func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 			"parse_run_executable_ast checked-run-ast\n",
 		"selected-body-parsing selfhost::backend::executable::" +
 			"parse_test_executable_ast checked-test-ast\n",
-		"selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_run_program_ast#MainScan LeadingFunctions\n",
-		"selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_test_program_ast#MainScan LeadingFunctions\n",
-		"selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_run_print_call_ast#RunPrintCall MainPrintString\n",
-		"selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_run_return_stmt_ast#RunReturnVoid MainReturnVoid\n",
-		"selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_expect_call_ast#TestExpectTrue MainExpectTrue\n",
-		"selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_expect_call_ast#TestExpectFalse MainExpectFalse\n",
 	}
 }
 

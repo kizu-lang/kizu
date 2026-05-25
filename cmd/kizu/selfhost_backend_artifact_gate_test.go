@@ -291,9 +291,9 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"dispatch_fmt_write_arg:",
 		"dispatch_fmt_write:",
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
-		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload",
-		"define i1 @kizu_selfhost__cli_run_return_ok",
-		"define i1 @kizu_selfhost__cli_run_payload_is_simple",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload",
+		"define i1 @kizu_selfhost__cli_parse_run_return_void_ok",
+		"define i1 @kizu_selfhost__cli_is_supported_run_print_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_executable = call %kizu.selfhost.executable " +
 			"@kizu_selfhost__cli_run_executable",
@@ -303,7 +303,7 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
-		"define i64 @kizu_selfhost__cli_test_expect_value",
+		"define i64 @kizu_selfhost__cli_parse_test_expect_value",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
@@ -611,18 +611,6 @@ func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 			"parse_run_executable_ast checked-run-ast\n",
 		"backend-input selected-body-parsing selfhost::backend::executable::" +
 			"parse_test_executable_ast checked-test-ast\n",
-		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_run_program_ast#MainScan LeadingFunctions\n",
-		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_test_program_ast#MainScan LeadingFunctions\n",
-		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_run_print_call_ast#RunPrintCall MainPrintString\n",
-		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_run_return_stmt_ast#RunReturnVoid MainReturnVoid\n",
-		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_expect_call_ast#TestExpectTrue MainExpectTrue\n",
-		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
-			"parse_expect_call_ast#TestExpectFalse MainExpectFalse\n",
 	}
 }
 

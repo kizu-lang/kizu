@@ -1,10 +1,10 @@
+import selfhost::backend::cli_executable_body_parsing_llvm;
 import selfhost::backend::cli_executable_body_lowering_llvm;
 import selfhost::backend::ir_contract;
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try require_executable_abi(ir_bytes);
-    try append_cli_parse_run_executable_ast_function(out, ir_bytes);
-    try append_cli_parse_test_executable_ast_function(out, ir_bytes);
+    try cli_executable_body_parsing_llvm::append_functions(out, ir_bytes);
     try cli_executable_body_lowering_llvm::append_functions(out, ir_bytes);
     try append_cli_run_executable_function(out);
     try append_cli_test_executable_function(out);
@@ -59,107 +59,6 @@ fn append_cli_test_executable_function(out: &var std::string::String) -> !void {
     try append_line(out, "}");
     try append_line(out, "");
     return;
-}
-
-fn append_cli_parse_run_executable_ast_function(
-    out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    let unsupported = try executable_ast_tag(ir_bytes, "Unsupported");
-    let run_print = try executable_ast_tag(ir_bytes, "RunPrintCall");
-    let run_return = try executable_ast_tag(ir_bytes, "RunReturnVoid");
-    try append_line(out,
-        "define %kizu.selfhost.executable.ast @kizu_selfhost__cli_parse_run_executable_ast(");
-    try append_line(out, "  %kizu.slice.u8 %source");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_empty_payload(out);
-    try append_line(out,
-        "  %payload_result = call %kizu.error.slice.u8 @kizu_selfhost__cli_run_print_payload(%kizu.slice.u8 %source)");
-    try append_line(out, "  %payload_ok = extractvalue %kizu.error.slice.u8 %payload_result, 0");
-    try append_line(out, "  br i1 %payload_ok, label %run_print, label %check_return");
-    try append_line(out, "run_print:");
-    try append_line(out, "  %payload = extractvalue %kizu.error.slice.u8 %payload_result, 1");
-    try append_executable_ast_return(out, "run_print", run_print, "payload");
-    try append_line(out, "check_return:");
-    try append_line(out,
-        "  %return_ok = call i1 @kizu_selfhost__cli_run_return_ok(%kizu.slice.u8 %source)");
-    try append_line(out, "  br i1 %return_ok, label %run_return, label %unsupported");
-    try append_line(out, "run_return:");
-    try append_executable_ast_return(out, "run_return", run_return, "empty");
-    try append_line(out, "unsupported:");
-    try append_executable_ast_return(out, "unsupported", unsupported, "empty");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_cli_parse_test_executable_ast_function(
-    out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    let unsupported = try executable_ast_tag(ir_bytes, "Unsupported");
-    let test_ok = try executable_ast_tag(ir_bytes, "TestExpectTrue");
-    let test_failure = try executable_ast_tag(ir_bytes, "TestExpectFalse");
-    try append_line(out,
-        "define %kizu.selfhost.executable.ast @kizu_selfhost__cli_parse_test_executable_ast(");
-    try append_line(out, "  %kizu.slice.u8 %source");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_empty_payload(out);
-    try append_line(out,
-        "  %expect = call i64 @kizu_selfhost__cli_test_expect_value(%kizu.slice.u8 %source)");
-    try append_line(out, "  %is_ok = icmp eq i64 %expect, 1");
-    try append_line(out, "  br i1 %is_ok, label %test_ok, label %check_failure");
-    try append_line(out, "test_ok:");
-    try append_executable_ast_return(out, "test_ok", test_ok, "empty");
-    try append_line(out, "check_failure:");
-    try append_line(out, "  %is_failure = icmp eq i64 %expect, 0");
-    try append_line(out, "  br i1 %is_failure, label %test_failure, label %unsupported");
-    try append_line(out, "test_failure:");
-    try append_executable_ast_return(out, "test_failure", test_failure, "empty");
-    try append_line(out, "unsupported:");
-    try append_executable_ast_return(out, "unsupported", unsupported, "empty");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_empty_payload(out: &var std::string::String) -> !void {
-    try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
-    try append_line(out, "  %empty_base = insertvalue %kizu.slice.u8 poison, ptr %source_ptr, 0");
-    try append_line(out, "  %empty = insertvalue %kizu.slice.u8 %empty_base, i64 0, 1");
-    return;
-}
-
-fn append_executable_ast_return(
-    out: &var std::string::String,
-    suffix: []u8,
-    kind: i64,
-    payload: []u8
-) -> !void {
-    try out.append_bytes("  %ast_kinded_");
-    try out.append_bytes(suffix);
-    try out.append_bytes(" = insertvalue %kizu.selfhost.executable.ast zeroinitializer, i64 ");
-    try std::fmt::append_i64(out, kind);
-    try out.append_bytes(", 0");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %ast_result_");
-    try out.append_bytes(suffix);
-    try out.append_bytes(" = insertvalue %kizu.selfhost.executable.ast %ast_kinded_");
-    try out.append_bytes(suffix);
-    try out.append_bytes(", %kizu.slice.u8 %");
-    try out.append_bytes(payload);
-    try out.append_bytes(", 1");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  ret %kizu.selfhost.executable.ast %ast_result_");
-    try out.append_bytes(suffix);
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn executable_ast_tag(ir_bytes: []u8, name: []u8) -> !i64 {
-    return try ir_contract::named_i64_fact(ir_bytes, "executable-ast-kind ", name);
 }
 
 fn append_line(out: &var std::string::String, text: []u8) -> !void {
