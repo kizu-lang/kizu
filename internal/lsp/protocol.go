@@ -6,6 +6,7 @@ const (
 	textDocumentSyncKindFull = 1
 
 	diagnosticSeverityError = 1
+	diagnosticSeverityWarn  = 2
 
 	completionItemKindMethod        = 2
 	completionItemKindFunction      = 3
@@ -256,6 +257,7 @@ type symbolInformation struct {
 type Diagnostic struct {
 	Range    Range  `json:"range"`
 	Severity int    `json:"severity,omitempty"`
+	Code     string `json:"code,omitempty"`
 	Source   string `json:"source,omitempty"`
 	Message  string `json:"message"`
 }

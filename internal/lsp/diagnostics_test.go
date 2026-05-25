@@ -62,6 +62,9 @@ fn main() {
 	if got.Range.End.Line != 5 || got.Range.End.Character != 15 {
 		t.Fatalf("got end %d:%d, want 5:15", got.Range.End.Line, got.Range.End.Character)
 	}
+	if got.Code != "type.operator_type_mismatch" {
+		t.Fatalf("code = %q, want type.operator_type_mismatch", got.Code)
+	}
 	for _, want := range []string{
 		"operator `==` operands must have same type",
 		"at 6:14",
@@ -97,6 +100,9 @@ func TestAnalyzeReportsUnsafeCapabilityHelp(t *testing.T) {
 	if got.Start.Line != 1 || got.Start.Character != 11 {
 		t.Fatalf("got start %d:%d, want 1:11", got.Start.Line, got.Start.Character)
 	}
+	if diagnostics[0].Code != "unsafe.missing_capability" {
+		t.Fatalf("code = %q, want unsafe.missing_capability", diagnostics[0].Code)
+	}
 }
 
 // TestAnalyzeReportsUnknownNamespaceHelp checks namespace diagnostics guide imports.
@@ -121,6 +127,9 @@ fn main() { print(Color::Red); }
 	got := diagnostics[0].Range
 	if got.Start.Line != 1 || got.Start.Character != 18 {
 		t.Fatalf("got start %d:%d, want 1:18", got.Start.Line, got.Start.Character)
+	}
+	if diagnostics[0].Code != "type.unknown_namespace" {
+		t.Fatalf("code = %q, want type.unknown_namespace", diagnostics[0].Code)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	compilerdiag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
@@ -229,8 +230,16 @@ type sourceSpanError interface {
 	SourceSpan() ast.Span
 }
 
+type compilerDiagnosticError interface {
+	CompilerDiagnostic() compilerdiag.Diagnostic
+}
+
 // diagnosticFromError converts semantic errors into LSP diagnostics.
 func diagnosticFromError(err error) Diagnostic {
+	var withDiagnostic compilerDiagnosticError
+	if errors.As(err, &withDiagnostic) {
+		return diagnosticFromCompilerDiagnostic(withDiagnostic.CompilerDiagnostic())
+	}
 	var withSpan sourceSpanError
 	if errors.As(err, &withSpan) {
 		span := withSpan.SourceSpan()
@@ -239,6 +248,28 @@ func diagnosticFromError(err error) Diagnostic {
 		}
 	}
 	return diagnosticAtStart(err.Error())
+}
+
+// diagnosticFromCompilerDiagnostic converts a structured compiler diagnostic to LSP.
+func diagnosticFromCompilerDiagnostic(diag compilerdiag.Diagnostic) Diagnostic {
+	if diag.Primary.IsZero() {
+		result := diagnosticAtStart(diag.RenderText())
+		result.Code = diag.Code
+		result.Severity = severityFromCompilerDiagnostic(diag)
+		return result
+	}
+	result := diagnosticAtSpan(diag.RenderText(), diag.Primary)
+	result.Code = diag.Code
+	result.Severity = severityFromCompilerDiagnostic(diag)
+	return result
+}
+
+// severityFromCompilerDiagnostic maps compiler severity to LSP severity.
+func severityFromCompilerDiagnostic(diag compilerdiag.Diagnostic) int {
+	if diag.Severity == compilerdiag.SeverityWarning {
+		return diagnosticSeverityWarn
+	}
+	return diagnosticSeverityError
 }
 
 // diagnosticAtSpan reports a checker diagnostic at a source span.

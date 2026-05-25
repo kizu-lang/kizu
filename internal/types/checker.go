@@ -175,14 +175,17 @@ func requireUnsafeCapabilityAt(
 	if caps.has(cap) {
 		return nil
 	}
-	message := fmt.Sprintf("unsafe error: %s requires @unsafe(%s)", operation, cap)
+	diag := unsafeDiagnosticAt(
+		span,
+		"unsafe.missing_capability",
+		"%s requires @unsafe(%s)",
+		operation,
+		cap,
+	)
 	if info, ok := unsafecap.Lookup(string(cap)); ok {
-		message += "\nhelp: " + unsafecap.Hint(info)
+		diag = diag.WithHelp(unsafecap.Hint(info))
 	}
-	if !span.IsZero() {
-		return errorAt(span, "%s", message)
-	}
-	return fmt.Errorf("%s", message)
+	return diag.AsError()
 }
 
 // Checker validates type rules for a parsed program.
@@ -1569,9 +1572,14 @@ func (c *Checker) checkAssignStmt(
 		return false, err
 	}
 	if !sameType(got, want) {
-		return false, errorAt(expressionSpan(stmt.Target),
-			"type error: assignment to `%s` expects %s, got %s",
-			stmt.Target.String(), want, got)
+		return false, typeDiagnosticAt(
+			expressionSpan(stmt.Target),
+			"type.assignment_mismatch",
+			"assignment to `%s` expects %s, got %s",
+			stmt.Target.String(),
+			want,
+			got,
+		).AsError()
 	}
 	return false, nil
 }
@@ -2749,11 +2757,14 @@ func (c *Checker) checkBinaryExpr(
 // checkLogical validates boolean logical operands.
 func checkLogical(op string, left Type, right Type, span ast.Span) (Type, error) {
 	if left != typeBool || right != typeBool {
-		return "", errorAt(span,
-			"type error: operator `%s` expects bool operands\n"+
-				"note: left operand has type %s\n"+
-				"note: right operand has type %s",
-			op, left, right)
+		return "", typeDiagnosticAt(
+			span,
+			"type.operator_bool_operands",
+			"operator `%s` expects bool operands",
+			op,
+		).WithNotef("left operand has type %s", left).
+			WithNotef("right operand has type %s", right).
+			AsError()
 	}
 	return typeBool, nil
 }
@@ -2768,20 +2779,27 @@ func checkEquality(op string, left Type, right Type, span ast.Span) (Type, error
 
 // operatorTypeMismatch reports both operand types for binary mismatch errors.
 func operatorTypeMismatch(op string, left Type, right Type, span ast.Span) error {
-	return errorAt(span,
-		"type error: operator `%s` operands must have same type\n"+
-			"note: left operand has type %s\n"+
-			"note: right operand has type %s",
-		op, left, right)
+	return typeDiagnosticAt(
+		span,
+		"type.operator_type_mismatch",
+		"operator `%s` operands must have same type",
+		op,
+	).WithNotef("left operand has type %s", left).
+		WithNotef("right operand has type %s", right).
+		AsError()
 }
 
 // operatorOperandKindError reports non-matching operand categories.
 func operatorOperandKindError(op string, want string, left Type, right Type, span ast.Span) error {
-	return errorAt(span,
-		"type error: operator `%s` expects %s operands\n"+
-			"note: left operand has type %s\n"+
-			"note: right operand has type %s",
-		op, want, left, right)
+	return typeDiagnosticAt(
+		span,
+		"type.operator_operand_kind",
+		"operator `%s` expects %s operands",
+		op,
+		want,
+	).WithNotef("left operand has type %s", left).
+		WithNotef("right operand has type %s", right).
+		AsError()
 }
 
 // expressionSpan returns the best source span stored on an expression.
@@ -4722,15 +4740,12 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 
 // unknownNamespaceError suggests the two valid namespace sources in Kizu.
 func (c *Checker) unknownNamespaceError(name string, span ast.Span) error {
-	message := fmt.Sprintf("type error: unknown namespace `%s`", name)
-	message += "\nhelp: use an enum/union name or import a module that defines this namespace"
+	diag := typeDiagnosticAt(span, "type.unknown_namespace", "unknown namespace `%s`", name)
 	if known := c.knownNamespaceSummary(); known != "" {
-		message += "\nnote: known namespaces: " + known
+		diag = diag.WithNote("known namespaces: " + known)
 	}
-	if !span.IsZero() {
-		return errorAt(span, "%s", message)
-	}
-	return fmt.Errorf("%s", message)
+	return diag.WithHelp("use an enum/union name or import a module that defines this namespace").
+		AsError()
 }
 
 // knownNamespaceSummary returns a short display list of enum and union namespaces.
