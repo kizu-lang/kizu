@@ -36,7 +36,7 @@ ptr<const T>    non-null const raw pointer
 
 ## 影響
 
-- pointer dereference は unsafe 操作にする
-- `extern "c" fn` の呼び出しは unsafe 必須にする
+- pointer dereference は `@unsafe(ptr_deref)` 操作にする
+- `extern "c" fn` の呼び出しは `@unsafe(extern_call)` 必須にする
 - C API の null return は `?ptr<T>` で表す
 - safe reference / borrow と raw pointer は別物として扱う

@@ -37,7 +37,7 @@ ADR-0060 により、関数境界を越える borrowed return では `borrows <s
 
 `&T` / `&var T` は local borrow として扱う。borrow を struct field に保存する
 モデルは v0.2 では採用しない。関数から返す場合は `-> &T borrows value` のように
-戻り値の source を明示する。task / comptime / unsafe 境界で safe borrow を延命
+戻り値の source を明示する。task / comptime / `@unsafe` 境界で safe borrow を延命
 させることはできない。
 
 ## 影響
