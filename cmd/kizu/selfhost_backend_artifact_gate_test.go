@@ -617,11 +617,18 @@ func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 			"parse_run_executable_ast checked-run-ast\n",
 		"backend-input selected-body-parsing selfhost::backend::executable::" +
 			"parse_test_executable_ast checked-test-ast\n",
-		"backend-input selected-body-parser-rule MainScan LeadingFunctions\n",
-		"backend-input selected-body-parser-rule RunPrintCall MainPrintString\n",
-		"backend-input selected-body-parser-rule RunReturnVoid MainReturnVoid\n",
-		"backend-input selected-body-parser-rule TestExpectTrue MainExpectTrue\n",
-		"backend-input selected-body-parser-rule TestExpectFalse MainExpectFalse\n",
+		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_program_ast#MainScan LeadingFunctions\n",
+		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_test_program_ast#MainScan LeadingFunctions\n",
+		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_print_call_ast#RunPrintCall MainPrintString\n",
+		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_return_stmt_ast#RunReturnVoid MainReturnVoid\n",
+		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_expect_call_ast#TestExpectTrue MainExpectTrue\n",
+		"backend-input selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_expect_call_ast#TestExpectFalse MainExpectFalse\n",
 	}
 }
 

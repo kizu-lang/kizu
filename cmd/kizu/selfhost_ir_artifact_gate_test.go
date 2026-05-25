@@ -298,11 +298,18 @@ func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 			"parse_run_executable_ast checked-run-ast\n",
 		"selected-body-parsing selfhost::backend::executable::" +
 			"parse_test_executable_ast checked-test-ast\n",
-		"selected-body-parser-rule MainScan LeadingFunctions\n",
-		"selected-body-parser-rule RunPrintCall MainPrintString\n",
-		"selected-body-parser-rule RunReturnVoid MainReturnVoid\n",
-		"selected-body-parser-rule TestExpectTrue MainExpectTrue\n",
-		"selected-body-parser-rule TestExpectFalse MainExpectFalse\n",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_program_ast#MainScan LeadingFunctions\n",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_test_program_ast#MainScan LeadingFunctions\n",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_print_call_ast#RunPrintCall MainPrintString\n",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_return_stmt_ast#RunReturnVoid MainReturnVoid\n",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_expect_call_ast#TestExpectTrue MainExpectTrue\n",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_expect_call_ast#TestExpectFalse MainExpectFalse\n",
 	}
 }
 

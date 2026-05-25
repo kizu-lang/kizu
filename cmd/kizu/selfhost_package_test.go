@@ -2059,29 +2059,53 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 	}
 	emitter := selected + bodyParsing
 	for _, fact := range facts {
-		parts := strings.Fields(fact)
-		if len(parts) == 2 {
-			if !strings.Contains(emitter, `"`+fact+`"`) {
-				t.Fatalf("selected body parsing emitter does not publish %q", fact)
-			}
-			continue
+		assertSelectedBodyParsingFactOrigin(t, emitter, llvm, fact)
+	}
+}
+
+// assertSelectedBodyParsingFactOrigin checks parser facts are assembled from
+// selected helper body evidence rather than copied as backend literals.
+func assertSelectedBodyParsingFactOrigin(t *testing.T, emitter string, llvm string, fact string) {
+	t.Helper()
+	parts := strings.Fields(fact)
+	if len(parts) == 2 {
+		if !strings.Contains(emitter, `"`+fact+`"`) {
+			t.Fatalf("selected body parsing emitter does not publish %q", fact)
 		}
-		if strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend hardcodes complete selected body parsing fact %q", fact)
-		}
-		if len(parts) != 3 {
-			t.Fatalf("invalid selected-body-parsing fixture %q", fact)
-		}
-		for _, fragment := range []string{
-			`"` + parts[0] + ` "`,
-			`"` + parts[1] + `"`,
-			`"` + parts[2] + `"`,
-		} {
-			if !strings.Contains(emitter, fragment) {
-				t.Fatalf("selected body parsing emitter does not publish %q via %q", fact, fragment)
-			}
+		return
+	}
+	if strings.Contains(llvm, `"`+fact+`"`) {
+		t.Fatalf("backend hardcodes complete selected body parsing fact %q", fact)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("invalid selected-body-parsing fixture %q", fact)
+	}
+	requiredFragments := selectedBodyParsingOriginFragments(t, fact, parts)
+	for _, fragment := range requiredFragments {
+		if !strings.Contains(emitter, fragment) {
+			t.Fatalf("selected body parsing emitter does not publish %q via %q", fact, fragment)
 		}
 	}
+}
+
+// selectedBodyParsingOriginFragments returns source-side fragments expected to
+// assemble a parser fact.
+func selectedBodyParsingOriginFragments(t *testing.T, fact string, parts []string) []string {
+	t.Helper()
+	fragments := []string{`"` + parts[0] + ` "`, `"` + parts[2] + `"`}
+	if !strings.HasPrefix(fact, "selected-body-parser-rule ") {
+		return append(fragments, `"`+parts[1]+`"`)
+	}
+	key := parts[1]
+	index := strings.Index(key, "#")
+	if index < 0 {
+		t.Fatalf("invalid selected-body-parser-rule fixture %q", fact)
+	}
+	return append(
+		fragments,
+		`"`+strings.TrimPrefix(key[:index], "selfhost::backend::executable::")+`"`,
+		`"`+key[index+1:]+`"`,
+	)
 }
 
 // assertExecutableSelectedBodyLoweringComesFromCheckedAST keeps lowering facts
@@ -2297,6 +2321,7 @@ func isExecutableTagFact(fact string) bool {
 // isExecutableRuleFact reports whether a contract fact maps one executable rule name to another.
 func isExecutableRuleFact(fact string) bool {
 	return strings.HasPrefix(fact, "executable-ast-rule ") ||
+		strings.HasPrefix(fact, "selected-body-parser-rule ") ||
 		strings.HasPrefix(fact, "selected-body-lowering-rule ")
 }
 
@@ -2609,11 +2634,18 @@ func hostedExecutableSelectedBodyParsingFacts() []string {
 // must be emitted from checked parser bodies before matcher rendering.
 func hostedExecutableSelectedBodyParsingRuleFacts() []string {
 	return []string{
-		"selected-body-parser-rule MainScan LeadingFunctions",
-		"selected-body-parser-rule RunPrintCall MainPrintString",
-		"selected-body-parser-rule RunReturnVoid MainReturnVoid",
-		"selected-body-parser-rule TestExpectTrue MainExpectTrue",
-		"selected-body-parser-rule TestExpectFalse MainExpectFalse",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_program_ast#MainScan LeadingFunctions",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_test_program_ast#MainScan LeadingFunctions",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_print_call_ast#RunPrintCall MainPrintString",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_run_return_stmt_ast#RunReturnVoid MainReturnVoid",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_expect_call_ast#TestExpectTrue MainExpectTrue",
+		"selected-body-parser-rule selfhost::backend::executable::" +
+			"parse_expect_call_ast#TestExpectFalse MainExpectFalse",
 	}
 }
 
