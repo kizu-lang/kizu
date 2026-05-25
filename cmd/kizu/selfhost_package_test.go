@@ -1227,9 +1227,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_child_sequence_or_minus_one(",
 		"ir_contract::body_node_kind(",
+		"ir_contract::body_node_count(",
 		"body-field-expr ",
 		"body-struct-literal ",
-		"selected-function-body-end ",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
@@ -1241,6 +1241,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn sequence_fact_value(",
 		"pub fn sequence_fact_second_value(",
 		"pub fn sequence_fact_exists(",
+		"pub fn sequence_fact_count(",
+		"pub fn body_node_count(",
 		"pub fn body_node_kind(",
 		"pub fn body_child_sequence(",
 		"pub fn body_child_sequence_or_minus_one(",
@@ -1905,6 +1907,9 @@ func assertExecutableSelectedBodiesComeFromCheckedAST(
 		if strings.Contains(content, `"selected-function-body `) {
 			t.Fatal("executable path still depends on dedicated selected-function-body header facts")
 		}
+		if strings.Contains(content, `"selected-function-body-end `) {
+			t.Fatal("executable path still depends on selected function body count facts")
+		}
 	}
 }
 
@@ -1937,7 +1942,6 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 	for _, fragment := range []string{
 		"pub fn append_helper_body_ir(",
 		"fn append_body_ir(",
-		`"selected-helper-body-end "`,
 		"body-call ",
 		"body-struct-literal ",
 	} {
@@ -1948,6 +1952,9 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 	for _, content := range []string{body, llvm} {
 		if strings.Contains(content, `"selected-helper-body `) {
 			t.Fatal("executable path still depends on dedicated selected-helper-body header facts")
+		}
+		if strings.Contains(content, `"selected-helper-body-end `) {
+			t.Fatal("executable path still depends on selected helper body count facts")
 		}
 	}
 }
@@ -2450,7 +2457,7 @@ func assertExecutableHostedLoweringConsumers(
 	for _, fragment := range []string{
 		"try append_selected_hosted_executable_lowering_metadata(out, ir_bytes)",
 		"fn require_selected_hosted_executable_lowering(",
-		"ir_contract::sequence_fact_exists(",
+		"ir_contract::sequence_fact_count(",
 		`"hosted-lowering-case-kind "`,
 		`"hosted-lowering-case-comment-llvm "`,
 		`"hosted-lowering-case-payload-llvm "`,
@@ -2644,10 +2651,10 @@ func assertExecutableLoweringFactConsumers(t *testing.T, ast string) {
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_child_sequence_or_minus_one(",
 		"ir_contract::body_node_kind(",
+		"ir_contract::body_node_count(",
 		"cli_executable_body_lowering_contract::case_count(",
 		"cli_executable_body_lowering_contract::case_ast_kind_name(",
 		"cli_executable_body_lowering_contract::case_result_kind_name(",
-		"selected-function-body-end ",
 		"body-field-expr ",
 		"body-struct-literal ",
 		"append_cli_lower_executable_ast_function(",
