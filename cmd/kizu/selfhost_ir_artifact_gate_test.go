@@ -95,6 +95,7 @@ func requiredSelfhostIRContractFragments() []string {
 	fragments = append(fragments, requiredSelfhostIRSelectedHelperBodyFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyLoweringFragments()...)
+	fragments = append(fragments, requiredSelfhostIRHostedArtifactPathFragments()...)
 	return append(fragments, []string{
 		"frontend-executable-lowering checked-ast-selected-body-ir\n",
 		"hosted-executable-abi executable-result-layout-v1\n",
@@ -307,6 +308,38 @@ func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
 			"lower_run_executable_ast unsupported_executable\n",
 		"selected-body-lowering-unsupported selfhost::backend::executable::" +
 			"lower_test_executable_ast unsupported_executable\n",
+	}
+}
+
+// requiredSelfhostIRHostedArtifactPathFragments returns selected hosted
+// artifact path facts derived from backend::hosted writer bodies.
+func requiredSelfhostIRHostedArtifactPathFragments() []string {
+	return []string{
+		"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1\n",
+		"hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run\n",
+		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll\n",
+		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll.meta\n",
+		"hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_run_executable_artifact write_run_artifact\n",
+		"hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test\n",
+		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll\n",
+		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll.meta\n",
+		"hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_test_executable_artifact write_test_artifact\n",
 	}
 }
 

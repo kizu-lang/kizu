@@ -429,6 +429,7 @@ func requiredLLVMMetadataFragments() []string {
 	fragments = append(fragments, requiredLLVMMetadataSelectedHelperBodyFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataHostedArtifactPathFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
 	fragments = append(fragments, []string{
 		"entry @kizu_selfhost__cli_main\n",
@@ -626,6 +627,38 @@ func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
 			"lower_run_executable_ast unsupported_executable\n",
 		"backend-input selected-body-lowering-unsupported selfhost::backend::executable::" +
 			"lower_test_executable_ast unsupported_executable\n",
+	}
+}
+
+// requiredLLVMMetadataHostedArtifactPathFragments returns selected hosted
+// artifact path facts consumed by the backend.
+func requiredLLVMMetadataHostedArtifactPathFragments() []string {
+	return []string{
+		"backend-input executable-hosted-artifact-paths checked-ast-hosted-artifact-v1\n",
+		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run\n",
+		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll\n",
+		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/\n",
+		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll.meta\n",
+		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_run_executable_artifact write_run_artifact\n",
+		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test\n",
+		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll\n",
+		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/\n",
+		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll.meta\n",
+		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_test_executable_artifact write_test_artifact\n",
 	}
 }
 

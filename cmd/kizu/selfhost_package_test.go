@@ -1229,6 +1229,14 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"selected-signature-return ",
 		"selected-signature-param ",
 	},
+	"../../selfhost/src/ir/hosted_artifact_paths.kizu": {
+		"pub fn append_facts(",
+		"fn call_from_statement(",
+		"fn append_named_call_string_arg_fact(",
+		"fn append_string_literal_value(",
+		"hosted-artifact-dir ",
+		"hosted-artifact-ll-prefix ",
+	},
 	"../../selfhost/src/ir/executable_body.kizu": {
 		"pub fn append_function_body_ir(",
 		"pub fn append_helper_body_ir(",
@@ -1333,6 +1341,7 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		selectedHelperBodies:      hostedExecutableSelectedHelperBodyFacts(),
 		selectedBodyParsingFacts:  hostedExecutableSelectedBodyParsingFacts(),
 		selectedBodyLoweringFacts: hostedExecutableSelectedBodyLoweringFacts(),
+		hostedArtifactPathFacts:   hostedExecutableHostedArtifactPathFacts(),
 	}
 	assertHostedExecutableBackendInputs(t, sources.llvm, facts)
 	assertHostedExecutableFactOrigins(t, sources, facts)
@@ -1350,6 +1359,7 @@ type hostedExecutableContractFacts struct {
 	selectedHelperBodies      []string
 	selectedBodyParsingFacts  []string
 	selectedBodyLoweringFacts []string
+	hostedArtifactPathFacts   []string
 }
 
 // assertHostedExecutableBackendInputs checks backend validation and metadata
@@ -1371,6 +1381,7 @@ func assertHostedExecutableBackendInputs(
 	assertExecutableSelectedHelperBodiesValidated(t, llvm, facts.selectedHelperBodies)
 	assertExecutableSelectedBodyParsingValidated(t, llvm, facts.selectedBodyParsingFacts)
 	assertExecutableSelectedBodyLoweringValidated(t, llvm, facts.selectedBodyLoweringFacts)
+	assertExecutableHostedArtifactPathsValidated(t, llvm, facts.hostedArtifactPathFacts)
 	assertExecutableABIValidated(t, llvm, facts.abi)
 }
 
@@ -1435,6 +1446,14 @@ func assertHostedExecutableFactOrigins(
 		sources.llvm,
 		facts.selectedBodyLoweringFacts,
 	)
+	assertExecutableHostedArtifactPathsComeFromCheckedAST(
+		t,
+		sources.ir,
+		sources.selected,
+		sources.hostedPaths,
+		sources.llvm,
+		facts.hostedArtifactPathFacts,
+	)
 }
 
 // assertHostedExecutableRendererConsumers checks generated renderers consume
@@ -1459,6 +1478,13 @@ func assertHostedExecutableRendererConsumers(
 		sources.test,
 		facts.abi,
 	)
+	assertExecutableHostedArtifactPathConsumers(
+		t,
+		sources.llvm,
+		sources.cli,
+		sources.run,
+		sources.test,
+	)
 	assertExecutableIRThreading(
 		t,
 		sources.llvm,
@@ -1475,6 +1501,7 @@ type hostedExecutableContractSources struct {
 	ir           string
 	contract     string
 	selected     string
+	hostedPaths  string
 	body         string
 	bodyParsing  string
 	bodyLowering string
@@ -1495,6 +1522,7 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		ir:          readSelfhostFile(t, "../../selfhost/src/ir.kizu"),
 		contract:    readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu"),
 		selected:    readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu"),
+		hostedPaths: readSelfhostFile(t, "../../selfhost/src/ir/hosted_artifact_paths.kizu"),
 		body:        readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu"),
 		bodyParsing: readSelfhostFile(t, "../../selfhost/src/ir/executable_body_parsing.kizu"),
 		bodyLowering: readSelfhostFile(
@@ -1651,6 +1679,27 @@ func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string, fa
 	}
 	for _, fact := range facts {
 		assertNamedFactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
+	}
+}
+
+// assertExecutableHostedArtifactPathsValidated keeps stage2 artifact paths tied
+// to the selected hosted writer bodies instead of renderer-local constants.
+func assertExecutableHostedArtifactPathsValidated(t *testing.T, llvm string, facts []string) {
+	t.Helper()
+	if !strings.Contains(
+		llvm,
+		`"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1"`,
+	) {
+		t.Fatal("backend IR validation does not require hosted artifact path facts")
+	}
+	if !strings.Contains(
+		llvm,
+		`"backend-input executable-hosted-artifact-paths checked-ast-hosted-artifact-v1"`,
+	) {
+		t.Fatal("backend metadata does not record hosted artifact path facts")
+	}
+	for _, fact := range facts {
+		assertNamedFactConsumer(t, llvm, "backend hosted artifact path validation", fact)
 	}
 }
 
@@ -2120,6 +2169,109 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 	}
 }
 
+// assertExecutableHostedArtifactPathsComeFromCheckedAST keeps hosted artifact
+// output locations sourced from emit_*_executable_artifact bodies.
+func assertExecutableHostedArtifactPathsComeFromCheckedAST(
+	t *testing.T,
+	ir string,
+	selected string,
+	hostedPaths string,
+	llvm string,
+	facts []string,
+) {
+	t.Helper()
+	if strings.Contains(ir, `"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1"`) {
+		t.Fatal("IR root hardcodes hosted artifact path facts")
+	}
+	if !strings.Contains(selected, "hosted_artifact_paths::append_facts(") {
+		t.Fatal("selected executable functions do not delegate hosted artifact path facts")
+	}
+	for _, fragment := range []string{
+		"pub fn append_facts(",
+		"call_from_statement(",
+		"append_named_call_string_arg_fact(",
+		"call_callee(",
+		"append_string_literal_value(",
+		"bytes_contains_byte(",
+		"hosted-artifact-dir ",
+		"hosted-artifact-ll-prefix ",
+		"hosted-artifact-writer ",
+	} {
+		if !strings.Contains(hostedPaths, fragment) {
+			t.Fatalf("hosted artifact path facts are not checked AST-derived via %q", fragment)
+		}
+	}
+	emitter := selected + hostedPaths
+	for _, fact := range facts {
+		parts := strings.Fields(fact)
+		if len(parts) != 3 {
+			t.Fatalf("invalid hosted artifact path fixture %q", fact)
+		}
+		if strings.Contains(llvm, `"`+fact+`"`) {
+			t.Fatalf("backend hardcodes complete hosted artifact path fact %q", fact)
+		}
+		for _, fragment := range []string{`"` + parts[0] + ` "`, `"` + parts[1] + `"`} {
+			if !strings.Contains(emitter, fragment) {
+				t.Fatalf("hosted artifact path emitter does not publish %q via %q", fact, fragment)
+			}
+		}
+	}
+}
+
+// assertExecutableHostedArtifactPathConsumers checks stage2 globals use IR
+// facts for hosted artifact directories instead of renderer-local literals.
+func assertExecutableHostedArtifactPathConsumers(
+	t *testing.T,
+	llvm string,
+	cli string,
+	run string,
+	test string,
+) {
+	t.Helper()
+	if !strings.Contains(llvm, "try cli_llvm::append_globals(out, ir_bytes)") {
+		t.Fatal("IR bytes are not threaded from LLVM renderer to CLI globals")
+	}
+	for _, fragment := range []string{
+		"try cli_run_llvm::append_globals(out, ir_bytes)",
+		"try cli_test_llvm::append_globals(out, ir_bytes)",
+	} {
+		if !strings.Contains(cli, fragment) {
+			t.Fatalf("IR bytes are not threaded to hosted artifact globals with %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`append_llvm_constant(out, "ll_suffix"`,
+		`append_llvm_constant(out, "meta_suffix"`,
+	} {
+		if strings.Contains(cli, fragment) {
+			t.Fatalf("CLI globals still keep renderer-local artifact suffix %q", fragment)
+		}
+	}
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: "run", content: run},
+		{name: "test", content: test},
+	} {
+		for _, fragment := range []string{
+			"append_llvm_fact_constant(",
+			"ir_contract::named_fact_value(",
+			`"hosted-artifact-dir "`,
+			`"hosted-artifact-ll-prefix "`,
+			`"hosted-artifact-ll-suffix "`,
+			`"hosted-artifact-metadata-prefix "`,
+			`"hosted-artifact-metadata-suffix "`,
+			"metadata_path_prefix",
+			"metadata_path_suffix",
+		} {
+			if !strings.Contains(file.content, fragment) {
+				t.Fatalf("hosted %s artifact globals do not consume IR fact %q", file.name, fragment)
+			}
+		}
+	}
+}
+
 // assertExecutableParserConsumers checks generated parser/lowerer IR fact use.
 func assertExecutableParserConsumers(
 	t *testing.T,
@@ -2550,6 +2702,37 @@ func hostedExecutableSelectedBodyLoweringFacts() []string {
 			"lower_run_executable_ast unsupported_executable",
 		"selected-body-lowering-unsupported selfhost::backend::executable::" +
 			"lower_test_executable_ast unsupported_executable",
+	}
+}
+
+// hostedExecutableHostedArtifactPathFacts returns path facts derived from the
+// selected hosted artifact writer bodies and consumed by stage2 globals.
+func hostedExecutableHostedArtifactPathFacts() []string {
+	return []string{
+		"hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run",
+		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/",
+		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll",
+		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact target/selfhost/run/",
+		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_run_executable_artifact .ll.meta",
+		"hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_run_executable_artifact write_run_artifact",
+		"hosted-artifact-dir selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test",
+		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/",
+		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll",
+		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact target/selfhost/test/",
+		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
+			"emit_test_executable_artifact .ll.meta",
+		"hosted-artifact-writer selfhost::backend::hosted::" +
+			"emit_test_executable_artifact write_test_artifact",
 	}
 }
 

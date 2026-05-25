@@ -1,0 +1,324 @@
+pub fn append_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    qualified_name: []u8
+) -> !void {
+    let body = try function_body_node(text, ast, root, local_name);
+    let dir_call = try call_from_statement(ast, body, 0);
+    let ll_path_call = try call_from_statement(ast, body, 1);
+    let metadata_path_call = try call_from_statement(ast, body, 2);
+    let writer_call = try call_from_statement(ast, body, 3);
+    try append_named_call_string_arg_fact(
+        out,
+        "hosted-artifact-dir ",
+        qualified_name,
+        text,
+        ast,
+        dir_call,
+        1
+    );
+    try append_named_call_string_arg_fact(
+        out,
+        "hosted-artifact-ll-prefix ",
+        qualified_name,
+        text,
+        ast,
+        ll_path_call,
+        1
+    );
+    try append_named_call_string_arg_fact(
+        out,
+        "hosted-artifact-ll-suffix ",
+        qualified_name,
+        text,
+        ast,
+        ll_path_call,
+        3
+    );
+    try append_named_call_string_arg_fact(
+        out,
+        "hosted-artifact-metadata-prefix ",
+        qualified_name,
+        text,
+        ast,
+        metadata_path_call,
+        1
+    );
+    try append_named_call_string_arg_fact(
+        out,
+        "hosted-artifact-metadata-suffix ",
+        qualified_name,
+        text,
+        ast,
+        metadata_path_call,
+        3
+    );
+    try append_named_call_callee_fact(
+        out,
+        "hosted-artifact-writer ",
+        qualified_name,
+        text,
+        ast,
+        writer_call
+    );
+    return;
+}
+
+fn call_from_statement(
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    let statement = try block_statement(ast, body, index);
+    let expr = try statement_expr(ast, statement);
+    return try unwrap_try_call(ast, expr);
+}
+
+fn block_statement(
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(body);
+    match node.data {
+        Block(block) => return try ast.child_at(block.statements, index);,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn statement_expr(
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(statement);
+    match node.data {
+        ExprStmt(expr_stmt) => return expr_stmt.expr;,
+        Let(let_node) => return let_node.value;,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn unwrap_try_call(
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(expr);
+    match node.data {
+        TryExpr(try_expr) => return try require_call_node(ast, try_expr.value);,
+        Call(call_node) => return expr;,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn require_call_node(
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(expr);
+    match node.data {
+        Call(call_node) => return expr;,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn call_arg(
+    ast: std::kizu::ast::Ast,
+    call: std::kizu::ast::NodeId,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(call);
+    match node.data {
+        Call(call_node) => return try ast.child_at(call_node.args, index);,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn append_named_call_string_arg_fact(
+    out: &var std::string::String,
+    prefix: []u8,
+    name: []u8,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    call: std::kizu::ast::NodeId,
+    index: i64
+) -> !void {
+    let arg = try call_arg(ast, call, index);
+    try append_named_fact_start(out, prefix, name);
+    try append_string_literal_value(out, text, ast, arg);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_named_call_callee_fact(
+    out: &var std::string::String,
+    prefix: []u8,
+    name: []u8,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    call: std::kizu::ast::NodeId
+) -> !void {
+    let callee = try call_callee(ast, call);
+    try append_named_fact_start(out, prefix, name);
+    try out.append_bytes(ast_node_text(text, ast, callee));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn call_callee(
+    ast: std::kizu::ast::Ast,
+    call: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(call);
+    match node.data {
+        Call(call_node) => return call_node.callee;,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn append_string_literal_value(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        String(string_node) => return try append_string_literal_value_from_node(
+            out,
+            text,
+            ast,
+            node_id
+        );,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn append_string_literal_value_from_node(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let token = ast_node_text(text, ast, node_id);
+    let len = std::mem::len(token);
+    if len < 2 {
+        return error("invalid selected hosted artifact path source");
+    }
+    if token[0] != cast<u8>(34) or token[len - 1] != cast<u8>(34) {
+        return error("invalid selected hosted artifact path source");
+    }
+    let value = token[1..len - 1];
+    if bytes_contains_byte(value, cast<u8>(92)) or bytes_contains_byte(value, cast<u8>(32)) {
+        return error("unsupported selected hosted artifact path literal");
+    }
+    try out.append_bytes(value);
+    return;
+}
+
+fn bytes_contains_byte(bytes: []u8, needle: u8) -> bool {
+    var index = 0;
+    let len = std::mem::len(bytes);
+    while index < len {
+        if bytes[index] == needle {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn append_named_fact_start(
+    out: &var std::string::String,
+    prefix: []u8,
+    name: []u8
+) -> !void {
+    try out.append_bytes(prefix);
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(32));
+    return;
+}
+
+fn function_body_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_name: []u8
+) -> !std::kizu::ast::NodeId {
+    let function_node_id = try function_node(text, ast, root, function_name);
+    return try function_body_from_node(ast, function_node_id);
+}
+
+fn function_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_name: []u8
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return try function_node_in_program(
+            text,
+            ast,
+            program.declarations,
+            function_name
+        );,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn function_node_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_name: []u8
+) -> !std::kizu::ast::NodeId {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if function_node_matches(text, ast, child, function_name) {
+            return child;
+        }
+        index = index + 1;
+    }
+    return error("missing selected hosted artifact path source");
+}
+
+fn function_node_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        FnDecl(fn_decl) => std::mem::equal_bytes(
+            ast_node_text(text, ast, fn_decl.name),
+            name
+        ),
+        _ => false,
+    };
+}
+
+fn function_body_from_node(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return fn_decl.body;,
+        _ => return error("missing selected hosted artifact path source");,
+    }
+}
+
+fn ast_node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
+}
