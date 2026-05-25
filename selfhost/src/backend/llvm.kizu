@@ -126,7 +126,7 @@ fn validate_ir_artifact(bytes: []u8) -> !void {
         bytes,
         "executable-contract-source lowering selfhost::backend::executable"
     );
-    try require_selected_executable_signatures(bytes);
+    try require_executable_function_signatures(bytes);
     try require_selected_executable_body_ir(bytes);
     try require_selected_executable_body_parsing(bytes);
     try require_selected_executable_body_lowering(bytes);
@@ -189,73 +189,134 @@ fn require_selected_executable_body_ir(bytes: []u8) -> !void {
     return;
 }
 
-fn require_selected_executable_signatures(bytes: []u8) -> !void {
-    try require_selected_signature_param_count(bytes, "selfhost::cli::execute::run_file_cli");
-    try require_selected_signature_return(bytes, "selfhost::cli::execute::run_file_cli", "!i64");
-    try require_selected_signature_param(
+fn require_executable_function_signatures(bytes: []u8) -> !void {
+    try require_function_signature_param_count(
         bytes,
-        "selfhost::cli::execute::run_file_cli#0",
+        "selfhost::cli::execute::run_file_cli",
+        3
+    );
+    try require_function_signature_return(bytes, "selfhost::cli::execute::run_file_cli", "!i64");
+    try require_function_signature_param(
+        bytes,
+        "selfhost::cli::execute::run_file_cli",
+        0,
         "allocator:runtime:Allocator"
     );
-    try require_selected_signature_param_count(
+    try require_function_signature_param_count(
         bytes,
-        "selfhost::backend::executable::lower_run_executable"
+        "selfhost::backend::executable::lower_run_executable",
+        3
     );
-    try require_selected_signature_return(
+    try require_function_signature_return(
         bytes,
         "selfhost::backend::executable::lower_run_executable",
         "!data::Executable"
     );
-    try require_selected_signature_param(
+    try require_function_signature_param(
         bytes,
-        "selfhost::backend::executable::lower_run_executable#1",
+        "selfhost::backend::executable::lower_run_executable",
+        1,
         "ast:runtime:std::kizu::ast::Ast"
     );
-    try require_selected_signature_return(
+    try require_function_signature_return(
         bytes,
         "selfhost::backend::executable::lower_run_executable_ast",
         "data::Executable"
     );
-    try require_selected_signature_return(
+    try require_function_signature_return(
         bytes,
         "selfhost::backend::executable::parse_run_program_ast",
         "!data::ExecutableAst"
     );
-    try require_selected_signature_param(
+    try require_function_signature_param(
         bytes,
-        "selfhost::backend::executable::parse_run_print_call_ast#3",
+        "selfhost::backend::executable::parse_run_print_call_ast",
+        3,
         "args:runtime:std::kizu::ast::ChildRange"
     );
-    try require_selected_signature_param(
+    try require_function_signature_param(
         bytes,
-        "selfhost::backend::executable::parse_expect_call_ast#3",
+        "selfhost::backend::executable::parse_expect_call_ast",
+        3,
         "args:runtime:std::kizu::ast::ChildRange"
     );
-    try require_selected_signature_return(
+    try require_function_signature_return(
         bytes,
         "selfhost::backend::hosted::emit_run_executable_artifact",
         "!data::RunArtifact"
     );
-    try require_selected_signature_param(
+    try require_function_signature_param(
         bytes,
-        "selfhost::backend::hosted::emit_run_executable_artifact#3",
+        "selfhost::backend::hosted::emit_run_executable_artifact",
+        3,
         "executable:runtime:data::Executable"
     );
     return;
 }
 
-fn require_selected_signature_param_count(bytes: []u8, name: []u8) -> !void {
-    try ir_contract::require_named_i64_fact(bytes, "selected-signature-param-count ", name);
+fn require_function_signature_param_count(
+    bytes: []u8,
+    name: []u8,
+    expected: i64
+) -> !void {
+    let actual = try function_signature_param_count(bytes, name);
+    if actual != expected {
+        return error("invalid IR artifact fact");
+    }
     return;
 }
 
-fn require_selected_signature_return(bytes: []u8, name: []u8, return_type: []u8) -> !void {
-    try ir_contract::require_named_fact(bytes, "selected-signature-return ", name, return_type);
+fn require_function_signature_return(bytes: []u8, name: []u8, return_type: []u8) -> !void {
+    try ir_contract::require_named_fact(bytes, "function-signature-return ", name, return_type);
     return;
 }
 
-fn require_selected_signature_param(bytes: []u8, name: []u8, value: []u8) -> !void {
-    try ir_contract::require_named_fact(bytes, "selected-signature-param ", name, value);
+fn require_function_signature_param(
+    bytes: []u8,
+    name: []u8,
+    sequence: i64,
+    value: []u8
+) -> !void {
+    try ir_contract::require_sequence_fact(
+        bytes,
+        "function-signature-param ",
+        name,
+        sequence,
+        value
+    );
+    return;
+}
+
+fn function_signature_param_count(bytes: []u8, name: []u8) -> !i64 {
+    var count = 0;
+    while try ir_contract::sequence_fact_exists(
+        bytes,
+        "function-signature-param ",
+        name,
+        count
+    ) {
+        count = count + 1;
+    }
+    return count;
+}
+
+fn append_function_signature_params_metadata(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    name: []u8
+) -> !void {
+    let count = try function_signature_param_count(ir_bytes, name);
+    var index = 0;
+    while index < count {
+        try append_backend_input_sequence_fact(
+            out,
+            ir_bytes,
+            "function-signature-param ",
+            name,
+            index
+        );
+        index = index + 1;
+    }
     return;
 }
 
@@ -715,7 +776,7 @@ fn render_llvm_metadata(
         out,
         "backend-input executable-contract-source lowering selfhost::backend::executable"
     );
-    try append_selected_executable_signature_metadata(out, ir_bytes);
+    try append_executable_function_signature_metadata(out, ir_bytes);
     try append_selected_executable_body_parsing_metadata(out, ir_bytes);
     try append_selected_hosted_artifact_path_metadata(out, ir_bytes);
     try append_selected_hosted_executable_lowering_metadata(out, ir_bytes);
@@ -772,75 +833,64 @@ fn render_llvm_metadata(
     return out;
 }
 
-fn append_selected_executable_signature_metadata(
+fn append_executable_function_signature_metadata(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
-    try append_backend_input_i64_fact(
+    try append_backend_input_named_fact(
         out,
         ir_bytes,
-        "selected-signature-param-count ",
+        "function-signature-return ",
+        "selfhost::cli::execute::run_file_cli"
+    );
+    try append_function_signature_params_metadata(
+        out,
+        ir_bytes,
         "selfhost::cli::execute::run_file_cli"
     );
     try append_backend_input_named_fact(
         out,
         ir_bytes,
-        "selected-signature-return ",
-        "selfhost::cli::execute::run_file_cli"
+        "function-signature-return ",
+        "selfhost::backend::executable::lower_run_executable"
     );
-    try append_backend_input_named_fact(
+    try append_function_signature_params_metadata(
         out,
         ir_bytes,
-        "selected-signature-param ",
-        "selfhost::cli::execute::run_file_cli#0"
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "selected-signature-return ",
         "selfhost::backend::executable::lower_run_executable"
     );
     try append_backend_input_named_fact(
         out,
         ir_bytes,
-        "selected-signature-param ",
-        "selfhost::backend::executable::lower_run_executable#1"
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "selected-signature-return ",
+        "function-signature-return ",
         "selfhost::backend::executable::lower_run_executable_ast"
     );
     try append_backend_input_named_fact(
         out,
         ir_bytes,
-        "selected-signature-return ",
+        "function-signature-return ",
         "selfhost::backend::executable::parse_run_program_ast"
     );
-    try append_backend_input_named_fact(
+    try append_function_signature_params_metadata(
         out,
         ir_bytes,
-        "selected-signature-param ",
-        "selfhost::backend::executable::parse_run_print_call_ast#3"
+        "selfhost::backend::executable::parse_run_print_call_ast"
+    );
+    try append_function_signature_params_metadata(
+        out,
+        ir_bytes,
+        "selfhost::backend::executable::parse_expect_call_ast"
     );
     try append_backend_input_named_fact(
         out,
         ir_bytes,
-        "selected-signature-param ",
-        "selfhost::backend::executable::parse_expect_call_ast#3"
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "selected-signature-return ",
+        "function-signature-return ",
         "selfhost::backend::hosted::emit_run_executable_artifact"
     );
-    try append_backend_input_named_fact(
+    try append_function_signature_params_metadata(
         out,
         ir_bytes,
-        "selected-signature-param ",
-        "selfhost::backend::hosted::emit_run_executable_artifact#3"
+        "selfhost::backend::hosted::emit_run_executable_artifact"
     );
     return;
 }

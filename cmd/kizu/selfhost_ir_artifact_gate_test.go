@@ -121,26 +121,25 @@ func requiredSelfhostIRContractFragments() []string {
 // requiredSelfhostIRSelectedSignatureFragments returns selected executable signatures.
 func requiredSelfhostIRSelectedSignatureFragments() []string {
 	return []string{
-		"selected-signature-param-count selfhost::cli::execute::run_file_cli 3\n",
-		"selected-signature-return selfhost::cli::execute::run_file_cli !i64\n",
-		"selected-signature-param selfhost::cli::execute::run_file_cli#0 " +
+		"function-signature-return selfhost::cli::execute::run_file_cli !i64\n",
+		"function-signature-param selfhost::cli::execute::run_file_cli 0 " +
 			"allocator:runtime:Allocator\n",
-		"selected-signature-return selfhost::backend::executable::" +
+		"function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable !data::Executable\n",
-		"selected-signature-param selfhost::backend::executable::" +
-			"lower_run_executable#1 ast:runtime:std::kizu::ast::Ast\n",
-		"selected-signature-return selfhost::backend::executable::" +
+		"function-signature-param selfhost::backend::executable::" +
+			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast\n",
+		"function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable_ast data::Executable\n",
-		"selected-signature-return selfhost::backend::executable::" +
+		"function-signature-return selfhost::backend::executable::" +
 			"parse_run_program_ast !data::ExecutableAst\n",
-		"selected-signature-param selfhost::backend::executable::" +
-			"parse_run_print_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
-		"selected-signature-param selfhost::backend::executable::" +
-			"parse_expect_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
-		"selected-signature-return selfhost::backend::hosted::" +
+		"function-signature-param selfhost::backend::executable::" +
+			"parse_run_print_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
+		"function-signature-param selfhost::backend::executable::" +
+			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
+		"function-signature-return selfhost::backend::hosted::" +
 			"emit_run_executable_artifact !data::RunArtifact\n",
-		"selected-signature-param selfhost::backend::hosted::" +
-			"emit_run_executable_artifact#3 executable:runtime:data::Executable\n",
+		"function-signature-param selfhost::backend::hosted::" +
+			"emit_run_executable_artifact 3 executable:runtime:data::Executable\n",
 	}
 }
 

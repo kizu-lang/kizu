@@ -457,28 +457,26 @@ func requiredLLVMMetadataFragments() []string {
 // requiredLLVMMetadataSelectedSignatureFragments returns executable signature inputs.
 func requiredLLVMMetadataSelectedSignatureFragments() []string {
 	return []string{
-		"backend-input selected-signature-param-count selfhost::cli::execute::" +
-			"run_file_cli 3\n",
-		"backend-input selected-signature-return selfhost::cli::execute::" +
+		"backend-input function-signature-return selfhost::cli::execute::" +
 			"run_file_cli !i64\n",
-		"backend-input selected-signature-param selfhost::cli::execute::" +
-			"run_file_cli#0 allocator:runtime:Allocator\n",
-		"backend-input selected-signature-return selfhost::backend::executable::" +
+		"backend-input function-signature-param selfhost::cli::execute::" +
+			"run_file_cli 0 allocator:runtime:Allocator\n",
+		"backend-input function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable !data::Executable\n",
-		"backend-input selected-signature-param selfhost::backend::executable::" +
-			"lower_run_executable#1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input selected-signature-return selfhost::backend::executable::" +
+		"backend-input function-signature-param selfhost::backend::executable::" +
+			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast\n",
+		"backend-input function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable_ast data::Executable\n",
-		"backend-input selected-signature-return selfhost::backend::executable::" +
+		"backend-input function-signature-return selfhost::backend::executable::" +
 			"parse_run_program_ast !data::ExecutableAst\n",
-		"backend-input selected-signature-param selfhost::backend::executable::" +
-			"parse_run_print_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
-		"backend-input selected-signature-param selfhost::backend::executable::" +
-			"parse_expect_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
-		"backend-input selected-signature-return selfhost::backend::hosted::" +
+		"backend-input function-signature-param selfhost::backend::executable::" +
+			"parse_run_print_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
+		"backend-input function-signature-param selfhost::backend::executable::" +
+			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
+		"backend-input function-signature-return selfhost::backend::hosted::" +
 			"emit_run_executable_artifact !data::RunArtifact\n",
-		"backend-input selected-signature-param selfhost::backend::hosted::" +
-			"emit_run_executable_artifact#3 executable:runtime:data::Executable\n",
+		"backend-input function-signature-param selfhost::backend::hosted::" +
+			"emit_run_executable_artifact 3 executable:runtime:data::Executable\n",
 	}
 }
 
