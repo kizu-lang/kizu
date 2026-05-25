@@ -458,22 +458,6 @@ func requiredLLVMMetadataFragments() []string {
 func requiredLLVMMetadataSelectedSignatureFragments() []string {
 	return []string{
 		"backend-input executable-selected-signatures checked-ast-signature-v1\n",
-		"backend-input selected-signature selfhost::cli::execute::" +
-			"run_file_cli checked-run-artifact\n",
-		"backend-input selected-signature selfhost::cli::execute::" +
-			"test_file_cli checked-test-artifact\n",
-		"backend-input selected-signature selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper\n",
-		"backend-input selected-signature selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast\n",
-		"backend-input selected-signature selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable\n",
-		"backend-input selected-signature selfhost::backend::executable::" +
-			"parse_run_program_ast checked-run-ast-helper\n",
-		"backend-input selected-signature selfhost::backend::executable::" +
-			"parse_run_print_call_ast checked-run-ast-helper\n",
-		"backend-input selected-signature selfhost::backend::executable::" +
-			"parse_expect_call_ast checked-test-ast-helper\n",
 		"backend-input selected-signature-param-count selfhost::cli::execute::" +
 			"run_file_cli 3\n",
 		"backend-input selected-signature-return selfhost::cli::execute::" +

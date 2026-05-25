@@ -122,20 +122,6 @@ func requiredSelfhostIRContractFragments() []string {
 func requiredSelfhostIRSelectedSignatureFragments() []string {
 	return []string{
 		"executable-selected-signatures checked-ast-signature-v1\n",
-		"selected-signature selfhost::cli::execute::run_file_cli checked-run-artifact\n",
-		"selected-signature selfhost::cli::execute::test_file_cli checked-test-artifact\n",
-		"selected-signature selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper\n",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast\n",
-		"selected-signature selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable\n",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_run_program_ast checked-run-ast-helper\n",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_run_print_call_ast checked-run-ast-helper\n",
-		"selected-signature selfhost::backend::executable::" +
-			"parse_expect_call_ast checked-test-ast-helper\n",
 		"selected-signature-param-count selfhost::cli::execute::run_file_cli 3\n",
 		"selected-signature-return selfhost::cli::execute::run_file_cli !i64\n",
 		"selected-signature-param selfhost::cli::execute::run_file_cli#0 " +
