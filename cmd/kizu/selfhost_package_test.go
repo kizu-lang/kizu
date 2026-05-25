@@ -1185,6 +1185,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
 		"pub fn contains(",
+		"pub fn named_fact_value(",
+		"pub fn require_named_fact(",
 		"pub fn named_i64_fact(",
 		"pub fn require_named_i64_fact(",
 		"pub fn mapped_i64_fact(",
@@ -1294,7 +1296,7 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, astRules)
 	assertExecutableFactsValidated(t, llvm, loweringRules)
 	assertExecutableABIValidated(t, llvm, abiFacts)
-	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, loweringRules)
+	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, astRules, loweringRules)
 	assertExecutableRuleConsumers(t, match, ast, astRules, loweringRules)
 	assertExecutableABIConsumers(t, ast, run, test, abiFacts)
 	assertExecutableIRThreading(t, llvm, cli, match)
@@ -1307,6 +1309,7 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	ir string,
 	contract string,
 	llvm string,
+	astRules []string,
 	loweringRules []string,
 ) {
 	t.Helper()
@@ -1324,6 +1327,10 @@ func assertExecutableContractFactsComeFromCheckedAST(
 		"append_enum_tag_facts(",
 		"require_struct_fields(",
 		"require_function(",
+		"append_executable_ast_rule_facts(",
+		"require_function_body_fragment(",
+		"append_executable_ast_rule_fact(",
+		"node_text_contains(",
 		"append_executable_lowering_rule_facts(",
 		"append_executable_lowering_rule_fact_from_binary(",
 		"executable_kind_node_from_struct_literal(",
@@ -1344,6 +1351,12 @@ func assertExecutableContractFactsComeFromCheckedAST(
 			t.Fatalf("backend validation/metadata does not require source fact %q", fragment)
 		}
 	}
+	for _, fact := range astRules {
+		if strings.HasPrefix(fact, "executable-ast-rule ") &&
+			strings.Contains(contract, `"`+fact+`"`) {
+			t.Fatalf("executable contract still hardcodes AST rule %q", fact)
+		}
+	}
 	for _, fact := range loweringRules {
 		if strings.Contains(contract, `"`+fact+`"`) {
 			t.Fatalf("executable contract still hardcodes lowering rule %q", fact)
@@ -1356,6 +1369,10 @@ func assertExecutableContractFactsComeFromCheckedAST(
 func assertExecutableFactsValidated(t *testing.T, llvm string, facts []string) {
 	t.Helper()
 	for _, fact := range facts {
+		if isExecutableRuleFact(fact) {
+			assertNamedFactConsumer(t, llvm, "backend IR validation", fact)
+			continue
+		}
 		if !strings.Contains(llvm, `"`+fact+`"`) {
 			t.Fatalf("backend IR validation does not require %q", fact)
 		}
@@ -1400,6 +1417,10 @@ func assertExecutableRuleConsumers(
 ) {
 	t.Helper()
 	for _, rule := range astRules {
+		if isExecutableRuleFact(rule) {
+			assertNamedFactConsumer(t, match, "hosted executable matcher renderer", rule)
+			continue
+		}
 		if !strings.Contains(match, `"`+rule+`"`) {
 			t.Fatalf("hosted executable matcher renderer does not consume %q", rule)
 		}
@@ -1494,6 +1515,37 @@ func isExecutableTagFact(fact string) bool {
 		strings.HasPrefix(fact, "executable-kind ")
 }
 
+// isExecutableRuleFact reports whether a contract fact maps one executable rule name to another.
+func isExecutableRuleFact(fact string) bool {
+	return strings.HasPrefix(fact, "executable-ast-rule ") ||
+		strings.HasPrefix(fact, "executable-lowering-rule ")
+}
+
+// assertNamedFactConsumer checks rule consumers read mapped facts by prefix and key.
+func assertNamedFactConsumer(t *testing.T, content string, owner string, fact string) {
+	t.Helper()
+	if strings.Contains(content, `"`+fact+`"`) {
+		t.Fatalf("%s hardcodes complete executable rule fact %q", owner, fact)
+	}
+	parts := strings.Fields(fact)
+	if len(parts) != 3 {
+		t.Fatalf("invalid executable rule fact fixture %q", fact)
+	}
+	if !strings.Contains(content, "ir_contract::require_named_fact(") &&
+		!strings.Contains(content, "ir_contract::named_fact_value(") {
+		t.Fatalf("%s does not consume executable rule fact %q through named fact APIs", owner, fact)
+	}
+	for _, fragment := range []string{
+		`"` + parts[0] + ` "`,
+		`"` + parts[1] + `"`,
+		`"` + parts[2] + `"`,
+	} {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("%s does not consume executable rule fact %q via %q", owner, fact, fragment)
+		}
+	}
+}
+
 // assertExecutableIRThreading checks IR bytes reach hosted executable renderers.
 func assertExecutableIRThreading(t *testing.T, llvm string, cli string, match string) {
 	t.Helper()
@@ -1555,8 +1607,27 @@ func assertExecutableFactsPublishedAndValidated(
 ) {
 	t.Helper()
 	for _, fact := range facts {
-		if !strings.Contains(ir, fact) {
+		if strings.HasPrefix(fact, "executable-ast-rule ") {
+			parts := strings.Fields(fact)
+			if len(parts) != 3 {
+				t.Fatalf("invalid executable AST fact fixture %q", fact)
+			}
+			for _, fragment := range []string{
+				`"executable-ast-rule "`,
+				`"` + parts[1] + `"`,
+				`"` + parts[2] + `"`,
+				"append_executable_ast_rule_fact(",
+			} {
+				if !strings.Contains(ir, fragment) {
+					t.Fatalf("IR artifact does not derive executable fact %q via %q", fact, fragment)
+				}
+			}
+		} else if !strings.Contains(ir, fact) {
 			t.Fatalf("IR artifact does not publish executable fact %q", fact)
+		}
+		if isExecutableRuleFact(fact) {
+			assertNamedFactConsumer(t, llvm, "backend IR validation", fact)
+			continue
 		}
 		if !strings.Contains(llvm, `ir_contract::require_fact(bytes, "`+fact+`")`) {
 			t.Fatalf("backend IR validation does not require %q", fact)
