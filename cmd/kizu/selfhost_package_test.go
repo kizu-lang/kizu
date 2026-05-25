@@ -1136,6 +1136,14 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_i64_decimal_function(",
 		"fn append_artifact_path_function(",
 	},
+	"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu": {
+		"pub fn append_prefix_constant(",
+		"pub fn prefix_size(",
+		"fn metadata_fact(",
+		"fn llvm_c_decoded_len(",
+		"hosted-artifact-metadata-title ",
+		"hosted-artifact-metadata-source-prefix ",
+	},
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
@@ -1240,11 +1248,16 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/ir/hosted_artifact_paths.kizu": {
 		"pub fn append_facts(",
+		"pub fn append_metadata_facts(",
+		"pub fn append_common_metadata_facts(",
 		"fn call_from_statement(",
 		"fn append_named_call_string_arg_fact(",
+		"fn append_named_call_llvm_string_arg_fact(",
 		"fn append_string_literal_value(",
+		"fn append_llvm_c_string_token(",
 		"hosted-artifact-dir ",
 		"hosted-artifact-ll-prefix ",
+		"hosted-artifact-metadata-title ",
 	},
 	"../../selfhost/src/ir/hosted_executable_lowering.kizu": {
 		"pub fn append_facts(",
@@ -1530,6 +1543,7 @@ func assertHostedExecutableRendererConsumers(
 		sources.cli,
 		sources.run,
 		sources.test,
+		sources.metadata,
 	)
 	assertExecutableHostedLoweringConsumers(t, sources.llvm, sources.run, sources.test)
 	assertExecutableIRThreading(
@@ -1560,6 +1574,7 @@ type hostedExecutableContractSources struct {
 	lowerer        string
 	run            string
 	test           string
+	metadata       string
 }
 
 // readHostedExecutableContractSources loads the split selfhost files involved
@@ -1597,6 +1612,10 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		),
 		run:  readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
 		test: readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
+		metadata: readSelfhostFile(
+			t,
+			"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu",
+		),
 	}
 }
 
@@ -2280,14 +2299,21 @@ func assertExecutableHostedArtifactPathsComeFromCheckedAST(
 	}
 	for _, fragment := range []string{
 		"pub fn append_facts(",
+		"pub fn append_metadata_facts(",
+		"pub fn append_common_metadata_facts(",
 		"call_from_statement(",
 		"append_named_call_string_arg_fact(",
+		"append_named_call_llvm_string_arg_fact(",
 		"call_callee(",
 		"append_string_literal_value(",
+		"append_llvm_c_string_token(",
 		"bytes_contains_byte(",
 		"hosted-artifact-dir ",
 		"hosted-artifact-ll-prefix ",
 		"hosted-artifact-writer ",
+		"hosted-artifact-metadata-title ",
+		"hosted-artifact-metadata-issue ",
+		"hosted-artifact-metadata-source-prefix ",
 	} {
 		if !strings.Contains(hostedPaths, fragment) {
 			t.Fatalf("hosted artifact path facts are not checked AST-derived via %q", fragment)
@@ -2369,6 +2395,7 @@ func assertExecutableHostedArtifactPathConsumers(
 	cli string,
 	run string,
 	test string,
+	metadata string,
 ) {
 	t.Helper()
 	if !strings.Contains(llvm, "try cli_llvm::append_globals(out, ir_bytes)") {
@@ -2390,6 +2417,29 @@ func assertExecutableHostedArtifactPathConsumers(
 			t.Fatalf("CLI globals still keep renderer-local artifact suffix %q", fragment)
 		}
 	}
+	assertExecutableHostedArtifactGlobalConsumers(t, run, test, metadata)
+	assertExecutableHostedMetadataPrefixNotRendererLocal(t, run, test)
+}
+
+// assertExecutableHostedArtifactGlobalConsumers checks run/test emitters read
+// hosted artifact globals from IR facts.
+func assertExecutableHostedArtifactGlobalConsumers(
+	t *testing.T,
+	run string,
+	test string,
+	metadata string,
+) {
+	t.Helper()
+	for _, fragment := range []string{
+		"ir_contract::named_fact_value(",
+		`"hosted-artifact-metadata-title "`,
+		`"hosted-artifact-metadata-issue "`,
+		`"hosted-artifact-metadata-source-prefix "`,
+	} {
+		if !strings.Contains(metadata, fragment) {
+			t.Fatalf("hosted metadata globals do not consume IR fact %q", fragment)
+		}
+	}
 	for _, file := range []struct {
 		name    string
 		content string
@@ -2399,18 +2449,56 @@ func assertExecutableHostedArtifactPathConsumers(
 	} {
 		for _, fragment := range []string{
 			"append_llvm_fact_constant(",
-			"ir_contract::named_fact_value(",
 			`"hosted-artifact-dir "`,
 			`"hosted-artifact-ll-prefix "`,
 			`"hosted-artifact-ll-suffix "`,
 			`"hosted-artifact-metadata-prefix "`,
 			`"hosted-artifact-metadata-suffix "`,
+			"cli_hosted_metadata_llvm::append_prefix_constant(",
+			"cli_hosted_metadata_llvm::prefix_size(",
 			"metadata_path_prefix",
 			"metadata_path_suffix",
 		} {
 			if !strings.Contains(file.content, fragment) {
 				t.Fatalf("hosted %s artifact globals do not consume IR fact %q", file.name, fragment)
 			}
+		}
+	}
+}
+
+// assertExecutableHostedMetadataPrefixNotRendererLocal keeps metadata prefixes
+// sourced from backend::hosted facts instead of local renderer literals.
+func assertExecutableHostedMetadataPrefixNotRendererLocal(t *testing.T, run string, test string) {
+	t.Helper()
+	for _, forbidden := range []struct {
+		name     string
+		content  string
+		fragment string
+	}{
+		{
+			name:     "run",
+			content:  run,
+			fragment: `"kizu-run-artifact-v0\0Aissue #569\0Asource "`,
+		},
+		{
+			name:     "test",
+			content:  test,
+			fragment: `"kizu-test-artifact-v0\0Aissue #570\0Asource "`,
+		},
+		{
+			name:     "run",
+			content:  run,
+			fragment: `append_llvm_constant(out, "run_meta_prefix"`,
+		},
+		{
+			name:     "test",
+			content:  test,
+			fragment: `append_llvm_constant(out, "test_meta_prefix"`,
+		},
+	} {
+		if strings.Contains(forbidden.content, forbidden.fragment) {
+			t.Fatalf("hosted %s metadata prefix remains renderer-local: %q",
+				forbidden.name, forbidden.fragment)
 		}
 	}
 }
@@ -3095,6 +3183,10 @@ func hostedExecutableHostedArtifactPathFacts() []string {
 			"emit_run_executable_artifact .ll.meta",
 		"hosted-artifact-writer selfhost::backend::hosted::" +
 			"emit_run_executable_artifact write_run_artifact",
+		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
+			"write_run_metadata kizu-run-artifact-v0",
+		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
+			"write_run_metadata issue\\20#569",
 		"hosted-artifact-dir selfhost::backend::hosted::" +
 			"emit_test_executable_artifact target/selfhost/test",
 		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
@@ -3107,6 +3199,12 @@ func hostedExecutableHostedArtifactPathFacts() []string {
 			"emit_test_executable_artifact .ll.meta",
 		"hosted-artifact-writer selfhost::backend::hosted::" +
 			"emit_test_executable_artifact write_test_artifact",
+		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
+			"write_test_metadata kizu-test-artifact-v0",
+		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
+			"write_test_metadata issue\\20#570",
+		"hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
+			"append_common_metadata source\\20",
 	}
 }
 

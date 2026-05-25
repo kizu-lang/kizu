@@ -389,6 +389,10 @@ func requiredSelfhostIRHostedArtifactPathFragments() []string {
 			"emit_run_executable_artifact .ll.meta\n",
 		"hosted-artifact-writer selfhost::backend::hosted::" +
 			"emit_run_executable_artifact write_run_artifact\n",
+		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
+			"write_run_metadata kizu-run-artifact-v0\n",
+		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
+			"write_run_metadata issue\\20#569\n",
 		"hosted-artifact-dir selfhost::backend::hosted::" +
 			"emit_test_executable_artifact target/selfhost/test\n",
 		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
@@ -401,6 +405,12 @@ func requiredSelfhostIRHostedArtifactPathFragments() []string {
 			"emit_test_executable_artifact .ll.meta\n",
 		"hosted-artifact-writer selfhost::backend::hosted::" +
 			"emit_test_executable_artifact write_test_artifact\n",
+		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
+			"write_test_metadata kizu-test-artifact-v0\n",
+		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
+			"write_test_metadata issue\\20#570\n",
+		"hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
+			"append_common_metadata source\\20\n",
 	}
 }
 

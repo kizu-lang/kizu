@@ -1,0 +1,101 @@
+import selfhost::backend::ir_contract;
+
+pub fn append_prefix_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    function_name: []u8
+) -> !void {
+    let title = try metadata_fact(ir_bytes, "hosted-artifact-metadata-title ", function_name);
+    let issue = try metadata_fact(ir_bytes, "hosted-artifact-metadata-issue ", function_name);
+    let source_prefix = try metadata_fact(
+        ir_bytes,
+        "hosted-artifact-metadata-source-prefix ",
+        "selfhost::backend::hosted::append_common_metadata"
+    );
+    let size = prefix_decoded_size(title, issue, source_prefix);
+    try append_llvm_constant_header(out, name, size);
+    try out.append_bytes(title);
+    try out.append_bytes("\0A");
+    try out.append_bytes(issue);
+    try out.append_bytes("\0A");
+    try out.append_bytes(source_prefix);
+    try append_llvm_constant_footer(out);
+    return;
+}
+
+pub fn prefix_size(ir_bytes: []u8, function_name: []u8) -> !i64 {
+    let title = try metadata_fact(ir_bytes, "hosted-artifact-metadata-title ", function_name);
+    let issue = try metadata_fact(ir_bytes, "hosted-artifact-metadata-issue ", function_name);
+    let source_prefix = try metadata_fact(
+        ir_bytes,
+        "hosted-artifact-metadata-source-prefix ",
+        "selfhost::backend::hosted::append_common_metadata"
+    );
+    return prefix_decoded_size(title, issue, source_prefix);
+}
+
+fn metadata_fact(
+    ir_bytes: []u8,
+    prefix: []u8,
+    fact_name: []u8
+) -> ![]u8 borrows ir_bytes {
+    return try ir_contract::named_fact_value(ir_bytes, prefix, fact_name);
+}
+
+fn prefix_decoded_size(title: []u8, issue: []u8, source_prefix: []u8) -> i64 {
+    return llvm_c_decoded_len(title) + 1 + llvm_c_decoded_len(issue) + 1 +
+        llvm_c_decoded_len(source_prefix);
+}
+
+fn append_llvm_constant_header(
+    out: &var std::string::String,
+    name: []u8,
+    size: i64
+) -> !void {
+    try out.append_bytes("@.kizu.cli.");
+    try out.append_bytes(name);
+    try out.append_bytes(" = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, size);
+    try out.append_bytes(" x i8] c");
+    try out.append_byte(cast<u8>(34));
+    return;
+}
+
+fn append_llvm_constant_footer(out: &var std::string::String) -> !void {
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn llvm_c_decoded_len(text: []u8) -> i64 {
+    var len = 0;
+    var index = 0;
+    let byte_len = std::mem::len(text);
+    while index < byte_len {
+        if index + 2 < byte_len and
+            text[index] == cast<u8>(92) and
+            is_hex_digit(text[index + 1]) and
+            is_hex_digit(text[index + 2]) {
+            len = len + 1;
+            index = index + 3;
+        } else {
+            len = len + 1;
+            index = index + 1;
+        }
+    }
+    return len;
+}
+
+fn is_hex_digit(byte: u8) -> bool {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return true;
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
+        return true;
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
+        return true;
+    }
+    return false;
+}
