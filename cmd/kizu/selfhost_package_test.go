@@ -1255,7 +1255,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_enum_kind_facts(",
 		"fn require_struct_fields(",
 		"fn require_function(",
-		"frontend-executable-lowering checked-ast-selected-body-ir",
+		"frontend-executable-lowering checked-body-ir",
 	},
 	"../../selfhost/src/ir/executable_functions.kizu": {
 		"pub fn append_facts(",
@@ -1971,9 +1971,10 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	for _, fragment := range []string{
 		`"executable-ast-kind Unsupported 0"`,
 		`"executable-kind RunPrintString 1"`,
+		`"frontend-executable-lowering checked-ast-selected-body-ir"`,
 	} {
 		if strings.Contains(ir, fragment) {
-			t.Fatalf("IR root still hardcodes executable ABI fact %q", fragment)
+			t.Fatalf("IR root still hardcodes executable contract fact %q", fragment)
 		}
 	}
 	for _, fragment := range []string{
@@ -1986,6 +1987,7 @@ func assertExecutableContractFactsComeFromCheckedAST(
 		"ExecutableKind",
 		"executable-contract-source data selfhost::backend::data",
 		"executable-contract-source lowering selfhost::backend::executable",
+		"frontend-executable-lowering checked-body-ir",
 	} {
 		if !strings.Contains(contract, fragment) {
 			t.Fatalf("executable contract does not derive checked AST fact with %q", fragment)

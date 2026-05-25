@@ -97,7 +97,7 @@ func requiredSelfhostIRContractFragments() []string {
 	fragments = append(fragments, requiredSelfhostIRHostedArtifactPathFragments()...)
 	fragments = append(fragments, requiredSelfhostIRHostedLoweringFragments()...)
 	return append(fragments, []string{
-		"frontend-executable-lowering checked-ast-selected-body-ir\n",
+		"frontend-executable-lowering checked-body-ir\n",
 		"hosted-executable-abi executable-result-layout-v1\n",
 		"executable-ast-layout kind:i64 payload:[]u8\n",
 		"executable-layout kind:i64 stdout_payload:[]u8\n",
