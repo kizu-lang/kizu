@@ -15,11 +15,11 @@ pub fn append_prefix_constant(
     );
     let size = prefix_decoded_size(title, issue, source_prefix);
     try append_llvm_constant_header(out, name, size);
-    try out.append_bytes(title);
+    try append_llvm_c_string_payload(out, title);
     try out.append_bytes("\0A");
-    try out.append_bytes(issue);
+    try append_llvm_c_string_payload(out, issue);
     try out.append_bytes("\0A");
-    try out.append_bytes(source_prefix);
+    try append_llvm_c_string_payload(out, source_prefix);
     try append_llvm_constant_footer(out);
     return;
 }
@@ -41,17 +41,17 @@ pub fn append_output_prefix_constant(
     ir_bytes: []u8
 ) -> !void {
     let output_prefix = try output_prefix_fact(ir_bytes);
-    let size = output_prefix_size_from_token(output_prefix);
+    let size = output_prefix_size_from_value(output_prefix);
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("\0A");
-    try out.append_bytes(output_prefix);
+    try append_llvm_c_string_payload(out, output_prefix);
     try append_llvm_constant_footer(out);
     return;
 }
 
 pub fn output_prefix_size(ir_bytes: []u8) -> !i64 {
     let output_prefix = try output_prefix_fact(ir_bytes);
-    return output_prefix_size_from_token(output_prefix);
+    return output_prefix_size_from_value(output_prefix);
 }
 
 pub fn append_before_runtime_constant(
@@ -71,11 +71,11 @@ pub fn append_before_runtime_constant(
     let runtime_prefix = try runtime_line_prefix(ir_bytes);
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("\0A");
-    try append_line_token(out, abi_line);
-    try out.append_bytes(entry_prefix);
+    try append_line_value(out, abi_line);
+    try append_llvm_c_string_payload(out, entry_prefix);
     try out.append_bytes(entry);
     try out.append_bytes("\0A");
-    try out.append_bytes(runtime_prefix);
+    try append_llvm_c_string_payload(out, runtime_prefix);
     try append_llvm_constant_footer(out);
     return;
 }
@@ -98,16 +98,16 @@ pub fn append_after_runtime_constant(
     let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("\0A");
-    try append_line_token(out, lowering_line);
-    try append_line_token(out, fallback_line);
-    try append_line_token(out, mode_line);
+    try append_line_value(out, lowering_line);
+    try append_line_value(out, fallback_line);
+    try append_line_value(out, mode_line);
     if include_discovery {
         let discovery_line = try metadata_fact(
             ir_bytes,
             "hosted-artifact-metadata-discovery-line ",
             "selfhost::backend::hosted::write_test_metadata"
         );
-        try append_line_token(out, discovery_line);
+        try append_line_value(out, discovery_line);
     }
     try append_llvm_constant_footer(out);
     return;
@@ -125,8 +125,8 @@ pub fn before_runtime_size(
         "hosted-artifact-metadata-entry-prefix "
     );
     let runtime_prefix = try runtime_line_prefix(ir_bytes);
-    return 1 + line_token_size(abi_line) + llvm_c_decoded_len(entry_prefix) +
-        std::mem::len(entry) + 1 + llvm_c_decoded_len(runtime_prefix);
+    return 1 + line_value_size(abi_line) + std::mem::len(entry_prefix) +
+        std::mem::len(entry) + 1 + std::mem::len(runtime_prefix);
 }
 
 pub fn after_runtime_size(ir_bytes: []u8, include_discovery: bool) -> !i64 {
@@ -139,15 +139,15 @@ pub fn after_runtime_size(ir_bytes: []u8, include_discovery: bool) -> !i64 {
         "hosted-artifact-metadata-lowering-line "
     );
     let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
-    var size = 1 + line_token_size(lowering_line) + line_token_size(fallback_line) +
-        line_token_size(mode_line);
+    var size = 1 + line_value_size(lowering_line) + line_value_size(fallback_line) +
+        line_value_size(mode_line);
     if include_discovery {
         let discovery_line = try metadata_fact(
             ir_bytes,
             "hosted-artifact-metadata-discovery-line ",
             "selfhost::backend::hosted::write_test_metadata"
         );
-        size = size + line_token_size(discovery_line);
+        size = size + line_value_size(discovery_line);
     }
     return size;
 }
@@ -157,7 +157,7 @@ fn metadata_fact(
     prefix: []u8,
     fact_name: []u8
 ) -> ![]u8 borrows ir_bytes {
-    return try ir_contract::named_fact_value(ir_bytes, prefix, fact_name);
+    return try ir_contract::named_fact_line_value(ir_bytes, prefix, fact_name);
 }
 
 fn common_metadata_fact(ir_bytes: []u8, prefix: []u8) -> ![]u8 borrows ir_bytes {
@@ -186,7 +186,7 @@ fn runtime_line_prefix(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
         ir_bytes,
         "hosted-artifact-metadata-runtime-line "
     );
-    return try llvm_c_token_prefix_through_escaped_space(runtime_line);
+    return try line_prefix_through_space(runtime_line);
 }
 
 fn output_prefix_fact(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
@@ -198,32 +198,30 @@ fn output_prefix_fact(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
 }
 
 fn prefix_decoded_size(title: []u8, issue: []u8, source_prefix: []u8) -> i64 {
-    return llvm_c_decoded_len(title) + 1 + llvm_c_decoded_len(issue) + 1 +
-        llvm_c_decoded_len(source_prefix);
+    return std::mem::len(title) + 1 + std::mem::len(issue) + 1 +
+        std::mem::len(source_prefix);
 }
 
-fn output_prefix_size_from_token(output_prefix: []u8) -> i64 {
-    return 1 + llvm_c_decoded_len(output_prefix);
+fn output_prefix_size_from_value(output_prefix: []u8) -> i64 {
+    return 1 + std::mem::len(output_prefix);
 }
 
-fn append_line_token(out: &var std::string::String, token: []u8) -> !void {
-    try out.append_bytes(token);
+fn append_line_value(out: &var std::string::String, value: []u8) -> !void {
+    try append_llvm_c_string_payload(out, value);
     try out.append_bytes("\0A");
     return;
 }
 
-fn line_token_size(token: []u8) -> i64 {
-    return llvm_c_decoded_len(token) + 1;
+fn line_value_size(value: []u8) -> i64 {
+    return std::mem::len(value) + 1;
 }
 
-fn llvm_c_token_prefix_through_escaped_space(token: []u8) -> ![]u8 borrows token {
+fn line_prefix_through_space(line: []u8) -> ![]u8 borrows line {
     var index = 0;
-    let len = std::mem::len(token);
-    while index + 2 < len {
-        if token[index] == cast<u8>(92) and
-            token[index + 1] == cast<u8>(50) and
-            token[index + 2] == cast<u8>(48) {
-            return token[0..index + 3];
+    let len = std::mem::len(line);
+    while index < len {
+        if line[index] == cast<u8>(32) {
+            return line[0..index + 1];
         }
         index = index + 1;
     }
@@ -250,34 +248,25 @@ fn append_llvm_constant_footer(out: &var std::string::String) -> !void {
     return;
 }
 
-fn llvm_c_decoded_len(text: []u8) -> i64 {
-    var len = 0;
+fn append_llvm_c_string_payload(out: &var std::string::String, payload: []u8) -> !void {
     var index = 0;
-    let byte_len = std::mem::len(text);
-    while index < byte_len {
-        if index + 2 < byte_len and
-            text[index] == cast<u8>(92) and
-            is_hex_digit(text[index + 1]) and
-            is_hex_digit(text[index + 2]) {
-            len = len + 1;
-            index = index + 3;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        if byte == cast<u8>(34) {
+            try out.append_bytes("\22");
         } else {
-            len = len + 1;
-            index = index + 1;
+            if byte == cast<u8>(92) {
+                try out.append_bytes("\5C");
+            } else {
+                if byte == cast<u8>(10) {
+                    try out.append_bytes("\0A");
+                } else {
+                    try out.append_byte(byte);
+                }
+            }
         }
+        index = index + 1;
     }
-    return len;
-}
-
-fn is_hex_digit(byte: u8) -> bool {
-    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
-        return true;
-    }
-    if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
-        return true;
-    }
-    if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
-        return true;
-    }
-    return false;
+    return;
 }
