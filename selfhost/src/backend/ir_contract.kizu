@@ -69,7 +69,53 @@ pub fn sequence_fact_value(
     return bytes[value_start..value_end];
 }
 
+pub fn sequence_fact_second_value(
+    bytes: []u8,
+    prefix: []u8,
+    name: []u8,
+    sequence: i64
+) -> ![]u8 borrows bytes {
+    let first_start = try sequence_fact_value_start(bytes, prefix, name, sequence);
+    let first_end = token_end(bytes, first_start);
+    let second_start = skip_spaces(bytes, first_end);
+    let second_end = token_end(bytes, second_start);
+    if second_start == second_end {
+        return error("missing IR artifact fact");
+    }
+    return bytes[second_start..second_end];
+}
+
+pub fn body_node_kind(
+    bytes: []u8,
+    function_name: []u8,
+    sequence: i64
+) -> ![]u8 borrows bytes {
+    let value_start = try body_node_kind_start(bytes, function_name, sequence);
+    let value_end = token_end(bytes, value_start);
+    return bytes[value_start..value_end];
+}
+
 pub fn body_child_sequence(
+    bytes: []u8,
+    function_name: []u8,
+    parent_sequence: i64,
+    edge: []u8,
+    ordinal: i64
+) -> !i64 {
+    let child = try body_child_sequence_or_minus_one(
+        bytes,
+        function_name,
+        parent_sequence,
+        edge,
+        ordinal
+    );
+    if child >= 0 {
+        return child;
+    }
+    return error("missing IR artifact fact");
+}
+
+pub fn body_child_sequence_or_minus_one(
     bytes: []u8,
     function_name: []u8,
     parent_sequence: i64,
@@ -102,7 +148,7 @@ pub fn body_child_sequence(
         }
         index = index + 1;
     }
-    return error("missing IR artifact fact");
+    return -1;
 }
 
 pub fn require_sequence_fact(
@@ -178,6 +224,50 @@ fn sequence_fact_value_start(
         index = index + 1;
     }
     return error("missing IR artifact fact");
+}
+
+fn body_node_kind_start(bytes: []u8, function_name: []u8, sequence: i64) -> !i64 {
+    let byte_len = std::mem::len(bytes);
+    let prefix = "body-node ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(function_name);
+    var index = 0;
+    while index + prefix_len + name_len < byte_len {
+        if is_line_start(bytes, index) and
+            std::mem::equal_bytes(bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if std::mem::equal_bytes(bytes[name_start..name_end], function_name) and
+                is_space(bytes[name_end]) {
+                let sequence_start = skip_spaces(bytes, name_end);
+                let actual = try parse_i64_token(bytes, sequence_start);
+                if actual == sequence {
+                    return try body_node_kind_start_in_line(bytes, sequence_start);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("missing IR artifact fact");
+}
+
+fn body_node_kind_start_in_line(bytes: []u8, sequence_start: i64) -> !i64 {
+    let sequence_end = token_end(bytes, sequence_start);
+    let depth_label_start = skip_spaces(bytes, sequence_end);
+    let depth_label_end = token_end(bytes, depth_label_start);
+    if !std::mem::equal_bytes(bytes[depth_label_start..depth_label_end], "depth") {
+        return error("invalid IR artifact fact");
+    }
+
+    let depth_start = skip_spaces(bytes, depth_label_end);
+    let depth_end = token_end(bytes, depth_start);
+    let kind_label_start = skip_spaces(bytes, depth_end);
+    let kind_label_end = token_end(bytes, kind_label_start);
+    if !std::mem::equal_bytes(bytes[kind_label_start..kind_label_end], "kind") {
+        return error("invalid IR artifact fact");
+    }
+
+    return skip_spaces(bytes, kind_label_end);
 }
 
 fn named_fact_value_start(bytes: []u8, prefix: []u8, name: []u8) -> !i64 {

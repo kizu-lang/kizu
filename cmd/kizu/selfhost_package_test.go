@@ -1213,9 +1213,23 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_lower_executable_ast_function(",
 		"fn append_case_dispatch(",
 		"fn lowering_case_count(",
-		"ir_contract::sequence_fact_value(",
-		"selected-body-lowering-case-ast ",
-		"selected-body-lowering-case-result ",
+		"cli_executable_body_lowering_contract::require(",
+		"cli_executable_body_lowering_contract::case_count(",
+		"cli_executable_body_lowering_contract::case_ast_kind_name(",
+		"cli_executable_body_lowering_contract::case_result_kind_name(",
+	},
+	"../../selfhost/src/backend/cli_executable_body_lowering_contract.kizu": {
+		"pub fn require(",
+		"pub fn case_count(",
+		"pub fn case_ast_kind_name(",
+		"pub fn case_result_kind_name(",
+		"fn require_unsupported_return(",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_child_sequence_or_minus_one(",
+		"ir_contract::body_node_kind(",
+		"body-field-expr ",
+		"body-struct-literal ",
+		"selected-function-body-end ",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
@@ -1225,7 +1239,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn named_i64_fact(",
 		"pub fn require_named_i64_fact(",
 		"pub fn sequence_fact_value(",
+		"pub fn sequence_fact_second_value(",
+		"pub fn body_node_kind(",
 		"pub fn body_child_sequence(",
+		"pub fn body_child_sequence_or_minus_one(",
 		"pub fn require_sequence_fact(",
 	},
 	"../../selfhost/src/ir/executable_contract.kizu": {
@@ -1250,8 +1267,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
 		"executable_body_parsing::append_run_parsing_facts(",
-		"executable_body_lowering::append_run_lowering_facts(",
+		"fn append_selected_body_lowering(",
 		"selected-function ",
+		"selected-body-lowering ",
 		"selected-signature ",
 		"selected-signature-param-count ",
 		"selected-signature-return ",
@@ -1293,18 +1311,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_run_parsing_facts(",
 		"pub fn append_test_parsing_facts(",
 		"fn require_function_body_fragment(",
-	},
-	"../../selfhost/src/ir/executable_body_lowering.kizu": {
-		"pub fn append_run_lowering_facts(",
-		"pub fn append_test_lowering_facts(",
-		"fn append_lowering_case_facts(",
-		"fn lowering_case_ast_kind(",
-		"fn lowering_case_result_kind(",
-		"fn require_unsupported_return(",
-		"selected-body-lowering-case-count ",
-		"selected-body-lowering-case-ast ",
-		"selected-body-lowering-case-result ",
-		"selected-body-lowering-unsupported ",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1493,7 +1499,7 @@ func assertHostedExecutableFactOrigins(
 		t,
 		sources.ir,
 		sources.selected,
-		sources.bodyLowering,
+		sources.loweringContract,
 		sources.llvm,
 		facts.selectedBodyLoweringFacts,
 	)
@@ -1537,7 +1543,7 @@ func assertHostedExecutableRendererConsumers(
 	assertExecutableParserConsumers(
 		t,
 		sources.parser,
-		sources.lowerer,
+		sources.lowerer+sources.loweringContract,
 	)
 	assertExecutableABIConsumers(
 		t,
@@ -1570,22 +1576,22 @@ func assertHostedExecutableRendererConsumers(
 // hostedExecutableContractSources groups the selfhost files used by executable
 // path contract assertions.
 type hostedExecutableContractSources struct {
-	ir             string
-	contract       string
-	selected       string
-	hostedPaths    string
-	hostedLowering string
-	body           string
-	bodyParsing    string
-	bodyLowering   string
-	llvm           string
-	cli            string
-	parser         string
-	ast            string
-	lowerer        string
-	run            string
-	test           string
-	metadata       string
+	ir               string
+	contract         string
+	selected         string
+	hostedPaths      string
+	hostedLowering   string
+	body             string
+	bodyParsing      string
+	loweringContract string
+	llvm             string
+	cli              string
+	parser           string
+	ast              string
+	lowerer          string
+	run              string
+	test             string
+	metadata         string
 }
 
 // readHostedExecutableContractSources loads the split selfhost files involved
@@ -1603,9 +1609,9 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		),
 		body:        readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu"),
 		bodyParsing: readSelfhostFile(t, "../../selfhost/src/ir/executable_body_parsing.kizu"),
-		bodyLowering: readSelfhostFile(
+		loweringContract: readSelfhostFile(
 			t,
-			"../../selfhost/src/ir/executable_body_lowering.kizu",
+			"../../selfhost/src/backend/cli_executable_body_lowering_contract.kizu",
 		),
 		llvm: readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu"),
 		cli:  readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu"),
@@ -1763,15 +1769,14 @@ func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string, fa
 		t.Fatal("backend metadata does not record selected body lowering facts")
 	}
 	for _, fact := range facts {
-		if strings.HasPrefix(fact, "selected-body-lowering-case-count ") {
-			assertNamedI64FactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
-			continue
-		}
-		if strings.HasPrefix(fact, "selected-body-lowering-case-") {
-			assertSequenceFactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
-			continue
-		}
 		assertNamedFactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
+	}
+	for _, fragment := range []string{
+		"cli_executable_body_lowering_contract::require(",
+	} {
+		if !strings.Contains(llvm, fragment) {
+			t.Fatalf("backend selected-body-lowering validation missing body IR use %q", fragment)
+		}
 	}
 }
 
@@ -2242,7 +2247,7 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 	t *testing.T,
 	ir string,
 	selected string,
-	bodyLowering string,
+	loweringContract string,
 	llvm string,
 	facts []string,
 ) {
@@ -2251,45 +2256,38 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 		t.Fatal("IR root hardcodes selected body lowering facts")
 	}
 	for _, fragment := range []string{
-		"executable_body_lowering::append_run_lowering_facts(",
-		"executable_body_lowering::append_test_lowering_facts(",
 		"function_body_node(",
+		"append_selected_body_lowering(",
 	} {
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("selected body lowering is not rooted in checked AST via %q", fragment)
 		}
 	}
 	for _, fragment := range []string{
-		"pub fn append_run_lowering_facts(",
-		"pub fn append_test_lowering_facts(",
-		"ast.get(",
-		"ast.child_at(",
-		"unsupported_executable",
+		"pub fn require(",
+		"pub fn case_count(",
+		"pub fn case_ast_kind_name(",
+		"pub fn case_result_kind_name(",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_node_kind(",
+		"require_unsupported_return(",
 	} {
-		if !strings.Contains(bodyLowering, fragment) {
-			t.Fatalf("selected body lowering emitter missing %q", fragment)
+		if !strings.Contains(loweringContract, fragment) {
+			t.Fatalf("selected body lowering contract missing %q", fragment)
 		}
 	}
-	emitter := selected + bodyLowering
 	for _, fact := range facts {
 		if strings.Contains(llvm, `"`+fact+`"`) {
 			t.Fatalf("backend hardcodes complete selected body lowering fact %q", fact)
 		}
 		parts := strings.Fields(fact)
-		if len(parts) != 3 && len(parts) != 4 {
+		if len(parts) != 3 {
 			t.Fatalf("invalid selected-body-lowering fixture %q", fact)
 		}
-		requiredFragments := []string{`"` + parts[0] + ` "`}
-		if strings.HasPrefix(fact, "selected-body-lowering ") ||
-			strings.HasPrefix(fact, "selected-body-lowering-unsupported ") {
-			requiredFragments = append(requiredFragments, `"`+parts[1]+`"`)
-		}
-		if strings.HasPrefix(fact, "selected-body-lowering-case-") {
-			requiredFragments = append(requiredFragments, `"`+parts[1]+`"`)
-		}
+		requiredFragments := []string{`"` + parts[0] + ` "`, `"` + parts[1] + `"`}
 		for _, fragment := range requiredFragments {
-			if !strings.Contains(emitter, fragment) {
-				t.Fatalf("selected body lowering emitter does not publish %q via %q", fact, fragment)
+			if !strings.Contains(selected, fragment) {
+				t.Fatalf("selected body lowering marker does not publish %q via %q", fact, fragment)
 			}
 		}
 	}
@@ -2731,6 +2729,13 @@ func assertExecutableParserConsumers(
 	ast string,
 ) {
 	t.Helper()
+	assertExecutableParserFactConsumers(t, parser)
+	assertExecutableLoweringFactConsumers(t, ast)
+}
+
+// assertExecutableParserFactConsumers checks parser renderer fact contracts.
+func assertExecutableParserFactConsumers(t *testing.T, parser string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
 		"ir_contract::require_named_fact(",
@@ -2770,12 +2775,23 @@ func assertExecutableParserConsumers(
 			t.Fatalf("hosted executable parser still traverses body facts with %q", fragment)
 		}
 	}
+}
+
+// assertExecutableLoweringFactConsumers checks lowerer renderer fact contracts.
+func assertExecutableLoweringFactConsumers(t *testing.T, ast string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
 		"ir_contract::sequence_fact_value(",
-		"selected-body-lowering-case-count ",
-		"selected-body-lowering-case-ast ",
-		"selected-body-lowering-case-result ",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_child_sequence_or_minus_one(",
+		"ir_contract::body_node_kind(",
+		"cli_executable_body_lowering_contract::case_count(",
+		"cli_executable_body_lowering_contract::case_ast_kind_name(",
+		"cli_executable_body_lowering_contract::case_result_kind_name(",
+		"selected-function-body-end ",
+		"body-field-expr ",
+		"body-struct-literal ",
 		"append_cli_lower_executable_ast_function(",
 		"append_case_dispatch(",
 		"lowering_case_ast_kind_name(",
@@ -2787,6 +2803,10 @@ func assertExecutableParserConsumers(
 		}
 	}
 	for _, fragment := range []string{
+		"selected-body-lowering-case-count ",
+		"selected-body-lowering-case-ast ",
+		"selected-body-lowering-case-result ",
+		"selected-body-lowering-unsupported ",
 		"body_field_expr_value(ir_bytes, function_name, 6)",
 		"body_field_expr_value(ir_bytes, function_name, 19)",
 		"body_field_expr_value(ir_bytes, function_name, 35)",
@@ -3222,30 +3242,6 @@ func hostedExecutableSelectedBodyLoweringFacts() []string {
 			"lower_run_executable_ast checked-run-executable",
 		"selected-body-lowering selfhost::backend::executable::" +
 			"lower_test_executable_ast checked-test-executable",
-		"selected-body-lowering-unsupported selfhost::backend::executable::" +
-			"lower_run_executable_ast unsupported_executable",
-		"selected-body-lowering-unsupported selfhost::backend::executable::" +
-			"lower_test_executable_ast unsupported_executable",
-		"selected-body-lowering-case-count selfhost::backend::executable::" +
-			"lower_run_executable_ast 2",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_run_executable_ast 0 RunPrintCall",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_run_executable_ast 0 RunPrintString",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_run_executable_ast 1 RunReturnVoid",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_run_executable_ast 1 RunReturnVoid",
-		"selected-body-lowering-case-count selfhost::backend::executable::" +
-			"lower_test_executable_ast 2",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_test_executable_ast 0 TestExpectTrue",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_test_executable_ast 0 TestExpectOk",
-		"selected-body-lowering-case-ast selfhost::backend::executable::" +
-			"lower_test_executable_ast 1 TestExpectFalse",
-		"selected-body-lowering-case-result selfhost::backend::executable::" +
-			"lower_test_executable_ast 1 TestExpectFailure",
 	}
 }
 
