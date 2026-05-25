@@ -60,3 +60,16 @@ func TestAnalyzeAcceptsValidSource(t *testing.T) {
 		t.Fatalf("got diagnostics %#v, want none", diagnostics)
 	}
 }
+
+// TestAnalyzeAcceptsStdTestingSource checks LSP diagnostics share CLI std wrappers.
+func TestAnalyzeAcceptsStdTestingSource(t *testing.T) {
+	source := `test "vscode test command" {
+    std::testing::expect(true);
+    std::testing::expect_equal<i64>(3, 1 + 2);
+}
+`
+	diagnostics := Analyze(source)
+	if len(diagnostics) != 0 {
+		t.Fatalf("got diagnostics %#v, want none", diagnostics)
+	}
+}
