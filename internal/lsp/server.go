@@ -74,7 +74,10 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 				CompletionProvider: &completionOptions{
 					TriggerCharacters: []string{":", "."},
 				},
-				InlayHintProvider: true,
+				InlayHintProvider:      true,
+				DefinitionProvider:     true,
+				HoverProvider:          true,
+				DocumentSymbolProvider: true,
 			},
 			ServerInfo: serverInfo{Name: "kizu-lsp"},
 		})
@@ -86,6 +89,12 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 		return false, s.handleCompletionRequest(msg)
 	case "textDocument/inlayHint":
 		return false, s.handleInlayHintRequest(msg)
+	case "textDocument/definition":
+		return false, s.handleDefinitionRequest(msg)
+	case "textDocument/hover":
+		return false, s.handleHoverRequest(msg)
+	case "textDocument/documentSymbol":
+		return false, s.handleDocumentSymbolRequest(msg)
 	default:
 		return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
 	}
@@ -124,6 +133,37 @@ func (s *Server) handleInlayHintRequest(msg incomingMessage) error {
 		return s.respond(msg.ID, []inlayHint{})
 	}
 	return s.respond(msg.ID, InlayHints(source, params.Range))
+}
+
+// handleDefinitionRequest returns a location for the symbol under the cursor.
+func (s *Server) handleDefinitionRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.definition(params.TextDocument.URI, params.Position))
+}
+
+// handleHoverRequest returns concise information for the symbol under the cursor.
+func (s *Server) handleHoverRequest(msg incomingMessage) error {
+	var params textDocumentPositionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	return s.respond(msg.ID, s.hover(params.TextDocument.URI, params.Position))
+}
+
+// handleDocumentSymbolRequest returns outline symbols for a tracked document.
+func (s *Server) handleDocumentSymbolRequest(msg incomingMessage) error {
+	var params documentSymbolParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	source, ok := s.documents[params.TextDocument.URI]
+	if !ok {
+		return s.respond(msg.ID, []documentSymbol{})
+	}
+	return s.respond(msg.ID, DocumentSymbols(source))
 }
 
 // handleNotification applies LSP notifications without sending request responses.
