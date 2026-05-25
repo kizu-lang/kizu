@@ -1,7 +1,10 @@
 package lsp
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +17,49 @@ func TestCompleteReturnsStaticSnippets(t *testing.T) {
 	}
 	if item.InsertText == "" {
 		t.Fatalf("fn completion missing insert text")
+	}
+}
+
+// TestCompleteReturnsTestSnippet keeps the test-block LSP template available.
+func TestCompleteReturnsTestSnippet(t *testing.T) {
+	items := Complete("", Position{})
+	item := requireCompletionKind(t, items, "test", completionItemKindSnippet)
+	if item.Detail != "test block" {
+		t.Fatalf("detail = %q, want test block", item.Detail)
+	}
+	if item.InsertTextFormat != insertTextFormatSnippet {
+		t.Fatalf("insertTextFormat = %d, want snippet", item.InsertTextFormat)
+	}
+	want := "test \"${1:name}\" {\n    $0\n}"
+	if item.InsertText != want {
+		t.Fatalf("insertText = %q, want %q", item.InsertText, want)
+	}
+}
+
+// TestVSCodeSnippetsExposeTestBlock checks the packaged editor snippet file.
+func TestVSCodeSnippetsExposeTestBlock(t *testing.T) {
+	path := filepath.Join("..", "..", "editors", "vscode", "snippets", "kizu.code-snippets")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snippets map[string]vscodeSnippet
+	if err := json.Unmarshal(data, &snippets); err != nil {
+		t.Fatal(err)
+	}
+	snippet, ok := snippets["Test Block"]
+	if !ok {
+		t.Fatalf("Test Block snippet missing from %s", path)
+	}
+	if snippet.Prefix != "test" {
+		t.Fatalf("prefix = %q, want test", snippet.Prefix)
+	}
+	want := "test \"${1:name}\" {\n    $0\n}"
+	if strings.Join(snippet.Body, "\n") != want {
+		t.Fatalf("body = %#v, want %q", snippet.Body, want)
+	}
+	if snippet.Description != "Test block" {
+		t.Fatalf("description = %q, want Test block", snippet.Description)
 	}
 }
 
@@ -121,4 +167,10 @@ func requireCompletionKind(
 	}
 	t.Fatalf("completion %q kind %d not found in %#v", label, kind, items)
 	return completionItem{}
+}
+
+type vscodeSnippet struct {
+	Prefix      string   `json:"prefix"`
+	Body        []string `json:"body"`
+	Description string   `json:"description"`
 }
