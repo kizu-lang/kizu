@@ -1193,7 +1193,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
-		"cli_executable_body_parser_contract::require_selected_body_parsing(",
+		"cli_executable_body_parser_contract::require_executable_body_parsing(",
 		"fn append_cli_parse_run_executable_ast_function(",
 		"fn append_cli_parse_test_executable_ast_function(",
 		"fn append_cli_parse_run_print_payload_function(",
@@ -1201,7 +1201,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_parse_test_expect_value_function(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu": {
-		"pub fn require_selected_body_parsing(",
+		"pub fn require_executable_body_parsing(",
 		"fn require_run_parser_body_shape(",
 		"fn require_test_parser_body_shape(",
 		"fn require_parser_body_call(",
@@ -1712,7 +1712,7 @@ func assertExecutableSelectedBodyParsingValidated(
 ) {
 	t.Helper()
 	for _, fact := range facts {
-		if strings.HasPrefix(fact, "selected-body-parsing-token ") {
+		if strings.HasPrefix(fact, "executable-parser-token ") {
 			assertNamedFactConsumer(t, parser, "backend selected-body-parsing validation", fact)
 			continue
 		}
@@ -1720,7 +1720,10 @@ func assertExecutableSelectedBodyParsingValidated(
 			t.Fatalf("backend selected-body-parsing validation missing %q", fact)
 		}
 	}
-	if !strings.Contains(llvm, "cli_executable_body_parser_contract::require_selected_body_parsing(") {
+	if !strings.Contains(
+		llvm,
+		"cli_executable_body_parser_contract::require_executable_body_parsing(",
+	) {
 		t.Fatal("backend selected-body-parsing validation does not use parser contract")
 	}
 }
@@ -2599,7 +2602,7 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"ir_contract::require_named_fact(",
 		"ir_contract::named_fact_value(",
 		"ir_contract::require_body_call(",
-		"selected-body-parsing-token ",
+		"executable-parser-token ",
 		"parser_source_token(",
 	} {
 		if !strings.Contains(parser, fragment) {
@@ -3074,17 +3077,17 @@ func hostedExecutableTestHostedLoweringFacts() []string {
 // from the selected executable AST parser implementation.
 func hostedExecutableSelectedBodyParsingFacts() []string {
 	facts := []string{
-		"selected-body-parsing-token syntax-fn fn",
-		"selected-body-parsing-token syntax-test test",
-		"selected-body-parsing-token syntax-return return",
-		"selected-body-parsing-token syntax-void void",
-		"selected-body-parsing-token value-main main",
-		"selected-body-parsing-token run-print-callee print",
-		"selected-body-parsing-token expect-callee-root std",
-		"selected-body-parsing-token expect-callee-module testing",
-		"selected-body-parsing-token expect-callee-function expect",
-		"selected-body-parsing-token literal-true true",
-		"selected-body-parsing-token literal-false false",
+		"executable-parser-token syntax-fn fn",
+		"executable-parser-token syntax-test test",
+		"executable-parser-token syntax-return return",
+		"executable-parser-token syntax-void void",
+		"executable-parser-token value-main main",
+		"executable-parser-token run-print-callee print",
+		"executable-parser-token expect-callee-root std",
+		"executable-parser-token expect-callee-module testing",
+		"executable-parser-token expect-callee-function expect",
+		"executable-parser-token literal-true true",
+		"executable-parser-token literal-false false",
 	}
 	return facts
 }
