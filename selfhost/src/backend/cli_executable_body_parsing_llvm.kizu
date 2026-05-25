@@ -6,7 +6,7 @@ import selfhost::backend::ir_contract;
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try cli_executable_body_parser_contract::require_executable_body_parsing(ir_bytes);
     try cli_executable_main_llvm::append_functions(out, ir_bytes);
-    try append_cli_is_supported_run_print_payload_function(out);
+    try append_cli_is_supported_run_print_payload_function(out, ir_bytes);
     try append_cli_parse_run_print_payload_function(out, ir_bytes);
     try append_cli_parse_run_return_void_ok_function(out, ir_bytes);
     try append_cli_parse_test_expect_value_function(out, ir_bytes);
@@ -132,7 +132,15 @@ fn executable_ast_tag(ir_bytes: []u8, name: []u8) -> !i64 {
     return try ir_contract::named_i64_fact(ir_bytes, "executable-ast-kind ", name);
 }
 
-fn append_cli_is_supported_run_print_payload_function(out: &var std::string::String) -> !void {
+fn append_cli_is_supported_run_print_payload_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let min_byte = try cli_executable_body_parser_contract::run_payload_min_byte(ir_bytes);
+    let max_byte = try cli_executable_body_parser_contract::run_payload_max_byte(ir_bytes);
+    let forbidden_byte = try cli_executable_body_parser_contract::run_payload_forbidden_byte(
+        ir_bytes
+    );
     try append_line(out, "define i1 @kizu_selfhost__cli_is_supported_run_print_payload(");
     try append_line(out, "  %kizu.slice.u8 %source,");
     try append_line(out, "  i64 %start,");
@@ -149,10 +157,10 @@ fn append_cli_is_supported_run_print_payload_function(out: &var std::string::Str
     try append_line(out, "  %index = add i64 %start, %offset");
     try append_line(out, "  %ptr = getelementptr i8, ptr %source_ptr, i64 %index");
     try append_line(out, "  %byte = load i8, ptr %ptr");
-    try append_line(out, "  %min_ok = icmp uge i8 %byte, 32");
-    try append_line(out, "  %max_ok = icmp ule i8 %byte, 126");
+    try append_i8_constant_line(out, "  %min_ok = icmp uge i8 %byte, ", min_byte);
+    try append_i8_constant_line(out, "  %max_ok = icmp ule i8 %byte, ", max_byte);
     try append_line(out, "  %range_ok = and i1 %min_ok, %max_ok");
-    try append_line(out, "  %is_quote = icmp eq i8 %byte, 34");
+    try append_i8_constant_line(out, "  %is_quote = icmp eq i8 %byte, ", forbidden_byte);
     try append_line(out, "  %not_special = xor i1 %is_quote, true");
     try append_line(out, "  %safe = and i1 %range_ok, %not_special");
     try append_line(out, "  br i1 %safe, label %advance, label %false");
@@ -172,6 +180,7 @@ fn append_cli_parse_run_print_payload_function(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
+    let quote_byte = try cli_executable_body_parser_contract::run_literal_quote_byte(ir_bytes);
     try append_line(out,
         "define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload(");
     try append_line(out, "  %kizu.slice.u8 %source");
@@ -228,11 +237,11 @@ fn append_cli_parse_run_print_payload_function(
     try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
     try append_line(out, "  %quote_start_ptr = getelementptr i8, ptr %source_ptr, i64 %arg_start");
     try append_line(out, "  %quote_start = load i8, ptr %quote_start_ptr");
-    try append_line(out, "  %quote_start_ok = icmp eq i8 %quote_start, 34");
+    try append_i8_constant_line(out, "  %quote_start_ok = icmp eq i8 %quote_start, ", quote_byte);
     try append_line(out, "  %quote_end_index = sub i64 %arg_end, 1");
     try append_line(out, "  %quote_end_ptr = getelementptr i8, ptr %source_ptr, i64 %quote_end_index");
     try append_line(out, "  %quote_end = load i8, ptr %quote_end_ptr");
-    try append_line(out, "  %quote_end_ok = icmp eq i8 %quote_end, 34");
+    try append_i8_constant_line(out, "  %quote_end_ok = icmp eq i8 %quote_end, ", quote_byte);
     try append_line(out, "  %quotes_ok = and i1 %quote_start_ok, %quote_end_ok");
     try append_line(out, "  br i1 %quotes_ok, label %validate_payload, label %continue");
     try append_line(out, "validate_payload:");
@@ -284,6 +293,17 @@ fn append_cli_parse_run_print_payload_function(
     try append_line(out, "  ret %kizu.error.slice.u8 zeroinitializer");
     try append_line(out, "}");
     try append_line(out, "");
+    return;
+}
+
+fn append_i8_constant_line(
+    out: &var std::string::String,
+    prefix: []u8,
+    value: i64
+) -> !void {
+    try out.append_bytes(prefix);
+    try std::fmt::append_i64(out, value);
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
