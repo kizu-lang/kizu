@@ -732,6 +732,21 @@ func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 			"append_common_metadata source\\20\n",
 		"backend-input hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
 			"append_common_metadata output\\20\n",
+		"backend-input hosted-artifact-metadata-abi-line selfhost::backend::hosted::" +
+			"append_common_metadata abi\\20selfhost-abi-v0\n",
+		"backend-input hosted-artifact-metadata-entry-prefix selfhost::backend::hosted::" +
+			"append_common_metadata entry\\20@\n",
+		"backend-input hosted-artifact-metadata-runtime-line selfhost::backend::hosted::" +
+			"append_common_metadata runtime\\20target/selfhost/selfhost.host.ll\n",
+		"backend-input hosted-artifact-metadata-lowering-line selfhost::backend::hosted::" +
+			"append_common_metadata executable_lowering\\20selfhost::backend::" +
+			"executable\\20checked-ast\n",
+		"backend-input hosted-artifact-metadata-fallback-line selfhost::backend::hosted::" +
+			"append_common_metadata go.cmd-kizu-fallback\\20none\n",
+		"backend-input hosted-artifact-metadata-mode-line selfhost::backend::hosted::" +
+			"append_common_metadata artifact_mode\\20hosted-artifact\n",
+		"backend-input hosted-artifact-metadata-discovery-line selfhost::backend::hosted::" +
+			"write_test_metadata discovery\\20none\n",
 	}
 }
 
