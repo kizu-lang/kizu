@@ -54,22 +54,39 @@ pub fn output_prefix_size(ir_bytes: []u8) -> !i64 {
     return output_prefix_size_from_token(output_prefix);
 }
 
-pub fn append_suffix_constant(
+pub fn append_before_runtime_constant(
     out: &var std::string::String,
     name: []u8,
     ir_bytes: []u8,
     function_name: []u8,
-    index: i64,
-    include_discovery: bool,
-    runtime_line: []u8
+    index: i64
 ) -> !void {
-    let size = try suffix_size(ir_bytes, function_name, index, include_discovery, runtime_line);
+    let size = try before_runtime_size(ir_bytes, function_name, index);
     let entry = try lowering_case_entry(ir_bytes, function_name, index);
     let abi_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-abi-line ");
     let entry_prefix = try common_metadata_fact(
         ir_bytes,
         "hosted-artifact-metadata-entry-prefix "
     );
+    let runtime_prefix = try runtime_line_prefix(ir_bytes);
+    try append_llvm_constant_header(out, name, size);
+    try out.append_bytes("\0A");
+    try append_line_token(out, abi_line);
+    try out.append_bytes(entry_prefix);
+    try out.append_bytes(entry);
+    try out.append_bytes("\0A");
+    try out.append_bytes(runtime_prefix);
+    try append_llvm_constant_footer(out);
+    return;
+}
+
+pub fn append_after_runtime_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    include_discovery: bool
+) -> !void {
+    let size = try after_runtime_size(ir_bytes, include_discovery);
     let fallback_line = try common_metadata_fact(
         ir_bytes,
         "hosted-artifact-metadata-fallback-line "
@@ -81,11 +98,6 @@ pub fn append_suffix_constant(
     let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("\0A");
-    try append_line_token(out, abi_line);
-    try out.append_bytes(entry_prefix);
-    try out.append_bytes(entry);
-    try out.append_bytes("\0A");
-    try append_line_token(out, runtime_line);
     try append_line_token(out, lowering_line);
     try append_line_token(out, fallback_line);
     try append_line_token(out, mode_line);
@@ -101,12 +113,10 @@ pub fn append_suffix_constant(
     return;
 }
 
-pub fn suffix_size(
+pub fn before_runtime_size(
     ir_bytes: []u8,
     function_name: []u8,
-    index: i64,
-    include_discovery: bool,
-    runtime_line: []u8
+    index: i64
 ) -> !i64 {
     let entry = try lowering_case_entry(ir_bytes, function_name, index);
     let abi_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-abi-line ");
@@ -114,6 +124,12 @@ pub fn suffix_size(
         ir_bytes,
         "hosted-artifact-metadata-entry-prefix "
     );
+    let runtime_prefix = try runtime_line_prefix(ir_bytes);
+    return 1 + line_token_size(abi_line) + llvm_c_decoded_len(entry_prefix) +
+        std::mem::len(entry) + 1 + llvm_c_decoded_len(runtime_prefix);
+}
+
+pub fn after_runtime_size(ir_bytes: []u8, include_discovery: bool) -> !i64 {
     let fallback_line = try common_metadata_fact(
         ir_bytes,
         "hosted-artifact-metadata-fallback-line "
@@ -123,9 +139,7 @@ pub fn suffix_size(
         "hosted-artifact-metadata-lowering-line "
     );
     let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
-    var size = 1 + line_token_size(abi_line) + llvm_c_decoded_len(entry_prefix) +
-        std::mem::len(entry) + 1 + line_token_size(runtime_line) +
-        line_token_size(lowering_line) + line_token_size(fallback_line) +
+    var size = 1 + line_token_size(lowering_line) + line_token_size(fallback_line) +
         line_token_size(mode_line);
     if include_discovery {
         let discovery_line = try metadata_fact(
@@ -167,6 +181,14 @@ fn lowering_case_entry(
     );
 }
 
+fn runtime_line_prefix(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
+    let runtime_line = try common_metadata_fact(
+        ir_bytes,
+        "hosted-artifact-metadata-runtime-line "
+    );
+    return try llvm_c_token_prefix_through_escaped_space(runtime_line);
+}
+
 fn output_prefix_fact(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
     return try metadata_fact(
         ir_bytes,
@@ -192,6 +214,20 @@ fn append_line_token(out: &var std::string::String, token: []u8) -> !void {
 
 fn line_token_size(token: []u8) -> i64 {
     return llvm_c_decoded_len(token) + 1;
+}
+
+fn llvm_c_token_prefix_through_escaped_space(token: []u8) -> ![]u8 borrows token {
+    var index = 0;
+    let len = std::mem::len(token);
+    while index + 2 < len {
+        if token[index] == cast<u8>(92) and
+            token[index + 1] == cast<u8>(50) and
+            token[index + 2] == cast<u8>(48) {
+            return token[0..index + 3];
+        }
+        index = index + 1;
+    }
+    return error("invalid hosted metadata runtime line");
 }
 
 fn append_llvm_constant_header(

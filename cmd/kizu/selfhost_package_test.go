@@ -1141,8 +1141,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn prefix_size(",
 		"pub fn append_output_prefix_constant(",
 		"pub fn output_prefix_size(",
-		"pub fn append_suffix_constant(",
-		"pub fn suffix_size(",
+		"pub fn append_before_runtime_constant(",
+		"pub fn before_runtime_size(",
+		"pub fn append_after_runtime_constant(",
+		"pub fn after_runtime_size(",
+		"fn runtime_line_prefix(",
 		"fn metadata_fact(",
 		"fn common_metadata_fact(",
 		"fn llvm_c_decoded_len(",
@@ -2486,8 +2489,11 @@ func assertExecutableHostedArtifactGlobalConsumers(
 			"cli_hosted_metadata_llvm::append_prefix_constant(",
 			"cli_hosted_metadata_llvm::prefix_size(",
 			"cli_hosted_metadata_llvm::output_prefix_size(",
-			"cli_hosted_metadata_llvm::append_suffix_constant(",
-			"cli_hosted_metadata_llvm::suffix_size(",
+			"cli_hosted_metadata_llvm::append_before_runtime_constant(",
+			"cli_hosted_metadata_llvm::append_after_runtime_constant(",
+			"cli_hosted_metadata_llvm::before_runtime_size(",
+			"cli_hosted_metadata_llvm::after_runtime_size(",
+			"stage2_host_path",
 			"metadata_path_prefix",
 			"metadata_path_suffix",
 		} {
@@ -2551,6 +2557,16 @@ func assertExecutableHostedMetadataPrefixNotRendererLocal(t *testing.T, run stri
 			name:     "test",
 			content:  test,
 			fragment: `discovery none\0A`,
+		},
+		{
+			name:     "run",
+			content:  run,
+			fragment: `runtime\20target/selfhost/stage2/selfhost.host.ll`,
+		},
+		{
+			name:     "test",
+			content:  test,
+			fragment: `runtime\20target/selfhost/stage2/selfhost.host.ll`,
 		},
 	} {
 		if strings.Contains(forbidden.content, forbidden.fragment) {
@@ -2632,9 +2648,10 @@ func assertHostedLoweringSliceSizesUseFacts(t *testing.T, run string, test strin
 		"run_dynamic_body_prefix_size(",
 		"run_dynamic_body_suffix_size(",
 		"hosted_return_body_suffix_size(",
-		"cli_hosted_metadata_llvm::suffix_size(",
+		"cli_hosted_metadata_llvm::before_runtime_size(",
+		"cli_hosted_metadata_llvm::after_runtime_size(",
 		`"run_return_ll_prefix_source"`,
-		`"run_return_meta_suffix"`,
+		`"run_return_meta_before_runtime"`,
 	} {
 		if !strings.Contains(run, fragment) {
 			t.Fatalf("hosted run artifact slices are not fact-sized with %q", fragment)
@@ -2644,7 +2661,8 @@ func assertHostedLoweringSliceSizesUseFacts(t *testing.T, run string, test strin
 		"hosted_artifact_fact_len(",
 		"hosted_prefix_source_size(",
 		"test_case_ll_suffix_size(",
-		"cli_hosted_metadata_llvm::suffix_size(",
+		"cli_hosted_metadata_llvm::before_runtime_size(",
+		"cli_hosted_metadata_llvm::after_runtime_size(",
 		`"test_ok_ll_prefix"`,
 		`"test_failure_ll_prefix"`,
 	} {

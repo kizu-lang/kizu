@@ -307,13 +307,13 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
-		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
+		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%run_return_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
-		"%run_return_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
+		"%run_return_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
-		"%test_ok_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
+		"%test_ok_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%test_failure_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
-		"%test_failure_meta_write = call %kizu.error.void @kizu_selfhost__write_concat5",
+		"%test_failure_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 	}
 }
 
