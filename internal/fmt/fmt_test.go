@@ -86,6 +86,24 @@ func TestFormatPreservesImplMethodDocComment(t *testing.T) {
 	}
 }
 
+// TestFormatPreservesTypeMemberDocComments keeps docs on fields and variants.
+func TestFormatPreservesTypeMemberDocComments(t *testing.T) {
+	src := "struct Trace{\n/// Label.\nlabel:[]u8,}\n" +
+		"enum Color{\n/// Secondary.\nGreen,}\n"
+	want := "struct Trace {\n" +
+		"    /// Label.\n" +
+		"    label: []u8\n" +
+		"}\n" +
+		"\n" +
+		"enum Color {\n" +
+		"    /// Secondary.\n" +
+		"    Green,\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(type member docs):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatKeepsFunctionLineCommentAttached keeps doc comments with following functions.
 func TestFormatKeepsFunctionLineCommentAttached(t *testing.T) {
 	src := "fn helper(){return;}\n// explain main\nfn main(){return;}\n"

@@ -150,6 +150,7 @@ func (d *TestDecl) String() string {
 // StructDecl represents a top-level struct declaration.
 type StructDecl struct {
 	Name       string
+	Doc        string
 	TypeParams []string
 	Fields     []Field
 	Public     bool
@@ -178,9 +179,11 @@ func (d *StructDecl) String() string {
 
 // EnumDecl represents a Zig/C-style tag enum declaration.
 type EnumDecl struct {
-	Name   string
-	Tags   []string
-	Public bool
+	Name    string
+	Doc     string
+	Tags    []string
+	TagDocs map[string]string
+	Public  bool
 }
 
 // declNode marks EnumDecl as a declaration node.
@@ -198,6 +201,7 @@ func (d *EnumDecl) String() string {
 // UnionDecl represents a tagged union declaration.
 type UnionDecl struct {
 	Name       string
+	Doc        string
 	TypeParams []string
 	Variants   []UnionVariant
 	Public     bool
@@ -227,6 +231,7 @@ func (d *UnionDecl) String() string {
 // UnionVariant represents one tagged union variant.
 type UnionVariant struct {
 	Name    string
+	Doc     string
 	Payload string
 }
 
@@ -287,6 +292,7 @@ func (d *ImplDecl) String() string {
 // Field represents a named struct field.
 type Field struct {
 	Name      string
+	Doc       string
 	TypeName  string
 	Borrow    bool
 	MutBorrow bool

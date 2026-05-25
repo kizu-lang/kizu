@@ -122,11 +122,11 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 	case token.Extern:
 		return p.parseExternDeclWithDoc(false, docs)
 	case token.Struct:
-		return p.parseStructDecl()
+		return p.parseStructDeclWithDoc(docs)
 	case token.Enum:
-		return p.parseEnumDecl()
+		return p.parseEnumDeclWithDoc(docs)
 	case token.Union:
-		return p.parseUnionDecl()
+		return p.parseUnionDeclWithDoc(docs)
 	case token.Contract:
 		return p.parseContractDecl()
 	default:
@@ -337,7 +337,12 @@ func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
 
 // parseStructDecl parses a top-level struct declaration.
 func (p *Parser) parseStructDecl() ast.Decl {
-	decl := &ast.StructDecl{}
+	return p.parseStructDeclWithDoc(docText(p.cur))
+}
+
+// parseStructDeclWithDoc parses a top-level struct declaration with attached docs.
+func (p *Parser) parseStructDeclWithDoc(docs string) ast.Decl {
+	decl := &ast.StructDecl{Doc: docs}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
@@ -376,7 +381,7 @@ func (p *Parser) parseStructFields() []ast.Field {
 
 // parseStructField parses one struct field declaration.
 func (p *Parser) parseStructField() (ast.Field, bool) {
-	field := ast.Field{}
+	field := ast.Field{Doc: docText(p.cur)}
 	if p.cur.Type == token.Public {
 		field.Public = true
 		p.nextToken()
@@ -407,7 +412,12 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 
 // parseEnumDecl parses a top-level Zig/C-style tag enum declaration.
 func (p *Parser) parseEnumDecl() ast.Decl {
-	decl := &ast.EnumDecl{}
+	return p.parseEnumDeclWithDoc(docText(p.cur))
+}
+
+// parseEnumDeclWithDoc parses a top-level enum declaration with attached docs.
+func (p *Parser) parseEnumDeclWithDoc(docs string) ast.Decl {
+	decl := &ast.EnumDecl{Doc: docs}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
@@ -415,31 +425,48 @@ func (p *Parser) parseEnumDecl() ast.Decl {
 	if !p.expectPeek(token.LBrace) {
 		return decl
 	}
-	decl.Tags = p.parseEnumTags()
+	decl.Tags, decl.TagDocs = p.parseEnumTags()
 	return decl
 }
 
 // parseEnumTags parses comma-separated enum tags.
-func (p *Parser) parseEnumTags() []string {
+func (p *Parser) parseEnumTags() ([]string, map[string]string) {
 	tags := []string{}
+	tagDocs := map[string]string{}
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
 		if p.cur.Type != token.Ident {
 			p.errorf("expected enum tag, got %s", p.cur.Type)
-			return tags
+			return tags, tagDocsOrNil(tagDocs)
 		}
 		tags = append(tags, p.cur.Literal)
+		if docs := docText(p.cur); docs != "" {
+			tagDocs[p.cur.Literal] = docs
+		}
 		if !p.consumeListDelimiter("enum tag") {
-			return tags
+			return tags, tagDocsOrNil(tagDocs)
 		}
 		p.nextToken()
 	}
-	return tags
+	return tags, tagDocsOrNil(tagDocs)
+}
+
+// tagDocsOrNil keeps empty enum doc metadata compact.
+func tagDocsOrNil(tagDocs map[string]string) map[string]string {
+	if len(tagDocs) == 0 {
+		return nil
+	}
+	return tagDocs
 }
 
 // parseUnionDecl parses a top-level tagged union declaration.
 func (p *Parser) parseUnionDecl() ast.Decl {
-	decl := &ast.UnionDecl{}
+	return p.parseUnionDeclWithDoc(docText(p.cur))
+}
+
+// parseUnionDeclWithDoc parses a top-level union declaration with attached docs.
+func (p *Parser) parseUnionDeclWithDoc(docs string) ast.Decl {
+	decl := &ast.UnionDecl{Doc: docs}
 	if !p.expectPeek(token.Ident) {
 		return decl
 	}
@@ -478,7 +505,7 @@ func (p *Parser) parseUnionVariants() []ast.UnionVariant {
 
 // parseUnionVariant parses one tagged union variant declaration.
 func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
-	variant := ast.UnionVariant{}
+	variant := ast.UnionVariant{Doc: docText(p.cur)}
 	if p.cur.Type != token.Ident {
 		p.errorf("expected union variant, got %s", p.cur.Type)
 		return variant, false

@@ -30,13 +30,18 @@ type completionContext struct {
 
 type completionIndex struct {
 	functions map[string]functionCompletion
-	types     map[string]int
+	types     map[string]typeCompletion
 	structs   map[string][]fieldCompletion
-	enums     map[string][]string
+	enums     map[string][]enumMemberCompletion
 	unions    map[string][]unionVariantCompletion
 	methods   map[string][]functionCompletion
 	modules   map[string]bool
 	imports   map[string]bool
+}
+
+type typeCompletion struct {
+	kind          int
+	documentation string
 }
 
 type functionCompletion struct {
@@ -47,13 +52,20 @@ type functionCompletion struct {
 }
 
 type fieldCompletion struct {
-	name string
-	typ  string
+	name          string
+	typ           string
+	documentation string
+}
+
+type enumMemberCompletion struct {
+	name          string
+	documentation string
 }
 
 type unionVariantCompletion struct {
-	name    string
-	payload bool
+	name          string
+	documentation string
+	payload       bool
 }
 
 type localBinding struct {
@@ -182,8 +194,13 @@ func (idx completionIndex) addGeneralItems(builder *completionBuilder) {
 	for name, fn := range idx.functions {
 		builder.add(functionItem(name, fn, completionItemKindFunction, "function"))
 	}
-	for name, kind := range idx.types {
-		builder.add(completionItem{Label: name, Kind: kind, Detail: "type"})
+	for name, typ := range idx.types {
+		builder.add(completionItem{
+			Label:         name,
+			Kind:          typ.kind,
+			Detail:        "type",
+			Documentation: markdownDocumentation(typ.documentation),
+		})
 	}
 	for module := range idx.modules {
 		builder.add(completionItem{Label: module, Kind: completionItemKindModule, Detail: "module"})
@@ -205,18 +222,20 @@ func (idx completionIndex) addNamespaceItems(
 	if tags := idx.enums[context.receiver]; len(tags) > 0 {
 		for _, tag := range tags {
 			builder.add(contextualItem(context, completionItem{
-				Label:  tag,
-				Kind:   completionItemKindEnumMember,
-				Detail: context.receiver,
+				Label:         tag.name,
+				Kind:          completionItemKindEnumMember,
+				Detail:        context.receiver,
+				Documentation: markdownDocumentation(tag.documentation),
 			}))
 		}
 	}
 	if variants := idx.unions[context.receiver]; len(variants) > 0 {
 		for _, variant := range variants {
 			item := completionItem{
-				Label:  variant.name,
-				Kind:   completionItemKindEnumMember,
-				Detail: context.receiver,
+				Label:         variant.name,
+				Kind:          completionItemKindEnumMember,
+				Detail:        context.receiver,
+				Documentation: markdownDocumentation(variant.documentation),
 			}
 			if variant.payload {
 				item.InsertText = variant.name + "($1)"
@@ -250,9 +269,10 @@ func (idx completionIndex) addMemberItems(
 	typ = normalizeCompletionType(typ)
 	for _, field := range idx.structs[typ] {
 		builder.add(contextualItem(context, completionItem{
-			Label:  field.name,
-			Kind:   completionItemKindField,
-			Detail: field.typ,
+			Label:         field.name,
+			Kind:          completionItemKindField,
+			Detail:        field.typ,
+			Documentation: markdownDocumentation(field.documentation),
 		}))
 	}
 	for _, method := range idx.methods[typ] {
@@ -323,9 +343,9 @@ func (b *completionBuilder) sortedItems() []completionItem {
 func newCompletionIndex() completionIndex {
 	return completionIndex{
 		functions: map[string]functionCompletion{},
-		types:     map[string]int{},
+		types:     map[string]typeCompletion{},
 		structs:   map[string][]fieldCompletion{},
-		enums:     map[string][]string{},
+		enums:     map[string][]enumMemberCompletion{},
 		unions:    map[string][]unionVariantCompletion{},
 		methods:   map[string][]functionCompletion{},
 		modules:   map[string]bool{},
@@ -362,7 +382,10 @@ func (idx completionIndex) scan(source string) {
 			i = next
 		case token.Contract:
 			if name, ok := nextIdentifier(tokens, i+1); ok {
-				idx.types[name] = completionItemKindStruct
+				idx.types[name] = typeCompletion{
+					kind:          completionItemKindStruct,
+					documentation: declarationDocumentation(tokens, i),
+				}
 			}
 			i = skipDeclarationBody(tokens, i+1)
 		case token.Impl:
@@ -378,7 +401,10 @@ func (idx completionIndex) scanStruct(tokens []token.Token, start int) int {
 	if !ok {
 		return start
 	}
-	idx.types[name] = completionItemKindStruct
+	idx.types[name] = typeCompletion{
+		kind:          completionItemKindStruct,
+		documentation: declarationDocumentation(tokens, start),
+	}
 	brace := findNextToken(tokens, start+1, token.LBrace)
 	if brace < 0 {
 		return start
@@ -400,7 +426,11 @@ func (idx completionIndex) scanStruct(tokens []token.Token, start int) int {
 		}
 		fieldName := tokens[fieldIndex].Literal
 		typ, next := readTypeUntil(tokens, fieldIndex+2, token.Comma, token.RBrace)
-		fields = append(fields, fieldCompletion{name: fieldName, typ: typ})
+		fields = append(fields, fieldCompletion{
+			name:          fieldName,
+			typ:           typ,
+			documentation: declarationDocumentation(tokens, fieldIndex),
+		})
 		i = next
 		if i < len(tokens) && tokens[i].Type == token.RBrace {
 			idx.structs[name] = fields
@@ -417,19 +447,25 @@ func (idx completionIndex) scanEnum(tokens []token.Token, start int) int {
 	if !ok {
 		return start
 	}
-	idx.types[name] = completionItemKindEnum
+	idx.types[name] = typeCompletion{
+		kind:          completionItemKindEnum,
+		documentation: declarationDocumentation(tokens, start),
+	}
 	brace := findNextToken(tokens, start+1, token.LBrace)
 	if brace < 0 {
 		return start
 	}
-	tags := []string{}
+	tags := []enumMemberCompletion{}
 	for i := brace + 1; i < len(tokens) && tokens[i].Type != token.EOF; i++ {
 		if tokens[i].Type == token.RBrace {
 			idx.enums[name] = tags
 			return i
 		}
 		if tokens[i].Type == token.Ident {
-			tags = append(tags, tokens[i].Literal)
+			tags = append(tags, enumMemberCompletion{
+				name:          tokens[i].Literal,
+				documentation: declarationDocumentation(tokens, i),
+			})
 		}
 	}
 	idx.enums[name] = tags
@@ -442,7 +478,10 @@ func (idx completionIndex) scanUnion(tokens []token.Token, start int) int {
 	if !ok {
 		return start
 	}
-	idx.types[name] = completionItemKindEnum
+	idx.types[name] = typeCompletion{
+		kind:          completionItemKindEnum,
+		documentation: declarationDocumentation(tokens, start),
+	}
 	brace := findNextToken(tokens, start+1, token.LBrace)
 	if brace < 0 {
 		return start
@@ -456,7 +495,10 @@ func (idx completionIndex) scanUnion(tokens []token.Token, start int) int {
 		if tokens[i].Type != token.Ident {
 			continue
 		}
-		variant := unionVariantCompletion{name: tokens[i].Literal}
+		variant := unionVariantCompletion{
+			name:          tokens[i].Literal,
+			documentation: declarationDocumentation(tokens, i),
+		}
 		if i+1 < len(tokens) && tokens[i+1].Type == token.LParen {
 			variant.payload = true
 			i = skipBalanced(tokens, i+1, token.LParen, token.RParen)
@@ -587,7 +629,7 @@ func readFunction(tokens []token.Token, start int) (functionCompletion, int, boo
 		name:          name,
 		params:        callableParamNames(params),
 		detail:        functionSignature(name, params, returnType),
-		documentation: functionDocumentation(tokens, start),
+		documentation: declarationDocumentation(tokens, start),
 	}, next, true
 }
 
@@ -624,15 +666,15 @@ func readFunctionReturnType(tokens []token.Token, close int) (string, int) {
 	return readTypeUntil(tokens, close+2, token.LBrace, token.Semicolon)
 }
 
-// functionDocumentation returns docs attached to a function or its modifiers.
-func functionDocumentation(tokens []token.Token, start int) string {
+// declarationDocumentation returns docs attached to a declaration or its modifiers.
+func declarationDocumentation(tokens []token.Token, start int) string {
 	if start < 0 || start >= len(tokens) {
 		return ""
 	}
 	if len(tokens[start].DocComments) > 0 {
 		return strings.Join(tokens[start].DocComments, "\n")
 	}
-	for i := start - 1; i >= 0 && isFunctionModifierToken(tokens[i]); i-- {
+	for i := start - 1; i >= 0 && isDeclarationModifierToken(tokens[i]); i-- {
 		if len(tokens[i].DocComments) > 0 {
 			return strings.Join(tokens[i].DocComments, "\n")
 		}
@@ -640,8 +682,8 @@ func functionDocumentation(tokens []token.Token, start int) string {
 	return ""
 }
 
-// isFunctionModifierToken reports whether docs may attach through this token.
-func isFunctionModifierToken(tok token.Token) bool {
+// isDeclarationModifierToken reports whether docs may attach through this token.
+func isDeclarationModifierToken(tok token.Token) bool {
 	switch tok.Type {
 	case token.Public, token.Unsafe, token.Extern, token.String:
 		return true
@@ -783,12 +825,18 @@ func functionItem(name string, fn functionCompletion, kind int, detail string) c
 		detail = fn.detail
 	}
 	item := completionItem{Label: name, Kind: kind, Detail: detail}
-	if strings.TrimSpace(fn.documentation) != "" {
-		item.Documentation = &markupContent{Kind: "markdown", Value: fn.documentation}
-	}
+	item.Documentation = markdownDocumentation(fn.documentation)
 	item.InsertText = callSnippet(name, fn.params)
 	item.InsertTextFormat = insertTextFormatSnippet
 	return item
+}
+
+// markdownDocumentation converts attached docs into LSP markdown content.
+func markdownDocumentation(docs string) *markupContent {
+	if strings.TrimSpace(docs) == "" {
+		return nil
+	}
+	return &markupContent{Kind: "markdown", Value: docs}
 }
 
 // callSnippet builds a function call snippet with named placeholders.

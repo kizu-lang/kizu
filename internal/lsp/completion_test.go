@@ -89,8 +89,10 @@ func TestVSCodePackageExposesRunAndTestCommands(t *testing.T) {
 
 // TestCompleteReturnsEnumMembersAfterNamespace checks incomplete namespace expressions work.
 func TestCompleteReturnsEnumMembersAfterNamespace(t *testing.T) {
-	source := `enum Color {
+	source := `/// Visible colors.
+enum Color {
     Red,
+    /// Secondary color.
     Green,
 }
 
@@ -98,7 +100,7 @@ fn main() {
     let color = Color::
 }
 `
-	items := Complete(source, Position{Line: 6, Character: len("    let color = Color::")})
+	items := Complete(source, Position{Line: 8, Character: len("    let color = Color::")})
 	item := requireCompletion(t, items, "Green")
 	if item.Kind != completionItemKindEnumMember {
 		t.Fatalf("kind = %d, want enum member", item.Kind)
@@ -106,11 +108,60 @@ fn main() {
 	if item.TextEdit == nil || item.TextEdit.NewText != "Green" {
 		t.Fatalf("textEdit = %#v, want Green replacement", item.TextEdit)
 	}
+	if item.Documentation == nil || item.Documentation.Value != "Secondary color." {
+		t.Fatalf("documentation = %#v", item.Documentation)
+	}
+}
+
+// TestCompleteReturnsTypeDocumentation checks general completions include type docs.
+func TestCompleteReturnsTypeDocumentation(t *testing.T) {
+	source := `/// Trace data.
+struct Trace {
+    value: i64,
+}
+
+fn main() {
+    Tr
+}
+`
+	items := Complete(source, Position{Line: 6, Character: len("    Tr")})
+	trace := requireCompletion(t, items, "Trace")
+	if trace.Kind != completionItemKindStruct {
+		t.Fatalf("kind = %d, want struct", trace.Kind)
+	}
+	if trace.Documentation == nil || trace.Documentation.Value != "Trace data." {
+		t.Fatalf("documentation = %#v", trace.Documentation)
+	}
+}
+
+// TestCompleteReturnsUnionVariantDocumentation checks union namespace docs.
+func TestCompleteReturnsUnionVariantDocumentation(t *testing.T) {
+	source := `union Event {
+    /// Rename event.
+    Rename([]u8),
+}
+
+fn main() {
+    let event = Event::
+}
+`
+	items := Complete(source, Position{Line: 6, Character: len("    let event = Event::")})
+	rename := requireCompletion(t, items, "Rename")
+	if rename.Kind != completionItemKindEnumMember {
+		t.Fatalf("kind = %d, want enum member", rename.Kind)
+	}
+	if rename.TextEdit == nil || rename.TextEdit.NewText != "Rename($1)" {
+		t.Fatalf("textEdit = %#v, want Rename payload snippet", rename.TextEdit)
+	}
+	if rename.Documentation == nil || rename.Documentation.Value != "Rename event." {
+		t.Fatalf("documentation = %#v", rename.Documentation)
+	}
 }
 
 // TestCompleteReturnsStructFieldsAndImplMethods checks member completions for simple locals.
 func TestCompleteReturnsStructFieldsAndImplMethods(t *testing.T) {
 	source := `struct Trace {
+    /// Human-readable label.
     label: []u8,
     count: i64,
 }
@@ -130,10 +181,13 @@ fn main() {
     first.
 }
 `
-	items := Complete(source, Position{Line: 17, Character: len("    first.")})
+	items := Complete(source, Position{Line: 18, Character: len("    first.")})
 	label := requireCompletion(t, items, "label")
 	if label.Kind != completionItemKindField || label.Detail != "[]u8" {
 		t.Fatalf("label item = %#v, want []u8 field", label)
+	}
+	if label.Documentation == nil || label.Documentation.Value != "Human-readable label." {
+		t.Fatalf("label documentation = %#v", label.Documentation)
 	}
 	deinit := requireCompletion(t, items, "deinit")
 	if deinit.Kind != completionItemKindMethod || deinit.TextEdit == nil ||
