@@ -58,6 +58,7 @@ func requireInitializeCapabilities(t *testing.T, capabilities map[string]any) {
 	requireCapability(t, capabilities, "referencesProvider")
 	requireCapability(t, capabilities, "workspaceSymbolProvider")
 	requireCapabilityObject(t, capabilities, "completionProvider")
+	requireCompletionTrigger(t, capabilities, "@")
 	requireCapabilityObject(t, capabilities, "signatureHelpProvider")
 	requireCapabilityObject(t, capabilities, "semanticTokensProvider")
 }
@@ -76,6 +77,22 @@ func requireCapabilityObject(t *testing.T, capabilities map[string]any, key stri
 	if _, ok := capabilities[key].(map[string]any); !ok {
 		t.Fatalf("%s missing from capabilities: %#v", key, capabilities)
 	}
+}
+
+// requireCompletionTrigger checks one advertised completion trigger character.
+func requireCompletionTrigger(t *testing.T, capabilities map[string]any, want string) {
+	t.Helper()
+	provider := capabilities["completionProvider"].(map[string]any)
+	values, ok := provider["triggerCharacters"].([]any)
+	if !ok {
+		t.Fatalf("triggerCharacters missing: %#v", provider)
+	}
+	for _, value := range values {
+		if value == want {
+			return
+		}
+	}
+	t.Fatalf("triggerCharacters = %#v, want %q", values, want)
 }
 
 // TestServerInlayHintReturnsLocalTypes checks the LSP request response shape.
