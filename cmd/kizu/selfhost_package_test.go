@@ -1161,6 +1161,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"fn append_cli_main_name_end_function(",
 		"fn append_cli_run_main_body_start_function(",
+		"fn append_cli_test_block_body_start_function(",
 		"fn append_cli_test_main_body_start_function(",
 	},
 	"../../selfhost/src/backend/cli_executable_ast_llvm.kizu": {
@@ -1173,12 +1174,18 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
-		"fn require_selected_body_parsing(",
+		"cli_executable_body_parser_contract::require_selected_body_parsing(",
 		"fn append_cli_parse_run_executable_ast_function(",
 		"fn append_cli_parse_test_executable_ast_function(",
 		"fn append_cli_parse_run_print_payload_function(",
 		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
+	},
+	"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu": {
+		"pub fn require_selected_body_parsing(",
+		"fn require_run_parser_body_shape(",
+		"fn require_test_parser_body_shape(",
+		"fn return_match_arm_try_call(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::require_sequence_fact(",
 	},
@@ -1536,6 +1543,9 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		parser: readSelfhostFile(
 			t,
 			"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu",
+		) + readSelfhostFile(
+			t,
+			"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu",
 		),
 		ast: readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu"),
 		lowerer: readSelfhostFile(
