@@ -1268,7 +1268,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_executable_helper_body_facts(",
 		"fn append_hosted_function_facts(",
 		"function_signature::append(",
-		"fn require_function_body_fragment(",
+		"fn append_selected_function_with_body(",
 		"fn function_node(",
 		"executable_body::append_function_body_ir(",
 		"executable_body::append_helper_body_ir(",
@@ -1785,14 +1785,9 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 		"fn append_execute_function_facts(",
 		"fn append_executable_function_facts(",
 		"fn append_hosted_function_facts(",
-		"fn require_function_body_fragment(",
-		"check::checked_ast_node(",
-		"backend::lower_run_executable(",
-		"backend::emit_run_executable_artifact(",
-		"data::ExecutableKind::RunPrintString",
-		"data::ExecutableKind::TestExpectFailure",
-		"write_run_artifact(",
-		"write_test_artifact(",
+		"fn append_selected_function_with_body(",
+		"executable_body::append_function_body_ir(",
+		"hosted_executable_lowering::append_facts(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(selected, fragment) {
@@ -1802,6 +1797,27 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 	for _, content := range []string{selected, llvm} {
 		if strings.Contains(content, `"selected-function `) {
 			t.Fatal("executable path still depends on dedicated selected-function facts")
+		}
+	}
+	for _, fragment := range []string{
+		"fn require_function_body_fragment(",
+		"node_text_contains(",
+		"bytes_contains(",
+	} {
+		if strings.Contains(selected, fragment) {
+			t.Fatalf("selected executable function facts still use source substring validation %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`"check::checked_ast_node"`,
+		`"backend::emit_run_executable_artifact"`,
+		`"backend::emit_test_executable_artifact"`,
+		`"lower_run_executable_ast"`,
+		`"lower_test_executable_ast"`,
+		`"ensure_hosted_artifact_dir"`,
+	} {
+		if !strings.Contains(llvm, fragment) {
+			t.Fatalf("backend body IR validation does not require selected call %q", fragment)
 		}
 	}
 }
