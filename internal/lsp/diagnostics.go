@@ -1,6 +1,9 @@
 package lsp
 
 import (
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 
@@ -8,6 +11,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/project"
 	"github.com/kizu-lang/kizu/internal/types"
 )
 
@@ -21,6 +25,42 @@ func Analyze(source string) []Diagnostic {
 	if len(parseErrors) > 0 {
 		return []Diagnostic{diagnosticFromParseError(parseErrors[0])}
 	}
+	return checkProgramDiagnostics(program)
+}
+
+// analyzeDocument returns diagnostics using package context when available.
+func (s *Server) analyzeDocument(uri string) []Diagnostic {
+	source, ok := s.documents[uri]
+	if !ok {
+		return nil
+	}
+	path, ok := filePathFromURI(uri)
+	if !ok {
+		return Analyze(source)
+	}
+	root, found, err := findPackageRoot(path)
+	if err != nil {
+		return []Diagnostic{diagnosticAtStart(err.Error())}
+	}
+	if !found {
+		return Analyze(source)
+	}
+	graph, err := loadPackageGraph(root)
+	if err != nil {
+		return []Diagnostic{diagnosticAtStart(err.Error())}
+	}
+	if !graphContainsFile(graph, path) {
+		return Analyze(source)
+	}
+	program, err := project.LoadProgramWithSources(graph, s.packageSourceOverrides(graph))
+	if err != nil {
+		return []Diagnostic{diagnosticAtStart(err.Error())}
+	}
+	return checkProgramDiagnostics(program)
+}
+
+// checkProgramDiagnostics runs semantic checks for a parsed program.
+func checkProgramDiagnostics(program *ast.Program) []Diagnostic {
 	if err := types.New().Check(program); err != nil {
 		return []Diagnostic{diagnosticAtStart(err.Error())}
 	}
@@ -28,6 +68,90 @@ func Analyze(source string) []Diagnostic {
 		return []Diagnostic{diagnosticAtStart(err.Error())}
 	}
 	return []Diagnostic{}
+}
+
+// loadPackageGraph parses the package manifest and resolves its module graph.
+func loadPackageGraph(root string) (project.Graph, error) {
+	source, err := os.ReadFile(filepath.Join(root, "kizu.toml"))
+	if err != nil {
+		return project.Graph{}, err
+	}
+	manifest, err := project.ParseManifest(string(source))
+	if err != nil {
+		return project.Graph{}, err
+	}
+	return project.ResolveModules(root, manifest)
+}
+
+// packageSourceOverrides returns open buffers that correspond to graph modules.
+func (s *Server) packageSourceOverrides(graph project.Graph) map[string]string {
+	moduleFiles := map[string]bool{}
+	for _, module := range graph.Modules {
+		moduleFiles[filepath.Clean(module.File)] = true
+	}
+	sources := map[string]string{}
+	for uri, source := range s.documents {
+		path, ok := filePathFromURI(uri)
+		if !ok {
+			continue
+		}
+		cleanPath := filepath.Clean(path)
+		if moduleFiles[cleanPath] {
+			sources[cleanPath] = source
+		}
+	}
+	return sources
+}
+
+// findPackageRoot finds the nearest parent directory containing kizu.toml.
+func findPackageRoot(path string) (string, bool, error) {
+	dir := filepath.Dir(filepath.Clean(path))
+	for {
+		manifest := filepath.Join(dir, "kizu.toml")
+		info, err := os.Stat(manifest)
+		if err == nil {
+			if info.IsDir() {
+				return "", false, errPackageManifestIsDir(manifest)
+			}
+			return dir, true, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", false, err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false, nil
+		}
+		dir = parent
+	}
+}
+
+// errPackageManifestIsDir reports an invalid manifest path shape.
+func errPackageManifestIsDir(path string) error {
+	return &os.PathError{Op: "open", Path: path, Err: os.ErrInvalid}
+}
+
+// graphContainsFile reports whether path is one of the resolved graph modules.
+func graphContainsFile(graph project.Graph, path string) bool {
+	cleanPath := filepath.Clean(path)
+	for _, module := range graph.Modules {
+		if filepath.Clean(module.File) == cleanPath {
+			return true
+		}
+	}
+	return false
+}
+
+// filePathFromURI converts local file URIs into file system paths.
+func filePathFromURI(rawURI string) (string, bool) {
+	parsed, err := url.Parse(rawURI)
+	if err != nil || parsed.Scheme != "file" || parsed.Path == "" {
+		return "", false
+	}
+	if parsed.Host != "" && parsed.Host != "localhost" {
+		return "", false
+	}
+	return filepath.Clean(filepath.FromSlash(parsed.Path)), true
 }
 
 // parseSource parses one in-memory Kizu document.

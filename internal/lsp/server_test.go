@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,6 +46,76 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	diagnostics := params["diagnostics"].([]any)
 	if len(diagnostics) != 1 {
 		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
+	}
+}
+
+// TestServerUsesNestedPackageGraphForDiagnostics checks subdirectory package roots work.
+func TestServerUsesNestedPackageGraphForDiagnostics(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace", "sub-app")
+	mainSource := `import app::token;
+
+fn main(value: token::Token) -> void {
+    return;
+}
+`
+	writeLSPPackage(t, root, map[string]string{
+		"src/main.kizu": mainSource,
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64,
+}
+`,
+	})
+	input := strings.Join([]string{
+		didOpenFrame(t, fileURI(filepath.Join(root, "src", "main.kizu")), mainSource),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 1 {
+		t.Fatalf("got %d messages, want 1", len(messages))
+	}
+	diagnostics := publishedDiagnostics(t, messages[0])
+	if len(diagnostics) != 0 {
+		t.Fatalf("got diagnostics %#v, want none", diagnostics)
+	}
+}
+
+// TestServerPackageDiagnosticsUseOpenBuffer checks unsaved edits override disk.
+func TestServerPackageDiagnosticsUseOpenBuffer(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace", "sub-app")
+	openMain := `import app::token;
+
+fn main(value: token::Token) -> void {
+    return;
+}
+`
+	writeLSPPackage(t, root, map[string]string{
+		"src/main.kizu": "let x = 1;\n",
+		"src/token.kizu": `pub struct Token {
+    pub kind: i64,
+}
+`,
+	})
+	input := strings.Join([]string{
+		didOpenFrame(t, fileURI(filepath.Join(root, "src", "main.kizu")), openMain),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 1 {
+		t.Fatalf("got %d messages, want 1", len(messages))
+	}
+	diagnostics := publishedDiagnostics(t, messages[0])
+	if len(diagnostics) != 0 {
+		t.Fatalf("got diagnostics %#v, want none", diagnostics)
 	}
 }
 
@@ -156,6 +229,70 @@ func TestServerShutdownReturnsNullResult(t *testing.T) {
 // frame adds the LSP Content-Length envelope around a JSON body.
 func frame(body string) string {
 	return "Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+}
+
+// didOpenFrame returns one didOpen notification for a file buffer.
+func didOpenFrame(t *testing.T, uri string, text string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didOpen",
+		"params": map[string]any{
+			"textDocument": map[string]any{
+				"uri":        uri,
+				"languageId": "kizu",
+				"version":    1,
+				"text":       text,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frame(string(body))
+}
+
+// fileURI converts a test file path into a local LSP URI.
+func fileURI(path string) string {
+	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
+}
+
+// writeLSPPackage writes a minimal Kizu package for server diagnostics tests.
+func writeLSPPackage(t *testing.T, root string, sources map[string]string) {
+	t.Helper()
+	manifest := `[package]
+name = "app"
+version = "0.2.0"
+
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+`
+	writeLSPFile(t, filepath.Join(root, "kizu.toml"), manifest)
+	for rel, source := range sources {
+		writeLSPFile(t, filepath.Join(root, rel), source)
+	}
+}
+
+// writeLSPFile writes one test file, creating parent directories first.
+func writeLSPFile(t *testing.T, path string, source string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// publishedDiagnostics returns the diagnostics array from one publish notification.
+func publishedDiagnostics(t *testing.T, message map[string]any) []any {
+	t.Helper()
+	if message["method"] != "textDocument/publishDiagnostics" {
+		t.Fatalf("got method %#v, want publish diagnostics", message["method"])
+	}
+	params := message["params"].(map[string]any)
+	return params["diagnostics"].([]any)
 }
 
 // readFrames decodes all framed JSON-RPC messages from server output.
