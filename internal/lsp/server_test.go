@@ -42,6 +42,9 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	if _, ok := capabilities["completionProvider"].(map[string]any); !ok {
 		t.Fatalf("completionProvider missing from capabilities: %#v", capabilities)
 	}
+	if capabilities["inlayHintProvider"] != true {
+		t.Fatalf("inlayHintProvider = %#v, want true", capabilities["inlayHintProvider"])
+	}
 	if messages[1]["method"] != "textDocument/publishDiagnostics" {
 		t.Fatalf("got method %#v, want publish diagnostics", messages[1]["method"])
 	}
@@ -49,6 +52,44 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	diagnostics := params["diagnostics"].([]any)
 	if len(diagnostics) != 1 {
 		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
+	}
+}
+
+// TestServerInlayHintReturnsLocalTypes checks the LSP request response shape.
+func TestServerInlayHintReturnsLocalTypes(t *testing.T) {
+	input := strings.Join([]string{
+		frame(`{"jsonrpc":"2.0","method":"textDocument/didOpen",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu",` +
+			`"languageId":"kizu","version":1,"text":"fn main() {\n    let n = 1;\n}"}}}`),
+		frame(`{"jsonrpc":"2.0","id":9,"method":"textDocument/inlayHint",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu"},` +
+			`"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":1}}}}`),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages, want 2", len(messages))
+	}
+	if messages[1]["id"].(float64) != 9 {
+		t.Fatalf("inlay hint response id = %#v, want 9", messages[1]["id"])
+	}
+	hints := messages[1]["result"].([]any)
+	if len(hints) != 1 {
+		t.Fatalf("got hints %#v, want one hint", hints)
+	}
+	got := hints[0].(map[string]any)
+	if got["label"] != ": i64" {
+		t.Fatalf("hint label = %#v, want : i64", got["label"])
+	}
+	position := got["position"].(map[string]any)
+	if position["line"].(float64) != 1 ||
+		position["character"].(float64) != float64(len("    let n")) {
+		t.Fatalf("position = %#v, want after local name", position)
 	}
 }
 
