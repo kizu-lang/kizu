@@ -52,7 +52,8 @@ Source: [ADR-0050](adr/0050-visibility-diagnostics.md) and
 
 ### Diagnostics
 
-Source: [ADR-0050](adr/0050-visibility-diagnostics.md).
+Source: [ADR-0050](adr/0050-visibility-diagnostics.md) and
+[ADR-0072](adr/0072-diagnostic-message-style.md).
 
 Spans carry:
 

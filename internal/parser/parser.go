@@ -140,7 +140,7 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 	case token.Contract:
 		return p.parseContractDecl()
 	default:
-		p.errorf("expected public declaration, got %s", p.cur.Type)
+		p.errorf("expected public declaration, got %s", tokenDescription(p.cur))
 		return &ast.FunctionDecl{Public: true, Doc: docs}
 	}
 }
@@ -299,7 +299,7 @@ func (p *Parser) parseContractMethods() []*ast.FunctionDecl {
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
 		if p.cur.Type != token.Function {
-			p.errorf("expected contract method, got %s", p.cur.Type)
+			p.errorf("expected contract method, got %s", tokenDescription(p.cur))
 			return methods
 		}
 		method := p.parseFunctionSignature(&ast.FunctionDecl{}, false)
@@ -353,7 +353,7 @@ func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
 			p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
 			return methods
 		default:
-			p.errorf("expected impl method, got %s", p.cur.Type)
+			p.errorf("expected impl method, got %s", tokenDescription(p.cur))
 			return methods
 		}
 		if fn, ok := method.(*ast.FunctionDecl); ok {
@@ -416,7 +416,7 @@ func (p *Parser) parseStructField() (ast.Field, bool) {
 		p.nextToken()
 	}
 	if p.cur.Type != token.Ident {
-		p.errorf("expected field name, got %s", p.cur.Type)
+		p.errorf("expected field name, got %s", tokenDescription(p.cur))
 		return field, false
 	}
 	field.Name = p.cur.Literal
@@ -465,7 +465,7 @@ func (p *Parser) parseEnumTags() ([]string, map[string]string) {
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
 		if p.cur.Type != token.Ident {
-			p.errorf("expected enum tag, got %s", p.cur.Type)
+			p.errorf("expected enum tag, got %s", tokenDescription(p.cur))
 			return tags, tagDocsOrNil(tagDocs)
 		}
 		tags = append(tags, p.cur.Literal)
@@ -536,7 +536,7 @@ func (p *Parser) parseUnionVariants() []ast.UnionVariant {
 func (p *Parser) parseUnionVariant() (ast.UnionVariant, bool) {
 	variant := ast.UnionVariant{Doc: docText(p.cur)}
 	if p.cur.Type != token.Ident {
-		p.errorf("expected union variant, got %s", p.cur.Type)
+		p.errorf("expected union variant, got %s", tokenDescription(p.cur))
 		return variant, false
 	}
 	variant.Name = p.cur.Literal
@@ -566,7 +566,7 @@ func (p *Parser) parseParams() []ast.Param {
 			p.nextToken()
 		}
 		if p.cur.Type != token.Ident {
-			p.errorf("expected parameter name, got %s", p.cur.Type)
+			p.errorf("expected parameter name, got %s", tokenDescription(p.cur))
 			return params
 		}
 		param.Name = p.cur.Literal
@@ -749,7 +749,7 @@ func (p *Parser) parseUnsafeCapabilities() []string {
 	}
 	for {
 		if p.cur.Type != token.Ident {
-			p.errorf("expected unsafe capability, got %s", p.cur.Type)
+			p.errorf("expected unsafe capability, got %s", tokenDescription(p.cur))
 			return capabilities
 		}
 		if _, ok := unsafecap.Lookup(p.cur.Literal); !ok {
@@ -1007,7 +1007,7 @@ func (p *Parser) parseMatchArms() []ast.MatchArm {
 func (p *Parser) parseMatchArm() (ast.MatchArm, bool) {
 	arm := ast.MatchArm{}
 	if p.cur.Type != token.Ident {
-		p.errorf("expected match tag, got %s", p.cur.Type)
+		p.errorf("expected match tag, got %s", tokenDescription(p.cur))
 		return arm, false
 	}
 	arm.Tag = p.cur.Literal
@@ -1189,7 +1189,7 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		p.expectPeek(token.RParen)
 		return left
 	default:
-		p.errorf("expected expression, got %s", p.cur.Type)
+		p.errorf("expected expression, got %s", tokenDescription(p.cur))
 		return &ast.IdentExpr{Name: "<error>", Span: tokenSpan(p.cur)}
 	}
 }
@@ -1258,7 +1258,7 @@ func (p *Parser) parseTypeName() string {
 	case token.Ident:
 		return p.parseNamedTypeName()
 	default:
-		p.errorf("expected type, got %s", p.cur.Type)
+		p.errorf("expected type, got %s", tokenDescription(p.cur))
 		return ""
 	}
 }
@@ -1301,7 +1301,7 @@ func (p *Parser) parseNamedTypeName() string {
 func (p *Parser) parseDynTypeName() string {
 	p.nextToken()
 	if p.cur.Type != token.Ident {
-		p.errorf("expected contract after dyn, got %s", p.cur.Type)
+		p.errorf("expected contract after dyn, got %s", tokenDescription(p.cur))
 		return ""
 	}
 	name := p.parseTypeBaseName()
@@ -1402,7 +1402,7 @@ func (p *Parser) parseGenericParamList() []string {
 			seen[p.cur.Literal] = true
 			types = append(types, p.cur.Literal)
 		default:
-			p.errorf("expected type parameter, got %s", p.cur.Type)
+			p.errorf("expected type parameter, got %s", tokenDescription(p.cur))
 			return nil
 		}
 		if p.peek.Type != token.Comma {
@@ -1434,7 +1434,7 @@ func (p *Parser) parseStaticTypeArg(allowConst bool) string {
 	case token.Ident, token.Bang, token.Amp, token.Dyn, token.LBracket, token.Question:
 		return p.parseTypeArg(allowConst)
 	default:
-		p.errorf("expected static type argument, got %s", p.cur.Type)
+		p.errorf("expected static type argument, got %s", tokenDescription(p.cur))
 		return ""
 	}
 }
@@ -1600,7 +1600,7 @@ func namespaceExprParts(expr ast.Expression) ([]string, bool) {
 func (p *Parser) parseFieldValue() (ast.FieldValue, bool) {
 	field := ast.FieldValue{}
 	if p.cur.Type != token.Ident {
-		p.errorf("expected field name, got %s", p.cur.Type)
+		p.errorf("expected field name, got %s", tokenDescription(p.cur))
 		return field, false
 	}
 	field.Name = p.cur.Literal
@@ -1638,7 +1638,7 @@ func (p *Parser) expectCur(t token.Type) bool {
 	if p.cur.Type == t {
 		return true
 	}
-	p.errorf("expected %s, got %s", t, p.cur.Type)
+	p.errorf("expected %s, got %s", tokenTypeDescription(t), tokenDescription(p.cur))
 	return false
 }
 
@@ -1648,7 +1648,7 @@ func (p *Parser) expectPeek(t token.Type) bool {
 		p.nextToken()
 		return true
 	}
-	p.errorf("expected next token %s, got %s", t, p.peek.Type)
+	p.errorf("expected next token %s, got %s", tokenTypeDescription(t), tokenDescription(p.peek))
 	return false
 }
 
@@ -1700,6 +1700,22 @@ func tokenDescription(tok token.Token) string {
 		return "end of file"
 	default:
 		return fmt.Sprintf("`%s`", tok.Literal)
+	}
+}
+
+// tokenTypeDescription renders an expected token kind without lexer internals.
+func tokenTypeDescription(typ token.Type) string {
+	switch typ {
+	case token.Ident:
+		return "identifier"
+	case token.Int:
+		return "integer"
+	case token.String:
+		return "string"
+	case token.EOF:
+		return "end of file"
+	default:
+		return fmt.Sprintf("`%s`", typ)
 	}
 }
 

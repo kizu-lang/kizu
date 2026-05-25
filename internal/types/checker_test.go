@@ -377,6 +377,46 @@ func TestCheckRejectsReturnAndOperatorErrors(t *testing.T) {
 	runErrorCases(t, cases)
 }
 
+// TestCheckOperatorKindErrorReportsOperandTypes keeps operator notes actionable.
+func TestCheckOperatorKindErrorReportsOperandTypes(t *testing.T) {
+	err := checkSource(`fn bad(a: bool, b: bool) -> bool {
+    return a + b;
+}`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{
+		"operator `+` expects numeric operands",
+		"at 2:14",
+		"left operand has type bool",
+		"right operand has type bool",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
+
+// TestCheckAssignmentMismatchUsesExpectedGot keeps assignment diagnostics concrete.
+func TestCheckAssignmentMismatchUsesExpectedGot(t *testing.T) {
+	err := checkSource(`struct User { name: []u8 }
+fn main() {
+    var user = User { name: "alice" };
+    user.name = 1;
+}`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{
+		"assignment to `user.name` expects []u8, got i64",
+		"at 4:5",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
+
 // runErrorCases checks that each source fails with the expected message.
 func runErrorCases(t *testing.T, cases []struct {
 	name   string
