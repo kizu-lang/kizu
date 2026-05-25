@@ -3,8 +3,35 @@ import selfhost::backend::ir_contract;
 pub fn require_executable_body_parsing(ir_bytes: []u8) -> !void {
     try require_run_parser_body_shape(ir_bytes);
     try require_test_parser_body_shape(ir_bytes);
+    try require_run_payload_byte_contract(ir_bytes);
     try require_parser_source_tokens(ir_bytes);
     return;
+}
+
+pub fn run_literal_quote_byte(ir_bytes: []u8) -> !i64 {
+    let function_name = "selfhost::backend::executable::run_payload_from_literal";
+    let start_quote = try literal_boundary_quote_byte(ir_bytes, function_name, 0);
+    let end_quote = try literal_boundary_quote_byte(ir_bytes, function_name, 1);
+    if start_quote != end_quote {
+        return error("invalid executable parser payload contract");
+    }
+    let forbidden_quote = try run_payload_forbidden_byte(ir_bytes);
+    if start_quote != forbidden_quote {
+        return error("invalid executable parser payload contract");
+    }
+    return start_quote;
+}
+
+pub fn run_payload_min_byte(ir_bytes: []u8) -> !i64 {
+    return try payload_guard_byte_constant(ir_bytes, "lt");
+}
+
+pub fn run_payload_max_byte(ir_bytes: []u8) -> !i64 {
+    return try payload_guard_byte_constant(ir_bytes, "gt");
+}
+
+pub fn run_payload_forbidden_byte(ir_bytes: []u8) -> !i64 {
+    return try payload_guard_byte_constant(ir_bytes, "eq");
 }
 
 pub fn unsupported_ast_kind_name(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
@@ -70,6 +97,17 @@ fn executable_ast_result_kind_name(
         kind_value,
         "namespace"
     );
+}
+
+fn require_run_payload_byte_contract(ir_bytes: []u8) -> !void {
+    let quote = try run_literal_quote_byte(ir_bytes);
+    let min = try run_payload_min_byte(ir_bytes);
+    let max = try run_payload_max_byte(ir_bytes);
+    let forbidden = try run_payload_forbidden_byte(ir_bytes);
+    if min > max or forbidden < min or forbidden > max or quote != forbidden {
+        return error("invalid executable parser payload contract");
+    }
+    return;
 }
 
 fn require_run_parser_body_shape(ir_bytes: []u8) -> !void {
@@ -190,6 +228,164 @@ fn require_run_parser_body_shape(ir_bytes: []u8) -> !void {
         "unsupported_executable_ast"
     );
     return;
+}
+
+fn payload_guard_byte_constant(ir_bytes: []u8, op: []u8) -> !i64 {
+    let function_name = "selfhost::backend::executable::is_supported_run_print_payload";
+    return try binary_right_cast_u8_int_value_for_left_var(
+        ir_bytes,
+        function_name,
+        op,
+        "byte"
+    );
+}
+
+fn binary_right_cast_u8_int_value_for_left_var(
+    ir_bytes: []u8,
+    function_name: []u8,
+    op: []u8,
+    variable: []u8
+) -> !i64 {
+    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var sequence = 0;
+    while sequence < count {
+        if try binary_op_matches(ir_bytes, function_name, sequence, op) {
+            let left = try ir_contract::body_child_sequence(
+                ir_bytes,
+                function_name,
+                sequence,
+                "left",
+                0
+            );
+            if try node_token_matches(ir_bytes, function_name, left, "Var", variable) {
+                let right = try ir_contract::body_child_sequence(
+                    ir_bytes,
+                    function_name,
+                    sequence,
+                    "right",
+                    0
+                );
+                return try cast_u8_int_value(ir_bytes, function_name, right);
+            }
+        }
+        sequence = sequence + 1;
+    }
+    return error("missing IR artifact fact");
+}
+
+fn literal_boundary_quote_byte(
+    ir_bytes: []u8,
+    function_name: []u8,
+    ordinal: i64
+) -> !i64 {
+    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var sequence = 0;
+    var matched = 0;
+    while sequence < count {
+        if try binary_op_matches(ir_bytes, function_name, sequence, "not-eq") {
+            let left = try ir_contract::body_child_sequence(
+                ir_bytes,
+                function_name,
+                sequence,
+                "left",
+                0
+            );
+            if try index_target_matches(ir_bytes, function_name, left, "literal") {
+                if matched == ordinal {
+                    let right = try ir_contract::body_child_sequence(
+                        ir_bytes,
+                        function_name,
+                        sequence,
+                        "right",
+                        0
+                    );
+                    return try cast_u8_int_value(ir_bytes, function_name, right);
+                }
+                matched = matched + 1;
+            }
+        }
+        sequence = sequence + 1;
+    }
+    return error("missing IR artifact fact");
+}
+
+fn binary_op_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64,
+    op: []u8
+) -> !bool {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if !std::mem::equal_bytes(kind, "Binary") {
+        return false;
+    }
+    let actual = try ir_contract::sequence_fact_value(
+        ir_bytes,
+        "body-binary ",
+        function_name,
+        sequence
+    );
+    return std::mem::equal_bytes(actual, op);
+}
+
+fn index_target_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64,
+    variable: []u8
+) -> !bool {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if !std::mem::equal_bytes(kind, "IndexExpr") {
+        return false;
+    }
+    let target = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        sequence,
+        "target",
+        0
+    );
+    return try node_token_matches(ir_bytes, function_name, target, "Var", variable);
+}
+
+fn cast_u8_int_value(ir_bytes: []u8, function_name: []u8, sequence: i64) -> !i64 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if !std::mem::equal_bytes(kind, "CastExpr") {
+        return error("invalid executable parser payload contract");
+    }
+    let type_node = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        sequence,
+        "type",
+        0
+    );
+    if !(try node_token_matches(ir_bytes, function_name, type_node, "TypeName", "u8")) {
+        return error("invalid executable parser payload contract");
+    }
+    let value = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        sequence,
+        "value",
+        0
+    );
+    return try ir_contract::body_int_value(ir_bytes, function_name, value);
+}
+
+fn node_token_matches(
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64,
+    kind: []u8,
+    token: []u8
+) -> !bool {
+    let actual_kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if !std::mem::equal_bytes(actual_kind, kind) {
+        return false;
+    }
+    let actual = try ir_contract::body_token_or_empty(ir_bytes, function_name, sequence);
+    return std::mem::equal_bytes(actual, token);
 }
 
 fn require_test_parser_body_shape(ir_bytes: []u8) -> !void {

@@ -2125,12 +2125,20 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 		"run_return_ast_kind_name(",
 		"test_ok_ast_kind_name(",
 		"test_failure_ast_kind_name(",
+		"run_literal_quote_byte(",
+		"run_payload_min_byte(",
+		"run_payload_max_byte(",
+		"run_payload_forbidden_byte(",
+		"payload_guard_byte_constant(",
+		"literal_boundary_quote_byte(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_parent_with_child_token(",
 		"ir_contract::body_struct_literal_of_type(",
 		"ir_contract::body_struct_field_value(",
 		"ir_contract::body_field_expr_name(",
+		"ir_contract::body_int_value(",
 		"ir_contract::body_call_callee_or_empty(",
+		`"body-binary "`,
 		"parse_run_executable_ast",
 		"parse_test_executable_ast",
 		`"Program"`,
@@ -2153,6 +2161,17 @@ func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser stri
 	} {
 		if strings.Contains(parser, fragment) {
 			t.Fatalf("selected body parser hardcodes executable AST result tag %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`"  %min_ok = icmp uge i8 %byte, 32"`,
+		`"  %max_ok = icmp ule i8 %byte, 126"`,
+		`"  %is_quote = icmp eq i8 %byte, 34"`,
+		`"  %quote_start_ok = icmp eq i8 %quote_start, 34"`,
+		`"  %quote_end_ok = icmp eq i8 %quote_end, 34"`,
+	} {
+		if strings.Contains(parser, fragment) {
+			t.Fatalf("selected body parser hardcodes payload byte rule %q", fragment)
 		}
 	}
 }
