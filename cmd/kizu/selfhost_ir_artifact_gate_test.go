@@ -334,6 +334,17 @@ func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 			"parse_expect_call_ast#expect_bool_value checked-call\n",
 		"selected-body-parsing-call selfhost::backend::executable::" +
 			"expect_bool_value#bool_value_as_i64 checked-call\n",
+		"selected-body-parsing-token syntax-fn fn\n",
+		"selected-body-parsing-token syntax-test test\n",
+		"selected-body-parsing-token syntax-return return\n",
+		"selected-body-parsing-token syntax-void void\n",
+		"selected-body-parsing-token value-main main\n",
+		"selected-body-parsing-token run-print-callee print\n",
+		"selected-body-parsing-token expect-callee-root std\n",
+		"selected-body-parsing-token expect-callee-module testing\n",
+		"selected-body-parsing-token expect-callee-function expect\n",
+		"selected-body-parsing-token literal-true true\n",
+		"selected-body-parsing-token literal-false false\n",
 	}
 }
 

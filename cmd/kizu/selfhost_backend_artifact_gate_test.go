@@ -653,6 +653,17 @@ func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 			"parse_expect_call_ast#expect_bool_value checked-call\n",
 		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
 			"expect_bool_value#bool_value_as_i64 checked-call\n",
+		"backend-input selected-body-parsing-token syntax-fn fn\n",
+		"backend-input selected-body-parsing-token syntax-test test\n",
+		"backend-input selected-body-parsing-token syntax-return return\n",
+		"backend-input selected-body-parsing-token syntax-void void\n",
+		"backend-input selected-body-parsing-token value-main main\n",
+		"backend-input selected-body-parsing-token run-print-callee print\n",
+		"backend-input selected-body-parsing-token expect-callee-root std\n",
+		"backend-input selected-body-parsing-token expect-callee-module testing\n",
+		"backend-input selected-body-parsing-token expect-callee-function expect\n",
+		"backend-input selected-body-parsing-token literal-true true\n",
+		"backend-input selected-body-parsing-token literal-false false\n",
 	}
 }
 
