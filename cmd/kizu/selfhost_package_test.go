@@ -1177,8 +1177,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn require_selected_body_lowering(",
 		"fn append_cli_lower_run_executable_ast_function(",
 		"fn append_cli_lower_test_executable_ast_function(",
-		"fn selected_body_executable_kind(",
-		"selected-body-lowering-rule ",
+		"fn body_field_expr_value(",
+		"ir_contract::sequence_fact_value(",
+		"ir_contract::require_sequence_fact(",
 	},
 	"../../selfhost/src/backend/cli_executable_match_llvm.kizu": {
 		"pub fn append_functions(",
@@ -1195,7 +1196,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn require_named_fact(",
 		"pub fn named_i64_fact(",
 		"pub fn require_named_i64_fact(",
-		"pub fn mapped_i64_fact(",
+		"pub fn sequence_fact_value(",
+		"pub fn require_sequence_fact(",
 	},
 	"../../selfhost/src/ir/executable_contract.kizu": {
 		"pub fn append_facts(",
@@ -1245,9 +1247,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/ir/executable_body_lowering.kizu": {
 		"pub fn append_run_lowering_facts(",
 		"pub fn append_test_lowering_facts(",
-		"fn append_lowering_rule_facts_from_body(",
-		"fn append_lowering_rule_fact_from_if(",
-		"selected-body-lowering-rule ",
+		"fn require_unsupported_return(",
+		"selected-body-lowering-unsupported ",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1331,7 +1332,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		selectedBodyParsingFacts:  hostedExecutableSelectedBodyParsingFacts(),
 		selectedBodyLoweringFacts: hostedExecutableSelectedBodyLoweringFacts(),
 		selectedBodyParsingRules:  hostedExecutableSelectedBodyParsingRuleFacts(),
-		selectedBodyLoweringRules: hostedExecutableSelectedBodyLoweringRuleFacts(),
 	}
 	assertHostedExecutableBackendInputs(t, sources.llvm, facts)
 	assertHostedExecutableFactOrigins(t, sources, facts)
@@ -1350,7 +1350,6 @@ type hostedExecutableContractFacts struct {
 	selectedBodyParsingFacts  []string
 	selectedBodyLoweringFacts []string
 	selectedBodyParsingRules  []string
-	selectedBodyLoweringRules []string
 }
 
 // assertHostedExecutableBackendInputs checks backend validation and metadata
@@ -1451,7 +1450,6 @@ func assertHostedExecutableRendererConsumers(
 		sources.match,
 		sources.lowerer,
 		facts.selectedBodyParsingRules,
-		facts.selectedBodyLoweringRules,
 	)
 	assertExecutableABIConsumers(
 		t,
@@ -2103,12 +2101,8 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 	for _, fragment := range []string{
 		"pub fn append_run_lowering_facts(",
 		"pub fn append_test_lowering_facts(",
-		"fn append_lowering_rule_facts_from_body(",
-		"fn append_lowering_rule_fact_from_if(",
 		"ast.get(",
 		"ast.child_at(",
-		"data::ExecutableAstKind::",
-		"data::ExecutableKind::",
 		"unsupported_executable",
 	} {
 		if !strings.Contains(bodyLowering, fragment) {
@@ -2129,18 +2123,6 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 			strings.HasPrefix(fact, "selected-body-lowering-unsupported ") {
 			requiredFragments = append(requiredFragments, `"`+parts[1]+`"`)
 		}
-		if strings.HasPrefix(fact, "selected-body-lowering-rule ") {
-			key := parts[1]
-			index := strings.Index(key, "#")
-			if index < 0 {
-				t.Fatalf("invalid selected-body-lowering-rule fixture %q", fact)
-			}
-			requiredFragments = append(
-				requiredFragments,
-				`"`+key[:index]+`"`,
-				"append_enum_suffix(",
-			)
-		}
 		for _, fragment := range requiredFragments {
 			if !strings.Contains(emitter, fragment) {
 				t.Fatalf("selected body lowering emitter does not publish %q via %q", fact, fragment)
@@ -2155,22 +2137,17 @@ func assertExecutableRuleConsumers(
 	match string,
 	ast string,
 	parsingRules []string,
-	loweringRules []string,
 ) {
 	t.Helper()
 	for _, rule := range parsingRules {
 		assertNamedFactConsumer(t, match, "hosted executable matcher renderer", rule)
 	}
-	for _, rule := range loweringRules {
-		if strings.Contains(ast, `"`+rule+`"`) {
-			t.Fatalf("hosted executable lowerer hardcodes complete rule %q", rule)
-		}
-	}
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
-		"ir_contract::mapped_i64_fact(",
-		"selected_body_executable_kind(",
-		`"selected-body-lowering-rule "`,
+		"ir_contract::sequence_fact_value(",
+		"ir_contract::require_sequence_fact(",
+		"body_field_expr_value(",
+		`"body-field-expr "`,
 		`"executable-kind "`,
 	} {
 		if !strings.Contains(ast, fragment) {
@@ -2556,7 +2533,7 @@ func hostedExecutableSelectedHelperBodyFacts() []string {
 // hostedExecutableSelectedBodyLoweringFacts returns checked body lowering facts
 // derived from the selected lowering function bodies.
 func hostedExecutableSelectedBodyLoweringFacts() []string {
-	facts := []string{
+	return []string{
 		"selected-body-lowering selfhost::backend::executable::" +
 			"lower_run_executable_ast checked-run-executable",
 		"selected-body-lowering selfhost::backend::executable::" +
@@ -2566,7 +2543,6 @@ func hostedExecutableSelectedBodyLoweringFacts() []string {
 		"selected-body-lowering-unsupported selfhost::backend::executable::" +
 			"lower_test_executable_ast unsupported_executable",
 	}
-	return append(facts, hostedExecutableSelectedBodyLoweringRuleFacts()...)
 }
 
 // hostedExecutableSelectedBodyParsingFacts returns checked parser facts derived
@@ -2598,21 +2574,6 @@ func hostedExecutableSelectedBodyParsingRuleFacts() []string {
 			"parse_expect_call_ast#TestExpectTrue MainExpectTrue",
 		"selected-body-parser-rule selfhost::backend::executable::" +
 			"parse_expect_call_ast#TestExpectFalse MainExpectFalse",
-	}
-}
-
-// hostedExecutableSelectedBodyLoweringRuleFacts returns AST-kind to executable
-// kind mappings that must be emitted from checked lowering bodies.
-func hostedExecutableSelectedBodyLoweringRuleFacts() []string {
-	return []string{
-		"selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_run_executable_ast#RunPrintCall RunPrintString",
-		"selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_run_executable_ast#RunReturnVoid RunReturnVoid",
-		"selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_test_executable_ast#TestExpectTrue TestExpectOk",
-		"selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_test_executable_ast#TestExpectFalse TestExpectFailure",
 	}
 }
 

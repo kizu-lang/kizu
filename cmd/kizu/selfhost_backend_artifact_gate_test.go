@@ -634,14 +634,6 @@ func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
 			"lower_run_executable_ast checked-run-executable\n",
 		"backend-input selected-body-lowering selfhost::backend::executable::" +
 			"lower_test_executable_ast checked-test-executable\n",
-		"backend-input selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_run_executable_ast#RunPrintCall RunPrintString\n",
-		"backend-input selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_run_executable_ast#RunReturnVoid RunReturnVoid\n",
-		"backend-input selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_test_executable_ast#TestExpectTrue TestExpectOk\n",
-		"backend-input selected-body-lowering-rule selfhost::backend::executable::" +
-			"lower_test_executable_ast#TestExpectFalse TestExpectFailure\n",
 		"backend-input selected-body-lowering-unsupported selfhost::backend::executable::" +
 			"lower_run_executable_ast unsupported_executable\n",
 		"backend-input selected-body-lowering-unsupported selfhost::backend::executable::" +
