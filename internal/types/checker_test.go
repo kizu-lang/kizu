@@ -613,6 +613,16 @@ fn main() { print(Color::Blue); }`,
 			source: `fn main() { print(Color::Red); }`,
 			want:   "unknown namespace `Color`",
 		},
+		{
+			name: "mismatched enum equality",
+			source: `enum Color { Red, Green }
+enum Animal { Cat, Dog }
+fn main() {
+    let color = Color::Green;
+    if color == Animal::Cat { return; }
+}`,
+			want: "operator `==` operands must have same type",
+		},
 	}
 	runErrorCases(t, cases)
 }
