@@ -3567,6 +3567,9 @@ func (c *Checker) checkAstAddExprMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	if result, ok, err := c.checkAstAddDocExprMethod(receiver, name, args, env); ok || err != nil {
+		return result, ok, err
+	}
 	switch name {
 	case "add_int":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
@@ -3628,6 +3631,25 @@ func (c *Checker) checkAstAddExprMethod(
 		return result, true, err
 	default:
 		return c.checkAstAddExtendedExprMethod(receiver, name, args, env)
+	}
+}
+
+// checkAstAddDocExprMethod validates expression constructors carrying doc metadata.
+func (c *Checker) checkAstAddDocExprMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "add_var_with_doc":
+		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::Span", "std::kizu::ast::SymbolId",
+			"std::kizu::ast::Span",
+		}, "std::kizu::ast::NodeId")
+		return result, true, err
+	default:
+		return "", false, nil
 	}
 }
 
@@ -3787,6 +3809,9 @@ func (c *Checker) checkAstAddDeclMethod(
 	args []ast.Expression,
 	env *scope,
 ) (string, bool, error) {
+	if result, ok, err := c.checkAstAddDocDeclMethod(receiver, name, args, env); ok || err != nil {
+		return result, ok, err
+	}
 	switch name {
 	case "add_param":
 		result, err := c.checkAstMethodArgs(receiver, name, args, env, []string{
@@ -3848,6 +3873,57 @@ func (c *Checker) checkAstAddDeclMethod(
 	default:
 		return "", false, nil
 	}
+}
+
+// checkAstAddDocDeclMethod validates declaration constructors carrying doc metadata.
+func (c *Checker) checkAstAddDocDeclMethod(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+) (string, bool, error) {
+	switch name {
+	case "add_field_with_doc":
+		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
+			"bool", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		})
+	case "add_struct_decl_with_doc", "add_union_decl_with_doc":
+		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
+			"bool", "std::kizu::ast::NodeId",
+			"std::kizu::ast::ChildRange", "std::kizu::ast::ChildRange",
+		})
+	case "add_enum_decl_with_doc":
+		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
+			"bool", "std::kizu::ast::NodeId", "std::kizu::ast::ChildRange",
+		})
+	case "add_union_variant_with_doc":
+		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+		})
+	case "add_fn_decl_with_doc":
+		return c.checkAstDocMethodArgs(receiver, name, args, env, []string{
+			"bool", "bool", "std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+			"std::kizu::ast::ChildRange", "std::kizu::ast::ChildRange",
+			"std::kizu::ast::NodeId", "std::kizu::ast::NodeId",
+			"std::kizu::ast::NodeId",
+		})
+	default:
+		return "", false, nil
+	}
+}
+
+// checkAstDocMethodArgs validates constructor args with leading and trailing doc spans.
+func (c *Checker) checkAstDocMethodArgs(
+	receiver *binding,
+	name string,
+	args []ast.Expression,
+	env *scope,
+	middle []string,
+) (string, bool, error) {
+	want := append([]string{"std::kizu::ast::Span"}, middle...)
+	want = append(want, "std::kizu::ast::Span")
+	result, err := c.checkAstMethodArgs(receiver, name, args, env, want, "std::kizu::ast::NodeId")
+	return result, true, err
 }
 
 // checkAstMethodArgs checks AST helper arguments without moving copy-like ids.
@@ -5300,14 +5376,17 @@ func (c *Checker) astChildRangeReceiver(expr ast.Expression, env *scope) *bindin
 // astNodeIDMethod reports methods that return an Ast-owned NodeId.
 func astNodeIDMethod(name string) bool {
 	switch name {
-	case "add_node", "add_int", "add_string", "add_type_name", "add_var", "add_bool",
+	case "add_node", "add_int", "add_string", "add_type_name", "add_var",
+		"add_var_with_doc", "add_bool",
 		"add_prefix", "add_binary", "add_field_expr", "add_deref_expr", "add_call", "add_try_expr",
 		"add_comptime_expr", "add_block", "add_if", "add_let", "add_assign",
 		"add_return", "add_defer", "add_expr_stmt", "add_while", "add_for", "add_break",
 		"add_continue", "add_program", "add_param", "add_import_decl", "add_field",
-		"add_struct_decl", "add_enum_decl", "add_union_decl", "add_impl_decl",
-		"add_union_variant", "add_match", "add_match_arm", "add_unsafe", "add_comptime_if",
-		"add_fn_decl", "add_empty",
+		"add_field_with_doc", "add_struct_decl", "add_struct_decl_with_doc",
+		"add_enum_decl", "add_enum_decl_with_doc", "add_union_decl",
+		"add_union_decl_with_doc", "add_impl_decl", "add_union_variant",
+		"add_union_variant_with_doc", "add_match", "add_match_arm", "add_unsafe",
+		"add_comptime_if", "add_fn_decl", "add_fn_decl_with_doc", "add_empty",
 		"child_at":
 		return true
 	default:
