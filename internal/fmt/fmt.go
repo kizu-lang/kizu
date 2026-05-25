@@ -624,6 +624,8 @@ func isTopLevelDeclStart(t token.Token) bool {
 	case token.Import, token.Public, token.Unsafe, token.Extern,
 		token.Function, token.Struct, token.Enum, token.Union, token.Contract, token.Impl:
 		return true
+	case token.Ident:
+		return t.Literal == "test"
 	}
 	return false
 }

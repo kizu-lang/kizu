@@ -114,7 +114,7 @@ std::fs
 std::path
 std::io
 std::process
-kizu test <file>
+kizu test <path>
 self-host compiler skeleton
 module/import syntax and manifest groundwork
 defer explicit cleanup statement
@@ -1731,9 +1731,21 @@ failure は `expected ... got ...` 形式の diagnostic を出し、assertion �
 v0.2 では static 引数が type だけなので、caller は `expect_equal<i64>(1, actual)` のように
 期待型を明示します。type argument inference と per-type `expect_equal_i64` family は
 導入しません。
-`kizu test <file>` は v0.2 では discovery なしの single-file runner です。
-file を check して `main` を実行し、未処理 error がなければ `test: ok` を表示します。
-test discovery、location-aware diagnostics、message builder helper は後続で扱います。
+test は top-level declaration として書きます。
+
+```kizu
+test "parser accepts minimal function" {
+    std::testing::expect(true);
+}
+```
+
+`kizu test <path>` は v0.2 では file または package root を受け取り、check 後に
+top-level `test` block だけを source order で実行します。`main` は実行しません。
+test block は parameterless `!void` body として扱うため、helper が返す `!T` には
+`try` を使えます。test block が 0 件なら失敗します。未処理 error がなければ
+`test: ok` を表示します。
+filesystem-wide test discovery、test filter、test attribute、async test、location-aware
+diagnostics、message builder helper は後続で扱います。
 
 ## 15. concurrency / async 方針
 
@@ -2013,7 +2025,8 @@ kizu test
 先頭の連続 `import` block は comment を含まない場合に辞書順へ正規化します。
 comment trivia preservation の残りは後続で扱います。
 comment trivia preservation までは、`--write` は full-line ではない line comment を含む file を拒否します。
-`kizu test` は v0.2 では discovery なしの single-file runner です。
+`kizu test` は v0.2 では file または package root 内の top-level `test` block runner です。
+`main` 実行、filesystem-wide discovery、filter は行いません。
 
 experimental tooling:
 
@@ -2053,7 +2066,7 @@ build cache key には、compiler version、manifest hash、resolved module grap
 source hash、public interface hash、target、backend、optimization mode、stdlib hash
 を含めます。
 
-`kizu test` は v0.2 では discovery なしの single-file runner として実装済みです。
+`kizu test` は v0.2 では top-level `test` block runner として実装済みです。
 `kizu lint` は未実装です。
 
 ## 18. v0.1 実装構成

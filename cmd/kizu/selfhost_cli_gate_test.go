@@ -1745,14 +1745,13 @@ func writeSelfhostCLIInvalidAggregateFrontendFixtures(
 func writeSelfhostCLIExpectFrontendFixtures(t *testing.T) (string, string, string) {
 	t.Helper()
 
-	const expectOKSource = `fn main() -> !void {
+	const expectOKSource = `test "expect ok" {
     std::testing::expect(true);
-    return;
 }
 `
 	tempExpectOK := writeTempKizuSource(t, "frontend_expect_ok.kizu", expectOKSource)
 
-	const expectVoidOKSource = `fn main() -> void {
+	const expectVoidOKSource = `test "expect void ok" {
     std::testing::expect(true);
 }
 `
@@ -1762,9 +1761,8 @@ func writeSelfhostCLIExpectFrontendFixtures(t *testing.T) (string, string, strin
 		expectVoidOKSource,
 	)
 
-	const expectFailSource = `fn main() -> !void {
+	const expectFailSource = `test "expect failure" {
     std::testing::expect(false);
-    return;
 }
 `
 	tempExpectFail := writeTempKizuSource(t, "frontend_expect_failure.kizu", expectFailSource)

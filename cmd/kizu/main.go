@@ -330,7 +330,7 @@ func packageStdDecls(graph project.Graph) ([]ast.Decl, error) {
 	return decls, nil
 }
 
-// testFile runs a single Kizu test source and reports a minimal test result.
+// testFile runs Kizu test blocks and reports a minimal test result.
 func testFile(path string, args []string) error {
 	if isPackageRoot(path) {
 		return testPackage(path, args)
@@ -348,24 +348,23 @@ func testFile(path string, args []string) error {
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	if err := interp.NewWithProcessArgs(os.Stdout, args).Run(program); err != nil {
+	if err := interp.NewWithProcessArgs(os.Stdout, args).RunTests(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")
 	return nil
 }
 
-// testPackage resolves a package root and runs its root module as a test.
+// testPackage resolves a package root and runs package test blocks.
 func testPackage(path string, args []string) error {
-	graph, program, err := loadPackageProgram(path)
+	_, program, err := loadPackageProgram(path)
 	if err != nil {
 		return err
 	}
 	if err := checkProgram(program); err != nil {
 		return err
 	}
-	entry := graph.Root + "::main"
-	if err := interp.NewWithProcessArgs(os.Stdout, args).RunEntry(program, entry); err != nil {
+	if err := interp.NewWithProcessArgs(os.Stdout, args).RunTests(program); err != nil {
 		return err
 	}
 	_, _ = fmt.Println("test: ok")

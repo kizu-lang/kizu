@@ -27,6 +27,23 @@ func TestParseHello(t *testing.T) {
 	}
 }
 
+// TestParseTestDecl checks top-level test block parsing.
+func TestParseTestDecl(t *testing.T) {
+	input := `test "basic assertion" {
+    std::testing::expect(true);
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	got := program.String()
+	want := `test "basic assertion" { std::testing::expect(true); }`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestParseFunctionWithParamsAndReturn checks typed parameters and return parsing.
 func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 	input := `fn add(a: &i64, b: &var i64) -> i64 {

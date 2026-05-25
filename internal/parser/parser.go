@@ -41,6 +41,13 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Public:
 			program.Decls = append(program.Decls, p.parsePublicDecl())
 			p.nextToken()
+		case token.Ident:
+			if p.cur.Literal == "test" {
+				program.Decls = append(program.Decls, p.parseTestDecl())
+			} else {
+				p.errorf("expected declaration, got %s", p.cur.Type)
+			}
+			p.nextToken()
 		case token.Function:
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
@@ -173,6 +180,20 @@ func (p *Parser) parseExternDecl(unsafe bool) ast.Decl {
 // parseFunctionDecl parses a top-level function declaration.
 func (p *Parser) parseFunctionDecl() ast.Decl {
 	return p.parseFunctionSignature(&ast.FunctionDecl{}, true)
+}
+
+// parseTestDecl parses a top-level test block.
+func (p *Parser) parseTestDecl() ast.Decl {
+	decl := &ast.TestDecl{}
+	if !p.expectPeek(token.String) {
+		return decl
+	}
+	decl.Name = p.cur.Literal
+	if !p.expectPeek(token.LBrace) {
+		return decl
+	}
+	decl.Body = p.parseBlockStmt()
+	return decl
 }
 
 // parseFunctionSignature parses a function declaration after the fn token.
