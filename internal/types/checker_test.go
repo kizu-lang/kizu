@@ -7,6 +7,7 @@ import (
 
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/parser"
+	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
 // TestCheckValidPhase2Programs checks programs that the interpreter can run.
@@ -396,6 +397,20 @@ func runErrorCases(t *testing.T, cases []struct {
 	}
 }
 
+// TestUnsafeCapabilityMetadataMatchesChecker keeps semantic and LSP docs in sync.
+func TestUnsafeCapabilityMetadataMatchesChecker(t *testing.T) {
+	for name := range knownUnsafeCapabilities {
+		if _, ok := unsafecap.Lookup(name); !ok {
+			t.Fatalf("checker capability %q is missing metadata", name)
+		}
+	}
+	for _, info := range unsafecap.All() {
+		if _, ok := knownUnsafeCapabilities[info.Name]; !ok {
+			t.Fatalf("metadata capability %q is missing checker support", info.Name)
+		}
+	}
+}
+
 // TestCheckAcceptsDeclaredLowLevelTypes checks reserved scalar types in signatures.
 func TestCheckAcceptsDeclaredLowLevelTypes(t *testing.T) {
 	source := `fn a(x: i8) -> i8 { return x ;}
@@ -675,6 +690,36 @@ fn main() {
 	if diagnostic.Span.End.Line != 6 || diagnostic.Span.End.Column != 16 {
 		t.Fatalf("end = %d:%d, want 6:16",
 			diagnostic.Span.End.Line, diagnostic.Span.End.Column)
+	}
+	for _, want := range []string{
+		"operator `==` operands must have same type",
+		"at 6:14",
+		"left operand has type Color",
+		"right operand has type Animal",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	}
+}
+
+// TestCheckUnknownNamespaceReportsHelp keeps namespace diagnostics actionable.
+func TestCheckUnknownNamespaceReportsHelp(t *testing.T) {
+	source := `enum Animal { Cat }
+fn main() { print(Color::Red); }`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{
+		"unknown namespace `Color`",
+		"at 2:19",
+		"enum/union name or import a module",
+		"known namespaces: Animal",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
 	}
 }
 
@@ -1684,6 +1729,25 @@ fn main() {
 		},
 	}
 	runErrorCases(t, cases)
+}
+
+// TestCheckUnsafeBoundaryErrorReportsCapabilityHelp keeps unsafe diagnostics actionable.
+func TestCheckUnsafeBoundaryErrorReportsCapabilityHelp(t *testing.T) {
+	err := checkSource(`fn read(p: ptr<u8>) -> u8 {
+    return ptr_read(p);
+}`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{
+		"`ptr_read` requires @unsafe(ptr_read)",
+		"at 2:12",
+		"help: `@unsafe(ptr_read)` permits raw pointer reads with `ptr_read(p)`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	}
 }
 
 // TestCheckRejectsUnsafeCapabilityErrors checks capability-specific unsafe operations.

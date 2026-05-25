@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 )
@@ -14,7 +15,15 @@ type DiagnosticError struct {
 
 // Error returns the diagnostic message.
 func (e *DiagnosticError) Error() string {
-	return e.Message
+	if e.Span.IsZero() {
+		return e.Message
+	}
+	first, rest, ok := strings.Cut(e.Message, "\n")
+	first = fmt.Sprintf("%s at %d:%d", first, e.Span.Start.Line, e.Span.Start.Column)
+	if !ok {
+		return first
+	}
+	return first + "\n" + rest
 }
 
 // SourceSpan returns the span associated with the diagnostic.
