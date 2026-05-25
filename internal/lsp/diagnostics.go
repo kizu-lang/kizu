@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -62,10 +63,10 @@ func (s *Server) analyzeDocument(uri string) []Diagnostic {
 // checkProgramDiagnostics runs semantic checks for a parsed program.
 func checkProgramDiagnostics(program *ast.Program) []Diagnostic {
 	if err := types.New().Check(program); err != nil {
-		return []Diagnostic{diagnosticAtStart(err.Error())}
+		return []Diagnostic{diagnosticFromError(err)}
 	}
 	if err := ownership.New().Check(program); err != nil {
-		return []Diagnostic{diagnosticAtStart(err.Error())}
+		return []Diagnostic{diagnosticFromError(err)}
 	}
 	return []Diagnostic{}
 }
@@ -181,6 +182,32 @@ func diagnosticAtStart(message string) Diagnostic {
 	}
 }
 
+type sourceSpanError interface {
+	SourceSpan() ast.Span
+}
+
+// diagnosticFromError converts semantic errors into LSP diagnostics.
+func diagnosticFromError(err error) Diagnostic {
+	var withSpan sourceSpanError
+	if errors.As(err, &withSpan) {
+		span := withSpan.SourceSpan()
+		if !span.IsZero() {
+			return diagnosticAtSpan(err.Error(), span)
+		}
+	}
+	return diagnosticAtStart(err.Error())
+}
+
+// diagnosticAtSpan reports a checker diagnostic at a source span.
+func diagnosticAtSpan(message string, span ast.Span) Diagnostic {
+	return Diagnostic{
+		Range:    rangeFromSpan(span),
+		Severity: diagnosticSeverityError,
+		Source:   diagnosticSource,
+		Message:  message,
+	}
+}
+
 // parsePosition extracts a one-based parser position as a zero-based LSP position.
 func parsePosition(message string) (int, int) {
 	match := parsePositionPattern.FindStringSubmatch(message)
@@ -199,6 +226,33 @@ func parsePosition(message string) (int, int) {
 		column = 1
 	}
 	return line - 1, column - 1
+}
+
+// rangeFromSpan converts a one-based AST span into a zero-based LSP range.
+func rangeFromSpan(span ast.Span) Range {
+	startLine, startChar := oneBasedPosition(span.Start)
+	endLine, endChar := oneBasedPosition(span.End)
+	if endLine < startLine || (endLine == startLine && endChar <= startChar) {
+		endLine = startLine
+		endChar = startChar + 1
+	}
+	return Range{
+		Start: Position{Line: startLine, Character: startChar},
+		End:   Position{Line: endLine, Character: endChar},
+	}
+}
+
+// oneBasedPosition converts a one-based AST position to a zero-based LSP position.
+func oneBasedPosition(pos ast.Position) (int, int) {
+	line := pos.Line
+	character := pos.Column
+	if line <= 0 {
+		line = 1
+	}
+	if character <= 0 {
+		character = 1
+	}
+	return line - 1, character - 1
 }
 
 // oneCharacterRange creates a stable one-character diagnostic range.

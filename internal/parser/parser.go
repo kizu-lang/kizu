@@ -1305,11 +1305,27 @@ func (p *Parser) parseTypeArg(allowConst bool) string {
 
 // parseBinaryExpr parses an infix binary expression.
 func (p *Parser) parseBinaryExpr(left ast.Expression) ast.Expression {
-	expr := &ast.BinaryExpr{Left: left, Operator: p.cur.Literal}
+	expr := &ast.BinaryExpr{
+		Left:         left,
+		Operator:     p.cur.Literal,
+		OperatorSpan: tokenSpan(p.cur),
+	}
 	precedence := p.curPrecedence()
 	p.nextToken()
 	expr.Right = p.parseExpression(precedence)
 	return expr
+}
+
+// tokenSpan converts a token position into a half-open AST span.
+func tokenSpan(tok token.Token) ast.Span {
+	width := len([]rune(tok.Literal))
+	if width == 0 {
+		width = 1
+	}
+	return ast.Span{
+		Start: ast.Position{Line: tok.Line, Column: tok.Column},
+		End:   ast.Position{Line: tok.Line, Column: tok.Column + width},
+	}
 }
 
 // parseCallExpr parses a function call expression.
