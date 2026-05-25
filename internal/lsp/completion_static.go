@@ -78,7 +78,12 @@ var snippetCompletionItems = []completionItem{
 	snippet("var", "mutable binding", "var ${1:name} = ${2:value};"),
 	snippet("return", "return statement", "return ${1:value};"),
 	snippet("defer", "defer cleanup", "defer ${1:value}.deinit();"),
-	snippet("unsafe", "unsafe block", "unsafe {\n    $0\n}"),
+	snippet("unsafe", "unsafe capability block", "@unsafe(${1:ptr_read}) {\n    $0\n}"),
+	snippet(
+		"requires unsafe",
+		"caller-obligation function declaration",
+		"@requires_unsafe() fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}",
+	),
 	snippet("comptime if", "comptime if block", "comptime if ${1:condition} {\n    $0\n}"),
 	snippet("print", "print builtin", "print(${1:value})"),
 	snippet("error", "error builtin", "error(${1:message})"),

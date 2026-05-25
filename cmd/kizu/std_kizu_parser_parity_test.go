@@ -133,7 +133,7 @@ fn dump_fn_decl(
 ) -> !void {
     print("FnDecl");
     dump_visibility(fn_decl.public);
-    dump_safety(fn_decl.unsafe_decl);
+    dump_safety(fn_decl.requires_unsafe);
     try dump_node(source, ast, fn_decl.extern_abi);
     try dump_node(source, ast, fn_decl.name);
     try dump_range(source, ast, fn_decl.type_params);
@@ -251,9 +251,9 @@ fn dump_visibility(public: bool) -> void {
     return;
 }
 
-fn dump_safety(unsafe_decl: bool) -> void {
-    if unsafe_decl {
-        print("Unsafe");
+fn dump_safety(requires_unsafe: bool) -> void {
+    if requires_unsafe {
+        print("RequiresUnsafe");
     } else {
         print("Safe");
     }
@@ -585,6 +585,7 @@ fn dump_unsafe(
     unsafe_node: std::kizu::ast::UnsafeNode
 ) -> !void {
     print("Unsafe");
+    try dump_range(source, ast, unsafe_node.capabilities);
     try dump_node(source, ast, unsafe_node.body);
     return;
 }
@@ -961,7 +962,7 @@ func parserParityFunctionBodySeedCases() []parserParityCase {
 		},
 		{
 			name: "seed/fn_unsafe_comptime_if",
-			source: "fn main() { unsafe { print(1); } comptime if 1 + 1 == 2 { " +
+			source: "fn main() { @unsafe(ptr_read) { print(1); } comptime if 1 + 1 == 2 { " +
 				"print(comptime 8); } else { print(0); } }",
 		},
 	}
@@ -1015,10 +1016,14 @@ func parserParityDeclarationSeedCases() []parserParityCase {
 		{name: "seed/enum_decl", source: "enum Color { Red, Blue, }"},
 		{name: "seed/union_decl", source: "union Shape { Point, Circle(i64), }"},
 		{name: "seed/extern_fn", source: `extern "c" fn puts(s: ptr<const u8>) -> i32`},
-		{name: "seed/unsafe_fn", source: "unsafe fn poke() {}"},
+		{name: "seed/requires_unsafe_fn", source: "@requires_unsafe() fn poke() {}"},
 		{
 			name:   "seed/inherent_impl_decl",
 			source: "impl User { fn deinit(self: User) -> void { return; } }",
+		},
+		{
+			name:   "seed/requires_unsafe_impl_method",
+			source: "impl Register { @requires_unsafe() fn write(self: Register) -> void { return; } }",
 		},
 	}
 	return seeds
@@ -1189,7 +1194,7 @@ func summarizeFunctionSubset(fn *kizuast.FunctionDecl) ([]string, string) {
 	lines := []string{
 		"FnDecl",
 		parserParityVisibility(fn.Public),
-		parserParitySafety(fn.Unsafe),
+		parserParitySafety(fn.RequiresUnsafe),
 	}
 	lines = append(lines, summarizeExternABISubset(fn.ExternABI)...)
 	lines = append(lines, "Var", fn.Name)
@@ -1250,10 +1255,10 @@ func parserParityVisibility(public bool) string {
 	return "Private"
 }
 
-// parserParitySafety maps unsafe declaration metadata to summary labels.
+// parserParitySafety maps caller-obligation declaration metadata to summary labels.
 func parserParitySafety(unsafe bool) string {
 	if unsafe {
-		return "Unsafe"
+		return "RequiresUnsafe"
 	}
 	return "Safe"
 }
@@ -1449,6 +1454,14 @@ func summarizeStatementSubset(stmt kizuast.Statement) ([]string, string) {
 		return summarizeWhileSubset(node)
 	case *kizuast.ForStmt:
 		return summarizeForSubset(node)
+	default:
+		return summarizeStatementSubsetExtra(stmt)
+	}
+}
+
+// summarizeStatementSubsetExtra summarizes less common statement forms.
+func summarizeStatementSubsetExtra(stmt kizuast.Statement) ([]string, string) {
+	switch node := stmt.(type) {
 	case *kizuast.BreakStmt:
 		return append([]string{"Break"}, summarizeOptionalName(node.Label)...), ""
 	case *kizuast.ContinueStmt:
@@ -1456,16 +1469,25 @@ func summarizeStatementSubset(stmt kizuast.Statement) ([]string, string) {
 	case *kizuast.MatchStmt:
 		return summarizeMatchSubset(node)
 	case *kizuast.UnsafeStmt:
-		body, reason := summarizeBlockSubset(node.Body)
-		if reason != "" {
-			return nil, reason
-		}
-		return append([]string{"Unsafe"}, body...), ""
+		return summarizeUnsafeSubset(node)
 	case *kizuast.ComptimeIfStmt:
 		return summarizeComptimeIfSubset(node)
 	default:
 		return nil, "statement outside std parser subset"
 	}
+}
+
+// summarizeUnsafeSubset summarizes unsafe capability blocks.
+func summarizeUnsafeSubset(node *kizuast.UnsafeStmt) ([]string, string) {
+	body, reason := summarizeBlockSubset(node.Body)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{"Unsafe", "Range", strconv.Itoa(len(node.Capabilities))}
+	for _, capability := range node.Capabilities {
+		lines = append(lines, "Var", capability)
+	}
+	return append(lines, body...), ""
 }
 
 // summarizeLetSubset summarizes let and var declarations.
@@ -2021,7 +2043,7 @@ func isStdParserSpace(r rune) bool {
 
 // isStdParserPunctuation reports punctuation understood by std::kizu::lexer.
 func isStdParserPunctuation(r rune) bool {
-	return strings.ContainsRune("{}();,:!&[]<>?+*-=/>%.|'", r)
+	return strings.ContainsRune("{}();,:!&[]<>?+*-=/>%.|'@", r)
 }
 
 // isStdParserWordRune reports identifier and number bytes understood by the std lexer.

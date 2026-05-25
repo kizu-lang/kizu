@@ -46,6 +46,9 @@ func (p *Parser) ParseProgram() *ast.Program {
 		case token.Public:
 			program.Decls = append(program.Decls, p.parsePublicDecl())
 			p.nextToken()
+		case token.At:
+			program.Decls = append(program.Decls, p.parseDirectiveDecl(false, docText(p.cur)))
+			p.nextToken()
 		case token.Ident:
 			if p.cur.Literal == "test" {
 				program.Decls = append(program.Decls, p.parseTestDecl())
@@ -57,10 +60,10 @@ func (p *Parser) ParseProgram() *ast.Program {
 			program.Decls = append(program.Decls, p.parseFunctionDecl())
 			p.nextToken()
 		case token.Unsafe:
-			program.Decls = append(program.Decls, p.parseUnsafeDecl())
+			p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
 			p.nextToken()
 		case token.Extern:
-			program.Decls = append(program.Decls, p.parseExternDecl(false))
+			program.Decls = append(program.Decls, p.parseExternDecl())
 			p.nextToken()
 		case token.Struct:
 			program.Decls = append(program.Decls, p.parseStructDecl())
@@ -107,6 +110,9 @@ func (p *Parser) parseImportDecl() ast.Decl {
 func (p *Parser) parsePublicDecl() ast.Decl {
 	docs := docText(p.cur)
 	p.nextToken()
+	if p.cur.Type == token.At {
+		return p.parseDirectiveDecl(true, docs)
+	}
 	decl := p.parseTopLevelDeclWithDoc(docs)
 	setPublicDecl(decl)
 	return decl
@@ -117,10 +123,13 @@ func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 	switch p.cur.Type {
 	case token.Function:
 		return p.parseFunctionDeclWithDoc(docs)
+	case token.At:
+		return p.parseDirectiveDecl(false, docs)
 	case token.Unsafe:
-		return p.parseUnsafeDeclWithDoc(docs)
+		p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
+		return &ast.FunctionDecl{Doc: docs}
 	case token.Extern:
-		return p.parseExternDeclWithDoc(false, docs)
+		return p.parseExternDeclWithDoc(docs)
 	case token.Struct:
 		return p.parseStructDeclWithDoc(docs)
 	case token.Enum:
@@ -151,34 +160,45 @@ func setPublicDecl(decl ast.Decl) {
 	}
 }
 
-// parseUnsafeDecl parses unsafe top-level declarations.
-func (p *Parser) parseUnsafeDecl() ast.Decl {
-	return p.parseUnsafeDeclWithDoc(docText(p.cur))
-}
-
-// parseUnsafeDeclWithDoc parses unsafe top-level declarations with attached docs.
-func (p *Parser) parseUnsafeDeclWithDoc(docs string) ast.Decl {
-	switch p.peek.Type {
-	case token.Function:
-		p.nextToken()
-		return p.parseFunctionSignature(&ast.FunctionDecl{Unsafe: true, Doc: docs}, true)
-	case token.Extern:
-		p.nextToken()
-		return p.parseExternDeclWithDoc(true, docs)
+// parseDirectiveDecl parses top-level compiler directive declarations.
+func (p *Parser) parseDirectiveDecl(public bool, docs string) ast.Decl {
+	if !p.expectPeek(token.Ident) {
+		return &ast.FunctionDecl{Public: public, Doc: docs}
+	}
+	switch p.cur.Literal {
+	case "requires_unsafe":
+		return p.parseRequiresUnsafeDecl(public, docs)
 	default:
-		p.errorf("expected fn or extern after unsafe, got %s", p.peek.Type)
-		return &ast.FunctionDecl{Unsafe: true, Doc: docs}
+		p.errorf("unknown declaration directive `@%s`", p.cur.Literal)
+		return &ast.FunctionDecl{Public: public, Doc: docs}
 	}
 }
 
+// parseRequiresUnsafeDecl parses @requires_unsafe() fn declarations.
+func (p *Parser) parseRequiresUnsafeDecl(public bool, docs string) ast.Decl {
+	if !p.expectPeek(token.LParen) {
+		return &ast.FunctionDecl{Public: public, RequiresUnsafe: true, Doc: docs}
+	}
+	if !p.expectPeek(token.RParen) {
+		return &ast.FunctionDecl{Public: public, RequiresUnsafe: true, Doc: docs}
+	}
+	if !p.expectPeek(token.Function) {
+		p.errorf("expected fn after @requires_unsafe()")
+		return &ast.FunctionDecl{Public: public, RequiresUnsafe: true, Doc: docs}
+	}
+	return p.parseFunctionSignature(&ast.FunctionDecl{
+		Public: public, RequiresUnsafe: true, Doc: docs,
+	}, true)
+}
+
 // parseExternDecl parses extern "abi" fn declarations.
-func (p *Parser) parseExternDecl(unsafe bool) ast.Decl {
-	return p.parseExternDeclWithDoc(unsafe, docText(p.cur))
+func (p *Parser) parseExternDecl() ast.Decl {
+	return p.parseExternDeclWithDoc(docText(p.cur))
 }
 
 // parseExternDeclWithDoc parses extern "abi" fn declarations with attached docs.
-func (p *Parser) parseExternDeclWithDoc(unsafe bool, docs string) ast.Decl {
-	fn := &ast.FunctionDecl{Unsafe: unsafe, Doc: docs}
+func (p *Parser) parseExternDeclWithDoc(docs string) ast.Decl {
+	fn := &ast.FunctionDecl{Doc: docs}
 	if !p.expectPeek(token.String) {
 		return fn
 	}
@@ -322,11 +342,19 @@ func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
 	methods := []*ast.FunctionDecl{}
 	p.nextToken()
 	for p.cur.Type != token.RBrace && p.cur.Type != token.EOF {
-		if p.cur.Type != token.Function {
+		var method ast.Decl
+		switch p.cur.Type {
+		case token.Function:
+			method = p.parseFunctionSignature(&ast.FunctionDecl{Doc: docText(p.cur)}, true)
+		case token.At:
+			method = p.parseDirectiveDecl(false, docText(p.cur))
+		case token.Unsafe:
+			p.errorf("unsafe fn is not supported; use @requires_unsafe() fn")
+			return methods
+		default:
 			p.errorf("expected impl method, got %s", p.cur.Type)
 			return methods
 		}
-		method := p.parseFunctionSignature(&ast.FunctionDecl{Doc: docText(p.cur)}, true)
 		if fn, ok := method.(*ast.FunctionDecl); ok {
 			methods = append(methods, fn)
 		}
@@ -588,6 +616,9 @@ func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 
 // parseStatement parses a single statement.
 func (p *Parser) parseStatement() ast.Statement {
+	if p.cur.Type == token.At {
+		return p.parseUnsafeStmt()
+	}
 	if stmt, ok := p.parseKeywordStatement(); ok {
 		return stmt
 	}
@@ -627,7 +658,7 @@ func (p *Parser) parseKeywordStatement() (ast.Statement, bool) {
 	case token.Match:
 		return p.parseMatchStmt(), true
 	case token.Unsafe:
-		return p.parseUnsafeStmt(), true
+		return p.parseLegacyUnsafeStmt(), true
 	case token.Comptime:
 		if p.peek.Type == token.If {
 			return p.parseComptimeIfStmt(), true
@@ -674,14 +705,81 @@ func (p *Parser) parseComptimeIfStmt() ast.Statement {
 	return stmt
 }
 
-// parseUnsafeStmt parses an unsafe statement block.
+var unsafeCapabilityNames = map[string]bool{
+	"ptr_read":     true,
+	"ptr_write":    true,
+	"ptr_deref":    true,
+	"ptr_cast":     true,
+	"ptr_int_cast": true,
+	"extern_call":  true,
+	"unsafe_call":  true,
+	"volatile":     true,
+}
+
+// parseUnsafeStmt parses an @unsafe capability statement block.
 func (p *Parser) parseUnsafeStmt() ast.Statement {
 	stmt := &ast.UnsafeStmt{}
+	if !p.expectPeek(token.Unsafe) {
+		p.errorf("expected unsafe after @")
+		return stmt
+	}
+	if !p.expectPeek(token.LParen) {
+		return stmt
+	}
+	stmt.Capabilities = p.parseUnsafeCapabilities()
+	if !p.expectCur(token.RParen) {
+		return stmt
+	}
 	if !p.expectPeek(token.LBrace) {
 		return stmt
 	}
 	stmt.Body = p.parseBlockStmt()
 	return stmt
+}
+
+// parseLegacyUnsafeStmt rejects the removed `unsafe {}` block while recovering its body.
+func (p *Parser) parseLegacyUnsafeStmt() ast.Statement {
+	stmt := &ast.UnsafeStmt{}
+	p.errorf("unsafe block syntax is not supported; use @unsafe(...)")
+	if p.peek.Type != token.LBrace {
+		return stmt
+	}
+	p.nextToken()
+	stmt.Body = p.parseBlockStmt()
+	return stmt
+}
+
+// parseUnsafeCapabilities parses one or more comma-separated capability names.
+func (p *Parser) parseUnsafeCapabilities() []string {
+	capabilities := []string{}
+	p.nextToken()
+	if p.cur.Type == token.RParen {
+		p.errorf("expected unsafe capability")
+		return capabilities
+	}
+	for {
+		if p.cur.Type != token.Ident {
+			p.errorf("expected unsafe capability, got %s", p.cur.Type)
+			return capabilities
+		}
+		if !unsafeCapabilityNames[p.cur.Literal] {
+			p.errorf("unknown unsafe capability `%s`", p.cur.Literal)
+		}
+		capabilities = append(capabilities, p.cur.Literal)
+		if p.peek.Type != token.Comma {
+			break
+		}
+		p.nextToken()
+		if p.peek.Type == token.RParen {
+			p.errorf("expected unsafe capability after comma")
+			return capabilities
+		}
+		p.nextToken()
+	}
+	if !p.expectPeek(token.RParen) {
+		return capabilities
+	}
+	return capabilities
 }
 
 // parseLetStmt parses a let or var declaration.
@@ -854,7 +952,7 @@ func (p *Parser) hasImplicitStatementTerminator() bool {
 	case token.RBrace, token.EOF, token.Comma:
 		return true
 	case token.Let, token.Var, token.Return, token.If, token.While, token.For,
-		token.Break, token.Continue, token.Match, token.Unsafe, token.Comptime:
+		token.Break, token.Continue, token.Match, token.Unsafe, token.At, token.Comptime:
 		return true
 	default:
 		return false

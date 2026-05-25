@@ -201,7 +201,13 @@ fn validate_top_level_decl_start(
         Import => try validate_import_decl_header(source, tokens, index),
         Pub => try validate_public_top_level_decl_start(source, tokens, index),
         Fn => try validate_fn_decl_header(source, tokens, index, true),
-        Unsafe => try validate_unsafe_top_level_decl_start(source, tokens, index),
+        Unsafe => invalid_parse_validation(
+            "unsafe fn is not supported; use @requires_unsafe() fn",
+            token.line,
+            token.column,
+            validation_tokens::token_text(source, token)
+        ),
+        At => try validate_directive_top_level_decl_start(source, tokens, index),
         Extern => try validate_extern_decl_header(source, tokens, index),
         Struct => try validate_aggregate_decl_header(source, tokens, index, true, true),
         Enum => try validate_aggregate_decl_header(source, tokens, index, false, false),
@@ -226,8 +232,8 @@ fn validate_public_top_level_decl_start(
     if lexer::is_eof(next) {
         return invalid_parse_validation("expected declaration", next.line, next.column, "");
     }
-    if validation_tokens::is_unsafe_modifier_token(next) {
-        return try validate_unsafe_top_level_decl_start(source, tokens, index + 1);
+    if validation_tokens::is_at_token(next) {
+        return try validate_directive_top_level_decl_start(source, tokens, index + 1);
     }
     if validation_tokens::is_fn_token(next) {
         return try validate_fn_decl_header(source, tokens, index + 1, true);
@@ -255,26 +261,50 @@ fn validate_public_top_level_decl_start(
     );
 }
 
-fn validate_unsafe_top_level_decl_start(
+fn validate_directive_top_level_decl_start(
     source: []u8,
     tokens: &std::array::Array<std::kizu::lexer::Token>,
     index: i64
 ) -> !ParseValidation {
-    let next = try tokens.get(index + 1);
-    if lexer::is_eof(next) {
-        return invalid_parse_validation("expected fn or extern after unsafe", next.line, next.column, "");
+    let directive = try tokens.get(index + 1);
+    if lexer::is_eof(directive) {
+        return invalid_parse_validation("expected directive name", directive.line, directive.column, "");
     }
-    if validation_tokens::is_fn_token(next) {
-        return try validate_fn_decl_header(source, tokens, index + 1, true);
+    if !std::mem::equal_bytes(validation_tokens::token_text(source, directive), "requires_unsafe") {
+        return invalid_parse_validation(
+            "unknown declaration directive",
+            directive.line,
+            directive.column,
+            validation_tokens::token_text(source, directive)
+        );
     }
-    if validation_tokens::is_extern_token(next) {
-        return try validate_extern_decl_header(source, tokens, index + 1);
+    let open = try tokens.get(index + 2);
+    if !validation_tokens::is_left_paren_token(open) {
+        return invalid_parse_validation(
+            "expected left paren",
+            open.line,
+            open.column,
+            validation_tokens::token_text(source, open)
+        );
+    }
+    let close = try tokens.get(index + 3);
+    if !validation_tokens::is_right_paren_token(close) {
+        return invalid_parse_validation(
+            "expected right paren",
+            close.line,
+            close.column,
+            validation_tokens::token_text(source, close)
+        );
+    }
+    let fn_token = try tokens.get(index + 4);
+    if validation_tokens::is_fn_token(fn_token) {
+        return try validate_fn_decl_header(source, tokens, index + 4, true);
     }
     return invalid_parse_validation(
-        "expected fn or extern after unsafe",
-        next.line,
-        next.column,
-        validation_tokens::token_text(source, next)
+        "expected fn after @requires_unsafe()",
+        fn_token.line,
+        fn_token.column,
+        validation_tokens::token_text(source, fn_token)
     );
 }
 
@@ -1212,7 +1242,7 @@ fn is_public_top_level_decl_start(
 ) -> bool {
     return match token.kind {
         Fn => true,
-        Unsafe => true,
+        At => true,
         Extern => true,
         Struct => true,
         Enum => true,

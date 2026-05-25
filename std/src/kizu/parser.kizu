@@ -15,7 +15,8 @@ pub fn parse_first_node(
         Import => return std::kizu::parser::parse_decl_result(allocator, source);,
         Pub => return std::kizu::parser::parse_decl_result(allocator, source);,
         Fn => return std::kizu::parser::parse_decl_result(allocator, source);,
-        Unsafe => return std::kizu::parser::parse_decl_result(allocator, source);,
+        Unsafe => return error("unsafe fn is not supported; use @requires_unsafe() fn");,
+        At => return std::kizu::parser::parse_decl_result(allocator, source);,
         Extern => return std::kizu::parser::parse_decl_result(allocator, source);,
         Dyn => return error("unexpected dyn");,
         Struct => return std::kizu::parser::parse_decl_result(allocator, source);,
@@ -156,8 +157,16 @@ fn parse_decl_with_visibility(
             true,
             doc
         );,
-        Unsafe => return std::kizu::parser::parse_unsafe_decl(allocator, ast, text, token, public, doc);,
-        Extern => return std::kizu::parser::parse_extern_decl(allocator, ast, text, token, public, false, doc);,
+        Unsafe => return error("unsafe fn is not supported; use @requires_unsafe() fn");,
+        At => return std::kizu::parser::parse_directive_decl(
+            allocator,
+            ast,
+            text,
+            token,
+            public,
+            doc
+        );,
+        Extern => return std::kizu::parser::parse_extern_decl(allocator, ast, text, token, public, doc);,
         Dyn => return error("expected declaration");,
         Struct => return std::kizu::parser::parse_struct_decl(allocator, ast, text, token, public, doc);,
         Enum => return std::kizu::parser::parse_enum_decl(allocator, ast, text, token, public, doc);,
@@ -275,20 +284,33 @@ fn parse_impl_decl(
         if std::kizu::parser::is_eof_token(current) {
             return error("expected right brace");
         }
-        if !std::mem::equal_bytes(text[current.start..current.end], "fn") {
-            return error("expected impl method");
+        var method = std::kizu::parser::empty_parse_node(ast, current);
+        if std::mem::equal_bytes(text[current.start..current.end], "@") {
+            method = try std::kizu::parser::parse_directive_decl(
+                allocator,
+                ast,
+                text,
+                current,
+                false,
+                std::kizu::parser::token_doc_span(current)
+            );
+        } else {
+            if std::mem::equal_bytes(text[current.start..current.end], "fn") {
+                method = try std::kizu::parser::parse_fn_decl(
+                    allocator,
+                    ast,
+                    text,
+                    current,
+                    false,
+                    false,
+                    ast.add_empty(current.start),
+                    true,
+                    std::kizu::parser::token_doc_span(current)
+                );
+            } else {
+                return error("expected impl method");
+            }
         }
-        let method = try std::kizu::parser::parse_fn_decl(
-            allocator,
-            ast,
-            text,
-            current,
-            false,
-            false,
-            ast.add_empty(current.start),
-            true,
-            std::kizu::parser::token_doc_span(current)
-        );
         try methods.append(method.node);
         current = method.next;
     }
@@ -437,7 +459,7 @@ fn parse_fn_decl(
     text: []u8,
     fn_token: std::kizu::lexer::Token,
     public: bool,
-    unsafe_decl: bool,
+    requires_unsafe: bool,
     extern_abi: std::kizu::ast::NodeId,
     require_body: bool,
     doc: std::kizu::ast::Span
@@ -451,7 +473,7 @@ fn parse_fn_decl(
             text,
             fn_token,
             public,
-            unsafe_decl,
+            requires_unsafe,
             extern_abi,
             name,
             require_body,
@@ -498,6 +520,9 @@ fn parse_fn_decl(
         Continue => return error("expected function name");,
         Match => return error("expected function name");,
         Unsafe => return error("expected function name");,
+
+
+        At => return error("expected function name");,
         Comptime => return error("expected function name");,
         Try => return error("expected function name");,
         True => return error("expected function name");,
@@ -550,7 +575,7 @@ fn parse_fn_body_node(
     text: []u8,
     fn_token: std::kizu::lexer::Token,
     public: bool,
-    unsafe_decl: bool,
+    requires_unsafe: bool,
     extern_abi: std::kizu::ast::NodeId,
     name: std::kizu::lexer::Token,
     require_body: bool,
@@ -584,7 +609,7 @@ fn parse_fn_body_node(
     let root = ast.add_fn_decl_with_doc(
         std::kizu::ast::span(fn_token.start, body_node.span.end),
         public,
-        unsafe_decl,
+        requires_unsafe,
         extern_abi,
         name_node,
         type_params.range,
@@ -597,96 +622,58 @@ fn parse_fn_body_node(
     return std::kizu::parser::parse_node(root, body.next);
 }
 
-fn parse_unsafe_decl(
+fn parse_directive_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []u8,
-    unsafe_token: std::kizu::lexer::Token,
+    at_token: std::kizu::lexer::Token,
     public: bool,
     doc: std::kizu::ast::Span
 ) -> !ParseNode {
-    let next = std::kizu::lexer::next_token(text, unsafe_token);
-    match next.kind {
-        Fn => return std::kizu::parser::parse_fn_decl(
+    let directive = try std::kizu::parser::expect_ident(
+        std::kizu::lexer::next_token(text, at_token)
+    );
+    if try std::kizu::parser::is_token_text(text, directive, "requires_unsafe") {
+        return std::kizu::parser::parse_requires_unsafe_decl(
             allocator,
             ast,
             text,
-            next,
+            at_token,
+            directive,
             public,
-            true,
-            ast.add_empty(unsafe_token.start),
-            true,
             doc
-        );,
-        Extern => return std::kizu::parser::parse_extern_decl(
-            allocator,
-            ast,
-            text,
-            next,
-            public,
-            true,
-            doc
-        );,
-        Dyn => return error("expected fn or extern after unsafe");,
-        Import => return error("expected fn or extern after unsafe");,
-        Pub => return error("expected fn or extern after unsafe");,
-        Struct => return error("expected fn or extern after unsafe");,
-        Enum => return error("expected fn or extern after unsafe");,
-        Union => return error("expected fn or extern after unsafe");,
-        Let => return error("expected fn or extern after unsafe");,
-        Var => return error("expected fn or extern after unsafe");,
-        Return => return error("expected fn or extern after unsafe");,
-        Defer => return error("expected fn or extern after unsafe");,
-        If => return error("expected fn or extern after unsafe");,
-        Else => return error("expected fn or extern after unsafe");,
-        While => return error("expected fn or extern after unsafe");,
-        For => return error("expected fn or extern after unsafe");,
-        Break => return error("expected fn or extern after unsafe");,
-        Continue => return error("expected fn or extern after unsafe");,
-        Match => return error("expected fn or extern after unsafe");,
-        Unsafe => return error("expected fn or extern after unsafe");,
-        Comptime => return error("expected fn or extern after unsafe");,
-        Try => return error("expected fn or extern after unsafe");,
-        True => return error("expected fn or extern after unsafe");,
-        False => return error("expected fn or extern after unsafe");,
-        And => return error("expected fn or extern after unsafe");,
-        Or => return error("expected fn or extern after unsafe");,
-        Ident => return error("expected fn or extern after unsafe");,
-        Number => return error("expected fn or extern after unsafe");,
-        String => return error("expected fn or extern after unsafe");,
-        LBrace => return error("expected fn or extern after unsafe");,
-        RBrace => return error("expected fn or extern after unsafe");,
-        LParen => return error("expected fn or extern after unsafe");,
-        RParen => return error("expected fn or extern after unsafe");,
-        Semicolon => return error("expected fn or extern after unsafe");,
-        Comma => return error("expected fn or extern after unsafe");,
-        Colon => return error("expected fn or extern after unsafe");,
-        DoubleColon => return error("expected fn or extern after unsafe");,
-        Assign => return error("expected fn or extern after unsafe");,
-        Arrow => return error("expected fn or extern after unsafe");,
-        FatArrow => return error("expected fn or extern after unsafe");,
-        Bang => return error("expected fn or extern after unsafe");,
-        Eq => return error("expected fn or extern after unsafe");,
-        NotEq => return error("expected fn or extern after unsafe");,
-        Amp => return error("expected fn or extern after unsafe");,
-        LBracket => return error("expected fn or extern after unsafe");,
-        RBracket => return error("expected fn or extern after unsafe");,
-        LT => return error("expected fn or extern after unsafe");,
-        LTE => return error("expected fn or extern after unsafe");,
-        GT => return error("expected fn or extern after unsafe");,
-        GTE => return error("expected fn or extern after unsafe");,
-        Question => return error("expected fn or extern after unsafe");,
-        Plus => return error("expected fn or extern after unsafe");,
-        Minus => return error("expected fn or extern after unsafe");,
-        Asterisk => return error("expected fn or extern after unsafe");,
-        Slash => return error("expected fn or extern after unsafe");,
-        Percent => return error("expected fn or extern after unsafe");,
-        Dot => return error("expected fn or extern after unsafe");,
-        Range => return error("expected fn or extern after unsafe");,
-        Pipe => return error("expected fn or extern after unsafe");,
-        Mut => return error("expected fn or extern after unsafe");,
-        Eof => return error("expected fn or extern after unsafe");,
+        );
     }
+    return error("unknown declaration directive");
+}
+
+fn parse_requires_unsafe_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    at_token: std::kizu::lexer::Token,
+    directive: std::kizu::lexer::Token,
+    public: bool,
+    doc: std::kizu::ast::Span
+) -> !ParseNode {
+    let open = try std::kizu::parser::expect_left_paren(
+        std::kizu::lexer::next_token(text, directive)
+    );
+    let close = try std::kizu::parser::expect_right_paren(
+        std::kizu::lexer::next_token(text, open)
+    );
+    let fn_token = try std::kizu::parser::expect_fn(std::kizu::lexer::next_token(text, close));
+    return std::kizu::parser::parse_fn_decl(
+        allocator,
+        ast,
+        text,
+        fn_token,
+        public,
+        true,
+        ast.add_empty(at_token.start),
+        true,
+        doc
+    );
 }
 
 fn parse_extern_decl(
@@ -695,7 +682,6 @@ fn parse_extern_decl(
     text: []u8,
     extern_token: std::kizu::lexer::Token,
     public: bool,
-    unsafe_decl: bool,
     doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let abi_token = try std::kizu::parser::expect_string(
@@ -712,7 +698,7 @@ fn parse_extern_decl(
         text,
         fn_token,
         public,
-        unsafe_decl,
+        false,
         abi,
         false,
         doc
@@ -1198,6 +1184,9 @@ fn parse_optional_params(
         Continue => return error("expected params or block");,
         Match => return error("expected params or block");,
         Unsafe => return error("expected params or block");,
+
+
+        At => return error("expected params or block");,
         Comptime => return error("expected params or block");,
         Try => return error("expected params or block");,
         True => return error("expected params or block");,
@@ -1270,6 +1259,9 @@ fn parse_params(
         Continue => return error("expected right paren");,
         Match => return error("expected right paren");,
         Unsafe => return error("expected right paren");,
+
+
+        At => return error("expected right paren");,
         Try => return error("expected right paren");,
         True => return error("expected right paren");,
         False => return error("expected right paren");,
@@ -1359,6 +1351,9 @@ fn parse_param_list(
         Continue => return error("expected comma or right paren");,
         Match => return error("expected comma or right paren");,
         Unsafe => return error("expected comma or right paren");,
+
+
+        At => return error("expected comma or right paren");,
         Comptime => return error("expected comma or right paren");,
         Try => return error("expected comma or right paren");,
         True => return error("expected comma or right paren");,
@@ -1430,6 +1425,9 @@ fn parse_param_after_comma(
         Continue => return error("expected parameter");,
         Match => return error("expected parameter");,
         Unsafe => return error("expected parameter");,
+
+
+        At => return error("expected parameter");,
         Try => return error("expected parameter");,
         True => return error("expected parameter");,
         False => return error("expected parameter");,
@@ -1527,6 +1525,9 @@ fn expect_colon(
         Continue => return error("expected colon");,
         Match => return error("expected colon");,
         Unsafe => return error("expected colon");,
+
+
+        At => return error("expected colon");,
         Comptime => return error("expected colon");,
         Try => return error("expected colon");,
         True => return error("expected colon");,
@@ -1601,6 +1602,9 @@ fn parse_optional_return_type(
         Continue => return error("expected return type or block");,
         Match => return error("expected return type or block");,
         Unsafe => return error("expected return type or block");,
+
+
+        At => return error("expected return type or block");,
         Comptime => return error("expected return type or block");,
         Try => return error("expected return type or block");,
         True => return error("expected return type or block");,
@@ -1689,6 +1693,9 @@ fn parse_type_end(
         Continue => return error("expected type name");,
         Match => return error("expected type name");,
         Unsafe => return error("expected type name");,
+
+
+        At => return error("expected type name");,
         Comptime => return error("expected type name");,
         Try => return error("expected type name");,
         True => return error("expected type name");,
@@ -1774,6 +1781,9 @@ fn parse_named_type_end(
         Continue => return base;,
         Match => return base;,
         Unsafe => return base;,
+
+
+        At => return base;,
         Comptime => return base;,
         Try => return base;,
         True => return base;,
@@ -1854,6 +1864,9 @@ fn is_double_colon(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -1922,6 +1935,9 @@ fn expect_type_segment(
         Continue => return error("expected type segment");,
         Match => return error("expected type segment");,
         Unsafe => return error("expected type segment");,
+
+
+        At => return error("expected type segment");,
         Comptime => return error("expected type segment");,
         Try => return error("expected type segment");,
         True => return error("expected type segment");,
@@ -1995,6 +2011,9 @@ fn parse_borrow_type_end(
         Continue => return error("expected borrowed type");,
         Match => return error("expected borrowed type");,
         Unsafe => return error("expected borrowed type");,
+
+
+        At => return error("expected borrowed type");,
         Comptime => return error("expected borrowed type");,
         Try => return error("expected borrowed type");,
         True => return error("expected borrowed type");,
@@ -2068,6 +2087,9 @@ fn parse_slice_type_end(
         Continue => return error("expected right bracket");,
         Match => return error("expected right bracket");,
         Unsafe => return error("expected right bracket");,
+
+
+        At => return error("expected right bracket");,
         Comptime => return error("expected right bracket");,
         Try => return error("expected right bracket");,
         True => return error("expected right bracket");,
@@ -2137,6 +2159,9 @@ fn parse_type_arg_end(
         Continue => return error("expected static type argument");,
         Match => return error("expected static type argument");,
         Unsafe => return error("expected static type argument");,
+
+
+        At => return error("expected static type argument");,
         Comptime => return error("expected static type argument");,
         Try => return error("expected static type argument");,
         True => return error("expected static type argument");,
@@ -2258,6 +2283,9 @@ fn parse_generic_type_end(
         Continue => return error("expected comma or greater than");,
         Match => return error("expected comma or greater than");,
         Unsafe => return error("expected comma or greater than");,
+
+
+        At => return error("expected comma or greater than");,
         Comptime => return error("expected comma or greater than");,
         Try => return error("expected comma or greater than");,
         True => return error("expected comma or greater than");,
@@ -2330,6 +2358,9 @@ fn next_generic_type_arg(
         Continue => return error("expected static type argument");,
         Match => return error("expected static type argument");,
         Unsafe => return error("expected static type argument");,
+
+
+        At => return error("expected static type argument");,
         Comptime => return error("expected static type argument");,
         Try => return error("expected static type argument");,
         True => return error("expected static type argument");,
@@ -2410,6 +2441,9 @@ fn parse_optional_block(
         Continue => return error("expected block");,
         Match => return error("expected block");,
         Unsafe => return error("expected block");,
+
+
+        At => return error("expected block");,
         Comptime => return error("expected block");,
         Try => return error("expected block");,
         True => return error("expected block");,
@@ -2496,6 +2530,9 @@ fn is_eof_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -2576,6 +2613,9 @@ fn is_block_close_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -2645,7 +2685,8 @@ fn parse_statement(
         Break => return std::kizu::parser::parse_break(ast, text, token);,
         Continue => return std::kizu::parser::parse_continue(ast, text, token);,
         Match => return std::kizu::parser::parse_match(allocator, ast, text, token);,
-        Unsafe => return std::kizu::parser::parse_unsafe(allocator, ast, text, token);,
+        Unsafe => return error("unsafe block syntax is not supported; use @unsafe(...)");,
+        At => return std::kizu::parser::parse_unsafe(allocator, ast, text, token);,
         Comptime => return std::kizu::parser::parse_comptime_statement(allocator, ast, text, token);,
         Ident => return std::kizu::parser::parse_ident_statement(allocator, ast, text, token);,
         Number => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
@@ -2721,6 +2762,9 @@ fn parse_ident_statement(
         Continue => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Match => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Unsafe => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
+
+
+        At => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Comptime => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Try => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         True => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
@@ -2799,6 +2843,9 @@ fn parse_labeled_statement(
         Continue => return error("label must attach to loop");,
         Match => return error("label must attach to loop");,
         Unsafe => return error("label must attach to loop");,
+
+
+        At => return error("label must attach to loop");,
         Comptime => return error("label must attach to loop");,
         Try => return error("label must attach to loop");,
         True => return error("label must attach to loop");,
@@ -2871,6 +2918,9 @@ fn parse_comptime_statement(
         Continue => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Match => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Unsafe => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
+
+
+        At => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Comptime => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         Try => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
         True => return std::kizu::parser::parse_expr_or_assign_statement(allocator, ast, text, token);,
@@ -2973,6 +3023,9 @@ fn parse_return(
         Continue => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);,
         Match => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);,
         Unsafe => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);,
+
+
+        At => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);,
         Comptime => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);,
         Try => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);,
         True => return std::kizu::parser::parse_return_value(allocator, ast, text, token, next);,
@@ -3089,6 +3142,9 @@ fn parse_expr_or_assign_statement(
         Continue => return error("expected semicolon");,
         Match => return error("expected semicolon");,
         Unsafe => return error("expected semicolon");,
+
+
+        At => return error("expected semicolon");,
         Comptime => return error("expected semicolon");,
         Try => return error("expected semicolon");,
         True => return error("expected semicolon");,
@@ -3318,13 +3374,80 @@ fn parse_unsafe(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []u8,
-    token: std::kizu::lexer::Token
+    at_token: std::kizu::lexer::Token
 ) -> !ParseNode {
-    let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, token));
+    let directive = std::kizu::lexer::next_token(text, at_token);
+    if !(try std::kizu::parser::is_token_text(text, directive, "unsafe")) {
+        return error("unknown statement directive");
+    }
+    let open_paren = try std::kizu::parser::expect_left_paren(
+        std::kizu::lexer::next_token(text, directive)
+    );
+    let capabilities = try std::kizu::parser::parse_unsafe_capabilities(
+        ast,
+        text,
+        std::kizu::lexer::next_token(text, open_paren)
+    );
+    let open = try std::kizu::parser::expect_lbrace(capabilities.next);
     let body = try std::kizu::parser::parse_block(allocator, ast, text, open);
     let body_node = ast.get(body.node);
-    let node = ast.add_unsafe(std::kizu::ast::span(token.start, body_node.span.end), body.node);
+    let node = ast.add_unsafe(
+        std::kizu::ast::span(at_token.start, body_node.span.end),
+        capabilities.range,
+        body.node
+    );
     return std::kizu::parser::parse_node(node, body.next);
+}
+
+fn parse_unsafe_capabilities(
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    first: std::kizu::lexer::Token
+) -> !ParseRange {
+    if std::kizu::parser::is_right_paren_token(first) {
+        return error("expected unsafe capability");
+    }
+    let start = ast.begin_children();
+    let close = try std::kizu::parser::parse_unsafe_capability_list(ast, text, first);
+    return ParseRange {
+        range: ast.finish_children(start),
+        next: std::kizu::lexer::next_token(text, close)
+    };
+}
+
+fn parse_unsafe_capability_list(
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    token: std::kizu::lexer::Token
+) -> !std::kizu::lexer::Token {
+    let capability = try std::kizu::parser::expect_ident(token);
+    if !(try std::kizu::parser::is_unsafe_capability_name(text, capability)) {
+        return error("unknown unsafe capability");
+    }
+    try ast.add_child(std::kizu::parser::name_node(ast, capability));
+    let next = std::kizu::lexer::next_token(text, capability);
+    if std::kizu::parser::is_right_paren_token(next) {
+        return next;
+    }
+    if std::kizu::parser::is_comma_token(next) {
+        let after_comma = std::kizu::lexer::next_token(text, next);
+        if std::kizu::parser::is_right_paren_token(after_comma) {
+            return error("expected unsafe capability");
+        }
+        return std::kizu::parser::parse_unsafe_capability_list(ast, text, after_comma);
+    }
+    return error("expected comma or right paren");
+}
+
+fn is_unsafe_capability_name(text: []u8, token: std::kizu::lexer::Token) -> !bool {
+    return (try std::kizu::parser::is_token_text(text, token, "ptr_read")) or
+        (try std::kizu::parser::is_token_text(text, token, "ptr_write")) or
+        (try std::kizu::parser::is_token_text(text, token, "ptr_deref")) or
+        (try std::kizu::parser::is_token_text(text, token, "ptr_cast")) or
+        (try std::kizu::parser::is_token_text(text, token, "ptr_int_cast")) or
+        (try std::kizu::parser::is_token_text(text, token, "extern_call")) or
+        (try std::kizu::parser::is_token_text(text, token, "unsafe_call")) or
+        (try std::kizu::parser::is_token_text(text, token, "volatile"));
 }
 
 fn parse_comptime_if(
@@ -3541,6 +3664,9 @@ fn parse_primary(
         Continue => return error("expected expression");,
         Match => return std::kizu::parser::parse_match(allocator, ast, text, token);,
         Unsafe => return error("expected expression");,
+
+
+        At => return error("expected expression");,
         And => return error("expected expression");,
         Or => return error("expected expression");,
         LBrace => return error("expected expression");,
@@ -3776,6 +3902,9 @@ fn prefix_right_start(
         Continue => return error("expected prefix operator");,
         Match => return error("expected prefix operator");,
         Unsafe => return error("expected prefix operator");,
+
+
+        At => return error("expected prefix operator");,
         Comptime => return error("expected prefix operator");,
         Try => return error("expected prefix operator");,
         True => return error("expected prefix operator");,
@@ -3843,6 +3972,9 @@ fn prefix_borrow_right_start(
         Continue => return next;,
         Match => return next;,
         Unsafe => return next;,
+
+
+        At => return next;,
         Comptime => return next;,
         Try => return next;,
         True => return next;,
@@ -3914,6 +4046,9 @@ fn prefix_op(
         Continue => return error("expected prefix operator");,
         Match => return error("expected prefix operator");,
         Unsafe => return error("expected prefix operator");,
+
+
+        At => return error("expected prefix operator");,
         Comptime => return error("expected prefix operator");,
         Try => return error("expected prefix operator");,
         True => return error("expected prefix operator");,
@@ -3982,6 +4117,9 @@ fn borrow_prefix_op(
         Continue => return std::kizu::ast::prefix_borrow();,
         Match => return std::kizu::ast::prefix_borrow();,
         Unsafe => return std::kizu::ast::prefix_borrow();,
+
+
+        At => return std::kizu::ast::prefix_borrow();,
         Comptime => return std::kizu::ast::prefix_borrow();,
         Try => return std::kizu::ast::prefix_borrow();,
         True => return std::kizu::ast::prefix_borrow();,
@@ -4081,6 +4219,9 @@ fn parse_one_postfix(
         Continue => return error("expected postfix operator");,
         Match => return error("expected postfix operator");,
         Unsafe => return error("expected postfix operator");,
+
+
+        At => return error("expected postfix operator");,
         Comptime => return error("expected postfix operator");,
         Try => return error("expected postfix operator");,
         True => return error("expected postfix operator");,
@@ -4634,6 +4775,9 @@ fn expect_block_close(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Toke
         Continue => return error("expected statement");,
         Match => return error("expected statement");,
         Unsafe => return error("expected statement");,
+
+
+        At => return error("expected statement");,
         Comptime => return error("expected statement");,
         Try => return error("expected statement");,
         True => return error("expected statement");,
@@ -4698,6 +4842,9 @@ fn is_postfix_start(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -4764,6 +4911,9 @@ fn is_call_close_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -4835,6 +4985,9 @@ fn parse_optional_else(
         Continue => return std::kizu::parser::empty_parse_node(ast, token);,
         Match => return std::kizu::parser::empty_parse_node(ast, token);,
         Unsafe => return std::kizu::parser::empty_parse_node(ast, token);,
+
+
+        At => return std::kizu::parser::empty_parse_node(ast, token);,
         Comptime => return std::kizu::parser::empty_parse_node(ast, token);,
         Try => return std::kizu::parser::empty_parse_node(ast, token);,
         True => return std::kizu::parser::empty_parse_node(ast, token);,
@@ -4906,6 +5059,9 @@ fn parse_optional_branch_label(
         Continue => return std::kizu::parser::empty_parse_node(ast, next);,
         Match => return std::kizu::parser::empty_parse_node(ast, next);,
         Unsafe => return std::kizu::parser::empty_parse_node(ast, next);,
+
+
+        At => return std::kizu::parser::empty_parse_node(ast, next);,
         Comptime => return std::kizu::parser::empty_parse_node(ast, next);,
         Try => return std::kizu::parser::empty_parse_node(ast, next);,
         True => return std::kizu::parser::empty_parse_node(ast, next);,
@@ -4976,6 +5132,9 @@ fn parse_optional_match_binding(
         Continue => return std::kizu::parser::empty_parse_node(ast, token);,
         Match => return std::kizu::parser::empty_parse_node(ast, token);,
         Unsafe => return std::kizu::parser::empty_parse_node(ast, token);,
+
+
+        At => return std::kizu::parser::empty_parse_node(ast, token);,
         Comptime => return std::kizu::parser::empty_parse_node(ast, token);,
         Try => return std::kizu::parser::empty_parse_node(ast, token);,
         True => return std::kizu::parser::empty_parse_node(ast, token);,
@@ -5052,6 +5211,9 @@ fn binary_precedence(token: std::kizu::lexer::Token) -> i64 {
         Continue => return 0 - 1;,
         Match => return 0 - 1;,
         Unsafe => return 0 - 1;,
+
+
+        At => return 0 - 1;,
         Comptime => return 0 - 1;,
         Try => return 0 - 1;,
         True => return 0 - 1;,
@@ -5118,6 +5280,9 @@ fn binary_op(token: std::kizu::lexer::Token) -> !std::kizu::ast::BinaryOp {
         Continue => return error("expected binary operator");,
         Match => return error("expected binary operator");,
         Unsafe => return error("expected binary operator");,
+
+
+        At => return error("expected binary operator");,
         Comptime => return error("expected binary operator");,
         Try => return error("expected binary operator");,
         True => return error("expected binary operator");,
@@ -5184,6 +5349,9 @@ fn expect_call_arg_start(token: std::kizu::lexer::Token) -> !std::kizu::lexer::T
         Continue => return error("expected call arg");,
         Match => return error("expected call arg");,
         Unsafe => return error("expected call arg");,
+
+
+        At => return error("expected call arg");,
         Comptime => return token;,
         Try => return token;,
         True => return token;,
@@ -5253,6 +5421,9 @@ fn next_call_arg_token(
         Continue => return error("expected comma or right paren");,
         Match => return error("expected comma or right paren");,
         Unsafe => return error("expected comma or right paren");,
+
+
+        At => return error("expected comma or right paren");,
         Comptime => return error("expected comma or right paren");,
         Try => return error("expected comma or right paren");,
         True => return error("expected comma or right paren");,
@@ -5319,6 +5490,9 @@ fn is_pub_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -5385,6 +5559,9 @@ fn is_comptime_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return true;,
         Try => return false;,
         True => return false;,
@@ -5451,6 +5628,9 @@ fn is_decl_item_separator(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -5517,6 +5697,9 @@ fn is_lt_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -5583,6 +5766,9 @@ fn is_gt_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -5649,6 +5835,9 @@ fn is_comma_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -5715,6 +5904,9 @@ fn is_arrow_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -5781,6 +5973,9 @@ fn is_left_paren_token(token: std::kizu::lexer::Token) -> bool {
         Continue => return false;,
         Match => return false;,
         Unsafe => return false;,
+
+
+        At => return false;,
         Comptime => return false;,
         Try => return false;,
         True => return false;,
@@ -5825,6 +6020,13 @@ fn is_left_paren_token(token: std::kizu::lexer::Token) -> bool {
     }
 }
 
+fn is_right_paren_token(token: std::kizu::lexer::Token) -> bool {
+    return match token.kind {
+        RParen => true,
+        _ => false,
+    };
+}
+
 fn expect_string(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
     match token.kind {
         Fn => return error("expected string");,
@@ -5847,6 +6049,9 @@ fn expect_string(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected string");,
         Match => return error("expected string");,
         Unsafe => return error("expected string");,
+
+
+        At => return error("expected string");,
         Comptime => return error("expected string");,
         Try => return error("expected string");,
         True => return error("expected string");,
@@ -5913,6 +6118,9 @@ fn expect_fn(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected fn");,
         Match => return error("expected fn");,
         Unsafe => return error("expected fn");,
+
+
+        At => return error("expected fn");,
         Comptime => return error("expected fn");,
         Try => return error("expected fn");,
         True => return error("expected fn");,
@@ -5979,6 +6187,9 @@ fn expect_left_paren(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token
         Continue => return error("expected left paren");,
         Match => return error("expected left paren");,
         Unsafe => return error("expected left paren");,
+
+
+        At => return error("expected left paren");,
         Comptime => return error("expected left paren");,
         Try => return error("expected left paren");,
         True => return error("expected left paren");,
@@ -6045,6 +6256,9 @@ fn expect_gt(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected greater than");,
         Match => return error("expected greater than");,
         Unsafe => return error("expected greater than");,
+
+
+        At => return error("expected greater than");,
         Comptime => return error("expected greater than");,
         Try => return error("expected greater than");,
         True => return error("expected greater than");,
@@ -6112,6 +6326,9 @@ fn expect_type_param(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token
         Continue => return error("expected type parameter");,
         Match => return error("expected type parameter");,
         Unsafe => return error("expected type parameter");,
+
+
+        At => return error("expected type parameter");,
         Comptime => return error("expected type parameter");,
         Try => return error("expected type parameter");,
         True => return error("expected type parameter");,
@@ -6177,6 +6394,9 @@ fn expect_ident(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected identifier");,
         Match => return error("expected identifier");,
         Unsafe => return error("expected identifier");,
+
+
+        At => return error("expected identifier");,
         Comptime => return error("expected identifier");,
         Try => return error("expected identifier");,
         True => return error("expected identifier");,
@@ -6243,6 +6463,9 @@ fn expect_assign(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected assign");,
         Match => return error("expected assign");,
         Unsafe => return error("expected assign");,
+
+
+        At => return error("expected assign");,
         Comptime => return error("expected assign");,
         Try => return error("expected assign");,
         True => return error("expected assign");,
@@ -6309,6 +6532,9 @@ fn expect_semicolon(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token 
         Continue => return error("expected semicolon");,
         Match => return error("expected semicolon");,
         Unsafe => return error("expected semicolon");,
+
+
+        At => return error("expected semicolon");,
         Comptime => return error("expected semicolon");,
         Try => return error("expected semicolon");,
         True => return error("expected semicolon");,
@@ -6375,6 +6601,9 @@ fn expect_lbrace(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected left brace");,
         Match => return error("expected left brace");,
         Unsafe => return error("expected left brace");,
+
+
+        At => return error("expected left brace");,
         Comptime => return error("expected left brace");,
         Try => return error("expected left brace");,
         True => return error("expected left brace");,
@@ -6441,6 +6670,9 @@ fn expect_right_paren(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Toke
         Continue => return error("expected right paren");,
         Match => return error("expected right paren");,
         Unsafe => return error("expected right paren");,
+
+
+        At => return error("expected right paren");,
         Comptime => return error("expected right paren");,
         Try => return error("expected right paren");,
         True => return error("expected right paren");,
@@ -6507,6 +6739,9 @@ fn expect_range(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected range");,
         Match => return error("expected range");,
         Unsafe => return error("expected range");,
+
+
+        At => return error("expected range");,
         Comptime => return error("expected range");,
         Try => return error("expected range");,
         True => return error("expected range");,
@@ -6573,6 +6808,9 @@ fn expect_pipe(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token {
         Continue => return error("expected pipe");,
         Match => return error("expected pipe");,
         Unsafe => return error("expected pipe");,
+
+
+        At => return error("expected pipe");,
         Comptime => return error("expected pipe");,
         Try => return error("expected pipe");,
         True => return error("expected pipe");,
@@ -6639,6 +6877,9 @@ fn expect_fat_arrow(token: std::kizu::lexer::Token) -> !std::kizu::lexer::Token 
         Continue => return error("expected fat arrow");,
         Match => return error("expected fat arrow");,
         Unsafe => return error("expected fat arrow");,
+
+
+        At => return error("expected fat arrow");,
         Comptime => return error("expected fat arrow");,
         Try => return error("expected fat arrow");,
         True => return error("expected fat arrow");,

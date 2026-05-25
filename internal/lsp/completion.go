@@ -685,7 +685,7 @@ func declarationDocumentation(tokens []token.Token, start int) string {
 // isDeclarationModifierToken reports whether docs may attach through this token.
 func isDeclarationModifierToken(tok token.Token) bool {
 	switch tok.Type {
-	case token.Public, token.Unsafe, token.Extern, token.String:
+	case token.Public, token.At, token.Extern, token.String:
 		return true
 	default:
 		return false

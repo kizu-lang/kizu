@@ -597,7 +597,7 @@ func noSpaceBefore(t token.Token) bool {
 func noSpaceAfter(t token.Token) bool {
 	switch t.Type {
 	case token.LParen, token.LBracket, token.Dot, token.DoubleColon,
-		token.Bang, token.Question, token.Amp, token.Range:
+		token.Bang, token.Question, token.Amp, token.At, token.Range:
 		return true
 	}
 	return false
@@ -621,7 +621,7 @@ func canFollowSliceMarker(t token.Token) bool {
 // isTopLevelDeclStart reports whether t begins a top-level declaration.
 func isTopLevelDeclStart(t token.Token) bool {
 	switch t.Type {
-	case token.Import, token.Public, token.Unsafe, token.Extern,
+	case token.Import, token.Public, token.Extern,
 		token.Function, token.Struct, token.Enum, token.Union, token.Contract, token.Impl:
 		return true
 	case token.Ident:

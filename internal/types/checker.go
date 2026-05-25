@@ -112,6 +112,61 @@ var integerTypes = map[Type]bool{
 	"isize": true,
 }
 
+type unsafeCapability string
+
+const (
+	unsafePtrRead    unsafeCapability = "ptr_read"
+	unsafePtrWrite   unsafeCapability = "ptr_write"
+	unsafePtrDeref   unsafeCapability = "ptr_deref"
+	unsafePtrCast    unsafeCapability = "ptr_cast"
+	unsafePtrIntCast unsafeCapability = "ptr_int_cast"
+	unsafeExternCall unsafeCapability = "extern_call"
+	unsafeUnsafeCall unsafeCapability = "unsafe_call"
+	unsafeVolatile   unsafeCapability = "volatile"
+)
+
+var knownUnsafeCapabilities = map[string]unsafeCapability{
+	string(unsafePtrRead):    unsafePtrRead,
+	string(unsafePtrWrite):   unsafePtrWrite,
+	string(unsafePtrDeref):   unsafePtrDeref,
+	string(unsafePtrCast):    unsafePtrCast,
+	string(unsafePtrIntCast): unsafePtrIntCast,
+	string(unsafeExternCall): unsafeExternCall,
+	string(unsafeUnsafeCall): unsafeUnsafeCall,
+	string(unsafeVolatile):   unsafeVolatile,
+}
+
+type unsafeCaps map[unsafeCapability]bool
+
+// has reports whether an unsafe capability is available in the current scope.
+func (caps unsafeCaps) has(cap unsafeCapability) bool {
+	return caps != nil && caps[cap]
+}
+
+// with returns a scope containing the receiver capabilities plus the parsed names.
+func (caps unsafeCaps) with(names []string) (unsafeCaps, error) {
+	next := unsafeCaps{}
+	for cap := range caps {
+		next[cap] = true
+	}
+	for _, name := range names {
+		cap, ok := knownUnsafeCapabilities[name]
+		if !ok {
+			return nil, fmt.Errorf("unsafe error: unknown capability `%s`", name)
+		}
+		next[cap] = true
+	}
+	return next, nil
+}
+
+// requireUnsafeCapability rejects an unsafe operation outside its capability scope.
+func requireUnsafeCapability(caps unsafeCaps, cap unsafeCapability, operation string) error {
+	if caps.has(cap) {
+		return nil
+	}
+	return fmt.Errorf("unsafe error: %s requires @unsafe(%s)", operation, cap)
+}
+
 // Checker validates type rules for a parsed program.
 type Checker struct {
 	functions       map[string]*functionType
@@ -153,7 +208,7 @@ type functionType struct {
 	returnBorrow    string
 	returnType      Type
 	decl            *ast.FunctionDecl
-	unsafe          bool
+	requiresUnsafe  bool
 	externABI       string
 	implicitReturn  bool
 }
@@ -654,7 +709,8 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		mutBorrowParams: paramInfo.mutBorrowParams, comptimeParams: paramInfo.comptimeParams,
 		typeParams:   fn.TypeParams,
 		returnBorrow: fn.ReturnBorrow,
-		returnType:   ret, decl: fn, unsafe: fn.Unsafe, externABI: fn.ExternABI,
+		returnType:   ret, decl: fn, requiresUnsafe: fn.RequiresUnsafe,
+		externABI: fn.ExternABI,
 	}, nil
 }
 
@@ -1183,7 +1239,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		c.typeParams = previousTypeParams
 		c.loopLabels = previousLoops
 	}()
-	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, fn.unsafe)
+	returns, err := c.checkBlock(fn.decl.Body, env, fn.returnType, nil)
 	if err != nil {
 		return err
 	}
@@ -1223,7 +1279,7 @@ func (c *Checker) checkBlock(
 	block *ast.BlockStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	for _, stmt := range block.Statements {
 		returns, err := c.checkStmt(stmt, env, wantReturn, unsafe)
@@ -1239,7 +1295,7 @@ func (c *Checker) checkStmt(
 	stmt ast.Statement,
 	env *scope,
 	wantReturn Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
@@ -1266,7 +1322,11 @@ func (c *Checker) checkStmt(
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env, wantReturn, unsafe)
 	case *ast.UnsafeStmt:
-		return c.checkBlock(s.Body, env.child(), wantReturn, true)
+		caps, err := unsafe.with(s.Capabilities)
+		if err != nil {
+			return false, err
+		}
+		return c.checkBlock(s.Body, env.child(), wantReturn, caps)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
 	default:
@@ -1275,7 +1335,7 @@ func (c *Checker) checkStmt(
 }
 
 // checkDeferStmt validates the first supported block cleanup registration form.
-func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe bool) (bool, error) {
+func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe unsafeCaps) (bool, error) {
 	if err := validateDeferCleanupExpr(stmt.Expr); err != nil {
 		return false, err
 	}
@@ -1303,7 +1363,7 @@ func validateDeferCleanupExpr(expr ast.Expression) error {
 }
 
 // checkLetStmt validates a let or var declaration.
-func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool, error) {
+func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe unsafeCaps) (bool, error) {
 	handled, err := c.defineSpecialLetInitializer(stmt, env, unsafe)
 	if handled || err != nil {
 		return false, err
@@ -1332,7 +1392,7 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe bool) (bool
 func (c *Checker) defineSpecialLetInitializer(
 	stmt *ast.LetStmt,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	if borrow, ok := borrowPrefix(stmt.Value); ok {
 		typ, mutable, err := c.checkBorrowPrefix(borrow, env, unsafe)
@@ -1368,7 +1428,7 @@ func (c *Checker) defineSpecialLetInitializer(
 func (c *Checker) checkBoxBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -1414,7 +1474,7 @@ func boxBorrowMutReceiverIsMutable(expr ast.Expression, env *scope) bool {
 func (c *Checker) checkStringViewInitializer(
 	expr ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (string, bool, error) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -1443,7 +1503,7 @@ func (c *Checker) checkStringViewInitializer(
 func (c *Checker) checkArrayBorrowInitializer(
 	expr ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, bool, error) {
 	tryExpr, ok := expr.(*ast.TryExpr)
 	if !ok {
@@ -1477,7 +1537,11 @@ func (c *Checker) checkArrayBorrowInitializer(
 }
 
 // checkAssignStmt validates assignment to an existing binding.
-func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope, unsafe bool) (bool, error) {
+func (c *Checker) checkAssignStmt(
+	stmt *ast.AssignStmt,
+	env *scope,
+	unsafe unsafeCaps,
+) (bool, error) {
 	want, err := c.checkAssignableTarget(stmt.Target, env, unsafe)
 	if err != nil {
 		return false, err
@@ -1497,7 +1561,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope, unsafe bool)
 func (c *Checker) checkAssignableTarget(
 	expr ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch target := expr.(type) {
 	case *ast.IdentExpr:
@@ -1517,7 +1581,7 @@ func (c *Checker) checkAssignableTarget(
 func (c *Checker) checkAssignableCall(
 	expr *ast.CallExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	field, ok := expr.Callee.(*ast.FieldExpr)
 	if !ok {
@@ -1550,7 +1614,7 @@ func (c *Checker) checkReturnStmt(
 	stmt *ast.ReturnStmt,
 	env *scope,
 	want Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	if stmt.Value == nil {
 		if acceptsBareReturn(want) {
@@ -1574,7 +1638,7 @@ func (c *Checker) checkReturnValue(
 	env *scope,
 	want Type,
 	got Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	if ok, err := c.checkErrorUnionReturn(expr, env, want, got, unsafe); ok || err != nil {
 		return ok, err
@@ -1605,7 +1669,7 @@ func (c *Checker) checkErrorUnionReturn(
 	env *scope,
 	want Type,
 	got Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	if elem, ok := errorUnionElement(want); ok {
 		success := Type(elem)
@@ -1681,7 +1745,7 @@ func (c *Checker) checkReturnBorrowSources(
 	expr ast.Expression,
 	env *scope,
 	_ Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if c.currentFunction == nil || c.currentFunction.returnBorrow == "" {
 		return nil
@@ -1711,7 +1775,7 @@ func (c *Checker) checkReturnBorrowSources(
 func (c *Checker) exprBorrowSources(
 	expr ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (map[string]bool, error) {
 	switch e := expr.(type) {
 	case *ast.StringExpr:
@@ -1752,7 +1816,7 @@ func (c *Checker) identBorrowSources(name string, env *scope) map[string]bool {
 func (c *Checker) callBorrowSources(
 	expr *ast.CallExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (map[string]bool, error) {
 	if sources, ok, err := c.methodBorrowSources(expr, env, unsafe); ok || err != nil {
 		return sources, err
@@ -1789,7 +1853,7 @@ func borrowReturnParamIndex(fn *functionType) int {
 func (c *Checker) methodBorrowSources(
 	expr *ast.CallExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (map[string]bool, bool, error) {
 	field, ok := expr.Callee.(*ast.FieldExpr)
 	if !ok || field.Namespace {
@@ -1805,7 +1869,7 @@ func (c *Checker) methodBorrowSources(
 }
 
 // singleBorrowSource extracts a deterministic source name when one source is known.
-func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe bool) string {
+func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe unsafeCaps) string {
 	sources, err := c.exprBorrowSources(expr, env, unsafe)
 	if err != nil {
 		return ""
@@ -1827,7 +1891,7 @@ func (c *Checker) singleBorrowSource(expr ast.Expression, env *scope, unsafe boo
 func (c *Checker) fieldBorrowSources(
 	expr *ast.FieldExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (map[string]bool, error) {
 	if expr.Namespace {
 		return map[string]bool{}, nil
@@ -1839,7 +1903,7 @@ func (c *Checker) fieldBorrowSources(
 func (c *Checker) structLiteralBorrowSources(
 	expr *ast.StructLiteralExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (map[string]bool, error) {
 	decl := c.structs[expr.TypeName]
 	if decl == nil {
@@ -1964,7 +2028,7 @@ func (c *Checker) checkIfStmt(
 	stmt *ast.IfStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
@@ -1992,7 +2056,7 @@ func (c *Checker) checkWhileStmt(
 	stmt *ast.WhileStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
@@ -2015,7 +2079,7 @@ func (c *Checker) checkForStmt(
 	stmt *ast.ForStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	if err := c.checkForBounds(stmt, env, unsafe); err != nil {
 		return false, err
@@ -2034,7 +2098,7 @@ func (c *Checker) checkForStmt(
 }
 
 // checkForBounds validates the start and end expressions for a range loop.
-func (c *Checker) checkForBounds(stmt *ast.ForStmt, env *scope, unsafe bool) error {
+func (c *Checker) checkForBounds(stmt *ast.ForStmt, env *scope, unsafe unsafeCaps) error {
 	start, err := c.checkExpr(stmt.Start, env, unsafe)
 	if err != nil {
 		return err
@@ -2086,7 +2150,7 @@ func (c *Checker) checkMatchStmt(
 	stmt *ast.MatchStmt,
 	env *scope,
 	wantReturn Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	valueType, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
@@ -2109,7 +2173,7 @@ func (c *Checker) checkMatchArms(
 	unionType *unionType,
 	env *scope,
 	wantReturn Type,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (bool, error) {
 	seen := map[string]bool{}
 	wildcard := false
@@ -2207,7 +2271,7 @@ func matchVariantCount(enumType *enumType, unionType *unionType) int {
 }
 
 // checkExpr computes the static type of an expression.
-func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkExpr(expr ast.Expression, env *scope, unsafe unsafeCaps) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IntExpr, *ast.StringExpr, *ast.BoolExpr, *ast.TypeExpr:
 		return c.checkScalarExpr(e)
@@ -2252,7 +2316,11 @@ func (c *Checker) checkScalarExpr(expr ast.Expression) (Type, error) {
 }
 
 // checkControlExpr validates statement-compatible control flow used as expressions.
-func (c *Checker) checkControlExpr(expr ast.Expression, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkControlExpr(
+	expr ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
 	switch e := expr.(type) {
 	case *ast.IfStmt:
 		return c.checkIfExpr(e, env, unsafe)
@@ -2264,7 +2332,7 @@ func (c *Checker) checkControlExpr(expr ast.Expression, env *scope, unsafe bool)
 }
 
 // checkIfExpr validates an if expression and returns the common branch type.
-func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeCaps) (Type, error) {
 	cond, err := c.checkExpr(stmt.Condition, env, unsafe)
 	if err != nil {
 		return "", err
@@ -2291,7 +2359,11 @@ func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe bool) (Type, 
 }
 
 // checkBlockValue validates a block used as an expression branch.
-func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkBlockValue(
+	block *ast.BlockStmt,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
 	if block == nil || len(block.Statements) == 0 {
 		return "", fmt.Errorf("type error: expression block must end with a value")
 	}
@@ -2308,7 +2380,7 @@ func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, unsafe bool)
 }
 
 // checkStmtValue computes the value type of a statement in expression-tail position.
-func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeCaps) (Type, error) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if s.Semicolon {
@@ -2325,7 +2397,7 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe bool) (T
 }
 
 // checkMatchExpr validates an exhaustive match expression and its arm result type.
-func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeCaps) (Type, error) {
 	valueType, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
 		return "", err
@@ -2344,7 +2416,7 @@ func (c *Checker) checkMatchExprArms(
 	enumType *enumType,
 	unionType *unionType,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	seen := map[string]bool{}
 	wildcard := false
@@ -2395,7 +2467,7 @@ func (c *Checker) checkMatchExprArm(
 	enumType *enumType,
 	unionType *unionType,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if arm.IsWildcard() {
 		return c.checkStmtValue(arm.Body, env.child(), unsafe)
@@ -2414,7 +2486,7 @@ func (c *Checker) checkMatchExprArm(
 }
 
 // checkIndexExpr validates checked one-dimensional byte indexing and slicing.
-func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	target, err := c.checkExpr(expr.Target, env, unsafe)
 	if err != nil {
 		return "", err
@@ -2446,7 +2518,7 @@ func (c *Checker) checkIndexBound(
 	name string,
 	expr ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if expr == nil {
 		return fmt.Errorf("type error: %s is missing", name)
@@ -2480,7 +2552,7 @@ func (c *Checker) checkContextualExpr(
 	expr ast.Expression,
 	want Type,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	got, err := c.checkExpr(expr, env, unsafe)
 	if err != nil {
@@ -2569,7 +2641,11 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 }
 
 // checkPrefixExpr validates unary operators.
-func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkPrefixExpr(
+	expr *ast.PrefixExpr,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
 	if expr.Operator == "&" || expr.Operator == "&var" {
 		typ, _, err := c.checkBorrowPrefix(expr, env, unsafe)
 		return typ, err
@@ -2598,7 +2674,7 @@ func (c *Checker) checkPrefixExpr(expr *ast.PrefixExpr, env *scope, unsafe bool)
 func (c *Checker) checkBorrowPrefix(
 	expr *ast.PrefixExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	mutable := expr.Operator == "&var"
 	if mutable {
@@ -2617,7 +2693,11 @@ func (c *Checker) checkBorrowPrefix(
 }
 
 // checkBinaryExpr validates arithmetic, logical, equality, and comparison operators.
-func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkBinaryExpr(
+	expr *ast.BinaryExpr,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
 	left, err := c.checkExpr(expr.Left, env, unsafe)
 	if err != nil {
 		return "", err
@@ -2672,7 +2752,7 @@ func isComparison(op string) bool {
 }
 
 // checkCastExpr validates explicit low-level casts.
-func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	target, err := c.parseType(expr.TargetType)
 	if err != nil {
 		return "", err
@@ -2688,8 +2768,8 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe bool) (Ty
 		return target, nil
 	}
 	if isPointerType(source) && isPointerType(target) {
-		if !unsafe {
-			return "", fmt.Errorf("unsafe error: pointer cast requires unsafe block")
+		if err := requireUnsafeCapability(unsafe, unsafePtrCast, "pointer cast"); err != nil {
+			return "", err
 		}
 		return target, nil
 	}
@@ -2725,7 +2805,7 @@ func (c *Checker) unionHasMessageVariant(name string) bool {
 }
 
 // checkTryExpr validates error-union propagation and returns the success type.
-func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if _, _, ok := errorUnionParts(c.currentReturn); !ok {
 		return "", fmt.Errorf("type error: try requires function to return !T")
 	}
@@ -2745,7 +2825,7 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe bool) (Type
 }
 
 // checkCallExpr validates builtin and user function calls.
-func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if field, ok := expr.Callee.(*ast.FieldExpr); ok {
 		return c.checkFieldCallExpr(field, expr.Args, env, unsafe)
 	}
@@ -2765,6 +2845,12 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	if name.Name == "ptr_write" {
 		return c.checkPtrWrite(expr, env, unsafe)
 	}
+	if name.Name == "volatile_read" {
+		return c.checkVolatileRead(expr, env, unsafe)
+	}
+	if name.Name == "volatile_write" {
+		return c.checkVolatileWrite(expr, env, unsafe)
+	}
 	if name.Name == "error" {
 		return c.checkErrorCall(expr, env, unsafe)
 	}
@@ -2782,7 +2868,7 @@ func (c *Checker) checkFieldCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if typ, ok, err := c.checkUnionConstructorCall(field, args, env, unsafe); ok || err != nil {
 		return typ, err
@@ -2801,7 +2887,7 @@ func (c *Checker) checkQualifiedUserCall(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	name, ok := qualifiedName(field)
 	if !ok {
@@ -2835,7 +2921,7 @@ func (c *Checker) checkQualifiedBuiltin(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	name, ok := qualifiedName(field)
 	if !ok {
@@ -2852,7 +2938,7 @@ func (c *Checker) checkStdCoreBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if typ, ok, err := c.checkFsBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
@@ -2874,7 +2960,7 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if replacement, ok := stdprim.RemovedBuiltinReplacement(name); ok {
 		return "", true, fmt.Errorf("type error: `%s` was removed; use %s", name, replacement)
@@ -2918,7 +3004,7 @@ func (c *Checker) checkIoBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	return c.checkSimpleCoreBuiltin(name, args, env, unsafe)
 }
@@ -2928,7 +3014,7 @@ func (c *Checker) checkProcessBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	return c.checkSimpleCoreBuiltin(name, args, env, unsafe)
 }
@@ -2938,7 +3024,7 @@ func (c *Checker) checkSimpleCoreBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	signature, ok := stdprim.SimpleCoreSignatures[name]
 	if !ok {
@@ -2963,7 +3049,7 @@ func (c *Checker) checkCoreArg(
 	want stdprim.ArgKind,
 	arg ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if want == stdprim.ArgIo {
 		return c.checkIoArg(arg, env, unsafe, name)
@@ -3003,7 +3089,7 @@ func (c *Checker) checkMemBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	return c.checkSimpleCoreBuiltin(name, args, env, unsafe)
 }
@@ -3013,7 +3099,7 @@ func (c *Checker) checkFsBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.fs_read_file":
@@ -3038,7 +3124,7 @@ func (c *Checker) checkTaskBuiltin(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if strings.HasPrefix(name, "std.builtin.task_") && !c.currentStd {
 		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::task", name)
@@ -3066,7 +3152,7 @@ func (c *Checker) checkTaskBuiltin(
 func (c *Checker) checkFsReadFile(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 2 {
 		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects io and path")
@@ -3089,7 +3175,7 @@ func (c *Checker) checkFsReadFile(
 func (c *Checker) checkFsWriteFile(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 3 {
 		return "", true, fmt.Errorf("type error: `std::fs::write_file` expects io, path, and bytes")
@@ -3114,7 +3200,7 @@ func (c *Checker) checkFsWriteFile(
 func (c *Checker) checkFsExists(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::exists", args, env, unsafe)
 	return "!bool", true, err
@@ -3124,7 +3210,7 @@ func (c *Checker) checkFsExists(
 func (c *Checker) checkFsMetadata(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::metadata", args, env, unsafe)
 	return "!std::fs::Metadata", true, err
@@ -3134,7 +3220,7 @@ func (c *Checker) checkFsMetadata(
 func (c *Checker) checkFsReadDir(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs("std::fs::read_dir", args, env, unsafe)
 	return "!std::array::Array<std::fs::DirEntry>", true, err
@@ -3145,7 +3231,7 @@ func (c *Checker) checkFsPathOnly(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 	result Type,
 ) (Type, bool, error) {
 	_, _, err := c.checkFsPathArgs(name, args, env, unsafe)
@@ -3157,7 +3243,7 @@ func (c *Checker) checkFsPathArgs(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, Type, error) {
 	if len(args) != 2 {
 		return "", "", fmt.Errorf("type error: `%s` expects io and path", name)
@@ -3180,7 +3266,7 @@ func (c *Checker) checkArrayConstructor(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !c.typeParams[string(elem)] {
 		if err := c.rejectArrayElementType(elem); err != nil {
@@ -3297,7 +3383,7 @@ func (c *Checker) rejectArrayStorageUnion(typ Type, seen map[Type]bool) error {
 }
 
 // checkIoArg validates an explicit Io argument for a std call.
-func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe bool, name string) error {
+func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe unsafeCaps, name string) error {
 	got, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {
 		return err
@@ -3313,13 +3399,19 @@ func (c *Checker) checkTypeApplyCallExpr(
 	expr *ast.TypeApplyExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	name, ok := qualifiedName(expr.Callee)
 	if !ok {
 		return "", fmt.Errorf("type error: unsupported type application `%s`", expr.String())
 	}
 	typeArg := c.instantiateTypeArgText(expr.TypeArg)
+	if name == "ptr_from_int" {
+		return c.checkPtrFromInt(typeArg, args, env, unsafe)
+	}
+	if name == "int_from_ptr" {
+		return c.checkIntFromPtr(typeArg, args, env, unsafe)
+	}
 	if name == "std.arena.Arena" {
 		return c.checkArenaTypeApply(typeArg, args, env, unsafe)
 	}
@@ -3361,7 +3453,7 @@ func (c *Checker) checkArenaTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
@@ -3393,7 +3485,7 @@ func (c *Checker) checkBuiltinTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if typ, ok, err := c.checkBuiltinMethodTypeApply(
 		name, typeArg, args, env, unsafe,
@@ -3414,7 +3506,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if name != "std.builtin.test_fail_equal" {
 		return "", false, nil
@@ -3436,7 +3528,7 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.channel":
@@ -3489,7 +3581,7 @@ func (c *Checker) checkBuiltinTestFailEqual(
 	typ Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 2 {
 		return "", fmt.Errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
@@ -3518,7 +3610,7 @@ func (c *Checker) checkBuiltinMethodTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.box", "std.builtin.box_borrow", "std.builtin.box_borrow_mut",
@@ -3541,7 +3633,7 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	elem, err := c.parseType(typeArg)
 	if err != nil {
@@ -3564,7 +3656,7 @@ func (c *Checker) checkBoxConstructor(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !c.currentStd {
 		return "", true, fmt.Errorf("type error: `std.builtin.box` is reserved; use std::mem::Box")
@@ -3603,7 +3695,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 	method string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
 	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (Type, error) {
@@ -3628,7 +3720,7 @@ func (c *Checker) checkBuiltinArrayMethodTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	switch name {
 	case "std.builtin.array_append", "std.builtin.array_len", "std.builtin.array_capacity",
@@ -3647,7 +3739,7 @@ func (c *Checker) checkBuiltinChannelMethod(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	elem, err := c.parseType(typeArg)
 	if err != nil {
@@ -3666,7 +3758,7 @@ func (c *Checker) checkBuiltinAtomicMethod(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	elem, err := c.parseType(typeArg)
 	if err != nil {
@@ -3685,7 +3777,7 @@ func (c *Checker) checkBuiltinMutexMethod(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	elem, err := c.parseType(typeArg)
 	if err != nil {
@@ -3703,7 +3795,7 @@ func (c *Checker) checkBuiltinArrayMethod(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	elem, err := c.parseType(typeArg)
 	if err != nil {
@@ -3723,7 +3815,7 @@ func (c *Checker) checkBuiltinReceiverMethod(
 	checkRest func([]ast.Expression) (Type, error),
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !c.currentStd {
 		return "", true, fmt.Errorf("type error: `%s` is reserved", name)
@@ -3749,7 +3841,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch name {
 	case "pop":
@@ -3798,7 +3890,7 @@ func (c *Checker) checkBuiltinMapTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if strings.HasPrefix(name, "std.builtin.map_") {
 		return c.checkBuiltinMapMethod(name, typeArg, args, env, unsafe)
@@ -3825,7 +3917,7 @@ func (c *Checker) checkBuiltinMapMethod(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	mapArgs, err := c.checkedMapArgsAllowTypeParams(typeArg)
 	if err != nil {
@@ -3847,7 +3939,7 @@ func (c *Checker) checkMapPrimitiveMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if !isGenericParamType(Type(keyType)) && !isGenericParamType(valueType) {
 		return c.checkMapMethod(valueType, name, args, env, unsafe)
@@ -3892,7 +3984,7 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	keyType string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
@@ -3913,7 +4005,7 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if name != "std.builtin.thread_scoped" {
 		return "", false, nil
@@ -3935,7 +4027,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	typeArg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	fn := c.functions[name]
 	if fn == nil || len(fn.typeParams) == 0 {
@@ -4004,7 +4096,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		c.typeArgValues = previousTypeArgValues
 		c.loopLabels = previousLoops
 	}()
-	returns, err := c.checkBlock(fn.decl.Body, env, returnType, fn.unsafe)
+	returns, err := c.checkBlock(fn.decl.Body, env, returnType, nil)
 	if err != nil {
 		return err
 	}
@@ -4057,7 +4149,7 @@ func (c *Checker) checkGenericUserArg(
 	idx int,
 	arg ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	want := substituteTypeParams(fn.params[idx], subst)
 	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
@@ -4129,7 +4221,7 @@ func typeFunctionParamName(fn *functionType, idx int) string {
 }
 
 // checkErrorCall validates error-union error construction.
-func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if len(expr.Args) != 1 {
 		return "", fmt.Errorf("type error: `error` expects 1 arg, got %d", len(expr.Args))
 	}
@@ -4155,14 +4247,22 @@ func (c *Checker) checkUserCall(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	fn, ok := c.functions[name]
 	if !ok {
 		return "", fmt.Errorf("type error: undefined function `%s`", name)
 	}
-	if (fn.unsafe || fn.externABI != "") && !unsafe {
-		return "", fmt.Errorf("unsafe error: call to `%s` requires unsafe block", name)
+	operation := fmt.Sprintf("call to `%s`", name)
+	if fn.externABI != "" {
+		if err := requireUnsafeCapability(unsafe, unsafeExternCall, operation); err != nil {
+			return "", err
+		}
+	}
+	if fn.requiresUnsafe {
+		if err := requireUnsafeCapability(unsafe, unsafeUnsafeCall, operation); err != nil {
+			return "", err
+		}
 	}
 	if len(fn.typeParams) > 0 {
 		return "", fmt.Errorf("type error: `%s` requires explicit static arguments", name)
@@ -4185,7 +4285,7 @@ func (c *Checker) checkUserCallArg(
 	idx int,
 	arg ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	checkedArg, err := prepareBorrowArgument(arg, fn.borrowParams[idx], fn.mutBorrowParams[idx], env)
 	if err != nil {
@@ -4312,7 +4412,7 @@ func (c *Checker) checkUnionConstructorCall(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !field.Namespace {
 		if enumType, ok := enumReceiver(field.Receiver, c.enums); ok {
@@ -4362,7 +4462,7 @@ func (c *Checker) checkUnionConstructorCall(
 func (c *Checker) checkArenaNewExpr(
 	expr *ast.ArenaNewExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if _, err := c.parseType(expr.TypeName); err != nil {
 		return "", err
@@ -4387,7 +4487,7 @@ func (c *Checker) checkArenaNewExpr(
 func (c *Checker) checkStructLiteralExpr(
 	expr *ast.StructLiteralExpr,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	decl := c.structs[expr.TypeName]
 	if decl == nil {
@@ -4430,7 +4530,7 @@ func (c *Checker) checkStructLiteralExpr(
 }
 
 // checkFieldExpr returns the declared type of a struct field access.
-func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if expr.Namespace {
 		return c.checkNamespaceExpr(expr)
 	}
@@ -4555,7 +4655,7 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 }
 
 // checkDerefExpr returns the value type behind a local borrow or raw pointer.
-func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
 		typ, _ := env.lookup(ident.Name)
 		return typ, nil
@@ -4565,8 +4665,8 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe bool) (
 		return "", err
 	}
 	if isPointerType(receiver) {
-		if !unsafe {
-			return "", fmt.Errorf("unsafe error: raw pointer dereference requires unsafe block")
+		if err := requireUnsafeCapability(unsafe, unsafePtrDeref, "raw pointer dereference"); err != nil {
+			return "", err
 		}
 		typ, err := rawPointerDerefType(receiver)
 		if err != nil {
@@ -4581,7 +4681,11 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe bool) (
 }
 
 // checkAssignableField validates mutation of a field on a mutable value.
-func (c *Checker) checkAssignableField(expr *ast.FieldExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkAssignableField(
+	expr *ast.FieldExpr,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
 		if env.isBorrowed(ident.Name) {
 			if !env.isMutBorrowed(ident.Name) {
@@ -4606,7 +4710,11 @@ func (c *Checker) checkAssignableField(expr *ast.FieldExpr, env *scope, unsafe b
 }
 
 // checkAssignableDeref validates mutation through an &var borrow or raw pointer.
-func (c *Checker) checkAssignableDeref(expr *ast.DerefExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkAssignableDeref(
+	expr *ast.DerefExpr,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok && env.isMutBorrowed(ident.Name) {
 		return c.checkDerefExpr(expr, env, unsafe)
 	}
@@ -4615,8 +4723,8 @@ func (c *Checker) checkAssignableDeref(expr *ast.DerefExpr, env *scope, unsafe b
 		return "", err
 	}
 	if isPointerType(receiver) {
-		if !unsafe {
-			return "", fmt.Errorf("unsafe error: raw pointer dereference requires unsafe block")
+		if err := requireUnsafeCapability(unsafe, unsafePtrDeref, "raw pointer dereference"); err != nil {
+			return "", err
 		}
 		return assignableRawPointerDerefType(receiver)
 	}
@@ -4648,7 +4756,7 @@ func (c *Checker) checkMethodCallExpr(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if err := c.checkMethodReceiverPath(field, env); err != nil {
 		return "", err
@@ -4705,7 +4813,7 @@ func (c *Checker) checkKnownReceiverMethod(
 	receiver Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if contractName, ok := dynContract(receiver); ok {
 		typ, err := c.checkDynMethodCall(contractName, field.Name, args, env, unsafe)
@@ -4754,7 +4862,7 @@ func (c *Checker) checkBoxReceiverMethod(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch field.Name {
 	case "borrow":
@@ -4788,7 +4896,7 @@ func (c *Checker) checkArenaOrImplMethod(
 	receiver Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	base, arg, ok := splitGenericType(string(receiver))
 	if !ok || base != "std::arena::Arena" {
@@ -4815,7 +4923,7 @@ func (c *Checker) checkStringReceiverMethod(
 	field *ast.FieldExpr,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if field.Name == "deinit" && ok && env.isBorrowed(ident.Name) {
@@ -4833,7 +4941,7 @@ func (c *Checker) checkStringMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch name {
 	case "append_bytes":
@@ -4889,7 +4997,7 @@ func (c *Checker) checkStringBytesArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
@@ -4909,7 +5017,7 @@ func (c *Checker) checkStringReserveArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
@@ -4929,7 +5037,7 @@ func (c *Checker) checkStringByteArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
@@ -4950,7 +5058,7 @@ func (c *Checker) checkArrayReceiverMethod(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if field.Name == "at_mut" {
 		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
@@ -4966,7 +5074,7 @@ func (c *Checker) checkMapReceiverMethod(
 	arg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if err := checkMapReceiverBorrow(field, env); err != nil {
 		return "", err
@@ -4999,7 +5107,7 @@ func (c *Checker) checkConcurrencyMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	base, arg, generic := splitGenericType(string(receiver))
 	if generic {
@@ -5036,7 +5144,7 @@ func (c *Checker) checkArrayMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if isStdArrayStorageMethod(name) {
 		return c.checkStdArrayStorageMethod(elem, name, args, env, unsafe)
@@ -5077,7 +5185,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if !c.currentStd {
 		return "", fmt.Errorf("type error: Array has no method `%s`", name)
@@ -5108,7 +5216,7 @@ func (c *Checker) checkArrayAppendArg(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
@@ -5140,7 +5248,7 @@ func (c *Checker) checkArrayGet(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if err := c.checkArrayIndexArg(name, args, env, unsafe); err != nil {
 		return "", err
@@ -5164,7 +5272,7 @@ func (c *Checker) checkArrayIndexArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `Array.%s` expects 1 arg, got %d", name, len(args))
@@ -5184,7 +5292,7 @@ func (c *Checker) checkArraySet(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 2 {
 		return "", fmt.Errorf("type error: `Array.set` expects 2 args, got %d", len(args))
@@ -5210,7 +5318,7 @@ func (c *Checker) checkMapConstructorForArgs(
 	valueType Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("type error: `std::map::Map` expects allocator")
@@ -5231,7 +5339,7 @@ func (c *Checker) checkMapMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch name {
 	case "insert":
@@ -5266,7 +5374,7 @@ func (c *Checker) checkMapInsert(
 	valueType Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 2 {
 		return "", fmt.Errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
@@ -5291,7 +5399,7 @@ func (c *Checker) checkMapKeyArg(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
 		return fmt.Errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
@@ -5349,7 +5457,7 @@ func (c *Checker) checkTaskGroupMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if name != "spawn" {
 		return "", fmt.Errorf("type error: TaskGroup has no method `%s`", name)
@@ -5378,7 +5486,7 @@ func (c *Checker) checkTaskGroupMethod(
 func (c *Checker) checkTaskGroup(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("type error: `std::task::Group` expects io")
@@ -5399,7 +5507,7 @@ func (c *Checker) checkSpawnArgs(
 	fn *functionType,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	if len(fn.params) == 0 || fn.params[0] != "Io" ||
 		fn.borrowParams[0] || fn.mutBorrowParams[0] {
@@ -5435,7 +5543,7 @@ func (c *Checker) checkQueueMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch name {
 	case "enqueue":
@@ -5451,7 +5559,11 @@ func (c *Checker) checkQueueMethod(
 }
 
 // checkQueueEnqueue validates one deferred function call.
-func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkQueueEnqueue(
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
 	if len(args) < 2 {
 		return "", fmt.Errorf("type error: `queue.enqueue` expects io, function, and args")
 	}
@@ -5500,7 +5612,7 @@ func (c *Checker) checkChannelMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch name {
 	case "send":
@@ -5538,7 +5650,7 @@ func (c *Checker) checkPartitionMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if name != "at" {
 		return "", fmt.Errorf("type error: Partition has no method `%s`", name)
@@ -5561,7 +5673,7 @@ func (c *Checker) checkLocalBufferMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if name != "get" {
 		return "", fmt.Errorf("type error: LocalBuffer has no method `%s`", name)
@@ -5585,7 +5697,7 @@ func (c *Checker) checkAtomicMethod(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	switch name {
 	case "load":
@@ -5640,7 +5752,7 @@ func checkTaskMethod(name string, elem string, args []ast.Expression) (Type, err
 func (c *Checker) checkPartitionMut(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 2 {
 		return "", true, fmt.Errorf("type error: `std::task::partition_mut` expects 2 args")
@@ -5666,7 +5778,7 @@ func (c *Checker) checkPartitionMut(
 func (c *Checker) checkLocalBuffer(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 2 {
 		return "", true, fmt.Errorf("type error: `std::task::LocalBuffer` expects 2 args")
@@ -5688,7 +5800,7 @@ func (c *Checker) checkLocalBuffer(
 func (c *Checker) checkParallelFor(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 4 {
 		return "", true, fmt.Errorf("type error: `std::task::parallel_for` expects 4 args")
@@ -5717,7 +5829,7 @@ func (c *Checker) checkParallelFor(
 func (c *Checker) checkParallelMap(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 5 {
 		return "", true, fmt.Errorf("type error: `std::task::parallel_map` expects 5 args")
@@ -5775,7 +5887,7 @@ func (c *Checker) checkThreadScopedTyped(
 	argType Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 3 {
 		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects io, function, and arg")
@@ -5802,7 +5914,7 @@ func (c *Checker) checkAtomic(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !c.typeParams[string(elem)] && !isAtomicSupportedType(elem) {
 		return "", true, fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", elem)
@@ -5826,7 +5938,7 @@ func (c *Checker) checkMutex(
 	elem Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 1 {
 		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects 1 arg", elem)
@@ -5857,7 +5969,7 @@ func (c *Checker) checkDynMethodCall(
 	name string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	contract := c.contracts[contractName]
 	if contract == nil || contract.methods[name] == nil {
@@ -5872,7 +5984,7 @@ func (c *Checker) checkMethodArgs(
 	receiver Type,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(method.params) == 0 {
 		return "", fmt.Errorf("type error: method `%s` must have self parameter", method.name)
@@ -5884,6 +5996,15 @@ func (c *Checker) checkMethodArgs(
 	if method.params[0] != receiver && method.params[0] != typeSelf {
 		return "", fmt.Errorf("type error: method `%s` self expects %s, got %s",
 			method.name, method.params[0], receiver)
+	}
+	if method.requiresUnsafe {
+		if err := requireUnsafeCapability(
+			unsafe,
+			unsafeUnsafeCall,
+			fmt.Sprintf("call to `%s`", method.name),
+		); err != nil {
+			return "", err
+		}
 	}
 	for idx, arg := range args {
 		want := method.params[idx+1]
@@ -5996,7 +6117,7 @@ func (c *Checker) checkArenaAdd(
 	arg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("type error: `arena.add` expects 1 arg, got %d", len(args))
@@ -6016,7 +6137,7 @@ func (c *Checker) checkArenaGet(
 	arg string,
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("type error: `arena.get` expects 1 arg, got %d", len(args))
@@ -6058,9 +6179,9 @@ func (c *Checker) directFieldCleanupReceiver(expr ast.Expression, env *scope) bo
 }
 
 // checkPtrRead validates unsafe raw pointer reads.
-func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
-	if !unsafe {
-		return "", fmt.Errorf("unsafe error: ptr_read requires unsafe block")
+func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+	if err := requireUnsafeCapability(unsafe, unsafePtrRead, "`ptr_read`"); err != nil {
+		return "", err
 	}
 	if len(expr.Args) != 1 {
 		return "", fmt.Errorf("type error: `ptr_read` expects 1 arg, got %d", len(expr.Args))
@@ -6077,9 +6198,9 @@ func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe bool) (Typ
 }
 
 // checkPtrWrite validates unsafe raw pointer writes.
-func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
-	if !unsafe {
-		return "", fmt.Errorf("unsafe error: ptr_write requires unsafe block")
+func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
+	if err := requireUnsafeCapability(unsafe, unsafePtrWrite, "`ptr_write`"); err != nil {
+		return "", err
 	}
 	if len(expr.Args) != 2 {
 		return "", fmt.Errorf("type error: `ptr_write` expects 2 args, got %d", len(expr.Args))
@@ -6098,6 +6219,119 @@ func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe bool) (Ty
 	}
 	if !sameType(valueType, Type(elem)) {
 		return "", fmt.Errorf("type error: `ptr_write` expects %s, got %s", elem, valueType)
+	}
+	return typeVoid, nil
+}
+
+// checkPtrFromInt validates unsafe integer-to-pointer conversion.
+func (c *Checker) checkPtrFromInt(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
+	if err := requireUnsafeCapability(unsafe, unsafePtrIntCast, "`ptr_from_int`"); err != nil {
+		return "", err
+	}
+	target, err := c.parseType(typeArg)
+	if err != nil {
+		return "", err
+	}
+	if !isPointerType(target) || strings.HasPrefix(string(target), "?") {
+		return "", fmt.Errorf("type error: `ptr_from_int` target must be non-null raw pointer")
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `ptr_from_int` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !integerTypes[got] {
+		return "", fmt.Errorf("type error: `ptr_from_int` expects integer, got %s", got)
+	}
+	return target, nil
+}
+
+// checkIntFromPtr validates unsafe pointer-to-integer conversion.
+func (c *Checker) checkIntFromPtr(
+	typeArg string,
+	args []ast.Expression,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
+	if err := requireUnsafeCapability(unsafe, unsafePtrIntCast, "`int_from_ptr`"); err != nil {
+		return "", err
+	}
+	target, err := c.parseType(typeArg)
+	if err != nil {
+		return "", err
+	}
+	if !integerTypes[target] {
+		return "", fmt.Errorf("type error: `int_from_ptr` target must be integer")
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("type error: `int_from_ptr` expects 1 arg, got %d", len(args))
+	}
+	got, err := c.checkExpr(args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !isPointerType(got) {
+		return "", fmt.Errorf("type error: `int_from_ptr` expects raw pointer, got %s", got)
+	}
+	return target, nil
+}
+
+// checkVolatileRead validates unsafe volatile raw pointer reads.
+func (c *Checker) checkVolatileRead(
+	expr *ast.CallExpr,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
+	if err := requireUnsafeCapability(unsafe, unsafeVolatile, "`volatile_read`"); err != nil {
+		return "", err
+	}
+	if len(expr.Args) != 1 {
+		return "", fmt.Errorf("type error: `volatile_read` expects 1 arg, got %d", len(expr.Args))
+	}
+	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := pointerElement(ptrType)
+	if !ok || strings.HasPrefix(string(ptrType), "?") {
+		return "", fmt.Errorf("type error: `volatile_read` expects non-null raw pointer, got %s", ptrType)
+	}
+	return Type(strings.TrimPrefix(elem, "const ")), nil
+}
+
+// checkVolatileWrite validates unsafe volatile raw pointer writes.
+func (c *Checker) checkVolatileWrite(
+	expr *ast.CallExpr,
+	env *scope,
+	unsafe unsafeCaps,
+) (Type, error) {
+	if err := requireUnsafeCapability(unsafe, unsafeVolatile, "`volatile_write`"); err != nil {
+		return "", err
+	}
+	if len(expr.Args) != 2 {
+		return "", fmt.Errorf("type error: `volatile_write` expects 2 args, got %d", len(expr.Args))
+	}
+	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	elem, ok := pointerElement(ptrType)
+	if !ok || strings.HasPrefix(string(ptrType), "?") || strings.HasPrefix(elem, "const ") {
+		return "", fmt.Errorf("type error: `volatile_write` expects mutable non-null raw pointer")
+	}
+	valueType, err := c.checkContextualExpr(expr.Args[1], Type(elem), env, unsafe)
+	if err != nil {
+		return "", err
+	}
+	if !sameType(valueType, Type(elem)) {
+		return "", fmt.Errorf("type error: `volatile_write` expects %s, got %s", elem, valueType)
 	}
 	return typeVoid, nil
 }
@@ -6269,7 +6503,7 @@ func taskElement(typ Type) (string, bool) {
 func (c *Checker) checkIoAndRange(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 	name string,
 ) error {
 	ioType, err := c.checkExpr(args[0], env, unsafe)
@@ -6295,7 +6529,7 @@ func (c *Checker) checkIoAndRange(
 func (c *Checker) checkIoAndPartitionRange(
 	args []ast.Expression,
 	env *scope,
-	unsafe bool,
+	unsafe unsafeCaps,
 ) error {
 	ioType, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -6354,7 +6588,7 @@ func (c *Checker) checkThreadScopedWorker(
 }
 
 // rejectThreadBoundaryArg rejects values unsafe to move across concurrency boundaries.
-func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe bool) error {
+func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe unsafeCaps) error {
 	if ident, ok := arg.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
 		return fmt.Errorf("type error: borrow cannot cross concurrency boundary")
 	}
@@ -6649,7 +6883,7 @@ func typedErrorUnionParts(name string) (string, string, bool) {
 }
 
 // checkPrintCall validates the print builtin.
-func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe bool) (Type, error) {
+func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if len(expr.Args) != 1 {
 		return "", fmt.Errorf("type error: `print` expects 1 arg, got %d", len(expr.Args))
 	}

@@ -369,18 +369,18 @@ fn main() {
 func TestCheckAcceptsRawPointerDerefSyntax(t *testing.T) {
 	source := `struct Node { tag: i64, name: []u8 }
 fn read_tag(node: ptr<const Node>) -> i64 {
-    unsafe {
+    @unsafe(ptr_deref) {
         return node.*.tag;
     }
 }
 fn write_tag(node: ptr<Node>, tag: i64) -> void {
-    unsafe {
+    @unsafe(ptr_deref) {
         node.*.tag = tag;
         return;
     }
 }
 fn replace(node: ptr<Node>, value: Node) -> void {
-    unsafe {
+    @unsafe(ptr_deref) {
         node.* = value;
         return;
     }
@@ -825,13 +825,13 @@ fn take(name: Name) { print(name.value); }
 fn main() {
     let name = Name { value: "alice" };
     take(name);
-    unsafe { print(name.value); }
+    @unsafe(ptr_read) { print(name.value); }
 }`,
 			want: "moved value `name` was used",
 		},
 		{
-			name: "borrow escape in unsafe function",
-			source: `unsafe fn bad(s: &[]u8) -> []u8 {
+			name: "borrow escape in requires-unsafe function",
+			source: `@requires_unsafe() fn bad(s: &[]u8) -> []u8 {
     return s;
 }`,
 			want: "borrowed value `s` cannot escape",
@@ -839,7 +839,7 @@ fn main() {
 		{
 			name: "borrow escape in unsafe block",
 			source: `fn bad(s: &[]u8) {
-    unsafe {
+    @unsafe(ptr_read) {
         let alias = s;
         print(alias);
     }
@@ -851,7 +851,7 @@ fn main() {
 			source: `struct Bad {
     value: &[]u8,
 }
-fn main() { unsafe { print(1); } }`,
+fn main() { @unsafe(ptr_read) { print(1); } }`,
 			want: "struct field `Bad.value` cannot store borrow",
 		},
 	}

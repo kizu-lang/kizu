@@ -20,6 +20,7 @@ const (
 	Asterisk Type = "*"
 	Slash    Type = "/"
 	Percent  Type = "%"
+	At       Type = "@"
 
 	Eq          Type = "=="
 	FatArrow    Type = "=>"

@@ -90,10 +90,10 @@ pub fn parse() -> i64 {
 	}
 }
 
-// TestParseFunctionDocCommentsThroughUnsafeExtern checks docs pass through modifiers.
-func TestParseFunctionDocCommentsThroughUnsafeExtern(t *testing.T) {
+// TestParseFunctionDocCommentsThroughExtern checks docs pass through modifiers.
+func TestParseFunctionDocCommentsThroughExtern(t *testing.T) {
 	input := `/// Calls the host runtime.
-pub unsafe extern "c" fn host(value: i64)`
+pub extern "c" fn host(value: i64)`
 	p := New(lexer.New(input))
 	program := p.ParseProgram()
 	if len(p.Errors()) != 0 {
@@ -103,8 +103,8 @@ pub unsafe extern "c" fn host(value: i64)`
 	if !ok {
 		t.Fatalf("decl = %#v, want function", program.Decls[0])
 	}
-	if !fn.Public || !fn.Unsafe || fn.ExternABI != "c" {
-		t.Fatalf("function modifiers = public:%v unsafe:%v abi:%q", fn.Public, fn.Unsafe, fn.ExternABI)
+	if !fn.Public || fn.ExternABI != "c" {
+		t.Fatalf("function modifiers = public:%v abi:%q", fn.Public, fn.ExternABI)
 	}
 	if fn.Doc != "Calls the host runtime." {
 		t.Fatalf("doc = %q", fn.Doc)
@@ -700,14 +700,11 @@ fn at_mut<T>(values: std::array::Array<T>, index: i64) -> !&var T { ` +
 	}
 }
 
-// TestParseUnsafeAndExtern checks Phase 12 unsafe and C ABI declarations.
+// TestParseUnsafeAndExtern checks Phase 12 @unsafe and C ABI declarations.
 func TestParseUnsafeAndExtern(t *testing.T) {
 	input := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
-unsafe fn write_byte(p: ptr<u8>, value: u8) {
-    ptr_write(p, value);
-}
 fn main() {
-    unsafe {
+    @unsafe(extern_call, ptr_read) {
         print(get_byte(ptr_read_ptr()));
     }
 }`
@@ -717,10 +714,83 @@ fn main() {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
 	want := `extern "c" fn get_byte(p: ptr<const u8>) -> u8
-unsafe fn write_byte(p: ptr<u8>, value: u8) { ptr_write(p, value); }
-fn main() { unsafe { print(get_byte(ptr_read_ptr())); } }`
+fn main() { @unsafe(extern_call, ptr_read) { print(get_byte(ptr_read_ptr())); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseUnsafeFnIsRejected keeps the removed caller-obligation syntax out.
+func TestParseUnsafeFnIsRejected(t *testing.T) {
+	p := New(lexer.New(`unsafe fn poke() { return; }`))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatal("expected parser error")
+	}
+	if got := p.Errors()[0]; !strings.Contains(got, "unsafe fn is not supported") {
+		t.Fatalf("first error = %q", got)
+	}
+}
+
+// TestParseRequiresUnsafeFunction checks caller-obligation function syntax.
+func TestParseRequiresUnsafeFunction(t *testing.T) {
+	input := `pub @requires_unsafe() fn poke() -> i64 {
+    return 1;
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `pub @requires_unsafe() fn poke() -> i64 { return 1; }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	fn, ok := program.Decls[0].(*ast.FunctionDecl)
+	if !ok || !fn.RequiresUnsafe || !fn.Public {
+		t.Fatalf("decl = %#v, want public requires-unsafe function", program.Decls[0])
+	}
+}
+
+// TestParseUnsafeCapabilityListRejectsEmpty checks capability lists are explicit.
+func TestParseUnsafeCapabilityListRejectsEmpty(t *testing.T) {
+	p := New(lexer.New(`fn main() { @unsafe() { return; } }`))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatal("expected parser error")
+	}
+	if got := p.Errors()[0]; !strings.Contains(got, "expected unsafe capability") {
+		t.Fatalf("first error = %q", got)
+	}
+}
+
+// TestParseUnsafeCapabilityListRejectsUnknown checks capability names are reserved.
+func TestParseUnsafeCapabilityListRejectsUnknown(t *testing.T) {
+	p := New(lexer.New(`fn main() { @unsafe(anything) { return; } }`))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatal("expected parser error")
+	}
+	if got := p.Errors()[0]; !strings.Contains(got, "unknown unsafe capability") {
+		t.Fatalf("first error = %q", got)
+	}
+}
+
+// TestParseRequiresUnsafeImplMethod checks caller-obligation method syntax.
+func TestParseRequiresUnsafeImplMethod(t *testing.T) {
+	input := `impl Register {
+    @requires_unsafe() fn write(self: Register) -> void {
+        return;
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	impl, ok := program.Decls[0].(*ast.ImplDecl)
+	if !ok || len(impl.Methods) != 1 || !impl.Methods[0].RequiresUnsafe {
+		t.Fatalf("decl = %#v, want impl method requiring unsafe", program.Decls[0])
 	}
 }
 
@@ -798,7 +868,7 @@ fn main() {
 func TestParseCast(t *testing.T) {
 	input := `fn main() {
     let x = cast<i32>(1);
-    unsafe {
+    @unsafe(ptr_cast) {
         let p = cast<ptr<u8>>(raw());
     }
 }`
@@ -807,7 +877,7 @@ func TestParseCast(t *testing.T) {
 	if len(p.Errors()) != 0 {
 		t.Fatalf("parser errors: %v", p.Errors())
 	}
-	want := `fn main() { let x = cast<i32>(1); unsafe { let p = cast<ptr<u8>>(raw()); } }`
+	want := `fn main() { let x = cast<i32>(1); @unsafe(ptr_cast) { let p = cast<ptr<u8>>(raw()); } }`
 	if got := program.String(); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
