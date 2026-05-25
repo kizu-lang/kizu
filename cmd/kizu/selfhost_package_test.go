@@ -1179,6 +1179,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_parse_run_print_payload_function(",
 		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
+		"ir_contract::body_child_sequence(",
 		"ir_contract::require_sequence_fact(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu": {
@@ -2282,12 +2283,29 @@ func assertExecutableParserConsumers(
 	t.Helper()
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
+		"ir_contract::body_child_sequence(",
 		"ir_contract::require_sequence_fact(",
 		"require_body_call(",
 		`"body-call "`,
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`"selfhost::backend::executable::parse_run_executable_ast",
+        18,`,
+		`"selfhost::backend::executable::parse_run_program_ast",
+        39,`,
+		`"selfhost::backend::executable::parse_run_fn_ast",
+        38,`,
+		`"selfhost::backend::executable::parse_run_block_ast",
+        39,`,
+		`"selfhost::backend::executable::parse_test_block_ast",
+        62,`,
+	} {
+		if strings.Contains(parser, fragment) {
+			t.Fatalf("hosted executable parser still uses fixed body sequence %q", fragment)
 		}
 	}
 	for _, fragment := range []string{
