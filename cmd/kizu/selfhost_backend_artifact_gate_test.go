@@ -1699,7 +1699,7 @@ func countHostedCompilerCLITestFailures(t *testing.T, exePath string) int {
 		exePath,
 		"hosted_test_ok_generic.kizu",
 		"hosted_test_ok_generic",
-		"fn main()->!void{std :: testing :: expect ( true );return;}\n",
+		"test \"ok\" { std :: testing :: expect ( true ); }\n",
 		"target/selfhost/test/expectoksrc.kizu",
 	)
 	failures += countHostedCompilerCLITestSourceFailures(
@@ -1707,7 +1707,7 @@ func countHostedCompilerCLITestFailures(t *testing.T, exePath string) int {
 		exePath,
 		"hosted_test_failure_generic.kizu",
 		"hosted_test_failure_generic",
-		"fn main()->!void{std :: testing :: expect ( false );return;}\n",
+		"test \"failure\" { std :: testing :: expect ( false ); }\n",
 		"target/selfhost/test/expectfailureabc.kizu",
 	)
 	return failures

@@ -2,6 +2,7 @@ package lsp
 
 var keywordCompletionItems = []completionItem{
 	{Label: "fn", Kind: completionItemKindKeyword},
+	{Label: "test", Kind: completionItemKindKeyword},
 	{Label: "import", Kind: completionItemKindKeyword},
 	{Label: "pub", Kind: completionItemKindKeyword},
 	{Label: "let", Kind: completionItemKindKeyword},
@@ -54,6 +55,7 @@ var primitiveTypeCompletionItems = []completionItem{
 var snippetCompletionItems = []completionItem{
 	snippet("fn", "function declaration", "fn ${1:name}(${2}) -> ${3:void} {\n    $0\n}"),
 	snippet("main", "main function", "fn main() {\n    $0\n}"),
+	snippet("test", "test block", "test \"${1:name}\" {\n    $0\n}"),
 	snippet("struct", "struct declaration", "struct ${1:Name} {\n    ${2:field}: ${3:i64},\n}"),
 	snippet("enum", "enum declaration", "enum ${1:Name} {\n    ${2:Tag},\n}"),
 	snippet("union", "union declaration", "union ${1:Name} {\n    ${2:Variant}(${3:i64}),\n}"),

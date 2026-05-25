@@ -155,6 +155,7 @@ type functionType struct {
 	decl            *ast.FunctionDecl
 	unsafe          bool
 	externABI       string
+	implicitReturn  bool
 }
 
 type contractType struct {
@@ -201,6 +202,10 @@ func (c *Checker) Check(program *ast.Program) error {
 				continue
 			}
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
+				return err
+			}
+		case *ast.TestDecl:
+			if err := c.checkTestDecl(d); err != nil {
 				return err
 			}
 		case *ast.ImplDecl:
@@ -252,7 +257,7 @@ func (c *Checker) collectTypeDecl(decl ast.Decl) error {
 		return c.collectUnion(d)
 	case *ast.ContractDecl:
 		return c.collectContract(d)
-	case *ast.ImportDecl, *ast.FunctionDecl, *ast.ImplDecl:
+	case *ast.ImportDecl, *ast.FunctionDecl, *ast.TestDecl, *ast.ImplDecl:
 		return nil
 	default:
 		return fmt.Errorf("type error: unsupported declaration %T", decl)
@@ -1182,10 +1187,21 @@ func (c *Checker) checkFunction(fn *functionType) error {
 	if err != nil {
 		return err
 	}
-	if fn.returnType != typeVoid && !returns {
+	if fn.returnType != typeVoid && !fn.implicitReturn && !returns {
 		return fmt.Errorf("type error: function `%s` must return %s", fn.name, fn.returnType)
 	}
 	return nil
+}
+
+// checkTestDecl validates a top-level test block as an errorable, parameterless body.
+func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
+	fn := &ast.FunctionDecl{Name: "test " + strconv.Quote(decl.Name), Body: decl.Body}
+	return c.checkFunction(&functionType{
+		name:           fn.Name,
+		returnType:     "!void",
+		decl:           fn,
+		implicitReturn: true,
+	})
 }
 
 // checkImpl validates method bodies in an impl block.

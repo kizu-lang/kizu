@@ -1001,6 +1001,10 @@ func parserParityDeclarationSeedCases() []parserParityCase {
 	seeds := []parserParityCase{
 		{name: "seed/import_decl", source: "import app::lexer;"},
 		{
+			name:   "seed/test_block",
+			source: `test "basic" { std::testing::expect(true); }`,
+		},
+		{
 			name:   "seed/pub_struct_decl",
 			source: "pub struct User { pub name: []u8, age: i64, }",
 		},
@@ -1089,6 +1093,8 @@ func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
 		return summarizeImportDeclSubset(node)
 	case *kizuast.FunctionDecl:
 		return summarizeFunctionSubset(node)
+	case *kizuast.TestDecl:
+		return summarizeTestDeclSubset(node)
 	case *kizuast.StructDecl:
 		return summarizeStructDeclSubset(node)
 	case *kizuast.EnumDecl:
@@ -1102,6 +1108,29 @@ func summarizeDeclSubset(decl kizuast.Decl) ([]string, string) {
 	default:
 		return nil, "top-level declaration outside std parser subset"
 	}
+}
+
+// summarizeTestDeclSubset matches the std parser's synthetic FnDecl for test blocks.
+func summarizeTestDeclSubset(decl *kizuast.TestDecl) ([]string, string) {
+	body, reason := summarizeBlockSubset(decl.Body)
+	if reason != "" {
+		return nil, reason
+	}
+	lines := []string{
+		"FnDecl",
+		"Private",
+		"Safe",
+		"Empty",
+		"String",
+		decl.Name,
+		"Range",
+		"0",
+		"Range",
+		"0",
+		"Empty",
+		"Empty",
+	}
+	return append(lines, body...), ""
 }
 
 // summarizeImplDeclSubset summarizes inherent impl methods in the shared subset.

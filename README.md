@@ -48,7 +48,7 @@ Implemented language-core pieces:
 - minimal `std::mem`, `std::array::Array<T>`, `std::string::String`,
   `std::map::Map<K, V>`, and `std::testing`
 - explicit-Io `std::fs`, `std::path`, `std::io`, and `std::process` helpers
-- `kizu test <file>` single-file test runner
+- `kizu test <file-or-package>` top-level `test "name" { ... }` runner
 
 Experimental compiler and tooling pieces:
 
@@ -88,6 +88,12 @@ go run ./cmd/kizu run examples/hello.kizu
 ```
 
 Run one Kizu test source:
+
+```kizu
+test "std testing assertions" {
+    std::testing::expect(true);
+}
+```
 
 ```sh
 go run ./cmd/kizu test examples/std_testing.kizu
@@ -159,7 +165,7 @@ go run ./cmd/kizu import-c-header examples/c_abi.h
 - `kizu check <file>` runs type, ownership, move, borrow, and arena checks.
 - `kizu fmt [--write|-w] <file>` prints or writes canonical token formatter output. `--write` currently rejects files with line comments until comment trivia is preserved.
 - `kizu run <file>` executes the file with the interpreter.
-- `kizu test <file>` runs one checked Kizu source as a test file.
+- `kizu test <file-or-package>` runs checked top-level test blocks without invoking `main`.
 - `kizu ir [--opt] <file>` prints typed SSA IR.
 - `kizu build --emit-llvm [--opt] <file>` emits LLVM IR text.
 - `kizu build --target wasm32-wasi [--opt] <file>` emits WASI-compatible WAT.

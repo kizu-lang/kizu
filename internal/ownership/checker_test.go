@@ -24,6 +24,24 @@ fn main() {
 	}
 }
 
+// TestCheckRejectsMoveErrorsInTestDecl checks test blocks share move checking.
+func TestCheckRejectsMoveErrorsInTestDecl(t *testing.T) {
+	source := `struct Name { value: []u8 }
+test "move error" {
+    let a = Name { value: "hello" };
+    let b = a;
+    print(a.value);
+    print(b.value);
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "moved value `a` was used") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckRejectsMoveErrors checks basic non-copy move failures.
 func TestCheckRejectsMoveErrors(t *testing.T) {
 	cases := []struct {

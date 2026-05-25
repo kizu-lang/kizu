@@ -1069,8 +1069,52 @@ func TestTestPackageCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	if string(out) != "0\n2\nfn\nmain\ntoken\n3\n8\n3\n3\ntest: ok\n" {
+	if string(out) != "test: ok\n" {
 		t.Fatalf("got %q, want package test output", out)
+	}
+}
+
+// TestTestFileCommandSmoke checks a file test block reports success.
+func TestTestFileCommandSmoke(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample_test.kizu")
+	source := `test "sample" {
+    std::testing::expect(true);
+}
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, runErr := runDispatchCaptureOutput(t, "test", []string{path})
+	if runErr != nil {
+		t.Fatalf("command failed: %v\nstdout:\n%s\nstderr:\n%s", runErr, stdout, stderr)
+	}
+	if stdout != "test: ok\n" {
+		t.Fatalf("got stdout %q, want test ok", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+}
+
+// TestTestFileCommandDoesNotRunMain keeps kizu test scoped to test blocks.
+func TestTestFileCommandDoesNotRunMain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main_only.kizu")
+	source := `fn main() {
+    print("main");
+}
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, runErr := runDispatchCaptureOutput(t, "test", []string{path})
+	if runErr == nil || !strings.Contains(runErr.Error(), "test error: no tests found") {
+		t.Fatalf("got error %v, want no tests found", runErr)
+	}
+	if stdout != "" {
+		t.Fatalf("got stdout %q, want empty", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
 	}
 }
 

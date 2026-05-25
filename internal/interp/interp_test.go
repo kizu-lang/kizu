@@ -22,6 +22,50 @@ func TestRunHello(t *testing.T) {
 	}
 }
 
+// TestRunTestsExecutesTestDecls checks test blocks run in source order.
+func TestRunTestsExecutesTestDecls(t *testing.T) {
+	got := runTestsSource(t, `test "one" {
+    print("one");
+}
+test "two" {
+    print("two");
+}`)
+	want := "one\ntwo\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestRunTestsRejectsMissingTestDecls keeps main out of the test command.
+func TestRunTestsRejectsMissingTestDecls(t *testing.T) {
+	got, err := parseAndRunTests(`fn main() { print("main"); }`)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if err.Error() != "test error: no tests found" {
+		t.Fatalf("got %q", err.Error())
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty output", got)
+	}
+}
+
+// TestRunTestsReportsUnhandledErrorUnion checks test blocks surface returned errors.
+func TestRunTestsReportsUnhandledErrorUnion(t *testing.T) {
+	got, err := parseAndRunTests(`test "fails" {
+    return error("boom");
+}`)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if err.Error() != "runtime error: boom" {
+		t.Fatalf("got %q", err.Error())
+	}
+	if got != "" {
+		t.Fatalf("got %q, want empty output", got)
+	}
+}
+
 // TestRunFunctionsAndReturn checks user function calls and explicit return.
 func TestRunFunctionsAndReturn(t *testing.T) {
 	got := runSource(t, `fn add(a: i64, b: i64) -> i64 { return a + b ;}
@@ -593,6 +637,16 @@ func runSource(t *testing.T, source string) string {
 	return out
 }
 
+// runTestsSource executes test blocks and fails the test on parse or runtime errors.
+func runTestsSource(t *testing.T, source string) string {
+	t.Helper()
+	out, err := parseAndRunTests(source)
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	return out
+}
+
 // parseAndRun parses and executes source, returning captured stdout.
 func parseAndRun(source string) (string, error) {
 	p := parser.New(lexer.New(source))
@@ -602,5 +656,17 @@ func parseAndRun(source string) (string, error) {
 	}
 	var out bytes.Buffer
 	err := New(&out).Run(program)
+	return out.String(), err
+}
+
+// parseAndRunTests parses and executes top-level test blocks.
+func parseAndRunTests(source string) (string, error) {
+	p := parser.New(lexer.New(source))
+	program := p.ParseProgram()
+	if len(p.Errors()) > 0 {
+		return "", errors.New(p.Errors()[0])
+	}
+	var out bytes.Buffer
+	err := New(&out).RunTests(program)
 	return out.String(), err
 }

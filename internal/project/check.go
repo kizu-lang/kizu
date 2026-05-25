@@ -327,6 +327,8 @@ func (c *graphChecker) qualifyDecl(module *moduleUnit, decl ast.Decl) (ast.Decl,
 		return c.qualifyImpl(module, d)
 	case *ast.FunctionDecl:
 		return c.qualifyFunction(module, d, module.path+"::"+d.Name)
+	case *ast.TestDecl:
+		return c.qualifyTestDecl(module, d)
 	default:
 		return decl, nil
 	}
@@ -444,6 +446,17 @@ func (c *graphChecker) qualifyFunction(
 	}
 	cp.Body = body
 	return &cp, nil
+}
+
+// qualifyTestDecl rewrites type-bearing expressions inside a test block.
+func (c *graphChecker) qualifyTestDecl(
+	module *moduleUnit,
+	decl *ast.TestDecl,
+) (*ast.TestDecl, error) {
+	cp := *decl
+	body, err := c.qualifyBlock(module, decl.Body)
+	cp.Body = body
+	return &cp, err
 }
 
 // qualifyBlock rewrites type-bearing expressions inside a block.

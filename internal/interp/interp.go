@@ -106,8 +106,34 @@ func (i *Interpreter) RunEntryInt(program *ast.Program, entry string) (int64, er
 	return value.i, nil
 }
 
+// RunTests registers top-level declarations and runs test blocks in source order.
+func (i *Interpreter) RunTests(program *ast.Program) error {
+	i.registerProgram(program)
+	count := 0
+	for _, decl := range program.Decls {
+		testDecl, ok := decl.(*ast.TestDecl)
+		if !ok {
+			continue
+		}
+		count++
+		if err := i.runTestDecl(testDecl); err != nil {
+			return err
+		}
+	}
+	if count == 0 {
+		return fmt.Errorf("test error: no tests found")
+	}
+	return nil
+}
+
 // runEntryValue registers top-level declarations and returns the entry result.
 func (i *Interpreter) runEntryValue(program *ast.Program, entry string) (Value, error) {
+	i.registerProgram(program)
+	return i.callFunction(entry, nil)
+}
+
+// registerProgram records declarations needed by runtime evaluation.
+func (i *Interpreter) registerProgram(program *ast.Program) {
 	for _, decl := range program.Decls {
 		switch d := decl.(type) {
 		case *ast.EnumDecl:
@@ -127,7 +153,20 @@ func (i *Interpreter) runEntryValue(program *ast.Program, entry string) (Value, 
 			continue
 		}
 	}
-	return i.callFunction(entry, nil)
+}
+
+// runTestDecl executes one test block with a fresh local environment.
+func (i *Interpreter) runTestDecl(decl *ast.TestDecl) error {
+	env := NewEnvWithCapacity(0)
+	defer env.Release()
+	value, _, err := i.evalBlock(decl.Body, env)
+	if err != nil {
+		return err
+	}
+	if value.kind == kindErrorUnion {
+		return fmt.Errorf("runtime error: %s", errorUnionMessage(value))
+	}
+	return nil
 }
 
 // errorUnionMessage extracts a readable message from an unhandled !T value.

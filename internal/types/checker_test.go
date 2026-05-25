@@ -36,6 +36,30 @@ fn main() { print(add(1, 2)); }`,
 	}
 }
 
+// TestCheckAcceptsTestDecl checks test blocks are first-class checked bodies.
+func TestCheckAcceptsTestDecl(t *testing.T) {
+	source := `test "basic assertion" {
+    print("ok");
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+}
+
+// TestCheckRejectsTestReturnValue keeps test blocks void-returning.
+func TestCheckRejectsTestNonVoidReturnValue(t *testing.T) {
+	source := `test "bad return" {
+    return 1;
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "return expects !void, got i64") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
 // TestCheckAcceptsContractImpl checks explicit contract implementation syntax.
 func TestCheckAcceptsContractImpl(t *testing.T) {
 	source := `struct Bytes { text: []u8 }

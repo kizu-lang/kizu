@@ -110,6 +110,10 @@ func (c *Checker) Check(program *ast.Program) error {
 			if err := c.checkFunction(c.functions[d.Name]); err != nil {
 				return err
 			}
+		case *ast.TestDecl:
+			if err := c.checkTestDecl(d); err != nil {
+				return err
+			}
 		case *ast.ImplDecl:
 			if err := c.checkImpl(d); err != nil {
 				return err
@@ -255,6 +259,16 @@ func (c *Checker) checkFunction(fn *functionInfo) error {
 	defer func() { c.currentStd = previousStd }()
 	defer func() { c.typeArgValues = previousTypeArgValues }()
 	return c.checkBlock(fn.decl.Body, env)
+}
+
+// checkTestDecl validates a top-level test block as an errorable, parameterless body.
+func (c *Checker) checkTestDecl(decl *ast.TestDecl) error {
+	fn := functionInfoFromDecl("test "+strconv.Quote(decl.Name), &ast.FunctionDecl{
+		Name:       "test " + strconv.Quote(decl.Name),
+		ReturnType: "!void",
+		Body:       decl.Body,
+	})
+	return c.checkFunction(fn)
 }
 
 // seedMethodParamProvenance records method preconditions represented by special receivers.

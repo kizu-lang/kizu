@@ -26,7 +26,7 @@ type conformanceCase struct {
 	Command        string   `json:"command"`
 	Path           string   `json:"path"`
 	Args           []string `json:"args"`
-	Stdout         string   `json:"stdout"`
+	Stdout         *string  `json:"stdout"`
 	StderrContains string   `json:"stderr_contains"`
 	Features       []string `json:"features"`
 }
@@ -72,21 +72,32 @@ func runConformanceCase(t *testing.T, tt conformanceCase) {
 	case "run":
 		runReferenceCheckOK(t, tt.Path)
 		out := runKizuOK(t, runArgs(tt)...)
-		if out != tt.Stdout {
-			t.Fatalf("got %q, want %q", out, tt.Stdout)
+		want := conformanceExpectedStdout(t, tt)
+		if out != want {
+			t.Fatalf("got %q, want %q", out, want)
 		}
 	case "check":
 		runReferenceCheckOK(t, tt.Path)
 	case "test":
 		out := runKizuOK(t, "test", tt.Path)
-		if out != tt.Stdout {
-			t.Fatalf("got %q, want %q", out, tt.Stdout)
+		want := conformanceExpectedStdout(t, tt)
+		if out != want {
+			t.Fatalf("got %q, want %q", out, want)
 		}
 	case "error":
 		runConformanceErrorCase(t, tt)
 	default:
 		t.Fatalf("unknown conformance mode %q", tt.Mode)
 	}
+}
+
+// conformanceExpectedStdout returns declared stdout, allowing explicit empty output.
+func conformanceExpectedStdout(t *testing.T, tt conformanceCase) string {
+	t.Helper()
+	if tt.Stdout == nil {
+		t.Fatalf("%s: stdout must be declared", tt.Name)
+	}
+	return *tt.Stdout
 }
 
 // runConformanceErrorCase checks one expected failure entry.
@@ -140,12 +151,12 @@ func validateConformanceCase(t *testing.T, tt conformanceCase, seen map[string]b
 	}
 	switch tt.Mode {
 	case "run":
-		if tt.Stdout == "" {
+		if tt.Stdout == nil {
 			t.Fatalf("%s: run case must declare stdout", tt.Name)
 		}
 	case "check":
 	case "test":
-		if tt.Stdout == "" {
+		if tt.Stdout == nil {
 			t.Fatalf("%s: test case must declare stdout", tt.Name)
 		}
 	case "error":

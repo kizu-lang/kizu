@@ -129,6 +129,23 @@ func (d *FunctionDecl) String() string {
 		prefix, d.Name, typeParams, strings.Join(params, ", "), ret, d.Body.String())
 }
 
+// TestDecl represents a top-level test block.
+type TestDecl struct {
+	Name string
+	Body *BlockStmt
+}
+
+// declNode marks TestDecl as a declaration node.
+func (*TestDecl) declNode() {}
+
+// String returns a compact debug representation of the test declaration.
+func (d *TestDecl) String() string {
+	if d.Body == nil {
+		return fmt.Sprintf("test %q <missing>", d.Name)
+	}
+	return fmt.Sprintf("test %q %s", d.Name, d.Body.String())
+}
+
 // StructDecl represents a top-level struct declaration.
 type StructDecl struct {
 	Name       string

@@ -8,6 +8,9 @@ pub fn parse_first_node(
     source: std::kizu::ast::SourceFile
 ) -> !std::kizu::ast::ParseResult {
     let token = std::kizu::lexer::first_token(source.text);
+    if try std::kizu::parser::is_token_text(source.text, token, "test") {
+        return std::kizu::parser::parse_decl_result(allocator, source);
+    }
     match token.kind {
         Import => return std::kizu::parser::parse_decl_result(allocator, source);,
         Pub => return std::kizu::parser::parse_decl_result(allocator, source);,
@@ -154,7 +157,8 @@ fn parse_decl_with_visibility(
             allocator,
             ast,
             text,
-            token
+            token,
+            public
         );,
         Eof => return error("expected declaration");,
         Return => return error("expected declaration");,
@@ -214,8 +218,15 @@ fn parse_ident_top_level_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []u8,
-    token: std::kizu::lexer::Token
+    token: std::kizu::lexer::Token,
+    public: bool
 ) -> !ParseNode {
+    if try std::kizu::parser::is_token_text(text, token, "test") {
+        if public {
+            return error("expected declaration");
+        }
+        return std::kizu::parser::parse_test_decl(allocator, ast, text, token);
+    }
     if try std::kizu::parser::is_token_text(text, token, "impl") {
         return std::kizu::parser::parse_impl_decl(allocator, ast, text, token);
     }
@@ -358,6 +369,44 @@ fn parse_decl_result(
         std::kizu::lexer::first_token(text)
     );
     return std::kizu::ast::parse_result(ast, root.node);
+}
+
+fn parse_test_decl(
+    allocator: Allocator,
+    ast: std::kizu::ast::Ast,
+    text: []u8,
+    test_token: std::kizu::lexer::Token
+) -> !ParseNode {
+    let name_token = try std::kizu::parser::expect_string(
+        std::kizu::lexer::next_token(text, test_token)
+    );
+    let name = ast.add_string(
+        std::kizu::ast::span(name_token.start, name_token.end),
+        std::kizu::ast::token_id(name_token.start)
+    );
+    let open = try std::kizu::parser::expect_lbrace(
+        std::kizu::lexer::next_token(text, name_token)
+    );
+    let body = try std::kizu::parser::parse_block(allocator, ast, text, open);
+    let type_param_start = ast.begin_children();
+    let type_params = ast.finish_children(type_param_start);
+    let param_start = ast.begin_children();
+    let params = ast.finish_children(param_start);
+    let empty = ast.add_empty(test_token.start);
+    let body_node = ast.get(body.node);
+    let root = ast.add_fn_decl(
+        std::kizu::ast::span(test_token.start, body_node.span.end),
+        false,
+        false,
+        empty,
+        name,
+        type_params,
+        params,
+        empty,
+        empty,
+        body.node
+    );
+    return std::kizu::parser::parse_node(root, body.next);
 }
 
 fn parse_fn_decl_result(
