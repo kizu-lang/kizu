@@ -15,6 +15,7 @@ pub fn gate() -> parser::ParseError!void {
     std::testing::expect(summary.nodes > summary.declarations);
 
     try expect_diagnostic();
+    try cast<parser::ParseError!void>(expect_doc_metadata(allocator));
     result.deinit();
 
     print("parser-tokens");
@@ -27,6 +28,198 @@ pub fn gate() -> parser::ParseError!void {
     print(summary.diagnostics);
     print("parser-typed-diagnostics");
     print(1);
+    return;
+}
+
+fn expect_doc_metadata(allocator: Allocator) -> !void {
+    let source = "/// User record.
+pub struct User { /// Display name.
+pub name: i64, }
+/// User state.
+enum State { /// Active user.
+Active, }
+/// User event.
+union Event { /// Rename event.
+Rename(i64), }
+impl User { /// Returns name.
+fn id(self: User) -> i64 { return 0; } }";
+    expect_lexer_doc_metadata(source);
+    let file = std::kizu::ast::source_file("doc_metadata.kizu", source);
+    let result = try std::kizu::parser::parse_program(allocator, file);
+    let root = result.ast.get(result.root);
+    match root.data {
+        Program(program) => try expect_program_doc_metadata(source, result.ast, program.declarations);,
+        _ => return std::testing::fail("expected program");,
+    }
+    result.deinit();
+    return;
+}
+
+fn expect_lexer_doc_metadata(source: []u8) -> void {
+    let first = std::kizu::lexer::first_token(source);
+    expect_span_text(
+        source,
+        std::kizu::ast::span(first.doc_start, first.doc_end),
+        "/// User record."
+    );
+
+    let detached_source = "/// Detached.
+
+fn main() {}";
+    let detached = std::kizu::lexer::first_token(detached_source);
+    std::testing::expect_equal<i64>(detached.start, detached.doc_start);
+    std::testing::expect_equal<i64>(detached.start, detached.doc_end);
+    return;
+}
+
+fn expect_program_doc_metadata(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !void {
+    std::testing::expect_equal<i64>(4, declarations.len);
+    try expect_struct_doc(source, tree, try tree.child_at(declarations, 0));
+    try expect_enum_doc(source, tree, try tree.child_at(declarations, 1));
+    try expect_union_doc(source, tree, try tree.child_at(declarations, 2));
+    try expect_method_doc(source, tree, try tree.child_at(declarations, 3));
+    return;
+}
+
+fn expect_struct_doc(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    id: std::kizu::ast::NodeId
+) -> !void {
+    let node = tree.get(id);
+    match node.data {
+        StructDecl(struct_decl) => try expect_struct_doc_node(
+            source,
+            tree,
+            struct_decl.doc,
+            struct_decl.fields
+        );,
+        _ => return std::testing::fail("expected struct");,
+    }
+    return;
+}
+
+fn expect_struct_doc_node(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    doc: std::kizu::ast::Span,
+    fields: std::kizu::ast::ChildRange
+) -> !void {
+    expect_span_text(source, doc, "/// User record.");
+    let field = tree.get(try tree.child_at(fields, 0));
+    match field.data {
+        Field(field_node) => expect_span_text(source, field_node.doc, "/// Display name.");,
+        _ => return std::testing::fail("expected field");,
+    }
+    return;
+}
+
+fn expect_enum_doc(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    id: std::kizu::ast::NodeId
+) -> !void {
+    let node = tree.get(id);
+    match node.data {
+        EnumDecl(enum_decl) => try expect_enum_doc_node(
+            source,
+            tree,
+            enum_decl.doc,
+            enum_decl.tags
+        );,
+        _ => return std::testing::fail("expected enum");,
+    }
+    return;
+}
+
+fn expect_enum_doc_node(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    doc: std::kizu::ast::Span,
+    tags: std::kizu::ast::ChildRange
+) -> !void {
+    expect_span_text(source, doc, "/// User state.");
+    let tag = tree.get(try tree.child_at(tags, 0));
+    match tag.data {
+        Var(var_node) => expect_span_text(source, var_node.doc, "/// Active user.");,
+        _ => return std::testing::fail("expected enum tag");,
+    }
+    return;
+}
+
+fn expect_union_doc(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    id: std::kizu::ast::NodeId
+) -> !void {
+    let node = tree.get(id);
+    match node.data {
+        UnionDecl(union_decl) => try expect_union_doc_node(
+            source,
+            tree,
+            union_decl.doc,
+            union_decl.variants
+        );,
+        _ => return std::testing::fail("expected union");,
+    }
+    return;
+}
+
+fn expect_union_doc_node(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    doc: std::kizu::ast::Span,
+    variants: std::kizu::ast::ChildRange
+) -> !void {
+    expect_span_text(source, doc, "/// User event.");
+    let variant = tree.get(try tree.child_at(variants, 0));
+    match variant.data {
+        UnionVariant(variant_node) => expect_span_text(
+            source,
+            variant_node.doc,
+            "/// Rename event."
+        );,
+        _ => return std::testing::fail("expected union variant");,
+    }
+    return;
+}
+
+fn expect_method_doc(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    id: std::kizu::ast::NodeId
+) -> !void {
+    let node = tree.get(id);
+    match node.data {
+        ImplDecl(impl_decl) => try expect_method_doc_node(source, tree, impl_decl.methods);,
+        _ => return std::testing::fail("expected impl");,
+    }
+    return;
+}
+
+fn expect_method_doc_node(
+    source: []u8,
+    tree: std::kizu::ast::Ast,
+    methods: std::kizu::ast::ChildRange
+) -> !void {
+    let method = tree.get(try tree.child_at(methods, 0));
+    match method.data {
+        FnDecl(fn_decl) => expect_span_text(source, fn_decl.doc, "/// Returns name.");,
+        _ => return std::testing::fail("expected method");,
+    }
+    return;
+}
+
+fn expect_span_text(
+    source: []u8,
+    span: std::kizu::ast::Span,
+    expected: []u8
+) -> void {
+    std::testing::expect(std::mem::equal_bytes(source[span.start..span.end], expected));
     return;
 }
 

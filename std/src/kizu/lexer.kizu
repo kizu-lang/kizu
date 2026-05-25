@@ -68,6 +68,8 @@ pub struct Token {
     pub end: i64,
     pub line: i64,
     pub column: i64,
+    pub doc_start: i64,
+    pub doc_end: i64,
 }
 
 struct Position {
@@ -114,23 +116,64 @@ fn token_at(
     let length = std::mem::len(source);
     var start = offset;
     var current = initial;
+    var has_doc = false;
+    var doc_start = start;
+    var doc_end = start;
     var scanning = true;
     while scanning {
+        var newlines = 0;
         while start < length and std::kizu::lexer::is_space(source[start]) {
+            if source[start] == cast<u8>(10) {
+                newlines = newlines + 1;
+            }
             current = std::kizu::lexer::advance_byte(source[start], current);
             start = start + 1;
         }
+        if newlines > 1 {
+            has_doc = false;
+            doc_start = start;
+            doc_end = start;
+        }
         if start + 1 < length and source[start] == cast<u8>(47) and
             source[start + 1] == cast<u8>(47) {
+            let doc_comment = std::kizu::lexer::is_doc_comment_start(source, start);
+            if doc_comment and !has_doc {
+                doc_start = start;
+            }
             current = std::kizu::lexer::advance_byte(source[start], current);
             current = std::kizu::lexer::advance_byte(source[start + 1], current);
             let skipped = std::kizu::lexer::skip_line_comment(source, start + 2, current);
+            if doc_comment {
+                has_doc = true;
+                doc_end = skipped.start;
+            } else {
+                has_doc = false;
+                doc_start = skipped.start;
+                doc_end = skipped.start;
+            }
             start = skipped.start;
             current = std::kizu::lexer::position(skipped.line, skipped.column);
         } else {
             scanning = false;
         }
     }
+    if !has_doc {
+        doc_start = start;
+        doc_end = start;
+    }
+    return std::kizu::lexer::attach_doc(
+        std::kizu::lexer::raw_token_at(source, start, current),
+        doc_start,
+        doc_end
+    );
+}
+
+fn raw_token_at(
+    source: []u8,
+    start: i64,
+    current: Position
+) -> std::kizu::lexer::Token {
+    let length = std::mem::len(source);
     if start >= length {
         return std::kizu::lexer::token(TokenKind::Eof, start, start, current);
     }
@@ -344,6 +387,18 @@ fn skip_line_comment(source: []u8, start: i64, initial: Position) -> Token {
     return std::kizu::lexer::token(TokenKind::Eof, end, end, current);
 }
 
+fn is_doc_comment_start(source: []u8, start: i64) -> bool {
+    let length = std::mem::len(source);
+    if start + 2 >= length {
+        return false;
+    }
+    if source[start] != cast<u8>(47) or source[start + 1] != cast<u8>(47) or
+        source[start + 2] != cast<u8>(47) {
+        return false;
+    }
+    return start + 3 >= length or source[start + 3] != cast<u8>(47);
+}
+
 fn number_token(
     source: []u8,
     start: i64,
@@ -384,7 +439,25 @@ fn token(
         start: start,
         end: end,
         line: current.line,
-        column: current.column
+        column: current.column,
+        doc_start: start,
+        doc_end: start
+    };
+}
+
+fn attach_doc(
+    raw: std::kizu::lexer::Token,
+    doc_start: i64,
+    doc_end: i64
+) -> std::kizu::lexer::Token {
+    return Token {
+        kind: raw.kind,
+        start: raw.start,
+        end: raw.end,
+        line: raw.line,
+        column: raw.column,
+        doc_start: doc_start,
+        doc_end: doc_end
     };
 }
 

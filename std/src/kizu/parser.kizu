@@ -124,7 +124,14 @@ fn parse_top_level_decl(
     text: []u8,
     token: std::kizu::lexer::Token
 ) -> !ParseNode {
-    return std::kizu::parser::parse_decl_with_visibility(allocator, ast, text, token, false);
+    return std::kizu::parser::parse_decl_with_visibility(
+        allocator,
+        ast,
+        text,
+        token,
+        false,
+        std::kizu::parser::token_doc_span(token)
+    );
 }
 
 fn parse_decl_with_visibility(
@@ -132,7 +139,8 @@ fn parse_decl_with_visibility(
     ast: std::kizu::ast::Ast,
     text: []u8,
     token: std::kizu::lexer::Token,
-    public: bool
+    public: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     match token.kind {
         Import => return std::kizu::parser::parse_import_decl(ast, text, token);,
@@ -145,20 +153,22 @@ fn parse_decl_with_visibility(
             public,
             false,
             ast.add_empty(token.start),
-            true
+            true,
+            doc
         );,
-        Unsafe => return std::kizu::parser::parse_unsafe_decl(allocator, ast, text, token, public);,
-        Extern => return std::kizu::parser::parse_extern_decl(allocator, ast, text, token, public, false);,
+        Unsafe => return std::kizu::parser::parse_unsafe_decl(allocator, ast, text, token, public, doc);,
+        Extern => return std::kizu::parser::parse_extern_decl(allocator, ast, text, token, public, false, doc);,
         Dyn => return error("expected declaration");,
-        Struct => return std::kizu::parser::parse_struct_decl(allocator, ast, text, token, public);,
-        Enum => return std::kizu::parser::parse_enum_decl(allocator, ast, text, token, public);,
-        Union => return std::kizu::parser::parse_union_decl(allocator, ast, text, token, public);,
+        Struct => return std::kizu::parser::parse_struct_decl(allocator, ast, text, token, public, doc);,
+        Enum => return std::kizu::parser::parse_enum_decl(allocator, ast, text, token, public, doc);,
+        Union => return std::kizu::parser::parse_union_decl(allocator, ast, text, token, public, doc);,
         Ident => return std::kizu::parser::parse_ident_top_level_decl(
             allocator,
             ast,
             text,
             token,
-            public
+            public,
+            doc
         );,
         Eof => return error("expected declaration");,
         Return => return error("expected declaration");,
@@ -219,13 +229,14 @@ fn parse_ident_top_level_decl(
     ast: std::kizu::ast::Ast,
     text: []u8,
     token: std::kizu::lexer::Token,
-    public: bool
+    public: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     if try std::kizu::parser::is_token_text(text, token, "test") {
         if public {
             return error("expected declaration");
         }
-        return std::kizu::parser::parse_test_decl(allocator, ast, text, token);
+        return std::kizu::parser::parse_test_decl(allocator, ast, text, token, doc);
     }
     if try std::kizu::parser::is_token_text(text, token, "impl") {
         return std::kizu::parser::parse_impl_decl(allocator, ast, text, token);
@@ -275,7 +286,8 @@ fn parse_impl_decl(
             false,
             false,
             ast.add_empty(current.start),
-            true
+            true,
+            std::kizu::parser::token_doc_span(current)
         );
         try methods.append(method.node);
         current = method.next;
@@ -352,7 +364,8 @@ fn parse_public_decl(
         ast,
         text,
         std::kizu::lexer::next_token(text, pub_token),
-        true
+        true,
+        std::kizu::parser::token_doc_span(pub_token)
     );
 }
 
@@ -375,7 +388,8 @@ fn parse_test_decl(
     allocator: Allocator,
     ast: std::kizu::ast::Ast,
     text: []u8,
-    test_token: std::kizu::lexer::Token
+    test_token: std::kizu::lexer::Token,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_string(
         std::kizu::lexer::next_token(text, test_token)
@@ -394,7 +408,7 @@ fn parse_test_decl(
     let params = ast.finish_children(param_start);
     let empty = ast.add_empty(test_token.start);
     let body_node = ast.get(body.node);
-    let root = ast.add_fn_decl(
+    let root = ast.add_fn_decl_with_doc(
         std::kizu::ast::span(test_token.start, body_node.span.end),
         false,
         false,
@@ -404,7 +418,8 @@ fn parse_test_decl(
         params,
         empty,
         empty,
-        body.node
+        body.node,
+        doc
     );
     return std::kizu::parser::parse_node(root, body.next);
 }
@@ -424,7 +439,8 @@ fn parse_fn_decl(
     public: bool,
     unsafe_decl: bool,
     extern_abi: std::kizu::ast::NodeId,
-    require_body: bool
+    require_body: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let name = std::kizu::lexer::next_token(text, fn_token);
     match name.kind {
@@ -438,7 +454,8 @@ fn parse_fn_decl(
             unsafe_decl,
             extern_abi,
             name,
-            require_body
+            require_body,
+            doc
         );,
         Eof => return error("expected function name");,
         Import => return error("expected function name");,
@@ -536,7 +553,8 @@ fn parse_fn_body_node(
     unsafe_decl: bool,
     extern_abi: std::kizu::ast::NodeId,
     name: std::kizu::lexer::Token,
-    require_body: bool
+    require_body: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let name_node = ast.add_var(
         std::kizu::ast::span(name.start, name.end),
@@ -563,7 +581,7 @@ fn parse_fn_body_node(
         require_body
     );
     let body_node = ast.get(body.node);
-    let root = ast.add_fn_decl(
+    let root = ast.add_fn_decl_with_doc(
         std::kizu::ast::span(fn_token.start, body_node.span.end),
         public,
         unsafe_decl,
@@ -573,7 +591,8 @@ fn parse_fn_body_node(
         params.range,
         return_type.node,
         return_borrow.node,
-        body.node
+        body.node,
+        doc
     );
     return std::kizu::parser::parse_node(root, body.next);
 }
@@ -583,7 +602,8 @@ fn parse_unsafe_decl(
     ast: std::kizu::ast::Ast,
     text: []u8,
     unsafe_token: std::kizu::lexer::Token,
-    public: bool
+    public: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let next = std::kizu::lexer::next_token(text, unsafe_token);
     match next.kind {
@@ -595,7 +615,8 @@ fn parse_unsafe_decl(
             public,
             true,
             ast.add_empty(unsafe_token.start),
-            true
+            true,
+            doc
         );,
         Extern => return std::kizu::parser::parse_extern_decl(
             allocator,
@@ -603,7 +624,8 @@ fn parse_unsafe_decl(
             text,
             next,
             public,
-            true
+            true,
+            doc
         );,
         Dyn => return error("expected fn or extern after unsafe");,
         Import => return error("expected fn or extern after unsafe");,
@@ -673,7 +695,8 @@ fn parse_extern_decl(
     text: []u8,
     extern_token: std::kizu::lexer::Token,
     public: bool,
-    unsafe_decl: bool
+    unsafe_decl: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let abi_token = try std::kizu::parser::expect_string(
         std::kizu::lexer::next_token(text, extern_token)
@@ -691,7 +714,8 @@ fn parse_extern_decl(
         public,
         unsafe_decl,
         abi,
-        false
+        false,
+        doc
     );
 }
 
@@ -728,7 +752,8 @@ fn parse_struct_decl(
     ast: std::kizu::ast::Ast,
     text: []u8,
     struct_token: std::kizu::lexer::Token,
-    public: bool
+    public: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, struct_token));
     let name = std::kizu::parser::name_node(ast, name_token);
@@ -739,12 +764,13 @@ fn parse_struct_decl(
     );
     let open = try std::kizu::parser::expect_lbrace(type_params.next);
     let fields = try std::kizu::parser::parse_struct_fields(allocator, ast, text, open);
-    let node = ast.add_struct_decl(
+    let node = ast.add_struct_decl_with_doc(
         std::kizu::ast::span(struct_token.start, fields.next.start),
         public,
         name,
         type_params.range,
-        fields.range
+        fields.range,
+        doc
     );
     return std::kizu::parser::parse_node(node, fields.next);
 }
@@ -804,11 +830,12 @@ fn parse_struct_field(
     );
     let type_name = try std::kizu::parser::parse_type_name(ast, text, colon);
     let type_node = ast.get(type_name.node);
-    let node = ast.add_field(
+    let node = ast.add_field_with_doc(
         std::kizu::ast::span(token.start, type_node.span.end),
         public,
         std::kizu::parser::name_node(ast, name_token),
-        type_name.node
+        type_name.node,
+        std::kizu::parser::token_doc_span(token)
     );
     return std::kizu::parser::parse_node(node, type_name.next);
 }
@@ -818,17 +845,19 @@ fn parse_enum_decl(
     ast: std::kizu::ast::Ast,
     text: []u8,
     enum_token: std::kizu::lexer::Token,
-    public: bool
+    public: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, enum_token));
     let name = std::kizu::parser::name_node(ast, name_token);
     let open = try std::kizu::parser::expect_lbrace(std::kizu::lexer::next_token(text, name_token));
     let tags = try std::kizu::parser::parse_enum_tags(allocator, ast, text, open);
-    let node = ast.add_enum_decl(
+    let node = ast.add_enum_decl_with_doc(
         std::kizu::ast::span(enum_token.start, tags.next.start),
         public,
         name,
-        tags.range
+        tags.range,
+        doc
     );
     return std::kizu::parser::parse_node(node, tags.next);
 }
@@ -854,7 +883,11 @@ fn parse_enum_tags_with_array(
     var token = std::kizu::lexer::next_token(text, open);
     while !std::kizu::parser::is_block_close_token(token) {
         let tag = try std::kizu::parser::expect_ident(token);
-        try tags.append(std::kizu::parser::name_node(ast, tag));
+        try tags.append(std::kizu::parser::name_node_with_doc(
+            ast,
+            tag,
+            std::kizu::parser::token_doc_span(tag)
+        ));
         token = try std::kizu::parser::next_decl_item_token(
             text,
             std::kizu::lexer::next_token(text, tag)
@@ -878,7 +911,8 @@ fn parse_union_decl(
     ast: std::kizu::ast::Ast,
     text: []u8,
     union_token: std::kizu::lexer::Token,
-    public: bool
+    public: bool,
+    doc: std::kizu::ast::Span
 ) -> !ParseNode {
     let name_token = try std::kizu::parser::expect_ident(std::kizu::lexer::next_token(text, union_token));
     let name = std::kizu::parser::name_node(ast, name_token);
@@ -889,12 +923,13 @@ fn parse_union_decl(
     );
     let open = try std::kizu::parser::expect_lbrace(type_params.next);
     let variants = try std::kizu::parser::parse_union_variants(allocator, ast, text, open);
-    let node = ast.add_union_decl(
+    let node = ast.add_union_decl_with_doc(
         std::kizu::ast::span(union_token.start, variants.next.start),
         public,
         name,
         type_params.range,
-        variants.range
+        variants.range,
+        doc
     );
     return std::kizu::parser::parse_node(node, variants.next);
 }
@@ -948,10 +983,11 @@ fn parse_union_variant(
         std::kizu::lexer::next_token(text, name_token)
     );
     let payload_node = ast.get(payload.node);
-    let node = ast.add_union_variant(
+    let node = ast.add_union_variant_with_doc(
         std::kizu::ast::span(name_token.start, payload_node.span.end),
         std::kizu::parser::name_node(ast, name_token),
-        payload.node
+        payload.node,
+        std::kizu::parser::token_doc_span(name_token)
     );
     return std::kizu::parser::parse_node(node, payload.next);
 }
@@ -979,10 +1015,27 @@ fn add_name_child(ast: std::kizu::ast::Ast, token: std::kizu::lexer::Token) -> !
 }
 
 fn name_node(ast: std::kizu::ast::Ast, token: std::kizu::lexer::Token) -> std::kizu::ast::NodeId {
-    return ast.add_var(
-        std::kizu::ast::span(token.start, token.end),
-        std::kizu::ast::symbol_id(token.start)
+    return std::kizu::parser::name_node_with_doc(
+        ast,
+        token,
+        std::kizu::ast::empty_span(token.start)
     );
+}
+
+fn name_node_with_doc(
+    ast: std::kizu::ast::Ast,
+    token: std::kizu::lexer::Token,
+    doc: std::kizu::ast::Span
+) -> std::kizu::ast::NodeId {
+    return ast.add_var_with_doc(
+        std::kizu::ast::span(token.start, token.end),
+        std::kizu::ast::symbol_id(token.start),
+        doc
+    );
+}
+
+fn token_doc_span(token: std::kizu::lexer::Token) -> std::kizu::ast::Span {
+    return std::kizu::ast::span(token.doc_start, token.doc_end);
 }
 
 fn next_decl_item_token(
