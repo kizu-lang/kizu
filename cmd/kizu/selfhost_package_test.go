@@ -1202,7 +1202,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_enum_kind_facts(",
 		"fn require_struct_fields(",
 		"fn require_function(",
-		"fn append_executable_ast_rule_facts(",
+		"frontend-executable-lowering checked-ast-bounded",
 	},
 	"../../selfhost/src/ir/executable_functions.kizu": {
 		"pub fn append_facts(",
@@ -1322,7 +1322,6 @@ func assertSelfhostSplitFiles(t *testing.T) {
 func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	sources := readHostedExecutableContractSources(t)
 	facts := hostedExecutableContractFacts{
-		astRules:                  hostedExecutableASTRules(),
 		abi:                       hostedExecutableABIFacts(),
 		selectedFunctions:         hostedExecutableSelectedFunctionFacts(),
 		selectedSignatures:        hostedExecutableSelectedSignatureFacts(),
@@ -1334,31 +1333,14 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		selectedBodyParsingRules:  hostedExecutableSelectedBodyParsingRuleFacts(),
 		selectedBodyLoweringRules: hostedExecutableSelectedBodyLoweringRuleFacts(),
 	}
-	irFacts := sources.ir + sources.contract + sources.selected +
-		sources.body + sources.bodyParsing + sources.bodyLowering
-	assertExecutableFactsPublishedAndValidated(t, irFacts, sources.llvm, facts.astRules)
 	assertHostedExecutableBackendInputs(t, sources.llvm, facts)
 	assertHostedExecutableFactOrigins(t, sources, facts)
 	assertHostedExecutableRendererConsumers(t, sources, facts)
 }
 
-// hostedExecutableASTRules returns the AST recognition facts used by the
-// temporary executable matcher and its checked-AST replacement contract.
-func hostedExecutableASTRules() []string {
-	return []string{
-		"hosted-executable-ast executable-ast-rules-v1",
-		"executable-ast-rule MainScan LeadingFunctions",
-		"executable-ast-rule RunPrintCall MainPrintString",
-		"executable-ast-rule RunReturnVoid MainReturnVoid",
-		"executable-ast-rule TestExpectTrue MainExpectTrue",
-		"executable-ast-rule TestExpectFalse MainExpectFalse",
-	}
-}
-
 // hostedExecutableContractFacts groups fixture facts used by the selfhost
 // executable path contract assertions.
 type hostedExecutableContractFacts struct {
-	astRules                  []string
 	abi                       []string
 	selectedFunctions         []string
 	selectedSignatures        []string
@@ -1406,7 +1388,6 @@ func assertHostedExecutableFactOrigins(
 		sources.ir,
 		sources.contract,
 		sources.llvm,
-		facts.astRules,
 	)
 	assertExecutableSelectedFunctionsComeFromCheckedAST(
 		t,
@@ -1469,7 +1450,6 @@ func assertHostedExecutableRendererConsumers(
 		t,
 		sources.match,
 		sources.lowerer,
-		facts.astRules,
 		facts.selectedBodyParsingRules,
 		facts.selectedBodyLoweringRules,
 	)
@@ -1945,7 +1925,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	ir string,
 	contract string,
 	llvm string,
-	astRules []string,
 ) {
 	t.Helper()
 	for _, fragment := range []string{
@@ -1962,10 +1941,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 		"append_enum_tag_facts(",
 		"require_struct_fields(",
 		"require_function(",
-		"append_executable_ast_rule_facts(",
-		"require_function_body_fragment(",
-		"append_executable_ast_rule_fact(",
-		"node_text_contains(",
 		"ExecutableAstKind",
 		"ExecutableKind",
 		"executable-contract-source data selfhost::backend::data",
@@ -1981,12 +1956,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	} {
 		if !strings.Contains(llvm, fragment) {
 			t.Fatalf("backend validation/metadata does not require source fact %q", fragment)
-		}
-	}
-	for _, fact := range astRules {
-		if strings.HasPrefix(fact, "executable-ast-rule ") &&
-			strings.Contains(contract, `"`+fact+`"`) {
-			t.Fatalf("executable contract still hardcodes AST rule %q", fact)
 		}
 	}
 }
@@ -2185,20 +2154,10 @@ func assertExecutableRuleConsumers(
 	t *testing.T,
 	match string,
 	ast string,
-	astRules []string,
 	parsingRules []string,
 	loweringRules []string,
 ) {
 	t.Helper()
-	for _, rule := range astRules {
-		if isExecutableRuleFact(rule) {
-			assertNamedFactConsumer(t, match, "hosted executable matcher renderer", rule)
-			continue
-		}
-		if !strings.Contains(match, `"`+rule+`"`) {
-			t.Fatalf("hosted executable matcher renderer does not consume %q", rule)
-		}
-	}
 	for _, rule := range parsingRules {
 		assertNamedFactConsumer(t, match, "hosted executable matcher renderer", rule)
 	}
@@ -2316,13 +2275,6 @@ func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string)
 func isExecutableTagFact(fact string) bool {
 	return strings.HasPrefix(fact, "executable-ast-kind ") ||
 		strings.HasPrefix(fact, "executable-kind ")
-}
-
-// isExecutableRuleFact reports whether a contract fact maps one executable rule name to another.
-func isExecutableRuleFact(fact string) bool {
-	return strings.HasPrefix(fact, "executable-ast-rule ") ||
-		strings.HasPrefix(fact, "selected-body-parser-rule ") ||
-		strings.HasPrefix(fact, "selected-body-lowering-rule ")
 }
 
 // assertNamedFactConsumer checks rule consumers read mapped facts by prefix and key.
@@ -2698,43 +2650,6 @@ func hostedExecutableSelectedHelperBodySemanticFacts() []string {
 			"run_string_literal_payload 3",
 		"body-call selfhost::backend::executable::parse_expect_call_ast " +
 			"expect_bool_value 2",
-	}
-}
-
-// assertExecutableFactsPublishedAndValidated checks IR/backend contract coupling.
-func assertExecutableFactsPublishedAndValidated(
-	t *testing.T,
-	ir string,
-	llvm string,
-	facts []string,
-) {
-	t.Helper()
-	for _, fact := range facts {
-		if strings.HasPrefix(fact, "executable-ast-rule ") {
-			parts := strings.Fields(fact)
-			if len(parts) != 3 {
-				t.Fatalf("invalid executable AST fact fixture %q", fact)
-			}
-			for _, fragment := range []string{
-				`"executable-ast-rule "`,
-				`"` + parts[1] + `"`,
-				`"` + parts[2] + `"`,
-				"append_executable_ast_rule_fact(",
-			} {
-				if !strings.Contains(ir, fragment) {
-					t.Fatalf("IR artifact does not derive executable fact %q via %q", fact, fragment)
-				}
-			}
-		} else if !strings.Contains(ir, fact) {
-			t.Fatalf("IR artifact does not publish executable fact %q", fact)
-		}
-		if isExecutableRuleFact(fact) {
-			assertNamedFactConsumer(t, llvm, "backend IR validation", fact)
-			continue
-		}
-		if !strings.Contains(llvm, `ir_contract::require_fact(bytes, "`+fact+`")`) {
-			t.Fatalf("backend IR validation does not require %q", fact)
-		}
 	}
 }
 

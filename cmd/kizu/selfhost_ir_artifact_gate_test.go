@@ -97,12 +97,6 @@ func requiredSelfhostIRContractFragments() []string {
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyLoweringFragments()...)
 	return append(fragments, []string{
 		"frontend-executable-lowering checked-ast-bounded\n",
-		"hosted-executable-ast executable-ast-rules-v1\n",
-		"executable-ast-rule MainScan LeadingFunctions\n",
-		"executable-ast-rule RunPrintCall MainPrintString\n",
-		"executable-ast-rule RunReturnVoid MainReturnVoid\n",
-		"executable-ast-rule TestExpectTrue MainExpectTrue\n",
-		"executable-ast-rule TestExpectFalse MainExpectFalse\n",
 		"hosted-executable-abi executable-result-layout-v1\n",
 		"executable-ast-layout kind:i64 payload:[]u8\n",
 		"executable-layout kind:i64 stdout_payload:[]u8\n",
