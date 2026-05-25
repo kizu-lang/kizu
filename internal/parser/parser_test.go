@@ -48,6 +48,19 @@ func TestParseTopLevelErrorNamesAllowedDeclarations(t *testing.T) {
 	}
 }
 
+// TestParseExpectedGotDescribesTokenText avoids exposing lexer token names to users.
+func TestParseExpectedGotDescribesTokenText(t *testing.T) {
+	p := New(lexer.New(`enum Color { 1 }`))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatal("expected parser error")
+	}
+	got := p.Errors()[0]
+	if !strings.Contains(got, `expected enum tag, got integer "1"`) {
+		t.Fatalf("error = %q, want integer token description", got)
+	}
+}
+
 // TestParseTestDecl checks top-level test block parsing.
 func TestParseTestDecl(t *testing.T) {
 	input := `test "basic assertion" {

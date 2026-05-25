@@ -2332,6 +2332,8 @@ fn main() -> void {
 ## 21. エラーメッセージ方針
 
 エラーは短く、直接的で、読めるものにします。
+詳細な diagnostic message style は
+[ADR-0072](docs/adr/0072-diagnostic-message-style.md) に従います。
 
 良い例:
 

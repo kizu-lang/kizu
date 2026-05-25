@@ -1569,8 +1569,9 @@ func (c *Checker) checkAssignStmt(
 		return false, err
 	}
 	if !sameType(got, want) {
-		return false, fmt.Errorf("type error: cannot assign %s to `%s` of type %s",
-			got, stmt.Target.String(), want)
+		return false, errorAt(expressionSpan(stmt.Target),
+			"type error: assignment to `%s` expects %s, got %s",
+			stmt.Target.String(), want, got)
 	}
 	return false, nil
 }
@@ -2734,12 +2735,10 @@ func (c *Checker) checkBinaryExpr(
 		return "", operatorTypeMismatch(expr.Operator, left, right, expr.OperatorSpan)
 	}
 	if !numericTypes[left] {
-		return "", errorAt(expr.OperatorSpan,
-			"type error: operator `%s` expects numeric operands", expr.Operator)
+		return "", operatorOperandKindError(expr.Operator, "numeric", left, right, expr.OperatorSpan)
 	}
 	if expr.Operator == "%" && !integerTypes[left] {
-		return "", errorAt(expr.OperatorSpan,
-			"type error: operator `%s` expects integer operands", expr.Operator)
+		return "", operatorOperandKindError(expr.Operator, "integer", left, right, expr.OperatorSpan)
 	}
 	if isComparison(expr.Operator) {
 		return typeBool, nil
@@ -2774,6 +2773,15 @@ func operatorTypeMismatch(op string, left Type, right Type, span ast.Span) error
 			"note: left operand has type %s\n"+
 			"note: right operand has type %s",
 		op, left, right)
+}
+
+// operatorOperandKindError reports non-matching operand categories.
+func operatorOperandKindError(op string, want string, left Type, right Type, span ast.Span) error {
+	return errorAt(span,
+		"type error: operator `%s` expects %s operands\n"+
+			"note: left operand has type %s\n"+
+			"note: right operand has type %s",
+		op, want, left, right)
 }
 
 // expressionSpan returns the best source span stored on an expression.
