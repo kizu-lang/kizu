@@ -39,6 +39,9 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	if capabilities["documentFormattingProvider"] != true {
 		t.Fatalf("formatting capability = %#v, want true", capabilities["documentFormattingProvider"])
 	}
+	if _, ok := capabilities["completionProvider"].(map[string]any); !ok {
+		t.Fatalf("completionProvider missing from capabilities: %#v", capabilities)
+	}
 	if messages[1]["method"] != "textDocument/publishDiagnostics" {
 		t.Fatalf("got method %#v, want publish diagnostics", messages[1]["method"])
 	}

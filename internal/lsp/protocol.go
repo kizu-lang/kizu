@@ -6,6 +6,21 @@ const (
 	textDocumentSyncKindFull = 1
 
 	diagnosticSeverityError = 1
+
+	completionItemKindMethod        = 2
+	completionItemKindFunction      = 3
+	completionItemKindField         = 5
+	completionItemKindVariable      = 6
+	completionItemKindModule        = 9
+	completionItemKindValue         = 12
+	completionItemKindEnum          = 13
+	completionItemKindKeyword       = 14
+	completionItemKindSnippet       = 15
+	completionItemKindEnumMember    = 20
+	completionItemKindStruct        = 22
+	completionItemKindTypeParameter = 25
+
+	insertTextFormatSnippet = 2
 )
 
 type incomingMessage struct {
@@ -39,8 +54,13 @@ type initializeResult struct {
 }
 
 type serverCapabilities struct {
-	TextDocumentSync           int  `json:"textDocumentSync"`
-	DocumentFormattingProvider bool `json:"documentFormattingProvider,omitempty"`
+	TextDocumentSync           int                `json:"textDocumentSync"`
+	DocumentFormattingProvider bool               `json:"documentFormattingProvider,omitempty"`
+	CompletionProvider         *completionOptions `json:"completionProvider,omitempty"`
+}
+
+type completionOptions struct {
+	TriggerCharacters []string `json:"triggerCharacters,omitempty"`
 }
 
 type serverInfo struct {
@@ -80,6 +100,11 @@ type documentFormattingParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 }
 
+type textDocumentPositionParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+}
+
 type textDocumentContentChangeEvent struct {
 	Text string `json:"text"`
 }
@@ -92,6 +117,20 @@ type publishDiagnosticsParams struct {
 type textEdit struct {
 	Range   Range  `json:"range"`
 	NewText string `json:"newText"`
+}
+
+type completionTextEdit struct {
+	Range   Range  `json:"range"`
+	NewText string `json:"newText"`
+}
+
+type completionItem struct {
+	Label            string              `json:"label"`
+	Kind             int                 `json:"kind,omitempty"`
+	Detail           string              `json:"detail,omitempty"`
+	InsertText       string              `json:"insertText,omitempty"`
+	InsertTextFormat int                 `json:"insertTextFormat,omitempty"`
+	TextEdit         *completionTextEdit `json:"textEdit,omitempty"`
 }
 
 // Diagnostic is the LSP diagnostic shape emitted by the server.
