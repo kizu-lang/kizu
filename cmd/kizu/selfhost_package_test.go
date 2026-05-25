@@ -2470,6 +2470,88 @@ func assertExecutableHostedLoweringConsumers(
 			t.Fatalf("hosted artifact renderer still hardcodes body literal %q", fragment)
 		}
 	}
+	assertHostedLoweringSliceSizesUseFacts(t, run, test)
+}
+
+// assertHostedLoweringSliceSizesUseFacts keeps global declarations and their
+// slice use sites sized from the same selected hosted lowering facts.
+func assertHostedLoweringSliceSizesUseFacts(t *testing.T, run string, test string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"hosted_artifact_fact_len(",
+		"hosted_prefix_source_size(",
+		"run_dynamic_global_prefix_size(",
+		"run_dynamic_body_prefix_size(",
+		"run_dynamic_body_suffix_size(",
+		"hosted_return_body_suffix_size(",
+		"hosted_meta_suffix_size(",
+		`"run_return_ll_prefix_source"`,
+		`"run_return_meta_suffix"`,
+	} {
+		if !strings.Contains(run, fragment) {
+			t.Fatalf("hosted run artifact slices are not fact-sized with %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"hosted_artifact_fact_len(",
+		"hosted_prefix_source_size(",
+		"test_case_ll_suffix_size(",
+		"hosted_meta_suffix_size(",
+		`"test_ok_ll_prefix"`,
+		`"test_failure_ll_prefix"`,
+	} {
+		if !strings.Contains(test, fragment) {
+			t.Fatalf("hosted test artifact slices are not fact-sized with %q", fragment)
+		}
+	}
+	for _, file := range []struct {
+		name      string
+		content   string
+		forbidden []string
+	}{
+		{name: "run", content: run, forbidden: hostedRunFixedSliceSizes()},
+		{name: "test", content: test, forbidden: hostedTestFixedSliceSizes()},
+	} {
+		for _, fragment := range file.forbidden {
+			if strings.Contains(file.content, fragment) {
+				t.Fatalf("hosted %s artifact slice keeps fixed size %q", file.name, fragment)
+			}
+		}
+	}
+}
+
+// hostedRunFixedSliceSizes returns fixed sizes that must stay fact-derived.
+func hostedRunFixedSliceSizes() []string {
+	return []string{
+		`"run_dir", "19"`,
+		`"run_path_prefix", "20"`,
+		`"run_ll_suffix", "3"`,
+		`"run_metadata_path_prefix", "20"`,
+		`"run_metadata_path_suffix", "8"`,
+		`"run_print_ll_prefix_source", "45"`,
+		`"run_print_ll_prefix_len", "164"`,
+		`"run_print_ll_prefix_payload", "9"`,
+		`"run_print_ll_prefix_len2", "377"`,
+		`"run_print_ll_suffix", "173"`,
+		`"run_return_ll_suffix", "156"`,
+		`"run_meta_suffix", "146"`,
+	}
+}
+
+// hostedTestFixedSliceSizes returns fixed sizes that must stay fact-derived.
+func hostedTestFixedSliceSizes() []string {
+	return []string{
+		`"test_dir", "20"`,
+		`"test_path_prefix", "21"`,
+		`"test_ll_suffix", "3"`,
+		`"test_ll_prefix", "46"`,
+		`"test_ok_ll_suffix", "793"`,
+		`"test_failure_ll_suffix", "849"`,
+		`"test_metadata_path_prefix", "21"`,
+		`"test_metadata_path_suffix", "8"`,
+		`"test_ok_meta_suffix", "162"`,
+		`"test_failure_meta_suffix", "162"`,
+	}
 }
 
 // assertExecutableParserConsumers checks generated parser/lowerer IR fact use.
