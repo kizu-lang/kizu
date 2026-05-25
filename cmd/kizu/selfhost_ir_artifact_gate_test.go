@@ -373,6 +373,8 @@ func requiredSelfhostIRHostedLoweringFragments() []string {
 			"lower_run_hosted_executable 2\n",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 RunPrintString\n",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 kizu\\20run\\20artifact\\20ll\\20v0\n",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 kizu_run_main\n",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -387,6 +389,8 @@ func requiredSelfhostIRHostedLoweringFragments() []string {
 			"lower_run_hosted_executable 0 executable-field\n",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 RunReturnVoid\n",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 1 kizu\\20run\\20artifact\\20ll\\20v0\n",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 none\n",
 		"hosted-lowering-case-stream selfhost::backend::hosted::" +
@@ -397,18 +401,27 @@ func requiredSelfhostIRHostedLoweringFragments() []string {
 			"lower_test_hosted_executable 2\n",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 TestExpectOk\n",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 kizu\\20test\\20artifact\\20ll\\20v0\n",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 kizu.test.ok\n",
 		"hosted-lowering-case-stream selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 Stdout\n",
+		"hosted-lowering-case-payload-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 test:\\20ok\n",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 TestExpectFailure\n",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 kizu\\20test\\20artifact\\20ll\\20v0\n",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 kizu.test.failure\n",
 		"hosted-lowering-case-stream selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 Stderr\n",
 		"hosted-lowering-case-exit selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 1\n",
+		"hosted-lowering-case-payload-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 error:\\20runtime\\20error:" +
+			"\\20expected\\20condition\\20to\\20be\\20true\n",
 	}
 }
 

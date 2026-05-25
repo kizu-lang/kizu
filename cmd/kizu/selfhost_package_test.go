@@ -2330,9 +2330,12 @@ func assertExecutableHostedLoweringComesFromCheckedAST(
 		"lowering_case_return_struct(",
 		"struct_field_enum_value(",
 		"struct_field_payload_kind(",
+		"append_case_llvm_c_string_fact(",
 		"hosted-lowering-case-kind ",
+		"hosted-lowering-case-comment-llvm ",
 		"hosted-lowering-case-entry ",
 		"hosted-lowering-case-payload ",
+		"hosted-lowering-case-payload-llvm ",
 	} {
 		if !strings.Contains(hostedLowering, fragment) {
 			t.Fatalf("hosted lowering facts are not checked AST-derived via %q", fragment)
@@ -2422,6 +2425,8 @@ func assertExecutableHostedLoweringConsumers(
 		"try append_selected_hosted_executable_lowering_metadata(out, ir_bytes)",
 		"fn require_selected_hosted_executable_lowering(",
 		`"hosted-lowering-case-kind "`,
+		`"hosted-lowering-case-comment-llvm "`,
+		`"hosted-lowering-case-payload-llvm "`,
 	} {
 		if !strings.Contains(llvm, fragment) {
 			t.Fatalf("backend hosted lowering consumer missing %q", fragment)
@@ -2438,6 +2443,10 @@ func assertExecutableHostedLoweringConsumers(
 			"hosted_lowering_case_kind_tag(",
 			"ir_contract::sequence_fact_value(",
 			`"hosted-lowering-case-kind "`,
+			`"hosted-lowering-case-comment-llvm "`,
+			`"hosted-lowering-case-entry "`,
+			`"hosted-lowering-case-stream "`,
+			`"hosted-lowering-case-exit "`,
 		} {
 			if !strings.Contains(file.content, fragment) {
 				t.Fatalf("hosted %s dispatch does not consume hosted lowering fact %q", file.name, fragment)
@@ -2447,6 +2456,18 @@ func assertExecutableHostedLoweringConsumers(
 	for _, fragment := range []string{`"RunPrintString"`, `"TestExpectOk"`} {
 		if strings.Contains(run, fragment) || strings.Contains(test, fragment) {
 			t.Fatalf("hosted dispatch still hardcodes executable kind name %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		`"; kizu run artifact ll v0\0Asource_filename = \22"`,
+		`"; kizu test artifact ll v0\0Asource_filename = \22"`,
+		`"test: ok\5C0A"`,
+		`"error: runtime error: expected condition to be true\5C0A"`,
+		`"declare %kizu.error.void @kizu_rt_io_write_stdout`,
+		`"declare %kizu.error.void @kizu_rt_io_write_stderr`,
+	} {
+		if strings.Contains(run, fragment) || strings.Contains(test, fragment) {
+			t.Fatalf("hosted artifact renderer still hardcodes body literal %q", fragment)
 		}
 	}
 }
@@ -2998,11 +3019,19 @@ func hostedExecutableHostedArtifactPathFacts() []string {
 // hostedExecutableHostedLoweringFacts returns behavior facts derived from
 // lower_*_hosted_executable bodies and consumed by hosted stage2 dispatch.
 func hostedExecutableHostedLoweringFacts() []string {
+	facts := hostedExecutableRunHostedLoweringFacts()
+	return append(facts, hostedExecutableTestHostedLoweringFacts()...)
+}
+
+// hostedExecutableRunHostedLoweringFacts returns run artifact behavior facts.
+func hostedExecutableRunHostedLoweringFacts() []string {
 	return []string{
 		"hosted-lowering-case-count selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 2",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 RunPrintString",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 kizu\\20run\\20artifact\\20ll\\20v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 kizu_run_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3017,6 +3046,8 @@ func hostedExecutableHostedLoweringFacts() []string {
 			"lower_run_hosted_executable 0 executable-field",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 RunReturnVoid",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 1 kizu\\20run\\20artifact\\20ll\\20v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 kizu_run_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3029,10 +3060,18 @@ func hostedExecutableHostedLoweringFacts() []string {
 			"lower_run_hosted_executable 1 0",
 		"hosted-lowering-case-payload selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 empty-source-slice",
+	}
+}
+
+// hostedExecutableTestHostedLoweringFacts returns test artifact behavior facts.
+func hostedExecutableTestHostedLoweringFacts() []string {
+	return []string{
 		"hosted-lowering-case-count selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 2",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 TestExpectOk",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 kizu\\20test\\20artifact\\20ll\\20v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 kizu_test_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3045,8 +3084,12 @@ func hostedExecutableHostedLoweringFacts() []string {
 			"lower_test_hosted_executable 0 0",
 		"hosted-lowering-case-payload selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 literal",
+		"hosted-lowering-case-payload-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 test:\\20ok",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 TestExpectFailure",
+		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 kizu\\20test\\20artifact\\20ll\\20v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 kizu_test_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3059,6 +3102,9 @@ func hostedExecutableHostedLoweringFacts() []string {
 			"lower_test_hosted_executable 1 1",
 		"hosted-lowering-case-payload selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 literal",
+		"hosted-lowering-case-payload-llvm selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 error:\\20runtime\\20error:" +
+			"\\20expected\\20condition\\20to\\20be\\20true",
 	}
 }
 
