@@ -61,6 +61,15 @@ func (s *Server) hover(uri string, position Position) *hover {
 	if !ok {
 		return nil
 	}
+	doc := s.checkedDocument(uri)
+	if fact, ok := typeFactAt(source, position, doc.TypeFacts); ok {
+		return &hover{
+			Contents: markupContent{
+				Kind:  "markdown",
+				Value: kizuHoverMarkup(fact.name + ": " + fact.typ),
+			},
+		}
+	}
 	tokens := lexCompletionTokens(source)
 	index, sources := s.navigationIndex(uri, source)
 	decl, ok := hoverAt(tokens, position, uri, source, index, sources)

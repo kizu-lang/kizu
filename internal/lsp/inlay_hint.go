@@ -9,44 +9,32 @@ import (
 
 // InlayHints returns inferred type hints for local bindings in source.
 func InlayHints(source string, rng Range) []inlayHint {
-	tokens := lexCompletionTokens(source)
-	hints := []inlayHint{}
-	bindings := map[string]string{}
-	for i := 0; i < len(tokens); i++ {
-		switch tokens[i].Type {
-		case token.Function:
-			bindings = functionParamBindings(tokens, i)
-		case token.Ident:
-			if isTestDeclStart(tokens, i) {
-				bindings = map[string]string{}
-			}
-		case token.Let, token.Var:
-			hint, binding, hasHint, hasBinding := readLetInlayHint(tokens, i, bindings, rng)
-			if hasHint {
-				hints = append(hints, hint)
-			}
-			if hasBinding {
-				bindings[binding.name] = binding.typ
-			}
-		case token.For:
-			if i+5 < len(tokens) && tokens[i+3].Type == token.Pipe && tokens[i+4].Type == token.Ident {
-				bindings[tokens[i+4].Literal] = "i64"
-			}
-		}
-	}
-	return hints
+	return inlayHintsFromTypeFacts(documentTypeFacts(source), rng)
 }
 
-// functionParamBindings returns typed params for the function that starts at index.
-func functionParamBindings(tokens []token.Token, start int) map[string]string {
-	params, _ := readFunctionParams(tokens, start)
-	bindings := map[string]string{}
-	for _, param := range params {
-		if param.typ != "" {
-			bindings[param.name] = param.typ
-		}
+// inlayHints returns cached type hints for a tracked document.
+func (s *Server) inlayHints(uri string, rng Range) []inlayHint {
+	doc := s.checkedDocument(uri)
+	if doc.Source == "" {
+		return []inlayHint{}
 	}
-	return bindings
+	return inlayHintsFromTypeFacts(doc.TypeFacts, rng)
+}
+
+// inlayHintsFromTypeFacts converts cached type facts into range-filtered hints.
+func inlayHintsFromTypeFacts(facts []typeFact, rng Range) []inlayHint {
+	hints := []inlayHint{}
+	for _, fact := range facts {
+		if !fact.showInlay || !positionInRange(fact.rng.Start, rng) {
+			continue
+		}
+		hints = append(hints, inlayHint{
+			Position: fact.rng.End,
+			Label:    ": " + fact.typ,
+			Kind:     inlayHintKindType,
+		})
+	}
+	return hints
 }
 
 // isTestDeclStart reports top-level test declarations tokenized as an identifier.
@@ -55,40 +43,6 @@ func isTestDeclStart(tokens []token.Token, start int) bool {
 		start+2 < len(tokens) &&
 		tokens[start+1].Type == token.String &&
 		tokens[start+2].Type == token.LBrace
-}
-
-// readLetInlayHint reads one local binding and builds its type hint if known.
-func readLetInlayHint(
-	tokens []token.Token,
-	start int,
-	bindings map[string]string,
-	rng Range,
-) (inlayHint, localBinding, bool, bool) {
-	if start+2 >= len(tokens) || tokens[start+1].Type != token.Ident {
-		return inlayHint{}, localBinding{}, false, false
-	}
-	name := tokens[start+1]
-	assign := findBindingAssign(tokens, start+2)
-	if assign < 0 {
-		return inlayHint{}, localBinding{}, false, false
-	}
-	typ, _ := inferInlayExprType(tokens, assign+1, bindings)
-	if typ == "" {
-		return inlayHint{}, localBinding{}, false, false
-	}
-	binding := localBinding{name: name.Literal, typ: typ}
-	if !tokenInRange(name, rng) {
-		return inlayHint{}, binding, false, true
-	}
-	position := Position{
-		Line:      name.Line - 1,
-		Character: name.Column - 1 + utf16Len(name.Literal),
-	}
-	return inlayHint{
-		Position: position,
-		Label:    ": " + typ,
-		Kind:     inlayHintKindType,
-	}, binding, true, true
 }
 
 // inferInlayExprType infers a conservative display type for one initializer.
@@ -260,17 +214,15 @@ func findBindingAssign(tokens []token.Token, start int) int {
 	return -1
 }
 
-// tokenInRange checks whether token starts within the requested LSP range.
-func tokenInRange(tok token.Token, rng Range) bool {
-	line := tok.Line - 1
-	character := tok.Column - 1
-	if line < rng.Start.Line || line > rng.End.Line {
+// positionInRange checks whether an LSP position starts within a range.
+func positionInRange(position Position, rng Range) bool {
+	if position.Line < rng.Start.Line || position.Line > rng.End.Line {
 		return false
 	}
-	if line == rng.Start.Line && character < rng.Start.Character {
+	if position.Line == rng.Start.Line && position.Character < rng.Start.Character {
 		return false
 	}
-	if line == rng.End.Line && character >= rng.End.Character {
+	if position.Line == rng.End.Line && position.Character >= rng.End.Character {
 		return false
 	}
 	return true

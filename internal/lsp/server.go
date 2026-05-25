@@ -147,11 +147,7 @@ func (s *Server) handleInlayHintRequest(msg incomingMessage) error {
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		return err
 	}
-	source, ok := s.documents[params.TextDocument.URI]
-	if !ok {
-		return s.respond(msg.ID, []inlayHint{})
-	}
-	return s.respond(msg.ID, InlayHints(source, params.Range))
+	return s.respond(msg.ID, s.inlayHints(params.TextDocument.URI, params.Range))
 }
 
 // handleDefinitionRequest returns a location for the symbol under the cursor.

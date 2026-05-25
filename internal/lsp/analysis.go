@@ -4,6 +4,7 @@ package lsp
 type checkedDocument struct {
 	Source      string
 	Diagnostics []Diagnostic
+	TypeFacts   []typeFact
 }
 
 // checkedDocument returns cached diagnostics for a tracked document source.
@@ -18,6 +19,7 @@ func (s *Server) checkedDocument(uri string) checkedDocument {
 	result := checkedDocument{
 		Source:      source,
 		Diagnostics: s.analyzeDocument(uri),
+		TypeFacts:   documentTypeFacts(source),
 	}
 	s.analysis[uri] = result
 	return result
