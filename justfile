@@ -19,6 +19,22 @@ lint:
 check:
     pre-commit run --all-files
 
+# Install VSCode extension dependencies.
+vscode-extension-install:
+    cd editors/vscode && npm ci
+
+# Compile the VSCode extension.
+vscode-extension-build:
+    cd editors/vscode && npm run compile
+
+# Package the VSCode extension as a local VSIX.
+vscode-extension-package:
+    cd editors/vscode && npm ci && npm run compile && npm run package
+
+# Run VSCode extension checks.
+vscode-extension-check:
+    cd editors/vscode && npm ci && npm run compile
+
 # Run Go/Kizu selfhost component oracle parity checks.
 selfhost-oracle:
     GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
