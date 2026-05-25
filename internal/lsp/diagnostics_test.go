@@ -29,6 +29,29 @@ func TestAnalyzeReportsCheckDiagnostic(t *testing.T) {
 	}
 }
 
+// TestAnalyzeReportsBinaryCheckDiagnosticPosition checks semantic diagnostics use checker spans.
+func TestAnalyzeReportsBinaryCheckDiagnosticPosition(t *testing.T) {
+	source := `enum Color { Red, Green }
+enum Animal { Cat, Dog }
+
+fn main() {
+    let color = Color::Green;
+    if color == Animal::Cat { return; }
+}
+`
+	diagnostics := Analyze(source)
+	if len(diagnostics) != 1 {
+		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
+	}
+	got := diagnostics[0]
+	if got.Range.Start.Line != 5 || got.Range.Start.Character != 13 {
+		t.Fatalf("got start %d:%d, want 5:13", got.Range.Start.Line, got.Range.Start.Character)
+	}
+	if got.Range.End.Line != 5 || got.Range.End.Character != 15 {
+		t.Fatalf("got end %d:%d, want 5:15", got.Range.End.Line, got.Range.End.Character)
+	}
+}
+
 // TestAnalyzeAcceptsValidSource checks clean source publishes no diagnostics.
 func TestAnalyzeAcceptsValidSource(t *testing.T) {
 	source := "fn main() -> i64 { return 7; }\n"

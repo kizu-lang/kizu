@@ -6,6 +6,23 @@ import (
 	"strings"
 )
 
+// Position identifies a source position using one-based line and column values.
+type Position struct {
+	Line   int
+	Column int
+}
+
+// Span identifies a half-open source range using one-based positions.
+type Span struct {
+	Start Position
+	End   Position
+}
+
+// IsZero reports whether a span has no source position.
+func (s Span) IsZero() bool {
+	return s.Start.Line == 0 || s.Start.Column == 0
+}
+
 // Node is implemented by every AST node.
 type Node interface {
 	String() string
@@ -671,9 +688,10 @@ func (e *PrefixExpr) String() string {
 
 // BinaryExpr represents an infix binary operator expression.
 type BinaryExpr struct {
-	Left     Expression
-	Operator string
-	Right    Expression
+	Left         Expression
+	Operator     string
+	OperatorSpan Span
+	Right        Expression
 }
 
 // expressionNode marks BinaryExpr as an expression node.

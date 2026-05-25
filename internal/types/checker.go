@@ -2611,19 +2611,22 @@ func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool)
 		return "", err
 	}
 	if expr.Operator == "and" || expr.Operator == "or" {
-		return checkLogical(expr.Operator, left, right)
+		return checkLogical(expr.Operator, left, right, expr.OperatorSpan)
 	}
 	if expr.Operator == "==" || expr.Operator == "!=" {
-		return checkEquality(expr.Operator, left, right)
+		return checkEquality(expr.Operator, left, right, expr.OperatorSpan)
 	}
 	if left != right {
-		return "", fmt.Errorf("type error: operator `%s` operands must have same type", expr.Operator)
+		return "", errorAt(expr.OperatorSpan,
+			"type error: operator `%s` operands must have same type", expr.Operator)
 	}
 	if !numericTypes[left] {
-		return "", fmt.Errorf("type error: operator `%s` expects numeric operands", expr.Operator)
+		return "", errorAt(expr.OperatorSpan,
+			"type error: operator `%s` expects numeric operands", expr.Operator)
 	}
 	if expr.Operator == "%" && !integerTypes[left] {
-		return "", fmt.Errorf("type error: operator `%s` expects integer operands", expr.Operator)
+		return "", errorAt(expr.OperatorSpan,
+			"type error: operator `%s` expects integer operands", expr.Operator)
 	}
 	if isComparison(expr.Operator) {
 		return typeBool, nil
@@ -2632,17 +2635,17 @@ func (c *Checker) checkBinaryExpr(expr *ast.BinaryExpr, env *scope, unsafe bool)
 }
 
 // checkLogical validates boolean logical operands.
-func checkLogical(op string, left Type, right Type) (Type, error) {
+func checkLogical(op string, left Type, right Type, span ast.Span) (Type, error) {
 	if left != typeBool || right != typeBool {
-		return "", fmt.Errorf("type error: operator `%s` expects bool operands", op)
+		return "", errorAt(span, "type error: operator `%s` expects bool operands", op)
 	}
 	return typeBool, nil
 }
 
 // checkEquality validates equality operands.
-func checkEquality(op string, left Type, right Type) (Type, error) {
+func checkEquality(op string, left Type, right Type, span ast.Span) (Type, error) {
 	if left != right {
-		return "", fmt.Errorf("type error: operator `%s` operands must have same type", op)
+		return "", errorAt(span, "type error: operator `%s` operands must have same type", op)
 	}
 	return typeBool, nil
 }
