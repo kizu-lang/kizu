@@ -1148,7 +1148,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn runtime_line_prefix(",
 		"fn metadata_fact(",
 		"fn common_metadata_fact(",
-		"fn llvm_c_decoded_len(",
+		"fn append_llvm_c_string_payload(",
+		"fn line_prefix_through_space(",
 		"hosted-artifact-metadata-title ",
 		"hosted-artifact-metadata-source-prefix ",
 		"hosted-artifact-metadata-output-prefix ",
@@ -1235,7 +1236,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn require_fact(",
 		"pub fn contains(",
 		"pub fn named_fact_value(",
+		"pub fn named_fact_line_value(",
 		"pub fn require_named_fact(",
+		"pub fn require_named_line_fact(",
 		"pub fn named_i64_fact(",
 		"pub fn require_named_i64_fact(",
 		"pub fn sequence_fact_value(",
@@ -1287,9 +1290,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_common_metadata_facts(",
 		"fn call_from_statement(",
 		"fn append_named_call_string_arg_fact(",
-		"fn append_named_call_llvm_string_arg_fact(",
+		"fn append_named_call_line_string_arg_fact(",
 		"fn append_string_literal_value(",
-		"fn append_llvm_c_string_token(",
+		"fn append_line_string_literal_value(",
 		"hosted-artifact-dir ",
 		"hosted-artifact-ll-prefix ",
 		"hosted-artifact-metadata-title ",
@@ -2186,10 +2189,10 @@ func assertExecutableHostedArtifactPathsComeFromCheckedAST(
 		"pub fn append_common_metadata_facts(",
 		"call_from_statement(",
 		"append_named_call_string_arg_fact(",
-		"append_named_call_llvm_string_arg_fact(",
+		"append_named_call_line_string_arg_fact(",
 		"call_callee(",
 		"append_string_literal_value(",
-		"append_llvm_c_string_token(",
+		"append_line_string_literal_value(",
 		"bytes_contains_byte(",
 		"hosted-artifact-dir ",
 		"hosted-artifact-ll-prefix ",
@@ -2213,7 +2216,7 @@ func assertExecutableHostedArtifactPathsComeFromCheckedAST(
 	emitter := selected + hostedPaths
 	for _, fact := range facts {
 		parts := strings.Fields(fact)
-		if len(parts) != 3 {
+		if len(parts) < 3 {
 			t.Fatalf("invalid hosted artifact path fixture %q", fact)
 		}
 		if strings.Contains(llvm, `"`+fact+`"`) {
@@ -2328,7 +2331,7 @@ func assertExecutableHostedArtifactGlobalConsumers(
 ) {
 	t.Helper()
 	for _, fragment := range []string{
-		"ir_contract::named_fact_value(",
+		"ir_contract::named_fact_line_value(",
 		`"hosted-artifact-metadata-title "`,
 		`"hosted-artifact-metadata-issue "`,
 		`"hosted-artifact-metadata-source-prefix "`,
@@ -2806,17 +2809,20 @@ func assertNamedFactConsumer(t *testing.T, content string, owner string, fact st
 		t.Fatalf("%s hardcodes complete executable rule fact %q", owner, fact)
 	}
 	parts := strings.Fields(fact)
-	if len(parts) != 3 {
+	if len(parts) < 3 {
 		t.Fatalf("invalid executable rule fact fixture %q", fact)
 	}
+	value := strings.TrimPrefix(fact, parts[0]+" "+parts[1]+" ")
 	if !strings.Contains(content, "ir_contract::require_named_fact(") &&
-		!strings.Contains(content, "ir_contract::named_fact_value(") {
+		!strings.Contains(content, "ir_contract::require_named_line_fact(") &&
+		!strings.Contains(content, "ir_contract::named_fact_value(") &&
+		!strings.Contains(content, "ir_contract::named_fact_line_value(") {
 		t.Fatalf("%s does not consume executable rule fact %q through named fact APIs", owner, fact)
 	}
 	for _, fragment := range []string{
 		`"` + parts[0] + ` "`,
 		`"` + parts[1] + `"`,
-		`"` + parts[2] + `"`,
+		`"` + value + `"`,
 	} {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("%s does not consume executable rule fact %q via %q", owner, fact, fragment)
@@ -2959,7 +2965,7 @@ func hostedExecutableHostedArtifactPathFacts() []string {
 		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
 			"write_run_metadata kizu-run-artifact-v0",
 		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_run_metadata issue\\20#569",
+			"write_run_metadata issue #569",
 		"hosted-artifact-dir selfhost::backend::hosted::" +
 			"emit_test_executable_artifact target/selfhost/test",
 		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
@@ -2975,26 +2981,26 @@ func hostedExecutableHostedArtifactPathFacts() []string {
 		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
 			"write_test_metadata kizu-test-artifact-v0",
 		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_test_metadata issue\\20#570",
+			"write_test_metadata issue #570",
 		"hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
-			"append_common_metadata source\\20",
+			"append_common_metadata source ",
 		"hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
-			"append_common_metadata output\\20",
+			"append_common_metadata output ",
 		"hosted-artifact-metadata-abi-line selfhost::backend::hosted::" +
-			"append_common_metadata abi\\20selfhost-abi-v0",
+			"append_common_metadata abi selfhost-abi-v0",
 		"hosted-artifact-metadata-entry-prefix selfhost::backend::hosted::" +
-			"append_common_metadata entry\\20@",
+			"append_common_metadata entry @",
 		"hosted-artifact-metadata-runtime-line selfhost::backend::hosted::" +
-			"append_common_metadata runtime\\20target/selfhost/selfhost.host.ll",
+			"append_common_metadata runtime target/selfhost/selfhost.host.ll",
 		"hosted-artifact-metadata-lowering-line selfhost::backend::hosted::" +
-			"append_common_metadata executable_lowering\\20selfhost::backend::" +
-			"executable\\20checked-ast",
+			"append_common_metadata executable_lowering selfhost::backend::" +
+			"executable checked-ast",
 		"hosted-artifact-metadata-fallback-line selfhost::backend::hosted::" +
-			"append_common_metadata go.cmd-kizu-fallback\\20none",
+			"append_common_metadata go.cmd-kizu-fallback none",
 		"hosted-artifact-metadata-mode-line selfhost::backend::hosted::" +
-			"append_common_metadata artifact_mode\\20hosted-artifact",
+			"append_common_metadata artifact_mode hosted-artifact",
 		"hosted-artifact-metadata-discovery-line selfhost::backend::hosted::" +
-			"write_test_metadata discovery\\20none",
+			"write_test_metadata discovery none",
 	}
 }
 

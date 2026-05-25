@@ -531,7 +531,7 @@ func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 		"backend-input hosted-artifact-metadata-title selfhost::backend::hosted::" +
 			"write_run_metadata kizu-run-artifact-v0\n",
 		"backend-input hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_run_metadata issue\\20#569\n",
+			"write_run_metadata issue #569\n",
 		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
 			"emit_test_executable_artifact target/selfhost/test\n",
 		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
@@ -547,26 +547,26 @@ func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 		"backend-input hosted-artifact-metadata-title selfhost::backend::hosted::" +
 			"write_test_metadata kizu-test-artifact-v0\n",
 		"backend-input hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_test_metadata issue\\20#570\n",
+			"write_test_metadata issue #570\n",
 		"backend-input hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
-			"append_common_metadata source\\20\n",
+			"append_common_metadata source \n",
 		"backend-input hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
-			"append_common_metadata output\\20\n",
+			"append_common_metadata output \n",
 		"backend-input hosted-artifact-metadata-abi-line selfhost::backend::hosted::" +
-			"append_common_metadata abi\\20selfhost-abi-v0\n",
+			"append_common_metadata abi selfhost-abi-v0\n",
 		"backend-input hosted-artifact-metadata-entry-prefix selfhost::backend::hosted::" +
-			"append_common_metadata entry\\20@\n",
+			"append_common_metadata entry @\n",
 		"backend-input hosted-artifact-metadata-runtime-line selfhost::backend::hosted::" +
-			"append_common_metadata runtime\\20target/selfhost/selfhost.host.ll\n",
+			"append_common_metadata runtime target/selfhost/selfhost.host.ll\n",
 		"backend-input hosted-artifact-metadata-lowering-line selfhost::backend::hosted::" +
-			"append_common_metadata executable_lowering\\20selfhost::backend::" +
-			"executable\\20checked-ast\n",
+			"append_common_metadata executable_lowering selfhost::backend::" +
+			"executable checked-ast\n",
 		"backend-input hosted-artifact-metadata-fallback-line selfhost::backend::hosted::" +
-			"append_common_metadata go.cmd-kizu-fallback\\20none\n",
+			"append_common_metadata go.cmd-kizu-fallback none\n",
 		"backend-input hosted-artifact-metadata-mode-line selfhost::backend::hosted::" +
-			"append_common_metadata artifact_mode\\20hosted-artifact\n",
+			"append_common_metadata artifact_mode hosted-artifact\n",
 		"backend-input hosted-artifact-metadata-discovery-line selfhost::backend::hosted::" +
-			"write_test_metadata discovery\\20none\n",
+			"write_test_metadata discovery none\n",
 	}
 }
 
