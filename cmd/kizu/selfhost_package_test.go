@@ -1139,10 +1139,13 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu": {
 		"pub fn append_prefix_constant(",
 		"pub fn prefix_size(",
+		"pub fn append_output_prefix_constant(",
+		"pub fn output_prefix_size(",
 		"fn metadata_fact(",
 		"fn llvm_c_decoded_len(",
 		"hosted-artifact-metadata-title ",
 		"hosted-artifact-metadata-source-prefix ",
+		"hosted-artifact-metadata-output-prefix ",
 	},
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2314,6 +2317,7 @@ func assertExecutableHostedArtifactPathsComeFromCheckedAST(
 		"hosted-artifact-metadata-title ",
 		"hosted-artifact-metadata-issue ",
 		"hosted-artifact-metadata-source-prefix ",
+		"hosted-artifact-metadata-output-prefix ",
 	} {
 		if !strings.Contains(hostedPaths, fragment) {
 			t.Fatalf("hosted artifact path facts are not checked AST-derived via %q", fragment)
@@ -2417,6 +2421,12 @@ func assertExecutableHostedArtifactPathConsumers(
 			t.Fatalf("CLI globals still keep renderer-local artifact suffix %q", fragment)
 		}
 	}
+	if !strings.Contains(cli, "cli_hosted_metadata_llvm::append_output_prefix_constant(") {
+		t.Fatal("CLI globals do not derive artifact output prefix from hosted metadata facts")
+	}
+	if strings.Contains(cli, `append_llvm_constant(out, "artifact_output_prefix", "8"`) {
+		t.Fatal("CLI globals still keep renderer-local artifact output prefix")
+	}
 	assertExecutableHostedArtifactGlobalConsumers(t, run, test, metadata)
 	assertExecutableHostedMetadataPrefixNotRendererLocal(t, run, test)
 }
@@ -2435,6 +2445,7 @@ func assertExecutableHostedArtifactGlobalConsumers(
 		`"hosted-artifact-metadata-title "`,
 		`"hosted-artifact-metadata-issue "`,
 		`"hosted-artifact-metadata-source-prefix "`,
+		`"hosted-artifact-metadata-output-prefix "`,
 	} {
 		if !strings.Contains(metadata, fragment) {
 			t.Fatalf("hosted metadata globals do not consume IR fact %q", fragment)
@@ -2456,6 +2467,7 @@ func assertExecutableHostedArtifactGlobalConsumers(
 			`"hosted-artifact-metadata-suffix "`,
 			"cli_hosted_metadata_llvm::append_prefix_constant(",
 			"cli_hosted_metadata_llvm::prefix_size(",
+			"cli_hosted_metadata_llvm::output_prefix_size(",
 			"metadata_path_prefix",
 			"metadata_path_suffix",
 		} {
@@ -3205,6 +3217,8 @@ func hostedExecutableHostedArtifactPathFacts() []string {
 			"write_test_metadata issue\\20#570",
 		"hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
 			"append_common_metadata source\\20",
+		"hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
+			"append_common_metadata output\\20",
 	}
 }
 
