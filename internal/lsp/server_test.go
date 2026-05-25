@@ -42,6 +42,11 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	if _, ok := capabilities["completionProvider"].(map[string]any); !ok {
 		t.Fatalf("completionProvider = %#v, want object", capabilities["completionProvider"])
 	}
+	provider := capabilities["completionProvider"].(map[string]any)
+	triggers := provider["triggerCharacters"].([]any)
+	if !containsJSONValue(triggers, ".") {
+		t.Fatalf("triggerCharacters = %#v, want dot trigger", triggers)
+	}
 	if messages[1]["method"] != "textDocument/publishDiagnostics" {
 		t.Fatalf("got method %#v, want publish diagnostics", messages[1]["method"])
 	}
@@ -296,6 +301,16 @@ func publishedDiagnostics(t *testing.T, message map[string]any) []any {
 	}
 	params := message["params"].(map[string]any)
 	return params["diagnostics"].([]any)
+}
+
+// containsJSONValue reports whether values contains one string value.
+func containsJSONValue(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // readFrames decodes all framed JSON-RPC messages from server output.
