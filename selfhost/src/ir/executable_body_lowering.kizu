@@ -6,6 +6,7 @@ pub fn append_run_lowering_facts(
 ) -> !void {
     let function_name = "selfhost::backend::executable::lower_run_executable_ast";
     try append_selected_body_lowering(out, function_name, "checked-run-executable");
+    try append_lowering_case_facts(out, text, ast, function_name, body);
     try require_unsupported_return(text, ast, body);
     try append_selected_body_unsupported(out, function_name);
     return;
@@ -19,6 +20,7 @@ pub fn append_test_lowering_facts(
 ) -> !void {
     let function_name = "selfhost::backend::executable::lower_test_executable_ast";
     try append_selected_body_lowering(out, function_name, "checked-test-executable");
+    try append_lowering_case_facts(out, text, ast, function_name, body);
     try require_unsupported_return(text, ast, body);
     try append_selected_body_unsupported(out, function_name);
     return;
@@ -46,6 +48,362 @@ fn append_selected_body_unsupported(
     try out.append_bytes(" unsupported_executable");
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+fn append_lowering_case_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    body: std::kizu::ast::NodeId
+) -> !void {
+    let count = try lowering_case_count(ast, body);
+    if count < 1 {
+        return error("missing selected body lowering cases");
+    }
+    try append_lowering_case_count(out, function_name, count);
+
+    var index = 0;
+    while index < count {
+        let if_node = try lowering_case_if_node(ast, body, index);
+        let ast_kind = try lowering_case_ast_kind(text, ast, if_node);
+        let result_kind = try lowering_case_result_kind(text, ast, if_node);
+        try append_lowering_case_fact(
+            out,
+            "selected-body-lowering-case-ast ",
+            function_name,
+            index,
+            ast_kind
+        );
+        try append_lowering_case_fact(
+            out,
+            "selected-body-lowering-case-result ",
+            function_name,
+            index,
+            result_kind
+        );
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_lowering_case_count(
+    out: &var std::string::String,
+    function_name: []u8,
+    count: i64
+) -> !void {
+    try out.append_bytes("selected-body-lowering-case-count ");
+    try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, count);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_lowering_case_fact(
+    out: &var std::string::String,
+    prefix: []u8,
+    function_name: []u8,
+    index: i64,
+    value: []u8
+) -> !void {
+    try out.append_bytes(prefix);
+    try out.append_bytes(function_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(value);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn lowering_case_count(
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId
+) -> !i64 {
+    let node = ast.get(body);
+    match node.data {
+        Block(block) => return try lowering_case_count_in_range(ast, block.statements);,
+        _ => return error("missing selected body lowering cases");,
+    }
+}
+
+fn lowering_case_count_in_range(
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !i64 {
+    var count = 0;
+    while count < statements.len {
+        let statement = try ast.child_at(statements, count);
+        let statement_node = ast.get(statement);
+        match statement_node.data {
+            If(if_node) => count = count + 1;,
+            _ => return count;,
+        }
+    }
+    return count;
+}
+
+fn lowering_case_if_node(
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(body);
+    match node.data {
+        Block(block) => return try lowering_case_if_node_in_range(ast, block.statements, index);,
+        _ => return error("missing selected body lowering cases");,
+    }
+}
+
+fn lowering_case_if_node_in_range(
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    index: i64
+) -> !std::kizu::ast::NodeId {
+    let statement = try ast.child_at(statements, index);
+    let statement_node = ast.get(statement);
+    match statement_node.data {
+        If(if_node) => return statement;,
+        _ => return error("missing selected body lowering case");,
+    }
+}
+
+fn lowering_case_ast_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    if_node_id: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let if_node = ast.get(if_node_id);
+    match if_node.data {
+        If(if_data) => return try lowering_case_ast_kind_from_condition(
+            text,
+            ast,
+            if_data.condition
+        );,
+        _ => return error("unsupported selected body lowering condition");,
+    }
+}
+
+fn lowering_case_ast_kind_from_condition(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let node = ast.get(condition);
+    match node.data {
+        Binary(binary) => return try binary_condition_ast_kind(text, ast, condition);,
+        _ => return error("unsupported selected body lowering condition");,
+    }
+}
+
+fn binary_condition_ast_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    condition: std::kizu::ast::NodeId
+) -> ![]u8 {
+    try require_binary_eq(ast, condition);
+    let left = try binary_left(ast, condition);
+    let right = try binary_right(ast, condition);
+    try require_kind_field_expr(text, ast, left);
+    return try enum_variant_name(text, ast, right);
+}
+
+fn require_binary_eq(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        Binary(binary) => return require_binary_eq_op(binary.op);,
+        _ => return error("unsupported selected body lowering condition");,
+    }
+}
+
+fn require_binary_eq_op(op: std::kizu::ast::BinaryOp) -> !void {
+    if op == std::kizu::ast::binary_eq() {
+        return;
+    }
+    return error("unsupported selected body lowering condition");
+}
+
+fn binary_left(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(node_id);
+    match node.data {
+        Binary(binary) => return binary.left;,
+        _ => return error("unsupported selected body lowering condition");,
+    }
+}
+
+fn binary_right(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(node_id);
+    match node.data {
+        Binary(binary) => return binary.right;,
+        _ => return error("unsupported selected body lowering condition");,
+    }
+}
+
+fn lowering_case_result_kind(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    if_node_id: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let if_node = ast.get(if_node_id);
+    match if_node.data {
+        If(if_data) => return try lowering_case_result_kind_from_then(
+            text,
+            ast,
+            if_data.then_block
+        );,
+        _ => return error("missing selected body lowering result");,
+    }
+}
+
+fn lowering_case_result_kind_from_then(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    then_block: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let struct_literal = try lowering_case_return_struct(ast, then_block);
+    return try struct_literal_field_enum_value(text, ast, struct_literal, "kind");
+}
+
+fn lowering_case_return_struct(
+    ast: std::kizu::ast::Ast,
+    then_block: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(then_block);
+    match node.data {
+        Block(block) => return try lowering_case_return_struct_in_range(ast, block.statements);,
+        _ => return error("missing selected body lowering result");,
+    }
+}
+
+fn lowering_case_return_struct_in_range(
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !std::kizu::ast::NodeId {
+    if statements.len < 1 {
+        return error("missing selected body lowering result");
+    }
+    let statement = try ast.child_at(statements, 0);
+    let statement_node = ast.get(statement);
+    match statement_node.data {
+        Return(return_node) => return try return_struct_literal(ast, return_node.value);,
+        _ => return error("missing selected body lowering result");,
+    }
+}
+
+fn return_struct_literal(
+    ast: std::kizu::ast::Ast,
+    value: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let value_node = ast.get(value);
+    match value_node.data {
+        StructLiteralExpr(struct_literal) => return value;,
+        _ => return error("missing selected body lowering result");,
+    }
+}
+
+fn struct_literal_field_enum_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    struct_literal: std::kizu::ast::NodeId,
+    field_name: []u8
+) -> ![]u8 {
+    let node = ast.get(struct_literal);
+    match node.data {
+        StructLiteralExpr(struct_data) => return try struct_field_enum_value(
+            text,
+            ast,
+            struct_data.fields,
+            field_name
+        );,
+        _ => return error("missing selected body lowering result");,
+    }
+}
+
+fn struct_field_enum_value(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    fields: std::kizu::ast::ChildRange,
+    field_name: []u8
+) -> ![]u8 {
+    var index = 0;
+    while index < fields.len {
+        let field = try ast.child_at(fields, index);
+        if try struct_field_matches(text, ast, field, field_name) {
+            return try struct_field_enum_value_at(text, ast, field);
+        }
+        index = index + 1;
+    }
+    return error("missing selected body lowering result field");
+}
+
+fn struct_field_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field: std::kizu::ast::NodeId,
+    field_name: []u8
+) -> !bool {
+    let node = ast.get(field);
+    match node.data {
+        StructFieldInit(field_init) => return std::mem::equal_bytes(
+            ast_node_text(text, ast, field_init.name),
+            field_name
+        );,
+        _ => return error("missing selected body lowering result field");,
+    }
+}
+
+fn struct_field_enum_value_at(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    field: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let node = ast.get(field);
+    match node.data {
+        StructFieldInit(field_init) => return try enum_variant_name(text, ast, field_init.value);,
+        _ => return error("missing selected body lowering result field");,
+    }
+}
+
+fn require_kind_field_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(node_id);
+    match node.data {
+        FieldExpr(field_expr) => return require_kind_field_name(text, ast, field_expr.name);,
+        _ => return error("unsupported selected body lowering condition");,
+    }
+}
+
+fn require_kind_field_name(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId
+) -> !void {
+    if std::mem::equal_bytes(ast_node_text(text, ast, name), "kind") {
+        return;
+    }
+    return error("unsupported selected body lowering condition");
+}
+
+fn enum_variant_name(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> ![]u8 {
+    let node = ast.get(node_id);
+    match node.data {
+        FieldExpr(field_expr) => return ast_node_text(text, ast, field_expr.name);,
+        _ => return error("unsupported selected body lowering enum value");,
+    }
 }
 
 fn require_unsupported_return(

@@ -1192,11 +1192,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn require_selected_body_lowering(",
-		"fn append_cli_lower_run_executable_ast_function(",
-		"fn append_cli_lower_test_executable_ast_function(",
-		"fn body_field_expr_value(",
+		"fn append_cli_lower_executable_ast_function(",
+		"fn append_case_dispatch(",
+		"fn lowering_case_count(",
 		"ir_contract::sequence_fact_value(",
-		"ir_contract::require_sequence_fact(",
+		"selected-body-lowering-case-ast ",
+		"selected-body-lowering-case-result ",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
@@ -1264,7 +1265,13 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/ir/executable_body_lowering.kizu": {
 		"pub fn append_run_lowering_facts(",
 		"pub fn append_test_lowering_facts(",
+		"fn append_lowering_case_facts(",
+		"fn lowering_case_ast_kind(",
+		"fn lowering_case_result_kind(",
 		"fn require_unsupported_return(",
+		"selected-body-lowering-case-count ",
+		"selected-body-lowering-case-ast ",
+		"selected-body-lowering-case-result ",
 		"selected-body-lowering-unsupported ",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
@@ -1690,6 +1697,14 @@ func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string, fa
 		t.Fatal("backend metadata does not record selected body lowering facts")
 	}
 	for _, fact := range facts {
+		if strings.HasPrefix(fact, "selected-body-lowering-case-count ") {
+			assertNamedI64FactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
+			continue
+		}
+		if strings.HasPrefix(fact, "selected-body-lowering-case-") {
+			assertSequenceFactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
+			continue
+		}
 		assertNamedFactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
 	}
 }
@@ -2165,12 +2180,15 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 			t.Fatalf("backend hardcodes complete selected body lowering fact %q", fact)
 		}
 		parts := strings.Fields(fact)
-		if len(parts) != 3 {
+		if len(parts) != 3 && len(parts) != 4 {
 			t.Fatalf("invalid selected-body-lowering fixture %q", fact)
 		}
 		requiredFragments := []string{`"` + parts[0] + ` "`}
 		if strings.HasPrefix(fact, "selected-body-lowering ") ||
 			strings.HasPrefix(fact, "selected-body-lowering-unsupported ") {
+			requiredFragments = append(requiredFragments, `"`+parts[1]+`"`)
+		}
+		if strings.HasPrefix(fact, "selected-body-lowering-case-") {
 			requiredFragments = append(requiredFragments, `"`+parts[1]+`"`)
 		}
 		for _, fragment := range requiredFragments {
@@ -2321,12 +2339,13 @@ func assertExecutableParserConsumers(
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
 		"ir_contract::sequence_fact_value(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::require_sequence_fact(",
-		"body_field_expr_value(",
+		"selected-body-lowering-case-count ",
+		"selected-body-lowering-case-ast ",
+		"selected-body-lowering-case-result ",
+		"append_cli_lower_executable_ast_function(",
+		"append_case_dispatch(",
 		"lowering_case_ast_kind_name(",
 		"lowering_case_result_kind_name(",
-		`"body-field-expr "`,
 		`"executable-kind "`,
 	} {
 		if !strings.Contains(ast, fragment) {
@@ -2501,6 +2520,35 @@ func assertNamedI64FactConsumer(t *testing.T, content string, owner string, fact
 	} {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("%s does not consume executable numeric fact %q via %q", owner, fact, fragment)
+		}
+	}
+}
+
+// assertSequenceFactConsumer checks ordered facts are read by prefix, key, and
+// sequence rather than hardcoded as complete fact lines.
+func assertSequenceFactConsumer(t *testing.T, content string, owner string, fact string) {
+	t.Helper()
+	if strings.Contains(content, `"`+fact+`"`) {
+		t.Fatalf("%s hardcodes complete executable sequence fact %q", owner, fact)
+	}
+	parts := strings.Fields(fact)
+	if len(parts) != 4 {
+		t.Fatalf("invalid executable sequence fact fixture %q", fact)
+	}
+	if !strings.Contains(content, "ir_contract::sequence_fact_value(") &&
+		!strings.Contains(content, "ir_contract::require_sequence_fact(") {
+		t.Fatalf(
+			"%s does not consume executable sequence fact %q through sequence fact APIs",
+			owner,
+			fact,
+		)
+	}
+	for _, fragment := range []string{
+		`"` + parts[0] + ` "`,
+		`"` + parts[1] + `"`,
+	} {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("%s does not consume executable sequence fact %q via %q", owner, fact, fragment)
 		}
 	}
 }
@@ -2744,6 +2792,26 @@ func hostedExecutableSelectedBodyLoweringFacts() []string {
 			"lower_run_executable_ast unsupported_executable",
 		"selected-body-lowering-unsupported selfhost::backend::executable::" +
 			"lower_test_executable_ast unsupported_executable",
+		"selected-body-lowering-case-count selfhost::backend::executable::" +
+			"lower_run_executable_ast 2",
+		"selected-body-lowering-case-ast selfhost::backend::executable::" +
+			"lower_run_executable_ast 0 RunPrintCall",
+		"selected-body-lowering-case-result selfhost::backend::executable::" +
+			"lower_run_executable_ast 0 RunPrintString",
+		"selected-body-lowering-case-ast selfhost::backend::executable::" +
+			"lower_run_executable_ast 1 RunReturnVoid",
+		"selected-body-lowering-case-result selfhost::backend::executable::" +
+			"lower_run_executable_ast 1 RunReturnVoid",
+		"selected-body-lowering-case-count selfhost::backend::executable::" +
+			"lower_test_executable_ast 2",
+		"selected-body-lowering-case-ast selfhost::backend::executable::" +
+			"lower_test_executable_ast 0 TestExpectTrue",
+		"selected-body-lowering-case-result selfhost::backend::executable::" +
+			"lower_test_executable_ast 0 TestExpectOk",
+		"selected-body-lowering-case-ast selfhost::backend::executable::" +
+			"lower_test_executable_ast 1 TestExpectFalse",
+		"selected-body-lowering-case-result selfhost::backend::executable::" +
+			"lower_test_executable_ast 1 TestExpectFailure",
 	}
 }
 
