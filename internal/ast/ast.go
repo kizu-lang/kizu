@@ -619,6 +619,7 @@ func (s *ExprStmt) String() string {
 // IdentExpr represents a name reference.
 type IdentExpr struct {
 	Name string
+	Span Span
 }
 
 // expressionNode marks IdentExpr as an expression node.
@@ -761,8 +762,9 @@ func (e *TypeApplyExpr) String() string {
 
 // CastExpr represents an explicit cast<T>(value) conversion.
 type CastExpr struct {
-	TargetType string
-	Value      Expression
+	TargetType  string
+	Value       Expression
+	KeywordSpan Span
 }
 
 // expressionNode marks CastExpr as an expression node.
@@ -865,6 +867,7 @@ type FieldExpr struct {
 	Receiver  Expression
 	Name      string
 	Namespace bool
+	Span      Span
 }
 
 // expressionNode marks FieldExpr as an expression node.
@@ -880,7 +883,8 @@ func (e *FieldExpr) String() string {
 
 // DerefExpr represents explicit postfix dereference with Zig-style .*
 type DerefExpr struct {
-	Receiver Expression
+	Receiver     Expression
+	OperatorSpan Span
 }
 
 // expressionNode marks DerefExpr as an expression node.

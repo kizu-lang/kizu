@@ -28,6 +28,26 @@ func TestParseHello(t *testing.T) {
 	}
 }
 
+// TestParseTopLevelErrorNamesAllowedDeclarations keeps top-level diagnostics useful.
+func TestParseTopLevelErrorNamesAllowedDeclarations(t *testing.T) {
+	p := New(lexer.New(`foo`))
+	p.ParseProgram()
+	if len(p.Errors()) == 0 {
+		t.Fatal("expected parser error")
+	}
+	got := p.Errors()[0]
+	for _, want := range []string{
+		"expected declaration",
+		"fn, test, import",
+		"@requires_unsafe()",
+		`identifier "foo"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want substring %q", got, want)
+		}
+	}
+}
+
 // TestParseTestDecl checks top-level test block parsing.
 func TestParseTestDecl(t *testing.T) {
 	input := `test "basic assertion" {

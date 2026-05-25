@@ -7,6 +7,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/token"
+	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
 // Parser consumes tokens and builds a Kizu AST.
@@ -53,7 +54,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 			if p.cur.Literal == "test" {
 				program.Decls = append(program.Decls, p.parseTestDecl())
 			} else {
-				p.errorf("expected declaration, got %s", p.cur.Type)
+				p.errorExpectedDeclaration()
 			}
 			p.nextToken()
 		case token.Function:
@@ -81,7 +82,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 			program.Decls = append(program.Decls, p.parseImplDecl())
 			p.nextToken()
 		default:
-			p.errorf("expected declaration, got %s", p.cur.Type)
+			p.errorExpectedDeclaration()
 			p.nextToken()
 		}
 	}
@@ -679,7 +680,7 @@ func (p *Parser) parseLabeledStmt() ast.Statement {
 		return p.parseForStmt(label)
 	default:
 		p.errorf("label `%s` must be attached to while or for", label)
-		return &ast.ExprStmt{Expr: &ast.IdentExpr{Name: "<error>"}}
+		return &ast.ExprStmt{Expr: &ast.IdentExpr{Name: "<error>", Span: tokenSpan(p.cur)}}
 	}
 }
 
@@ -703,17 +704,6 @@ func (p *Parser) parseComptimeIfStmt() ast.Statement {
 		stmt.Alternative = p.parseBlockStmt()
 	}
 	return stmt
-}
-
-var unsafeCapabilityNames = map[string]bool{
-	"ptr_read":     true,
-	"ptr_write":    true,
-	"ptr_deref":    true,
-	"ptr_cast":     true,
-	"ptr_int_cast": true,
-	"extern_call":  true,
-	"unsafe_call":  true,
-	"volatile":     true,
 }
 
 // parseUnsafeStmt parses an @unsafe capability statement block.
@@ -762,7 +752,7 @@ func (p *Parser) parseUnsafeCapabilities() []string {
 			p.errorf("expected unsafe capability, got %s", p.cur.Type)
 			return capabilities
 		}
-		if !unsafeCapabilityNames[p.cur.Literal] {
+		if _, ok := unsafecap.Lookup(p.cur.Literal); !ok {
 			p.errorf("unknown unsafe capability `%s`", p.cur.Literal)
 		}
 		capabilities = append(capabilities, p.cur.Literal)
@@ -1200,7 +1190,7 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 		return left
 	default:
 		p.errorf("expected expression, got %s", p.cur.Type)
-		return &ast.IdentExpr{Name: "<error>"}
+		return &ast.IdentExpr{Name: "<error>", Span: tokenSpan(p.cur)}
 	}
 }
 
@@ -1215,7 +1205,7 @@ func (p *Parser) parseIdentPrefixExpression() ast.Expression {
 	if p.peek.Type == token.LBrace && startsUpper(p.cur.Literal) {
 		return p.parseStructLiteralExpr(p.cur.Literal)
 	}
-	return &ast.IdentExpr{Name: p.cur.Literal}
+	return &ast.IdentExpr{Name: p.cur.Literal, Span: tokenSpan(p.cur)}
 }
 
 // parseTypeExpr parses type<T> compile-time type literals.
@@ -1234,7 +1224,7 @@ func (p *Parser) parseTypeExpr() ast.Expression {
 
 // parseCastExpr parses cast<T>(value).
 func (p *Parser) parseCastExpr() ast.Expression {
-	expr := &ast.CastExpr{}
+	expr := &ast.CastExpr{KeywordSpan: tokenSpan(p.cur)}
 	if !p.expectPeek(token.LT) {
 		return expr
 	}
@@ -1491,6 +1481,39 @@ func tokenSpan(tok token.Token) ast.Span {
 	}
 }
 
+// expressionSpan returns the best source span currently stored on an expression.
+func expressionSpan(expr ast.Expression) ast.Span {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Span
+	case *ast.BinaryExpr:
+		return e.OperatorSpan
+	case *ast.CallExpr:
+		return expressionSpan(e.Callee)
+	case *ast.TypeApplyExpr:
+		return expressionSpan(e.Callee)
+	case *ast.CastExpr:
+		return e.KeywordSpan
+	case *ast.FieldExpr:
+		return e.Span
+	case *ast.DerefExpr:
+		return e.OperatorSpan
+	default:
+		return ast.Span{}
+	}
+}
+
+// joinSpans returns the range from first.Start to last.End when both are known.
+func joinSpans(first ast.Span, last ast.Span) ast.Span {
+	if first.IsZero() {
+		return last
+	}
+	if last.IsZero() {
+		return first
+	}
+	return ast.Span{Start: first.Start, End: last.End}
+}
+
 // parseCallExpr parses a function call expression.
 func (p *Parser) parseCallExpr(callee ast.Expression) ast.Expression {
 	expr := &ast.CallExpr{Callee: callee}
@@ -1593,13 +1616,14 @@ func (p *Parser) parseFieldValue() (ast.FieldValue, bool) {
 func (p *Parser) parseFieldExpr(receiver ast.Expression, namespace bool) ast.Expression {
 	if !namespace && p.peek.Type == token.Asterisk {
 		p.nextToken()
-		return &ast.DerefExpr{Receiver: receiver}
+		return &ast.DerefExpr{Receiver: receiver, OperatorSpan: tokenSpan(p.cur)}
 	}
 	expr := &ast.FieldExpr{Receiver: receiver, Namespace: namespace}
 	if !p.expectPeek(token.Ident) {
 		return expr
 	}
 	expr.Name = p.cur.Literal
+	expr.Span = joinSpans(expressionSpan(receiver), tokenSpan(p.cur))
 	return expr
 }
 
@@ -1648,6 +1672,35 @@ func (p *Parser) peekPrecedence() int {
 func (p *Parser) errorf(format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	p.errors = append(p.errors, fmt.Sprintf("error: %s at %d:%d", message, p.cur.Line, p.cur.Column))
+}
+
+// errorExpectedDeclaration reports the accepted top-level declaration starts.
+func (p *Parser) errorExpectedDeclaration() {
+	p.errorf("expected declaration (%s), got %s",
+		"fn, test, import, struct, enum, union, contract, impl, extern, pub, or @requires_unsafe()",
+		tokenDescription(p.cur),
+	)
+}
+
+// tokenDescription renders a short user-facing token name.
+func tokenDescription(tok token.Token) string {
+	switch tok.Type {
+	case token.Ident:
+		return fmt.Sprintf("identifier %q", tok.Literal)
+	case token.Int:
+		return fmt.Sprintf("integer %q", tok.Literal)
+	case token.String:
+		return fmt.Sprintf("string %q", tok.Literal)
+	case token.Illegal:
+		if tok.Literal != "" {
+			return fmt.Sprintf("illegal token %q", tok.Literal)
+		}
+		return "illegal token"
+	case token.EOF:
+		return "end of file"
+	default:
+		return fmt.Sprintf("`%s`", tok.Literal)
+	}
 }
 
 // startsUpper reports whether name follows the v0 struct literal convention.

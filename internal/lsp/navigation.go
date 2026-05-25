@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/token"
+	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
 type navigationSource struct {
@@ -73,11 +74,11 @@ func (s *Server) hover(uri string, position Position) *hover {
 	}
 	tokens := lexCompletionTokens(source)
 	if capability, ok := unsafeCapabilityAt(tokens, position); ok {
-		detail := "@unsafe(" + capability.label + ")"
+		detail := "@unsafe(" + capability.Name + ")"
 		return &hover{
 			Contents: markupContent{
 				Kind:  "markdown",
-				Value: kizuHoverMarkupWithDocumentation(detail, unsafeCapabilityMarkdown(capability)),
+				Value: kizuHoverMarkupWithDocumentation(detail, unsafecap.Markdown(capability)),
 			},
 		}
 	}
@@ -527,15 +528,15 @@ func hoverAt(
 }
 
 // unsafeCapabilityAt resolves hover documentation for names inside @unsafe(...).
-func unsafeCapabilityAt(tokens []token.Token, position Position) (unsafeCapabilityDoc, bool) {
+func unsafeCapabilityAt(tokens []token.Token, position Position) (unsafecap.Info, bool) {
 	tokenIndex := tokenIndexAtPosition(tokens, position)
 	if tokenIndex < 0 || tokens[tokenIndex].Type != token.Ident {
-		return unsafeCapabilityDoc{}, false
+		return unsafecap.Info{}, false
 	}
 	if !insideUnsafeCapabilityList(tokens, tokenIndex) {
-		return unsafeCapabilityDoc{}, false
+		return unsafecap.Info{}, false
 	}
-	return unsafeCapabilityDocByName(tokens[tokenIndex].Literal)
+	return unsafecap.Lookup(tokens[tokenIndex].Literal)
 }
 
 // insideUnsafeCapabilityList reports whether tokenIndex is within @unsafe(...).

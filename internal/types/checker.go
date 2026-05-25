@@ -2,11 +2,13 @@ package types
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/stdprim"
+	"github.com/kizu-lang/kizu/internal/unsafecap"
 )
 
 // Type is the static type name used by the v0 checker.
@@ -150,6 +152,9 @@ func (caps unsafeCaps) with(names []string) (unsafeCaps, error) {
 		next[cap] = true
 	}
 	for _, name := range names {
+		if _, ok := unsafecap.Lookup(name); !ok {
+			return nil, fmt.Errorf("unsafe error: unknown capability `%s`", name)
+		}
 		cap, ok := knownUnsafeCapabilities[name]
 		if !ok {
 			return nil, fmt.Errorf("unsafe error: unknown capability `%s`", name)
@@ -160,11 +165,24 @@ func (caps unsafeCaps) with(names []string) (unsafeCaps, error) {
 }
 
 // requireUnsafeCapability rejects an unsafe operation outside its capability scope.
-func requireUnsafeCapability(caps unsafeCaps, cap unsafeCapability, operation string) error {
+// requireUnsafeCapabilityAt reports a missing unsafe capability at a source span.
+func requireUnsafeCapabilityAt(
+	caps unsafeCaps,
+	cap unsafeCapability,
+	operation string,
+	span ast.Span,
+) error {
 	if caps.has(cap) {
 		return nil
 	}
-	return fmt.Errorf("unsafe error: %s requires @unsafe(%s)", operation, cap)
+	message := fmt.Sprintf("unsafe error: %s requires @unsafe(%s)", operation, cap)
+	if info, ok := unsafecap.Lookup(string(cap)); ok {
+		message += "\nhelp: " + unsafecap.Hint(info)
+	}
+	if !span.IsZero() {
+		return errorAt(span, "%s", message)
+	}
+	return fmt.Errorf("%s", message)
 }
 
 // Checker validates type rules for a parsed program.
@@ -2713,8 +2731,7 @@ func (c *Checker) checkBinaryExpr(
 		return checkEquality(expr.Operator, left, right, expr.OperatorSpan)
 	}
 	if left != right {
-		return "", errorAt(expr.OperatorSpan,
-			"type error: operator `%s` operands must have same type", expr.Operator)
+		return "", operatorTypeMismatch(expr.Operator, left, right, expr.OperatorSpan)
 	}
 	if !numericTypes[left] {
 		return "", errorAt(expr.OperatorSpan,
@@ -2733,7 +2750,11 @@ func (c *Checker) checkBinaryExpr(
 // checkLogical validates boolean logical operands.
 func checkLogical(op string, left Type, right Type, span ast.Span) (Type, error) {
 	if left != typeBool || right != typeBool {
-		return "", errorAt(span, "type error: operator `%s` expects bool operands", op)
+		return "", errorAt(span,
+			"type error: operator `%s` expects bool operands\n"+
+				"note: left operand has type %s\n"+
+				"note: right operand has type %s",
+			op, left, right)
 	}
 	return typeBool, nil
 }
@@ -2741,9 +2762,40 @@ func checkLogical(op string, left Type, right Type, span ast.Span) (Type, error)
 // checkEquality validates equality operands.
 func checkEquality(op string, left Type, right Type, span ast.Span) (Type, error) {
 	if left != right {
-		return "", errorAt(span, "type error: operator `%s` operands must have same type", op)
+		return "", operatorTypeMismatch(op, left, right, span)
 	}
 	return typeBool, nil
+}
+
+// operatorTypeMismatch reports both operand types for binary mismatch errors.
+func operatorTypeMismatch(op string, left Type, right Type, span ast.Span) error {
+	return errorAt(span,
+		"type error: operator `%s` operands must have same type\n"+
+			"note: left operand has type %s\n"+
+			"note: right operand has type %s",
+		op, left, right)
+}
+
+// expressionSpan returns the best source span stored on an expression.
+func expressionSpan(expr ast.Expression) ast.Span {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Span
+	case *ast.BinaryExpr:
+		return e.OperatorSpan
+	case *ast.CallExpr:
+		return expressionSpan(e.Callee)
+	case *ast.TypeApplyExpr:
+		return expressionSpan(e.Callee)
+	case *ast.CastExpr:
+		return e.KeywordSpan
+	case *ast.FieldExpr:
+		return e.Span
+	case *ast.DerefExpr:
+		return e.OperatorSpan
+	default:
+		return ast.Span{}
+	}
 }
 
 // isComparison reports whether op returns bool for numeric operands.
@@ -2768,7 +2820,12 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCap
 		return target, nil
 	}
 	if isPointerType(source) && isPointerType(target) {
-		if err := requireUnsafeCapability(unsafe, unsafePtrCast, "pointer cast"); err != nil {
+		if err := requireUnsafeCapabilityAt(
+			unsafe,
+			unsafePtrCast,
+			"pointer cast",
+			expr.KeywordSpan,
+		); err != nil {
 			return "", err
 		}
 		return target, nil
@@ -2860,7 +2917,7 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeCap
 	if name.Name == "TaskGroup" {
 		return "", fmt.Errorf("type error: use `std::task::Group(io)`")
 	}
-	return c.checkUserCall(name.Name, expr.Args, env, unsafe)
+	return c.checkUserCall(name.Name, name.Span, expr.Args, env, unsafe)
 }
 
 // checkFieldCallExpr validates qualified, union, and method calls.
@@ -2903,7 +2960,7 @@ func (c *Checker) checkQualifiedUserCall(
 	if len(fn.typeParams) > 0 {
 		return "", false, nil
 	}
-	typ, err := c.checkUserCall(name, args, env, unsafe)
+	typ, err := c.checkUserCall(name, expressionSpan(field), args, env, unsafe)
 	return typ, true, err
 }
 
@@ -3407,10 +3464,10 @@ func (c *Checker) checkTypeApplyCallExpr(
 	}
 	typeArg := c.instantiateTypeArgText(expr.TypeArg)
 	if name == "ptr_from_int" {
-		return c.checkPtrFromInt(typeArg, args, env, unsafe)
+		return c.checkPtrFromInt(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
 	if name == "int_from_ptr" {
-		return c.checkIntFromPtr(typeArg, args, env, unsafe)
+		return c.checkIntFromPtr(typeArg, expressionSpan(expr.Callee), args, env, unsafe)
 	}
 	if name == "std.arena.Arena" {
 		return c.checkArenaTypeApply(typeArg, args, env, unsafe)
@@ -4245,6 +4302,7 @@ func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe unsafeCa
 // checkUserCall validates a declared function call.
 func (c *Checker) checkUserCall(
 	name string,
+	span ast.Span,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeCaps,
@@ -4255,12 +4313,12 @@ func (c *Checker) checkUserCall(
 	}
 	operation := fmt.Sprintf("call to `%s`", name)
 	if fn.externABI != "" {
-		if err := requireUnsafeCapability(unsafe, unsafeExternCall, operation); err != nil {
+		if err := requireUnsafeCapabilityAt(unsafe, unsafeExternCall, operation, span); err != nil {
 			return "", err
 		}
 	}
 	if fn.requiresUnsafe {
-		if err := requireUnsafeCapability(unsafe, unsafeUnsafeCall, operation); err != nil {
+		if err := requireUnsafeCapabilityAt(unsafe, unsafeUnsafeCall, operation, span); err != nil {
 			return "", err
 		}
 	}
@@ -4651,7 +4709,36 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 		}
 		return Type(unionType.name), nil
 	}
-	return "", fmt.Errorf("type error: unknown namespace `%s`", expr.Receiver.String())
+	return "", c.unknownNamespaceError(expr.Receiver.String(), expressionSpan(expr.Receiver))
+}
+
+// unknownNamespaceError suggests the two valid namespace sources in Kizu.
+func (c *Checker) unknownNamespaceError(name string, span ast.Span) error {
+	message := fmt.Sprintf("type error: unknown namespace `%s`", name)
+	message += "\nhelp: use an enum/union name or import a module that defines this namespace"
+	if known := c.knownNamespaceSummary(); known != "" {
+		message += "\nnote: known namespaces: " + known
+	}
+	if !span.IsZero() {
+		return errorAt(span, "%s", message)
+	}
+	return fmt.Errorf("%s", message)
+}
+
+// knownNamespaceSummary returns a short display list of enum and union namespaces.
+func (c *Checker) knownNamespaceSummary() string {
+	names := make([]string, 0, len(c.enums)+len(c.unions))
+	for name := range c.enums {
+		names = append(names, name)
+	}
+	for name := range c.unions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) > 5 {
+		names = append(names[:5], "...")
+	}
+	return strings.Join(names, ", ")
 }
 
 // checkDerefExpr returns the value type behind a local borrow or raw pointer.
@@ -4665,7 +4752,12 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeC
 		return "", err
 	}
 	if isPointerType(receiver) {
-		if err := requireUnsafeCapability(unsafe, unsafePtrDeref, "raw pointer dereference"); err != nil {
+		if err := requireUnsafeCapabilityAt(
+			unsafe,
+			unsafePtrDeref,
+			"raw pointer dereference",
+			expr.OperatorSpan,
+		); err != nil {
 			return "", err
 		}
 		typ, err := rawPointerDerefType(receiver)
@@ -4723,7 +4815,12 @@ func (c *Checker) checkAssignableDeref(
 		return "", err
 	}
 	if isPointerType(receiver) {
-		if err := requireUnsafeCapability(unsafe, unsafePtrDeref, "raw pointer dereference"); err != nil {
+		if err := requireUnsafeCapabilityAt(
+			unsafe,
+			unsafePtrDeref,
+			"raw pointer dereference",
+			expr.OperatorSpan,
+		); err != nil {
 			return "", err
 		}
 		return assignableRawPointerDerefType(receiver)
@@ -4816,7 +4913,14 @@ func (c *Checker) checkKnownReceiverMethod(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if contractName, ok := dynContract(receiver); ok {
-		typ, err := c.checkDynMethodCall(contractName, field.Name, args, env, unsafe)
+		typ, err := c.checkDynMethodCall(
+			contractName,
+			field.Name,
+			expressionSpan(field),
+			args,
+			env,
+			unsafe,
+		)
 		return typ, true, err
 	}
 	if receiver == "TaskGroup" {
@@ -4884,7 +4988,7 @@ func (c *Checker) checkBoxReceiverMethod(
 		receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
-			return c.checkMethodArgs(method, receiver, args, env, unsafe)
+			return c.checkMethodArgs(method, receiver, expressionSpan(field), args, env, unsafe)
 		}
 		return "", fmt.Errorf("type error: Box has no method `%s`", field.Name)
 	}
@@ -4902,7 +5006,7 @@ func (c *Checker) checkArenaOrImplMethod(
 	if !ok || base != "std::arena::Arena" {
 		method := c.implMethod(string(receiver), field.Name)
 		if method != nil {
-			return c.checkMethodArgs(method, receiver, args, env, unsafe)
+			return c.checkMethodArgs(method, receiver, expressionSpan(field), args, env, unsafe)
 		}
 		return "", fmt.Errorf("type error: `%s` has no method `%s`", receiver, field.Name)
 	}
@@ -5967,6 +6071,7 @@ func (c *Checker) checkMutex(
 func (c *Checker) checkDynMethodCall(
 	contractName string,
 	name string,
+	span ast.Span,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeCaps,
@@ -5975,13 +6080,14 @@ func (c *Checker) checkDynMethodCall(
 	if contract == nil || contract.methods[name] == nil {
 		return "", fmt.Errorf("type error: `dyn %s` has no method `%s`", contractName, name)
 	}
-	return c.checkMethodArgs(contract.methods[name], typeSelf, args, env, unsafe)
+	return c.checkMethodArgs(contract.methods[name], typeSelf, span, args, env, unsafe)
 }
 
 // checkMethodArgs validates method-call arguments after the implicit self receiver.
 func (c *Checker) checkMethodArgs(
 	method *functionType,
 	receiver Type,
+	span ast.Span,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeCaps,
@@ -5998,10 +6104,11 @@ func (c *Checker) checkMethodArgs(
 			method.name, method.params[0], receiver)
 	}
 	if method.requiresUnsafe {
-		if err := requireUnsafeCapability(
+		if err := requireUnsafeCapabilityAt(
 			unsafe,
 			unsafeUnsafeCall,
 			fmt.Sprintf("call to `%s`", method.name),
+			span,
 		); err != nil {
 			return "", err
 		}
@@ -6180,7 +6287,12 @@ func (c *Checker) directFieldCleanupReceiver(expr ast.Expression, env *scope) bo
 
 // checkPtrRead validates unsafe raw pointer reads.
 func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
-	if err := requireUnsafeCapability(unsafe, unsafePtrRead, "`ptr_read`"); err != nil {
+	if err := requireUnsafeCapabilityAt(
+		unsafe,
+		unsafePtrRead,
+		"`ptr_read`",
+		expressionSpan(expr.Callee),
+	); err != nil {
 		return "", err
 	}
 	if len(expr.Args) != 1 {
@@ -6199,7 +6311,12 @@ func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeCaps
 
 // checkPtrWrite validates unsafe raw pointer writes.
 func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
-	if err := requireUnsafeCapability(unsafe, unsafePtrWrite, "`ptr_write`"); err != nil {
+	if err := requireUnsafeCapabilityAt(
+		unsafe,
+		unsafePtrWrite,
+		"`ptr_write`",
+		expressionSpan(expr.Callee),
+	); err != nil {
 		return "", err
 	}
 	if len(expr.Args) != 2 {
@@ -6226,11 +6343,12 @@ func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe unsafeCap
 // checkPtrFromInt validates unsafe integer-to-pointer conversion.
 func (c *Checker) checkPtrFromInt(
 	typeArg string,
+	span ast.Span,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, error) {
-	if err := requireUnsafeCapability(unsafe, unsafePtrIntCast, "`ptr_from_int`"); err != nil {
+	if err := requireUnsafeCapabilityAt(unsafe, unsafePtrIntCast, "`ptr_from_int`", span); err != nil {
 		return "", err
 	}
 	target, err := c.parseType(typeArg)
@@ -6256,11 +6374,12 @@ func (c *Checker) checkPtrFromInt(
 // checkIntFromPtr validates unsafe pointer-to-integer conversion.
 func (c *Checker) checkIntFromPtr(
 	typeArg string,
+	span ast.Span,
 	args []ast.Expression,
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, error) {
-	if err := requireUnsafeCapability(unsafe, unsafePtrIntCast, "`int_from_ptr`"); err != nil {
+	if err := requireUnsafeCapabilityAt(unsafe, unsafePtrIntCast, "`int_from_ptr`", span); err != nil {
 		return "", err
 	}
 	target, err := c.parseType(typeArg)
@@ -6289,7 +6408,12 @@ func (c *Checker) checkVolatileRead(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, error) {
-	if err := requireUnsafeCapability(unsafe, unsafeVolatile, "`volatile_read`"); err != nil {
+	if err := requireUnsafeCapabilityAt(
+		unsafe,
+		unsafeVolatile,
+		"`volatile_read`",
+		expressionSpan(expr.Callee),
+	); err != nil {
 		return "", err
 	}
 	if len(expr.Args) != 1 {
@@ -6312,7 +6436,12 @@ func (c *Checker) checkVolatileWrite(
 	env *scope,
 	unsafe unsafeCaps,
 ) (Type, error) {
-	if err := requireUnsafeCapability(unsafe, unsafeVolatile, "`volatile_write`"); err != nil {
+	if err := requireUnsafeCapabilityAt(
+		unsafe,
+		unsafeVolatile,
+		"`volatile_write`",
+		expressionSpan(expr.Callee),
+	); err != nil {
 		return "", err
 	}
 	if len(expr.Args) != 2 {
