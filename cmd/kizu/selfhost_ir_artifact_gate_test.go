@@ -308,14 +308,10 @@ func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 	}
 }
 
-// requiredSelfhostIRSelectedBodyLoweringFragments returns selected body lowering facts.
+// requiredSelfhostIRSelectedBodyLoweringFragments returns the selected body lowering gate fact.
 func requiredSelfhostIRSelectedBodyLoweringFragments() []string {
 	return []string{
 		"executable-selected-body-lowering checked-ast-body-lowering-v1\n",
-		"selected-body-lowering selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable\n",
-		"selected-body-lowering selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable\n",
 	}
 }
 

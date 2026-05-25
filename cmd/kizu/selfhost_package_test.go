@@ -1269,9 +1269,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
 		"executable_body_parsing::append_run_parsing_facts(",
-		"fn append_selected_body_lowering(",
 		"selected-function ",
-		"selected-body-lowering ",
 		"selected-signature ",
 		"selected-signature-param-count ",
 		"selected-signature-return ",
@@ -1389,16 +1387,15 @@ func assertSelfhostSplitFiles(t *testing.T) {
 func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	sources := readHostedExecutableContractSources(t)
 	facts := hostedExecutableContractFacts{
-		abi:                       hostedExecutableABIFacts(),
-		selectedFunctions:         hostedExecutableSelectedFunctionFacts(),
-		selectedSignatures:        hostedExecutableSelectedSignatureFacts(),
-		selectedSignatureDetails:  hostedExecutableSelectedSignatureDetailFacts(),
-		selectedBodies:            hostedExecutableSelectedBodyFacts(),
-		selectedHelperBodies:      hostedExecutableSelectedHelperBodyFacts(),
-		selectedBodyParsingFacts:  hostedExecutableSelectedBodyParsingFacts(),
-		selectedBodyLoweringFacts: hostedExecutableSelectedBodyLoweringFacts(),
-		hostedArtifactPathFacts:   hostedExecutableHostedArtifactPathFacts(),
-		hostedLoweringFacts:       hostedExecutableHostedLoweringFacts(),
+		abi:                      hostedExecutableABIFacts(),
+		selectedFunctions:        hostedExecutableSelectedFunctionFacts(),
+		selectedSignatures:       hostedExecutableSelectedSignatureFacts(),
+		selectedSignatureDetails: hostedExecutableSelectedSignatureDetailFacts(),
+		selectedBodies:           hostedExecutableSelectedBodyFacts(),
+		selectedHelperBodies:     hostedExecutableSelectedHelperBodyFacts(),
+		selectedBodyParsingFacts: hostedExecutableSelectedBodyParsingFacts(),
+		hostedArtifactPathFacts:  hostedExecutableHostedArtifactPathFacts(),
+		hostedLoweringFacts:      hostedExecutableHostedLoweringFacts(),
 	}
 	assertHostedExecutableBackendInputs(t, sources, facts)
 	assertHostedExecutableFactOrigins(t, sources, facts)
@@ -1408,16 +1405,15 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 // hostedExecutableContractFacts groups fixture facts used by the selfhost
 // executable path contract assertions.
 type hostedExecutableContractFacts struct {
-	abi                       []string
-	selectedFunctions         []string
-	selectedSignatures        []string
-	selectedSignatureDetails  []string
-	selectedBodies            []string
-	selectedHelperBodies      []string
-	selectedBodyParsingFacts  []string
-	selectedBodyLoweringFacts []string
-	hostedArtifactPathFacts   []string
-	hostedLoweringFacts       []string
+	abi                      []string
+	selectedFunctions        []string
+	selectedSignatures       []string
+	selectedSignatureDetails []string
+	selectedBodies           []string
+	selectedHelperBodies     []string
+	selectedBodyParsingFacts []string
+	hostedArtifactPathFacts  []string
+	hostedLoweringFacts      []string
 }
 
 // assertHostedExecutableBackendInputs checks backend validation and metadata
@@ -1444,7 +1440,7 @@ func assertHostedExecutableBackendInputs(
 		sources.parser,
 		facts.selectedBodyParsingFacts,
 	)
-	assertExecutableSelectedBodyLoweringValidated(t, llvm, facts.selectedBodyLoweringFacts)
+	assertExecutableSelectedBodyLoweringValidated(t, llvm)
 	assertExecutableHostedArtifactPathsValidated(t, llvm, facts.hostedArtifactPathFacts)
 	assertExecutableHostedLoweringValidated(t, llvm, facts.hostedLoweringFacts)
 	assertExecutableABIValidated(t, llvm, facts.abi)
@@ -1510,7 +1506,6 @@ func assertHostedExecutableFactOrigins(
 		sources.selected,
 		sources.loweringContract,
 		sources.llvm,
-		facts.selectedBodyLoweringFacts,
 	)
 	assertHostedExecutableArtifactOrigins(t, sources, facts)
 }
@@ -1781,8 +1776,8 @@ func assertExecutableSelectedBodyParsingValidated(
 }
 
 // assertExecutableSelectedBodyLoweringValidated keeps selected body lowering
-// facts required by the backend before the hosted lowerer can consume them.
-func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string, facts []string) {
+// contract validation required before the hosted lowerer can consume body IR.
+func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string) {
 	t.Helper()
 	if !strings.Contains(llvm, `"executable-selected-body-lowering checked-ast-body-lowering-v1"`) {
 		t.Fatal("backend IR validation does not require selected body lowering facts")
@@ -1792,9 +1787,6 @@ func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string, fa
 		`"backend-input executable-selected-body-lowering checked-ast-body-lowering-v1"`,
 	) {
 		t.Fatal("backend metadata does not record selected body lowering facts")
-	}
-	for _, fact := range facts {
-		assertNamedFactConsumer(t, llvm, "backend selected-body-lowering validation", fact)
 	}
 	for _, fragment := range []string{
 		"cli_executable_body_lowering_contract::require(",
@@ -2276,7 +2268,6 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 	selected string,
 	loweringContract string,
 	llvm string,
-	facts []string,
 ) {
 	t.Helper()
 	if strings.Contains(ir, `"executable-selected-body-lowering checked-ast-body-lowering-v1"`) {
@@ -2284,7 +2275,7 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 	}
 	for _, fragment := range []string{
 		"function_body_node(",
-		"append_selected_body_lowering(",
+		"append_selected_function_with_body_node(",
 	} {
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("selected body lowering is not rooted in checked AST via %q", fragment)
@@ -2303,19 +2294,9 @@ func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 			t.Fatalf("selected body lowering contract missing %q", fragment)
 		}
 	}
-	for _, fact := range facts {
-		if strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend hardcodes complete selected body lowering fact %q", fact)
-		}
-		parts := strings.Fields(fact)
-		if len(parts) != 3 {
-			t.Fatalf("invalid selected-body-lowering fixture %q", fact)
-		}
-		requiredFragments := []string{`"` + parts[0] + ` "`, `"` + parts[1] + `"`}
-		for _, fragment := range requiredFragments {
-			if !strings.Contains(selected, fragment) {
-				t.Fatalf("selected body lowering marker does not publish %q via %q", fact, fragment)
-			}
+	for _, content := range []string{selected, llvm, loweringContract} {
+		if strings.Contains(content, `"selected-body-lowering `) {
+			t.Fatal("selected body lowering still depends on dedicated named facts")
 		}
 	}
 }
@@ -3255,17 +3236,6 @@ func hostedExecutableSelectedHelperBodyFacts() []string {
 			"unsupported_executable checked-executable-shared-helper",
 		"selected-helper-body selfhost::backend::executable::" +
 			"ast_node_text checked-executable-shared-helper",
-	}
-}
-
-// hostedExecutableSelectedBodyLoweringFacts returns checked body lowering facts
-// derived from the selected lowering function bodies.
-func hostedExecutableSelectedBodyLoweringFacts() []string {
-	return []string{
-		"selected-body-lowering selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable",
-		"selected-body-lowering selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable",
 	}
 }
 

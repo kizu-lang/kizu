@@ -631,10 +631,6 @@ func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
 	return []string{
 		"backend-input executable-selected-body-lowering checked-ast-body-lowering-v1\n",
-		"backend-input selected-body-lowering selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable\n",
-		"backend-input selected-body-lowering selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable\n",
 	}
 }
 
