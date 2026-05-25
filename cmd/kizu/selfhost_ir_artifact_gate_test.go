@@ -205,21 +205,21 @@ func requiredSelfhostIRSelectedBodyFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"selected-function-body selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
-		"body-call selfhost::cli::execute::run_file_cli check::checked_ast_node 6\n",
-		"body-call selfhost::cli::execute::run_file_cli backend::lower_run_executable 3\n",
-		"body-call selfhost::cli::execute::test_file_cli backend::lower_test_executable 3\n",
+		"body-call selfhost::cli::execute::run_file_cli 82 check::checked_ast_node 6\n",
+		"body-call selfhost::cli::execute::run_file_cli 109 backend::lower_run_executable 3\n",
+		"body-call selfhost::cli::execute::test_file_cli 109 backend::lower_test_executable 3\n",
 		"body-call selfhost::backend::executable::lower_run_executable " +
-			"parse_run_executable_ast 3\n",
+			"4 parse_run_executable_ast 3\n",
 		"body-call selfhost::backend::executable::lower_test_executable " +
-			"parse_test_executable_ast 3\n",
+			"4 parse_test_executable_ast 3\n",
 		"body-struct-literal selfhost::backend::executable::" +
-			"lower_run_executable_ast data::Executable\n",
+			"lower_run_executable_ast 13 data::Executable\n",
 		"body-struct-literal selfhost::backend::executable::" +
-			"lower_test_executable_ast data::Executable\n",
+			"lower_test_executable_ast 13 data::Executable\n",
 		"body-call selfhost::backend::hosted::emit_run_executable_artifact " +
-			"write_run_artifact 6\n",
+			"28 write_run_artifact 6\n",
 		"body-call selfhost::backend::hosted::emit_test_executable_artifact " +
-			"write_test_artifact 6\n",
+			"28 write_test_artifact 6\n",
 	}
 }
 
@@ -274,13 +274,13 @@ func requiredSelfhostIRSelectedHelperBodyFragments() []string {
 		"selected-helper-body selfhost::backend::executable::" +
 			"ast_node_text checked-executable-shared-helper\n",
 		"body-call selfhost::backend::executable::parse_run_program_ast " +
-			"parse_run_fn_ast 4\n",
+			"39 parse_run_fn_ast 4\n",
 		"body-call selfhost::backend::executable::parse_test_program_ast " +
-			"parse_test_fn_ast 5\n",
+			"39 parse_test_fn_ast 5\n",
 		"body-call selfhost::backend::executable::parse_run_print_call_ast " +
-			"run_string_literal_payload 3\n",
+			"38 run_string_literal_payload 3\n",
 		"body-call selfhost::backend::executable::parse_expect_call_ast " +
-			"expect_bool_value 2\n",
+			"38 expect_bool_value 2\n",
 	}
 }
 
