@@ -25,7 +25,7 @@ import (
 
 // main dispatches the kizu command line interface.
 func main() {
-	if len(os.Args) < 3 {
+	if len(os.Args) < 2 || (len(os.Args) < 3 && !commandAllowsNoTarget(os.Args[1])) {
 		usage()
 		os.Exit(2)
 	}
@@ -74,6 +74,8 @@ func dispatch(cmd string, args []string) error {
 		return testFile(path, programArgs)
 	case "fmt":
 		return fmtCommand(args)
+	case "init":
+		return initCommand(args)
 	case "ir":
 		return irCommand(args)
 	case "build":
@@ -158,6 +160,7 @@ func selfhostFrontendProcessArgs(command string, args []string) ([]string, error
 // usage prints the supported command line shape.
 func usage() {
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu <parse|run|check|test> <file> [-- args...]")
+	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu init [path]")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu fmt [--write] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu ir [--opt] <file>")
 	_, _ = fmt.Fprintln(os.Stderr, "usage: kizu build --emit-llvm [--opt] <file>")
