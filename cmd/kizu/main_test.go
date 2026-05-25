@@ -196,6 +196,137 @@ func TestFmtCommandHasNoGoWriteFallback(t *testing.T) {
 	}
 }
 
+// TestInitCommandCreatesRunnablePackage checks init scaffolds a minimal package.
+func TestInitCommandCreatesRunnablePackage(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "my-app")
+
+	stdout, stderr, runErr := runDispatchCaptureOutput(t, "init", []string{target})
+	if runErr != nil {
+		t.Fatalf("init failed: %v\nstderr:%s", runErr, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+	if !strings.Contains(stdout, "initialized Kizu package `my_app`") {
+		t.Fatalf("got stdout %q, want package name", stdout)
+	}
+	assertFileContent(t, filepath.Join(target, "kizu.toml"), `[package]
+name = "my_app"
+version = "0.1.0"
+
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+`)
+	assertFileContent(t, filepath.Join(target, "src", "main.kizu"), initMainSource)
+
+	runStdout, runStderr, runErr := runDispatchCaptureOutput(t, "run", []string{target})
+	if runErr != nil {
+		t.Fatalf("run generated package: %v\nstderr:%s", runErr, runStderr)
+	}
+	if runStderr != "" {
+		t.Fatalf("got run stderr %q, want empty", runStderr)
+	}
+	if runStdout != "hello, kizu\n" {
+		t.Fatalf("got run stdout %q, want hello", runStdout)
+	}
+}
+
+// TestInitCommandUsesCurrentDirectory checks `kizu init` with no path.
+func TestInitCommandUsesCurrentDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "current-project")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restore := chdirForTest(t, root)
+	defer restore()
+
+	stdout, stderr, runErr := runDispatchCaptureOutput(t, "init", nil)
+	if runErr != nil {
+		t.Fatalf("init failed: %v\nstderr:%s", runErr, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+	if !strings.Contains(stdout, "initialized Kizu package `current_project`") {
+		t.Fatalf("got stdout %q, want normalized package name", stdout)
+	}
+	assertFileContent(t, filepath.Join(root, "kizu.toml"), `[package]
+name = "current_project"
+version = "0.1.0"
+
+[modules]
+root = "src/main.kizu"
+paths = ["src"]
+`)
+}
+
+// TestInitCommandRefusesOverwrite checks init does not replace user files.
+func TestInitCommandRefusesOverwrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "existing-project")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "kizu.toml"), []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, runErr := runDispatchCaptureOutput(t, "init", []string{root})
+	if runErr == nil || !strings.Contains(runErr.Error(), "already exists") {
+		t.Fatalf("got error %v, want already exists", runErr)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("got stdout %q stderr %q, want empty", stdout, stderr)
+	}
+	assertFileContent(t, filepath.Join(root, "kizu.toml"), "keep me\n")
+	if _, err := os.Stat(filepath.Join(root, "src", "main.kizu")); !os.IsNotExist(err) {
+		t.Fatalf("src/main.kizu stat error = %v, want not exist", err)
+	}
+}
+
+// TestInitPackageNameNormalization checks path basenames become valid namespaces.
+func TestInitPackageNameNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "my-app", want: "my_app"},
+		{name: "My--App", want: "my_app"},
+		{name: "my_app", want: "my_app"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeInitPackageName(tt.name)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInitPackageNameRejectsInvalidNames keeps manifest namespaces parseable.
+func TestInitPackageNameRejectsInvalidNames(t *testing.T) {
+	for _, name := range []string{"123-app", "std", "bad name"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := initPackageName(filepath.Join(t.TempDir(), name))
+			if err == nil {
+				t.Fatalf("got nil error for %q", name)
+			}
+		})
+	}
+}
+
+// TestInitCommandCanRunWithoutTarget checks main accepts the init command shape.
+func TestInitCommandCanRunWithoutTarget(t *testing.T) {
+	if !commandAllowsNoTarget("init") {
+		t.Fatal("init should be accepted without a path argument")
+	}
+	if commandAllowsNoTarget("run") {
+		t.Fatal("run should still require a path argument")
+	}
+}
+
 // TestCheckPackageCommandReportsSelfhostDiagnostic keeps package diagnostics detailed.
 func TestCheckPackageCommandReportsSelfhostDiagnostic(t *testing.T) {
 	root := t.TempDir()
@@ -626,6 +757,35 @@ func runDispatchCaptureOutput(t *testing.T, command string, args []string) (stri
 		t.Fatal(err)
 	}
 	return string(stdout), string(stderr), runErr
+}
+
+// assertFileContent checks a generated file matches expected content exactly.
+func assertFileContent(t *testing.T, path string, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("%s:\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
+	}
+}
+
+// chdirForTest changes the process working directory until cleanup runs.
+func chdirForTest(t *testing.T, dir string) func() {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // TestFmtCommandSmoke checks the CLI can print stable formatted Kizu source.
