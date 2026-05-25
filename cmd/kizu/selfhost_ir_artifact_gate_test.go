@@ -248,8 +248,6 @@ func requiredSelfhostIRHostedArtifactPathFragments() []string {
 // behavior facts derived from backend::hosted lowering bodies.
 func requiredSelfhostIRHostedLoweringFragments() []string {
 	return []string{
-		"hosted-lowering-case-count selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 2\n",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 RunPrintString\n",
 		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
@@ -276,8 +274,6 @@ func requiredSelfhostIRHostedLoweringFragments() []string {
 			"lower_run_hosted_executable 1 None\n",
 		"hosted-lowering-case-payload selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 empty-source-slice\n",
-		"hosted-lowering-case-count selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 2\n",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 TestExpectOk\n",
 		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +

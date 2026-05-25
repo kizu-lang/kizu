@@ -1240,6 +1240,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn require_named_i64_fact(",
 		"pub fn sequence_fact_value(",
 		"pub fn sequence_fact_second_value(",
+		"pub fn sequence_fact_exists(",
 		"pub fn body_node_kind(",
 		"pub fn body_child_sequence(",
 		"pub fn body_child_sequence_or_minus_one(",
@@ -1745,10 +1746,6 @@ func assertExecutableHostedArtifactPathsValidated(t *testing.T, llvm string, fac
 func assertExecutableHostedLoweringValidated(t *testing.T, llvm string, facts []string) {
 	t.Helper()
 	for _, fact := range facts {
-		if strings.HasPrefix(fact, "hosted-lowering-case-count ") {
-			assertNamedI64FactConsumer(t, llvm, "backend hosted lowering validation", fact)
-			continue
-		}
 		assertSequenceFactConsumer(t, llvm, "backend hosted lowering validation", fact)
 	}
 }
@@ -2447,6 +2444,7 @@ func assertExecutableHostedLoweringConsumers(
 	for _, fragment := range []string{
 		"try append_selected_hosted_executable_lowering_metadata(out, ir_bytes)",
 		"fn require_selected_hosted_executable_lowering(",
+		"ir_contract::sequence_fact_exists(",
 		`"hosted-lowering-case-kind "`,
 		`"hosted-lowering-case-comment-llvm "`,
 		`"hosted-lowering-case-payload-llvm "`,
@@ -3018,8 +3016,6 @@ func hostedExecutableHostedLoweringFacts() []string {
 // hostedExecutableRunHostedLoweringFacts returns run artifact behavior facts.
 func hostedExecutableRunHostedLoweringFacts() []string {
 	return []string{
-		"hosted-lowering-case-count selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 2",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 RunPrintString",
 		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
@@ -3058,8 +3054,6 @@ func hostedExecutableRunHostedLoweringFacts() []string {
 // hostedExecutableTestHostedLoweringFacts returns test artifact behavior facts.
 func hostedExecutableTestHostedLoweringFacts() []string {
 	return []string{
-		"hosted-lowering-case-count selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 2",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 TestExpectOk",
 		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +

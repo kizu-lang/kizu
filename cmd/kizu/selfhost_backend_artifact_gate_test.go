@@ -576,8 +576,6 @@ func requiredLLVMMetadataHostedArtifactPathFragments() []string {
 // lowering facts consumed by the backend.
 func requiredLLVMMetadataHostedLoweringFragments() []string {
 	return []string{
-		"backend-input hosted-lowering-case-count selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 2\n",
 		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 RunPrintString\n",
 		"backend-input hosted-lowering-case-entry selfhost::backend::hosted::" +
@@ -600,8 +598,6 @@ func requiredLLVMMetadataHostedLoweringFragments() []string {
 			"lower_run_hosted_executable 1 None\n",
 		"backend-input hosted-lowering-case-payload selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 empty-source-slice\n",
-		"backend-input hosted-lowering-case-count selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 2\n",
 		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 TestExpectOk\n",
 		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
