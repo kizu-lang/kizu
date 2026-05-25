@@ -1,5 +1,7 @@
 package lsp
 
+import "strings"
+
 var keywordCompletionItems = []completionItem{
 	{Label: "fn", Kind: completionItemKindKeyword},
 	{Label: "test", Kind: completionItemKindKeyword},
@@ -100,16 +102,76 @@ var directiveCompletionItems = []completionItem{
 	),
 }
 
-var unsafeCapabilityCompletionItems = []completionItem{
-	unsafeCapability("extern_call", "extern function call"),
-	unsafeCapability("ptr_cast", "raw pointer cast"),
-	unsafeCapability("ptr_deref", "raw pointer dereference"),
-	unsafeCapability("ptr_int_cast", "integer and pointer conversion"),
-	unsafeCapability("ptr_read", "raw pointer read"),
-	unsafeCapability("ptr_write", "raw pointer write"),
-	unsafeCapability("unsafe_call", "caller-obligation function call"),
-	unsafeCapability("volatile", "volatile read or write"),
+type unsafeCapabilityDoc struct {
+	label   string
+	detail  string
+	permits []string
 }
+
+var unsafeCapabilityDocs = []unsafeCapabilityDoc{
+	{
+		label:  "extern_call",
+		detail: "extern function call",
+		permits: []string{
+			"Calling `extern \"c\" fn` declarations.",
+		},
+	},
+	{
+		label:  "ptr_cast",
+		detail: "raw pointer cast",
+		permits: []string{
+			"Raw pointer to raw pointer casts with `cast<ptr<...>>(value)`.",
+		},
+	},
+	{
+		label:  "ptr_deref",
+		detail: "raw pointer dereference",
+		permits: []string{
+			"Reading through `p.*`.",
+			"Writing through `p.* = value` when the pointer is mutable.",
+			"Reading or assigning struct fields through `p.*.field`.",
+		},
+	},
+	{
+		label:  "ptr_int_cast",
+		detail: "integer and pointer conversion",
+		permits: []string{
+			"Creating raw pointers with `ptr_from_int<ptr<...>>(value)`.",
+			"Converting raw pointers to integers with `int_from_ptr<usize>(value)`.",
+		},
+	},
+	{
+		label:  "ptr_read",
+		detail: "raw pointer read",
+		permits: []string{
+			"Reading a raw pointer with `ptr_read(p)`.",
+		},
+	},
+	{
+		label:  "ptr_write",
+		detail: "raw pointer write",
+		permits: []string{
+			"Writing a mutable raw pointer with `ptr_write(p, value)`.",
+		},
+	},
+	{
+		label:  "unsafe_call",
+		detail: "caller-obligation function call",
+		permits: []string{
+			"Calling functions or methods declared with `@requires_unsafe()`.",
+		},
+	},
+	{
+		label:  "volatile",
+		detail: "volatile read or write",
+		permits: []string{
+			"Volatile raw pointer reads with `volatile_read(p)`.",
+			"Volatile raw pointer writes with `volatile_write(p, value)`.",
+		},
+	},
+}
+
+var unsafeCapabilityCompletionItems = buildUnsafeCapabilityCompletionItems()
 
 // snippet builds one static snippet completion item.
 func snippet(label string, detail string, insertText string) completionItem {
@@ -122,7 +184,47 @@ func snippet(label string, detail string, insertText string) completionItem {
 	}
 }
 
+// buildUnsafeCapabilityCompletionItems builds @unsafe capability completion items.
+func buildUnsafeCapabilityCompletionItems() []completionItem {
+	items := make([]completionItem, 0, len(unsafeCapabilityDocs))
+	for _, doc := range unsafeCapabilityDocs {
+		items = append(items, unsafeCapability(doc))
+	}
+	return items
+}
+
 // unsafeCapability builds one @unsafe capability completion item.
-func unsafeCapability(label string, detail string) completionItem {
-	return completionItem{Label: label, Kind: completionItemKindKeyword, Detail: detail}
+func unsafeCapability(doc unsafeCapabilityDoc) completionItem {
+	return completionItem{
+		Label:         doc.label,
+		Kind:          completionItemKindKeyword,
+		Detail:        doc.detail,
+		Documentation: markdownDocumentation(unsafeCapabilityMarkdown(doc)),
+	}
+}
+
+// unsafeCapabilityDocByName returns documentation for one reserved capability.
+func unsafeCapabilityDocByName(name string) (unsafeCapabilityDoc, bool) {
+	for _, doc := range unsafeCapabilityDocs {
+		if doc.label == name {
+			return doc, true
+		}
+	}
+	return unsafeCapabilityDoc{}, false
+}
+
+// unsafeCapabilityMarkdown renders user-facing capability documentation.
+func unsafeCapabilityMarkdown(doc unsafeCapabilityDoc) string {
+	var builder strings.Builder
+	builder.WriteString(doc.detail)
+	builder.WriteString("\n\nPermits:\n")
+	for _, permit := range doc.permits {
+		builder.WriteString("- ")
+		builder.WriteString(permit)
+		builder.WriteByte('\n')
+	}
+	builder.WriteString("\n`@unsafe(")
+	builder.WriteString(doc.label)
+	builder.WriteString(")` does not disable type, move, or borrow checks.")
+	return strings.TrimSpace(builder.String())
 }

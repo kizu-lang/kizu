@@ -72,6 +72,15 @@ func (s *Server) hover(uri string, position Position) *hover {
 		}
 	}
 	tokens := lexCompletionTokens(source)
+	if capability, ok := unsafeCapabilityAt(tokens, position); ok {
+		detail := "@unsafe(" + capability.label + ")"
+		return &hover{
+			Contents: markupContent{
+				Kind:  "markdown",
+				Value: kizuHoverMarkupWithDocumentation(detail, unsafeCapabilityMarkdown(capability)),
+			},
+		}
+	}
 	index, sources := s.navigationIndex(uri, source)
 	decl, ok := hoverAt(tokens, position, uri, source, index, sources)
 	if !ok || decl.detail == "" {
@@ -515,6 +524,41 @@ func hoverAt(
 		return decl, true
 	}
 	return globalDefinition(tokens[tokenIndex].Literal, index, sources)
+}
+
+// unsafeCapabilityAt resolves hover documentation for names inside @unsafe(...).
+func unsafeCapabilityAt(tokens []token.Token, position Position) (unsafeCapabilityDoc, bool) {
+	tokenIndex := tokenIndexAtPosition(tokens, position)
+	if tokenIndex < 0 || tokens[tokenIndex].Type != token.Ident {
+		return unsafeCapabilityDoc{}, false
+	}
+	if !insideUnsafeCapabilityList(tokens, tokenIndex) {
+		return unsafeCapabilityDoc{}, false
+	}
+	return unsafeCapabilityDocByName(tokens[tokenIndex].Literal)
+}
+
+// insideUnsafeCapabilityList reports whether tokenIndex is within @unsafe(...).
+func insideUnsafeCapabilityList(tokens []token.Token, tokenIndex int) bool {
+	open := -1
+	for i := tokenIndex - 1; i >= 0; i-- {
+		switch tokens[i].Type {
+		case token.RParen, token.LBrace, token.RBrace, token.Semicolon:
+			return false
+		case token.LParen:
+			open = i
+			i = -1
+		}
+	}
+	if open < 2 || tokens[open-1].Type != token.Unsafe || tokens[open-2].Type != token.At {
+		return false
+	}
+	for i := open + 1; i < tokenIndex; i++ {
+		if tokens[i].Type != token.Ident && tokens[i].Type != token.Comma {
+			return false
+		}
+	}
+	return true
 }
 
 // moduleDefinitionAt resolves imports and namespace aliases to modules.

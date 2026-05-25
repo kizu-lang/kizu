@@ -268,6 +268,9 @@ func TestCompleteReturnsUnsafeCapabilities(t *testing.T) {
 	if item.TextEdit.Range.Start != (Position{Line: 1, Character: len("    @unsafe(")}) {
 		t.Fatalf("range start = %#v, want capability start", item.TextEdit.Range.Start)
 	}
+	if item.Documentation == nil || !strings.Contains(item.Documentation.Value, "ptr_read(p)") {
+		t.Fatalf("documentation = %#v, want ptr_read operation", item.Documentation)
+	}
 }
 
 // TestCompleteReturnsUnsafeCapabilitiesAfterComma checks additional capability slots.
