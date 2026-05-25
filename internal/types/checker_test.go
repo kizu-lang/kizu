@@ -627,6 +627,33 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckBinaryMismatchReportsOperatorSpan keeps checker diagnostics location-aware.
+func TestCheckBinaryMismatchReportsOperatorSpan(t *testing.T) {
+	source := `enum Color { Red, Green }
+enum Animal { Cat, Dog }
+
+fn main() {
+    let color = Color::Green;
+    if color == Animal::Cat { return; }
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var diagnostic *DiagnosticError
+	if !errors.As(err, &diagnostic) {
+		t.Fatalf("got %T, want DiagnosticError", err)
+	}
+	if diagnostic.Span.Start.Line != 6 || diagnostic.Span.Start.Column != 14 {
+		t.Fatalf("start = %d:%d, want 6:14",
+			diagnostic.Span.Start.Line, diagnostic.Span.Start.Column)
+	}
+	if diagnostic.Span.End.Line != 6 || diagnostic.Span.End.Column != 16 {
+		t.Fatalf("end = %d:%d, want 6:16",
+			diagnostic.Span.End.Line, diagnostic.Span.End.Column)
+	}
+}
+
 // TestCheckAcceptsEnumMatch checks exhaustive simple enum match statements.
 func TestCheckAcceptsEnumMatch(t *testing.T) {
 	source := `enum Color {
