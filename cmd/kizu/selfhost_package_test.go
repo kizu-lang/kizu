@@ -1387,8 +1387,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	facts := hostedExecutableContractFacts{
 		abi:                      hostedExecutableABIFacts(),
 		selectedSignatureDetails: hostedExecutableSelectedSignatureDetailFacts(),
-		selectedBodies:           hostedExecutableSelectedBodyFacts(),
-		selectedHelperBodies:     hostedExecutableSelectedHelperBodyFacts(),
 		selectedBodyParsingFacts: hostedExecutableSelectedBodyParsingFacts(),
 		hostedArtifactPathFacts:  hostedExecutableHostedArtifactPathFacts(),
 		hostedLoweringFacts:      hostedExecutableHostedLoweringFacts(),
@@ -1403,8 +1401,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 type hostedExecutableContractFacts struct {
 	abi                      []string
 	selectedSignatureDetails []string
-	selectedBodies           []string
-	selectedHelperBodies     []string
 	selectedBodyParsingFacts []string
 	hostedArtifactPathFacts  []string
 	hostedLoweringFacts      []string
@@ -1424,8 +1420,8 @@ func assertHostedExecutableBackendInputs(
 		llvm,
 		facts.selectedSignatureDetails,
 	)
-	assertExecutableSelectedBodiesValidated(t, llvm, facts.selectedBodies)
-	assertExecutableSelectedHelperBodiesValidated(t, llvm, facts.selectedHelperBodies)
+	assertExecutableSelectedBodiesValidated(t, llvm)
+	assertExecutableSelectedHelperBodiesValidated(t, llvm)
 	assertExecutableSelectedBodyParsingValidated(
 		t,
 		llvm,
@@ -1471,7 +1467,6 @@ func assertHostedExecutableFactOrigins(
 		sources.selected,
 		sources.body,
 		sources.llvm,
-		facts.selectedBodies,
 	)
 	assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 		t,
@@ -1479,7 +1474,6 @@ func assertHostedExecutableFactOrigins(
 		sources.selected,
 		sources.body,
 		sources.llvm,
-		facts.selectedHelperBodies,
 	)
 	assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		t,
@@ -1668,16 +1662,13 @@ func assertExecutableSignatureDetailConsumer(t *testing.T, llvm string, fact str
 
 // assertExecutableSelectedBodiesValidated keeps backend input tied to checked
 // AST body facts, not only selected function names.
-func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string, facts []string) {
+func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string) {
 	t.Helper()
 	if !strings.Contains(llvm, `"executable-selected-body-ir checked-ast-body-v1"`) {
 		t.Fatal("backend IR validation does not require selected executable body IR")
 	}
 	if !strings.Contains(llvm, `"backend-input executable-selected-body-ir checked-ast-body-v1"`) {
 		t.Fatal("backend metadata does not record selected executable body IR")
-	}
-	for _, fact := range facts {
-		assertNamedFactConsumer(t, llvm, "backend selected-function-body validation", fact)
 	}
 	for _, fact := range hostedExecutableSelectedBodySemanticFacts() {
 		if !strings.Contains(llvm, `"`+fact+`"`) {
@@ -1688,7 +1679,7 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string, facts []
 
 // assertExecutableSelectedHelperBodiesValidated keeps private executable helper
 // body IR required before generated parser code can be accepted.
-func assertExecutableSelectedHelperBodiesValidated(t *testing.T, llvm string, facts []string) {
+func assertExecutableSelectedHelperBodiesValidated(t *testing.T, llvm string) {
 	t.Helper()
 	if !strings.Contains(llvm, `"executable-selected-helper-body-ir checked-ast-helper-body-v1"`) {
 		t.Fatal("backend IR validation does not require selected executable helper body IR")
@@ -1698,9 +1689,6 @@ func assertExecutableSelectedHelperBodiesValidated(t *testing.T, llvm string, fa
 		`"backend-input executable-selected-helper-body-ir checked-ast-helper-body-v1"`,
 	) {
 		t.Fatal("backend metadata does not record selected executable helper body IR")
-	}
-	for _, fact := range facts {
-		assertNamedFactConsumer(t, llvm, "backend selected-helper-body validation", fact)
 	}
 }
 
@@ -1927,7 +1915,6 @@ func assertExecutableSelectedBodiesComeFromCheckedAST(
 	selected string,
 	body string,
 	llvm string,
-	facts []string,
 ) {
 	t.Helper()
 	if strings.Contains(ir, `"executable-selected-body-ir checked-ast-body-v1"`) {
@@ -1956,23 +1943,9 @@ func assertExecutableSelectedBodiesComeFromCheckedAST(
 			t.Fatalf("selected executable body IR emitter missing %q", fragment)
 		}
 	}
-	emitter := selected + body
-	for _, fact := range facts {
-		if strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend hardcodes complete selected-function-body fact %q", fact)
-		}
-		parts := strings.Fields(fact)
-		if len(parts) != 3 {
-			t.Fatalf("invalid selected-function-body fixture %q", fact)
-		}
-		for _, fragment := range []string{
-			`"` + parts[0] + ` "`,
-			`"` + parts[1] + `"`,
-			`"` + parts[2] + `"`,
-		} {
-			if !strings.Contains(emitter, fragment) {
-				t.Fatalf("selected body emitter does not publish %q via %q", fact, fragment)
-			}
+	for _, content := range []string{body, llvm} {
+		if strings.Contains(content, `"selected-function-body `) {
+			t.Fatal("executable path still depends on dedicated selected-function-body header facts")
 		}
 	}
 }
@@ -1985,7 +1958,6 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 	selected string,
 	body string,
 	llvm string,
-	facts []string,
 ) {
 	t.Helper()
 	if strings.Contains(ir, `"executable-selected-helper-body-ir checked-ast-helper-body-v1"`) {
@@ -2007,7 +1979,6 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 	for _, fragment := range []string{
 		"pub fn append_helper_body_ir(",
 		"fn append_body_ir(",
-		`"selected-helper-body "`,
 		`"selected-helper-body-end "`,
 		"body-call ",
 		"body-struct-literal ",
@@ -2016,23 +1987,9 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 			t.Fatalf("selected helper body IR emitter missing %q", fragment)
 		}
 	}
-	emitter := selected + body
-	for _, fact := range facts {
-		if strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend hardcodes complete selected-helper-body fact %q", fact)
-		}
-		parts := strings.Fields(fact)
-		if len(parts) != 3 {
-			t.Fatalf("invalid selected-helper-body fixture %q", fact)
-		}
-		for _, fragment := range []string{
-			`"` + parts[0] + ` "`,
-			`"` + parts[1] + `"`,
-			`"` + parts[2] + `"`,
-		} {
-			if !strings.Contains(emitter, fragment) {
-				t.Fatalf("selected helper body emitter does not publish %q via %q", fact, fragment)
-			}
+	for _, content := range []string{body, llvm} {
+		if strings.Contains(content, `"selected-helper-body `) {
+			t.Fatal("executable path still depends on dedicated selected-helper-body header facts")
 		}
 	}
 }
@@ -3035,84 +2992,6 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 			"emit_run_executable_artifact !data::RunArtifact",
 		"selected-signature-param selfhost::backend::hosted::" +
 			"emit_run_executable_artifact#3 executable:runtime:data::Executable",
-	}
-}
-
-// hostedExecutableSelectedBodyFacts returns the checked function bodies that
-// must be available before executable path static matching can be removed.
-func hostedExecutableSelectedBodyFacts() []string {
-	return []string{
-		"selected-function-body selfhost::cli::execute::run_file_cli checked-run-artifact",
-		"selected-function-body selfhost::cli::execute::test_file_cli checked-test-artifact",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_run_executable checked-run-wrapper",
-		"selected-function-body selfhost::backend::executable::" +
-			"parse_run_executable_ast checked-run-ast",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_run_executable_ast checked-run-executable",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_test_executable checked-test-wrapper",
-		"selected-function-body selfhost::backend::executable::" +
-			"parse_test_executable_ast checked-test-ast",
-		"selected-function-body selfhost::backend::executable::" +
-			"lower_test_executable_ast checked-test-executable",
-		"selected-function-body selfhost::backend::hosted::" +
-			"emit_run_executable_artifact hosted-run-writer",
-		"selected-function-body selfhost::backend::hosted::" +
-			"emit_test_executable_artifact hosted-test-writer",
-	}
-}
-
-// hostedExecutableSelectedHelperBodyFacts returns private executable helpers
-// whose checked bodies must be available before parser rendering is safe.
-func hostedExecutableSelectedHelperBodyFacts() []string {
-	return []string{
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_program_ast checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_fn_ast checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_block_ast checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_return_stmt_ast checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_print_stmt_ast checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_run_print_call_ast checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"run_string_literal_payload checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"run_payload_from_literal checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_supported_run_print_payload checked-run-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_program_ast checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_fn_ast checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_block_ast checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_test_expect_statement_ast checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_void_return_type checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_expect_stmt_ast checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"parse_expect_call_ast checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_empty_return checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"expect_bool_value checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"bool_value_as_i64 checked-test-ast-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"is_empty_node checked-executable-shared-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"unsupported_executable_ast checked-executable-shared-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"unsupported_executable checked-executable-shared-helper",
-		"selected-helper-body selfhost::backend::executable::" +
-			"ast_node_text checked-executable-shared-helper",
 	}
 }
 
