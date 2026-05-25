@@ -68,14 +68,32 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 	switch msg.Method {
 	case "initialize":
 		return false, s.respond(msg.ID, initializeResult{
-			Capabilities: serverCapabilities{TextDocumentSync: textDocumentSyncKindFull},
-			ServerInfo:   serverInfo{Name: "kizu-lsp"},
+			Capabilities: serverCapabilities{
+				TextDocumentSync:           textDocumentSyncKindFull,
+				DocumentFormattingProvider: true,
+			},
+			ServerInfo: serverInfo{Name: "kizu-lsp"},
 		})
 	case "shutdown":
 		return false, s.respond(msg.ID, nil)
+	case "textDocument/formatting":
+		return false, s.handleFormattingRequest(msg)
 	default:
 		return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
 	}
+}
+
+// handleFormattingRequest returns whole-document edits for a tracked document.
+func (s *Server) handleFormattingRequest(msg incomingMessage) error {
+	var params documentFormattingParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	source, ok := s.documents[params.TextDocument.URI]
+	if !ok {
+		return s.respond(msg.ID, []textEdit{})
+	}
+	return s.respond(msg.ID, FormatEdits(source))
 }
 
 // handleNotification applies LSP notifications without sending request responses.
