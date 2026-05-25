@@ -1198,6 +1198,14 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn require_function(",
 		"fn append_executable_lowering_rule_facts(",
 	},
+	"../../selfhost/src/ir/executable_functions.kizu": {
+		"pub fn append_facts(",
+		"fn append_execute_function_facts(",
+		"fn append_executable_function_facts(",
+		"fn append_hosted_function_facts(",
+		"fn require_function_body_fragment(",
+		"selected-function ",
+	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_parse_blocks(",
@@ -1271,6 +1279,7 @@ func assertSelfhostSplitFiles(t *testing.T) {
 func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	ir := readSelfhostFile(t, "../../selfhost/src/ir.kizu")
 	contract := readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu")
+	selected := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
 	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
 	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	match := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu")
@@ -1292,14 +1301,87 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		"executable-lowering-rule TestExpectFalse TestExpectFailure",
 	}
 	abiFacts := hostedExecutableABIFacts()
-	irFacts := ir + contract
+	selectedFunctions := hostedExecutableSelectedFunctionFacts()
+	irFacts := ir + contract + selected
 	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, astRules)
 	assertExecutableFactsValidated(t, llvm, loweringRules)
+	assertExecutableSelectedFunctionsValidated(t, llvm, selectedFunctions)
 	assertExecutableABIValidated(t, llvm, abiFacts)
 	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, astRules, loweringRules)
+	assertExecutableSelectedFunctionsComeFromCheckedAST(t, ir, selected, llvm, selectedFunctions)
 	assertExecutableRuleConsumers(t, match, ast, astRules, loweringRules)
 	assertExecutableABIConsumers(t, ast, run, test, abiFacts)
 	assertExecutableIRThreading(t, llvm, cli, match)
+}
+
+// assertExecutableSelectedFunctionsValidated keeps hosted backend input tied to
+// named selfhost executable path functions instead of an untracked matcher.
+func assertExecutableSelectedFunctionsValidated(t *testing.T, llvm string, facts []string) {
+	t.Helper()
+	if !strings.Contains(llvm, `"executable-selected-functions checked-ast-path-v1"`) {
+		t.Fatal("backend IR validation does not require selected executable functions")
+	}
+	if !strings.Contains(llvm, `"backend-input executable-selected-functions checked-ast-path-v1"`) {
+		t.Fatal("backend metadata does not record selected executable functions")
+	}
+	for _, fact := range facts {
+		assertNamedFactConsumer(t, llvm, "backend selected-function validation", fact)
+	}
+}
+
+// assertExecutableSelectedFunctionsComeFromCheckedAST keeps selected hosted
+// executable functions tied to parsed selfhost source function bodies.
+func assertExecutableSelectedFunctionsComeFromCheckedAST(
+	t *testing.T,
+	ir string,
+	selected string,
+	llvm string,
+	facts []string,
+) {
+	t.Helper()
+	if strings.Contains(ir, `"executable-selected-functions checked-ast-path-v1"`) {
+		t.Fatal("IR root hardcodes selected executable function facts")
+	}
+	required := []string{
+		"parser::parse_checked_file(",
+		"source::module_path(file)",
+		"fn append_execute_function_facts(",
+		"fn append_executable_function_facts(",
+		"fn append_hosted_function_facts(",
+		"fn require_function_body_fragment(",
+		"check::checked_ast_node(",
+		"backend::lower_run_executable(",
+		"backend::emit_run_executable_artifact(",
+		"data::ExecutableKind::RunPrintString",
+		"data::ExecutableKind::TestExpectFailure",
+		"write_run_artifact(",
+		"write_test_artifact(",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("selected executable function facts do not use checked AST with %q", fragment)
+		}
+	}
+	for _, fact := range facts {
+		if strings.Contains(llvm, `"`+fact+`"`) {
+			t.Fatalf("backend hardcodes complete selected-function fact %q", fact)
+		}
+		parts := strings.Fields(fact)
+		if len(parts) != 3 {
+			t.Fatalf("invalid selected-function fixture %q", fact)
+		}
+		for _, fragment := range []string{
+			`"` + parts[0] + ` "`,
+			`"` + parts[1] + `"`,
+			`"` + parts[2] + `"`,
+			"append_selected_function(",
+			"require_function_body_fragment(",
+		} {
+			if !strings.Contains(selected, fragment) {
+				t.Fatalf("selected executable function emitter does not publish %q via %q", fact, fragment)
+			}
+		}
+	}
 }
 
 // assertExecutableContractFactsComeFromCheckedAST keeps executable facts tied to
@@ -1595,6 +1677,31 @@ func hostedExecutableABIFacts() []string {
 		"executable-kind RunReturnVoid 2",
 		"executable-kind TestExpectOk 3",
 		"executable-kind TestExpectFailure 4",
+	}
+}
+
+// hostedExecutableSelectedFunctionFacts returns selfhost functions that must be
+// available on the real hosted executable path before the matcher is removable.
+func hostedExecutableSelectedFunctionFacts() []string {
+	return []string{
+		"selected-function selfhost::cli::execute::run_file_cli checked-run-artifact",
+		"selected-function selfhost::cli::execute::test_file_cli checked-test-artifact",
+		"selected-function selfhost::backend::executable::" +
+			"lower_run_executable checked-run-wrapper",
+		"selected-function selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast",
+		"selected-function selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable",
+		"selected-function selfhost::backend::executable::" +
+			"lower_test_executable checked-test-wrapper",
+		"selected-function selfhost::backend::executable::" +
+			"parse_test_executable_ast checked-test-ast",
+		"selected-function selfhost::backend::executable::" +
+			"lower_test_executable_ast checked-test-executable",
+		"selected-function selfhost::backend::hosted::" +
+			"emit_run_executable_artifact hosted-run-writer",
+		"selected-function selfhost::backend::hosted::" +
+			"emit_test_executable_artifact hosted-test-writer",
 	}
 }
 
