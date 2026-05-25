@@ -1,0 +1,409 @@
+import selfhost::parser;
+import selfhost::source;
+
+pub fn append_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    files: &std::array::Array<source::SourceFile>
+) -> !void {
+    var execute_found = false;
+    var executable_found = false;
+    var hosted_found = false;
+
+    try append_line(out, "executable-selected-functions checked-ast-path-v1");
+
+    var index = 0;
+    while index < files.len() {
+        let file = try files.at(index);
+        if file.kind == source::SourceKind::Selfhost {
+            let module = source::module_path(file);
+            if std::mem::equal_bytes(module, "cli/execute") {
+                try append_execute_function_facts(allocator, out, file);
+                execute_found = true;
+            }
+            if std::mem::equal_bytes(module, "backend/executable") {
+                try append_executable_function_facts(allocator, out, file);
+                executable_found = true;
+            }
+            if std::mem::equal_bytes(module, "backend/hosted") {
+                try append_hosted_function_facts(allocator, out, file);
+                hosted_found = true;
+            }
+        }
+        index = index + 1;
+    }
+    if !execute_found {
+        return error("missing executable CLI source");
+    }
+    if !executable_found {
+        return error("missing executable lowering source");
+    }
+    if !hosted_found {
+        return error("missing executable hosted backend source");
+    }
+    return;
+}
+
+fn append_execute_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "run_file_cli",
+        "check::checked_ast_node("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "run_file_cli",
+        "backend::lower_run_executable("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "run_file_cli",
+        "backend::emit_run_executable_artifact("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::cli::execute::run_file_cli",
+        "checked-run-artifact"
+    );
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "test_file_cli",
+        "check::checked_ast_node("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "test_file_cli",
+        "backend::lower_test_executable("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "test_file_cli",
+        "backend::emit_test_executable_artifact("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::cli::execute::test_file_cli",
+        "checked-test-artifact"
+    );
+    return;
+}
+
+fn append_executable_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_run_executable",
+        "parse_run_executable_ast("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_run_executable",
+        "lower_run_executable_ast("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::executable::lower_run_executable",
+        "checked-run-wrapper"
+    );
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "parse_run_executable_ast",
+        "parse_run_program_ast("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::executable::parse_run_executable_ast",
+        "checked-run-ast"
+    );
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_run_executable_ast",
+        "data::ExecutableKind::RunPrintString"
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_run_executable_ast",
+        "data::ExecutableKind::RunReturnVoid"
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::executable::lower_run_executable_ast",
+        "checked-run-executable"
+    );
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_test_executable",
+        "parse_test_executable_ast("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_test_executable",
+        "lower_test_executable_ast("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::executable::lower_test_executable",
+        "checked-test-wrapper"
+    );
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "parse_test_executable_ast",
+        "parse_test_program_ast("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::executable::parse_test_executable_ast",
+        "checked-test-ast"
+    );
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_test_executable_ast",
+        "data::ExecutableKind::TestExpectOk"
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "lower_test_executable_ast",
+        "data::ExecutableKind::TestExpectFailure"
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::executable::lower_test_executable_ast",
+        "checked-test-executable"
+    );
+    return;
+}
+
+fn append_hosted_function_facts(
+    allocator: Allocator,
+    out: &var std::string::String,
+    file: &source::SourceFile
+) -> !void {
+    let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
+    defer parsed.deinit();
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "emit_run_executable_artifact",
+        "write_run_artifact("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "emit_run_executable_artifact",
+        "ensure_hosted_artifact_dir("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::hosted::emit_run_executable_artifact",
+        "hosted-run-writer"
+    );
+
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "emit_test_executable_artifact",
+        "write_test_artifact("
+    );
+    try require_function_body_fragment(
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "emit_test_executable_artifact",
+        "ensure_hosted_artifact_dir("
+    );
+    try append_selected_function(
+        out,
+        "selfhost::backend::hosted::emit_test_executable_artifact",
+        "hosted-test-writer"
+    );
+    return;
+}
+
+fn append_selected_function(
+    out: &var std::string::String,
+    name: []u8,
+    role: []u8
+) -> !void {
+    try out.append_bytes("selected-function ");
+    try out.append_bytes(name);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(role);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn require_function_body_fragment(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_name: []u8,
+    fragment: []u8
+) -> !void {
+    let body = try function_body_node(text, ast, root, function_name);
+    if !node_text_contains(text, ast, body, fragment) {
+        return error("missing selected executable function body");
+    }
+    return;
+}
+
+fn function_body_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_name: []u8
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return try function_body_node_in_program(
+            text,
+            ast,
+            program.declarations,
+            function_name
+        );,
+        _ => return error("missing selected executable function body");,
+    }
+}
+
+fn function_body_node_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    function_name: []u8
+) -> !std::kizu::ast::NodeId {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if function_node_matches(text, ast, child, function_name) {
+            return try function_body_from_node(ast, child);
+        }
+        index = index + 1;
+    }
+    return error("missing selected executable function body");
+}
+
+fn function_node_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        FnDecl(fn_decl) => std::mem::equal_bytes(
+            ast_node_text(text, ast, fn_decl.name),
+            name
+        ),
+        _ => false,
+    };
+}
+
+fn function_body_from_node(
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(node_id);
+    match node.data {
+        FnDecl(fn_decl) => return fn_decl.body;,
+        _ => return error("missing selected executable function body");,
+    }
+}
+
+fn node_text_contains(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    fragment: []u8
+) -> bool {
+    return bytes_contains(ast_node_text(text, ast, node_id), fragment);
+}
+
+fn bytes_contains(bytes: []u8, needle: []u8) -> bool {
+    let byte_len = std::mem::len(bytes);
+    let needle_len = std::mem::len(needle);
+    if needle_len == 0 {
+        return true;
+    }
+    if needle_len > byte_len {
+        return false;
+    }
+    let last_start = byte_len - needle_len;
+    var index = 0;
+    while index <= last_start {
+        if std::mem::equal_bytes(bytes[index..index + needle_len], needle) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn ast_node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
+}
+
+fn append_line(out: &var std::string::String, text: []u8) -> !void {
+    try out.append_bytes(text);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
