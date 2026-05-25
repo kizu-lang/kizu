@@ -45,6 +45,7 @@ type selfhostCLIFrontendFixtures struct {
 	typeArity            string
 	unknownType          string
 	argumentMismatch     string
+	binaryMismatch       string
 	assignmentMismatch   string
 	immutableAssignment  string
 	invalidAssignment    string
@@ -200,7 +201,7 @@ func selfhostCLIFrontendDefaultHappyCases(
 			name: "parse_temp_source",
 			args: []string{"parse", fixtures.source},
 			wantOut: `enum Flag {
-    Yes, No
+    Yes, No,
 }
 
 struct Name {
@@ -712,6 +713,12 @@ func selfhostCLIFrontendTypeSemanticFailureCases(
 			wantErr: "error: type error: argument type mismatch\n",
 		},
 		{
+			name:    "check_temp_binary_type_mismatch",
+			args:    []string{"check", fixtures.binaryMismatch},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: type error: operator operands must have same type\n",
+		},
+		{
 			name:    "check_temp_assignment_type_mismatch",
 			args:    []string{"check", fixtures.assignmentMismatch},
 			wantOut: "exit-code\n1\n",
@@ -1000,6 +1007,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		tempDuplicate, tempTypeArity, tempUnknownType, tempUndefinedVariable, tempUndefinedMatch :=
 		writeSelfhostCLISemanticFrontendFixtures(t)
 	tempArgumentMismatch := writeSelfhostCLIArgumentFrontendFixtures(t)
+	tempBinaryMismatch := writeSelfhostCLIBinaryFrontendFixtures(t)
 	tempAssignmentMismatch, tempImmutableAssignment, tempInvalidAssignment :=
 		writeSelfhostCLIAssignmentFrontendFixtures(t)
 	tempReturnMismatch, tempReturnMatchMismatch, tempReturningIf,
@@ -1028,6 +1036,7 @@ func writeSelfhostCLIFrontendFixtures(t *testing.T) selfhostCLIFrontendFixtures 
 		typeArity:           tempTypeArity,
 		unknownType:         tempUnknownType,
 		argumentMismatch:    tempArgumentMismatch,
+		binaryMismatch:      tempBinaryMismatch,
 		assignmentMismatch:  tempAssignmentMismatch,
 		immutableAssignment: tempImmutableAssignment,
 		invalidAssignment:   tempInvalidAssignment,
@@ -1249,6 +1258,23 @@ fn main() {
 }
 `
 	return writeTempKizuSource(t, "frontend_argument_type_mismatch.kizu", argumentMismatch)
+}
+
+// writeSelfhostCLIBinaryFrontendFixtures writes binary expression semantic inputs.
+func writeSelfhostCLIBinaryFrontendFixtures(t *testing.T) string {
+	t.Helper()
+
+	const binaryMismatch = `enum Color { Red, Green }
+enum Animal { Cat, Dog }
+
+fn main() {
+    let color = Color::Green;
+    if color == Animal::Cat {
+        return;
+    }
+}
+`
+	return writeTempKizuSource(t, "frontend_binary_type_mismatch.kizu", binaryMismatch)
 }
 
 // writeSelfhostCLIAssignmentFrontendFixtures writes assignment semantic inputs.

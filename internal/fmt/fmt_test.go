@@ -48,6 +48,65 @@ func TestFormatTopLevelBlankLineSeparator(t *testing.T) {
 	}
 }
 
+// TestFormatPreservesFunctionLineComment keeps doc-style comments before functions.
+func TestFormatPreservesFunctionLineComment(t *testing.T) {
+	src := "// explain main\nfn main(){return;}\n"
+	want := "// explain main\n" +
+		"fn main() {\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(commented fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatKeepsFunctionLineCommentAttached keeps doc comments with following functions.
+func TestFormatKeepsFunctionLineCommentAttached(t *testing.T) {
+	src := "fn helper(){return;}\n// explain main\nfn main(){return;}\n"
+	want := "fn helper() {\n" +
+		"    return;\n" +
+		"}\n" +
+		"// explain main\n" +
+		"fn main() {\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(comment after fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatPreservesBlankLineBeforeTopLevelComment keeps section comments separated.
+func TestFormatPreservesBlankLineBeforeTopLevelComment(t *testing.T) {
+	src := "fn helper(){return;}\n\n// color choices\nenum Color{Red}\n"
+	want := "fn helper() {\n" +
+		"    return;\n" +
+		"}\n" +
+		"\n" +
+		"// color choices\n" +
+		"enum Color {\n" +
+		"    Red,\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(blank before comment):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatPreservesBlankLineAfterTopLevelComment keeps section comments detached.
+func TestFormatPreservesBlankLineAfterTopLevelComment(t *testing.T) {
+	src := "fn helper(){return;}\n// color choices\n\nenum Color{Red}\n"
+	want := "fn helper() {\n" +
+		"    return;\n" +
+		"}\n" +
+		"// color choices\n" +
+		"\n" +
+		"enum Color {\n" +
+		"    Red,\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(blank after comment):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatSortsLeadingImports keeps the import block canonical without blank lines inside it.
 func TestFormatSortsLeadingImports(t *testing.T) {
 	src := `import selfhost::parser;
@@ -63,6 +122,29 @@ fn main(){return;}`
 		"}\n"
 	if got := Format(src); got != want {
 		t.Fatalf("Format(imports):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatEnumKeepsTrailingComma checks enum declarations prefer trailing commas.
+func TestFormatEnumKeepsTrailingComma(t *testing.T) {
+	src := "enum Color { Red, Green }\n"
+	want := "enum Color {\n" +
+		"    Red, Green,\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("enum trailing comma:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatEnumAddsTrailingCommaBeforeComment keeps enum comments after the comma.
+func TestFormatEnumAddsTrailingCommaBeforeComment(t *testing.T) {
+	src := "enum Color {\n    Red\n    // primary\n}\n"
+	want := "enum Color {\n" +
+		"    Red,\n" +
+		"    // primary\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("enum comment trailing comma:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
