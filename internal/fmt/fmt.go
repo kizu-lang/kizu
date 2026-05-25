@@ -21,9 +21,18 @@ func Format(source string) string {
 	tokens := tokenize(source)
 	tokens = normalizeLeadingImports(tokens)
 	generic := detectGenericBrackets(tokens)
-	b := &builder{atLineStart: true, generic: generic}
+	b := &builder{
+		atLineStart: true,
+		generic:     generic,
+		tokens:      tokens,
+		comments:    fullLineComments(source),
+	}
 	for i := 0; i < len(tokens); i++ {
 		t := tokens[i]
+		if t.Type == token.RBrace {
+			b.emitEnumTrailingCommaBeforeClose()
+		}
+		b.emitCommentsBefore(t)
 		if t.Type == token.EOF {
 			break
 		}
@@ -37,6 +46,7 @@ func Format(source string) string {
 		b.index = i
 		b.emit(t, next)
 	}
+	b.emitRemainingComments()
 	return b.finish()
 }
 
@@ -98,6 +108,47 @@ func tokenize(source string) []token.Token {
 type importRange struct {
 	start int
 	end   int
+}
+
+type lineComment struct {
+	line        int
+	text        string
+	blankBefore bool
+	blankAfter  bool
+}
+
+// fullLineComments records line comments that can be preserved as standalone lines.
+func fullLineComments(source string) []lineComment {
+	lines := strings.Split(source, "\n")
+	comments := make([]lineComment, 0)
+	for idx, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t\r")
+		if strings.HasPrefix(trimmed, "//") {
+			comments = append(comments, lineComment{
+				line:        idx + 1,
+				text:        strings.TrimRight(trimmed, "\r"),
+				blankBefore: hasBlankLineBefore(lines, idx),
+				blankAfter:  hasBlankLineAfter(lines, idx),
+			})
+		}
+	}
+	return comments
+}
+
+// hasBlankLineBefore reports whether a standalone comment had a blank line before it.
+func hasBlankLineBefore(lines []string, idx int) bool {
+	if idx == 0 {
+		return false
+	}
+	return strings.TrimSpace(lines[idx-1]) == ""
+}
+
+// hasBlankLineAfter reports whether a standalone comment had a blank line after it.
+func hasBlankLineAfter(lines []string, idx int) bool {
+	if idx+1 >= len(lines) {
+		return false
+	}
+	return strings.TrimSpace(lines[idx+1]) == ""
 }
 
 // normalizeLeadingImports sorts the initial contiguous import block. Later
@@ -167,17 +218,29 @@ func isTrailingCommaBeforeClose(tokens []token.Token, i int) bool {
 
 // builder accumulates formatted output and tracks layout state.
 type builder struct {
-	out         strings.Builder
-	depth       int
-	atLineStart bool
-	prev        token.Token
-	hasPrev     bool
-	prevIndex   int
-	index       int
-	generic     []bool
-	sourceLine  int
-	lastTopDecl token.Type
+	out          strings.Builder
+	depth        int
+	atLineStart  bool
+	prev         token.Token
+	hasPrev      bool
+	prevIndex    int
+	index        int
+	tokens       []token.Token
+	generic      []bool
+	sourceLine   int
+	lastTopDecl  token.Type
+	comments     []lineComment
+	commentIdx   int
+	blockStack   []blockKind
+	afterComment bool
 }
+
+type blockKind int
+
+const (
+	normalBlock blockKind = iota
+	enumBlock
+)
 
 // emit appends a token using current layout state.
 func (b *builder) emit(t token.Token, next token.Token) {
@@ -197,18 +260,72 @@ func (b *builder) emit(t token.Token, next token.Token) {
 	b.maybeTrailingNewline(t, next)
 }
 
-// maybeBlankLineForTopLevel emits a blank line before each top-level declaration after the first.
-func (b *builder) maybeBlankLineForTopLevel(t token.Token) {
-	if !(b.hasPrev && b.depth == 0 && b.atLineStart && isTopLevelDeclStart(t) && b.out.Len() > 0) {
-		if b.depth == 0 && b.atLineStart && isTopLevelDeclStart(t) {
-			b.lastTopDecl = t.Type
-		}
+// emitCommentsBefore writes preserved standalone comments before token t.
+func (b *builder) emitCommentsBefore(t token.Token) {
+	if t.Line <= 0 {
 		return
 	}
-	if !(t.Type == token.Import && b.lastTopDecl == token.Import) && !endsWithBlankLine(&b.out) {
+	for b.commentIdx < len(b.comments) && b.comments[b.commentIdx].line < t.Line {
+		b.writeCommentLine(b.comments[b.commentIdx])
+		b.commentIdx++
+	}
+}
+
+// emitRemainingComments writes comments after the final token.
+func (b *builder) emitRemainingComments() {
+	for b.commentIdx < len(b.comments) {
+		b.writeCommentLine(b.comments[b.commentIdx])
+		b.commentIdx++
+	}
+}
+
+// writeCommentLine emits one standalone comment at the current indentation depth.
+func (b *builder) writeCommentLine(comment lineComment) {
+	if comment.blankBefore && b.out.Len() > 0 && !endsWithBlankLine(&b.out) {
+		if !b.atLineStart {
+			b.out.WriteByte('\n')
+			b.atLineStart = true
+		}
+		b.out.WriteByte('\n')
+	}
+	if !b.atLineStart {
+		b.out.WriteByte('\n')
+		b.atLineStart = true
+	}
+	b.writeIndent()
+	b.out.WriteString(comment.text)
+	b.out.WriteByte('\n')
+	b.atLineStart = true
+	b.afterComment = true
+	if comment.blankAfter && !endsWithBlankLine(&b.out) {
+		b.out.WriteByte('\n')
+	}
+	b.sourceLine = comment.line
+}
+
+// maybeBlankLineForTopLevel emits a blank line before each top-level declaration after the first.
+func (b *builder) maybeBlankLineForTopLevel(t token.Token) {
+	if !b.isTopLevelDeclAtLineStart(t) {
+		return
+	}
+	if b.afterComment || !b.hasPrev || b.out.Len() == 0 {
+		b.lastTopDecl = t.Type
+		return
+	}
+	if !b.isConsecutiveImport(t) && !endsWithBlankLine(&b.out) {
 		b.out.WriteByte('\n')
 	}
 	b.lastTopDecl = t.Type
+}
+
+// isTopLevelDeclAtLineStart reports whether t starts a declaration at top level.
+func (b *builder) isTopLevelDeclAtLineStart(t token.Token) bool {
+	return b.depth == 0 && b.atLineStart && isTopLevelDeclStart(t)
+}
+
+// isConsecutiveImport reports whether t continues a top-level import block.
+func (b *builder) isConsecutiveImport(t token.Token) bool {
+	return t.Type == token.Import && b.lastTopDecl == token.Import
 }
 
 // maybePreserveSourceLineBreak inserts a newline when the source had one between tokens.
@@ -240,12 +357,14 @@ func (b *builder) recordEmitted(t token.Token) {
 	if t.Line > 0 {
 		b.sourceLine = t.Line
 	}
+	b.afterComment = false
 }
 
 // maybeTrailingNewline handles structural tokens that always force a line break.
 func (b *builder) maybeTrailingNewline(t token.Token, next token.Token) {
 	switch t.Type {
 	case token.LBrace:
+		b.blockStack = append(b.blockStack, b.currentOpenBlockKind())
 		b.depth++
 		if next.Type == token.RBrace {
 			return
@@ -260,6 +379,7 @@ func (b *builder) maybeTrailingNewline(t token.Token, next token.Token) {
 
 // emitRBrace closes a block, deciding whether to emit a trailing newline.
 func (b *builder) emitRBrace(t token.Token, next token.Token) {
+	b.popBlockKind()
 	if b.depth > 0 {
 		b.depth--
 	}
@@ -282,11 +402,71 @@ func (b *builder) emitRBrace(t token.Token, next token.Token) {
 	if t.Line > 0 {
 		b.sourceLine = t.Line
 	}
+	b.afterComment = false
 
 	if rbraceWantsNewline(next) {
 		b.out.WriteByte('\n')
 		b.atLineStart = true
 	}
+}
+
+// emitEnumTrailingCommaBeforeClose attaches the canonical enum comma to the last variant.
+func (b *builder) emitEnumTrailingCommaBeforeClose() {
+	if b.currentBlockKind() != enumBlock ||
+		!b.hasPrev ||
+		b.prev.Type == token.Comma ||
+		b.prev.Type == token.LBrace {
+		return
+	}
+	comma := token.Token{Type: token.Comma, Literal: ","}
+	b.writeToken(comma)
+	b.prev = comma
+	b.hasPrev = true
+	b.atLineStart = false
+	b.afterComment = false
+}
+
+// currentOpenBlockKind reports the kind of block opened by the current `{`.
+func (b *builder) currentOpenBlockKind() blockKind {
+	if opensEnumBlockAtCurrentIndex(b.tokens, b.index) {
+		return enumBlock
+	}
+	return normalBlock
+}
+
+// currentBlockKind reports the innermost block kind without popping it.
+func (b *builder) currentBlockKind() blockKind {
+	if len(b.blockStack) == 0 {
+		return normalBlock
+	}
+	return b.blockStack[len(b.blockStack)-1]
+}
+
+// popBlockKind removes and returns the current closing block kind.
+func (b *builder) popBlockKind() blockKind {
+	if len(b.blockStack) == 0 {
+		return normalBlock
+	}
+	idx := len(b.blockStack) - 1
+	kind := b.blockStack[idx]
+	b.blockStack = b.blockStack[:idx]
+	return kind
+}
+
+// opensEnumBlockAtCurrentIndex reports whether tokens[index] opens an enum body.
+func opensEnumBlockAtCurrentIndex(tokens []token.Token, index int) bool {
+	if index < 0 || index >= len(tokens) || tokens[index].Type != token.LBrace {
+		return false
+	}
+	for cursor := index - 1; cursor >= 0; cursor-- {
+		switch tokens[cursor].Type {
+		case token.Enum:
+			return true
+		case token.LBrace, token.RBrace, token.Semicolon:
+			return false
+		}
+	}
+	return false
 }
 
 // rbraceWantsNewline reports whether a `}` should be followed by a newline.
