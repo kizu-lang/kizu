@@ -219,7 +219,7 @@ class KizuCodeLensProvider implements vscode.CodeLensProvider {
       }
       if (/^\s*test\s+"/.test(line.text)) {
         lenses.push(new vscode.CodeLens(line.range, {
-          title: "Test",
+          title: "Run Test",
           command: "kizu.testFile"
         }));
       }
