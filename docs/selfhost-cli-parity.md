@@ -81,8 +81,8 @@ explicit selfhost host runtime and records `go.cmd-kizu-fallback none`.
 The separate `just selfhost-native-source-gate` builds the selfhost source
 package as a native executable and verifies representative run artifacts are
 produced through `selfhost::backend::executable` checked-AST lowering. That gate
-is source-path evidence for #752; the hosted stage2 parity gate remains the
-release surface until the generated matcher is removed.
+is source-path evidence for #752; the hosted stage2 parity gate is now the
+release surface for the selected-body parser/lowering path.
 
 `selfhost/tests/cli/test-parity.tsv` is the #570/#590/#752 single-file test parity
 manifest. It records command args, fixture paths, expected exit codes,
