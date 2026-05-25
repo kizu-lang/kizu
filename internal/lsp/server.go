@@ -71,6 +71,9 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 			Capabilities: serverCapabilities{
 				TextDocumentSync:           textDocumentSyncKindFull,
 				DocumentFormattingProvider: true,
+				CompletionProvider: &completionOptions{
+					TriggerCharacters: []string{":", " "},
+				},
 			},
 			ServerInfo: serverInfo{Name: "kizu-lsp"},
 		})
@@ -78,6 +81,8 @@ func (s *Server) handleRequest(msg incomingMessage) (bool, error) {
 		return false, s.respond(msg.ID, nil)
 	case "textDocument/formatting":
 		return false, s.handleFormattingRequest(msg)
+	case "textDocument/completion":
+		return false, s.handleCompletionRequest(msg)
 	default:
 		return false, s.respondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
 	}
@@ -94,6 +99,20 @@ func (s *Server) handleFormattingRequest(msg incomingMessage) error {
 		return s.respond(msg.ID, []textEdit{})
 	}
 	return s.respond(msg.ID, FormatEdits(source))
+}
+
+// handleCompletionRequest returns basic language and package completion items.
+func (s *Server) handleCompletionRequest(msg incomingMessage) error {
+	var params completionParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return err
+	}
+	source, ok := s.documents[params.TextDocument.URI]
+	if !ok {
+		return s.respond(msg.ID, []completionItem{})
+	}
+	graph, hasGraph := s.packageGraphForURI(params.TextDocument.URI)
+	return s.respond(msg.ID, CompletionItems(source, graph, hasGraph))
 }
 
 // handleNotification applies LSP notifications without sending request responses.

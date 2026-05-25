@@ -27,6 +27,12 @@ func TestAnalyzeReportsCheckDiagnostic(t *testing.T) {
 	if diagnostics[0].Message == "" {
 		t.Fatal("diagnostic message is empty")
 	}
+	if diagnostics[0].Range.Start.Line != 0 || diagnostics[0].Range.Start.Character != 26 {
+		t.Fatalf("diagnostic start = %#v, want missing identifier", diagnostics[0].Range.Start)
+	}
+	if diagnostics[0].Range.End.Line != 0 || diagnostics[0].Range.End.Character != 33 {
+		t.Fatalf("diagnostic end = %#v, want missing identifier", diagnostics[0].Range.End)
+	}
 }
 
 // TestAnalyzeAcceptsValidSource checks clean source publishes no diagnostics.
