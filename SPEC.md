@@ -357,6 +357,45 @@ fn log(message: []u8) -> void {
 }
 ```
 
+#### 関数 doc comment
+
+関数や method の user-facing documentation は `///` line comment で書きます。
+`///` は通常の `//` comment とは区別され、直後の function declaration または
+impl method declaration に attached documentation として結びつきます。
+
+```kizu
+/// Parses one source file into an AST.
+/// Returns a parse error when the source is syntactically invalid.
+pub fn parse_source(source: []u8) -> !Program {
+    ...
+}
+
+impl Parser {
+    /// Advances to the next token.
+    fn advance(self: &var Parser) -> void {
+        ...
+    }
+}
+```
+
+attachment rule:
+
+* doc comment は declaration の直前にある連続した `///` 行だけを対象にします
+* 空行、通常の `//` comment、他の token が間にある場合は attach しません
+* `pub`、`unsafe`、`extern "c"` などの function modifier は declaration の一部として
+  扱い、その直前の `///` block を attach します
+* 1 行ごとに先頭の `///` と、直後に 1 つだけある空白を取り除き、
+  改行で連結します
+* `//// text` は `///` doc comment で、本文は `/ text` です
+* block doc comment は v0.2 では採用しません
+
+doc comment は型検査、ownership、name resolution、ABI、実行時挙動に
+影響しません。private function にも書けますが、doc comment の有無は
+visibility rule を変えません。
+tooling は hover / completion / generated docs で attached documentation を表示できます。
+最初の段落は summary として扱えますが、compiler diagnostic の意味づけには
+使いません。
+
 ### 6.3.1 defer cleanup statement
 
 `defer <expr-stmt>;` は、現在の lexical block に明示 cleanup 呼び出しを登録します。
