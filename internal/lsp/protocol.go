@@ -39,7 +39,8 @@ type initializeResult struct {
 }
 
 type serverCapabilities struct {
-	TextDocumentSync int `json:"textDocumentSync"`
+	TextDocumentSync           int  `json:"textDocumentSync"`
+	DocumentFormattingProvider bool `json:"documentFormattingProvider,omitempty"`
 }
 
 type serverInfo struct {
@@ -75,6 +76,10 @@ type didCloseTextDocumentParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 }
 
+type documentFormattingParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
 type textDocumentContentChangeEvent struct {
 	Text string `json:"text"`
 }
@@ -82,6 +87,11 @@ type textDocumentContentChangeEvent struct {
 type publishDiagnosticsParams struct {
 	URI         string       `json:"uri"`
 	Diagnostics []Diagnostic `json:"diagnostics"`
+}
+
+type textEdit struct {
+	Range   Range  `json:"range"`
+	NewText string `json:"newText"`
 }
 
 // Diagnostic is the LSP diagnostic shape emitted by the server.
