@@ -14,6 +14,7 @@ pub fn append_facts(
     var hosted_found = false;
 
     try append_line(out, "executable-selected-functions checked-ast-path-v1");
+    try append_line(out, "executable-selected-signatures checked-ast-signature-v1");
     try append_line(out, "executable-selected-body-ir checked-ast-body-v1");
     try append_line(out, "executable-selected-helper-body-ir checked-ast-helper-body-v1");
     try append_line(out, "executable-selected-body-parsing checked-ast-body-parsing-v1");
@@ -198,14 +199,23 @@ fn append_executable_function_facts(
         "lower_run_executable_ast",
         "data::ExecutableKind::RunReturnVoid"
     );
-    let run_lowering_body = try function_body_node(
+    let run_lowering_function = try function_node(
         file.text,
         parsed.ast,
         parsed.root,
         "lower_run_executable_ast"
     );
+    let run_lowering_body = try function_body_from_node(parsed.ast, run_lowering_function);
     try append_selected_function(
         out,
+        "selfhost::backend::executable::lower_run_executable_ast",
+        "checked-run-executable"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        run_lowering_function,
         "selfhost::backend::executable::lower_run_executable_ast",
         "checked-run-executable"
     );
@@ -287,14 +297,23 @@ fn append_executable_function_facts(
         "lower_test_executable_ast",
         "data::ExecutableKind::TestExpectFailure"
     );
-    let test_lowering_body = try function_body_node(
+    let test_lowering_function = try function_node(
         file.text,
         parsed.ast,
         parsed.root,
         "lower_test_executable_ast"
     );
+    let test_lowering_body = try function_body_from_node(parsed.ast, test_lowering_function);
     try append_selected_function(
         out,
+        "selfhost::backend::executable::lower_test_executable_ast",
+        "checked-test-executable"
+    );
+    try append_selected_function_signature(
+        out,
+        file.text,
+        parsed.ast,
+        test_lowering_function,
         "selfhost::backend::executable::lower_test_executable_ast",
         "checked-test-executable"
     );
@@ -614,7 +633,9 @@ fn append_selected_function_with_body(
     role: []u8
 ) -> !void {
     try append_selected_function(out, qualified_name, role);
-    let body = try function_body_node(text, ast, root, local_name);
+    let function_node_id = try function_node(text, ast, root, local_name);
+    try append_selected_function_signature(out, text, ast, function_node_id, qualified_name, role);
+    let body = try function_body_from_node(ast, function_node_id);
     try append_selected_function_with_body_node(out, text, ast, qualified_name, role, body);
     return;
 }
@@ -640,8 +661,202 @@ fn append_selected_helper_body(
     qualified_name: []u8,
     role: []u8
 ) -> !void {
-    let body = try function_body_node(text, ast, root, local_name);
+    let function_node_id = try function_node(text, ast, root, local_name);
+    try append_selected_function_signature(out, text, ast, function_node_id, qualified_name, role);
+    let body = try function_body_from_node(ast, function_node_id);
     try executable_body::append_helper_body_ir(out, text, ast, qualified_name, role, body);
+    return;
+}
+
+fn append_selected_function_signature(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    function: std::kizu::ast::NodeId,
+    qualified_name: []u8,
+    role: []u8
+) -> !void {
+    let node = ast.get(function);
+    match node.data {
+        FnDecl(fn_decl) => return try append_selected_function_signature_from_decl(
+            out,
+            text,
+            ast,
+            qualified_name,
+            role,
+            fn_decl.params,
+            fn_decl.return_type
+        );,
+        _ => return error("missing selected executable function body");,
+    }
+}
+
+fn append_selected_function_signature_from_decl(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    qualified_name: []u8,
+    role: []u8,
+    params: std::kizu::ast::ChildRange,
+    return_type: std::kizu::ast::NodeId
+) -> !void {
+    try append_selected_signature_header(out, qualified_name, role);
+    try append_selected_signature_param_count(out, qualified_name, params.len);
+    try append_selected_signature_return(out, text, ast, qualified_name, return_type);
+    try append_selected_signature_params(out, text, ast, qualified_name, params);
+    return;
+}
+
+fn append_selected_signature_header(
+    out: &var std::string::String,
+    qualified_name: []u8,
+    role: []u8
+) -> !void {
+    try out.append_bytes("selected-signature ");
+    try out.append_bytes(qualified_name);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(role);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_selected_signature_param_count(
+    out: &var std::string::String,
+    qualified_name: []u8,
+    count: i64
+) -> !void {
+    try out.append_bytes("selected-signature-param-count ");
+    try out.append_bytes(qualified_name);
+    try out.append_byte(cast<u8>(32));
+    try std::fmt::append_i64(out, count);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_selected_signature_return(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    qualified_name: []u8,
+    return_type: std::kizu::ast::NodeId
+) -> !void {
+    try out.append_bytes("selected-signature-return ");
+    try out.append_bytes(qualified_name);
+    try out.append_byte(cast<u8>(32));
+    try append_type_token(out, text, ast, return_type);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_selected_signature_params(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    qualified_name: []u8,
+    params: std::kizu::ast::ChildRange
+) -> !void {
+    var index = 0;
+    while index < params.len {
+        let param = try ast.child_at(params, index);
+        try append_selected_signature_param(out, text, ast, qualified_name, index, param);
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_selected_signature_param(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    qualified_name: []u8,
+    index: i64,
+    param: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(param);
+    match node.data {
+        Param(param_node) => return try append_selected_signature_param_from_node(
+            out,
+            text,
+            ast,
+            qualified_name,
+            index,
+            param_node.name,
+            param_node.comptime_param,
+            param_node.type_node
+        );,
+        _ => return error("missing selected executable function body");,
+    }
+}
+
+fn append_selected_signature_param_from_node(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    qualified_name: []u8,
+    index: i64,
+    name: std::kizu::ast::NodeId,
+    comptime_param: bool,
+    type_node: std::kizu::ast::NodeId
+) -> !void {
+    try out.append_bytes("selected-signature-param ");
+    try out.append_bytes(qualified_name);
+    try out.append_byte(cast<u8>(35));
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(32));
+    try out.append_bytes(ast_node_text(text, ast, name));
+    try out.append_byte(cast<u8>(58));
+    if comptime_param {
+        try out.append_bytes("comptime");
+    } else {
+        try out.append_bytes("runtime");
+    }
+    try out.append_byte(cast<u8>(58));
+    try append_type_token(out, text, ast, type_node);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_type_token(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> !void {
+    let node = ast.get(type_node);
+    match node.data {
+        Empty => return try append_void_type_token(out);,
+        _ => return try append_ast_type_token(out, text, ast, type_node);,
+    }
+}
+
+fn append_void_type_token(out: &var std::string::String) -> !void {
+    try out.append_bytes("void");
+    return;
+}
+
+fn append_ast_type_token(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    type_node: std::kizu::ast::NodeId
+) -> !void {
+    let type_text = ast_node_text(text, ast, type_node);
+    try append_non_space_token(out, type_text);
+    return;
+}
+
+fn append_non_space_token(out: &var std::string::String, text: []u8) -> !void {
+    var index = 0;
+    let len = std::mem::len(text);
+    while index < len {
+        let byte = text[index];
+        if byte == cast<u8>(32) or byte == cast<u8>(9) {
+            try out.append_byte(cast<u8>(95));
+        } else {
+            try out.append_byte(byte);
+        }
+        index = index + 1;
+    }
     return;
 }
 
@@ -665,9 +880,19 @@ fn function_body_node(
     root: std::kizu::ast::NodeId,
     function_name: []u8
 ) -> !std::kizu::ast::NodeId {
+    let function_node_id = try function_node(text, ast, root, function_name);
+    return try function_body_from_node(ast, function_node_id);
+}
+
+fn function_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    function_name: []u8
+) -> !std::kizu::ast::NodeId {
     let node = ast.get(root);
     match node.data {
-        Program(program) => return try function_body_node_in_program(
+        Program(program) => return try function_node_in_program(
             text,
             ast,
             program.declarations,
@@ -677,7 +902,7 @@ fn function_body_node(
     }
 }
 
-fn function_body_node_in_program(
+fn function_node_in_program(
     text: []u8,
     ast: std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange,
@@ -687,7 +912,7 @@ fn function_body_node_in_program(
     while index < declarations.len {
         let child = try ast.child_at(declarations, index);
         if function_node_matches(text, ast, child, function_name) {
-            return try function_body_from_node(ast, child);
+            return child;
         }
         index = index + 1;
     }

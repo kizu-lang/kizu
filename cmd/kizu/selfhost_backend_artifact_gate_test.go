@@ -430,6 +430,7 @@ func requiredLLVMMetadataFragments() []string {
 		"backend-input executable-ast-rule TestExpectFalse MainExpectFalse\n",
 	}
 	fragments = append(fragments, requiredLLVMMetadataSelectedFunctionFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedSignatureFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedHelperBodyFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
@@ -480,6 +481,51 @@ func requiredLLVMMetadataSelectedFunctionFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"backend-input selected-function selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
+	}
+}
+
+// requiredLLVMMetadataSelectedSignatureFragments returns executable signature inputs.
+func requiredLLVMMetadataSelectedSignatureFragments() []string {
+	return []string{
+		"backend-input executable-selected-signatures checked-ast-signature-v1\n",
+		"backend-input selected-signature selfhost::cli::execute::" +
+			"run_file_cli checked-run-artifact\n",
+		"backend-input selected-signature selfhost::cli::execute::" +
+			"test_file_cli checked-test-artifact\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"lower_run_executable checked-run-wrapper\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper\n",
+		"backend-input selected-signature selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper\n",
+		"backend-input selected-signature-param-count selfhost::cli::execute::" +
+			"run_file_cli 3\n",
+		"backend-input selected-signature-return selfhost::cli::execute::" +
+			"run_file_cli !i64\n",
+		"backend-input selected-signature-param selfhost::cli::execute::" +
+			"run_file_cli#0 allocator:runtime:Allocator\n",
+		"backend-input selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable !data::Executable\n",
+		"backend-input selected-signature-param selfhost::backend::executable::" +
+			"lower_run_executable#1 ast:runtime:std::kizu::ast::Ast\n",
+		"backend-input selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable_ast data::Executable\n",
+		"backend-input selected-signature-return selfhost::backend::executable::" +
+			"parse_run_program_ast !data::ExecutableAst\n",
+		"backend-input selected-signature-param selfhost::backend::executable::" +
+			"parse_run_print_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"backend-input selected-signature-param selfhost::backend::executable::" +
+			"parse_expect_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"backend-input selected-signature-return selfhost::backend::hosted::" +
+			"emit_run_executable_artifact !data::RunArtifact\n",
+		"backend-input selected-signature-param selfhost::backend::hosted::" +
+			"emit_run_executable_artifact#3 executable:runtime:data::Executable\n",
 	}
 }
 

@@ -90,6 +90,7 @@ func requiredSelfhostIRContractFragments() []string {
 		"executable-contract-source lowering selfhost::backend::executable\n",
 	}
 	fragments = append(fragments, requiredSelfhostIRSelectedFunctionFragments()...)
+	fragments = append(fragments, requiredSelfhostIRSelectedSignatureFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedHelperBodyFragments()...)
 	fragments = append(fragments, requiredSelfhostIRSelectedBodyParsingFragments()...)
@@ -144,6 +145,47 @@ func requiredSelfhostIRSelectedFunctionFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"selected-function selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
+	}
+}
+
+// requiredSelfhostIRSelectedSignatureFragments returns selected executable signatures.
+func requiredSelfhostIRSelectedSignatureFragments() []string {
+	return []string{
+		"executable-selected-signatures checked-ast-signature-v1\n",
+		"selected-signature selfhost::cli::execute::run_file_cli checked-run-artifact\n",
+		"selected-signature selfhost::cli::execute::test_file_cli checked-test-artifact\n",
+		"selected-signature selfhost::backend::executable::" +
+			"lower_run_executable checked-run-wrapper\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_run_executable_ast checked-run-ast\n",
+		"selected-signature selfhost::backend::executable::" +
+			"lower_run_executable_ast checked-run-executable\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper\n",
+		"selected-signature selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper\n",
+		"selected-signature-param-count selfhost::cli::execute::run_file_cli 3\n",
+		"selected-signature-return selfhost::cli::execute::run_file_cli !i64\n",
+		"selected-signature-param selfhost::cli::execute::run_file_cli#0 " +
+			"allocator:runtime:Allocator\n",
+		"selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable !data::Executable\n",
+		"selected-signature-param selfhost::backend::executable::" +
+			"lower_run_executable#1 ast:runtime:std::kizu::ast::Ast\n",
+		"selected-signature-return selfhost::backend::executable::" +
+			"lower_run_executable_ast data::Executable\n",
+		"selected-signature-return selfhost::backend::executable::" +
+			"parse_run_program_ast !data::ExecutableAst\n",
+		"selected-signature-param selfhost::backend::executable::" +
+			"parse_run_print_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"selected-signature-param selfhost::backend::executable::" +
+			"parse_expect_call_ast#3 args:runtime:std::kizu::ast::ChildRange\n",
+		"selected-signature-return selfhost::backend::hosted::" +
+			"emit_run_executable_artifact !data::RunArtifact\n",
+		"selected-signature-param selfhost::backend::hosted::" +
+			"emit_run_executable_artifact#3 executable:runtime:data::Executable\n",
 	}
 }
 
