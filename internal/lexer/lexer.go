@@ -4,12 +4,13 @@ import "github.com/kizu-lang/kizu/internal/token"
 
 // Lexer scans Kizu source text into tokens.
 type Lexer struct {
-	input        []rune
-	position     int
-	readPosition int
-	ch           rune
-	line         int
-	column       int
+	input              []rune
+	position           int
+	readPosition       int
+	ch                 rune
+	line               int
+	column             int
+	pendingDocComments []string
 }
 
 var singleCharTokens = map[rune]token.Type{
@@ -55,23 +56,24 @@ func New(input string) *Lexer {
 
 // NextToken returns the next token from the input stream.
 func (l *Lexer) NextToken() token.Token {
-	l.skipWhitespace()
+	l.skipIgnored()
 
-	tok := token.Token{Line: l.line, Column: l.column}
+	tok := token.Token{Line: l.line, Column: l.column, DocComments: l.takeDocComments()}
 
 	switch l.ch {
 	case '/':
 		if l.peekChar() == '/' {
+			l.clearDocComments()
 			l.skipLineComment()
 			return l.NextToken()
 		}
-		tok = l.oneCharToken(token.Slash)
+		tok = l.oneCharToken(token.Slash, tok.DocComments)
 	case '=':
 		if l.peekChar() == '>' {
-			tok = l.twoCharToken(token.FatArrow)
+			tok = l.twoCharToken(token.FatArrow, tok.DocComments)
 			break
 		}
-		tok = l.readCompoundToken(compoundTokens[l.ch])
+		tok = l.readCompoundToken(compoundTokens[l.ch], tok.DocComments)
 	case '"':
 		tok.Type = token.String
 		tok.Literal = l.readString()
@@ -82,17 +84,17 @@ func (l *Lexer) NextToken() token.Token {
 			tok.Literal = l.readMultilineString()
 			return tok
 		}
-		tok = l.oneCharToken(token.Illegal)
+		tok = l.oneCharToken(token.Illegal, tok.DocComments)
 	case 0:
 		tok.Type = token.EOF
 		tok.Literal = ""
 	default:
 		if spec, ok := compoundTokens[l.ch]; ok {
-			tok = l.readCompoundToken(spec)
+			tok = l.readCompoundToken(spec, tok.DocComments)
 			break
 		}
 		if tokType, ok := singleCharTokens[l.ch]; ok {
-			tok = l.oneCharToken(tokType)
+			tok = l.oneCharToken(tokType, tok.DocComments)
 			break
 		}
 		if isLetter(l.ch) {
@@ -105,7 +107,7 @@ func (l *Lexer) NextToken() token.Token {
 			tok.Literal = l.readNumber()
 			return tok
 		}
-		tok = l.oneCharToken(token.Illegal)
+		tok = l.oneCharToken(token.Illegal, tok.DocComments)
 	}
 
 	l.readChar()
@@ -113,25 +115,37 @@ func (l *Lexer) NextToken() token.Token {
 }
 
 // readCompoundToken reads an operator that may have a two-character spelling.
-func (l *Lexer) readCompoundToken(spec compoundToken) token.Token {
+func (l *Lexer) readCompoundToken(spec compoundToken, docs []string) token.Token {
 	if l.peekChar() == spec.next {
-		return l.twoCharToken(spec.compound)
+		return l.twoCharToken(spec.compound, docs)
 	}
-	return l.oneCharToken(spec.single)
+	return l.oneCharToken(spec.single, docs)
 }
 
 // oneCharToken returns a token for the current rune.
-func (l *Lexer) oneCharToken(t token.Type) token.Token {
-	return token.Token{Type: t, Literal: string(l.ch), Line: l.line, Column: l.column}
+func (l *Lexer) oneCharToken(t token.Type, docs []string) token.Token {
+	return token.Token{
+		Type:        t,
+		Literal:     string(l.ch),
+		Line:        l.line,
+		Column:      l.column,
+		DocComments: docs,
+	}
 }
 
 // twoCharToken returns a token spanning the current rune and the next rune.
-func (l *Lexer) twoCharToken(t token.Type) token.Token {
+func (l *Lexer) twoCharToken(t token.Type, docs []string) token.Token {
 	ch := l.ch
 	line := l.line
 	column := l.column
 	l.readChar()
-	return token.Token{Type: t, Literal: string([]rune{ch, l.ch}), Line: line, Column: column}
+	return token.Token{
+		Type:        t,
+		Literal:     string([]rune{ch, l.ch}),
+		Line:        line,
+		Column:      column,
+		DocComments: docs,
+	}
 }
 
 // readChar advances the lexer by one rune.
@@ -159,11 +173,43 @@ func (l *Lexer) peekChar() rune {
 	return l.input[l.readPosition]
 }
 
-// skipWhitespace advances past insignificant whitespace.
-func (l *Lexer) skipWhitespace() {
+// peekRune returns a rune at an offset from the current lexer position.
+func (l *Lexer) peekRune(offset int) rune {
+	position := l.position + offset
+	if position < 0 || position >= len(l.input) {
+		return 0
+	}
+	return l.input[position]
+}
+
+// skipIgnored advances past insignificant whitespace and comments.
+func (l *Lexer) skipIgnored() {
+	for {
+		if l.skipWhitespace() {
+			l.clearDocComments()
+		}
+		if l.ch != '/' || l.peekChar() != '/' {
+			return
+		}
+		if l.isDocCommentStart() {
+			l.pendingDocComments = append(l.pendingDocComments, l.readDocComment())
+			continue
+		}
+		l.clearDocComments()
+		l.skipLineComment()
+	}
+}
+
+// skipWhitespace advances past insignificant whitespace and reports blank lines.
+func (l *Lexer) skipWhitespace() bool {
+	newlines := 0
 	for l.ch == ' ' || l.ch == '\t' || l.ch == '\n' || l.ch == '\r' {
+		if l.ch == '\n' {
+			newlines++
+		}
 		l.readChar()
 	}
+	return newlines > 1
 }
 
 // skipLineComment advances past a line comment.
@@ -171,6 +217,45 @@ func (l *Lexer) skipLineComment() {
 	for l.ch != '\n' && l.ch != 0 {
 		l.readChar()
 	}
+}
+
+// isDocCommentStart reports whether the current line starts an exact `///` doc comment.
+func (l *Lexer) isDocCommentStart() bool {
+	return l.peekRune(2) == '/' && l.peekRune(3) != '/'
+}
+
+// readDocComment advances past one doc comment and returns its normalized text.
+func (l *Lexer) readDocComment() string {
+	l.readChar()
+	l.readChar()
+	l.readChar()
+	if l.ch == ' ' {
+		l.readChar()
+	}
+	start := l.position
+	for l.ch != '\n' && l.ch != 0 {
+		l.readChar()
+	}
+	end := l.position
+	if end > start && l.input[end-1] == '\r' {
+		end--
+	}
+	return string(l.input[start:end])
+}
+
+// clearDocComments discards doc comments no longer adjacent to a declaration.
+func (l *Lexer) clearDocComments() {
+	l.pendingDocComments = nil
+}
+
+// takeDocComments returns and clears comments for the next real token.
+func (l *Lexer) takeDocComments() []string {
+	if len(l.pendingDocComments) == 0 {
+		return nil
+	}
+	out := append([]string(nil), l.pendingDocComments...)
+	l.pendingDocComments = nil
+	return out
 }
 
 // readIdentifier reads an identifier or keyword literal.

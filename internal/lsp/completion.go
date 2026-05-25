@@ -40,9 +40,10 @@ type completionIndex struct {
 }
 
 type functionCompletion struct {
-	name   string
-	params []string
-	detail string
+	name          string
+	params        []string
+	detail        string
+	documentation string
 }
 
 type fieldCompletion struct {
@@ -583,9 +584,10 @@ func readFunction(tokens []token.Token, start int) (functionCompletion, int, boo
 	params, close := readFunctionParams(tokens, start)
 	returnType, next := readFunctionReturnType(tokens, close)
 	return functionCompletion{
-		name:   name,
-		params: callableParamNames(params),
-		detail: functionSignature(name, params, returnType),
+		name:          name,
+		params:        callableParamNames(params),
+		detail:        functionSignature(name, params, returnType),
+		documentation: functionDocumentation(tokens, start),
 	}, next, true
 }
 
@@ -620,6 +622,32 @@ func readFunctionReturnType(tokens []token.Token, close int) (string, int) {
 		return "", close
 	}
 	return readTypeUntil(tokens, close+2, token.LBrace, token.Semicolon)
+}
+
+// functionDocumentation returns docs attached to a function or its modifiers.
+func functionDocumentation(tokens []token.Token, start int) string {
+	if start < 0 || start >= len(tokens) {
+		return ""
+	}
+	if len(tokens[start].DocComments) > 0 {
+		return strings.Join(tokens[start].DocComments, "\n")
+	}
+	for i := start - 1; i >= 0 && isFunctionModifierToken(tokens[i]); i-- {
+		if len(tokens[i].DocComments) > 0 {
+			return strings.Join(tokens[i].DocComments, "\n")
+		}
+	}
+	return ""
+}
+
+// isFunctionModifierToken reports whether docs may attach through this token.
+func isFunctionModifierToken(tok token.Token) bool {
+	switch tok.Type {
+	case token.Public, token.Unsafe, token.Extern, token.String:
+		return true
+	default:
+		return false
+	}
 }
 
 // callableParamNames returns snippet placeholders for explicit call arguments.
@@ -755,6 +783,9 @@ func functionItem(name string, fn functionCompletion, kind int, detail string) c
 		detail = fn.detail
 	}
 	item := completionItem{Label: name, Kind: kind, Detail: detail}
+	if strings.TrimSpace(fn.documentation) != "" {
+		item.Documentation = &markupContent{Kind: "markdown", Value: fn.documentation}
+	}
 	item.InsertText = callSnippet(name, fn.params)
 	item.InsertTextFormat = insertTextFormatSnippet
 	return item

@@ -30,6 +30,11 @@ func (p *Parser) Errors() []string {
 	return p.errors
 }
 
+// docText normalizes doc comment lines attached by the lexer.
+func docText(tok token.Token) string {
+	return strings.Join(tok.DocComments, "\n")
+}
+
 // ParseProgram parses a complete source file.
 func (p *Parser) ParseProgram() *ast.Program {
 	program := &ast.Program{}
@@ -100,21 +105,22 @@ func (p *Parser) parseImportDecl() ast.Decl {
 
 // parsePublicDecl parses public top-level declarations.
 func (p *Parser) parsePublicDecl() ast.Decl {
+	docs := docText(p.cur)
 	p.nextToken()
-	decl := p.parseTopLevelDecl()
+	decl := p.parseTopLevelDeclWithDoc(docs)
 	setPublicDecl(decl)
 	return decl
 }
 
-// parseTopLevelDecl parses one declaration whose starting token is current.
-func (p *Parser) parseTopLevelDecl() ast.Decl {
+// parseTopLevelDeclWithDoc parses one declaration and applies already-read docs.
+func (p *Parser) parseTopLevelDeclWithDoc(docs string) ast.Decl {
 	switch p.cur.Type {
 	case token.Function:
-		return p.parseFunctionDecl()
+		return p.parseFunctionDeclWithDoc(docs)
 	case token.Unsafe:
-		return p.parseUnsafeDecl()
+		return p.parseUnsafeDeclWithDoc(docs)
 	case token.Extern:
-		return p.parseExternDecl(false)
+		return p.parseExternDeclWithDoc(false, docs)
 	case token.Struct:
 		return p.parseStructDecl()
 	case token.Enum:
@@ -125,7 +131,7 @@ func (p *Parser) parseTopLevelDecl() ast.Decl {
 		return p.parseContractDecl()
 	default:
 		p.errorf("expected public declaration, got %s", p.cur.Type)
-		return &ast.FunctionDecl{Public: true}
+		return &ast.FunctionDecl{Public: true, Doc: docs}
 	}
 }
 
@@ -147,26 +153,32 @@ func setPublicDecl(decl ast.Decl) {
 
 // parseUnsafeDecl parses unsafe top-level declarations.
 func (p *Parser) parseUnsafeDecl() ast.Decl {
+	return p.parseUnsafeDeclWithDoc(docText(p.cur))
+}
+
+// parseUnsafeDeclWithDoc parses unsafe top-level declarations with attached docs.
+func (p *Parser) parseUnsafeDeclWithDoc(docs string) ast.Decl {
 	switch p.peek.Type {
 	case token.Function:
 		p.nextToken()
-		decl := p.parseFunctionDecl()
-		if fn, ok := decl.(*ast.FunctionDecl); ok {
-			fn.Unsafe = true
-		}
-		return decl
+		return p.parseFunctionSignature(&ast.FunctionDecl{Unsafe: true, Doc: docs}, true)
 	case token.Extern:
 		p.nextToken()
-		return p.parseExternDecl(true)
+		return p.parseExternDeclWithDoc(true, docs)
 	default:
 		p.errorf("expected fn or extern after unsafe, got %s", p.peek.Type)
-		return &ast.FunctionDecl{Unsafe: true}
+		return &ast.FunctionDecl{Unsafe: true, Doc: docs}
 	}
 }
 
 // parseExternDecl parses extern "abi" fn declarations.
 func (p *Parser) parseExternDecl(unsafe bool) ast.Decl {
-	fn := &ast.FunctionDecl{Unsafe: unsafe}
+	return p.parseExternDeclWithDoc(unsafe, docText(p.cur))
+}
+
+// parseExternDeclWithDoc parses extern "abi" fn declarations with attached docs.
+func (p *Parser) parseExternDeclWithDoc(unsafe bool, docs string) ast.Decl {
+	fn := &ast.FunctionDecl{Unsafe: unsafe, Doc: docs}
 	if !p.expectPeek(token.String) {
 		return fn
 	}
@@ -179,7 +191,12 @@ func (p *Parser) parseExternDecl(unsafe bool) ast.Decl {
 
 // parseFunctionDecl parses a top-level function declaration.
 func (p *Parser) parseFunctionDecl() ast.Decl {
-	return p.parseFunctionSignature(&ast.FunctionDecl{}, true)
+	return p.parseFunctionDeclWithDoc(docText(p.cur))
+}
+
+// parseFunctionDeclWithDoc parses a top-level function declaration with attached docs.
+func (p *Parser) parseFunctionDeclWithDoc(docs string) ast.Decl {
+	return p.parseFunctionSignature(&ast.FunctionDecl{Doc: docs}, true)
 }
 
 // parseTestDecl parses a top-level test block.
@@ -309,7 +326,7 @@ func (p *Parser) parseImplMethods() []*ast.FunctionDecl {
 			p.errorf("expected impl method, got %s", p.cur.Type)
 			return methods
 		}
-		method := p.parseFunctionSignature(&ast.FunctionDecl{}, true)
+		method := p.parseFunctionSignature(&ast.FunctionDecl{Doc: docText(p.cur)}, true)
 		if fn, ok := method.(*ast.FunctionDecl); ok {
 			methods = append(methods, fn)
 		}
