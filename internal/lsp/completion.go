@@ -818,7 +818,8 @@ func tokenText(tokens []token.Token) string {
 		if tok.Type == token.EOF {
 			break
 		}
-		currentWord := tok.Type == token.Ident || tok.Type == token.Var ||
+		currentWord := tok.Type == token.Ident || tok.Type == token.Function ||
+			tok.Type == token.Var ||
 			tok.Type == token.Dyn || tok.Type == token.Comptime
 		if previousWord && currentWord {
 			out.WriteByte(' ')

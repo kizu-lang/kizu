@@ -23,6 +23,16 @@ const (
 	insertTextFormatSnippet = 2
 
 	inlayHintKindType = 1
+
+	symbolKindModule     = 2
+	symbolKindClass      = 5
+	symbolKindMethod     = 6
+	symbolKindField      = 8
+	symbolKindEnum       = 10
+	symbolKindInterface  = 11
+	symbolKindFunction   = 12
+	symbolKindEnumMember = 22
+	symbolKindStruct     = 23
 )
 
 type incomingMessage struct {
@@ -60,6 +70,9 @@ type serverCapabilities struct {
 	DocumentFormattingProvider bool               `json:"documentFormattingProvider,omitempty"`
 	CompletionProvider         *completionOptions `json:"completionProvider,omitempty"`
 	InlayHintProvider          bool               `json:"inlayHintProvider,omitempty"`
+	DefinitionProvider         bool               `json:"definitionProvider,omitempty"`
+	HoverProvider              bool               `json:"hoverProvider,omitempty"`
+	DocumentSymbolProvider     bool               `json:"documentSymbolProvider,omitempty"`
 }
 
 type completionOptions struct {
@@ -108,6 +121,10 @@ type inlayHintParams struct {
 	Range        Range                  `json:"range"`
 }
 
+type documentSymbolParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+}
+
 type textDocumentPositionParams struct {
 	TextDocument textDocumentIdentifier `json:"textDocument"`
 	Position     Position               `json:"position"`
@@ -145,6 +162,30 @@ type inlayHint struct {
 	Position Position `json:"position"`
 	Label    string   `json:"label"`
 	Kind     int      `json:"kind,omitempty"`
+}
+
+type location struct {
+	URI   string `json:"uri"`
+	Range Range  `json:"range"`
+}
+
+type hover struct {
+	Contents markupContent `json:"contents"`
+	Range    *Range        `json:"range,omitempty"`
+}
+
+type markupContent struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type documentSymbol struct {
+	Name           string           `json:"name"`
+	Detail         string           `json:"detail,omitempty"`
+	Kind           int              `json:"kind"`
+	Range          Range            `json:"range"`
+	SelectionRange Range            `json:"selectionRange"`
+	Children       []documentSymbol `json:"children,omitempty"`
 }
 
 // Diagnostic is the LSP diagnostic shape emitted by the server.

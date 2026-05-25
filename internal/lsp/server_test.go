@@ -45,6 +45,15 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	if capabilities["inlayHintProvider"] != true {
 		t.Fatalf("inlayHintProvider = %#v, want true", capabilities["inlayHintProvider"])
 	}
+	if capabilities["definitionProvider"] != true {
+		t.Fatalf("definitionProvider = %#v, want true", capabilities["definitionProvider"])
+	}
+	if capabilities["hoverProvider"] != true {
+		t.Fatalf("hoverProvider = %#v, want true", capabilities["hoverProvider"])
+	}
+	if capabilities["documentSymbolProvider"] != true {
+		t.Fatalf("documentSymbolProvider = %#v, want true", capabilities["documentSymbolProvider"])
+	}
 	if messages[1]["method"] != "textDocument/publishDiagnostics" {
 		t.Fatalf("got method %#v, want publish diagnostics", messages[1]["method"])
 	}
@@ -90,6 +99,47 @@ func TestServerInlayHintReturnsLocalTypes(t *testing.T) {
 	if position["line"].(float64) != 1 ||
 		position["character"].(float64) != float64(len("    let n")) {
 		t.Fatalf("position = %#v, want after local name", position)
+	}
+}
+
+// TestServerNavigationRequests checks definition, hover, and outline response shapes.
+func TestServerNavigationRequests(t *testing.T) {
+	source := "fn helper() -> void { return; }\n\nfn main() {\n    helper();\n}\n"
+	input := strings.Join([]string{
+		frame(`{"jsonrpc":"2.0","method":"textDocument/didOpen",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu",` +
+			`"languageId":"kizu","version":1,"text":` + strconv.Quote(source) + `}}}`),
+		frame(`{"jsonrpc":"2.0","id":2,"method":"textDocument/definition",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu"},` +
+			`"position":{"line":3,"character":5}}}`),
+		frame(`{"jsonrpc":"2.0","id":3,"method":"textDocument/hover",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu"},` +
+			`"position":{"line":3,"character":5}}}`),
+		frame(`{"jsonrpc":"2.0","id":4,"method":"textDocument/documentSymbol",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu"}}}`),
+		frame(`{"jsonrpc":"2.0","method":"exit"}`),
+	}, "")
+	var output bytes.Buffer
+
+	if err := Run(strings.NewReader(input), &output); err != nil {
+		t.Fatalf("run server: %v", err)
+	}
+	messages := readFrames(t, output.String())
+	if len(messages) != 4 {
+		t.Fatalf("got %d messages, want diagnostics and 3 responses", len(messages))
+	}
+	locations := messages[1]["result"].([]any)
+	if len(locations) != 1 {
+		t.Fatalf("definition result = %#v, want one location", locations)
+	}
+	hoverResult := messages[2]["result"].(map[string]any)
+	contents := hoverResult["contents"].(map[string]any)
+	if !strings.Contains(contents["value"].(string), "fn helper") {
+		t.Fatalf("hover contents = %#v, want helper signature", contents)
+	}
+	symbols := messages[3]["result"].([]any)
+	if len(symbols) != 2 {
+		t.Fatalf("symbols = %#v, want helper and main", symbols)
 	}
 }
 
