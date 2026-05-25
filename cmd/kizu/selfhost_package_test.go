@@ -1319,7 +1319,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_main_scan_fact(",
 		"pub fn append_run_parsing_facts(",
 		"pub fn append_test_parsing_facts(",
-		"fn require_function_body_fragment(",
+		"fn require_function_body_kind(",
+		"fn require_function_body_token(",
+		"fn node_contains_token(",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -2063,7 +2065,9 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		"pub fn append_main_scan_fact(",
 		"pub fn append_run_parsing_facts(",
 		"pub fn append_test_parsing_facts(",
-		"fn require_function_body_fragment(",
+		"fn require_function_body_kind(",
+		"fn require_function_body_token(",
+		"fn node_contains_token(",
 		"parse_run_program_ast",
 		"parse_run_print_call_ast",
 		"parse_expect_call_ast",
@@ -2088,6 +2092,14 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 	for _, content := range []string{bodyParsing, parser, llvm} {
 		if strings.Contains(content, `"selected-body-parsing `) {
 			t.Fatal("selected body parsing still depends on dedicated named facts")
+		}
+	}
+	for _, fragment := range []string{
+		"fn require_function_body_fragment(",
+		"node_text_contains(",
+	} {
+		if strings.Contains(bodyParsing, fragment) {
+			t.Fatalf("selected body parsing still uses source substring validation %q", fragment)
 		}
 	}
 }
