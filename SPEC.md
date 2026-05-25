@@ -386,7 +386,7 @@ attachment rule:
   扱い、その直前の `///` block を attach します
 * 1 行ごとに先頭の `///` と、直後に 1 つだけある空白を取り除き、
   改行で連結します
-* `//// text` は `///` doc comment で、本文は `/ text` です
+* slash 3 つだけの `///` を doc comment とし、`//// text` は通常の line comment です
 * block doc comment は v0.2 では採用しません
 
 doc comment は型検査、ownership、name resolution、ABI、実行時挙動に

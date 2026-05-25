@@ -79,6 +79,7 @@ func (p *Program) String() string {
 // FunctionDecl represents a function declaration.
 type FunctionDecl struct {
 	Name         string
+	Doc          string
 	TypeParams   []string
 	Params       []Param
 	ReturnType   string

@@ -60,6 +60,32 @@ func TestFormatPreservesFunctionLineComment(t *testing.T) {
 	}
 }
 
+// TestFormatPreservesFunctionDocComment keeps `///` documentation attached.
+func TestFormatPreservesFunctionDocComment(t *testing.T) {
+	src := "/// explain main\nfn main(){return;}\n"
+	want := "/// explain main\n" +
+		"fn main() {\n" +
+		"    return;\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(doc commented fn):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestFormatPreservesImplMethodDocComment keeps method docs inside impl bodies.
+func TestFormatPreservesImplMethodDocComment(t *testing.T) {
+	src := "impl Parser{\n/// Advances.\nfn advance(self: Parser)->void{return;}}\n"
+	want := "impl Parser {\n" +
+		"    /// Advances.\n" +
+		"    fn advance(self: Parser) -> void {\n" +
+		"        return;\n" +
+		"    }\n" +
+		"}\n"
+	if got := Format(src); got != want {
+		t.Fatalf("Format(doc commented method):\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFormatKeepsFunctionLineCommentAttached keeps doc comments with following functions.
 func TestFormatKeepsFunctionLineCommentAttached(t *testing.T) {
 	src := "fn helper(){return;}\n// explain main\nfn main(){return;}\n"

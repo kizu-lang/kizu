@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/lexer"
 )
 
@@ -58,6 +59,82 @@ func TestParseFunctionWithParamsAndReturn(t *testing.T) {
 	want := `fn add(a: &i64, b: &var i64) -> i64 { return (a + b); }`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseFunctionDocComments checks attached docs survive parsing through pub.
+func TestParseFunctionDocComments(t *testing.T) {
+	input := `/// Parses a source file.
+/// Returns an AST.
+pub fn parse() -> i64 {
+    return 1;
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	if len(program.Decls) != 1 {
+		t.Fatalf("got %d declarations, want 1", len(program.Decls))
+	}
+	fn, ok := program.Decls[0].(*ast.FunctionDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want function", program.Decls[0])
+	}
+	if !fn.Public {
+		t.Fatalf("function is not public")
+	}
+	want := "Parses a source file.\nReturns an AST."
+	if fn.Doc != want {
+		t.Fatalf("doc = %q, want %q", fn.Doc, want)
+	}
+}
+
+// TestParseFunctionDocCommentsThroughUnsafeExtern checks docs pass through modifiers.
+func TestParseFunctionDocCommentsThroughUnsafeExtern(t *testing.T) {
+	input := `/// Calls the host runtime.
+pub unsafe extern "c" fn host(value: i64)`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	fn, ok := program.Decls[0].(*ast.FunctionDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want function", program.Decls[0])
+	}
+	if !fn.Public || !fn.Unsafe || fn.ExternABI != "c" {
+		t.Fatalf("function modifiers = public:%v unsafe:%v abi:%q", fn.Public, fn.Unsafe, fn.ExternABI)
+	}
+	if fn.Doc != "Calls the host runtime." {
+		t.Fatalf("doc = %q", fn.Doc)
+	}
+}
+
+// TestParseImplMethodDocComments checks docs attach to methods inside impl blocks.
+func TestParseImplMethodDocComments(t *testing.T) {
+	input := `struct Parser {}
+
+impl Parser {
+    /// Advances to the next token.
+    fn advance(self: Parser) -> void {
+        return;
+    }
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	implDecl, ok := program.Decls[1].(*ast.ImplDecl)
+	if !ok {
+		t.Fatalf("decl = %#v, want impl", program.Decls[1])
+	}
+	if len(implDecl.Methods) != 1 {
+		t.Fatalf("got %d methods, want 1", len(implDecl.Methods))
+	}
+	if implDecl.Methods[0].Doc != "Advances to the next token." {
+		t.Fatalf("method doc = %q", implDecl.Methods[0].Doc)
 	}
 }
 

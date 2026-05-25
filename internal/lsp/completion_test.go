@@ -119,6 +119,7 @@ impl Trace {
     fn deinit(self: Trace) -> void {
         return;
     }
+    /// Renames the trace.
     fn rename(self: &var Trace, name: []u8) -> void {
         return;
     }
@@ -129,7 +130,7 @@ fn main() {
     first.
 }
 `
-	items := Complete(source, Position{Line: 16, Character: len("    first.")})
+	items := Complete(source, Position{Line: 17, Character: len("    first.")})
 	label := requireCompletion(t, items, "label")
 	if label.Kind != completionItemKindField || label.Detail != "[]u8" {
 		t.Fatalf("label item = %#v, want []u8 field", label)
@@ -149,11 +150,15 @@ fn main() {
 	if rename.Detail != "fn rename(self: &var Trace, name: []u8) -> void" {
 		t.Fatalf("rename detail = %q, want method signature", rename.Detail)
 	}
+	if rename.Documentation == nil || rename.Documentation.Value != "Renames the trace." {
+		t.Fatalf("rename documentation = %#v", rename.Documentation)
+	}
 }
 
 // TestCompleteReturnsFunctionSignatureDetails checks callable completions are descriptive.
 func TestCompleteReturnsFunctionSignatureDetails(t *testing.T) {
-	source := `fn inspect(value: i64, name: []u8) -> bool {
+	source := `/// Inspects a value.
+pub fn inspect(value: i64, name: []u8) -> bool {
     return true;
 }
 
@@ -161,7 +166,7 @@ fn main() {
     insp
 }
 `
-	items := Complete(source, Position{Line: 5, Character: len("    insp")})
+	items := Complete(source, Position{Line: 6, Character: len("    insp")})
 	inspect := requireCompletion(t, items, "inspect")
 	if inspect.Kind != completionItemKindFunction {
 		t.Fatalf("kind = %d, want function", inspect.Kind)
@@ -171,6 +176,9 @@ fn main() {
 	}
 	if inspect.InsertText != "inspect(${1:value}, ${2:name})" {
 		t.Fatalf("insertText = %q, want name-only snippet", inspect.InsertText)
+	}
+	if inspect.Documentation == nil || inspect.Documentation.Value != "Inspects a value." {
+		t.Fatalf("documentation = %#v", inspect.Documentation)
 	}
 }
 

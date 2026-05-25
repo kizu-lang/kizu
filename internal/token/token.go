@@ -77,10 +77,11 @@ const (
 )
 
 type Token struct {
-	Type    Type
-	Literal string
-	Line    int
-	Column  int
+	Type        Type
+	Literal     string
+	Line        int
+	Column      int
+	DocComments []string
 }
 
 var keywords = map[string]Type{

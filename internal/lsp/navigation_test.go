@@ -35,8 +35,11 @@ func TestHoverReturnsSymbolDetails(t *testing.T) {
 	requireHoverContains(t, local, "trace: Trace")
 	method := server.hover(uri, positionIn(source, "trace.rename", "rename"))
 	requireHoverContains(t, method, "fn rename")
+	requireHoverContains(t, method, "Renames the trace.")
 	variant := server.hover(uri, positionIn(source, "Color::Green;", "Green"))
 	requireHoverContains(t, variant, "enum Color::Green")
+	function := server.hover(uri, positionIn(source, "inspect(1)", "inspect"))
+	requireHoverContains(t, function, "Inspects a trace value.")
 }
 
 // TestDocumentSymbolsReturnOutline checks VSCode Outline gets useful structure.
@@ -97,12 +100,14 @@ struct Trace {
 }
 
 impl Trace {
+    /// Renames the trace.
     fn rename(self: &var Trace, name: []u8) -> void {
         return;
     }
 }
 
-fn inspect(value: i64) -> void {
+/// Inspects a trace value.
+pub fn inspect(value: i64) -> void {
     let trace = Trace { label: "x", count: value };
     let color = Color::Green;
     trace.label;

@@ -17,13 +17,14 @@ type navigationSource struct {
 }
 
 type navigationDeclaration struct {
-	name      string
-	detail    string
-	uri       string
-	rng       Range
-	kind      int
-	params    []string
-	container string
+	name          string
+	detail        string
+	documentation string
+	uri           string
+	rng           Range
+	kind          int
+	params        []string
+	container     string
 }
 
 type navigationIndex struct {
@@ -77,7 +78,10 @@ func (s *Server) hover(uri string, position Position) *hover {
 		return nil
 	}
 	return &hover{
-		Contents: markupContent{Kind: "markdown", Value: kizuHoverMarkup(decl.detail)},
+		Contents: markupContent{
+			Kind:  "markdown",
+			Value: kizuHoverMarkupWithDocumentation(decl.detail, decl.documentation),
+		},
 	}
 }
 
@@ -208,12 +212,13 @@ func (idx navigationIndex) scanFunction(
 	headerEnd := declarationHeaderEnd(tokens, start)
 	params, _ := readFunctionParams(tokens, start)
 	idx.functions[name] = navigationDeclaration{
-		name:   name,
-		detail: tokenText(tokens[start:headerEnd]),
-		uri:    src.uri,
-		rng:    tokenRange(tokens[start+1]),
-		kind:   symbolKindFunction,
-		params: parameterLabels(params, false),
+		name:          name,
+		detail:        tokenText(tokens[start:headerEnd]),
+		documentation: functionDocumentation(tokens, start),
+		uri:           src.uri,
+		rng:           tokenRange(tokens[start+1]),
+		kind:          symbolKindFunction,
+		params:        parameterLabels(params, false),
 	}
 	return skipDeclarationBody(tokens, headerEnd)
 }
@@ -352,12 +357,13 @@ func readMethodDeclaration(
 	name := tokens[start+1].Literal
 	params, _ := readFunctionParams(tokens, start)
 	return navigationDeclaration{
-		name:   name,
-		detail: tokenText(tokens[start:headerEnd]),
-		uri:    src.uri,
-		rng:    tokenRange(tokens[start+1]),
-		kind:   symbolKindMethod,
-		params: parameterLabels(params, true),
+		name:          name,
+		detail:        tokenText(tokens[start:headerEnd]),
+		documentation: functionDocumentation(tokens, start),
+		uri:           src.uri,
+		rng:           tokenRange(tokens[start+1]),
+		kind:          symbolKindMethod,
+		params:        parameterLabels(params, true),
 	}, headerEnd, true
 }
 
@@ -931,4 +937,13 @@ func fileURIFromPath(path string) string {
 // kizuHoverMarkup renders hover content as a Kizu markdown code block.
 func kizuHoverMarkup(detail string) string {
 	return "```kizu\n" + detail + "\n```"
+}
+
+// kizuHoverMarkupWithDocumentation appends attached docs below declaration details.
+func kizuHoverMarkupWithDocumentation(detail string, docs string) string {
+	value := kizuHoverMarkup(detail)
+	if strings.TrimSpace(docs) != "" {
+		value += "\n\n" + docs
+	}
+	return value
 }

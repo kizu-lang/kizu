@@ -954,6 +954,23 @@ func TestFmtCommandPreservesLeadingLineComments(t *testing.T) {
 	}
 }
 
+// TestFmtCommandPreservesFunctionDocComments keeps selfhost fmt from dropping docs.
+func TestFmtCommandPreservesFunctionDocComments(t *testing.T) {
+	path := writeTempKizuSource(t, "doc-commented.kizu",
+		"/// keep this doc\nfn main(){print(\"hello, kizu\");}\n")
+	got, stderr, runErr := runDispatchCaptureOutput(t, "fmt", []string{path})
+	if runErr != nil {
+		t.Fatalf("fmt failed: %v\n%s", runErr, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("got stderr %q, want empty", stderr)
+	}
+	want := "/// keep this doc\nfn main() {\n    print(\"hello, kizu\");\n}\n"
+	if got != want {
+		t.Fatalf("fmt doc comments:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestFmtCommandPreservesBlockLineComments keeps non-leading full-line comments.
 func TestFmtCommandPreservesBlockLineComments(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "block-comment.kizu")

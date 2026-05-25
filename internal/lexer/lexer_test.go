@@ -75,6 +75,48 @@ func TestNextToken(t *testing.T) {
 	}
 }
 
+// TestDocCommentsAttachToNextToken checks `///` blocks attach as token metadata.
+func TestDocCommentsAttachToNextToken(t *testing.T) {
+	l := New(`/// Parses a source file.
+/// Returns an AST.
+fn parse() {}
+`)
+	tok := l.NextToken()
+	if tok.Type != token.Function {
+		t.Fatalf("got %s, want fn", tok.Type)
+	}
+	requireDocComments(t, tok, []string{"Parses a source file.", "Returns an AST."})
+}
+
+// TestDocCommentsRequireExactThreeSlashesAndAdjacency checks non-doc comments break attachment.
+func TestDocCommentsRequireExactThreeSlashesAndAdjacency(t *testing.T) {
+	for _, input := range []string{
+		"//// ordinary\nfn main() {}\n",
+		"/// doc\n\nfn main() {}\n",
+		"/// doc\n// ordinary\nfn main() {}\n",
+	} {
+		l := New(input)
+		tok := l.NextToken()
+		if tok.Type != token.Function {
+			t.Fatalf("got %s, want fn for %q", tok.Type, input)
+		}
+		requireDocComments(t, tok, nil)
+	}
+}
+
+// requireDocComments checks token doc metadata exactly.
+func requireDocComments(t *testing.T, tok token.Token, want []string) {
+	t.Helper()
+	if len(tok.DocComments) != len(want) {
+		t.Fatalf("doc comments = %#v, want %#v", tok.DocComments, want)
+	}
+	for i := range want {
+		if tok.DocComments[i] != want[i] {
+			t.Fatalf("doc comments = %#v, want %#v", tok.DocComments, want)
+		}
+	}
+}
+
 // TestDynToken checks the dynamic dispatch keyword.
 func TestDynToken(t *testing.T) {
 	l := New(`dyn Writer`)
