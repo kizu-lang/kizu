@@ -200,7 +200,7 @@ func selfhostCLIFrontendDefaultHappyCases(
 			name: "parse_temp_source",
 			args: []string{"parse", fixtures.source},
 			wantOut: `enum Flag {
-    Yes, No
+    Yes, No,
 }
 
 struct Name {
