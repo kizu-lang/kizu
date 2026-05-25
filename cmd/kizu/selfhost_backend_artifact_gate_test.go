@@ -613,46 +613,6 @@ func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 			"parse_run_executable_ast checked-run-ast\n",
 		"backend-input selected-body-parsing selfhost::backend::executable::" +
 			"parse_test_executable_ast checked-test-ast\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_executable_ast#parse_run_program_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_program_ast#parse_run_fn_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_fn_ast#parse_run_block_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_block_ast#parse_run_print_stmt_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_block_ast#parse_run_return_stmt_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_return_stmt_ast#is_empty_node checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_print_stmt_ast#parse_run_print_call_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_run_print_call_ast#run_string_literal_payload checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"run_string_literal_payload#run_payload_from_literal checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"run_payload_from_literal#is_supported_run_print_payload checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_test_executable_ast#parse_test_program_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_test_program_ast#parse_test_fn_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_test_fn_ast#parse_test_block_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_test_block_ast#is_void_return_type checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_test_block_ast#parse_test_expect_statement_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_test_block_ast#is_empty_return checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_test_expect_statement_ast#parse_expect_stmt_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_expect_stmt_ast#parse_expect_call_ast checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"parse_expect_call_ast#expect_bool_value checked-call\n",
-		"backend-input selected-body-parsing-call selfhost::backend::executable::" +
-			"expect_bool_value#bool_value_as_i64 checked-call\n",
 		"backend-input selected-body-parsing-token syntax-fn fn\n",
 		"backend-input selected-body-parsing-token syntax-test test\n",
 		"backend-input selected-body-parsing-token syntax-return return\n",
