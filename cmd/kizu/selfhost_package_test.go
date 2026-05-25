@@ -1239,6 +1239,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn named_i64_fact(",
 		"pub fn require_named_i64_fact(",
 		"pub fn sequence_fact_value(",
+		"pub fn sequence_fact_line_value(",
 		"pub fn sequence_fact_second_value(",
 		"pub fn sequence_fact_exists(",
 		"pub fn sequence_fact_count(",
@@ -2249,12 +2250,12 @@ func assertExecutableHostedLoweringComesFromCheckedAST(
 		"lowering_case_return_struct(",
 		"struct_field_enum_value(",
 		"struct_field_payload_kind(",
-		"append_case_llvm_c_string_fact(",
+		"append_case_fact(",
 		"hosted-lowering-case-kind ",
-		"hosted-lowering-case-comment-llvm ",
+		"hosted-lowering-case-comment ",
 		"hosted-lowering-case-entry ",
 		"hosted-lowering-case-payload ",
-		"hosted-lowering-case-payload-llvm ",
+		"hosted-lowering-case-payload-literal ",
 	} {
 		if !strings.Contains(hostedLowering, fragment) {
 			t.Fatalf("hosted lowering facts are not checked AST-derived via %q", fragment)
@@ -2263,7 +2264,7 @@ func assertExecutableHostedLoweringComesFromCheckedAST(
 	emitter := selected + hostedLowering
 	for _, fact := range facts {
 		parts := strings.Fields(fact)
-		if len(parts) != 3 && len(parts) != 4 {
+		if len(parts) < 4 {
 			t.Fatalf("invalid hosted lowering fixture %q", fact)
 		}
 		if strings.Contains(llvm, `"`+fact+`"`) {
@@ -2460,9 +2461,10 @@ func assertExecutableHostedLoweringConsumers(
 		"try append_selected_hosted_executable_lowering_metadata(out, ir_bytes)",
 		"fn require_selected_hosted_executable_lowering(",
 		"ir_contract::sequence_fact_count(",
+		"ir_contract::sequence_fact_line_value(",
 		`"hosted-lowering-case-kind "`,
-		`"hosted-lowering-case-comment-llvm "`,
-		`"hosted-lowering-case-payload-llvm "`,
+		`"hosted-lowering-case-comment "`,
+		`"hosted-lowering-case-payload-literal "`,
 	} {
 		if !strings.Contains(llvm, fragment) {
 			t.Fatalf("backend hosted lowering consumer missing %q", fragment)
@@ -2478,8 +2480,9 @@ func assertExecutableHostedLoweringConsumers(
 		for _, fragment := range []string{
 			"hosted_lowering_case_kind_tag(",
 			"ir_contract::sequence_fact_value(",
+			"ir_contract::sequence_fact_line_value(",
 			`"hosted-lowering-case-kind "`,
-			`"hosted-lowering-case-comment-llvm "`,
+			`"hosted-lowering-case-comment "`,
 			`"hosted-lowering-case-entry "`,
 			`"hosted-lowering-case-stream "`,
 			`"hosted-lowering-case-exit "`,
@@ -2829,10 +2832,11 @@ func assertSequenceFactConsumer(t *testing.T, content string, owner string, fact
 		t.Fatalf("%s hardcodes complete executable sequence fact %q", owner, fact)
 	}
 	parts := strings.Fields(fact)
-	if len(parts) != 4 {
+	if len(parts) < 4 {
 		t.Fatalf("invalid executable sequence fact fixture %q", fact)
 	}
 	if !strings.Contains(content, "ir_contract::sequence_fact_value(") &&
+		!strings.Contains(content, "ir_contract::sequence_fact_line_value(") &&
 		!strings.Contains(content, "ir_contract::require_sequence_fact(") {
 		t.Fatalf(
 			"%s does not consume executable sequence fact %q through sequence fact APIs",
@@ -3006,8 +3010,8 @@ func hostedExecutableRunHostedLoweringFacts() []string {
 	return []string{
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 RunPrintString",
-		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu\\20run\\20artifact\\20ll\\20v0",
+		"hosted-lowering-case-comment selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 0 kizu run artifact ll v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 0 kizu_run_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3022,8 +3026,8 @@ func hostedExecutableRunHostedLoweringFacts() []string {
 			"lower_run_hosted_executable 0 executable-field",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 RunReturnVoid",
-		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 kizu\\20run\\20artifact\\20ll\\20v0",
+		"hosted-lowering-case-comment selfhost::backend::hosted::" +
+			"lower_run_hosted_executable 1 kizu run artifact ll v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_run_hosted_executable 1 kizu_run_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3044,8 +3048,8 @@ func hostedExecutableTestHostedLoweringFacts() []string {
 	return []string{
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 TestExpectOk",
-		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 kizu\\20test\\20artifact\\20ll\\20v0",
+		"hosted-lowering-case-comment selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 kizu test artifact ll v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 kizu_test_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3058,12 +3062,12 @@ func hostedExecutableTestHostedLoweringFacts() []string {
 			"lower_test_hosted_executable 0 0",
 		"hosted-lowering-case-payload selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 0 literal",
-		"hosted-lowering-case-payload-llvm selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 test:\\20ok",
+		"hosted-lowering-case-payload-literal selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 0 test: ok",
 		"hosted-lowering-case-kind selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 TestExpectFailure",
-		"hosted-lowering-case-comment-llvm selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 kizu\\20test\\20artifact\\20ll\\20v0",
+		"hosted-lowering-case-comment selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 kizu test artifact ll v0",
 		"hosted-lowering-case-entry selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 kizu_test_main",
 		"hosted-lowering-case-global selfhost::backend::hosted::" +
@@ -3076,9 +3080,9 @@ func hostedExecutableTestHostedLoweringFacts() []string {
 			"lower_test_hosted_executable 1 1",
 		"hosted-lowering-case-payload selfhost::backend::hosted::" +
 			"lower_test_hosted_executable 1 literal",
-		"hosted-lowering-case-payload-llvm selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 error:\\20runtime\\20error:" +
-			"\\20expected\\20condition\\20to\\20be\\20true",
+		"hosted-lowering-case-payload-literal selfhost::backend::hosted::" +
+			"lower_test_hosted_executable 1 error: runtime error:" +
+			" expected condition to be true",
 	}
 }
 
