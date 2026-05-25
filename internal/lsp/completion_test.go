@@ -63,6 +63,30 @@ func TestVSCodeSnippetsExposeTestBlock(t *testing.T) {
 	}
 }
 
+// TestVSCodePackageExposesRunAndTestCommands checks the editor command manifest.
+func TestVSCodePackageExposesRunAndTestCommands(t *testing.T) {
+	path := filepath.Join("..", "..", "editors", "vscode", "package.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest vscodePackageManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	requireVSCodeActivationEvent(t, manifest, "onCommand:kizu.runFile")
+	requireVSCodeActivationEvent(t, manifest, "onCommand:kizu.testFile")
+	requireVSCodeCommand(t, manifest, "kizu.runFile", "Kizu: Run File")
+	requireVSCodeCommand(t, manifest, "kizu.testFile", "Kizu: Test File")
+	prop, ok := manifest.Contributes.Configuration.Properties["kizu.cli.path"]
+	if !ok {
+		t.Fatalf("kizu.cli.path setting missing")
+	}
+	if prop.Type != "string" || prop.Default != "kizu" {
+		t.Fatalf("kizu.cli.path = %#v, want string default kizu", prop)
+	}
+}
+
 // TestCompleteReturnsEnumMembersAfterNamespace checks incomplete namespace expressions work.
 func TestCompleteReturnsEnumMembersAfterNamespace(t *testing.T) {
 	source := `enum Color {
@@ -173,4 +197,53 @@ type vscodeSnippet struct {
 	Prefix      string   `json:"prefix"`
 	Body        []string `json:"body"`
 	Description string   `json:"description"`
+}
+
+type vscodePackageManifest struct {
+	ActivationEvents []string `json:"activationEvents"`
+	Contributes      struct {
+		Commands []struct {
+			Command string `json:"command"`
+			Title   string `json:"title"`
+		} `json:"commands"`
+		Configuration struct {
+			Properties map[string]vscodePackageProperty `json:"properties"`
+		} `json:"configuration"`
+	} `json:"contributes"`
+}
+
+type vscodePackageProperty struct {
+	Type    string `json:"type"`
+	Default string `json:"default"`
+}
+
+// requireVSCodeActivationEvent checks that package.json activates a command.
+func requireVSCodeActivationEvent(
+	t *testing.T,
+	manifest vscodePackageManifest,
+	want string,
+) {
+	t.Helper()
+	for _, event := range manifest.ActivationEvents {
+		if event == want {
+			return
+		}
+	}
+	t.Fatalf("activation event %q missing from %#v", want, manifest.ActivationEvents)
+}
+
+// requireVSCodeCommand checks that package.json contributes a named command.
+func requireVSCodeCommand(
+	t *testing.T,
+	manifest vscodePackageManifest,
+	command string,
+	title string,
+) {
+	t.Helper()
+	for _, item := range manifest.Contributes.Commands {
+		if item.Command == command && item.Title == title {
+			return
+		}
+	}
+	t.Fatalf("command %q title %q missing from %#v", command, title, manifest.Contributes.Commands)
 }
