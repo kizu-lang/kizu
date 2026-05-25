@@ -1210,15 +1210,20 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_facts(",
 		"fn append_execute_function_facts(",
 		"fn append_executable_function_facts(",
+		"fn append_executable_helper_body_facts(",
 		"fn append_hosted_function_facts(",
 		"fn require_function_body_fragment(",
 		"executable_body::append_function_body_ir(",
+		"executable_body::append_helper_body_ir(",
+		"fn append_selected_helper_body(",
 		"executable_body_parsing::append_run_parsing_facts(",
 		"executable_body_lowering::append_run_lowering_facts(",
 		"selected-function ",
 	},
 	"../../selfhost/src/ir/executable_body.kizu": {
 		"pub fn append_function_body_ir(",
+		"pub fn append_helper_body_ir(",
+		"fn append_body_ir(",
 		"fn append_body_node_ir(",
 		"fn append_body_edge(",
 		"fn append_body_call_fact(",
@@ -1310,20 +1315,30 @@ func assertSelfhostSplitFiles(t *testing.T) {
 // TestSelfhostHostedExecutableRulesUseIRContract keeps hosted executable
 // recognition and lowering tied to the checked package IR contract.
 func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
-	ir := readSelfhostFile(t, "../../selfhost/src/ir.kizu")
-	contract := readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu")
-	selected := readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu")
-	body := readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu")
-	bodyParsing := readSelfhostFile(t, "../../selfhost/src/ir/executable_body_parsing.kizu")
-	bodyLowering := readSelfhostFile(t, "../../selfhost/src/ir/executable_body_lowering.kizu")
-	llvm := readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu")
-	cli := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	match := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu")
-	ast := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu")
-	lowerer := readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu")
-	run := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
-	test := readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu")
-	astRules := []string{
+	sources := readHostedExecutableContractSources(t)
+	facts := hostedExecutableContractFacts{
+		astRules:                  hostedExecutableASTRules(),
+		abi:                       hostedExecutableABIFacts(),
+		selectedFunctions:         hostedExecutableSelectedFunctionFacts(),
+		selectedBodies:            hostedExecutableSelectedBodyFacts(),
+		selectedHelperBodies:      hostedExecutableSelectedHelperBodyFacts(),
+		selectedBodyParsingFacts:  hostedExecutableSelectedBodyParsingFacts(),
+		selectedBodyLoweringFacts: hostedExecutableSelectedBodyLoweringFacts(),
+		selectedBodyParsingRules:  hostedExecutableSelectedBodyParsingRuleFacts(),
+		selectedBodyLoweringRules: hostedExecutableSelectedBodyLoweringRuleFacts(),
+	}
+	irFacts := sources.ir + sources.contract + sources.selected +
+		sources.body + sources.bodyParsing + sources.bodyLowering
+	assertExecutableFactsPublishedAndValidated(t, irFacts, sources.llvm, facts.astRules)
+	assertHostedExecutableBackendInputs(t, sources.llvm, facts)
+	assertHostedExecutableFactOrigins(t, sources, facts)
+	assertHostedExecutableRendererConsumers(t, sources, facts)
+}
+
+// hostedExecutableASTRules returns the AST recognition facts used by the
+// temporary executable matcher and its checked-AST replacement contract.
+func hostedExecutableASTRules() []string {
+	return []string{
 		"hosted-executable-ast executable-ast-rules-v1",
 		"executable-ast-rule MainScan LeadingFunctions",
 		"executable-ast-rule RunPrintCall MainPrintString",
@@ -1331,49 +1346,171 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 		"executable-ast-rule TestExpectTrue MainExpectTrue",
 		"executable-ast-rule TestExpectFalse MainExpectFalse",
 	}
-	abiFacts := hostedExecutableABIFacts()
-	selectedFunctions := hostedExecutableSelectedFunctionFacts()
-	selectedBodies := hostedExecutableSelectedBodyFacts()
-	selectedBodyParsingFacts := hostedExecutableSelectedBodyParsingFacts()
-	selectedBodyLoweringFacts := hostedExecutableSelectedBodyLoweringFacts()
-	selectedBodyParsingRules := hostedExecutableSelectedBodyParsingRuleFacts()
-	selectedBodyLoweringRules := hostedExecutableSelectedBodyLoweringRuleFacts()
-	irFacts := ir + contract + selected + body + bodyParsing + bodyLowering
-	assertExecutableFactsPublishedAndValidated(t, irFacts, llvm, astRules)
-	assertExecutableSelectedFunctionsValidated(t, llvm, selectedFunctions)
-	assertExecutableSelectedBodiesValidated(t, llvm, selectedBodies)
-	assertExecutableSelectedBodyParsingValidated(t, llvm, selectedBodyParsingFacts)
-	assertExecutableSelectedBodyLoweringValidated(t, llvm, selectedBodyLoweringFacts)
-	assertExecutableABIValidated(t, llvm, abiFacts)
-	assertExecutableContractFactsComeFromCheckedAST(t, ir, contract, llvm, astRules)
-	assertExecutableSelectedFunctionsComeFromCheckedAST(t, ir, selected, llvm, selectedFunctions)
-	assertExecutableSelectedBodiesComeFromCheckedAST(t, ir, selected, body, llvm, selectedBodies)
+}
+
+// hostedExecutableContractFacts groups fixture facts used by the selfhost
+// executable path contract assertions.
+type hostedExecutableContractFacts struct {
+	astRules                  []string
+	abi                       []string
+	selectedFunctions         []string
+	selectedBodies            []string
+	selectedHelperBodies      []string
+	selectedBodyParsingFacts  []string
+	selectedBodyLoweringFacts []string
+	selectedBodyParsingRules  []string
+	selectedBodyLoweringRules []string
+}
+
+// assertHostedExecutableBackendInputs checks backend validation and metadata
+// consume the selected executable facts.
+func assertHostedExecutableBackendInputs(
+	t *testing.T,
+	llvm string,
+	facts hostedExecutableContractFacts,
+) {
+	t.Helper()
+	assertExecutableSelectedFunctionsValidated(t, llvm, facts.selectedFunctions)
+	assertExecutableSelectedBodiesValidated(t, llvm, facts.selectedBodies)
+	assertExecutableSelectedHelperBodiesValidated(t, llvm, facts.selectedHelperBodies)
+	assertExecutableSelectedBodyParsingValidated(t, llvm, facts.selectedBodyParsingFacts)
+	assertExecutableSelectedBodyLoweringValidated(t, llvm, facts.selectedBodyLoweringFacts)
+	assertExecutableABIValidated(t, llvm, facts.abi)
+}
+
+// assertHostedExecutableFactOrigins checks executable path facts are derived
+// from parsed checked AST sources instead of root-level fixtures.
+func assertHostedExecutableFactOrigins(
+	t *testing.T,
+	sources hostedExecutableContractSources,
+	facts hostedExecutableContractFacts,
+) {
+	t.Helper()
+	assertExecutableContractFactsComeFromCheckedAST(
+		t,
+		sources.ir,
+		sources.contract,
+		sources.llvm,
+		facts.astRules,
+	)
+	assertExecutableSelectedFunctionsComeFromCheckedAST(
+		t,
+		sources.ir,
+		sources.selected,
+		sources.llvm,
+		facts.selectedFunctions,
+	)
+	assertExecutableSelectedBodiesComeFromCheckedAST(
+		t,
+		sources.ir,
+		sources.selected,
+		sources.body,
+		sources.llvm,
+		facts.selectedBodies,
+	)
+	assertExecutableSelectedHelperBodiesComeFromCheckedAST(
+		t,
+		sources.ir,
+		sources.selected,
+		sources.body,
+		sources.llvm,
+		facts.selectedHelperBodies,
+	)
 	assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		t,
-		ir,
-		selected,
-		bodyParsing,
-		llvm,
-		selectedBodyParsingFacts,
+		sources.ir,
+		sources.selected,
+		sources.bodyParsing,
+		sources.llvm,
+		facts.selectedBodyParsingFacts,
 	)
 	assertExecutableSelectedBodyLoweringComesFromCheckedAST(
 		t,
-		ir,
-		selected,
-		bodyLowering,
-		llvm,
-		selectedBodyLoweringFacts,
+		sources.ir,
+		sources.selected,
+		sources.bodyLowering,
+		sources.llvm,
+		facts.selectedBodyLoweringFacts,
 	)
+}
+
+// assertHostedExecutableRendererConsumers checks generated renderers consume
+// the IR facts they still need while the matcher remains.
+func assertHostedExecutableRendererConsumers(
+	t *testing.T,
+	sources hostedExecutableContractSources,
+	facts hostedExecutableContractFacts,
+) {
+	t.Helper()
 	assertExecutableRuleConsumers(
 		t,
-		match,
-		lowerer,
-		astRules,
-		selectedBodyParsingRules,
-		selectedBodyLoweringRules,
+		sources.match,
+		sources.lowerer,
+		facts.astRules,
+		facts.selectedBodyParsingRules,
+		facts.selectedBodyLoweringRules,
 	)
-	assertExecutableABIConsumers(t, ast, lowerer, run, test, abiFacts)
-	assertExecutableIRThreading(t, llvm, cli, match, ast, lowerer)
+	assertExecutableABIConsumers(
+		t,
+		sources.ast,
+		sources.lowerer,
+		sources.run,
+		sources.test,
+		facts.abi,
+	)
+	assertExecutableIRThreading(
+		t,
+		sources.llvm,
+		sources.cli,
+		sources.match,
+		sources.ast,
+		sources.lowerer,
+	)
+}
+
+// hostedExecutableContractSources groups the selfhost files used by executable
+// path contract assertions.
+type hostedExecutableContractSources struct {
+	ir           string
+	contract     string
+	selected     string
+	body         string
+	bodyParsing  string
+	bodyLowering string
+	llvm         string
+	cli          string
+	match        string
+	ast          string
+	lowerer      string
+	run          string
+	test         string
+}
+
+// readHostedExecutableContractSources loads the split selfhost files involved
+// in the bounded executable run/test path contract.
+func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractSources {
+	t.Helper()
+	return hostedExecutableContractSources{
+		ir:          readSelfhostFile(t, "../../selfhost/src/ir.kizu"),
+		contract:    readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu"),
+		selected:    readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu"),
+		body:        readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu"),
+		bodyParsing: readSelfhostFile(t, "../../selfhost/src/ir/executable_body_parsing.kizu"),
+		bodyLowering: readSelfhostFile(
+			t,
+			"../../selfhost/src/ir/executable_body_lowering.kizu",
+		),
+		llvm:  readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu"),
+		cli:   readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu"),
+		match: readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_match_llvm.kizu"),
+		ast:   readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu"),
+		lowerer: readSelfhostFile(
+			t,
+			"../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu",
+		),
+		run:  readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
+		test: readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
+	}
 }
 
 // assertExecutableSelectedFunctionsValidated keeps hosted backend input tied to
@@ -1407,6 +1544,29 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string, facts []
 	for _, fact := range hostedExecutableSelectedBodySemanticFacts() {
 		if !strings.Contains(llvm, `"`+fact+`"`) {
 			t.Fatalf("backend IR validation does not require body semantic fact %q", fact)
+		}
+	}
+}
+
+// assertExecutableSelectedHelperBodiesValidated keeps private executable helper
+// body IR required before generated matcher code can be replaced.
+func assertExecutableSelectedHelperBodiesValidated(t *testing.T, llvm string, facts []string) {
+	t.Helper()
+	if !strings.Contains(llvm, `"executable-selected-helper-body-ir checked-ast-helper-body-v1"`) {
+		t.Fatal("backend IR validation does not require selected executable helper body IR")
+	}
+	if !strings.Contains(
+		llvm,
+		`"backend-input executable-selected-helper-body-ir checked-ast-helper-body-v1"`,
+	) {
+		t.Fatal("backend metadata does not record selected executable helper body IR")
+	}
+	for _, fact := range facts {
+		assertNamedFactConsumer(t, llvm, "backend selected-helper-body validation", fact)
+	}
+	for _, fact := range hostedExecutableSelectedHelperBodySemanticFacts() {
+		if !strings.Contains(llvm, `"`+fact+`"`) {
+			t.Fatalf("backend IR validation does not require helper body semantic fact %q", fact)
 		}
 	}
 }
@@ -1562,6 +1722,66 @@ func assertExecutableSelectedBodiesComeFromCheckedAST(
 		} {
 			if !strings.Contains(emitter, fragment) {
 				t.Fatalf("selected body emitter does not publish %q via %q", fact, fragment)
+			}
+		}
+	}
+}
+
+// assertExecutableSelectedHelperBodiesComeFromCheckedAST keeps private helper
+// body facts rooted in parsed checked AST, not backend-side static fixtures.
+func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
+	t *testing.T,
+	ir string,
+	selected string,
+	body string,
+	llvm string,
+	facts []string,
+) {
+	t.Helper()
+	if strings.Contains(ir, `"executable-selected-helper-body-ir checked-ast-helper-body-v1"`) {
+		t.Fatal("IR root hardcodes selected executable helper body IR facts")
+	}
+	for _, fragment := range []string{
+		"append_executable_helper_body_facts(",
+		"append_selected_helper_body(",
+		"function_body_node(",
+		"executable_body::append_helper_body_ir(",
+		"parse_run_program_ast",
+		"parse_test_program_ast",
+		"parse_expect_call_ast",
+	} {
+		if !strings.Contains(selected, fragment) {
+			t.Fatalf("selected helper body IR is not rooted in checked AST via %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"pub fn append_helper_body_ir(",
+		"fn append_body_ir(",
+		`"selected-helper-body "`,
+		`"selected-helper-body-end "`,
+		"body-call ",
+		"body-struct-literal ",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("selected helper body IR emitter missing %q", fragment)
+		}
+	}
+	emitter := selected + body
+	for _, fact := range facts {
+		if strings.Contains(llvm, `"`+fact+`"`) {
+			t.Fatalf("backend hardcodes complete selected-helper-body fact %q", fact)
+		}
+		parts := strings.Fields(fact)
+		if len(parts) != 3 {
+			t.Fatalf("invalid selected-helper-body fixture %q", fact)
+		}
+		for _, fragment := range []string{
+			`"` + parts[0] + ` "`,
+			`"` + parts[1] + `"`,
+			`"` + parts[2] + `"`,
+		} {
+			if !strings.Contains(emitter, fragment) {
+				t.Fatalf("selected helper body emitter does not publish %q via %q", fact, fragment)
 			}
 		}
 	}
@@ -2055,6 +2275,59 @@ func hostedExecutableSelectedBodyFacts() []string {
 	}
 }
 
+// hostedExecutableSelectedHelperBodyFacts returns private executable helpers
+// whose checked bodies must be available before matcher replacement is safe.
+func hostedExecutableSelectedHelperBodyFacts() []string {
+	return []string{
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_fn_ast checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_block_ast checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_return_stmt_ast checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_stmt_ast checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"run_string_literal_payload checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"run_payload_from_literal checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_supported_run_print_payload checked-run-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_program_ast checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_fn_ast checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_block_ast checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_test_expect_statement_ast checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_void_return_type checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_stmt_ast checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_empty_return checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"expect_bool_value checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"bool_value_as_i64 checked-test-ast-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"is_empty_node checked-executable-shared-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable_ast checked-executable-shared-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable checked-executable-shared-helper",
+		"selected-helper-body selfhost::backend::executable::" +
+			"ast_node_text checked-executable-shared-helper",
+	}
+}
+
 // hostedExecutableSelectedBodyLoweringFacts returns checked body lowering facts
 // derived from the selected lowering function bodies.
 func hostedExecutableSelectedBodyLoweringFacts() []string {
@@ -2126,6 +2399,21 @@ func hostedExecutableSelectedBodySemanticFacts() []string {
 			"write_run_artifact 6",
 		"body-call selfhost::backend::hosted::emit_test_executable_artifact " +
 			"write_test_artifact 6",
+	}
+}
+
+// hostedExecutableSelectedHelperBodySemanticFacts returns representative
+// checked helper body edges required before accepting hosted executable IR.
+func hostedExecutableSelectedHelperBodySemanticFacts() []string {
+	return []string{
+		"body-call selfhost::backend::executable::parse_run_program_ast " +
+			"parse_run_fn_ast 4",
+		"body-call selfhost::backend::executable::parse_test_program_ast " +
+			"parse_test_fn_ast 5",
+		"body-call selfhost::backend::executable::parse_run_print_call_ast " +
+			"run_string_literal_payload 3",
+		"body-call selfhost::backend::executable::parse_expect_call_ast " +
+			"expect_bool_value 2",
 	}
 }
 

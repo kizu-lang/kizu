@@ -431,6 +431,7 @@ func requiredLLVMMetadataFragments() []string {
 	}
 	fragments = append(fragments, requiredLLVMMetadataSelectedFunctionFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyFragments()...)
+	fragments = append(fragments, requiredLLVMMetadataSelectedHelperBodyFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
@@ -506,6 +507,59 @@ func requiredLLVMMetadataSelectedBodyFragments() []string {
 			"emit_run_executable_artifact hosted-run-writer\n",
 		"backend-input selected-function-body selfhost::backend::hosted::" +
 			"emit_test_executable_artifact hosted-test-writer\n",
+	}
+}
+
+// requiredLLVMMetadataSelectedHelperBodyFragments returns executable helper body inputs.
+func requiredLLVMMetadataSelectedHelperBodyFragments() []string {
+	return []string{
+		"backend-input executable-selected-helper-body-ir checked-ast-helper-body-v1\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_program_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_fn_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_block_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_return_stmt_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_stmt_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_run_print_call_ast checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"run_string_literal_payload checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"run_payload_from_literal checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_supported_run_print_payload checked-run-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_program_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_fn_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_block_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_test_expect_statement_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_void_return_type checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_stmt_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"parse_expect_call_ast checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_empty_return checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"expect_bool_value checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"bool_value_as_i64 checked-test-ast-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"is_empty_node checked-executable-shared-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable_ast checked-executable-shared-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"unsupported_executable checked-executable-shared-helper\n",
+		"backend-input selected-helper-body selfhost::backend::executable::" +
+			"ast_node_text checked-executable-shared-helper\n",
 	}
 }
 
