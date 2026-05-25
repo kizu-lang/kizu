@@ -2,8 +2,18 @@ import selfhost::backend::ir_contract;
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try require_selected_body_lowering(ir_bytes);
-    try append_cli_lower_run_executable_ast_function(out, ir_bytes);
-    try append_cli_lower_test_executable_ast_function(out, ir_bytes);
+    try append_cli_lower_executable_ast_function(
+        out,
+        ir_bytes,
+        "kizu_selfhost__cli_lower_run_executable_ast",
+        "selfhost::backend::executable::lower_run_executable_ast"
+    );
+    try append_cli_lower_executable_ast_function(
+        out,
+        ir_bytes,
+        "kizu_selfhost__cli_lower_test_executable_ast",
+        "selfhost::backend::executable::lower_test_executable_ast"
+    );
     return;
 }
 
@@ -34,41 +44,50 @@ fn require_selected_body_lowering(ir_bytes: []u8) -> !void {
         test_function,
         "unsupported_executable"
     );
-    try require_lowering_body_shape(ir_bytes, run_function);
-    try require_lowering_body_shape(ir_bytes, test_function);
+    try require_lowering_cases(ir_bytes, run_function);
+    try require_lowering_cases(ir_bytes, test_function);
     return;
 }
 
-fn append_cli_lower_run_executable_ast_function(
+fn require_lowering_cases(ir_bytes: []u8, function_name: []u8) -> !void {
+    let count = try lowering_case_count(ir_bytes, function_name);
+    if count < 1 {
+        return error("missing selected body lowering cases");
+    }
+
+    var index = 0;
+    while index < count {
+        let ast_kind_name = try lowering_case_ast_kind_name(ir_bytes, function_name, index);
+        let result_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, index);
+        let ast_kind = try executable_ast_tag(ir_bytes, ast_kind_name);
+        let result_kind = try executable_kind_tag(ir_bytes, result_kind_name);
+        if ast_kind < 0 or result_kind < 0 {
+            return error("invalid selected body lowering cases");
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_cli_lower_executable_ast_function(
     out: &var std::string::String,
-    ir_bytes: []u8
+    ir_bytes: []u8,
+    llvm_name: []u8,
+    function_name: []u8
 ) -> !void {
-    let function_name = "selfhost::backend::executable::lower_run_executable_ast";
     let unsupported = try executable_kind_tag(ir_bytes, "Unsupported");
-    let run_print_ast_name = try lowering_case_ast_kind_name(ir_bytes, function_name, 0);
-    let run_print_ast = try executable_ast_tag(ir_bytes, run_print_ast_name);
-    let run_print_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, 0);
-    let run_print_kind = try executable_kind_tag(ir_bytes, run_print_kind_name);
-    let run_return_ast_name = try lowering_case_ast_kind_name(ir_bytes, function_name, 1);
-    let run_return_ast = try executable_ast_tag(ir_bytes, run_return_ast_name);
-    let run_return_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, 1);
-    let run_return_kind = try executable_kind_tag(ir_bytes, run_return_kind_name);
-    try append_line(out,
-        "define %kizu.selfhost.executable @kizu_selfhost__cli_lower_run_executable_ast(");
+    let count = try lowering_case_count(ir_bytes, function_name);
+    try out.append_bytes("define %kizu.selfhost.executable @");
+    try out.append_bytes(llvm_name);
+    try out.append_bytes("(");
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %kizu.selfhost.executable.ast %ast");
     try append_line(out, ") {");
     try append_line(out, "entry:");
     try append_line(out, "  %ast_kind = extractvalue %kizu.selfhost.executable.ast %ast, 0");
     try append_line(out, "  %payload = extractvalue %kizu.selfhost.executable.ast %ast, 1");
-    try append_ast_kind_compare(out, "is_print", run_print_ast);
-    try append_line(out, "  br i1 %is_print, label %run_print, label %check_return");
-    try append_line(out, "run_print:");
-    try append_executable_return(out, "run_print", run_print_kind, "payload");
-    try append_line(out, "check_return:");
-    try append_ast_kind_compare(out, "is_return", run_return_ast);
-    try append_line(out, "  br i1 %is_return, label %run_return, label %unsupported");
-    try append_line(out, "run_return:");
-    try append_executable_return(out, "run_return", run_return_kind, "payload");
+    try append_line(out, "  br label %check_case_0");
+    try append_case_dispatch(out, ir_bytes, function_name, count);
     try append_line(out, "unsupported:");
     try append_executable_return(out, "unsupported", unsupported, "payload");
     try append_line(out, "}");
@@ -76,40 +95,87 @@ fn append_cli_lower_run_executable_ast_function(
     return;
 }
 
-fn append_cli_lower_test_executable_ast_function(
+fn append_case_dispatch(
     out: &var std::string::String,
-    ir_bytes: []u8
+    ir_bytes: []u8,
+    function_name: []u8,
+    count: i64
 ) -> !void {
-    let function_name = "selfhost::backend::executable::lower_test_executable_ast";
-    let unsupported = try executable_kind_tag(ir_bytes, "Unsupported");
-    let test_ok_ast_name = try lowering_case_ast_kind_name(ir_bytes, function_name, 0);
-    let test_ok_ast = try executable_ast_tag(ir_bytes, test_ok_ast_name);
-    let test_ok_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, 0);
-    let test_ok_kind = try executable_kind_tag(ir_bytes, test_ok_kind_name);
-    let test_failure_ast_name = try lowering_case_ast_kind_name(ir_bytes, function_name, 1);
-    let test_failure_ast = try executable_ast_tag(ir_bytes, test_failure_ast_name);
-    let test_failure_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, 1);
-    let test_failure_kind = try executable_kind_tag(ir_bytes, test_failure_kind_name);
-    try append_line(out,
-        "define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_executable_ast(");
-    try append_line(out, "  %kizu.selfhost.executable.ast %ast");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_line(out, "  %ast_kind = extractvalue %kizu.selfhost.executable.ast %ast, 0");
-    try append_line(out, "  %payload = extractvalue %kizu.selfhost.executable.ast %ast, 1");
-    try append_ast_kind_compare(out, "is_ok", test_ok_ast);
-    try append_line(out, "  br i1 %is_ok, label %test_ok, label %check_failure");
-    try append_line(out, "test_ok:");
-    try append_executable_return(out, "test_ok", test_ok_kind, "payload");
-    try append_line(out, "check_failure:");
-    try append_ast_kind_compare(out, "is_failure", test_failure_ast);
-    try append_line(out, "  br i1 %is_failure, label %test_failure, label %unsupported");
-    try append_line(out, "test_failure:");
-    try append_executable_return(out, "test_failure", test_failure_kind, "payload");
-    try append_line(out, "unsupported:");
-    try append_executable_return(out, "unsupported", unsupported, "payload");
-    try append_line(out, "}");
-    try append_line(out, "");
+    var index = 0;
+    while index < count {
+        let ast_kind_name = try lowering_case_ast_kind_name(ir_bytes, function_name, index);
+        let result_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, index);
+        let ast_kind = try executable_ast_tag(ir_bytes, ast_kind_name);
+        let result_kind = try executable_kind_tag(ir_bytes, result_kind_name);
+        try append_check_label(out, index);
+        try append_case_compare(out, index, ast_kind);
+        try append_case_branch(out, index, count);
+        try append_case_return(out, index, result_kind);
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_check_label(out: &var std::string::String, index: i64) -> !void {
+    try out.append_bytes("check_case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes(":");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_case_compare(
+    out: &var std::string::String,
+    index: i64,
+    ast_kind: i64
+) -> !void {
+    try out.append_bytes("  %case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_match = icmp eq i64 %ast_kind, ");
+    try std::fmt::append_i64(out, ast_kind);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_case_branch(out: &var std::string::String, index: i64, count: i64) -> !void {
+    try out.append_bytes("  br i1 %case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_match, label %case_");
+    try std::fmt::append_i64(out, index);
+    if index + 1 < count {
+        try out.append_bytes(", label %check_case_");
+        try std::fmt::append_i64(out, index + 1);
+    } else {
+        try out.append_bytes(", label %unsupported");
+    }
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_case_return(
+    out: &var std::string::String,
+    index: i64,
+    result_kind: i64
+) -> !void {
+    try out.append_bytes("case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes(":");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %kinded_case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes(" = insertvalue %kizu.selfhost.executable zeroinitializer, i64 ");
+    try std::fmt::append_i64(out, result_kind);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %result_case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes(" = insertvalue %kizu.selfhost.executable %kinded_case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes(", %kizu.slice.u8 %payload, 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.selfhost.executable %result_case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
@@ -139,19 +205,6 @@ fn append_executable_return(
     return;
 }
 
-fn append_ast_kind_compare(
-    out: &var std::string::String,
-    result: []u8,
-    kind: i64
-) -> !void {
-    try out.append_bytes("  %");
-    try out.append_bytes(result);
-    try out.append_bytes(" = icmp eq i64 %ast_kind, ");
-    try std::fmt::append_i64(out, kind);
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
 fn executable_ast_tag(ir_bytes: []u8, name: []u8) -> !i64 {
     return try ir_contract::named_i64_fact(ir_bytes, "executable-ast-kind ", name);
 }
@@ -160,206 +213,38 @@ fn executable_kind_tag(ir_bytes: []u8, name: []u8) -> !i64 {
     return try ir_contract::named_i64_fact(ir_bytes, "executable-kind ", name);
 }
 
-fn body_field_expr_value(
-    ir_bytes: []u8,
-    function_name: []u8,
-    sequence: i64
-) -> ![]u8 borrows ir_bytes {
-    return try ir_contract::sequence_fact_value(
+fn lowering_case_count(ir_bytes: []u8, function_name: []u8) -> !i64 {
+    return try ir_contract::named_i64_fact(
         ir_bytes,
-        "body-field-expr ",
-        function_name,
-        sequence
+        "selected-body-lowering-case-count ",
+        function_name
     );
 }
 
 fn lowering_case_ast_kind_name(
     ir_bytes: []u8,
     function_name: []u8,
-    statement_index: i64
+    index: i64
 ) -> ![]u8 borrows ir_bytes {
-    let if_sequence = try function_statement_sequence(ir_bytes, function_name, statement_index);
-    let condition_sequence = try ir_contract::body_child_sequence(
+    return try ir_contract::sequence_fact_value(
         ir_bytes,
+        "selected-body-lowering-case-ast ",
         function_name,
-        if_sequence,
-        "condition",
-        0
+        index
     );
-    let left_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        condition_sequence,
-        "left",
-        0
-    );
-    try ir_contract::require_sequence_fact(
-        ir_bytes,
-        "body-field-expr ",
-        function_name,
-        left_sequence,
-        "kind"
-    );
-    let right_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        condition_sequence,
-        "right",
-        0
-    );
-    return try body_field_expr_value(ir_bytes, function_name, right_sequence);
 }
 
 fn lowering_case_result_kind_name(
     ir_bytes: []u8,
     function_name: []u8,
-    statement_index: i64
+    index: i64
 ) -> ![]u8 borrows ir_bytes {
-    let struct_sequence = try lowering_case_struct_sequence(
+    return try ir_contract::sequence_fact_value(
         ir_bytes,
+        "selected-body-lowering-case-result ",
         function_name,
-        statement_index
+        index
     );
-    let kind_init_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        struct_sequence,
-        "field",
-        0
-    );
-    try ir_contract::require_sequence_fact(
-        ir_bytes,
-        "body-field-init ",
-        function_name,
-        kind_init_sequence,
-        "kind"
-    );
-    let kind_value_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        kind_init_sequence,
-        "value",
-        0
-    );
-    return try body_field_expr_value(ir_bytes, function_name, kind_value_sequence);
-}
-
-fn function_statement_sequence(
-    ir_bytes: []u8,
-    function_name: []u8,
-    statement_index: i64
-) -> !i64 {
-    return try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        0,
-        "statement",
-        statement_index
-    );
-}
-
-fn lowering_case_struct_sequence(
-    ir_bytes: []u8,
-    function_name: []u8,
-    statement_index: i64
-) -> !i64 {
-    let if_sequence = try function_statement_sequence(ir_bytes, function_name, statement_index);
-    let then_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        if_sequence,
-        "then",
-        0
-    );
-    let return_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        then_sequence,
-        "statement",
-        0
-    );
-    let struct_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        return_sequence,
-        "value",
-        0
-    );
-    try ir_contract::require_sequence_fact(
-        ir_bytes,
-        "body-struct-literal ",
-        function_name,
-        struct_sequence,
-        "data::Executable"
-    );
-    return struct_sequence;
-}
-
-fn require_lowering_body_shape(ir_bytes: []u8, function_name: []u8) -> !void {
-    try require_lowering_case_shape(ir_bytes, function_name, 0);
-    try require_lowering_case_shape(ir_bytes, function_name, 1);
-    try require_lowering_unsupported_shape(ir_bytes, function_name);
-    return;
-}
-
-fn require_lowering_case_shape(
-    ir_bytes: []u8,
-    function_name: []u8,
-    statement_index: i64
-) -> !void {
-    let struct_sequence = try lowering_case_struct_sequence(
-        ir_bytes,
-        function_name,
-        statement_index
-    );
-    let payload_init_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        struct_sequence,
-        "field",
-        1
-    );
-    try ir_contract::require_sequence_fact(
-        ir_bytes,
-        "body-field-init ",
-        function_name,
-        payload_init_sequence,
-        "stdout_payload"
-    );
-    let payload_value_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        payload_init_sequence,
-        "value",
-        0
-    );
-    try ir_contract::require_sequence_fact(
-        ir_bytes,
-        "body-field-expr ",
-        function_name,
-        payload_value_sequence,
-        "payload"
-    );
-    return;
-}
-
-fn require_lowering_unsupported_shape(ir_bytes: []u8, function_name: []u8) -> !void {
-    let return_sequence = try function_statement_sequence(ir_bytes, function_name, 2);
-    let call_sequence = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        return_sequence,
-        "value",
-        0
-    );
-    try ir_contract::require_sequence_fact(
-        ir_bytes,
-        "body-call ",
-        function_name,
-        call_sequence,
-        "unsupported_executable"
-    );
-    return;
 }
 
 fn append_line(out: &var std::string::String, text: []u8) -> !void {
