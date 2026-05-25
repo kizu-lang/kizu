@@ -1615,6 +1615,9 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		) + readSelfhostFile(
 			t,
 			"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu",
+		) + readSelfhostFile(
+			t,
+			"../../selfhost/src/backend/cli_executable_parser_token_llvm.kizu",
 		),
 		ast: readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu"),
 		lowerer: readSelfhostFile(
@@ -1735,7 +1738,8 @@ func assertExecutableSelectedBodyParsingValidated(t *testing.T, llvm string, fac
 	}
 	for _, fact := range facts {
 		if strings.HasPrefix(fact, "selected-body-parsing ") ||
-			strings.HasPrefix(fact, "selected-body-parsing-call ") {
+			strings.HasPrefix(fact, "selected-body-parsing-call ") ||
+			strings.HasPrefix(fact, "selected-body-parsing-token ") {
 			assertNamedFactConsumer(t, llvm, "backend selected-body-parsing validation", fact)
 			continue
 		}
@@ -2730,7 +2734,10 @@ func assertExecutableParserConsumers(
 	for _, fragment := range []string{
 		"ir_contract::named_i64_fact(",
 		"ir_contract::require_named_fact(",
+		"ir_contract::named_fact_value(",
 		"require_selected_body_parsing_call(",
+		"selected-body-parsing-token ",
+		"parser_source_token(",
 		`"selected-body-parsing-call "`,
 	} {
 		if !strings.Contains(parser, fragment) {
@@ -3441,6 +3448,17 @@ func hostedExecutableSelectedBodyParsingFacts() []string {
 			"parse_expect_call_ast#expect_bool_value checked-call",
 		"selected-body-parsing-call selfhost::backend::executable::" +
 			"expect_bool_value#bool_value_as_i64 checked-call",
+		"selected-body-parsing-token syntax-fn fn",
+		"selected-body-parsing-token syntax-test test",
+		"selected-body-parsing-token syntax-return return",
+		"selected-body-parsing-token syntax-void void",
+		"selected-body-parsing-token value-main main",
+		"selected-body-parsing-token run-print-callee print",
+		"selected-body-parsing-token expect-callee-root std",
+		"selected-body-parsing-token expect-callee-module testing",
+		"selected-body-parsing-token expect-callee-function expect",
+		"selected-body-parsing-token literal-true true",
+		"selected-body-parsing-token literal-false false",
 	}
 	return facts
 }

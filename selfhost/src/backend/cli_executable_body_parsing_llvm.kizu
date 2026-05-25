@@ -1,14 +1,15 @@
 import selfhost::backend::cli_executable_main_llvm;
 import selfhost::backend::cli_executable_body_parser_contract;
+import selfhost::backend::cli_executable_parser_token_llvm;
 import selfhost::backend::ir_contract;
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try cli_executable_body_parser_contract::require_selected_body_parsing(ir_bytes);
-    try cli_executable_main_llvm::append_functions(out);
+    try cli_executable_main_llvm::append_functions(out, ir_bytes);
     try append_cli_is_supported_run_print_payload_function(out);
-    try append_cli_parse_run_print_payload_function(out);
-    try append_cli_parse_run_return_void_ok_function(out);
-    try append_cli_parse_test_expect_value_function(out);
+    try append_cli_parse_run_print_payload_function(out, ir_bytes);
+    try append_cli_parse_run_return_void_ok_function(out, ir_bytes);
+    try append_cli_parse_test_expect_value_function(out, ir_bytes);
     try append_cli_parse_run_executable_ast_function(out, ir_bytes);
     try append_cli_parse_test_executable_ast_function(out, ir_bytes);
     return;
@@ -151,7 +152,10 @@ fn append_cli_is_supported_run_print_payload_function(out: &var std::string::Str
     return;
 }
 
-fn append_cli_parse_run_print_payload_function(out: &var std::string::String) -> !void {
+fn append_cli_parse_run_print_payload_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
     try append_line(out,
         "define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload(");
     try append_line(out, "  %kizu.slice.u8 %source");
@@ -177,16 +181,10 @@ fn append_cli_parse_run_print_payload_function(out: &var std::string::String) ->
     try append_line(out, "  br label %check_print");
     try append_test_next_word_check(
         out,
+        ir_bytes,
         "print",
         "body_start",
-        "5",
-        "112",
-        "114",
-        "105",
-        "110",
-        "116",
-        "0",
-        "0",
+        "run-print-callee",
         "check_print_lparen",
         "continue"
     );
@@ -273,7 +271,10 @@ fn append_cli_parse_run_print_payload_function(out: &var std::string::String) ->
     return;
 }
 
-fn append_cli_parse_run_return_void_ok_function(out: &var std::string::String) -> !void {
+fn append_cli_parse_run_return_void_ok_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
     try append_line(out, "define i1 @kizu_selfhost__cli_parse_run_return_void_ok(");
     try append_line(out, "  %kizu.slice.u8 %source");
     try append_line(out, ") {");
@@ -299,16 +300,10 @@ fn append_cli_parse_run_return_void_ok_function(out: &var std::string::String) -
     try append_line(out, "  br label %check_return");
     try append_test_next_word_check(
         out,
+        ir_bytes,
         "return",
         "body_start",
-        "6",
-        "114",
-        "101",
-        "116",
-        "117",
-        "114",
-        "110",
-        "0",
+        "syntax-return",
         "check_return_semicolon",
         "continue"
     );
@@ -344,7 +339,10 @@ fn append_cli_parse_run_return_void_ok_function(out: &var std::string::String) -
     return;
 }
 
-fn append_cli_parse_test_expect_value_function(out: &var std::string::String) -> !void {
+fn append_cli_parse_test_expect_value_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
     try append_line(out, "define i64 @kizu_selfhost__cli_parse_test_expect_value(");
     try append_line(out, "  %kizu.slice.u8 %source");
     try append_line(out, ") {");
@@ -371,16 +369,10 @@ fn append_cli_parse_test_expect_value_function(out: &var std::string::String) ->
     try append_line(out, "  br label %check_std");
     try append_test_next_word_check(
         out,
+        ir_bytes,
         "std",
         "body_start",
-        "3",
-        "115",
-        "116",
-        "100",
-        "0",
-        "0",
-        "0",
-        "0",
+        "expect-callee-root",
         "check_colon_one",
         "continue"
     );
@@ -395,16 +387,10 @@ fn append_cli_parse_test_expect_value_function(out: &var std::string::String) ->
     );
     try append_test_next_word_check(
         out,
+        ir_bytes,
         "testing",
         "colon_one_end",
-        "7",
-        "116",
-        "101",
-        "115",
-        "116",
-        "105",
-        "110",
-        "103",
+        "expect-callee-module",
         "check_colon_two",
         "continue"
     );
@@ -419,16 +405,10 @@ fn append_cli_parse_test_expect_value_function(out: &var std::string::String) ->
     );
     try append_test_next_word_check(
         out,
+        ir_bytes,
         "expect",
         "colon_two_end",
-        "6",
-        "101",
-        "120",
-        "112",
-        "101",
-        "99",
-        "116",
-        "0",
+        "expect-callee-function",
         "check_lparen",
         "continue"
     );
@@ -441,12 +421,24 @@ fn append_cli_parse_test_expect_value_function(out: &var std::string::String) ->
     try append_line(out, "load_bool:");
     try append_line(out,
         "  %bool_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %bool_start)");
-    try append_line(out,
-        "  %bool_true = call i1 @kizu_selfhost__cli_token_word_eq(%kizu.slice.u8 %source, i64 %bool_start, i64 %bool_end, i64 4, i8 116, i8 114, i8 117, i8 101, i8 0, i8 0, i8 0)");
+    try cli_executable_parser_token_llvm::append_token_word_eq_call(
+        out,
+        ir_bytes,
+        "bool_true",
+        "bool_start",
+        "bool_end",
+        "literal-true"
+    );
     try append_line(out, "  br i1 %bool_true, label %bool_true_value, label %maybe_bool_false");
     try append_line(out, "maybe_bool_false:");
-    try append_line(out,
-        "  %bool_false = call i1 @kizu_selfhost__cli_token_word_eq(%kizu.slice.u8 %source, i64 %bool_start, i64 %bool_end, i64 5, i8 102, i8 97, i8 108, i8 115, i8 101, i8 0, i8 0)");
+    try cli_executable_parser_token_llvm::append_token_word_eq_call(
+        out,
+        ir_bytes,
+        "bool_false",
+        "bool_start",
+        "bool_end",
+        "literal-false"
+    );
     try append_line(out, "  br i1 %bool_false, label %bool_false_value, label %continue");
     try append_line(out, "bool_true_value:");
     try append_line(out, "  br label %check_rparen");
@@ -490,16 +482,10 @@ fn append_cli_parse_test_expect_value_function(out: &var std::string::String) ->
     try append_line(out, "  br i1 %at_void_eof, label %return_expect, label %continue");
     try append_test_next_word_check(
         out,
+        ir_bytes,
         "void_return",
         "expect_semicolon_end",
-        "6",
-        "114",
-        "101",
-        "116",
-        "117",
-        "114",
-        "110",
-        "0",
+        "syntax-return",
         "check_void_return_semicolon",
         "continue"
     );
@@ -527,16 +513,10 @@ fn append_cli_parse_test_expect_value_function(out: &var std::string::String) ->
     try append_line(out, "  br i1 %at_void_return_eof, label %return_expect, label %continue");
     try append_test_next_word_check(
         out,
+        ir_bytes,
         "return",
         "expect_semicolon_end",
-        "6",
-        "114",
-        "101",
-        "116",
-        "117",
-        "114",
-        "110",
-        "0",
+        "syntax-return",
         "check_return_semicolon",
         "continue"
     );
@@ -625,45 +605,21 @@ fn append_test_next_token_char_check(
 
 fn append_test_next_word_check(
     out: &var std::string::String,
+    ir_bytes: []u8,
     name: []u8,
     previous_end: []u8,
-    len: []u8,
-    b0: []u8,
-    b1: []u8,
-    b2: []u8,
-    b3: []u8,
-    b4: []u8,
-    b5: []u8,
-    b6: []u8,
+    token_key: []u8,
     ok_label: []u8,
     fail_label: []u8
 ) -> !void {
     try append_check_label(out, name);
     try append_next_token_load(out, name, previous_end);
-    try out.append_bytes("  %");
-    try out.append_bytes(name);
-    try out.append_bytes("_ok = call i1 @kizu_selfhost__cli_token_word_eq(%kizu.slice.u8 %source, i64 %");
-    try out.append_bytes(name);
-    try out.append_bytes("_start, i64 %");
-    try out.append_bytes(name);
-    try out.append_bytes("_end, i64 ");
-    try out.append_bytes(len);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b0);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b1);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b2);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b3);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b4);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b5);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b6);
-    try out.append_bytes(")");
-    try out.append_byte(cast<u8>(10));
+    try cli_executable_parser_token_llvm::append_named_token_word_eq_call(
+        out,
+        ir_bytes,
+        name,
+        token_key
+    );
     try append_named_branch(out, name, ok_label, fail_label);
     return;
 }
