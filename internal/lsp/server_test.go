@@ -36,24 +36,7 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	}
 	result := messages[0]["result"].(map[string]any)
 	capabilities := result["capabilities"].(map[string]any)
-	if capabilities["documentFormattingProvider"] != true {
-		t.Fatalf("formatting capability = %#v, want true", capabilities["documentFormattingProvider"])
-	}
-	if _, ok := capabilities["completionProvider"].(map[string]any); !ok {
-		t.Fatalf("completionProvider missing from capabilities: %#v", capabilities)
-	}
-	if capabilities["inlayHintProvider"] != true {
-		t.Fatalf("inlayHintProvider = %#v, want true", capabilities["inlayHintProvider"])
-	}
-	if capabilities["definitionProvider"] != true {
-		t.Fatalf("definitionProvider = %#v, want true", capabilities["definitionProvider"])
-	}
-	if capabilities["hoverProvider"] != true {
-		t.Fatalf("hoverProvider = %#v, want true", capabilities["hoverProvider"])
-	}
-	if capabilities["documentSymbolProvider"] != true {
-		t.Fatalf("documentSymbolProvider = %#v, want true", capabilities["documentSymbolProvider"])
-	}
+	requireInitializeCapabilities(t, capabilities)
 	if messages[1]["method"] != "textDocument/publishDiagnostics" {
 		t.Fatalf("got method %#v, want publish diagnostics", messages[1]["method"])
 	}
@@ -61,6 +44,37 @@ func TestServerInitializesAndPublishesDiagnostics(t *testing.T) {
 	diagnostics := params["diagnostics"].([]any)
 	if len(diagnostics) != 1 {
 		t.Fatalf("got %d diagnostics, want 1", len(diagnostics))
+	}
+}
+
+// requireInitializeCapabilities checks advertised LSP feature providers.
+func requireInitializeCapabilities(t *testing.T, capabilities map[string]any) {
+	t.Helper()
+	requireCapability(t, capabilities, "documentFormattingProvider")
+	requireCapability(t, capabilities, "inlayHintProvider")
+	requireCapability(t, capabilities, "definitionProvider")
+	requireCapability(t, capabilities, "hoverProvider")
+	requireCapability(t, capabilities, "documentSymbolProvider")
+	requireCapability(t, capabilities, "referencesProvider")
+	requireCapability(t, capabilities, "workspaceSymbolProvider")
+	requireCapabilityObject(t, capabilities, "completionProvider")
+	requireCapabilityObject(t, capabilities, "signatureHelpProvider")
+	requireCapabilityObject(t, capabilities, "semanticTokensProvider")
+}
+
+// requireCapability checks a boolean server capability.
+func requireCapability(t *testing.T, capabilities map[string]any, key string) {
+	t.Helper()
+	if capabilities[key] != true {
+		t.Fatalf("%s = %#v, want true", key, capabilities[key])
+	}
+}
+
+// requireCapabilityObject checks an object server capability.
+func requireCapabilityObject(t *testing.T, capabilities map[string]any, key string) {
+	t.Helper()
+	if _, ok := capabilities[key].(map[string]any); !ok {
+		t.Fatalf("%s missing from capabilities: %#v", key, capabilities)
 	}
 }
 
@@ -117,6 +131,16 @@ func TestServerNavigationRequests(t *testing.T) {
 			`"position":{"line":3,"character":5}}}`),
 		frame(`{"jsonrpc":"2.0","id":4,"method":"textDocument/documentSymbol",` +
 			`"params":{"textDocument":{"uri":"file:///main.kizu"}}}`),
+		frame(`{"jsonrpc":"2.0","id":5,"method":"textDocument/references",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu"},` +
+			`"position":{"line":3,"character":5},"context":{"includeDeclaration":true}}}`),
+		frame(`{"jsonrpc":"2.0","id":6,"method":"textDocument/signatureHelp",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu"},` +
+			`"position":{"line":3,"character":10}}}`),
+		frame(`{"jsonrpc":"2.0","id":7,"method":"textDocument/semanticTokens/full",` +
+			`"params":{"textDocument":{"uri":"file:///main.kizu"}}}`),
+		frame(`{"jsonrpc":"2.0","id":8,"method":"workspace/symbol",` +
+			`"params":{"query":"helper"}}`),
 		frame(`{"jsonrpc":"2.0","method":"exit"}`),
 	}, "")
 	var output bytes.Buffer
@@ -125,8 +149,8 @@ func TestServerNavigationRequests(t *testing.T) {
 		t.Fatalf("run server: %v", err)
 	}
 	messages := readFrames(t, output.String())
-	if len(messages) != 4 {
-		t.Fatalf("got %d messages, want diagnostics and 3 responses", len(messages))
+	if len(messages) != 8 {
+		t.Fatalf("got %d messages, want diagnostics and 7 responses", len(messages))
 	}
 	locations := messages[1]["result"].([]any)
 	if len(locations) != 1 {
@@ -140,6 +164,22 @@ func TestServerNavigationRequests(t *testing.T) {
 	symbols := messages[3]["result"].([]any)
 	if len(symbols) != 2 {
 		t.Fatalf("symbols = %#v, want helper and main", symbols)
+	}
+	references := messages[4]["result"].([]any)
+	if len(references) != 2 {
+		t.Fatalf("references = %#v, want declaration and call", references)
+	}
+	signature := messages[5]["result"].(map[string]any)
+	if len(signature["signatures"].([]any)) != 1 {
+		t.Fatalf("signature = %#v, want one signature", signature)
+	}
+	semantic := messages[6]["result"].(map[string]any)
+	if len(semantic["data"].([]any)) == 0 {
+		t.Fatalf("semantic tokens = %#v, want data", semantic)
+	}
+	workspaceSymbols := messages[7]["result"].([]any)
+	if len(workspaceSymbols) == 0 {
+		t.Fatalf("workspace symbols = %#v, want helper", workspaceSymbols)
 	}
 }
 

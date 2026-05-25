@@ -17,11 +17,13 @@ type navigationSource struct {
 }
 
 type navigationDeclaration struct {
-	name   string
-	detail string
-	uri    string
-	rng    Range
-	kind   int
+	name      string
+	detail    string
+	uri       string
+	rng       Range
+	kind      int
+	params    []string
+	container string
 }
 
 type navigationIndex struct {
@@ -58,6 +60,15 @@ func (s *Server) hover(uri string, position Position) *hover {
 	source, ok := s.documents[uri]
 	if !ok {
 		return nil
+	}
+	doc := s.checkedDocument(uri)
+	if fact, ok := typeFactAt(source, position, doc.TypeFacts); ok {
+		return &hover{
+			Contents: markupContent{
+				Kind:  "markdown",
+				Value: kizuHoverMarkup(fact.name + ": " + fact.typ),
+			},
+		}
 	}
 	tokens := lexCompletionTokens(source)
 	index, sources := s.navigationIndex(uri, source)
@@ -195,12 +206,14 @@ func (idx navigationIndex) scanFunction(
 	}
 	name := tokens[start+1].Literal
 	headerEnd := declarationHeaderEnd(tokens, start)
+	params, _ := readFunctionParams(tokens, start)
 	idx.functions[name] = navigationDeclaration{
 		name:   name,
 		detail: tokenText(tokens[start:headerEnd]),
 		uri:    src.uri,
 		rng:    tokenRange(tokens[start+1]),
 		kind:   symbolKindFunction,
+		params: parameterLabels(params, false),
 	}
 	return skipDeclarationBody(tokens, headerEnd)
 }
@@ -337,13 +350,31 @@ func readMethodDeclaration(
 	}
 	headerEnd := declarationHeaderEnd(tokens, start)
 	name := tokens[start+1].Literal
+	params, _ := readFunctionParams(tokens, start)
 	return navigationDeclaration{
 		name:   name,
 		detail: tokenText(tokens[start:headerEnd]),
 		uri:    src.uri,
 		rng:    tokenRange(tokens[start+1]),
 		kind:   symbolKindMethod,
+		params: parameterLabels(params, true),
 	}, headerEnd, true
+}
+
+// parameterLabels renders function parameters for signature help.
+func parameterLabels(params []localBinding, skipSelf bool) []string {
+	labels := []string{}
+	for _, param := range params {
+		if skipSelf && param.name == "self" {
+			continue
+		}
+		if param.typ == "" {
+			labels = append(labels, param.name)
+			continue
+		}
+		labels = append(labels, param.name+": "+param.typ)
+	}
+	return labels
 }
 
 // scanFieldDeclarations records fields inside a struct body.
@@ -370,11 +401,12 @@ func scanFieldDeclarations(
 		typ, next := readTypeUntil(tokens, fieldIndex+2, token.Comma, token.RBrace)
 		name := tokens[fieldIndex].Literal
 		fields[name] = navigationDeclaration{
-			name:   name,
-			detail: typeName + "." + name + ": " + typ,
-			uri:    src.uri,
-			rng:    tokenRange(tokens[fieldIndex]),
-			kind:   symbolKindField,
+			name:      name,
+			detail:    typeName + "." + name + ": " + typ,
+			uri:       src.uri,
+			rng:       tokenRange(tokens[fieldIndex]),
+			kind:      symbolKindField,
+			container: typeName,
 		}
 		i = next
 	}
@@ -403,11 +435,12 @@ func scanVariantDeclarations(
 		}
 		name := tokens[i].Literal
 		variants[name] = navigationDeclaration{
-			name:   name,
-			detail: prefix + " " + typeName + "::" + name,
-			uri:    src.uri,
-			rng:    tokenRange(tokens[i]),
-			kind:   symbolKindEnumMember,
+			name:      name,
+			detail:    prefix + " " + typeName + "::" + name,
+			uri:       src.uri,
+			rng:       tokenRange(tokens[i]),
+			kind:      symbolKindEnumMember,
+			container: typeName,
 		}
 		if i+1 < len(tokens) && tokens[i+1].Type == token.LParen {
 			i = skipBalanced(tokens, i+1, token.LParen, token.RParen)
@@ -661,7 +694,7 @@ func readParamDeclarations(
 			detail: name + ": " + typ,
 			uri:    uri,
 			rng:    tokenRange(tokens[i]),
-			kind:   symbolKindField,
+			kind:   symbolKindVariable,
 		})
 		i = next
 	}
@@ -700,7 +733,7 @@ func readLocalDeclaration(
 		detail: name + localDetailSuffix(typ),
 		uri:    uri,
 		rng:    tokenRange(tokens[start+1]),
-		kind:   symbolKindField,
+		kind:   symbolKindVariable,
 	}, localBinding{name: name, typ: typ}, true
 }
 
@@ -720,7 +753,7 @@ func readForPipeDeclaration(
 		detail: name + ": i64",
 		uri:    uri,
 		rng:    tokenRange(tokens[start+4]),
-		kind:   symbolKindField,
+		kind:   symbolKindVariable,
 	}, localBinding{name: name, typ: "i64"}, true
 }
 
