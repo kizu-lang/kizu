@@ -493,17 +493,17 @@ func requiredLLVMMetadataSelectedHelperBodyFragments() []string {
 // requiredLLVMMetadataSelectedBodyParsingFragments returns body parser inputs.
 func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 	return []string{
-		"backend-input selected-body-parsing-token syntax-fn fn\n",
-		"backend-input selected-body-parsing-token syntax-test test\n",
-		"backend-input selected-body-parsing-token syntax-return return\n",
-		"backend-input selected-body-parsing-token syntax-void void\n",
-		"backend-input selected-body-parsing-token value-main main\n",
-		"backend-input selected-body-parsing-token run-print-callee print\n",
-		"backend-input selected-body-parsing-token expect-callee-root std\n",
-		"backend-input selected-body-parsing-token expect-callee-module testing\n",
-		"backend-input selected-body-parsing-token expect-callee-function expect\n",
-		"backend-input selected-body-parsing-token literal-true true\n",
-		"backend-input selected-body-parsing-token literal-false false\n",
+		"backend-input executable-parser-token syntax-fn fn\n",
+		"backend-input executable-parser-token syntax-test test\n",
+		"backend-input executable-parser-token syntax-return return\n",
+		"backend-input executable-parser-token syntax-void void\n",
+		"backend-input executable-parser-token value-main main\n",
+		"backend-input executable-parser-token run-print-callee print\n",
+		"backend-input executable-parser-token expect-callee-root std\n",
+		"backend-input executable-parser-token expect-callee-module testing\n",
+		"backend-input executable-parser-token expect-callee-function expect\n",
+		"backend-input executable-parser-token literal-true true\n",
+		"backend-input executable-parser-token literal-false false\n",
 	}
 }
 

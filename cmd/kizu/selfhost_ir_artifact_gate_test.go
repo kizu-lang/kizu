@@ -163,17 +163,17 @@ func requiredSelfhostIRSelectedHelperBodyFragments() []string {
 // requiredSelfhostIRSelectedBodyParsingFragments returns checked AST parser facts.
 func requiredSelfhostIRSelectedBodyParsingFragments() []string {
 	return []string{
-		"selected-body-parsing-token syntax-fn fn\n",
-		"selected-body-parsing-token syntax-test test\n",
-		"selected-body-parsing-token syntax-return return\n",
-		"selected-body-parsing-token syntax-void void\n",
-		"selected-body-parsing-token value-main main\n",
-		"selected-body-parsing-token run-print-callee print\n",
-		"selected-body-parsing-token expect-callee-root std\n",
-		"selected-body-parsing-token expect-callee-module testing\n",
-		"selected-body-parsing-token expect-callee-function expect\n",
-		"selected-body-parsing-token literal-true true\n",
-		"selected-body-parsing-token literal-false false\n",
+		"executable-parser-token syntax-fn fn\n",
+		"executable-parser-token syntax-test test\n",
+		"executable-parser-token syntax-return return\n",
+		"executable-parser-token syntax-void void\n",
+		"executable-parser-token value-main main\n",
+		"executable-parser-token run-print-callee print\n",
+		"executable-parser-token expect-callee-root std\n",
+		"executable-parser-token expect-callee-module testing\n",
+		"executable-parser-token expect-callee-function expect\n",
+		"executable-parser-token literal-true true\n",
+		"executable-parser-token literal-false false\n",
 	}
 }
 
