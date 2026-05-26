@@ -1276,7 +1276,7 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "define i32 @main()"
+	want := "define i32 @main(i32 %kizu.argc, ptr %kizu.argv)"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("got %q, want substring %q", out, want)
 	}

@@ -428,8 +428,6 @@ func requiredLLVMMetadataFragments() []string {
 	fragments = append(fragments, requiredLLVMMetadataSelectedHelperBodyFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
-	fragments = append(fragments, requiredLLVMMetadataHostedArtifactPathFragments()...)
-	fragments = append(fragments, requiredLLVMMetadataHostedLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
 	fragments = append(fragments, []string{
 		"entry @kizu_selfhost__cli_main\n",
@@ -518,107 +516,6 @@ func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
 // requiredLLVMMetadataSelectedBodyLoweringFragments returns body lowering inputs.
 func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
 	return nil
-}
-
-// requiredLLVMMetadataHostedArtifactPathFragments returns selected hosted
-// artifact path facts consumed by the backend.
-func requiredLLVMMetadataHostedArtifactPathFragments() []string {
-	return []string{
-		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run\n",
-		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run/\n",
-		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact .ll\n",
-		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run/\n",
-		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact .ll.meta\n",
-		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
-			"emit_run_executable_artifact write_run_artifact\n",
-		"backend-input hosted-artifact-metadata-title selfhost::backend::hosted::" +
-			"write_run_metadata kizu-run-artifact-v0\n",
-		"backend-input hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_run_metadata issue #569\n",
-		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test\n",
-		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test/\n",
-		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact .ll\n",
-		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test/\n",
-		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact .ll.meta\n",
-		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
-			"emit_test_executable_artifact write_test_artifact\n",
-		"backend-input hosted-artifact-metadata-title selfhost::backend::hosted::" +
-			"write_test_metadata kizu-test-artifact-v0\n",
-		"backend-input hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_test_metadata issue #570\n",
-		"backend-input hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
-			"append_common_metadata source \n",
-		"backend-input hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
-			"append_common_metadata output \n",
-		"backend-input hosted-artifact-metadata-abi-line selfhost::backend::hosted::" +
-			"append_common_metadata abi selfhost-abi-v0\n",
-		"backend-input hosted-artifact-metadata-entry-prefix selfhost::backend::hosted::" +
-			"append_common_metadata entry @\n",
-		"backend-input hosted-artifact-metadata-runtime-line selfhost::backend::hosted::" +
-			"append_common_metadata runtime target/selfhost/selfhost.host.ll\n",
-		"backend-input hosted-artifact-metadata-lowering-line selfhost::backend::hosted::" +
-			"append_common_metadata executable_lowering selfhost::backend::" +
-			"executable checked-ast\n",
-		"backend-input hosted-artifact-metadata-fallback-line selfhost::backend::hosted::" +
-			"append_common_metadata go.cmd-kizu-fallback none\n",
-		"backend-input hosted-artifact-metadata-mode-line selfhost::backend::hosted::" +
-			"append_common_metadata artifact_mode hosted-artifact\n",
-		"backend-input hosted-artifact-metadata-discovery-line selfhost::backend::hosted::" +
-			"write_test_metadata discovery none\n",
-	}
-}
-
-// requiredLLVMMetadataHostedLoweringFragments returns selected hosted artifact
-// lowering facts consumed by the backend.
-func requiredLLVMMetadataHostedLoweringFragments() []string {
-	return []string{
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 RunPrintString\n",
-		"backend-input hosted-lowering-case-entry selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu_run_main\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu.run.stdout\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 Stdout\n",
-		"backend-input hosted-lowering-case-newline selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 true\n",
-		"backend-input hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 0\n",
-		"backend-input hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 executable-field\n",
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 RunReturnVoid\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 none\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 None\n",
-		"backend-input hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 empty-source-slice\n",
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 TestExpectOk\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 kizu.test.ok\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 Stdout\n",
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 TestExpectFailure\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 kizu.test.failure\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 Stderr\n",
-		"backend-input hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 1\n",
-	}
 }
 
 // requiredLLVMMetadataExternalFragments returns runtime symbols the artifact declares.

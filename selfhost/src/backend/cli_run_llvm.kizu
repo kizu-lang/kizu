@@ -1,5 +1,7 @@
 import selfhost::backend::cli_check_gate_llvm;
 import selfhost::backend::cli_hosted_metadata_llvm;
+import selfhost::backend::data;
+import selfhost::backend::hosted;
 import selfhost::backend::ir_contract;
 
 pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
@@ -120,7 +122,7 @@ fn append_llvm_fact_constant(
     prefix: []u8,
     fact_name: []u8
 ) -> !void {
-    let value = try ir_contract::named_fact_value(ir_bytes, prefix, fact_name);
+    let value = try hosted_artifact_fact_value(prefix, fact_name);
     try append_llvm_constant_bytes(out, name, value);
     return;
 }
@@ -818,7 +820,7 @@ fn append_global_slice(
 }
 
 fn hosted_artifact_fact_len(ir_bytes: []u8, prefix: []u8, fact_name: []u8) -> !i64 {
-    let value = try ir_contract::named_fact_value(ir_bytes, prefix, fact_name);
+    let value = try hosted_artifact_fact_value(prefix, fact_name);
     return std::mem::len(value);
 }
 
@@ -831,7 +833,7 @@ fn hosted_lowering_case_kind_tag(
     function_name: []u8,
     index: i64
 ) -> !i64 {
-    let kind_name = try ir_contract::sequence_fact_value(
+    let kind_name = try hosted_lowering_case_token(
         ir_bytes,
         "hosted-lowering-case-kind ",
         function_name,
@@ -845,8 +847,39 @@ fn hosted_lowering_case_token(
     prefix: []u8,
     function_name: []u8,
     index: i64
-) -> ![]u8 borrows ir_bytes {
-    return try ir_contract::sequence_fact_value(ir_bytes, prefix, function_name, index);
+) -> ![]u8 {
+    let case = try hosted_lowering_case(function_name, index);
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-kind ") {
+        return try hosted_lowering_case_kind_name(function_name, index);
+    }
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-entry ") {
+        return case.entry;
+    }
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-global ") {
+        if std::mem::len(case.global) < 1 {
+            return "none";
+        }
+        return case.global;
+    }
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-stream ") {
+        return hosted_output_stream_name(case.output_stream);
+    }
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-newline ") {
+        if case.append_newline {
+            return "true";
+        }
+        return "false";
+    }
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-exit ") {
+        return hosted_exit_code_name(case.exit_code);
+    }
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-payload ") {
+        if index == 0 {
+            return "executable-field";
+        }
+        return "empty-source-slice";
+    }
+    return error("invalid hosted lowering field");
 }
 
 fn hosted_lowering_case_line(
@@ -854,8 +887,12 @@ fn hosted_lowering_case_line(
     prefix: []u8,
     function_name: []u8,
     index: i64
-) -> ![]u8 borrows ir_bytes {
-    return try ir_contract::sequence_fact_line_value(ir_bytes, prefix, function_name, index);
+) -> ![]u8 {
+    let case = try hosted_lowering_case(function_name, index);
+    if std::mem::equal_bytes(prefix, "hosted-lowering-case-comment ") {
+        return case.comment;
+    }
+    return error("invalid hosted lowering line field");
 }
 
 fn hosted_prefix_source_size(ir_bytes: []u8, function_name: []u8, index: i64) -> !i64 {
@@ -1013,19 +1050,78 @@ fn hosted_lowering_case_stream_name(
     function_name: []u8,
     index: i64
 ) -> ![]u8 {
-    let value = try hosted_lowering_case_token(
-        ir_bytes,
-        "hosted-lowering-case-stream ",
-        function_name,
-        index
-    );
-    if std::mem::equal_bytes(value, "Stdout") {
+    let case = try hosted_lowering_case(function_name, index);
+    if case.output_stream == data::HostedOutputStream::Stdout {
         return "stdout";
     }
-    if std::mem::equal_bytes(value, "Stderr") {
+    if case.output_stream == data::HostedOutputStream::Stderr {
         return "stderr";
     }
-    return error("invalid IR artifact fact");
+    return error("invalid hosted output stream");
+}
+
+fn hosted_artifact_fact_value(prefix: []u8, fact_name: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(
+        fact_name,
+        "selfhost::backend::hosted::emit_run_executable_artifact"
+    ) {
+        if std::mem::equal_bytes(prefix, "hosted-artifact-dir ") {
+            return hosted::run_artifact_dir();
+        }
+        if std::mem::equal_bytes(prefix, "hosted-artifact-ll-prefix ") {
+            return hosted::run_artifact_path_prefix();
+        }
+        if std::mem::equal_bytes(prefix, "hosted-artifact-ll-suffix ") {
+            return hosted::artifact_ll_suffix();
+        }
+        if std::mem::equal_bytes(prefix, "hosted-artifact-metadata-prefix ") {
+            return hosted::run_artifact_path_prefix();
+        }
+        if std::mem::equal_bytes(prefix, "hosted-artifact-metadata-suffix ") {
+            return hosted::artifact_metadata_suffix();
+        }
+    }
+    return error("invalid hosted artifact fact");
+}
+
+fn hosted_lowering_case(function_name: []u8, index: i64) -> !data::HostedExecutable {
+    if std::mem::equal_bytes(
+        function_name,
+        "selfhost::backend::hosted::lower_run_hosted_executable"
+    ) {
+        return try hosted::run_case(index);
+    }
+    return error("invalid hosted lowering function");
+}
+
+fn hosted_lowering_case_kind_name(function_name: []u8, index: i64) -> ![]u8 {
+    if std::mem::equal_bytes(
+        function_name,
+        "selfhost::backend::hosted::lower_run_hosted_executable"
+    ) {
+        return try hosted::run_case_kind_name(index);
+    }
+    return error("invalid hosted lowering function");
+}
+
+fn hosted_output_stream_name(stream: data::HostedOutputStream) -> []u8 {
+    if stream == data::HostedOutputStream::None {
+        return "None";
+    }
+    if stream == data::HostedOutputStream::Stdout {
+        return "Stdout";
+    }
+    return "Stderr";
+}
+
+fn hosted_exit_code_name(exit_code: i64) -> ![]u8 {
+    if exit_code == 0 {
+        return "0";
+    }
+    if exit_code == 1 {
+        return "1";
+    }
+    return error("invalid hosted exit code");
 }
 
 fn append_hosted_exit(out: &var std::string::String, exit_code: i64) -> !void {
