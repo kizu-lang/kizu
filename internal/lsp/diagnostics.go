@@ -235,11 +235,14 @@ func diagnosticFromError(err error) Diagnostic {
 	if errors.As(err, &structured) {
 		span := structured.SourceSpan()
 		if !span.IsZero() {
-			return diagnosticAtSpan(structured.Error(), span, lspSeverity(structured.SeverityLevel()))
+			result := diagnosticAtSpan(structured.Error(), span, lspSeverity(structured.SeverityLevel()))
+			result.Code = structured.Code
+			return result
 		}
 		return Diagnostic{
 			Range:    oneCharacterRange(0, 0),
 			Severity: lspSeverity(structured.SeverityLevel()),
+			Code:     structured.Code,
 			Source:   diagnosticSource,
 			Message:  structured.Error(),
 		}

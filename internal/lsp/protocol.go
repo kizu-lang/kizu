@@ -257,6 +257,7 @@ type symbolInformation struct {
 type Diagnostic struct {
 	Range    Range  `json:"range"`
 	Severity int    `json:"severity,omitempty"`
+	Code     string `json:"code,omitempty"`
 	Source   string `json:"source,omitempty"`
 	Message  string `json:"message"`
 }

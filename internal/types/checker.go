@@ -180,7 +180,7 @@ func requireUnsafeCapabilityAt(
 		message += "\nhelp: " + unsafecap.Hint(info)
 	}
 	if !span.IsZero() {
-		return errorAt(span, "%s", message)
+		return errorAtCode(span, "unsafe.missing_capability", "%s", message)
 	}
 	return errorf("%s", message)
 }
@@ -2768,7 +2768,8 @@ func checkEquality(op string, left Type, right Type, span ast.Span) (Type, error
 
 // operatorTypeMismatch reports both operand types for binary mismatch errors.
 func operatorTypeMismatch(op string, left Type, right Type, span ast.Span) error {
-	return errorAt(span,
+	return errorAtCode(span,
+		"type.operator_type_mismatch",
 		"type error: operator `%s` operands must have same type\n"+
 			"note: left operand has type %s\n"+
 			"note: right operand has type %s",
@@ -4728,7 +4729,7 @@ func (c *Checker) unknownNamespaceError(name string, span ast.Span) error {
 		message += "\nnote: known namespaces: " + known
 	}
 	if !span.IsZero() {
-		return errorAt(span, "%s", message)
+		return errorAtCode(span, "type.unknown_namespace", "%s", message)
 	}
 	return errorf("%s", message)
 }

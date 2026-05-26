@@ -21,6 +21,7 @@ const (
 type Diagnostic struct {
 	Severity Severity
 	Category string
+	Code     string
 	Message  string
 	Span     ast.Span
 	Notes    []string
@@ -110,6 +111,12 @@ func (d *Diagnostic) SourceSpan() ast.Span {
 // SeverityLevel returns the diagnostic severity for LSP and other renderers.
 func (d *Diagnostic) SeverityLevel() Severity {
 	return d.Severity
+}
+
+// WithCode records one stable machine-readable diagnostic code.
+func (d *Diagnostic) WithCode(code string) *Diagnostic {
+	d.Code = code
+	return d
 }
 
 // WithNote appends one structured note line and returns the same diagnostic.
