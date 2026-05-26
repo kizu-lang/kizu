@@ -1203,12 +1203,13 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
 		"cli_executable_body_parser_contract::require_executable_body_parsing(",
+		"import selfhost::backend::executable;",
 		"fn append_cli_parse_run_executable_ast_function(",
 		"fn append_cli_parse_test_executable_ast_function(",
 		"fn append_cli_parse_run_print_payload_function(",
 		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
-		"data::executable_ast_kind_tag_by_name(",
+		"executable::run_print_executable_ast_kind_tag(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu": {
 		"pub fn require_executable_body_parsing(",
@@ -1352,6 +1353,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn parse_test_executable_ast(",
 		"pub fn lower_run_executable_ast(",
 		"pub fn lower_test_executable_ast(",
+		"pub fn unsupported_executable_ast_kind_tag(",
+		"pub fn run_literal_quote_byte(",
+		"pub fn test_expect_true_value(",
 		"fn parse_run_print_call_ast(",
 		"fn parse_expect_call_ast(",
 	},
@@ -2067,11 +2071,6 @@ func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser s
 		"ir_contract::require_body_call(",
 		"require_match_arm_dispatch(",
 		"find_match_arm_with_pattern(",
-		"executable_ast_result_kind_name(",
-		"run_print_ast_kind_name(",
-		"run_return_ast_kind_name(",
-		"test_ok_ast_kind_name(",
-		"test_failure_ast_kind_name(",
 		"run_literal_quote_byte(",
 		"run_literal_min_length(",
 		"run_literal_start_quote_offset(",
@@ -2096,9 +2095,6 @@ func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser s
 		"expression_i64_value(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_parent_with_child_token(",
-		"ir_contract::body_struct_literal_of_type(",
-		"ir_contract::body_struct_field_value(",
-		"ir_contract::body_field_expr_name(",
 		"ir_contract::body_int_value(",
 		"ir_contract::body_call_callee_or_empty(",
 		`"body-binary "`,
@@ -2348,27 +2344,43 @@ func assertExecutableParserConsumers(
 func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"ir_contract::require_named_fact(",
-		"ir_contract::named_fact_value(",
-		"ir_contract::require_body_call(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_parent_with_child_token(",
-		"ir_contract::body_struct_literal_of_type(",
-		"ir_contract::body_struct_field_value(",
-		"ir_contract::body_field_expr_name(",
-		"executable-parser-token ",
-		"parser_source_token(",
-		"append_named_token_char_eq_call(",
-		"append_named_token_pair_eq_call(",
-		"token_byte_value(",
-		"data::executable_ast_kind_tag_by_name(",
+		"cli_executable_body_parser_contract::require_executable_body_parsing(",
+		"cli_executable_parser_token_llvm::append_named_token_char_eq_call(",
+		"cli_executable_parser_token_llvm::append_named_token_pair_eq_call(",
+		"executable::unsupported_executable_ast_kind_tag(",
+		"executable::run_print_executable_ast_kind_tag(",
+		"executable::run_return_executable_ast_kind_tag(",
+		"executable::test_ok_executable_ast_kind_tag(",
+		"executable::test_failure_executable_ast_kind_tag(",
+		"executable::run_payload_min_byte(",
+		"executable::run_payload_max_byte(",
+		"executable::run_payload_forbidden_byte(",
+		"executable::run_literal_quote_byte(",
+		"executable::run_literal_min_length(",
+		"executable::run_literal_start_quote_offset(",
+		"executable::run_literal_end_quote_offset_from_end(",
+		"executable::run_literal_payload_start_offset(",
+		"executable::run_literal_payload_delimiter_width(",
+		"executable::test_expect_true_value(",
+		"executable::test_expect_false_value(",
+		"executable::test_expect_unsupported_value(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
 		}
 	}
-	if strings.Contains(parser, "ir_contract::named_i64_fact(") {
-		t.Fatal("hosted executable parser still consumes executable tag facts")
+	for _, forbidden := range []string{
+		"data::executable_ast_kind_tag_by_name(",
+		"cli_executable_body_parser_contract::unsupported_ast_kind_name(",
+		"cli_executable_body_parser_contract::run_print_ast_kind_name(",
+		"cli_executable_body_parser_contract::run_return_ast_kind_name(",
+		"cli_executable_body_parser_contract::test_ok_ast_kind_name(",
+		"cli_executable_body_parser_contract::test_failure_ast_kind_name(",
+		"ir_contract::named_i64_fact(",
+	} {
+		if strings.Contains(parser, forbidden) {
+			t.Fatalf("hosted executable parser keeps backend-owned contract lookup %q", forbidden)
+		}
 	}
 	for _, fragment := range []string{
 		`"selfhost::backend::executable::parse_run_executable_ast",
@@ -2481,8 +2493,11 @@ func assertExecutableASTABIConsumers(
 		}
 	}
 	for _, fragment := range []string{
-		"executable_ast_tag(",
-		"data::executable_ast_kind_tag_by_name(",
+		"executable::unsupported_executable_ast_kind_tag(",
+		"executable::run_print_executable_ast_kind_tag(",
+		"executable::run_return_executable_ast_kind_tag(",
+		"executable::test_ok_executable_ast_kind_tag(",
+		"executable::test_failure_executable_ast_kind_tag(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume ABI tags with %q", fragment)
