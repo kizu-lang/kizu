@@ -303,7 +303,7 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
-		"define i64 @kizu_selfhost__cli_parse_test_expect_value",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
