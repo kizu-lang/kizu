@@ -1,5 +1,6 @@
 import selfhost::cli::output;
-import selfhost::parser::validation;
+import selfhost::diagnostic;
+import selfhost::types;
 import selfhost::types::model;
 
 struct LineColumn {
@@ -11,17 +12,19 @@ pub fn parse_validation_error(
     allocator: Allocator,
     io: Io,
     path: []u8,
-    validation: validation::ParseValidation
+    validation: &var diagnostic::Report
 ) -> !void {
-    var message = std::string::String(allocator);
-    try message.append_bytes(validation.message);
-    if !std::mem::equal_bytes(validation.got, "") {
-        try message.append_bytes(", got ");
-        try message.append_bytes(validation.got);
+    let span = report_span(&validation.primary, "");
+    try write_owned_prefixed_line(allocator, io, "error", &var validation.message, span);
+    if validation.note_1.len() > 0 {
+        try write_owned_prefixed_line(allocator, io, "note", &var validation.note_1, note_span());
     }
-    let span = std::kizu::diagnostic::file_span(0, path, 0, 0, validation.line, validation.column);
-    try write_owned_prefixed_line(allocator, io, "error", message, span);
-    message.deinit();
+    if validation.note_2.len() > 0 {
+        try write_owned_prefixed_line(allocator, io, "note", &var validation.note_2, note_span());
+    }
+    if validation.help.len() > 0 {
+        try write_owned_prefixed_line(allocator, io, "help", &var validation.help, note_span());
+    }
     try output::error_line(allocator, io, "error: parse failed");
     return;
 }
@@ -35,13 +38,13 @@ pub fn move_error(
     end: i64,
     name: []u8
 ) -> !void {
-    let span = primary_span(path, file_text, start, end);
-    var message = std::string::String(allocator);
-    try message.append_bytes("move error: moved value `");
-    try message.append_bytes(name);
-    try message.append_bytes("` was used");
-    try write_owned_prefixed_line(allocator, io, "error", message, span);
-    message.deinit();
+    let primary = diagnostic::file_span(path, start, end);
+    var report = diagnostic::error_report(allocator, primary);
+    try report.message.append_bytes("move error: moved value `");
+    try report.message.append_bytes(name);
+    try report.message.append_bytes("` was used");
+    defer report.deinit();
+    try write_report(allocator, io, file_text, &var report);
     return;
 }
 
@@ -63,30 +66,9 @@ pub fn function_call_summary_error(
     text: []u8,
     call_error: model::FunctionCallSummary
 ) -> !void {
-    let name = text[call_error.start..call_error.end];
-    let span = primary_span(path, text, call_error.start, call_error.end);
-    if call_error.kind == 1 {
-        var message = std::string::String(allocator);
-        try message.append_bytes("type error: undefined function `");
-        try message.append_bytes(name);
-        try message.append_bytes("`");
-        try write_owned_prefixed_line(allocator, io, "error", message, span);
-        message.deinit();
-        return;
-    }
-    if call_error.kind == 2 {
-        var message = std::string::String(allocator);
-        try message.append_bytes("type error: `");
-        try message.append_bytes(name);
-        try message.append_bytes("` expects ");
-        try std::fmt::append_i64(message, call_error.expected);
-        try message.append_bytes(" args, got ");
-        try std::fmt::append_i64(message, call_error.observed);
-        try write_owned_prefixed_line(allocator, io, "error", message, span);
-        message.deinit();
-        return;
-    }
-    try output::error_line(allocator, io, "error: check failed");
+    var report = try types::function_call_diagnostic(allocator, path, text, call_error);
+    defer report.deinit();
+    try write_report(allocator, io, text, &var report);
     return;
 }
 
@@ -95,135 +77,37 @@ pub fn check_summary_error(
     io: Io,
     path: []u8,
     file_text: []u8,
-    diagnostic: &model::CheckDiagnosticSummary
+    diagnostic: diagnostic::Report
+) -> !bool {
+    var report = diagnostic;
+    defer report.deinit();
+    return try write_report(allocator, io, file_text, &var report);
+}
+
+fn write_report(
+    allocator: Allocator,
+    io: Io,
+    file_text: []u8,
+    diagnostic: &var diagnostic::Report
 ) -> !bool {
     if !diagnostic.found {
         return true;
     }
-    if diagnostic.kind == 1 {
-        try write_type_reference_summary_error(allocator, io, path, file_text, diagnostic);
-        return false;
+    var prefix = "error";
+    if diagnostic.warning {
+        prefix = "warning";
     }
-    if diagnostic.kind == 2 {
-        try write_match_summary_error(allocator, io, path, diagnostic);
-        return false;
+    let span = report_span(&diagnostic.primary, file_text);
+    try write_owned_prefixed_line(allocator, io, prefix, &var diagnostic.message, span);
+    if diagnostic.note_1.len() > 0 {
+        try write_owned_prefixed_line(allocator, io, "note", &var diagnostic.note_1, note_span());
     }
-    if diagnostic.kind == 3 {
-        try write_expected_got_summary_error(
-            allocator,
-            io,
-            path,
-            file_text,
-            diagnostic.start,
-            diagnostic.end,
-            "type error: return expects ",
-            diagnostic.expected_text,
-            diagnostic.actual_text
-        );
-        return false;
+    if diagnostic.note_2.len() > 0 {
+        try write_owned_prefixed_line(allocator, io, "note", &var diagnostic.note_2, note_span());
     }
-    if diagnostic.kind == 4 {
-        let call_summary = model::FunctionCallSummary {
-            found: true,
-            kind: diagnostic.detail_kind,
-            start: diagnostic.start,
-            end: diagnostic.end,
-            expected: diagnostic.expected,
-            observed: diagnostic.observed
-        };
-        try function_call_summary_error(allocator, io, path, file_text, call_summary);
-        return false;
+    if diagnostic.help.len() > 0 {
+        try write_owned_prefixed_line(allocator, io, "help", &var diagnostic.help, note_span());
     }
-    if diagnostic.kind == 5 {
-        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
-        var message = std::string::String(allocator);
-        try message.append_bytes("type error: undefined variable `");
-        try message.append_bytes(diagnostic.name);
-        try message.append_bytes("`");
-        try write_owned_prefixed_line(allocator, io, "error", message, span);
-        message.deinit();
-        return false;
-    }
-    if diagnostic.kind == 6 {
-        try write_expected_got_summary_error(
-            allocator,
-            io,
-            path,
-            file_text,
-            diagnostic.start,
-            diagnostic.end,
-            "type error: argument expects ",
-            diagnostic.expected_text,
-            diagnostic.actual_text
-        );
-        return false;
-    }
-    if diagnostic.kind == 7 {
-        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
-        var message = std::string::String(allocator);
-        try message.append_bytes("type error: cannot assign to immutable binding `");
-        try message.append_bytes(diagnostic.name);
-        try message.append_bytes("`");
-        try write_owned_prefixed_line(allocator, io, "error", message, span);
-        message.deinit();
-        return false;
-    }
-    if diagnostic.kind == 8 {
-        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
-        var message = std::string::String(allocator);
-        try message.append_bytes("type error: invalid assignment target `");
-        try message.append_bytes(file_text[diagnostic.start..diagnostic.end]);
-        try message.append_bytes("`");
-        try write_owned_prefixed_line(allocator, io, "error", message, span);
-        message.deinit();
-        return false;
-    }
-    if diagnostic.kind == 9 {
-        try write_expected_got_summary_error(
-            allocator,
-            io,
-            path,
-            file_text,
-            diagnostic.start,
-            diagnostic.end,
-            "type error: assignment expects ",
-            diagnostic.expected_text,
-            diagnostic.actual_text
-        );
-        return false;
-    }
-    if diagnostic.kind == 10 {
-        var message = std::string::String(allocator);
-        try message.append_bytes("type error: function `");
-        try message.append_bytes(diagnostic.name);
-        try message.append_bytes("` must return ");
-        try message.append_bytes(diagnostic.expected_text);
-        try write_owned_prefixed_line(allocator, io, "error", message, empty_span(path));
-        message.deinit();
-        return false;
-    }
-    if diagnostic.kind == 11 {
-        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
-        try write_prefixed_line(
-            allocator,
-            io,
-            "error",
-            "type error: operator operands must have same type",
-            span
-        );
-        var left_note = std::string::String(allocator);
-        try left_note.append_bytes("left operand has type ");
-        try left_note.append_bytes(diagnostic.expected_text);
-        try write_owned_prefixed_line(allocator, io, "note", left_note, note_span());
-        left_note.deinit();
-        var right_note = std::string::String(allocator);
-        try right_note.append_bytes("right operand has type ");
-        try right_note.append_bytes(diagnostic.actual_text);
-        try write_owned_prefixed_line(allocator, io, "note", right_note, note_span());
-        right_note.deinit();
-        return false;
-    }
-    try output::error_line(allocator, io, "error: check failed");
     return false;
 }
 
@@ -470,6 +354,26 @@ fn primary_span(
         position.line,
         position.column
     );
+}
+
+fn report_span(
+    primary: &diagnostic::FileSpan,
+    source: []u8
+) -> std::kizu::diagnostic::FileSpan {
+    if primary.line > 0 and primary.column > 0 {
+        return std::kizu::diagnostic::file_span(
+            0,
+            primary.path,
+            primary.start,
+            primary.end,
+            primary.line,
+            primary.column
+        );
+    }
+    if primary.start < 0 {
+        return empty_span(primary.path);
+    }
+    return primary_span(primary.path, source, primary.start, primary.end);
 }
 
 fn empty_span(path: []u8) -> std::kizu::diagnostic::FileSpan {

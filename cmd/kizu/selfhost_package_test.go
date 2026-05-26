@@ -2865,7 +2865,7 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
 		"let validation_ok = parsed_validation.ok",
 		"if !validation_ok {",
-		"diagnostics::parse_validation_error(allocator, io, path, parsed_validation)",
+		"diagnostics::parse_validation_error(allocator, io, path, &var parsed_validation)",
 		"let parsed = try parser::parse_validated_file(",
 		"validation_ok",
 		"parsed.deinit();",
