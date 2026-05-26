@@ -3583,7 +3583,14 @@ func ensureArrayCapacity(array *Array, want int) {
 	if want <= cap(array.values) {
 		return
 	}
-	values := make([]Value, len(array.values), want)
+	next := cap(array.values)
+	if next == 0 {
+		next = 4
+	}
+	for next < want {
+		next *= 2
+	}
+	values := make([]Value, len(array.values), next)
 	copy(values, array.values)
 	array.values = values
 }

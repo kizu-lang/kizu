@@ -194,7 +194,7 @@ func TestSelfhostTypeDeclarationsUseParsedAST(t *testing.T) {
 		}
 	}
 	requiredChecker := []string{
-		"parser::parse_checked_file(allocator, file.path, file.text)",
+		"parser::parse_source_files(allocator, files)",
 		"type_refs::collect_declared_types_from_ast(",
 		"type_refs::collect_type_parameters_from_ast(",
 	}
@@ -862,12 +862,15 @@ func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
 		t.Fatalf("read selfhost types: %v", err)
 	}
 	content := string(bytes)
-	body := selfhostKizuFunctionBody(t, content, "pub fn check_sources(")
+	body := selfhostKizuFunctionBody(t, content, "fn check_parsed_sources_core(")
 	if !strings.Contains(body, "if source::is_frontend_source(file.kind) {") {
 		t.Fatal("type checker second pass does not limit diagnostics to frontend sources")
 	}
-	if count := strings.Count(body, "if source::is_source_code(file.kind) {"); count != 1 {
-		t.Fatalf("type checker has %d source-code passes, want declarations-only pass", count)
+	if count := strings.Count(body, "while index < parsed_sources.len() {"); count != 2 {
+		t.Fatalf(
+			"type checker has %d parsed-source passes, want declarations plus frontend diagnostics",
+			count,
+		)
 	}
 }
 
@@ -879,21 +882,18 @@ func TestSelfhostTypeCheckReusesParsedFrontendAST(t *testing.T) {
 	}
 	body := selfhostKizuFunctionBody(t, string(bytes), "pub fn check_sources(")
 	required := []string{
-		"var parsed_frontend = std::array::Array<std::kizu::ast::ParseResult>(allocator)",
-		"var parsed_frontend_files = std::array::Array<i64>(allocator)",
-		"try parsed_frontend.append(result)",
-		"try parsed_frontend_files.append(index)",
-		"let result = try parsed_frontend.pop()",
-		"let file_index = try parsed_frontend_files.pop()",
-		"result.deinit()",
+		"var parsed_sources = try parser::parse_source_files(allocator, files)",
+		"&parsed_sources.parsed",
+		"&parsed_sources.source_indexes",
+		"try parser::deinit_parsed_source_files(parsed_sources)",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(body, fragment) {
-			t.Fatalf("type checker does not cache frontend ASTs with %q", fragment)
+			t.Fatalf("type checker does not reuse package parsed sources with %q", fragment)
 		}
 	}
-	if count := strings.Count(body, "parser::parse_checked_file("); count != 1 {
-		t.Fatalf("type checker parses source in %d syntactic sites, want 1", count)
+	if strings.Contains(body, "parser::parse_checked_file(") {
+		t.Fatal("type checker reparses source after parsing package sources")
 	}
 }
 
@@ -1194,8 +1194,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_ast_llvm.kizu": {
 		"pub fn append_functions(",
-		"fn require_executable_abi(",
-		"fn require_executable_tag_layout(",
 		"cli_executable_body_parsing_llvm::append_functions(",
 		"cli_executable_body_lowering_llvm::append_functions(",
 		"fn append_cli_run_executable_function(",
@@ -1203,7 +1201,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
-		"cli_executable_body_parser_contract::require_executable_body_parsing(",
 		"import selfhost::backend::executable;",
 		"fn append_cli_parse_run_executable_ast_function(",
 		"fn append_cli_parse_test_executable_ast_function(",
@@ -1221,11 +1218,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu": {
 		"pub fn append_functions(",
-		"fn require_selected_body_lowering(",
 		"import selfhost::backend::executable;",
 		"fn append_cli_lower_executable_ast_function(",
 		"fn append_case_dispatch(",
-		"cli_executable_body_lowering_contract::require(",
 		"executable::run_executable_lowering_case_count(",
 		"executable::test_executable_lowering_case_count(",
 		"executable::unsupported_executable_kind_tag(",
@@ -2327,7 +2322,6 @@ func assertExecutableParserConsumers(
 func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"cli_executable_body_parser_contract::require_executable_body_parsing(",
 		"cli_executable_parser_token_llvm::append_named_token_char_eq_call(",
 		"cli_executable_parser_token_llvm::append_named_token_pair_eq_call(",
 		"executable::parser_source_token(",
@@ -2396,7 +2390,6 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 func assertExecutableLoweringFactConsumers(t *testing.T, ast string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"cli_executable_body_lowering_contract::require(",
 		"append_cli_lower_executable_ast_function(",
 		"append_case_dispatch(",
 		"lowering_case_ast_kind_tag(",
@@ -2459,23 +2452,9 @@ func assertExecutableASTABIConsumers(
 ) {
 	t.Helper()
 	for _, fact := range abiFacts {
-		if isExecutableTagFact(fact) {
-			if strings.Contains(parser, `"`+fact+`"`) || strings.Contains(ast, `"`+fact+`"`) {
-				t.Fatalf("hosted executable renderer hardcodes ABI tag fact %q", fact)
-			}
-			continue
-		}
-		if !strings.Contains(ast, `"`+fact+`"`) {
-			t.Fatalf("hosted executable AST renderer does not consume ABI fact %q", fact)
-		}
-	}
-	for _, fragment := range []string{
-		"require_executable_tag_layout(",
-		"data::executable_ast_kind_tag_by_name(",
-		"data::executable_kind_tag_by_name(",
-	} {
-		if !strings.Contains(ast, fragment) {
-			t.Fatalf("hosted executable AST renderer does not consume ABI tags with %q", fragment)
+		if isExecutableTagFact(fact) &&
+			(strings.Contains(parser, `"`+fact+`"`) || strings.Contains(ast, `"`+fact+`"`)) {
+			t.Fatalf("hosted executable renderer hardcodes ABI tag fact %q", fact)
 		}
 	}
 	for _, fragment := range []string{

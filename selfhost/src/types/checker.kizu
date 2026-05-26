@@ -47,82 +47,111 @@ pub fn check_sources(
     files: &std::array::Array<source::SourceFile>,
     resolved: resolver::ResolveSummary
 ) -> !model::TypeSummary {
+    var parsed_sources = try parser::parse_source_files(allocator, files);
+    let summary = try check_parsed_sources_core(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        resolved
+    );
+    try parser::deinit_parsed_source_files(parsed_sources);
+    return summary;
+}
+
+pub fn check_parsed_sources(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_sources: &std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_source_indexes: &std::array::Array<i64>,
+    resolved: resolver::ResolveSummary
+) -> !model::TypeSummary {
+    return try check_parsed_sources_core(
+        allocator,
+        files,
+        parsed_sources,
+        parsed_source_indexes,
+        resolved
+    );
+}
+
+fn check_parsed_sources_core(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_sources: &std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_source_indexes: &std::array::Array<i64>,
+    resolved: resolver::ResolveSummary
+) -> !model::TypeSummary {
     var kinds = std::map::Map<[]u8, model::TypeKind>(allocator);
     var arities = std::map::Map<[]u8, i64>(allocator);
     var copyable = std::map::Map<[]u8, bool>(allocator);
     var function_arities = std::map::Map<[]u8, i64>(allocator);
     var function_returns = std::map::Map<[]u8, []u8>(allocator);
-    var parsed_frontend = std::array::Array<std::kizu::ast::ParseResult>(allocator);
-    var parsed_frontend_files = std::array::Array<i64>(allocator);
     try type_refs::seed_builtin_types(kinds, arities, copyable);
 
     var index = 0;
-    while index < files.len() {
-        let file = try files.at(index);
-        if source::is_source_code(file.kind) {
-            let result = try parser::parse_checked_file(allocator, file.path, file.text);
-            try type_refs::collect_declared_types_from_ast(
-                allocator,
-                file,
-                result.ast,
-                result.root,
-                kinds,
-                arities,
-                copyable
-            );
-            try function_calls::collect_function_signatures_from_ast(
-                allocator,
-                file,
-                &result.ast,
-                result.root,
-                function_arities,
-                function_returns
-            );
-            if source::is_frontend_source(file.kind) {
-                try parsed_frontend.append(result);
-                try parsed_frontend_files.append(index);
-            } else {
-                result.deinit();
-            }
-        }
+    while index < parsed_sources.len() {
+        let parsed_source = try parsed_sources.at(index);
+        let source_index = try parsed_source_indexes.get(index);
+        let file = try files.at(source_index);
+        try type_refs::collect_declared_types_from_ast(
+            allocator,
+            file,
+            parsed_source.ast,
+            parsed_source.root,
+            kinds,
+            arities,
+            copyable
+        );
+        try function_calls::collect_function_signatures_from_ast(
+            allocator,
+            file,
+            &parsed_source.ast,
+            parsed_source.root,
+            function_arities,
+            function_returns
+        );
         index = index + 1;
     }
 
     var typed_nodes = 0;
     var diagnostics = resolved.diagnostics;
-    while parsed_frontend.len() > 0 {
-        let result = try parsed_frontend.pop();
-        let file_index = try parsed_frontend_files.pop();
-        let file = try files.at(file_index);
-        let scan = try type_ref_scan_ast::check_file_type_references_from_ast(
-            allocator,
-            file,
-            &result.ast,
-            result.root,
-            kinds,
-            arities
-        );
-        typed_nodes = typed_nodes + scan.typed_nodes;
-        diagnostics = diagnostics + scan.diagnostics;
-        let call_scan = try function_call_scan_ast::check_file_function_references_from_ast(
-            allocator,
-            file,
-            &result.ast,
-            result.root,
-            function_arities
-        );
-        let body_scan = try check_file_body_ast_node(
-            allocator,
-            file,
-            result.ast,
-            result.root,
-            function_returns
-        );
-        typed_nodes = typed_nodes + call_scan.typed_nodes;
-        diagnostics = diagnostics + call_scan.diagnostics;
-        typed_nodes = typed_nodes + body_scan.typed_nodes;
-        diagnostics = diagnostics + body_scan.diagnostics;
-        result.deinit();
+    index = 0;
+    while index < parsed_sources.len() {
+        let parsed_source = try parsed_sources.at(index);
+        let source_index = try parsed_source_indexes.get(index);
+        let file = try files.at(source_index);
+        if source::is_frontend_source(file.kind) {
+            let scan = try type_ref_scan_ast::check_file_type_references_from_ast(
+                allocator,
+                file,
+                &parsed_source.ast,
+                parsed_source.root,
+                kinds,
+                arities
+            );
+            typed_nodes = typed_nodes + scan.typed_nodes;
+            diagnostics = diagnostics + scan.diagnostics;
+            let call_scan = try function_call_scan_ast::check_file_function_references_from_ast(
+                allocator,
+                file,
+                &parsed_source.ast,
+                parsed_source.root,
+                function_arities
+            );
+            let body_scan = try check_file_body_ast_node(
+                allocator,
+                file,
+                parsed_source.ast,
+                parsed_source.root,
+                function_returns
+            );
+            typed_nodes = typed_nodes + call_scan.typed_nodes;
+            diagnostics = diagnostics + call_scan.diagnostics;
+            typed_nodes = typed_nodes + body_scan.typed_nodes;
+            diagnostics = diagnostics + body_scan.diagnostics;
+        }
+        index = index + 1;
     }
 
     let summary = model::TypeSummary {
@@ -132,8 +161,6 @@ pub fn check_sources(
         typed_nodes: typed_nodes,
         diagnostics: diagnostics
     };
-    parsed_frontend_files.deinit();
-    parsed_frontend.deinit();
     kinds.deinit();
     arities.deinit();
     copyable.deinit();
