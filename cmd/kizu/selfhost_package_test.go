@@ -1345,7 +1345,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn parser_source_token(",
 		"pub fn run_literal_quote_byte(",
 		"pub fn run_executable_lowering_case_count(",
-		"pub fn test_expect_true_value(",
 		"fn parse_expect_call_ast(",
 	},
 }
@@ -2076,9 +2075,8 @@ func assertExecutableSelectedBodyParserNoHardcodedResultTags(t *testing.T, parse
 		`executable_ast_tag(ir_bytes, "ExprStmt")`,
 		`executable_ast_tag(ir_bytes, "Call")`,
 		`executable_ast_tag(ir_bytes, "StringLiteral")`,
+		`executable_ast_tag(ir_bytes, "BoolLiteral")`,
 		`executable_ast_tag(ir_bytes, "RunReturnVoid")`,
-		`executable_ast_tag(ir_bytes, "TestExpectTrue")`,
-		`executable_ast_tag(ir_bytes, "TestExpectFalse")`,
 	} {
 		if strings.Contains(parser, fragment) {
 			t.Fatalf("selected body parser hardcodes executable AST result tag %q", fragment)
@@ -2308,9 +2306,8 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"executable::parser_source_token(",
 		"executable::unsupported_executable_ast_kind_tag(",
 		"executable::expr_stmt_executable_ast_kind_tag(",
+		"executable::call_executable_ast_kind_tag(",
 		"executable::run_return_executable_ast_kind_tag(",
-		"executable::test_ok_executable_ast_kind_tag(",
-		"executable::test_failure_executable_ast_kind_tag(",
 		"executable::run_payload_min_byte(",
 		"executable::run_payload_max_byte(",
 		"executable::run_payload_forbidden_byte(",
@@ -2320,9 +2317,6 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"executable::run_literal_end_quote_offset_from_end(",
 		"executable::run_literal_payload_start_offset(",
 		"executable::run_literal_payload_delimiter_width(",
-		"executable::test_expect_true_value(",
-		"executable::test_expect_false_value(",
-		"executable::test_expect_unsupported_value(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
@@ -2441,9 +2435,8 @@ func assertExecutableASTABIConsumers(
 	for _, fragment := range []string{
 		"executable::unsupported_executable_ast_kind_tag(",
 		"executable::expr_stmt_executable_ast_kind_tag(",
+		"executable::call_executable_ast_kind_tag(",
 		"executable::run_return_executable_ast_kind_tag(",
-		"executable::test_ok_executable_ast_kind_tag(",
-		"executable::test_failure_executable_ast_kind_tag(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume ABI tags with %q", fragment)
@@ -2488,8 +2481,7 @@ func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string)
 		}
 	}
 	for _, fact := range []string{
-		"executable-kind TestExpectOk 3",
-		"executable-kind TestExpectFailure 4",
+		"executable-kind Call 3",
 	} {
 		if strings.Contains(test, `"`+fact+`"`) {
 			t.Fatalf("hosted test dispatch hardcodes executable ABI fact %q", fact)
@@ -2635,14 +2627,12 @@ func hostedExecutableABIFacts() []string {
 		"executable-ast-kind ExprStmt 1",
 		"executable-ast-kind Call 2",
 		"executable-ast-kind StringLiteral 3",
-		"executable-ast-kind RunReturnVoid 4",
-		"executable-ast-kind TestExpectTrue 5",
-		"executable-ast-kind TestExpectFalse 6",
+		"executable-ast-kind BoolLiteral 4",
+		"executable-ast-kind RunReturnVoid 5",
 		"executable-kind Unsupported 0",
 		"executable-kind RunPrintString 1",
 		"executable-kind RunReturnVoid 2",
-		"executable-kind TestExpectOk 3",
-		"executable-kind TestExpectFailure 4",
+		"executable-kind Call 3",
 	}
 }
 
