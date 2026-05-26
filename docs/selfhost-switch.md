@@ -79,6 +79,98 @@ Go-owned production boundary:
 | backend artifact | Go backend/cache for general builds | `selfhost::backend` | backend artifact gate plus `just selfhost-production-from-scratch` | first real codegen slice after hosted artifact mode |
 | CLI parse/check/run/test | Go `cmd/kizu` dispatch for the general CLI | `selfhost::cli` and stage2 hosted artifact | matching CLI parity gate and no `go.cmd-kizu-fallback` marker except `none` | unsupported source shapes remain issue-linked |
 
+## Issue 927 Closeout Inventory
+
+This inventory closes the #927 roadmap-definition stage. It names the remaining
+Go-owned boundaries and records whether the replacement has a concrete switch
+issue, an existing blocker issue, or an explicit deferral. It does not switch
+any additional production behavior by itself.
+
+### Source Loading And Module Graph
+
+| Behavior | Current Go-owned boundary | Selfhost boundary | Evidence | Replacement status |
+| --- | --- | --- | --- | --- |
+| package root discovery | Go project loader discovers roots for general CLI paths | `selfhost::source::loader` for selfhost and selected hosted targets | `just selfhost-production-from-scratch`, `just selfhost-oracle` when frontend parity is claimed | deferred until a selected general CLI switch issue names the root-selection surface |
+| manifest loading | Go `kizu.toml` parser for general packages | `selfhost::source::manifest` | source oracle and production bootstrap read `selfhost/kizu.toml` through explicit fs capability | deferred for arbitrary user manifests until diagnostic parity is selected |
+| selfhost/std source discovery | Go package loader owns broad discovery | `selfhost::source::std_index` plus loader table | production and corpus gates through stage2 artifact | switched only for selfhost package and supported corpus paths |
+| user file source loading | Go CLI reads arbitrary files | hosted artifact reads selected parity fixtures through `std::fs::read_file` | parse/check/run/test parity gates record `go.cmd-kizu-fallback none` | bounded slices only; broader user file loading is deferred to future command-slice issues |
+| module path derivation | Go project resolver derives module paths | selfhost source table stores source ids and module paths | source/resolver oracle | deferred until module diagnostics parity is selected |
+| duplicate module paths | Go project diagnostics | selfhost source/resolver diagnostics | resolver oracle | replacement blocker is the resolver diagnostics row below |
+| missing imports | Go project diagnostics | selfhost source/resolver diagnostics | resolver oracle | replacement blocker is the resolver diagnostics row below |
+| import cycles | Go project diagnostics | selfhost source/resolver diagnostics | resolver oracle | replacement blocker is the resolver diagnostics row below |
+
+### CLI Command Ownership
+
+| Command | Production owner today | Selfhost component owner | Go fallback status | Required gate | Switch blocker or deferral |
+| --- | --- | --- | --- | --- | --- |
+| `parse <file>` | mixed: Go general CLI, hosted artifact for bounded parity rows | `selfhost::cli`, `selfhost::parser` | no fallback in hosted parity rows | `just selfhost-parse-parity-gate` | broader parse recovery and diagnostics are deferred to command-slice issues |
+| `check selfhost` | hosted stage2 artifact | `selfhost::cli::check` plus selfhost source/resolver/type/ownership gates | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
+| `check <file>` | mixed: Go general CLI, hosted artifact for bounded parity rows | `selfhost::cli::check` | no fallback in hosted parity rows | `just selfhost-check-parity-gate` | broader type/ownership surface remains deferred |
+| `run <file>` | mixed: Go general CLI, hosted artifact for bounded run rows | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows | `just selfhost-run-parity-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader execution is deferred until package IR and backend slices expand |
+| `test <file>` | mixed: Go general CLI, hosted artifact for bounded test rows | `selfhost::cli::execute`, `selfhost::ir`, `selfhost::backend` | no fallback in hosted parity rows | `just selfhost-test-parity-gate`, `just selfhost-native-source-gate` when executable lowering changes | broader discovery and execution are deferred |
+| `stage selfhost` | hosted stage2 artifact | `selfhost::backend`, hosted runtime ABI | none | `just selfhost-production-gate` | no current blocker for the supported selfhost target |
+| `fmt <file>` / `fmt --write <file>` | mixed: Go general CLI, hosted artifact for bounded formatter rows | selfhost formatter writer | no fallback in hosted rows | `TestSelfhostBackendArtifactGate` | broader formatter preservation is deferred |
+| `build`, `ir`, `wasm`, `native` | Go general CLI | no production selfhost owner yet | no hidden fallback because no selfhost switch is claimed | Go tests and backend-specific gates | explicit deferral until package/codegen IR replaces the Go backend boundary |
+| `cache`, `why-rebuild` | Go build cache | none | no hidden fallback because no selfhost switch is claimed | cache smoke/perf commands when cache behavior changes | explicit deferral until a selfhost build-cache design issue exists |
+
+### Parser Switch Slice
+
+The first selected parse CLI switch remains the bounded
+`selfhost/tests/cli/parse-parity.tsv` manifest. It covers minimal return,
+print-call, qualified `std::testing::expect`, moved-value declarations, missing
+expression, and missing assignment cases. The gate is
+`just selfhost-parse-parity-gate`; it runs through
+`target/selfhost/stage2/selfhost`, compares checked-in goldens, and records
+`go.cmd-kizu-fallback none`.
+
+Broader parse behavior is explicitly deferred until a future command-slice issue
+names the source shape, stdout/stderr contract, diagnostics, and parity gate.
+That future issue must not dispatch by fixture path or source literal.
+
+### Resolver, Type, And Ownership Replacement Blockers
+
+| Phase | Required replacement surface | Current evidence | Remaining blocker status |
+| --- | --- | --- | --- |
+| resolver | missing symbols, duplicate symbols, private access, import cycles, import conflicts, local/import shadowing, user package named `std` | resolver oracle plus check parity for selected rows | broader module diagnostics are deferred until a selected switch issue names the exact diagnostic surface and gate |
+| type checker | primitive types, signatures, fields, variants, optionals, error unions, casts, generic constructors, std containers, calls, field/index expressions, spans | type oracle plus bounded check parity rows | broad expression/type coverage is deferred; unsupported surfaces must stay visible as diagnostics |
+| ownership checker | move after move, borrowed views, local/mutable/field borrow, array/map/string resources, arena/handle states, negative spans | ownership oracle plus moved-value check parity; borrowed-return provenance remains tracked by #538 | broad negative parity is deferred until a selected switch issue names the source shape and parity gate |
+
+### Diagnostics Blockers
+
+Structured diagnostics were introduced by #897. Phase switching remains blocked
+where stable structured fields are required for user-visible replacement:
+
+| Phase | Required fields | Switch impact | Status |
+| --- | --- | --- | --- |
+| parser | severity, code/category, primary span, recovery notes | parse CLI replacement cannot broaden without stable parse diagnostics | deferred to future parser switch slices |
+| resolver | severity, code/category, primary and related spans | module/import/visibility replacement needs stable related spans | deferred to future resolver switch slices |
+| type checker | severity, code/category, primary span, help text | check replacement needs stable typed diagnostics | partially available through internal structured diagnostics; broader migration deferred |
+| ownership checker | severity, code/category, primary span, related source/borrow spans | negative parity needs stable borrow/move spans | deferred with #538 for multi-source provenance |
+| CLI rendering | stable text plus structured source fields | hosted artifact parity compares stdout/stderr byte-for-byte | available for bounded parity manifests |
+| LSP | range/code compatibility with CLI diagnostics | LSP must not regress when shared diagnostics broaden | existing LSP alignment remains tracked by #832 |
+
+### Stdlib And Runtime Capabilities
+
+The runtime capability inventory is in
+[`docs/selfhost-runtime-abi.md`](selfhost-runtime-abi.md). Available
+capabilities are explicit fs/io/process/allocator/string/array/map boundaries.
+Blocked or deferred capabilities are issue-linked there: `@embed` and broader
+`@` builtins are #610, fixed-buffer and user allocator APIs are #549, and
+multi-source borrowed return provenance remains #538.
+
+### Production Report Audit Surface
+
+Production reports are the audit surface for fallback absence. A passing
+production report must include:
+
+| Field | Meaning | Guard |
+| --- | --- | --- |
+| `go.production none` | supported production path did not call Go compiler phases | `just selfhost-production-gate` fails if the marker changes |
+| `go.cmd-kizu-fallback none` | hosted CLI parity path did not fall back to Go `cmd/kizu` | parse/check/run/test parity gates fail if the marker changes |
+| `executable_lowering selfhost::backend::executable checked-ast` | native source executable artifacts use checked AST executable lowering | `just selfhost-native-source-gate` |
+| stage fingerprints | stage1/stage2 artifacts and command outputs match | `just selfhost-production-from-scratch` |
+| hosted/native artifact boundaries | artifact paths, runtime mode, and emitted metadata are explicit | backend artifact and production gates |
+
 ## Backend Boundary After Hosted Artifacts
 
 The current executable path is:
