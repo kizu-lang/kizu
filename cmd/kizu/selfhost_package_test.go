@@ -808,13 +808,9 @@ func assertSelfhostExecutableLoweringSplit(
 	for _, fragment := range []string{
 		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
-		"pub fn parse_run_executable_ast(",
 		"pub fn parse_test_executable_ast(",
 		"pub fn lower_run_executable_ast(",
 		"pub fn lower_test_executable_ast(",
-		"fn parse_run_expr_stmt_ast(",
-		"fn parse_run_call_ast(",
-		"fn parse_run_string_literal_ast(",
 		"fn parse_expect_call_ast(",
 	} {
 		if !strings.Contains(executable, fragment) {
@@ -830,22 +826,21 @@ func assertSelfhostExecutableLoweringSplit(
 			t.Fatalf("execute module still owns executable lowering %q", fragment)
 		}
 	}
-	assertSelfhostExecutableLoweringUsesBoundedAST(t, executable)
+	assertSelfhostExecutableLoweringUsesDirectRunIR(t, executable)
 }
 
-// assertSelfhostExecutableLoweringUsesBoundedAST keeps source AST matching
-// separate from executable artifact lowering.
-func assertSelfhostExecutableLoweringUsesBoundedAST(t *testing.T, executable string) {
+// assertSelfhostExecutableLoweringUsesDirectRunIR keeps run lowering on the
+// executable IR path while test lowering still uses the legacy executable AST.
+func assertSelfhostExecutableLoweringUsesDirectRunIR(t *testing.T, executable string) {
 	t.Helper()
 	runBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_run_executable(")
 	testBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_test_executable(")
-	for _, fragment := range []string{
-		"let executable_ast = try parse_run_executable_ast(text, ast, root)",
-		"return lower_run_executable_ast(executable_ast)",
-	} {
-		if !strings.Contains(runBody, fragment) {
-			t.Fatalf("run executable wrapper missing bounded AST step %q", fragment)
-		}
+	if !strings.Contains(runBody, "executable_lowering::lower_run_executable(text, ast, root)") {
+		t.Fatal("run executable wrapper does not use executable IR lowering")
+	}
+	if strings.Contains(runBody, "parse_run_executable_ast(") ||
+		strings.Contains(runBody, "lower_run_executable_ast(") {
+		t.Fatal("run executable wrapper still falls back through legacy executable AST")
 	}
 	for _, fragment := range []string{
 		"let executable_ast = try parse_test_executable_ast(text, ast, root)",
@@ -1213,7 +1208,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu": {
 		"pub fn require_executable_body_parsing(",
-		"fn require_run_parser_body_shape(",
 		"fn require_test_parser_body_shape(",
 		"fn require_parser_body_call(",
 		"ir_contract::require_body_call(",
@@ -1283,7 +1277,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"executable_body::append_function_body_ir(",
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
-		"executable_body_parsing::append_run_parsing_facts(",
 	},
 	"../../selfhost/src/ir/function_signature.kizu": {
 		"pub fn append(",
@@ -1304,10 +1297,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn body_node_kind(",
 	},
 	"../../selfhost/src/ir/executable_body_parsing.kizu": {
-		"pub fn append_main_scan_fact(",
-		"pub fn append_run_parsing_facts(",
 		"pub fn append_test_parsing_facts(",
-		"fn require_function_body_kind(",
 		"fn require_function_body_token(",
 		"fn node_contains_token(",
 	},
@@ -1347,7 +1337,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/executable.kizu": {
 		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
-		"pub fn parse_run_executable_ast(",
 		"pub fn parse_test_executable_ast(",
 		"pub fn lower_run_executable_ast(",
 		"pub fn lower_test_executable_ast(",
@@ -1357,9 +1346,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn run_literal_quote_byte(",
 		"pub fn run_executable_lowering_case_count(",
 		"pub fn test_expect_true_value(",
-		"fn parse_run_expr_stmt_ast(",
-		"fn parse_run_call_ast(",
-		"fn parse_run_string_literal_ast(",
 		"fn parse_expect_call_ast(",
 	},
 }
@@ -1745,7 +1731,6 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 		`"check::checked_ast_node"`,
 		`"backend::emit_run_executable_artifact"`,
 		`"backend::emit_test_executable_artifact"`,
-		`"lower_run_executable_ast"`,
 		`"lower_test_executable_ast"`,
 		`"ensure_hosted_artifact_dir"`,
 	} {
@@ -1886,7 +1871,6 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 		"append_selected_helper_body(",
 		"function_body_node(",
 		"executable_body::append_helper_body_ir(",
-		"parse_run_program_ast",
 		"parse_test_program_ast",
 		"parse_expect_call_ast",
 	} {
@@ -2009,8 +1993,6 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		t.Fatal("IR root hardcodes selected body parsing facts")
 	}
 	for _, fragment := range []string{
-		"executable_body_parsing::append_main_scan_fact(",
-		"executable_body_parsing::append_run_parsing_facts(",
 		"executable_body_parsing::append_test_parsing_facts(",
 	} {
 		if !strings.Contains(selected, fragment) {
@@ -2018,16 +2000,9 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		}
 	}
 	for _, fragment := range []string{
-		"pub fn append_main_scan_fact(",
-		"pub fn append_run_parsing_facts(",
 		"pub fn append_test_parsing_facts(",
-		"fn require_function_body_kind(",
 		"fn require_function_body_token(",
 		"fn node_contains_token(",
-		"parse_run_program_ast",
-		"parse_run_expr_stmt_ast",
-		"parse_run_call_ast",
-		"parse_run_string_literal_ast",
 		"parse_expect_call_ast",
 	} {
 		if !strings.Contains(bodyParsing, fragment) {
@@ -2079,14 +2054,12 @@ func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser s
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_parent_with_child_token(",
 		"ir_contract::body_call_callee_or_empty(",
-		"parse_run_executable_ast",
 		"parse_test_executable_ast",
 		"executable::parser_source_token(",
 		`"Program"`,
 		`"Block"`,
 		`"ExprStmt"`,
 		`"Call"`,
-		`"String"`,
 		`"Bool"`,
 	} {
 		if !strings.Contains(parser, fragment) {
@@ -2686,10 +2659,6 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast",
 		"function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable_ast data::Executable",
-		"function-signature-return selfhost::backend::executable::" +
-			"parse_run_program_ast !data::ExecutableAst",
-		"function-signature-param selfhost::backend::executable::" +
-			"parse_run_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
 		"function-signature-param selfhost::backend::executable::" +
 			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
 		"function-signature-return selfhost::backend::hosted::" +
@@ -2716,7 +2685,6 @@ func hostedExecutableBodyContractFragments() []string {
 		`"selfhost::cli::execute::test_file_cli"`,
 		`"backend::lower_test_executable"`,
 		`"selfhost::backend::executable::lower_run_executable"`,
-		`"parse_run_executable_ast"`,
 		`"selfhost::backend::executable::lower_test_executable"`,
 		`"parse_test_executable_ast"`,
 		`"selfhost::backend::hosted::emit_run_executable_artifact"`,
@@ -2735,7 +2703,6 @@ func hostedExecutableExactBodySequenceFragments() []string {
 		`"body-call selfhost::cli::execute::test_file_cli 109`,
 		`"body-call selfhost::backend::executable::lower_run_executable 4`,
 		`"body-call selfhost::backend::executable::lower_test_executable 4`,
-		`"body-struct-literal selfhost::backend::executable::lower_run_executable_ast 13`,
 		`"body-struct-literal selfhost::backend::executable::lower_test_executable_ast 13`,
 		`"body-call selfhost::backend::hosted::emit_run_executable_artifact 28`,
 		`"body-call selfhost::backend::hosted::emit_test_executable_artifact 28`,
