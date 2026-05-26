@@ -281,9 +281,6 @@ func linkAndRunRunParityArtifact(
 // countRunCodegenMetadataFailures proves selected run artifacts use codegen IR.
 func countRunCodegenMetadataFailures(t *testing.T, item runParityCase, metadataPath string) int {
 	t.Helper()
-	if item.artifactStem == "run_return" {
-		return 0
-	}
 	metadataBytes, err := os.ReadFile(metadataPath)
 	if err != nil {
 		t.Errorf("run parity %s read metadata: %v", item.name, err)

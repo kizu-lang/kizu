@@ -318,12 +318,8 @@ func selfhostCLIFrontendRunHappyCases(
 		{
 			name:    "run_temp_return_source",
 			args:    []string{"run", fixtures.runReturn},
-			wantOut: "exit-code\n0\n",
-			wantFiles: selfhostRunReturnArtifactExpectations(
-				fixtures.runReturn,
-				selfhostArtifactStem(fixtures.runReturn),
-				"selfhost/tests/cli/run_hello.kizu",
-			),
+			wantOut: "exit-code\n64\n",
+			wantErr: "usage: selfhost <check|stage|parse|run|test|fmt> <target>\n",
 		},
 		{
 			name:    "run_temp_explicit_void_no_return",
@@ -372,32 +368,6 @@ func selfhostRunArtifactExpectations(
 				`c"` + stdoutPayload + `\0A"`,
 			},
 			rejects: []string{rejectedSourcePath},
-		},
-		{
-			path: filepath.Join("target", "selfhost", "run", stem+".ll.meta"),
-			contains: []string{
-				"source " + sourcePath + "\n",
-				"output " + filepath.ToSlash(filepath.Join("target", "selfhost", "run", stem+".ll")) + "\n",
-			},
-			rejects: []string{rejectedSourcePath},
-		},
-	}
-}
-
-// selfhostRunReturnArtifactExpectations returns no-output run artifact checks.
-func selfhostRunReturnArtifactExpectations(
-	sourcePath string,
-	stem string,
-	rejectedSourcePath string,
-) []selfhostCLIArtifactExpectation {
-	return []selfhostCLIArtifactExpectation{
-		{
-			path: filepath.Join("target", "selfhost", "run", stem+".ll"),
-			contains: []string{
-				`source_filename = "` + sourcePath + `"`,
-				"define i64 @kizu_run_main()",
-			},
-			rejects: []string{rejectedSourcePath, "@.kizu.run.stdout"},
 		},
 		{
 			path: filepath.Join("target", "selfhost", "run", stem+".ll.meta"),

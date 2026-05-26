@@ -2,9 +2,7 @@ import selfhost::backend::data;
 
 pub enum LoweredStatementKind {
     Unsupported,
-    ReturnVoid,
     ExprStmt,
-    LocalBinding,
 }
 
 pub enum LoweredExpressionKind {
@@ -14,9 +12,7 @@ pub enum LoweredExpressionKind {
 
 pub enum LoweredValueKind {
     Unsupported,
-    StringLiteral,
     BoolLiteral,
-    LocalRef,
 }
 
 pub struct LoweredValue {
@@ -31,20 +27,8 @@ pub struct LoweredExpression {
     pub argument: LoweredValue,
 }
 
-pub struct LoweredLocalBinding {
-    pub name: []u8,
-    pub value: LoweredValue,
-}
-
-pub struct LoweredLocalBindingTable {
-    pub count: i64,
-    pub first: LoweredLocalBinding,
-    pub second: LoweredLocalBinding,
-}
-
 pub struct LoweredStatement {
     pub kind: LoweredStatementKind,
-    pub local_binding: LoweredLocalBinding,
     pub expr: LoweredExpression,
 }
 
@@ -56,15 +40,6 @@ pub struct LoweredFunction {
     pub body: LoweredBlock,
 }
 
-pub fn lower_run_executable(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
-) -> !data::Executable {
-    let executable_function = try lower_run_program(text, ast, root);
-    return lower_function(text, executable_function);
-}
-
 pub fn lower_test_executable(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -72,58 +47,6 @@ pub fn lower_test_executable(
 ) -> !data::Executable {
     let executable_function = try lower_test_program(text, ast, root);
     return lower_function(text, executable_function);
-}
-
-fn lower_run_program(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    root: std::kizu::ast::NodeId
-) -> !LoweredFunction {
-    let node = ast.get(root);
-    return match node.data {
-        Program(program) => try lower_run_program_declarations(text, ast, program.declarations),
-        _ => unsupported_function(text),
-    };
-}
-
-fn lower_run_program_declarations(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    declarations: std::kizu::ast::ChildRange
-) -> !LoweredFunction {
-    var index = 0;
-    while index < declarations.len {
-        let child = try ast.child_at(declarations, index);
-        let node = ast.get(child);
-        let executable_function = match node.data {
-            FnDecl(fn_decl) => try lower_run_function(text, ast, fn_decl.name, fn_decl.body),
-            _ => unsupported_function(text),
-        };
-        if executable_function.body.statement.kind != LoweredStatementKind::Unsupported {
-            return executable_function;
-        }
-        index = index + 1;
-    }
-    return unsupported_function(text);
-}
-
-fn lower_run_function(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    name: std::kizu::ast::NodeId,
-    body: std::kizu::ast::NodeId
-) -> !LoweredFunction {
-    if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
-        return unsupported_function(text);
-    }
-
-    let node = ast.get(body);
-    return match node.data {
-        Block(block) => LoweredFunction {
-            body: try lower_run_block(text, ast, block.statements)
-        },
-        _ => unsupported_function(text),
-    };
 }
 
 fn lower_test_program(
@@ -251,7 +174,6 @@ fn lower_test_expr_statement(
 ) -> !LoweredStatement {
     return LoweredStatement {
         kind: LoweredStatementKind::ExprStmt,
-        local_binding: empty_local_binding(text),
         expr: try lower_test_expr(text, ast, expr)
     };
 }
@@ -311,353 +233,6 @@ fn lower_test_bool_literal(
     };
 }
 
-fn lower_run_block(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    statements: std::kizu::ast::ChildRange
-) -> !LoweredBlock {
-    var locals = empty_local_bindings(text);
-    var index = 0;
-    while index < statements.len {
-        let statement_node = try ast.child_at(statements, index);
-        let statement = try lower_run_statement(
-            text,
-            ast,
-            statement_node,
-            &locals
-        );
-        if statement.kind == LoweredStatementKind::LocalBinding {
-            if !lower_run_local_binding_supported(&locals, &statement.local_binding) {
-                return unsupported_block(text);
-            }
-            locals = local_bindings_insert_string(text, &locals, &statement.local_binding);
-        } else {
-            return lower_run_terminal_block(text, statements.len, index, statement);
-        }
-        index = index + 1;
-    }
-    return unsupported_block(text);
-}
-
-fn lower_run_local_binding_supported(
-    locals: &LoweredLocalBindingTable,
-    binding: &LoweredLocalBinding
-) -> bool {
-    return local_bindings_can_insert_string(locals, binding);
-}
-
-fn lower_run_terminal_block(
-    text: []u8,
-    statement_count: i64,
-    index: i64,
-    statement: LoweredStatement
-) -> LoweredBlock {
-    if index + 1 != statement_count {
-        return unsupported_block(text);
-    }
-    return LoweredBlock {
-        statement: statement
-    };
-}
-
-fn lower_run_statement(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    statement: std::kizu::ast::NodeId,
-    locals: &LoweredLocalBindingTable
-) -> !LoweredStatement {
-    let node = ast.get(statement);
-    return match node.data {
-        Return(return_node) => lower_return_statement(text, ast, return_node.value),
-        Let(let_node) => lower_let_statement(text, ast, let_node.name, let_node.value),
-        ExprStmt(expr_stmt) => try lower_expr_statement(
-            text,
-            ast,
-            expr_stmt.expr,
-            locals
-        ),
-        _ => unsupported_statement(text),
-    };
-}
-
-fn lower_let_statement(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    name: std::kizu::ast::NodeId,
-    value: std::kizu::ast::NodeId
-) -> LoweredStatement {
-    let lowered_value = lower_string_literal_argument(text, ast, value);
-    if lowered_value.kind != LoweredValueKind::StringLiteral {
-        return unsupported_statement(text);
-    }
-    return LoweredStatement {
-        kind: LoweredStatementKind::LocalBinding,
-        local_binding: LoweredLocalBinding {
-            name: ast_node_text(text, ast, name),
-            value: lowered_value
-        },
-        expr: unsupported_expr(text)
-    };
-}
-
-fn lower_return_statement(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    value: std::kizu::ast::NodeId
-) -> LoweredStatement {
-    if !is_empty_node(ast, value) {
-        return unsupported_statement(text);
-    }
-    return LoweredStatement {
-        kind: LoweredStatementKind::ReturnVoid,
-        local_binding: empty_local_binding(text),
-        expr: unsupported_expr(text)
-    };
-}
-
-fn lower_expr_statement(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    expr: std::kizu::ast::NodeId,
-    locals: &LoweredLocalBindingTable
-) -> !LoweredStatement {
-    let node = ast.get(expr);
-    return match node.data {
-        Call(call_node) => LoweredStatement {
-            kind: LoweredStatementKind::ExprStmt,
-            local_binding: empty_local_binding(text),
-            expr: try lower_call_expr(
-                text,
-                ast,
-                call_node.callee,
-                call_node.args,
-                locals
-            )
-        },
-        _ => unsupported_statement(text),
-    };
-}
-
-fn lower_call_expr(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    callee: std::kizu::ast::NodeId,
-    args: std::kizu::ast::ChildRange,
-    locals: &LoweredLocalBindingTable
-) -> !LoweredExpression {
-    let callee_text = ast_node_text(text, ast, callee);
-    if !std::mem::equal_bytes(callee_text, "print") or args.len != 1 {
-        return unsupported_expr(text);
-    }
-    let arg = try ast.child_at(args, 0);
-    let argument = lower_print_argument(text, ast, arg, locals);
-    if argument.kind != LoweredValueKind::StringLiteral and
-        argument.kind != LoweredValueKind::LocalRef {
-        return unsupported_expr(text);
-    }
-    return LoweredExpression {
-        kind: LoweredExpressionKind::Call,
-        callee: callee_text,
-        argument: argument
-    };
-}
-
-fn lower_print_argument(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId,
-    locals: &LoweredLocalBindingTable
-) -> LoweredValue {
-    let node = ast.get(node_id);
-    return match node.data {
-        String(string_node) => lower_string_literal(text, ast_node_text(text, ast, node_id)),
-        Var(var_node) => lower_local_string_argument(text, ast, node_id, locals),
-        _ => unsupported_value(text),
-    };
-}
-
-fn lower_local_string_argument(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId,
-    locals: &LoweredLocalBindingTable
-) -> LoweredValue {
-    return local_bindings_lookup_string(text, locals, ast_node_text(text, ast, node_id));
-}
-
-fn empty_local_binding(text: []u8) -> LoweredLocalBinding {
-    return LoweredLocalBinding {
-        name: text[0..0],
-        value: unsupported_value(text)
-    };
-}
-
-fn empty_local_bindings(text: []u8) -> LoweredLocalBindingTable {
-    return LoweredLocalBindingTable {
-        count: 0,
-        first: empty_local_binding(text),
-        second: empty_local_binding(text)
-    };
-}
-
-fn local_bindings_can_insert_string(
-    locals: &LoweredLocalBindingTable,
-    binding: &LoweredLocalBinding
-) -> bool {
-    if binding.value.kind != LoweredValueKind::StringLiteral {
-        return false;
-    }
-    if locals.count >= local_binding_capacity() {
-        return false;
-    }
-    return !local_bindings_contains_name(locals, binding.name);
-}
-
-fn local_bindings_insert_string(
-    text: []u8,
-    locals: &LoweredLocalBindingTable,
-    binding: &LoweredLocalBinding
-) -> LoweredLocalBindingTable {
-    if locals.count == 0 {
-        return LoweredLocalBindingTable {
-            count: 1,
-            first: local_string_binding(text, binding),
-            second: empty_local_binding(text)
-        };
-    }
-    if locals.count == 1 {
-        return LoweredLocalBindingTable {
-            count: 2,
-            first: local_binding_copy(&locals.first),
-            second: local_string_binding(text, binding)
-        };
-    }
-    return empty_local_bindings(text);
-}
-
-fn local_string_binding(
-    text: []u8,
-    binding: &LoweredLocalBinding
-) -> LoweredLocalBinding {
-    return LoweredLocalBinding {
-        name: binding.name,
-        value: LoweredValue {
-            kind: LoweredValueKind::StringLiteral,
-            name: text[0..0],
-            payload: binding.value.payload
-        }
-    };
-}
-
-fn local_bindings_lookup_string(
-    text: []u8,
-    locals: &LoweredLocalBindingTable,
-    name: []u8
-) -> LoweredValue {
-    if locals.count >= 1 and std::mem::equal_bytes(name, locals.first.name) {
-        return local_ref_value(&locals.first);
-    }
-    if locals.count >= 2 and std::mem::equal_bytes(name, locals.second.name) {
-        return local_ref_value(&locals.second);
-    }
-    return unsupported_value(text);
-}
-
-fn local_ref_value(binding: &LoweredLocalBinding) -> LoweredValue {
-    return LoweredValue {
-        kind: LoweredValueKind::LocalRef,
-        name: binding.name,
-        payload: binding.value.payload
-    };
-}
-
-fn local_binding_copy(binding: &LoweredLocalBinding) -> LoweredLocalBinding {
-    return LoweredLocalBinding {
-        name: binding.name,
-        value: LoweredValue {
-            kind: binding.value.kind,
-            name: binding.value.name,
-            payload: binding.value.payload
-        }
-    };
-}
-
-fn local_bindings_contains_name(
-    locals: &LoweredLocalBindingTable,
-    name: []u8
-) -> bool {
-    if locals.count >= 1 and std::mem::equal_bytes(name, locals.first.name) {
-        return true;
-    }
-    if locals.count >= 2 and std::mem::equal_bytes(name, locals.second.name) {
-        return true;
-    }
-    return false;
-}
-
-fn local_binding_capacity() -> i64 {
-    return 2;
-}
-
-fn lower_string_literal_argument(
-    text: []u8,
-    ast: std::kizu::ast::Ast,
-    node_id: std::kizu::ast::NodeId
-) -> LoweredValue {
-    let node = ast.get(node_id);
-    return match node.data {
-        String(string_node) => lower_string_literal(text, ast_node_text(text, ast, node_id)),
-        _ => unsupported_value(text),
-    };
-}
-
-fn lower_string_literal(text: []u8, literal: []u8) -> LoweredValue {
-    let length = std::mem::len(literal);
-    if length < string_literal_min_length() {
-        return unsupported_value(text);
-    }
-    let quote = cast<u8>(string_literal_quote_byte());
-    if literal[0] != quote or literal[length - 1] != quote {
-        return unsupported_value(text);
-    }
-    let payload = literal[1..length - 1];
-    if !is_print_payload_supported(payload) {
-        return unsupported_value(text);
-    }
-    return LoweredValue {
-        kind: LoweredValueKind::StringLiteral,
-        name: text[0..0],
-        payload: payload
-    };
-}
-
-fn is_print_payload_supported(payload: []u8) -> bool {
-    var index = 0;
-    let length = std::mem::len(payload);
-    let min = cast<u8>(32);
-    let max = cast<u8>(126);
-    let quote = cast<u8>(string_literal_quote_byte());
-    while index < length {
-        let byte = payload[index];
-        if byte < min or byte > max {
-            return false;
-        }
-        if byte == quote {
-            return false;
-        }
-        index = index + 1;
-    }
-    return true;
-}
-
-fn string_literal_quote_byte() -> i64 {
-    return 34;
-}
-
-fn string_literal_min_length() -> i64 {
-    return 2;
-}
-
 fn lower_function(text: []u8, executable_function: LoweredFunction) -> data::Executable {
     if executable_function.body.statement.kind == LoweredStatementKind::ExprStmt and
         executable_function.body.statement.expr.kind == LoweredExpressionKind::Call {
@@ -665,13 +240,6 @@ fn lower_function(text: []u8, executable_function: LoweredFunction) -> data::Exe
             kind: data::ExecutableKind::Call,
             callee: executable_function.body.statement.expr.callee,
             payload: executable_function.body.statement.expr.argument.payload
-        };
-    }
-    if executable_function.body.statement.kind == LoweredStatementKind::ReturnVoid {
-        return data::Executable {
-            kind: data::ExecutableKind::RunReturnVoid,
-            callee: text[0..0],
-            payload: text[0..0]
         };
     }
     return unsupported_executable(text);
@@ -692,7 +260,6 @@ fn unsupported_block(text: []u8) -> LoweredBlock {
 fn unsupported_statement(text: []u8) -> LoweredStatement {
     return LoweredStatement {
         kind: LoweredStatementKind::Unsupported,
-        local_binding: empty_local_binding(text),
         expr: unsupported_expr(text)
     };
 }
