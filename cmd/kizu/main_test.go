@@ -348,7 +348,7 @@ func TestCheckPackageCommandReportsSelfhostDiagnostic(t *testing.T) {
 	if !errors.As(runErr, &status) || status.code != 1 {
 		t.Fatalf("got error %v, want exit status 1", runErr)
 	}
-	want := "error: unknown function `missing`\nerror: check failed\n"
+	want := "error: type error: undefined function `missing` at 2:5\nerror: check failed\n"
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
 	}
@@ -567,7 +567,7 @@ fn main() {
 	if !errors.As(runErr, &status) || status.code != 1 {
 		t.Fatalf("got error %v, want exit status 1", runErr)
 	}
-	want := "error: move error: moved value `name` was used\n"
+	want := "error: move error: moved value `name` was used at 16:11\n"
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
 	}
@@ -598,7 +598,7 @@ fn main() {
 	if !errors.As(runErr, &status) || status.code != 1 {
 		t.Fatalf("got error %v, want exit status 1", runErr)
 	}
-	want := "error: move error: moved value `name` was used\n"
+	want := "error: move error: moved value `name` was used at 16:11\n"
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
 	}
@@ -652,7 +652,7 @@ fn main() {
 	if !errors.As(runErr, &status) || status.code != 1 {
 		t.Fatalf("got error %v, want exit status 1", runErr)
 	}
-	want := "error: move error: moved value `name` was used\n"
+	want := "error: move error: moved value `name` was used at 14:11\n"
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
 	}
@@ -1276,9 +1276,14 @@ func TestBuildEmitLLVMCommandSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, out)
 	}
-	want := "define i32 @main(i32 %kizu.argc, ptr %kizu.argv)"
-	if !strings.Contains(string(out), want) {
-		t.Fatalf("got %q, want substring %q", out, want)
+	for _, want := range []string{
+		"declare void @kizu_runtime_init_args(i32, ptr)",
+		"define i32 @main(i32 %kizu.argc, ptr %kizu.argv)",
+		"call void @kizu_runtime_init_args(i32 %kizu.argc, ptr %kizu.argv)",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("got %q, want substring %q", out, want)
+		}
 	}
 }
 

@@ -5,10 +5,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/lexer"
 	"github.com/kizu-lang/kizu/internal/ownership"
 	"github.com/kizu-lang/kizu/internal/parser"
@@ -18,8 +17,6 @@ import (
 )
 
 const diagnosticSource = "kizu"
-
-var parsePositionPattern = regexp.MustCompile(` at ([0-9]+):([0-9]+)$`)
 
 // Analyze returns diagnostics for one in-memory Kizu source file.
 func Analyze(source string) []Diagnostic {
@@ -186,9 +183,9 @@ func filePathFromURI(rawURI string) (string, bool) {
 }
 
 // parseSource parses one in-memory Kizu document.
-func parseSource(source string) (*ast.Program, []string) {
+func parseSource(source string) (*ast.Program, []parser.Diagnostic) {
 	p := parser.New(lexer.New(source))
-	return p.ParseProgram(), p.Errors()
+	return p.ParseProgram(), p.Diagnostics()
 }
 
 // appendStdDecls prepends referenced std wrappers to match CLI check/run/test.
@@ -205,13 +202,16 @@ func appendStdDecls(program *ast.Program, sources []string) []Diagnostic {
 }
 
 // diagnosticFromParseError converts a parser message into an LSP diagnostic.
-func diagnosticFromParseError(message string) Diagnostic {
-	line, character := parsePosition(message)
+func diagnosticFromParseError(diag parser.Diagnostic) Diagnostic {
+	span := diag.SourceSpan()
+	if !span.IsZero() {
+		return diagnosticAtSpan(diag.Error(), span, lspSeverity(diag.SeverityLevel()))
+	}
 	return Diagnostic{
-		Range:    oneCharacterRange(line, character),
-		Severity: diagnosticSeverityError,
+		Range:    oneCharacterRange(0, 0),
+		Severity: lspSeverity(diag.SeverityLevel()),
 		Source:   diagnosticSource,
-		Message:  message,
+		Message:  diag.Error(),
 	}
 }
 
@@ -231,44 +231,45 @@ type sourceSpanError interface {
 
 // diagnosticFromError converts semantic errors into LSP diagnostics.
 func diagnosticFromError(err error) Diagnostic {
+	var structured *diag.Diagnostic
+	if errors.As(err, &structured) {
+		span := structured.SourceSpan()
+		if !span.IsZero() {
+			return diagnosticAtSpan(structured.Error(), span, lspSeverity(structured.SeverityLevel()))
+		}
+		return Diagnostic{
+			Range:    oneCharacterRange(0, 0),
+			Severity: lspSeverity(structured.SeverityLevel()),
+			Source:   diagnosticSource,
+			Message:  structured.Error(),
+		}
+	}
 	var withSpan sourceSpanError
 	if errors.As(err, &withSpan) {
 		span := withSpan.SourceSpan()
 		if !span.IsZero() {
-			return diagnosticAtSpan(err.Error(), span)
+			return diagnosticAtSpan(err.Error(), span, diagnosticSeverityError)
 		}
 	}
 	return diagnosticAtStart(err.Error())
 }
 
 // diagnosticAtSpan reports a checker diagnostic at a source span.
-func diagnosticAtSpan(message string, span ast.Span) Diagnostic {
+func diagnosticAtSpan(message string, span ast.Span, severity int) Diagnostic {
 	return Diagnostic{
 		Range:    rangeFromSpan(span),
-		Severity: diagnosticSeverityError,
+		Severity: severity,
 		Source:   diagnosticSource,
 		Message:  message,
 	}
 }
 
-// parsePosition extracts a one-based parser position as a zero-based LSP position.
-func parsePosition(message string) (int, int) {
-	match := parsePositionPattern.FindStringSubmatch(message)
-	if len(match) != 3 {
-		return 0, 0
+// lspSeverity maps compiler diagnostic severities onto LSP severity codes.
+func lspSeverity(severity diag.Severity) int {
+	if severity == diag.SeverityWarning {
+		return diagnosticSeverityWarning
 	}
-	line, lineErr := strconv.Atoi(match[1])
-	column, columnErr := strconv.Atoi(match[2])
-	if lineErr != nil || columnErr != nil {
-		return 0, 0
-	}
-	if line <= 0 {
-		line = 1
-	}
-	if column <= 0 {
-		column = 1
-	}
-	return line - 1, column - 1
+	return diagnosticSeverityError
 }
 
 // rangeFromSpan converts a one-based AST span into a zero-based LSP range.

@@ -10,6 +10,7 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 	"github.com/kizu-lang/kizu/internal/buildcache"
 	"github.com/kizu-lang/kizu/internal/cimport"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 	"github.com/kizu-lang/kizu/internal/interp"
 	"github.com/kizu-lang/kizu/internal/ir"
 	"github.com/kizu-lang/kizu/internal/lexer"
@@ -51,12 +52,24 @@ func (s exitStatus) Error() string {
 
 // printError writes a stable top-level CLI error prefix.
 func printError(err error) {
+	var structured *diag.Diagnostic
+	if errors.As(err, &structured) {
+		_, _ = fmt.Fprintln(os.Stderr, structured.CLIError())
+		return
+	}
 	msg := err.Error()
 	if strings.HasPrefix(msg, "error:") {
 		_, _ = fmt.Fprintln(os.Stderr, msg)
 		return
 	}
 	_, _ = fmt.Fprintln(os.Stderr, "error: "+msg)
+}
+
+// printParserDiagnostics writes parser diagnostics using the shared CLI severity prefix.
+func printParserDiagnostics(diags []parser.Diagnostic) {
+	for _, diag := range diags {
+		_, _ = fmt.Fprintln(os.Stderr, diag.CLIError())
+	}
 }
 
 // dispatch runs one CLI command.
@@ -178,9 +191,7 @@ func parseFile(path string) error {
 		return err
 	}
 	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
+		printParserDiagnostics(errs)
 		return fmt.Errorf("parse failed")
 	}
 	_, _ = fmt.Println(program.String())
@@ -197,9 +208,7 @@ func runFile(path string, args []string) error {
 		return err
 	}
 	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
+		printParserDiagnostics(errs)
 		return fmt.Errorf("parse failed")
 	}
 	if err := checkProgram(program); err != nil {
@@ -231,9 +240,7 @@ func checkFile(path string) error {
 		return err
 	}
 	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
+		printParserDiagnostics(errs)
 		return fmt.Errorf("parse failed")
 	}
 	if err := checkProgram(program); err != nil {
@@ -317,7 +324,7 @@ func packageStdDecls(graph project.Graph) ([]ast.Decl, error) {
 		return nil, err
 	}
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("parse std failed: %s", errs[0])
+		return nil, &errs[0]
 	}
 	return decls, nil
 }
@@ -332,9 +339,7 @@ func testFile(path string, args []string) error {
 		return err
 	}
 	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
+		printParserDiagnostics(errs)
 		return fmt.Errorf("parse failed")
 	}
 	if err := checkProgram(program); err != nil {
@@ -702,9 +707,7 @@ func lowerFile(path string, opt bool) (*ir.Module, error) {
 		return nil, err
 	}
 	if len(errs) > 0 {
-		for _, msg := range errs {
-			_, _ = fmt.Fprintln(os.Stderr, msg)
-		}
+		printParserDiagnostics(errs)
 		return nil, fmt.Errorf("parse failed")
 	}
 	if err := checkProgram(program); err != nil {
@@ -787,18 +790,18 @@ func checkProgram(program *ast.Program) error {
 }
 
 // parsePath reads and parses a source file.
-func parsePath(path string) (*ast.Program, []string, error) {
+func parsePath(path string) (*ast.Program, []parser.Diagnostic, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	p := parser.New(lexer.New(string(b)))
 	program := p.ParseProgram()
-	return program, p.Errors(), nil
+	return program, p.Diagnostics(), nil
 }
 
 // parsePathWithStd parses a source file and appends Kizu std wrappers.
-func parsePathWithStd(path string) (*ast.Program, []string, error) {
+func parsePathWithStd(path string) (*ast.Program, []parser.Diagnostic, error) {
 	program, errs, err := parsePath(path)
 	if err != nil || len(errs) > 0 {
 		return program, errs, err

@@ -1194,7 +1194,7 @@ func countHostedCompilerCLIMovedCheckFailures(t *testing.T, exePath string, dir 
 		exePath,
 		"check",
 		movedPath,
-		"error: move error: moved value `name` was used\n",
+		"error: move error: moved value `name` was used at 6:13\n",
 		"moved value spacing check",
 	)
 }

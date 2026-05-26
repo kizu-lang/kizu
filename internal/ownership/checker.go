@@ -163,7 +163,7 @@ func (c *Checker) checkStructs(program *ast.Program) error {
 		fields := map[string]string{}
 		for _, field := range st.Fields {
 			if field.Borrow {
-				return fmt.Errorf("borrow error: struct field `%s.%s` cannot store borrow",
+				return errorf("borrow error: struct field `%s.%s` cannot store borrow",
 					st.Name, field.Name)
 			}
 			fields[field.Name] = fieldOwnershipType(field)
@@ -199,7 +199,7 @@ func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
 	}
 	for _, method := range decl.Methods {
 		if _, exists := methods[method.Name]; exists {
-			return fmt.Errorf("move error: duplicate impl method `%s.%s`",
+			return errorf("move error: duplicate impl method `%s.%s`",
 				decl.TypeName, method.Name)
 		}
 		name := fmt.Sprintf("%s.%s", decl.TypeName, method.Name)
@@ -302,7 +302,7 @@ func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
 		}
 		fn := c.implMethod(decl.TypeName, method.Name)
 		if fn == nil {
-			return fmt.Errorf("move error: missing impl method `%s.%s`",
+			return errorf("move error: missing impl method `%s.%s`",
 				decl.TypeName, method.Name)
 		}
 		if err := c.checkFunction(fn); err != nil {
@@ -346,7 +346,7 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 	case *ast.ReturnStmt:
 		return c.checkReturnStmt(s, env)
 	case *ast.DeferStmt:
-		return fmt.Errorf("move error: defer statement must appear directly in a block")
+		return errorf("move error: defer statement must appear directly in a block")
 	case *ast.ExprStmt:
 		return c.checkExprStmt(s, env)
 	case *ast.IfStmt:
@@ -366,7 +366,7 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env)
 	default:
-		return fmt.Errorf("move error: unsupported statement %T", stmt)
+		return errorf("move error: unsupported statement %T", stmt)
 	}
 }
 
@@ -374,11 +374,11 @@ func (c *Checker) checkStmt(stmt ast.Statement, env *scope) error {
 func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope) error {
 	call, ok := stmt.Expr.(*ast.CallExpr)
 	if !ok {
-		return fmt.Errorf("move error: defer expects cleanup method call")
+		return errorf("move error: defer expects cleanup method call")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || field.Name != "deinit" {
-		return fmt.Errorf("move error: defer expects cleanup method call")
+		return errorf("move error: defer expects cleanup method call")
 	}
 	_, err := c.readExpr(field.Receiver, env)
 	return err
@@ -406,14 +406,16 @@ func (c *Checker) checkReturnStmt(stmt *ast.ReturnStmt, env *scope) error {
 			if c.borrowedReturnAllowed(ident.Name, value) {
 				return nil
 			}
-			return fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
+			return errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape",
+				ident.Name)
 		}
 		if exists && value.handleArenaID != 0 {
-			return fmt.Errorf("arena error: handle `%s` cannot outlive its arena", ident.Name)
+			return errorAt(ident.Span, "arena error: handle `%s` cannot outlive its arena",
+				ident.Name)
 		}
 	}
 	if arena := c.arenaAddReceiver(stmt.Value, env); arena != nil && arena.arenaID != 0 {
-		return fmt.Errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
+		return errorf("arena error: handle from `%s` cannot outlive its arena", arena.name)
 	}
 	_, err := c.moveExpr(stmt.Value, env)
 	return err
@@ -525,7 +527,7 @@ func (c *Checker) returnedBorrowInitializer(
 	idx := borrowReturnParamIndex(fn, mutable)
 	if idx < 0 || idx >= len(call.Args) {
 		return nil, "", "", false, true,
-			fmt.Errorf("borrow error: `%s` borrowed return has no source parameter", name)
+			errorf("borrow error: `%s` borrowed return has no source parameter", name)
 	}
 	target, field, err := c.borrowTarget(call.Args[idx], env)
 	if err != nil {
@@ -588,14 +590,14 @@ func (c *Checker) checkStringViewLetStmt(stmt *ast.LetStmt, target *binding, env
 func (c *Checker) checkStringViewInitializerShape(expr ast.Expression) error {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return fmt.Errorf("string error: String view initializer must call String.as_bytes")
+		return errorf("string error: String view initializer must call String.as_bytes")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || field.Name != "as_bytes" {
-		return fmt.Errorf("string error: String view initializer must call String.as_bytes")
+		return errorf("string error: String view initializer must call String.as_bytes")
 	}
 	if len(call.Args) != 0 {
-		return fmt.Errorf("string error: `String.as_bytes` expects 0 args, got %d", len(call.Args))
+		return errorf("string error: `String.as_bytes` expects 0 args, got %d", len(call.Args))
 	}
 	return nil
 }
@@ -630,7 +632,7 @@ func (c *Checker) checkArrayBorrowLetStmt(
 	env *scope,
 ) error {
 	if mutable && !target.mutable {
-		return fmt.Errorf("array error: `Array.at_mut` requires mutable array binding")
+		return errorf("array error: `Array.at_mut` requires mutable array binding")
 	}
 	if err := c.checkArrayBorrowInitializerIndex(stmt.Value, env); err != nil {
 		return err
@@ -652,25 +654,25 @@ func (c *Checker) checkArrayBorrowLetStmt(
 func (c *Checker) checkArrayBorrowInitializerIndex(expr ast.Expression, env *scope) error {
 	tryExpr, ok := expr.(*ast.TryExpr)
 	if !ok {
-		return fmt.Errorf("array error: Array borrow initializer must use try")
+		return errorf("array error: Array borrow initializer must use try")
 	}
 	call, ok := tryExpr.Value.(*ast.CallExpr)
 	if !ok {
-		return fmt.Errorf("array error: Array borrow initializer must call Array.at")
+		return errorf("array error: Array borrow initializer must call Array.at")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || (field.Name != "at" && field.Name != "at_mut") {
-		return fmt.Errorf("array error: Array borrow initializer must call Array.at")
+		return errorf("array error: Array borrow initializer must call Array.at")
 	}
 	if len(call.Args) != 1 {
-		return fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d", field.Name, len(call.Args))
+		return errorf("array error: `Array.%s` expects 1 arg, got %d", field.Name, len(call.Args))
 	}
 	got, err := c.readExpr(call.Args[0], env)
 	if err != nil {
 		return err
 	}
 	if got != "i64" {
-		return fmt.Errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
+		return errorf("array error: `Array.%s` expects i64 index, got %s", field.Name, got)
 	}
 	return nil
 }
@@ -717,7 +719,7 @@ func (c *Checker) checkBoxBorrowLetStmt(
 	env *scope,
 ) error {
 	if mutable && !boxBorrowTargetIsMutable(target, field) {
-		return fmt.Errorf("box error: `Box.borrow_mut` requires mutable Box receiver")
+		return errorf("box error: `Box.borrow_mut` requires mutable Box receiver")
 	}
 	if err := c.checkBoxBorrowInitializerShape(stmt.Value); err != nil {
 		return err
@@ -748,14 +750,14 @@ func boxBorrowTargetIsMutable(target *binding, field string) bool {
 func (c *Checker) checkBoxBorrowInitializerShape(expr ast.Expression) error {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return fmt.Errorf("box error: Box borrow initializer must call Box.borrow")
+		return errorf("box error: Box borrow initializer must call Box.borrow")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || (field.Name != "borrow" && field.Name != "borrow_mut") {
-		return fmt.Errorf("box error: Box borrow initializer must call Box.borrow")
+		return errorf("box error: Box borrow initializer must call Box.borrow")
 	}
 	if len(call.Args) != 0 {
-		return fmt.Errorf("box error: `Box.%s` expects 0 args, got %d", field.Name, len(call.Args))
+		return errorf("box error: `Box.%s` expects 0 args, got %d", field.Name, len(call.Args))
 	}
 	return nil
 }
@@ -783,7 +785,7 @@ func (c *Checker) boxBorrowInitializer(
 	}
 	base, elem, ok := splitGenericType(typeName)
 	if !ok || base != "std::mem::Box" {
-		return nil, "", "", false, true, fmt.Errorf("box error: `Box.%s` expects Box receiver",
+		return nil, "", "", false, true, errorf("box error: `Box.%s` expects Box receiver",
 			field.Name)
 	}
 	return target, borrowedField, elem, field.Name == "borrow_mut", true, nil
@@ -824,37 +826,43 @@ func (c *Checker) borrowTarget(expr ast.Expression, env *scope) (*binding, strin
 	case *ast.IdentExpr:
 		value, ok := env.lookup(target.Name)
 		if !ok {
-			return nil, "", fmt.Errorf("borrow error: undefined variable `%s`", target.Name)
+			return nil, "", errorAt(target.Span,
+				"borrow error: undefined variable `%s`", target.Name)
 		}
-		if err := checkDeinitializedBorrow(target.Name, value); err != nil {
+		if err := checkDeinitializedBorrow(target.Name, value, target.Span); err != nil {
 			return nil, "", err
 		}
 		if value.moved {
-			return nil, "", fmt.Errorf("borrow error: moved value `%s` was borrowed", target.Name)
+			return nil, "", errorAt(target.Span,
+				"borrow error: moved value `%s` was borrowed", target.Name)
 		}
 		return value, "", nil
 	case *ast.FieldExpr:
 		ident, ok := target.Receiver.(*ast.IdentExpr)
 		if !ok {
-			return nil, "", fmt.Errorf("borrow error: v0.1 field borrow only supports one direct field")
+			return nil, "", errorAt(target.Span,
+				"borrow error: v0.1 field borrow only supports one direct field")
 		}
 		value, ok := env.lookup(ident.Name)
 		if !ok {
-			return nil, "", fmt.Errorf("borrow error: undefined variable `%s`", ident.Name)
+			return nil, "", errorAt(ident.Span,
+				"borrow error: undefined variable `%s`", ident.Name)
 		}
-		if err := checkDeinitializedBorrow(ident.Name, value); err != nil {
+		if err := checkDeinitializedBorrow(ident.Name, value, ident.Span); err != nil {
 			return nil, "", err
 		}
 		if value.moved {
-			return nil, "", fmt.Errorf("borrow error: moved value `%s` was borrowed", ident.Name)
+			return nil, "", errorAt(ident.Span,
+				"borrow error: moved value `%s` was borrowed", ident.Name)
 		}
 		if value.fieldDeinit[target.Name] {
-			return nil, "", fmt.Errorf("move error: field `%s.%s` was deinitialized",
+			return nil, "", errorAt(target.Span,
+				"move error: field `%s.%s` was deinitialized",
 				ident.Name, target.Name)
 		}
 		return value, target.Name, nil
 	default:
-		return nil, "", fmt.Errorf("borrow error: borrow target must be a local binding or direct field")
+		return nil, "", errorf("borrow error: borrow target must be a local binding or direct field")
 	}
 }
 
@@ -889,7 +897,7 @@ func (c *Checker) checkAssignStmt(stmt *ast.AssignStmt, env *scope) error {
 			return err
 		}
 		if target.hasAnyBorrow() {
-			return fmt.Errorf("borrow error: value `%s` cannot be assigned while borrowed",
+			return errorf("borrow error: value `%s` cannot be assigned while borrowed",
 				target.name)
 		}
 		target.typeName = typeName
@@ -981,7 +989,7 @@ func (c *Checker) checkForStmt(stmt *ast.ForStmt, env *scope) error {
 // checkLoopBranch rejects branch statements outside loops during ownership-only tests.
 func (c *Checker) checkLoopBranch(label string) error {
 	if c.loopDepth == 0 {
-		return fmt.Errorf("move error: loop branch `%s` used outside loop", label)
+		return errorf("move error: loop branch `%s` used outside loop", label)
 	}
 	return nil
 }
@@ -994,15 +1002,15 @@ func (c *Checker) checkMatchStmt(stmt *ast.MatchStmt, env *scope) error {
 	}
 	tags, unionPayloads, ok := c.matchTags(valueType)
 	if !ok {
-		return fmt.Errorf("move error: match expects enum or union, got %s", valueType)
+		return errorf("move error: match expects enum or union, got %s", valueType)
 	}
 	for _, arm := range stmt.Arms {
 		if arm.IsWildcard() {
 			if arm.Binding != "" {
-				return fmt.Errorf("move error: wildcard match arm cannot bind payload")
+				return errorf("move error: wildcard match arm cannot bind payload")
 			}
 		} else if !tags[arm.Tag] {
-			return fmt.Errorf("move error: unknown match tag `%s::%s`", valueType, arm.Tag)
+			return errorf("move error: unknown match tag `%s::%s`", valueType, arm.Tag)
 		}
 		armEnv := env.clone()
 		child := armEnv.child()
@@ -1046,7 +1054,7 @@ func (c *Checker) readExpr(expr ast.Expression, env *scope) (string, error) {
 		if _, ok := c.typeArgValues[e.Name]; ok {
 			return "type", nil
 		}
-		return readIdent(e.Name, env)
+		return readIdent(e, env)
 	case *ast.PrefixExpr:
 		return c.readExpr(e.Right, env)
 	case *ast.BinaryExpr:
@@ -1083,7 +1091,7 @@ func (c *Checker) readScalarExpr(expr ast.Expression) (string, error) {
 // readArenaNewExpr validates allocator use without consuming its capability.
 func (c *Checker) readArenaNewExpr(expr *ast.ArenaNewExpr, env *scope) (string, error) {
 	if expr.Allocator == nil {
-		return "", fmt.Errorf(
+		return "", errorf(
 			"arena error: `std::arena::Arena<%s>` expects exactly one allocator argument",
 			expr.TypeName)
 	}
@@ -1092,7 +1100,7 @@ func (c *Checker) readArenaNewExpr(expr *ast.ArenaNewExpr, env *scope) (string, 
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
+		return "", errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
 			expr.TypeName, got)
 	}
 	return fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName), nil
@@ -1106,7 +1114,7 @@ func (c *Checker) readControlExpr(expr ast.Expression, env *scope) (string, erro
 	case *ast.MatchStmt:
 		return c.readMatchExpr(e, env)
 	default:
-		return "", fmt.Errorf("move error: unsupported expression %T", expr)
+		return "", errorf("move error: unsupported expression %T", expr)
 	}
 }
 
@@ -1117,7 +1125,7 @@ func (c *Checker) readIndexExpr(expr *ast.IndexExpr, env *scope) (string, error)
 		return "", err
 	}
 	if !sameOwnershipType(target, "[]u8") {
-		return "", fmt.Errorf("move error: index/slice target expects []u8, got %s", target)
+		return "", errorf("move error: index/slice target expects []u8, got %s", target)
 	}
 	if !expr.Slice {
 		if _, err := c.readExpr(expr.Index, env); err != nil {
@@ -1148,7 +1156,7 @@ func readLiteralType(expr ast.Expression) (string, error) {
 	case *ast.BoolExpr:
 		return "bool", nil
 	default:
-		return "", fmt.Errorf("move error: unsupported literal %T", expr)
+		return "", errorf("move error: unsupported literal %T", expr)
 	}
 }
 
@@ -1188,7 +1196,7 @@ func coerceContextualIntegerLiteral(expr ast.Expression, want string, got string
 		return got, nil
 	}
 	if !integerLiteralFitsType(value, want) {
-		return "", fmt.Errorf("move error: integer literal `%s` does not fit %s",
+		return "", errorf("move error: integer literal `%s` does not fit %s",
 			expr.String(), want)
 	}
 	return want, nil
@@ -1265,21 +1273,22 @@ func (c *Checker) moveExpr(expr ast.Expression, env *scope) (string, error) {
 	value, ok := env.lookup(ident.Name)
 	if !ok {
 		if ident.Name == "void" {
-			return "", fmt.Errorf("move error: void is not a value")
+			return "", errorAt(ident.Span, "move error: void is not a value")
 		}
-		return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
+		return "", errorAt(ident.Span, "move error: undefined variable `%s`", ident.Name)
 	}
-	if err := checkDeinitializedUse(ident.Name, value, env); err != nil {
+	if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
 		return "", err
 	}
 	if value.moved {
-		return "", fmt.Errorf("move error: moved value `%s` was used", ident.Name)
+		return "", errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
 	}
 	if value.borrowedParam {
-		return "", fmt.Errorf("borrow error: borrowed value `%s` cannot escape", ident.Name)
+		return "", errorAt(ident.Span, "borrow error: borrowed value `%s` cannot escape", ident.Name)
 	}
 	if value.hasAnyBorrow() && !c.isCopyType(value.typeName) {
-		return "", fmt.Errorf("borrow error: value `%s` cannot be moved while borrowed", ident.Name)
+		return "", errorAt(ident.Span,
+			"borrow error: value `%s` cannot be moved while borrowed", ident.Name)
 	}
 	if !c.isCopyType(value.typeName) {
 		value.moved = true
@@ -1300,7 +1309,8 @@ func (c *Checker) moveNonIdentExpr(expr ast.Expression, env *scope) (string, err
 		if c.isCopyType(typeName) {
 			return typeName, nil
 		}
-		return "", fmt.Errorf("arena error: arena.get returns a local borrow and cannot be moved")
+		return "", errorAt(expressionSpan(expr),
+			"arena error: arena.get returns a local borrow and cannot be moved")
 	}
 	if st, ok := expr.(*ast.StructLiteralExpr); ok {
 		return c.moveStructLiteralExpr(st, env)
@@ -1336,7 +1346,7 @@ func (c *Checker) checkIfExprValue(stmt *ast.IfStmt, env *scope, moveTail bool) 
 		return "", err
 	}
 	if stmt.Alternative == nil {
-		return "", fmt.Errorf("move error: if expression requires else branch")
+		return "", errorf("move error: if expression requires else branch")
 	}
 	left := env.clone()
 	leftType, err := c.checkBlockValue(stmt.Consequence, left.child(), moveTail)
@@ -1349,7 +1359,7 @@ func (c *Checker) checkIfExprValue(stmt *ast.IfStmt, env *scope, moveTail bool) 
 		return "", err
 	}
 	if leftType != rightType {
-		return "", fmt.Errorf("move error: if expression branch types differ: %s vs %s",
+		return "", errorf("move error: if expression branch types differ: %s vs %s",
 			leftType, rightType)
 	}
 	env.mergeMovedFrom(left)
@@ -1379,7 +1389,7 @@ func (c *Checker) checkMatchExprValue(
 	}
 	tags, unionPayloads, ok := c.matchTags(valueType)
 	if !ok {
-		return "", fmt.Errorf("move error: match expects enum or union, got %s", valueType)
+		return "", errorf("move error: match expects enum or union, got %s", valueType)
 	}
 	var result string
 	for idx, arm := range stmt.Arms {
@@ -1390,7 +1400,7 @@ func (c *Checker) checkMatchExprValue(
 		if idx == 0 {
 			result = got
 		} else if got != result {
-			return "", fmt.Errorf("move error: match arm types differ: %s vs %s", result, got)
+			return "", errorf("move error: match arm types differ: %s vs %s", result, got)
 		}
 	}
 	return result, nil
@@ -1406,10 +1416,10 @@ func (c *Checker) checkMatchExprArmValue(
 ) (string, error) {
 	if arm.IsWildcard() {
 		if arm.Binding != "" {
-			return "", fmt.Errorf("move error: wildcard match arm cannot bind payload")
+			return "", errorf("move error: wildcard match arm cannot bind payload")
 		}
 	} else if !tags[arm.Tag] {
-		return "", fmt.Errorf("move error: unknown match tag `%s`", arm.Tag)
+		return "", errorf("move error: unknown match tag `%s`", arm.Tag)
 	}
 	armEnv := env.clone()
 	child := armEnv.child()
@@ -1429,7 +1439,7 @@ func (c *Checker) checkMatchExprArmValue(
 // checkBlockValue checks a branch block used in expression position.
 func (c *Checker) checkBlockValue(block *ast.BlockStmt, env *scope, moveTail bool) (string, error) {
 	if block == nil || len(block.Statements) == 0 {
-		return "", fmt.Errorf("move error: expression block must end with a value")
+		return "", errorf("move error: expression block must end with a value")
 	}
 	lastUses := blockLastUses(block)
 	defers := []ast.Expression{}
@@ -1464,7 +1474,7 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, moveTail bool) 
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if s.Semicolon {
-			return "", fmt.Errorf("move error: expression block must end with a value")
+			return "", errorf("move error: expression block must end with a value")
 		}
 		if moveTail {
 			return c.moveExpr(s.Expr, env)
@@ -1475,7 +1485,7 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, moveTail bool) 
 	case *ast.MatchStmt:
 		return c.checkMatchExprValue(s, env, moveTail)
 	default:
-		return "", fmt.Errorf("move error: expression block must end with a value")
+		return "", errorf("move error: expression block must end with a value")
 	}
 }
 
@@ -1491,7 +1501,7 @@ func (c *Checker) moveDerefExpr(expr *ast.DerefExpr, env *scope) (string, error)
 	if c.isCopyType(typeName) {
 		return typeName, nil
 	}
-	return "", fmt.Errorf("borrow error: value `%s` cannot be moved out of borrow",
+	return "", errorf("borrow error: value `%s` cannot be moved out of borrow",
 		expr.Receiver.String())
 }
 
@@ -1533,7 +1543,7 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope) (string, error) 
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("move error: callee must be a function name")
+		return "", errorf("move error: callee must be a function name")
 	}
 	if result, ok, err := c.checkBuiltinCall(name.Name, expr, env); ok || err != nil {
 		return result, err
@@ -1549,13 +1559,13 @@ func (c *Checker) checkUserCall(
 ) (string, error) {
 	fn, ok := c.functions[name]
 	if !ok {
-		return "", fmt.Errorf("move error: undefined function `%s`", name)
+		return "", errorf("move error: undefined function `%s`", name)
 	}
 	if len(fn.decl.TypeParams) > 0 {
-		return "", fmt.Errorf("move error: `%s` requires explicit static arguments", name)
+		return "", errorf("move error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
-		return "", fmt.Errorf("move error: `%s` expects %d args, got %d",
+		return "", errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
 	borrowed, err := c.activateBorrowArgs(fn, args, env)
@@ -1596,11 +1606,11 @@ func (c *Checker) checkFunctionNameParam(
 ) error {
 	target, ok := arg.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
+		return errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
 	}
 	targetFn := c.functions[target.Name]
 	if targetFn == nil {
-		return fmt.Errorf("move error: undefined function `%s`", target.Name)
+		return errorf("move error: undefined function `%s`", target.Name)
 	}
 	if !strings.HasPrefix(name, "std.task.") {
 		return nil
@@ -1681,7 +1691,7 @@ func (c *Checker) checkQualifiedStdCoreBuiltin(
 	}
 	switch name {
 	case "std.channel.Channel":
-		return "", true, fmt.Errorf("move error: use `std::channel::Channel<T>()`")
+		return "", true, errorf("move error: use `std::channel::Channel<T>()`")
 	default:
 		return "", false, nil
 	}
@@ -1758,7 +1768,7 @@ func (c *Checker) checkSimpleCoreBuiltin(
 		return "", false, nil
 	}
 	if len(args) != len(signature.Args) {
-		return "", true, fmt.Errorf("move error: `%s` expects %s", name,
+		return "", true, errorf("move error: `%s` expects %s", name,
 			coreOwnershipArgsText(signature.Args))
 	}
 	for idx, arg := range args {
@@ -1785,7 +1795,7 @@ func (c *Checker) checkCoreArg(
 		return err
 	}
 	if got != string(want) {
-		return fmt.Errorf("move error: `%s` arg %d expects %s, got %s",
+		return errorf("move error: `%s` arg %d expects %s, got %s",
 			name, index+1, want, got)
 	}
 	return nil
@@ -1857,7 +1867,7 @@ func (c *Checker) checkTaskBuiltin(
 	env *scope,
 ) (string, bool, error) {
 	if strings.HasPrefix(name, "std.builtin.task_") && !c.currentStd {
-		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::task", name)
+		return "", true, errorf("move error: `%s` is reserved; use std::task", name)
 	}
 	switch name {
 	case "std.builtin.task_group":
@@ -1885,15 +1895,15 @@ func (c *Checker) checkTaskBuiltin(
 func checkConcurrencyConstructor(name string) (string, bool, error) {
 	switch name {
 	case "std.array.Array":
-		return "", true, fmt.Errorf("move error: use `std::array::Array<T>(allocator)`")
+		return "", true, errorf("move error: use `std::array::Array<T>(allocator)`")
 	case "std.map.Map":
-		return "", true, fmt.Errorf("move error: use `std::map::Map<K, V>(allocator)`")
+		return "", true, errorf("move error: use `std::map::Map<K, V>(allocator)`")
 	case "std.atomic.Atomic":
-		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<T>(value)`")
+		return "", true, errorf("move error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
-		return "", true, fmt.Errorf("move error: use `std::atomic::Atomic<i64>(value)`")
+		return "", true, errorf("move error: use `std::atomic::Atomic<i64>(value)`")
 	case "std.sync.Mutex":
-		return "", true, fmt.Errorf("move error: use `std::sync::Mutex<T>(value)`")
+		return "", true, errorf("move error: use `std::sync::Mutex<T>(value)`")
 	default:
 		return "", false, nil
 	}
@@ -1902,7 +1912,7 @@ func checkConcurrencyConstructor(name string) (string, bool, error) {
 // checkFsReadFile validates ownership effects for std::fs::read_file.
 func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("move error: `std::fs::read_file` expects io and path")
+		return "", true, errorf("move error: `std::fs::read_file` expects io and path")
 	}
 	if err := c.checkIoArg(args[0], env, "std::fs::read_file"); err != nil {
 		return "", true, err
@@ -1912,7 +1922,7 @@ func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bo
 		return "", true, err
 	}
 	if !sameOwnershipType(path, "[]u8") {
-		return "", true, fmt.Errorf("move error: `std::fs::read_file` expects []u8 path, got %s",
+		return "", true, errorf("move error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
 	return "![]u8", true, nil
@@ -1921,7 +1931,7 @@ func (c *Checker) checkFsReadFile(args []ast.Expression, env *scope) (string, bo
 // checkFsWriteFile validates ownership effects for std::fs::write_file.
 func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 3 {
-		return "", true, fmt.Errorf("move error: `std::fs::write_file` expects io, path, and bytes")
+		return "", true, errorf("move error: `std::fs::write_file` expects io, path, and bytes")
 	}
 	if err := c.checkIoArg(args[0], env, "std::fs::write_file"); err != nil {
 		return "", true, err
@@ -1932,7 +1942,7 @@ func (c *Checker) checkFsWriteFile(args []ast.Expression, env *scope) (string, b
 			return "", true, err
 		}
 		if !sameOwnershipType(got, "[]u8") {
-			return "", true, fmt.Errorf(
+			return "", true, errorf(
 				"move error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
@@ -1947,7 +1957,7 @@ func (c *Checker) checkFsPathOnly(
 	result string,
 ) (string, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("move error: `%s` expects io and path", name)
+		return "", true, errorf("move error: `%s` expects io and path", name)
 	}
 	if err := c.checkIoArg(args[0], env, name); err != nil {
 		return "", true, err
@@ -1957,7 +1967,7 @@ func (c *Checker) checkFsPathOnly(
 		return "", true, err
 	}
 	if !sameOwnershipType(path, "[]u8") {
-		return "", true, fmt.Errorf("move error: `%s` expects []u8 path, got %s", name, path)
+		return "", true, errorf("move error: `%s` expects []u8 path, got %s", name, path)
 	}
 	return result, true, nil
 }
@@ -1974,14 +1984,14 @@ func (c *Checker) checkArrayConstructor(
 		}
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("move error: `std::array::Array<%s>` expects allocator", elem)
+		return "", errorf("move error: `std::array::Array<%s>` expects allocator", elem)
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("move error: `std::array::Array<%s>` expects Allocator, got %s",
+		return "", errorf("move error: `std::array::Array<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	return fmt.Sprintf("std::array::Array<%s>", elem), nil
@@ -1995,17 +2005,17 @@ func (c *Checker) checkMapConstructorAllowTypeParams(
 ) (string, error) {
 	mapArgs, ok := splitGenericArgs(argsText)
 	if !ok || len(mapArgs) != 2 {
-		return "", fmt.Errorf("map error: std::map::Map expects 2 static arguments")
+		return "", errorf("map error: std::map::Map expects 2 static arguments")
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("map error: `std::map::Map` expects allocator")
+		return "", errorf("map error: `std::map::Map` expects allocator")
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("map error: `std::map::Map` expects Allocator, got %s", got)
+		return "", errorf("map error: `std::map::Map` expects Allocator, got %s", got)
 	}
 	return fmt.Sprintf("std::map::Map<%s, %s>", mapArgs[0], mapArgs[1]), nil
 }
@@ -2013,7 +2023,7 @@ func (c *Checker) checkMapConstructorAllowTypeParams(
 // rejectArrayElementType rejects element types with unresolved ownership hazards.
 func (c *Checker) rejectArrayElementType(elem string) error {
 	if err := c.rejectArrayStorageType(elem, map[string]bool{}); err != nil {
-		return fmt.Errorf("array error: Array element is not safe in v0.2: %w", err)
+		return errorf("array error: Array element is not safe in v0.2: %w", err)
 	}
 	return nil
 }
@@ -2028,10 +2038,10 @@ func (c *Checker) rejectArrayStorageType(typeName string, seen map[string]bool) 
 		return nil
 	}
 	if isRawPointerType(typeName) {
-		return fmt.Errorf("array error: Array element cannot be raw pointer in v0.2")
+		return errorf("array error: Array element cannot be raw pointer in v0.2")
 	}
 	if isDynType(typeName) {
-		return fmt.Errorf("array error: Array element cannot be dyn in v0.2")
+		return errorf("array error: Array element cannot be dyn in v0.2")
 	}
 	if err := c.rejectArrayStorageGeneric(typeName, seen); err != nil {
 		return err
@@ -2052,7 +2062,7 @@ func (c *Checker) rejectArrayStorageGeneric(typeName string, seen map[string]boo
 	case "std::arena::Arena", "std::arena::Handle", "std::array::Array", "std::map::Map":
 		return nil
 	case "Task", "Channel", "Mutex", "Atomic":
-		return fmt.Errorf("array error: Array element cannot be %s in v0.2", base)
+		return errorf("array error: Array element cannot be %s in v0.2", base)
 	case "option":
 		return c.rejectArrayStorageType(arg, seen)
 	default:
@@ -2065,7 +2075,7 @@ func (c *Checker) rejectArrayStorageStruct(typeName string, seen map[string]bool
 	fields := c.structs[typeName]
 	for fieldName, fieldType := range fields {
 		if err := c.rejectArrayStorageType(fieldType, seen); err != nil {
-			return fmt.Errorf("array error: struct `%s.%s` cannot be Array element: %w",
+			return errorf("array error: struct `%s.%s` cannot be Array element: %w",
 				typeName, fieldName, err)
 		}
 	}
@@ -2080,7 +2090,7 @@ func (c *Checker) rejectArrayStorageUnion(typeName string, seen map[string]bool)
 			continue
 		}
 		if err := c.rejectArrayStorageType(payload, seen); err != nil {
-			return fmt.Errorf("array error: union `%s::%s` cannot be Array element: %w",
+			return errorf("array error: union `%s::%s` cannot be Array element: %w",
 				typeName, variant, err)
 		}
 	}
@@ -2094,7 +2104,7 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, name string) error 
 		return err
 	}
 	if got != "Io" {
-		return fmt.Errorf("move error: `%s` expects Io, got %s", name, got)
+		return errorf("move error: `%s` expects Io, got %s", name, got)
 	}
 	return nil
 }
@@ -2109,7 +2119,7 @@ func checkIoBuiltin(name string, args []ast.Expression) (string, bool, error) {
 		}
 		return "Io", true, nil
 	case "std.io.evented", "std.builtin.io_evented":
-		return "", true, fmt.Errorf("move error: `std::io::evented` is not implemented in v0.1")
+		return "", true, errorf("move error: `std::io::evented` is not implemented in v0.1")
 	default:
 		return "", false, nil
 	}
@@ -2123,7 +2133,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 ) (string, error) {
 	name, ok := qualifiedName(expr.Callee)
 	if !ok {
-		return "", fmt.Errorf("move error: unsupported type application `%s`", expr.String())
+		return "", errorf("move error: unsupported type application `%s`", expr.String())
 	}
 	typeArg := c.instantiateTypeArgText(expr.TypeArg)
 	if name == "ptr_from_int" || name == "int_from_ptr" {
@@ -2148,7 +2158,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 	); ok || err != nil {
 		return typ, err
 	}
-	return "", fmt.Errorf("move error: `%s` does not take static arguments", name)
+	return "", errorf("move error: `%s` does not take static arguments", name)
 }
 
 // checkArenaTypeApply validates std::arena::Arena<T>(allocator) ownership.
@@ -2159,11 +2169,11 @@ func (c *Checker) checkArenaTypeApply(
 ) (string, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
-		return "", fmt.Errorf("arena error: std::arena::Arena expects 1 type argument")
+		return "", errorf("arena error: std::arena::Arena expects 1 type argument")
 	}
 	elem := parts[0]
 	if len(args) != 1 {
-		return "", fmt.Errorf(
+		return "", errorf(
 			"arena error: `std::arena::Arena<%s>` expects exactly one allocator argument",
 			elem)
 	}
@@ -2172,7 +2182,7 @@ func (c *Checker) checkArenaTypeApply(
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
+		return "", errorf("arena error: `std::arena::Arena<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	return fmt.Sprintf("std::arena::Arena<%s>", elem), nil
@@ -2208,7 +2218,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 		return "", false, nil
 	}
 	if !c.currentStd {
-		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::testing", name)
+		return "", true, errorf("move error: `%s` is reserved; use std::testing", name)
 	}
 	typ, err := c.checkBuiltinTestFailEqual(typeArg, args, env)
 	return typ, true, err
@@ -2224,7 +2234,7 @@ func (c *Checker) checkBuiltinChannelSyncTypeApply(
 	switch name {
 	case "std.builtin.channel":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::channel", name)
+			return "", true, errorf("move error: `%s` is reserved; use std::channel", name)
 		}
 		_, err := checkNoArgOwnershipCall(name, args)
 		if err != nil {
@@ -2233,13 +2243,13 @@ func (c *Checker) checkBuiltinChannelSyncTypeApply(
 		return fmt.Sprintf("Channel<%s>", typeArg), true, nil
 	case "std.builtin.atomic":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::atomic", name)
+			return "", true, errorf("move error: `%s` is reserved; use std::atomic", name)
 		}
 		typ, _, err := c.checkAtomic(typeArg, args, env)
 		return typ, true, err
 	case "std.builtin.mutex":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::sync", name)
+			return "", true, errorf("move error: `%s` is reserved; use std::sync", name)
 		}
 		typ, _, err := c.checkMutex(typeArg, args, env)
 		return typ, true, err
@@ -2261,7 +2271,7 @@ func (c *Checker) checkBuiltinTestFailEqual(
 	env *scope,
 ) (string, error) {
 	if len(args) != 2 {
-		return "", fmt.Errorf("move error: `std::testing::expect_equal<%s>` expects 2 args", typeArg)
+		return "", errorf("move error: `std::testing::expect_equal<%s>` expects 2 args", typeArg)
 	}
 	for idx, arg := range args {
 		got, err := c.readContextualExpr(arg, typeArg, env)
@@ -2269,7 +2279,7 @@ func (c *Checker) checkBuiltinTestFailEqual(
 			return "", err
 		}
 		if got != typeArg {
-			return "", fmt.Errorf(
+			return "", errorf(
 				"move error: arg %d of `std::testing::expect_equal<%s>` expects %s, got %s",
 				idx+1,
 				typeArg,
@@ -2291,7 +2301,7 @@ func (c *Checker) checkBuiltinArrayTypeApply(
 	switch name {
 	case "std.builtin.array":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::array", name)
+			return "", true, errorf("move error: `%s` is reserved; use std::array", name)
 		}
 		typ, err := c.checkArrayConstructor(typeArg, args, env)
 		return typ, true, err
@@ -2315,7 +2325,7 @@ func (c *Checker) checkBuiltinBoxTypeApply(
 	switch name {
 	case "std.builtin.box":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("move error: `%s` is reserved; use std::mem", name)
+			return "", true, errorf("move error: `%s` is reserved; use std::mem", name)
 		}
 		typ, err := c.checkBoxConstructor(typeArg, args, env)
 		return typ, true, err
@@ -2333,21 +2343,21 @@ func (c *Checker) checkBoxConstructor(
 	env *scope,
 ) (string, error) {
 	if len(args) != 2 {
-		return "", fmt.Errorf("box error: `std::mem::Box<%s>` expects allocator and value", elem)
+		return "", errorf("box error: `std::mem::Box<%s>` expects allocator and value", elem)
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("box error: `std::mem::Box<%s>` expects Allocator, got %s", elem, got)
+		return "", errorf("box error: `std::mem::Box<%s>` expects Allocator, got %s", elem, got)
 	}
 	got, err = c.moveContextualExpr(args[1], elem, env)
 	if err != nil {
 		return "", err
 	}
 	if got != elem {
-		return "", fmt.Errorf("box error: `std::mem::Box<%s>` expects %s value, got %s",
+		return "", errorf("box error: `std::mem::Box<%s>` expects %s value, got %s",
 			elem, elem, got)
 	}
 	return fmt.Sprintf("!std::mem::Box<%s>", elem), nil
@@ -2367,7 +2377,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 	receiver := fmt.Sprintf("std::mem::Box<%s>", typeArg)
 	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (string, error) {
 		if len(rest) != 0 {
-			return "", fmt.Errorf("box error: `Box.%s` expects 0 args, got %d", method, len(rest))
+			return "", errorf("box error: `Box.%s` expects 0 args, got %d", method, len(rest))
 		}
 		switch method {
 		case "borrow":
@@ -2377,7 +2387,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 		case "deinit":
 			return "void", nil
 		default:
-			return "", fmt.Errorf("box error: Box has no method `%s`", method)
+			return "", errorf("box error: Box has no method `%s`", method)
 		}
 	}, args, env)
 }
@@ -2446,17 +2456,17 @@ func (c *Checker) checkBuiltinReceiverMethod(
 	env *scope,
 ) (string, bool, error) {
 	if !c.currentStd {
-		return "", true, fmt.Errorf("move error: `%s` is reserved", name)
+		return "", true, errorf("move error: `%s` is reserved", name)
 	}
 	if len(args) == 0 {
-		return "", true, fmt.Errorf("move error: `%s` expects receiver", name)
+		return "", true, errorf("move error: `%s` expects receiver", name)
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", true, err
 	}
 	if got != receiver {
-		return "", true, fmt.Errorf("move error: `%s` expects %s receiver, got %s",
+		return "", true, errorf("move error: `%s` expects %s receiver, got %s",
 			name, receiver, got)
 	}
 	typ, err := checkRest(args[1:])
@@ -2483,7 +2493,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 		return "!&var " + elem, nil
 	case "get", "get_or_panic":
 		if len(args) != 1 {
-			return "", fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d",
+			return "", errorf("array error: `Array.%s` expects 1 arg, got %d",
 				name, len(args))
 		}
 		got, err := c.readExpr(args[0], env)
@@ -2491,10 +2501,10 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", err
 		}
 		if got != "i64" {
-			return "", fmt.Errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
+			return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
 		}
 		if !isGenericParamName(elem) && !c.isCopyType(elem) {
-			return "", fmt.Errorf("array error: `Array.%s` requires copy element in v0.2", name)
+			return "", errorf("array error: `Array.%s` requires copy element in v0.2", name)
 		}
 		if name == "get" {
 			return "!" + elem, nil
@@ -2520,7 +2530,7 @@ func (c *Checker) checkBuiltinMapTypeApply(
 		return "", false, nil
 	}
 	if !c.currentStd {
-		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::map", name)
+		return "", true, errorf("move error: `%s` is reserved; use std::map", name)
 	}
 	typ, err := c.checkMapConstructorAllowTypeParams(typeArg, args, env)
 	return typ, true, err
@@ -2562,19 +2572,19 @@ func (c *Checker) checkMapPrimitiveMethod(
 	switch name {
 	case "insert":
 		if len(args) != 2 {
-			return "", fmt.Errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
+			return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
 		}
 		if got, err := c.readExpr(args[0], env); err != nil {
 			return "", err
 		} else if got != keyType {
-			return "", fmt.Errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
+			return "", errorf("map error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
 		got, err := c.readContextualExpr(args[1], valueType, env)
 		if err != nil {
 			return "", err
 		}
 		if got != valueType {
-			return "", fmt.Errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
+			return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 		}
 		return "!void", nil
 	case "get":
@@ -2601,14 +2611,14 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	env *scope,
 ) error {
 	if len(args) != 1 {
-		return fmt.Errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return err
 	}
 	if got != keyType {
-		return fmt.Errorf("map error: `Map.%s` expects %s key, got %s", name, keyType, got)
+		return errorf("map error: `Map.%s` expects %s key, got %s", name, keyType, got)
 	}
 	return nil
 }
@@ -2624,7 +2634,7 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 		return "", false, nil
 	}
 	if !c.currentStd {
-		return "", true, fmt.Errorf("move error: `%s` is reserved; use std::thread", name)
+		return "", true, errorf("move error: `%s` is reserved; use std::thread", name)
 	}
 	typ, err := c.checkThreadScopedTyped(typeArg, args, env)
 	return typ, true, err
@@ -2634,7 +2644,7 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("map error: std::map::Map expects 2 static arguments")
+		return nil, errorf("map error: std::map::Map expects 2 static arguments")
 	}
 	if isGenericParamName(args[0]) {
 		return args, nil
@@ -2665,12 +2675,12 @@ func (c *Checker) checkGenericUserTypeApply(
 		return "", false, nil
 	}
 	if len(args) != len(fn.params) {
-		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
+		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			name, len(fn.params), len(args))
 	}
 	typeArgs, ok := splitGenericArgs(typeArg)
 	if !ok || len(typeArgs) != len(fn.decl.TypeParams) {
-		return "", true, fmt.Errorf("move error: `%s` expects %d static arguments",
+		return "", true, errorf("move error: `%s` expects %d static arguments",
 			name, len(fn.decl.TypeParams))
 	}
 	if err := c.checkGenericWrapperTypeArgs(name, typeArgs); err != nil {
@@ -2726,11 +2736,11 @@ func (c *Checker) checkGenericWrapperTypeArgs(name string, typeArgs []string) er
 		return c.rejectArrayElementType(typeArgs[0])
 	case "std.atomic.Atomic":
 		if !isAtomicSupportedType(typeArgs[0]) {
-			return fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArgs[0])
+			return errorf("atomic error: unsupported atomic type `%s` in v0.1", typeArgs[0])
 		}
 	case "std.sync.Mutex":
 		if !c.isCopyType(typeArgs[0]) {
-			return fmt.Errorf(
+			return errorf(
 				"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1",
 				typeArgs[0])
 		}
@@ -2771,7 +2781,7 @@ func (c *Checker) checkGenericUserArg(
 		return err
 	}
 	if got != want {
-		return fmt.Errorf("move error: arg %d of `%s` expects %s, got %s",
+		return errorf("move error: arg %d of `%s` expects %s, got %s",
 			idx+1, name, want, got)
 	}
 	return nil
@@ -2810,7 +2820,7 @@ func (c *Checker) checkMovedGenericArg(
 		return err
 	}
 	if got != want {
-		return fmt.Errorf("move error: arg %d of `%s` expects %s, got %s",
+		return errorf("move error: arg %d of `%s` expects %s, got %s",
 			idx+1, name, want, got)
 	}
 	return nil
@@ -2826,11 +2836,11 @@ func (c *Checker) checkGenericFunctionNameArg(
 ) error {
 	target, ok := arg.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
+		return errorf("move error: `%s` expects function name", strings.ReplaceAll(name, ".", "::"))
 	}
 	targetFn := c.functions[target.Name]
 	if targetFn == nil {
-		return fmt.Errorf("move error: undefined function `%s`", target.Name)
+		return errorf("move error: undefined function `%s`", target.Name)
 	}
 	if name == "std.thread.scoped" && ownershipFunctionParamName(fn, idx) == "worker" {
 		return c.checkThreadScopedWorker(
@@ -2865,9 +2875,9 @@ func (c *Checker) checkBuiltinCall(
 		result, err := c.checkErrorCall(expr, env)
 		return result, true, err
 	case "Io":
-		return "", true, fmt.Errorf("move error: use `std::io::blocking()`")
+		return "", true, errorf("move error: use `std::io::blocking()`")
 	case "TaskGroup":
-		return "", true, fmt.Errorf("move error: use `std::task::Group(io)`")
+		return "", true, errorf("move error: use `std::task::Group(io)`")
 	default:
 		return "", false, nil
 	}
@@ -2876,7 +2886,7 @@ func (c *Checker) checkBuiltinCall(
 // checkErrorCall reads and copies the message into the error payload.
 func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope) (string, error) {
 	if len(expr.Args) != 1 {
-		return "", fmt.Errorf("move error: `error` expects 1 arg, got %d", len(expr.Args))
+		return "", errorf("move error: `error` expects 1 arg, got %d", len(expr.Args))
 	}
 	if _, err := c.readExpr(expr.Args[0], env); err != nil {
 		return "", err
@@ -2892,7 +2902,7 @@ func (c *Checker) readTryExpr(expr *ast.TryExpr, env *scope) (string, error) {
 	}
 	arg, ok := errorUnionElement(got)
 	if !ok {
-		return "", fmt.Errorf("move error: try expects !T, got %s", got)
+		return "", errorf("move error: try expects !T, got %s", got)
 	}
 	return arg, nil
 }
@@ -2952,11 +2962,11 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	}
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
 		if _, exists := c.enums[ident.Name]; exists {
-			return "", fmt.Errorf("move error: enum tag `%s.%s` must use `::`",
+			return "", errorAt(expr.Span, "move error: enum tag `%s.%s` must use `::`",
 				ident.Name, expr.Name)
 		}
 		if _, exists := c.unions[ident.Name]; exists {
-			return "", fmt.Errorf("move error: union variant `%s.%s` must use `::`",
+			return "", errorAt(expr.Span, "move error: union variant `%s.%s` must use `::`",
 				ident.Name, expr.Name)
 		}
 	}
@@ -2966,15 +2976,17 @@ func (c *Checker) readFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 	}
 	if root, field, ok := directFieldRoot(expr, env); ok {
 		if field != "" && root.fieldDeinit[field] {
-			return "", fmt.Errorf("move error: field `%s.%s` was deinitialized",
+			return "", errorAt(expr.Span, "move error: field `%s.%s` was deinitialized",
 				root.name, field)
 		}
 		if root.activeMutBorrows > 0 {
-			return "", fmt.Errorf("borrow error: value `%s` cannot be read while mutably borrowed",
+			return "", errorAt(expr.Span,
+				"borrow error: value `%s` cannot be read while mutably borrowed",
 				root.name)
 		}
 		if root.fieldMutBorrows[field] > 0 {
-			return "", fmt.Errorf("borrow error: field `%s.%s` cannot be read while mutably borrowed",
+			return "", errorAt(expr.Span,
+				"borrow error: field `%s.%s` cannot be read while mutably borrowed",
 				root.name, field)
 		}
 	}
@@ -3029,27 +3041,29 @@ func readFsDirEntryFieldType(field string) (string, bool) {
 func (c *Checker) readNamespaceExpr(expr *ast.FieldExpr) (string, error) {
 	ident, ok := expr.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("move error: invalid namespace lookup `%s`", expr.String())
+		return "", errorAt(expr.Span, "move error: invalid namespace lookup `%s`", expr.String())
 	}
 	if tags, exists := c.enums[ident.Name]; exists {
 		if !tags[expr.Name] {
-			return "", fmt.Errorf("move error: unknown enum tag `%s::%s`", ident.Name, expr.Name)
+			return "", errorAt(expr.Span,
+				"move error: unknown enum tag `%s::%s`", ident.Name, expr.Name)
 		}
 		return ident.Name, nil
 	}
 	if variants, exists := c.unions[ident.Name]; exists {
 		payload, ok := variants[expr.Name]
 		if !ok {
-			return "", fmt.Errorf("move error: unknown union variant `%s::%s`",
+			return "", errorAt(expr.Span, "move error: unknown union variant `%s::%s`",
 				ident.Name, expr.Name)
 		}
 		if payload != "" {
-			return "", fmt.Errorf("move error: union variant `%s::%s` expects payload",
+			return "", errorAt(expr.Span,
+				"move error: union variant `%s::%s` expects payload",
 				ident.Name, expr.Name)
 		}
 		return ident.Name, nil
 	}
-	return "", fmt.Errorf("move error: unknown namespace `%s`", ident.Name)
+	return "", errorAt(expr.Span, "move error: unknown namespace `%s`", ident.Name)
 }
 
 // moveFieldExpr rejects partial moves from borrowed or aggregate values.
@@ -3062,18 +3076,21 @@ func (c *Checker) moveFieldExpr(expr *ast.FieldExpr, env *scope) (string, error)
 		return typeName, nil
 	}
 	if name, ok := c.borrowedFieldRoot(expr, env); ok {
-		return "", fmt.Errorf(
+		return "", errorAt(
+			expr.Span,
 			"borrow error: field `%s` cannot be moved out of borrowed value `%s`",
 			expr.String(),
 			name,
 		)
 	}
 	if c.containsArenaGet(expr.Receiver, env) {
-		return "", fmt.Errorf(
+		return "", errorAt(
+			expr.Span,
 			"arena error: arena.get returns a local borrow and its fields cannot be moved",
 		)
 	}
-	return "", fmt.Errorf("move error: field `%s` cannot be moved out of aggregate", expr.String())
+	return "", errorAt(expr.Span, "move error: field `%s` cannot be moved out of aggregate",
+		expr.String())
 }
 
 // checkAssignmentBorrowConflict rejects writes that overlap active borrows.
@@ -3084,19 +3101,19 @@ func (c *Checker) checkAssignmentBorrowConflict(expr ast.Expression, env *scope)
 	}
 	if field == "" {
 		if root.hasAnyBorrow() {
-			return fmt.Errorf("borrow error: value `%s` cannot be assigned while borrowed", root.name)
+			return errorf("borrow error: value `%s` cannot be assigned while borrowed", root.name)
 		}
 		return nil
 	}
 	if root.borrowedParam && !root.mutBorrow {
-		return fmt.Errorf("borrow error: cannot assign field through shared borrow `%s`", root.name)
+		return errorf("borrow error: cannot assign field through shared borrow `%s`", root.name)
 	}
 	if root.activeBorrows > 0 || root.activeMutBorrows > 0 {
-		return fmt.Errorf("borrow error: field `%s.%s` cannot be assigned while value is borrowed",
+		return errorf("borrow error: field `%s.%s` cannot be assigned while value is borrowed",
 			root.name, field)
 	}
 	if root.fieldBorrows[field] > 0 || root.fieldMutBorrows[field] > 0 {
-		return fmt.Errorf("borrow error: field `%s.%s` cannot be assigned while borrowed",
+		return errorf("borrow error: field `%s.%s` cannot be assigned while borrowed",
 			root.name, field)
 	}
 	return nil
@@ -3122,7 +3139,7 @@ func (c *Checker) readDerefExpr(expr *ast.DerefExpr, env *scope) (string, error)
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
 		value, exists := env.lookup(ident.Name)
 		if !exists {
-			return "", fmt.Errorf("move error: undefined variable `%s`", ident.Name)
+			return "", errorAt(ident.Span, "move error: undefined variable `%s`", ident.Name)
 		}
 		if value.borrowedParam {
 			return value.typeName, nil
@@ -3132,9 +3149,11 @@ func (c *Checker) readDerefExpr(expr *ast.DerefExpr, env *scope) (string, error)
 		return typeName, err
 	}
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
-		return "", fmt.Errorf("borrow error: `%s` is not a borrow or raw pointer", ident.Name)
+		return "", errorAt(ident.Span,
+			"borrow error: `%s` is not a borrow or raw pointer", ident.Name)
 	}
-	return "", fmt.Errorf("borrow error: dereference expects a local borrow or raw pointer")
+	return "", errorAt(expr.OperatorSpan,
+		"borrow error: dereference expects a local borrow or raw pointer")
 }
 
 // rawPointerDerefExprType returns the element type for unchecked pointer dereference.
@@ -3156,7 +3175,7 @@ func (c *Checker) rawPointerDerefExprType(
 		return "", false, nil
 	}
 	if strings.HasPrefix(receiverType, "?") {
-		return "", true, fmt.Errorf(
+		return "", true, errorf(
 			"borrow error: nullable raw pointer `%s` cannot be dereferenced",
 			receiverType,
 		)
@@ -3196,11 +3215,11 @@ func (c *Checker) checkUnionConstructor(
 	if !field.Namespace {
 		if ident, ok := field.Receiver.(*ast.IdentExpr); ok {
 			if _, exists := c.enums[ident.Name]; exists {
-				return "", true, fmt.Errorf("move error: enum tag `%s.%s` must use `::`",
+				return "", true, errorf("move error: enum tag `%s.%s` must use `::`",
 					ident.Name, field.Name)
 			}
 			if _, exists := c.unions[ident.Name]; exists {
-				return "", true, fmt.Errorf("move error: union variant `%s.%s` must use `::`",
+				return "", true, errorf("move error: union variant `%s.%s` must use `::`",
 					ident.Name, field.Name)
 			}
 		}
@@ -3216,15 +3235,15 @@ func (c *Checker) checkUnionConstructor(
 	}
 	payload, exists := variants[field.Name]
 	if !exists {
-		return "", true, fmt.Errorf("move error: unknown union variant `%s::%s`",
+		return "", true, errorf("move error: unknown union variant `%s::%s`",
 			ident.Name, field.Name)
 	}
 	if payload == "" {
-		return "", true, fmt.Errorf("move error: union variant `%s::%s` expects 0 args",
+		return "", true, errorf("move error: union variant `%s::%s` expects 0 args",
 			ident.Name, field.Name)
 	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("move error: union variant `%s::%s` expects 1 arg, got %d",
+		return "", true, errorf("move error: union variant `%s::%s` expects 1 arg, got %d",
 			ident.Name, field.Name, len(args))
 	}
 	if _, err := c.moveExpr(args[0], env); err != nil {
@@ -3256,17 +3275,18 @@ func (c *Checker) checkLocalReceiverMethod(
 ) (string, error) {
 	receiver, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("arena error: arena method receiver must be a local binding")
+		return "", errorAt(field.Span, "arena error: arena method receiver must be a local binding")
 	}
 	arena, exists := env.lookup(receiver.Name)
 	if !exists {
-		return "", fmt.Errorf("arena error: undefined arena `%s`", receiver.Name)
+		return "", errorAt(receiver.Span, "arena error: undefined arena `%s`", receiver.Name)
 	}
 	if arena.deinitialized {
-		return "", fmt.Errorf("arena error: arena `%s` was deinitialized", receiver.Name)
+		return "", errorAt(receiver.Span, "arena error: arena `%s` was deinitialized",
+			receiver.Name)
 	}
 	if arena.moved {
-		return "", fmt.Errorf("move error: moved value `%s` was used", receiver.Name)
+		return "", errorAt(receiver.Span, "move error: moved value `%s` was used", receiver.Name)
 	}
 	base, elem, ok := splitGenericType(arena.typeName)
 	if ok && base == "std::array::Array" {
@@ -3289,7 +3309,7 @@ func (c *Checker) checkLocalReceiverMethod(
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
-		return "", fmt.Errorf("arena error: unknown arena method `%s`", field.Name)
+		return "", errorf("arena error: unknown arena method `%s`", field.Name)
 	}
 }
 
@@ -3346,7 +3366,7 @@ func (c *Checker) checkDirectFieldReceiverMethod(
 		return "", true, err
 	}
 	if field.Name == "deinit" && !c.allowsDirectFieldCleanup(receiver) {
-		return "", true, fmt.Errorf(
+		return "", true, errorf(
 			"move error: field cleanup `%s.deinit` is only allowed inside owner deinit",
 			receiver.path,
 		)
@@ -3369,17 +3389,20 @@ func (c *Checker) directFieldReceiver(
 ) (*directFieldReceiver, error) {
 	ownerIdent, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return nil, fmt.Errorf("move error: field method receiver only supports one direct field")
+		return nil, errorAt(field.Span,
+			"move error: field method receiver only supports one direct field")
 	}
 	owner, exists := env.lookup(ownerIdent.Name)
 	if !exists {
-		return nil, fmt.Errorf("move error: undefined variable `%s`", ownerIdent.Name)
+		return nil, errorAt(ownerIdent.Span,
+			"move error: undefined variable `%s`", ownerIdent.Name)
 	}
-	if err := checkDeinitializedUse(ownerIdent.Name, owner, env); err != nil {
+	if err := checkDeinitializedUse(ownerIdent.Name, owner, env, ownerIdent.Span); err != nil {
 		return nil, err
 	}
 	if owner.moved {
-		return nil, fmt.Errorf("move error: moved value `%s` was used", ownerIdent.Name)
+		return nil, errorAt(ownerIdent.Span,
+			"move error: moved value `%s` was used", ownerIdent.Name)
 	}
 	typeName, err := c.readFieldExpr(field, env)
 	if err != nil {
@@ -3458,7 +3481,7 @@ func (c *Checker) checkFieldArenaMethod(
 	case "deinit":
 		return c.checkArenaDeinit(arena, args)
 	default:
-		return "", fmt.Errorf("arena error: unknown arena method `%s`", name)
+		return "", errorf("arena error: unknown arena method `%s`", name)
 	}
 }
 
@@ -3469,11 +3492,11 @@ func (c *Checker) checkFieldArenaGet(
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
+		return "", errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
-		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
+		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
 	if err := c.checkKnownHandleProvenance(arena, args[0], env); err != nil {
 		return "", err
@@ -3535,7 +3558,7 @@ func (c *Checker) checkAstNodeIDProvenance(
 		return nil
 	}
 	if idArena != receiver.arenaID {
-		return fmt.Errorf("ast error: NodeId does not belong to Ast `%s`", receiver.name)
+		return errorf("ast error: NodeId does not belong to Ast `%s`", receiver.name)
 	}
 	return nil
 }
@@ -3554,7 +3577,7 @@ func (c *Checker) checkAstChildRangeProvenance(
 		return nil
 	}
 	if rangeArena != receiver.arenaID {
-		return fmt.Errorf("ast error: ChildRange does not belong to Ast `%s`", receiver.name)
+		return errorf("ast error: ChildRange does not belong to Ast `%s`", receiver.name)
 	}
 	return nil
 }
@@ -3575,7 +3598,7 @@ func (c *Checker) checkAstAddMethod(
 	if result, ok, err := c.checkAstAddShapeMethod(receiver, name, args, env); ok || err != nil {
 		return result, err
 	}
-	return "", fmt.Errorf("move error: unknown Ast method `%s`", name)
+	return "", errorf("move error: unknown Ast method `%s`", name)
 }
 
 // checkAstAddExprMethod validates expression AST constructors.
@@ -3950,7 +3973,7 @@ func (c *Checker) checkAstMethodArgs(
 	result string,
 ) (string, error) {
 	if len(args) != len(want) {
-		return "", fmt.Errorf("move error: `Ast.%s` expects %d args, got %d", name, len(want), len(args))
+		return "", errorf("move error: `Ast.%s` expects %d args, got %d", name, len(want), len(args))
 	}
 	for idx, arg := range args {
 		if isAstNodeIDType(want[idx]) {
@@ -3968,7 +3991,7 @@ func (c *Checker) checkAstMethodArgs(
 			return "", err
 		}
 		if got != want[idx] {
-			return "", fmt.Errorf("move error: `Ast.%s` arg %d expects %s, got %s",
+			return "", errorf("move error: `Ast.%s` arg %d expects %s, got %s",
 				name, idx+1, want[idx], got)
 		}
 	}
@@ -3994,7 +4017,7 @@ func (c *Checker) checkBoxReceiverExpr(
 		return "", true, err
 	}
 	if field.Name == "deinit" && borrowedField != "" {
-		return "", true, fmt.Errorf("box error: `Box.deinit` requires local Box receiver")
+		return "", true, errorf("box error: `Box.deinit` requires local Box receiver")
 	}
 	typ, err := c.checkBoxMethodForTarget(target, borrowedField, field.Name, args)
 	return typ, true, err
@@ -4009,21 +4032,21 @@ func (c *Checker) checkBoxMethodForTarget(
 ) (string, error) {
 	switch name {
 	case "borrow", "borrow_mut":
-		return "", fmt.Errorf("box error: `Box.%s` must be bound with `let name = box.%s()`",
+		return "", errorf("box error: `Box.%s` must be bound with `let name = box.%s()`",
 			name, name)
 	case "deinit":
 		if target.hasAnyBorrow() {
-			return "", fmt.Errorf("box error: `Box.deinit` cannot run while box is borrowed")
+			return "", errorf("box error: `Box.deinit` cannot run while box is borrowed")
 		}
 		if len(args) != 0 {
-			return "", fmt.Errorf("box error: `Box.deinit` expects 0 args, got %d", len(args))
+			return "", errorf("box error: `Box.deinit` expects 0 args, got %d", len(args))
 		}
 		if field == "" {
 			target.moved = true
 		}
 		return "void", nil
 	default:
-		return "", fmt.Errorf("box error: Box has no method `%s`", name)
+		return "", errorf("box error: Box has no method `%s`", name)
 	}
 }
 
@@ -4039,10 +4062,10 @@ func (c *Checker) checkBoxMethod(
 // checkStringReceiverBorrow rejects String methods whose receiver cannot be tracked safely.
 func checkStringReceiverBorrow(value *binding, name string) error {
 	if name == "deinit" && value.borrowedParam {
-		return fmt.Errorf("string error: `String.deinit` requires owned String receiver")
+		return errorf("string error: `String.deinit` requires owned String receiver")
 	}
 	if isStringMutatingMethod(name) && value.borrowedParam && !value.mutBorrow {
-		return fmt.Errorf("string error: `String.%s` requires mutable String receiver", name)
+		return errorf("string error: `String.%s` requires mutable String receiver", name)
 	}
 	return nil
 }
@@ -4054,10 +4077,10 @@ func checkMapReceiverBorrow(value *binding, name string) error {
 		return nil
 	}
 	if name == "deinit" && value.borrowedParam {
-		return fmt.Errorf("map error: `Map.deinit` requires owned Map receiver")
+		return errorf("map error: `Map.deinit` requires owned Map receiver")
 	}
 	if name == "insert" && value.borrowedParam && !value.mutBorrow {
-		return fmt.Errorf("map error: `Map.insert` requires mutable Map receiver")
+		return errorf("map error: `Map.insert` requires mutable Map receiver")
 	}
 	return nil
 }
@@ -4081,7 +4104,7 @@ func (c *Checker) checkStringMethod(
 		}
 		return "i64", nil
 	case "as_bytes":
-		return "", fmt.Errorf(
+		return "", errorf(
 			"string error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
 	case "clear", "deinit":
 		if err := checkStringMutationAllowed(str, name); err != nil {
@@ -4095,7 +4118,7 @@ func (c *Checker) checkStringMethod(
 		}
 		return "void", nil
 	default:
-		return "", fmt.Errorf("string error: String has no method `%s`", name)
+		return "", errorf("string error: String has no method `%s`", name)
 	}
 }
 
@@ -4118,7 +4141,7 @@ func (c *Checker) checkStringAppendOrReserve(
 // checkStringMutationAllowed rejects mutation while a byte view is alive.
 func checkStringMutationAllowed(str *binding, name string) error {
 	if str.hasAnyBorrow() {
-		return fmt.Errorf("string error: `String.%s` cannot run while string is borrowed", name)
+		return errorf("string error: `String.%s` cannot run while string is borrowed", name)
 	}
 	return nil
 }
@@ -4126,7 +4149,7 @@ func checkStringMutationAllowed(str *binding, name string) error {
 // checkStringNoArgs validates no-argument String methods.
 func checkStringNoArgs(name string, args []ast.Expression) error {
 	if len(args) != 0 {
-		return fmt.Errorf("string error: `String.%s` expects 0 args, got %d", name, len(args))
+		return errorf("string error: `String.%s` expects 0 args, got %d", name, len(args))
 	}
 	return nil
 }
@@ -4148,14 +4171,14 @@ func (c *Checker) checkStringBytesArg(
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", err
 	}
 	if !sameOwnershipType(got, "[]u8") {
-		return "", fmt.Errorf("string error: `String.%s` expects []u8, got %s", name, got)
+		return "", errorf("string error: `String.%s` expects []u8, got %s", name, got)
 	}
 	return "!void", nil
 }
@@ -4167,14 +4190,14 @@ func (c *Checker) checkStringReserveArg(
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", err
 	}
 	if got != "i64" {
-		return "", fmt.Errorf("string error: `String.%s` expects i64, got %s", name, got)
+		return "", errorf("string error: `String.%s` expects i64, got %s", name, got)
 	}
 	return "!void", nil
 }
@@ -4186,14 +4209,14 @@ func (c *Checker) checkStringByteArg(
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return "", errorf("string error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.readContextualExpr(args[0], "u8", env)
 	if err != nil {
 		return "", err
 	}
 	if got != "u8" {
-		return "", fmt.Errorf("string error: `String.%s` expects u8, got %s", name, got)
+		return "", errorf("string error: `String.%s` expects u8, got %s", name, got)
 	}
 	return "!void", nil
 }
@@ -4241,36 +4264,36 @@ func (c *Checker) checkTaskGroupMethod(
 	env *scope,
 ) (string, error) {
 	if name != "spawn" {
-		return "", fmt.Errorf("task error: TaskGroup has no method `%s`", name)
+		return "", errorf("task error: TaskGroup has no method `%s`", name)
 	}
 	if len(args) < 1 {
-		return "", fmt.Errorf("task error: `TaskGroup.spawn` expects function and args")
+		return "", errorf("task error: `TaskGroup.spawn` expects function and args")
 	}
 	target, ok := args[0].(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("task error: `TaskGroup.spawn` expects function name")
+		return "", errorf("task error: `TaskGroup.spawn` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
 		if _, ok := env.lookup(target.Name); ok {
-			return "", fmt.Errorf("task error: `TaskGroup.spawn` expects function name")
+			return "", errorf("task error: `TaskGroup.spawn` expects function name")
 		}
-		return "", fmt.Errorf("task error: undefined function `%s`", target.Name)
+		return "", errorf("task error: undefined function `%s`", target.Name)
 	}
 	spawnArgs := args[1:]
 	if len(fn.params) == 0 || fn.params[0].typeName != "Io" ||
 		fn.params[0].borrow || fn.params[0].mutBorrow {
-		return "", fmt.Errorf("task error: spawned function `%s` must accept owned Io as first parameter",
+		return "", errorf("task error: spawned function `%s` must accept owned Io as first parameter",
 			target.Name)
 	}
 	if len(spawnArgs) != len(fn.params)-1 {
-		return "", fmt.Errorf("task error: `%s` expects %d args, got %d",
+		return "", errorf("task error: `%s` expects %d args, got %d",
 			target.Name, len(fn.params)-1, len(spawnArgs))
 	}
 	for idx, arg := range spawnArgs {
 		paramIdx := idx + 1
 		if fn.params[paramIdx].borrow {
-			return "", fmt.Errorf("task error: task cannot capture borrow parameter `%s`", target.Name)
+			return "", errorf("task error: task cannot capture borrow parameter `%s`", target.Name)
 		}
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
 			return "", err
@@ -4285,14 +4308,14 @@ func (c *Checker) checkTaskGroupMethod(
 // checkTaskGroup validates a task group bound to one Io implementation.
 func (c *Checker) checkTaskGroup(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("task error: `std::task::Group` expects io")
+		return "", true, errorf("task error: `std::task::Group` expects io")
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", true, err
 	}
 	if got != "Io" {
-		return "", true, fmt.Errorf("task error: `std::task::Group` expects Io, got %s", got)
+		return "", true, errorf("task error: `std::task::Group` expects Io, got %s", got)
 	}
 	return "TaskGroup", true, nil
 }
@@ -4305,10 +4328,10 @@ func (c *Checker) checkTaskMethod(
 	args []ast.Expression,
 ) (string, error) {
 	if len(args) != 0 {
-		return "", fmt.Errorf("task error: `task.%s` expects 0 args, got %d", name, len(args))
+		return "", errorf("task error: `task.%s` expects 0 args, got %d", name, len(args))
 	}
 	if task.taskDone {
-		return "", fmt.Errorf("task error: task `%s` was already completed", task.name)
+		return "", errorf("task error: task `%s` was already completed", task.name)
 	}
 	switch name {
 	case "await":
@@ -4318,7 +4341,7 @@ func (c *Checker) checkTaskMethod(
 		task.taskDone = true
 		return "void", nil
 	default:
-		return "", fmt.Errorf("task error: Task has no method `%s`", name)
+		return "", errorf("task error: Task has no method `%s`", name)
 	}
 }
 
@@ -4329,38 +4352,38 @@ func (c *Checker) checkQueueMethod(name string, args []ast.Expression, env *scop
 		return c.checkQueueEnqueue(args, env)
 	case "drain":
 		if len(args) != 0 {
-			return "", fmt.Errorf("task error: `queue.drain` expects 0 args, got %d", len(args))
+			return "", errorf("task error: `queue.drain` expects 0 args, got %d", len(args))
 		}
 		return "void", nil
 	default:
-		return "", fmt.Errorf("task error: Queue has no method `%s`", name)
+		return "", errorf("task error: Queue has no method `%s`", name)
 	}
 }
 
 // checkQueueEnqueue moves queued function arguments into the queue.
 func (c *Checker) checkQueueEnqueue(args []ast.Expression, env *scope) (string, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("task error: `queue.enqueue` expects io, function, and args")
+		return "", errorf("task error: `queue.enqueue` expects io, function, and args")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	}
 	target, ok := args[1].(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("task error: `queue.enqueue` expects function name")
+		return "", errorf("task error: `queue.enqueue` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
-		return "", fmt.Errorf("task error: undefined function `%s`", target.Name)
+		return "", errorf("task error: undefined function `%s`", target.Name)
 	}
 	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
 	if len(spawnArgs) != len(fn.params) {
-		return "", fmt.Errorf("task error: `%s` expects %d args, got %d",
+		return "", errorf("task error: `%s` expects %d args, got %d",
 			target.Name, len(fn.params), len(spawnArgs))
 	}
 	for idx, arg := range spawnArgs {
 		if fn.params[idx].borrow {
-			return "", fmt.Errorf("task error: queue cannot capture borrow parameter `%s`", target.Name)
+			return "", errorf("task error: queue cannot capture borrow parameter `%s`", target.Name)
 		}
 		if err := c.rejectConcurrencyBoundaryArg(arg, env); err != nil {
 			return "", err
@@ -4382,7 +4405,7 @@ func (c *Checker) checkChannelMethod(
 	switch name {
 	case "send":
 		if len(args) != 1 {
-			return "", fmt.Errorf("channel error: `channel.send` expects 1 arg, got %d", len(args))
+			return "", errorf("channel error: `channel.send` expects 1 arg, got %d", len(args))
 		}
 		if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
 			return "", err
@@ -4392,21 +4415,21 @@ func (c *Checker) checkChannelMethod(
 			return "", err
 		}
 		if got != elem {
-			return "", fmt.Errorf("channel error: `channel.send` expects %s, got %s", elem, got)
+			return "", errorf("channel error: `channel.send` expects %s, got %s", elem, got)
 		}
 		return "void", nil
 	case "recv":
 		if len(args) != 0 {
-			return "", fmt.Errorf("channel error: `channel.recv` expects 0 args, got %d", len(args))
+			return "", errorf("channel error: `channel.recv` expects 0 args, got %d", len(args))
 		}
 		return elem, nil
 	case "close":
 		if len(args) != 0 {
-			return "", fmt.Errorf("channel error: `channel.close` expects 0 args, got %d", len(args))
+			return "", errorf("channel error: `channel.close` expects 0 args, got %d", len(args))
 		}
 		return "void", nil
 	default:
-		return "", fmt.Errorf("channel error: Channel has no method `%s`", name)
+		return "", errorf("channel error: Channel has no method `%s`", name)
 	}
 }
 
@@ -4417,7 +4440,7 @@ func (c *Checker) checkPartitionMethod(
 	env *scope,
 ) (string, error) {
 	if name != "at" {
-		return "", fmt.Errorf("parallel error: Partition has no method `%s`", name)
+		return "", errorf("parallel error: Partition has no method `%s`", name)
 	}
 	return c.checkOneI64Arg("partition.at", args, env)
 }
@@ -4429,7 +4452,7 @@ func (c *Checker) checkLocalBufferMethod(
 	env *scope,
 ) (string, error) {
 	if name != "get" {
-		return "", fmt.Errorf("parallel error: LocalBuffer has no method `%s`", name)
+		return "", errorf("parallel error: LocalBuffer has no method `%s`", name)
 	}
 	return c.checkOneI64Arg("LocalBuffer.get", args, env)
 }
@@ -4454,27 +4477,27 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArrayReadNoArgs(array, name, args)
 	case "get", "get_or_panic":
 		if array.activeMutBorrows > 0 {
-			return "", fmt.Errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
+			return "", errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
 		}
 		return c.checkArrayGet(elem, name, args, env)
 	case "at", "at_mut":
-		return "", fmt.Errorf("array error: `Array.%s` must be bound with `let name = try array.%s(...)`",
+		return "", errorf("array error: `Array.%s` must be bound with `let name = try array.%s(...)`",
 			name, name)
 	case "set":
 		return c.checkArraySet(array, elem, args, env)
 	case "deinit":
 		if array.hasAnyBorrow() {
-			return "", fmt.Errorf("array error: `Array.%s` cannot run while array is borrowed", name)
+			return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
 		}
 		if len(args) != 0 {
-			return "", fmt.Errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
+			return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
 		if name == "deinit" {
 			array.moved = true
 		}
 		return "void", nil
 	default:
-		return "", fmt.Errorf("array error: Array has no method `%s`", name)
+		return "", errorf("array error: Array has no method `%s`", name)
 	}
 }
 
@@ -4487,22 +4510,22 @@ func (c *Checker) checkStdArrayStorageMethod(
 	env *scope,
 ) (string, error) {
 	if !c.currentStd {
-		return "", fmt.Errorf("array error: Array has no method `%s`", name)
+		return "", errorf("array error: Array has no method `%s`", name)
 	}
 	switch name {
 	case "reserve", "truncate":
 		return c.checkArrayCountMutation(array, name, args, env)
 	case "clear":
 		if array.hasAnyBorrow() {
-			return "", fmt.Errorf("array error: `Array.clear` cannot run while array is borrowed")
+			return "", errorf("array error: `Array.clear` cannot run while array is borrowed")
 		}
 		if len(args) != 0 {
-			return "", fmt.Errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
+			return "", errorf("array error: `Array.clear` expects 0 args, got %d", len(args))
 		}
 		return "void", nil
 	default:
 		if elem != "u8" {
-			return "", fmt.Errorf("array error: `Array.as_bytes` requires Array<u8>")
+			return "", errorf("array error: `Array.as_bytes` requires Array<u8>")
 		}
 		return c.checkArrayReadNoArgs(array, name, args)
 	}
@@ -4521,15 +4544,15 @@ func (c *Checker) checkArrayCountMutation(
 	env *scope,
 ) (string, error) {
 	if array.hasAnyBorrow() {
-		return "", fmt.Errorf("array error: `Array.%s` cannot run while array is borrowed", name)
+		return "", errorf("array error: `Array.%s` cannot run while array is borrowed", name)
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
+		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
 	}
 	if got, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	} else if got != "i64" {
-		return "", fmt.Errorf("array error: `Array.%s` expects i64, got %s", name, got)
+		return "", errorf("array error: `Array.%s` expects i64, got %s", name, got)
 	}
 	return "!void", nil
 }
@@ -4542,17 +4565,17 @@ func (c *Checker) checkArrayAppend(
 	env *scope,
 ) (string, error) {
 	if array.hasAnyBorrow() {
-		return "", fmt.Errorf("array error: `Array.append` cannot run while array is borrowed")
+		return "", errorf("array error: `Array.append` cannot run while array is borrowed")
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("array error: `Array.append` expects 1 arg, got %d", len(args))
+		return "", errorf("array error: `Array.append` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.moveContextualExpr(args[0], elem, env)
 	if err != nil {
 		return "", err
 	}
 	if got != elem {
-		return "", fmt.Errorf("array error: `Array.append` expects %s, got %s", elem, got)
+		return "", errorf("array error: `Array.append` expects %s, got %s", elem, got)
 	}
 	return "!void", nil
 }
@@ -4564,10 +4587,10 @@ func (c *Checker) checkArrayPop(
 	args []ast.Expression,
 ) (string, error) {
 	if array.hasAnyBorrow() {
-		return "", fmt.Errorf("array error: `Array.pop` cannot run while array is borrowed")
+		return "", errorf("array error: `Array.pop` cannot run while array is borrowed")
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("array error: `Array.pop` expects 0 args, got %d", len(args))
+		return "", errorf("array error: `Array.pop` expects 0 args, got %d", len(args))
 	}
 	return "!" + elem, nil
 }
@@ -4579,10 +4602,10 @@ func (c *Checker) checkArrayReadNoArgs(
 	args []ast.Expression,
 ) (string, error) {
 	if array.activeMutBorrows > 0 {
-		return "", fmt.Errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
+		return "", errorf("array error: `Array.%s` cannot read while mutably borrowed", name)
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
+		return "", errorf("array error: `Array.%s` expects 0 args, got %d", name, len(args))
 	}
 	return "i64", nil
 }
@@ -4595,22 +4618,22 @@ func (c *Checker) checkArraySet(
 	env *scope,
 ) (string, error) {
 	if array.hasAnyBorrow() {
-		return "", fmt.Errorf("array error: `Array.set` cannot run while array is borrowed")
+		return "", errorf("array error: `Array.set` cannot run while array is borrowed")
 	}
 	if len(args) != 2 {
-		return "", fmt.Errorf("array error: `Array.set` expects 2 args, got %d", len(args))
+		return "", errorf("array error: `Array.set` expects 2 args, got %d", len(args))
 	}
 	if got, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	} else if got != "i64" {
-		return "", fmt.Errorf("array error: `Array.set` expects i64 index, got %s", got)
+		return "", errorf("array error: `Array.set` expects i64 index, got %s", got)
 	}
 	got, err := c.moveContextualExpr(args[1], elem, env)
 	if err != nil {
 		return "", err
 	}
 	if got != elem {
-		return "", fmt.Errorf("array error: `Array.set` expects %s value, got %s", elem, got)
+		return "", errorf("array error: `Array.set` expects %s value, got %s", elem, got)
 	}
 	return "!void", nil
 }
@@ -4623,17 +4646,17 @@ func (c *Checker) checkArrayGet(
 	env *scope,
 ) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
+		return "", errorf("array error: `Array.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", err
 	}
 	if got != "i64" {
-		return "", fmt.Errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
+		return "", errorf("array error: `Array.%s` expects i64 index, got %s", name, got)
 	}
 	if !c.isCopyType(elem) {
-		return "", fmt.Errorf("array error: `Array.%s` requires copy element in v0.2", name)
+		return "", errorf("array error: `Array.%s` requires copy element in v0.2", name)
 	}
 	if name == "get" {
 		return "!" + elem, nil
@@ -4672,7 +4695,7 @@ func (c *Checker) checkMapMethod(
 	case "deinit":
 		return c.checkMapDeinit(mapValue, args)
 	default:
-		return "", fmt.Errorf("map error: Map has no method `%s`", name)
+		return "", errorf("map error: Map has no method `%s`", name)
 	}
 }
 
@@ -4684,22 +4707,22 @@ func (c *Checker) checkMapInsert(
 	env *scope,
 ) (string, error) {
 	if mapValue.hasAnyBorrow() {
-		return "", fmt.Errorf("map error: `Map.insert` cannot run while map is borrowed")
+		return "", errorf("map error: `Map.insert` cannot run while map is borrowed")
 	}
 	if len(args) != 2 {
-		return "", fmt.Errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
+		return "", errorf("map error: `Map.insert` expects 2 args, got %d", len(args))
 	}
 	if got, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	} else if !sameOwnershipType(got, "[]u8") {
-		return "", fmt.Errorf("map error: `Map.insert` expects []u8 key, got %s", got)
+		return "", errorf("map error: `Map.insert` expects []u8 key, got %s", got)
 	}
 	got, err := c.readContextualExpr(args[1], valueType, env)
 	if err != nil {
 		return "", err
 	}
 	if !sameOwnershipType(got, valueType) {
-		return "", fmt.Errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
+		return "", errorf("map error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "!void", nil
 }
@@ -4707,14 +4730,14 @@ func (c *Checker) checkMapInsert(
 // checkMapKeyArg validates one []u8 lookup key.
 func (c *Checker) checkMapKeyArg(name string, args []ast.Expression, env *scope) error {
 	if len(args) != 1 {
-		return fmt.Errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("map error: `Map.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.readExpr(args[0], env)
 	if err != nil {
 		return err
 	}
 	if !sameOwnershipType(got, "[]u8") {
-		return fmt.Errorf("map error: `Map.%s` expects []u8 key, got %s", name, got)
+		return errorf("map error: `Map.%s` expects []u8 key, got %s", name, got)
 	}
 	return nil
 }
@@ -4722,7 +4745,7 @@ func (c *Checker) checkMapKeyArg(name string, args []ast.Expression, env *scope)
 // checkMapReadNoArgs validates no-argument Map reads.
 func (c *Checker) checkMapReadNoArgs(name string, args []ast.Expression) (string, error) {
 	if len(args) != 0 {
-		return "", fmt.Errorf("map error: `Map.%s` expects 0 args, got %d", name, len(args))
+		return "", errorf("map error: `Map.%s` expects 0 args, got %d", name, len(args))
 	}
 	return "i64", nil
 }
@@ -4730,10 +4753,10 @@ func (c *Checker) checkMapReadNoArgs(name string, args []ast.Expression) (string
 // checkMapDeinit validates owned Map cleanup and marks it moved.
 func (c *Checker) checkMapDeinit(mapValue *binding, args []ast.Expression) (string, error) {
 	if mapValue.hasAnyBorrow() {
-		return "", fmt.Errorf("map error: `Map.deinit` cannot run while map is borrowed")
+		return "", errorf("map error: `Map.deinit` cannot run while map is borrowed")
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("map error: `Map.deinit` expects 0 args, got %d", len(args))
+		return "", errorf("map error: `Map.deinit` expects 0 args, got %d", len(args))
 	}
 	mapValue.moved = true
 	return "void", nil
@@ -4749,23 +4772,23 @@ func (c *Checker) checkAtomicMethod(
 	switch name {
 	case "load":
 		if len(args) != 0 {
-			return "", fmt.Errorf("atomic error: `atomic.load` expects 0 args, got %d", len(args))
+			return "", errorf("atomic error: `atomic.load` expects 0 args, got %d", len(args))
 		}
 		return elem, nil
 	case "store":
 		if len(args) != 1 {
-			return "", fmt.Errorf("atomic error: `atomic.store` expects 1 arg, got %d", len(args))
+			return "", errorf("atomic error: `atomic.store` expects 1 arg, got %d", len(args))
 		}
 		got, err := c.readContextualExpr(args[0], elem, env)
 		if err != nil {
 			return "", err
 		}
 		if got != elem {
-			return "", fmt.Errorf("atomic error: `atomic.store` expects %s, got %s", elem, got)
+			return "", errorf("atomic error: `atomic.store` expects %s, got %s", elem, got)
 		}
 		return "void", nil
 	default:
-		return "", fmt.Errorf("atomic error: Atomic has no method `%s`", name)
+		return "", errorf("atomic error: Atomic has no method `%s`", name)
 	}
 }
 
@@ -4777,10 +4800,10 @@ func (c *Checker) checkMutexMethod(
 	_ *scope,
 ) (string, error) {
 	if name != "get" {
-		return "", fmt.Errorf("sync error: Mutex has no method `%s`", name)
+		return "", errorf("sync error: Mutex has no method `%s`", name)
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("sync error: `mutex.get` expects 0 args, got %d", len(args))
+		return "", errorf("sync error: `mutex.get` expects 0 args, got %d", len(args))
 	}
 	return elem, nil
 }
@@ -4788,7 +4811,7 @@ func (c *Checker) checkMutexMethod(
 // checkOneI64Arg reads one i64 argument.
 func (c *Checker) checkOneI64Arg(name string, args []ast.Expression, env *scope) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("parallel error: `%s` expects 1 arg, got %d", name, len(args))
+		return "", errorf("parallel error: `%s` expects 1 arg, got %d", name, len(args))
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
@@ -4818,11 +4841,11 @@ func (c *Checker) checkImplMethodCall(
 		return "", false, nil
 	}
 	if len(method.params) == 0 {
-		return "", true, fmt.Errorf("move error: method `%s` must have self parameter",
+		return "", true, errorf("move error: method `%s` must have self parameter",
 			method.name)
 	}
 	if len(args) != len(method.params)-1 {
-		return "", true, fmt.Errorf("move error: `%s` expects %d args, got %d",
+		return "", true, errorf("move error: `%s` expects %d args, got %d",
 			method.name, len(method.params)-1, len(args))
 	}
 	if err := c.checkImplMethodArgs(method, args, env); err != nil {
@@ -4887,18 +4910,18 @@ func (c *Checker) checkImplMethodArg(
 // checkArenaAdd moves one value into an arena and returns a handle.
 func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scope) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("arena error: `arena.add` expects 1 arg, got %d", len(args))
+		return "", errorf("arena error: `arena.add` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
-		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
+		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
 	got, err := c.moveContextualExpr(args[0], arg, env)
 	if err != nil {
 		return "", err
 	}
 	if got != arg {
-		return "", fmt.Errorf("arena error: `arena.add` expects %s, got %s", arg, got)
+		return "", errorf("arena error: `arena.add` expects %s, got %s", arg, got)
 	}
 	return fmt.Sprintf("std::arena::Handle<%s>", arg), nil
 }
@@ -4906,11 +4929,11 @@ func (c *Checker) checkArenaAdd(arena *binding, args []ast.Expression, env *scop
 // checkArenaGet reads a handle and returns a local borrow-like value.
 func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scope) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
+		return "", errorf("arena error: `arena.get` expects 1 arg, got %d", len(args))
 	}
 	base, arg, ok := splitGenericType(arena.typeName)
 	if !ok || base != "std::arena::Arena" {
-		return "", fmt.Errorf("arena error: `%s` is not an arena", arena.name)
+		return "", errorf("arena error: `%s` is not an arena", arena.name)
 	}
 	if err := c.checkHandleProvenance(arena, args[0], env); err != nil {
 		return "", err
@@ -4924,10 +4947,10 @@ func (c *Checker) checkArenaGet(arena *binding, args []ast.Expression, env *scop
 // checkArenaDeinit validates explicit arena cleanup and invalidates the binding.
 func (c *Checker) checkArenaDeinit(arena *binding, args []ast.Expression) (string, error) {
 	if arena.hasAnyBorrow() {
-		return "", fmt.Errorf("arena error: `arena.deinit` cannot run while arena is borrowed")
+		return "", errorf("arena error: `arena.deinit` cannot run while arena is borrowed")
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("arena error: `arena.deinit` expects 0 args, got %d", len(args))
+		return "", errorf("arena error: `arena.deinit` expects 0 args, got %d", len(args))
 	}
 	arena.deinitialized = true
 	arena.moved = true
@@ -4937,28 +4960,28 @@ func (c *Checker) checkArenaDeinit(arena *binding, args []ast.Expression) (strin
 // checkHandleProvenance rejects handles that came from a different known arena.
 func (c *Checker) checkHandleProvenance(arena *binding, expr ast.Expression, env *scope) error {
 	if arena.arenaID == 0 {
-		return fmt.Errorf("arena error: arena `%s` has unknown provenance", arena.name)
+		return errorf("arena error: arena `%s` has unknown provenance", arena.name)
 	}
 	if addArena := c.arenaAddReceiver(expr, env); addArena != nil {
 		if addArena.arenaID != arena.arenaID {
-			return fmt.Errorf("arena error: handle from `%s` does not belong to arena `%s`",
+			return errorf("arena error: handle from `%s` does not belong to arena `%s`",
 				addArena.name, arena.name)
 		}
 		return nil
 	}
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("arena error: handle expression has unknown arena provenance")
+		return errorf("arena error: handle expression has unknown arena provenance")
 	}
 	handle, exists := env.lookup(ident.Name)
 	if !exists {
-		return fmt.Errorf("arena error: undefined handle `%s`", ident.Name)
+		return errorf("arena error: undefined handle `%s`", ident.Name)
 	}
 	if handle.handleArenaID == 0 {
-		return fmt.Errorf("arena error: handle `%s` has unknown arena provenance", ident.Name)
+		return errorf("arena error: handle `%s` has unknown arena provenance", ident.Name)
 	}
 	if handle.handleArenaID != arena.arenaID {
-		return fmt.Errorf("arena error: handle `%s` does not belong to arena `%s`",
+		return errorf("arena error: handle `%s` does not belong to arena `%s`",
 			ident.Name, arena.name)
 	}
 	return nil
@@ -4975,14 +4998,14 @@ func (c *Checker) checkKnownHandleProvenance(
 	}
 	if addArena := c.arenaAddReceiver(expr, env); addArena != nil && addArena.arenaID != 0 {
 		if addArena.arenaID != arena.arenaID {
-			return fmt.Errorf("arena error: handle from `%s` does not belong to arena `%s`",
+			return errorf("arena error: handle from `%s` does not belong to arena `%s`",
 				addArena.name, arena.name)
 		}
 		return nil
 	}
 	provenance := c.knownHandleProvenance(expr, env)
 	if provenance != 0 && provenance != arena.arenaID {
-		return fmt.Errorf("arena error: handle expression does not belong to arena `%s`",
+		return errorf("arena error: handle expression does not belong to arena `%s`",
 			arena.name)
 	}
 	return nil
@@ -5021,14 +5044,14 @@ func (c *Checker) activateBorrowArgs(
 		}
 		if value == nil && fn.params[idx].mutBorrow {
 			releaseTemporaryBorrows(borrowed)
-			return nil, fmt.Errorf(
+			return nil, errorf(
 				"borrow error: mutable borrow argument must be a local binding or direct field",
 			)
 		}
 		if value != nil {
 			if fn.params[idx].mutBorrow && value.borrowedParam && !value.mutBorrow {
 				releaseTemporaryBorrows(borrowed)
-				return nil, fmt.Errorf(
+				return nil, errorf(
 					"borrow error: shared borrow `%s` cannot be forwarded as mutable",
 					value.name,
 				)
@@ -5075,27 +5098,27 @@ func checkBorrowConflict(value *binding, mutable bool) error {
 func checkBorrowConflictForField(value *binding, field string, mutable bool) error {
 	if field != "" {
 		if value.activeMutBorrows > 0 {
-			return fmt.Errorf(
+			return errorf(
 				"borrow error: value `%s` cannot be borrowed while mutably borrowed",
 				value.name,
 			)
 		}
 		if mutable && value.activeBorrows > 0 {
-			return fmt.Errorf(
+			return errorf(
 				"borrow error: field `%s.%s` cannot be mutably borrowed while value is borrowed",
 				value.name,
 				field,
 			)
 		}
 		if mutable && value.fieldBorrows[field] > 0 {
-			return fmt.Errorf(
+			return errorf(
 				"borrow error: field `%s.%s` cannot be mutably borrowed while borrowed",
 				value.name,
 				field,
 			)
 		}
 		if value.fieldMutBorrows[field] > 0 {
-			return fmt.Errorf(
+			return errorf(
 				"borrow error: field `%s.%s` cannot be borrowed while mutably borrowed",
 				value.name,
 				field,
@@ -5104,19 +5127,19 @@ func checkBorrowConflictForField(value *binding, field string, mutable bool) err
 		return nil
 	}
 	if mutable && value.activeBorrows > 0 {
-		return fmt.Errorf(
+		return errorf(
 			"borrow error: value `%s` cannot be mutably borrowed while borrowed",
 			value.name,
 		)
 	}
 	if value.activeMutBorrows > 0 || len(value.fieldMutBorrows) > 0 {
-		return fmt.Errorf(
+		return errorf(
 			"borrow error: value `%s` cannot be borrowed while mutably borrowed",
 			value.name,
 		)
 	}
 	if mutable && len(value.fieldBorrows) > 0 {
-		return fmt.Errorf(
+		return errorf(
 			"borrow error: value `%s` cannot be mutably borrowed while field is borrowed",
 			value.name,
 		)
@@ -5485,47 +5508,48 @@ func (c *Checker) containsArenaGet(expr ast.Expression, env *scope) bool {
 }
 
 // readIdent resolves a variable reference without moving it.
-func readIdent(name string, env *scope) (string, error) {
-	value, ok := env.lookup(name)
+func readIdent(ident *ast.IdentExpr, env *scope) (string, error) {
+	value, ok := env.lookup(ident.Name)
 	if ok {
-		if err := checkDeinitializedUse(name, value, env); err != nil {
+		if err := checkDeinitializedUse(ident.Name, value, env, ident.Span); err != nil {
 			return "", err
 		}
 		if value.moved {
-			return "", fmt.Errorf("move error: moved value `%s` was used", name)
+			return "", errorAt(ident.Span, "move error: moved value `%s` was used", ident.Name)
 		}
 		if value.activeMutBorrows > 0 || len(value.fieldMutBorrows) > 0 {
-			return "", fmt.Errorf("borrow error: value `%s` cannot be read while mutably borrowed",
-				name)
+			return "", errorAt(ident.Span,
+				"borrow error: value `%s` cannot be read while mutably borrowed",
+				ident.Name)
 		}
 		return value.typeName, nil
 	}
-	if name == "void" {
-		return "", fmt.Errorf("move error: void is not a value")
+	if ident.Name == "void" {
+		return "", errorAt(ident.Span, "move error: void is not a value")
 	}
-	return "", fmt.Errorf("move error: undefined variable `%s`", name)
+	return "", errorAt(ident.Span, "move error: undefined variable `%s`", ident.Name)
 }
 
 // checkDeinitializedUse rejects arenas and known handles after arena cleanup.
-func checkDeinitializedUse(name string, value *binding, env *scope) error {
+func checkDeinitializedUse(name string, value *binding, env *scope, span ast.Span) error {
 	if value.deinitialized {
-		return fmt.Errorf("arena error: arena `%s` was deinitialized", name)
+		return errorAt(span, "arena error: arena `%s` was deinitialized", name)
 	}
 	if value.handleArenaID == 0 {
 		return nil
 	}
 	arena, ok := env.lookupArenaID(value.handleArenaID)
 	if ok && arena.deinitialized {
-		return fmt.Errorf("arena error: handle `%s` cannot be used after arena `%s` deinit",
+		return errorAt(span, "arena error: handle `%s` cannot be used after arena `%s` deinit",
 			name, arena.name)
 	}
 	return nil
 }
 
 // checkDeinitializedBorrow rejects borrowing an arena after cleanup.
-func checkDeinitializedBorrow(name string, value *binding) error {
+func checkDeinitializedBorrow(name string, value *binding, span ast.Span) error {
 	if value.deinitialized {
-		return fmt.Errorf("arena error: arena `%s` was deinitialized", name)
+		return errorAt(span, "arena error: arena `%s` was deinitialized", name)
 	}
 	return nil
 }
@@ -5813,7 +5837,7 @@ func rawPointerElement(typeName string) (string, bool) {
 // checkNoArgOwnershipCall validates a zero-argument builtin constructor.
 func checkNoArgOwnershipCall(name string, args []ast.Expression) (string, error) {
 	if len(args) != 0 {
-		return "", fmt.Errorf("move error: `%s` expects 0 args, got %d", name, len(args))
+		return "", errorf("move error: `%s` expects 0 args, got %d", name, len(args))
 	}
 	return name, nil
 }
@@ -5821,14 +5845,14 @@ func checkNoArgOwnershipCall(name string, args []ast.Expression) (string, error)
 // checkPartitionMut validates ownership for disjoint partition construction.
 func (c *Checker) checkPartitionMut(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("parallel error: `std::task::partition_mut` expects 2 args")
+		return "", true, errorf("parallel error: `std::task::partition_mut` expects 2 args")
 	}
 	init, err := c.readExpr(args[0], env)
 	if err != nil {
 		return "", true, err
 	}
 	if !c.isCopyType(init) {
-		return "", true, fmt.Errorf("parallel error: partition init must be copy, got %s", init)
+		return "", true, errorf("parallel error: partition init must be copy, got %s", init)
 	}
 	if _, err := c.readExpr(args[1], env); err != nil {
 		return "", true, err
@@ -5839,7 +5863,7 @@ func (c *Checker) checkPartitionMut(args []ast.Expression, env *scope) (string, 
 // checkLocalBuffer validates ownership for worker-local scratch construction.
 func (c *Checker) checkLocalBuffer(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("parallel error: `std::task::LocalBuffer` expects 2 args")
+		return "", true, errorf("parallel error: `std::task::LocalBuffer` expects 2 args")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", true, err
@@ -5853,7 +5877,7 @@ func (c *Checker) checkLocalBuffer(args []ast.Expression, env *scope) (string, b
 // checkParallelFor validates ownership for a safe data-parallel call.
 func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 4 {
-		return "", true, fmt.Errorf("parallel error: `std::task::parallel_for` expects 4 args")
+		return "", true, errorf("parallel error: `std::task::parallel_for` expects 4 args")
 	}
 	for idx := 0; idx < 3; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
@@ -5862,11 +5886,11 @@ func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, b
 	}
 	target, forwarded, ok := c.resolveFunctionNameArg(args[3], env)
 	if !ok {
-		return "", true, fmt.Errorf("parallel error: `std::task::parallel_for` expects function name")
+		return "", true, errorf("parallel error: `std::task::parallel_for` expects function name")
 	}
 	fn := c.functions[target]
 	if fn == nil && !forwarded {
-		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target)
+		return "", true, errorf("parallel error: undefined function `%s`", target)
 	}
 	if forwarded {
 		return "!void", true, nil
@@ -5877,7 +5901,7 @@ func (c *Checker) checkParallelFor(args []ast.Expression, env *scope) (string, b
 // checkParallelMap validates ownership for disjoint partition output.
 func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 5 {
-		return "", true, fmt.Errorf("parallel error: `std::task::parallel_map` expects 5 args")
+		return "", true, errorf("parallel error: `std::task::parallel_map` expects 5 args")
 	}
 	for idx := 0; idx < 4; idx++ {
 		if _, err := c.readExpr(args[idx], env); err != nil {
@@ -5886,11 +5910,11 @@ func (c *Checker) checkParallelMap(args []ast.Expression, env *scope) (string, b
 	}
 	target, forwarded, ok := c.resolveFunctionNameArg(args[4], env)
 	if !ok {
-		return "", true, fmt.Errorf("parallel error: `std::task::parallel_map` expects function name")
+		return "", true, errorf("parallel error: `std::task::parallel_map` expects function name")
 	}
 	fn := c.functions[target]
 	if fn == nil && !forwarded {
-		return "", true, fmt.Errorf("parallel error: undefined function `%s`", target)
+		return "", true, errorf("parallel error: undefined function `%s`", target)
 	}
 	if forwarded {
 		return "void", true, nil
@@ -5920,20 +5944,20 @@ func (c *Checker) checkThreadScopedTyped(
 	env *scope,
 ) (string, error) {
 	if len(args) != 3 {
-		return "", fmt.Errorf("thread error: `std::thread::scoped` expects io, function, and arg")
+		return "", errorf("thread error: `std::thread::scoped` expects io, function, and arg")
 	}
 	if _, err := c.readExpr(args[0], env); err != nil {
 		return "", err
 	}
 	if _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
-		return "", fmt.Errorf("thread error: `std::thread::scoped` expects function name")
+		return "", errorf("thread error: `std::thread::scoped` expects function name")
 	}
 	got, err := c.moveContextualExpr(args[2], argType, env)
 	if err != nil {
 		return "", err
 	}
 	if got != argType {
-		return "", fmt.Errorf("thread error: arg 1 of `std::thread::scoped` expects %s, got %s",
+		return "", errorf("thread error: arg 1 of `std::thread::scoped` expects %s, got %s",
 			argType, got)
 	}
 	return argType, nil
@@ -5946,13 +5970,13 @@ func (c *Checker) checkThreadScopedWorker(
 	targetFn *functionInfo,
 ) error {
 	if len(targetFn.params) != 1 || targetFn.params[0].typeName != typeName {
-		return fmt.Errorf("thread error: thread worker `%s` must accept %s", target, typeName)
+		return errorf("thread error: thread worker `%s` must accept %s", target, typeName)
 	}
 	if targetFn.params[0].borrow || targetFn.params[0].mutBorrow {
-		return fmt.Errorf("thread error: thread cannot capture borrow parameter `%s`", target)
+		return errorf("thread error: thread cannot capture borrow parameter `%s`", target)
 	}
 	if returnTypeName(targetFn) != typeName {
-		return fmt.Errorf("thread error: thread worker `%s` must return %s", target, typeName)
+		return errorf("thread error: thread worker `%s` must return %s", target, typeName)
 	}
 	return nil
 }
@@ -5964,17 +5988,17 @@ func (c *Checker) checkAtomic(
 	env *scope,
 ) (string, bool, error) {
 	if elem != "T" && !isAtomicSupportedType(elem) {
-		return "", true, fmt.Errorf("atomic error: unsupported atomic type `%s` in v0.1", elem)
+		return "", true, errorf("atomic error: unsupported atomic type `%s` in v0.1", elem)
 	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("atomic error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
+		return "", true, errorf("atomic error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
 	}
 	got, err := c.readContextualExpr(args[0], elem, env)
 	if err != nil {
 		return "", true, err
 	}
 	if got != elem {
-		return "", true, fmt.Errorf("atomic error: `std::atomic::Atomic<%s>` expects %s, got %s",
+		return "", true, errorf("atomic error: `std::atomic::Atomic<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
 	return fmt.Sprintf("Atomic<%s>", elem), true, nil
@@ -5983,7 +6007,7 @@ func (c *Checker) checkAtomic(
 // checkMutex validates ownership for a synchronized wrapper constructor.
 func (c *Checker) checkMutex(elem string, args []ast.Expression, env *scope) (string, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("sync error: `std::sync::Mutex<%s>` expects 1 arg", elem)
+		return "", true, errorf("sync error: `std::sync::Mutex<%s>` expects 1 arg", elem)
 	}
 	if elem != "T" {
 		if err := c.rejectConcurrencyBoundaryArg(args[0], env); err != nil {
@@ -5995,11 +6019,11 @@ func (c *Checker) checkMutex(elem string, args []ast.Expression, env *scope) (st
 		return "", true, err
 	}
 	if got != elem {
-		return "", true, fmt.Errorf("sync error: `std::sync::Mutex<%s>` expects %s, got %s",
+		return "", true, errorf("sync error: `std::sync::Mutex<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
 	if elem != "T" && !c.isCopyType(elem) {
-		return "", true, fmt.Errorf(
+		return "", true, errorf(
 			"sync error: `std::sync::Mutex<%s>` requires copy value in v0.1", elem)
 	}
 	return fmt.Sprintf("Mutex<%s>", elem), true, nil
@@ -6010,7 +6034,7 @@ func (c *Checker) rejectConcurrencyBoundaryArg(arg ast.Expression, env *scope) e
 	if ident, ok := arg.(*ast.IdentExpr); ok {
 		value, exists := env.lookup(ident.Name)
 		if exists && value.borrowedParam {
-			return fmt.Errorf("thread error: borrow cannot cross concurrency boundary")
+			return errorf("thread error: borrow cannot cross concurrency boundary")
 		}
 	}
 	got, err := c.readExpr(arg, env.clone())
@@ -6023,10 +6047,10 @@ func (c *Checker) rejectConcurrencyBoundaryArg(arg ast.Expression, env *scope) e
 // rejectConcurrencyBoundaryType rejects values unsafe to move across concurrency boundaries.
 func (c *Checker) rejectConcurrencyBoundaryType(typeName string, seen map[string]bool) error {
 	if isRawPointerType(typeName) {
-		return fmt.Errorf("thread error: raw pointer cannot cross concurrency boundary")
+		return errorf("thread error: raw pointer cannot cross concurrency boundary")
 	}
 	if isDynType(typeName) {
-		return fmt.Errorf("thread error: dyn cannot cross concurrency boundary")
+		return errorf("thread error: dyn cannot cross concurrency boundary")
 	}
 	if seen[typeName] {
 		return nil
@@ -6049,17 +6073,17 @@ func (c *Checker) rejectConcurrencyBoundaryGeneric(typeName string, seen map[str
 	}
 	switch base {
 	case "std::arena::Arena":
-		return fmt.Errorf("thread error: arena cannot cross concurrency boundary")
+		return errorf("thread error: arena cannot cross concurrency boundary")
 	case "std::array::Array":
-		return fmt.Errorf("thread error: Array cannot cross concurrency boundary in v0.2")
+		return errorf("thread error: Array cannot cross concurrency boundary in v0.2")
 	case "std::map::Map":
-		return fmt.Errorf("thread error: Map cannot cross concurrency boundary in v0.2")
+		return errorf("thread error: Map cannot cross concurrency boundary in v0.2")
 	case "std::arena::Handle":
-		return fmt.Errorf("thread error: handle cannot cross concurrency boundary")
+		return errorf("thread error: handle cannot cross concurrency boundary")
 	case "Mutex":
-		return fmt.Errorf("thread error: Mutex cannot cross concurrency boundary in v0.1")
+		return errorf("thread error: Mutex cannot cross concurrency boundary in v0.1")
 	case "Task":
-		return fmt.Errorf("thread error: Task cannot cross concurrency boundary")
+		return errorf("thread error: Task cannot cross concurrency boundary")
 	case "Channel", "option":
 		return c.rejectConcurrencyBoundaryType(arg, seen)
 	case "Atomic":
@@ -6072,7 +6096,7 @@ func (c *Checker) rejectConcurrencyBoundaryGeneric(typeName string, seen map[str
 // rejectConcurrencyBoundaryAtomic checks Atomic<T> boundary eligibility.
 func (c *Checker) rejectConcurrencyBoundaryAtomic(typeName string, seen map[string]bool) error {
 	if !isAtomicSupportedType(typeName) {
-		return fmt.Errorf("thread error: Atomic<%s> cannot cross concurrency boundary in v0.1",
+		return errorf("thread error: Atomic<%s> cannot cross concurrency boundary in v0.1",
 			typeName)
 	}
 	return c.rejectConcurrencyBoundaryType(typeName, seen)
@@ -6083,7 +6107,7 @@ func (c *Checker) rejectConcurrencyBoundaryStruct(typeName string, seen map[stri
 	fields := c.structs[typeName]
 	for fieldName, fieldType := range fields {
 		if err := c.rejectConcurrencyBoundaryType(fieldType, seen); err != nil {
-			return fmt.Errorf("thread error: struct `%s.%s` cannot cross concurrency boundary: %w",
+			return errorf("thread error: struct `%s.%s` cannot cross concurrency boundary: %w",
 				typeName, fieldName, err)
 		}
 	}
@@ -6098,7 +6122,7 @@ func (c *Checker) rejectConcurrencyBoundaryUnion(typeName string, seen map[strin
 			continue
 		}
 		if err := c.rejectConcurrencyBoundaryType(payload, seen); err != nil {
-			return fmt.Errorf("thread error: union `%s::%s` cannot cross concurrency boundary: %w",
+			return errorf("thread error: union `%s::%s` cannot cross concurrency boundary: %w",
 				typeName, variant, err)
 		}
 	}
@@ -6137,16 +6161,16 @@ func taskElement(typeName string) (string, bool) {
 func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("map error: std::map::Map expects 2 static arguments")
+		return nil, errorf("map error: std::map::Map expects 2 static arguments")
 	}
 	if !sameOwnershipType(args[0], "[]u8") {
-		return nil, fmt.Errorf("map error: std::map::Map key type must be []u8 in v0.2")
+		return nil, errorf("map error: std::map::Map key type must be []u8 in v0.2")
 	}
 	if isGenericParamName(args[1]) {
 		return args, nil
 	}
 	if !c.isCopyType(args[1]) {
-		return nil, fmt.Errorf("map error: std::map::Map value type must be copy in v0.2")
+		return nil, errorf("map error: std::map::Map value type must be copy in v0.2")
 	}
 	return args, nil
 }
@@ -6245,7 +6269,7 @@ func (s *scope) lookupArenaID(arenaID int) (*binding, bool) {
 func (s *scope) checkPendingTasks() error {
 	for name, value := range s.values {
 		if _, ok := taskElement(value.typeName); ok && !value.taskDone {
-			return fmt.Errorf("task error: task `%s` must be awaited or canceled", name)
+			return errorf("task error: task `%s` must be awaited or canceled", name)
 		}
 	}
 	return nil

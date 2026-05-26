@@ -640,43 +640,43 @@ func selfhostCLIFrontendCheckOnlySemanticFailureCases(
 			name:    "check_temp_moved_value",
 			args:    []string{"check", fixtures.movedValue},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: move error: moved value `name` was used\n",
+			wantErr: "error: move error: moved value `name` was used at 12:11\n",
 		},
 		{
 			name:    "check_temp_moved_record",
 			args:    []string{"check", fixtures.movedSource},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: move error: moved value `person` was used\n",
+			wantErr: "error: move error: moved value `person` was used at 12:11\n",
 		},
 		{
 			name:    "check_temp_unknown_call",
 			args:    []string{"check", fixtures.unknownSource},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: unknown function `missing_symbol`\n",
+			wantErr: "error: type error: undefined function `missing_symbol` at 2:5\n",
 		},
 		{
 			name:    "check_temp_unknown_std_call",
 			args:    []string{"check", fixtures.unknownStd},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: unknown function `std::testing::missing`\n",
+			wantErr: "error: type error: undefined function `std::testing::missing` at 2:5\n",
 		},
 		{
 			name:    "check_temp_undefined_variable",
 			args:    []string{"check", fixtures.undefinedVariable},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: undefined variable `name`\n",
+			wantErr: "error: type error: undefined variable `name` at 2:11\n",
 		},
 		{
 			name:    "check_temp_undefined_match_arm_variable",
 			args:    []string{"check", fixtures.undefinedMatch},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: undefined variable `name`\n",
+			wantErr: "error: type error: undefined variable `name` at 9:22\n",
 		},
 		{
 			name:    "check_temp_arity_mismatch",
 			args:    []string{"check", fixtures.aritySource},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: function `takes_one` expects 1 argument, got 2\n",
+			wantErr: "error: type error: `takes_one` expects 1 args, got 2 at 6:5\n",
 		},
 		{
 			name:    "check_temp_duplicate_declaration",
@@ -688,13 +688,13 @@ func selfhostCLIFrontendCheckOnlySemanticFailureCases(
 			name:    "check_temp_type_arity_mismatch",
 			args:    []string{"check", fixtures.typeArity},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type `std::map::Map` expects 2 type arguments, got 1\n",
+			wantErr: "error: type error: type `std::map::Map` expects 2 type arguments, got 1 at 1:17\n",
 		},
 		{
 			name:    "check_temp_unknown_type",
 			args:    []string{"check", fixtures.unknownType},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: unknown type `Missing`\n",
+			wantErr: "error: type error: unknown type `Missing` at 1:16\n",
 		},
 	}
 	cases = append(cases, selfhostCLIFrontendTypeSemanticFailureCases(fixtures)...)
@@ -705,48 +705,73 @@ func selfhostCLIFrontendCheckOnlySemanticFailureCases(
 func selfhostCLIFrontendTypeSemanticFailureCases(
 	fixtures selfhostCLIFrontendFixtures,
 ) []selfhostCLIFrontendCase {
+	cases := selfhostCLIFrontendTypeValueFailureCases(fixtures)
+	cases = append(cases, selfhostCLIFrontendReturnSemanticFailureCases(fixtures)...)
+	return cases
+}
+
+// selfhostCLIFrontendTypeValueFailureCases returns non-return type-check failures.
+func selfhostCLIFrontendTypeValueFailureCases(
+	fixtures selfhostCLIFrontendFixtures,
+) []selfhostCLIFrontendCase {
 	return []selfhostCLIFrontendCase{
 		{
 			name:    "check_temp_argument_type_mismatch",
 			args:    []string{"check", fixtures.argumentMismatch},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: argument type mismatch\n",
+			wantErr: "error: type error: argument expects i64, got bool at 6:15\n",
 		},
 		{
 			name:    "check_temp_binary_type_mismatch",
 			args:    []string{"check", fixtures.binaryMismatch},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: operator operands must have same type\n",
+			wantErr: "error: type error: operator operands must have same type at 6:17\n" +
+				"note: left operand has type Color\n" +
+				"note: right operand has type Animal\n",
 		},
 		{
 			name:    "check_temp_assignment_type_mismatch",
 			args:    []string{"check", fixtures.assignmentMismatch},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: assignment type mismatch\n",
+			wantErr: "error: type error: assignment expects i64, got bool at 3:13\n",
 		},
 		{
 			name:    "check_temp_immutable_assignment",
 			args:    []string{"check", fixtures.immutableAssignment},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: cannot assign to immutable binding `count`\n",
+			wantErr: "error: type error: cannot assign to immutable binding `count` at 3:5\n",
 		},
 		{
 			name:    "check_temp_invalid_assignment_target",
 			args:    []string{"check", fixtures.invalidAssignment},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: invalid assignment target `1`\n",
+			wantErr: "error: type error: invalid assignment target `1` at 2:5\n",
 		},
+		{
+			name:    "check_temp_match_non_exhaustive",
+			args:    []string{"check", fixtures.matchMissing},
+			wantOut: "exit-code\n1\n",
+			wantErr: "error: type error: match on `Color` is not exhaustive\n",
+		},
+	}
+}
+
+// selfhostCLIFrontendReturnSemanticFailureCases returns return-shape type failures.
+func selfhostCLIFrontendReturnSemanticFailureCases(
+	fixtures selfhostCLIFrontendFixtures,
+) []selfhostCLIFrontendCase {
+	return []selfhostCLIFrontendCase{
 		{
 			name:    "check_temp_return_type_mismatch",
 			args:    []string{"check", fixtures.returnMismatch},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: return type mismatch\n",
+			wantErr: "error: type error: return expects i64, got bool at 2:12\n",
 		},
 		{
 			name:    "check_temp_return_match_type_mismatch",
 			args:    []string{"check", fixtures.returnMatchMismatch},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: return type mismatch\n",
+			wantErr: "error: type error: return expects i64, got bool at 7:12\n",
 		},
 		{
 			name:    "check_temp_missing_return",
@@ -766,12 +791,6 @@ func selfhostCLIFrontendTypeSemanticFailureCases(
 			wantOut: "exit-code\n1\n",
 			wantErr: "error: type error: function `bad` must return !void\n",
 		},
-		{
-			name:    "check_temp_match_non_exhaustive",
-			args:    []string{"check", fixtures.matchMissing},
-			wantOut: "exit-code\n1\n",
-			wantErr: "error: type error: match on `Color` is not exhaustive\n",
-		},
 	}
 }
 
@@ -784,19 +803,19 @@ func selfhostCLIFrontendRunSemanticFailureCases(
 			name:    "run_temp_moved_value",
 			args:    []string{"run", fixtures.movedValue},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: move error: moved value `name` was used\n",
+			wantErr: "error: move error: moved value `name` was used at 12:11\n",
 		},
 		{
 			name:    "run_temp_unknown_call",
 			args:    []string{"run", fixtures.unknownSource},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: unknown function `missing_symbol`\n",
+			wantErr: "error: type error: undefined function `missing_symbol` at 2:5\n",
 		},
 		{
 			name:    "run_temp_unknown_std_call",
 			args:    []string{"run", fixtures.unknownStd},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: unknown function `std::testing::missing`\n",
+			wantErr: "error: type error: undefined function `std::testing::missing` at 2:5\n",
 		},
 	}
 }
@@ -810,13 +829,13 @@ func selfhostCLIFrontendTestSemanticFailureCases(
 			name:    "test_temp_unknown_call",
 			args:    []string{"test", fixtures.unknownSource},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: unknown function `missing_symbol`\n",
+			wantErr: "error: type error: undefined function `missing_symbol` at 2:5\n",
 		},
 		{
 			name:    "test_temp_unknown_std_call",
 			args:    []string{"test", fixtures.unknownStd},
 			wantOut: "exit-code\n1\n",
-			wantErr: "error: unknown function `std::testing::missing`\n",
+			wantErr: "error: type error: undefined function `std::testing::missing` at 2:5\n",
 		},
 	}
 }

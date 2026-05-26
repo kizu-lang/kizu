@@ -2,26 +2,26 @@ import selfhost::cli::output;
 import selfhost::parser::validation;
 import selfhost::types::model;
 
+struct LineColumn {
+    line: i64,
+    column: i64,
+}
+
 pub fn parse_validation_error(
     allocator: Allocator,
     io: Io,
+    path: []u8,
     validation: validation::ParseValidation
 ) -> !void {
-    var line = std::string::String(allocator);
-    try line.append_bytes("error: ");
-    try line.append_bytes(validation.message);
+    var message = std::string::String(allocator);
+    try message.append_bytes(validation.message);
     if !std::mem::equal_bytes(validation.got, "") {
-        try line.append_bytes(", got ");
-        try line.append_bytes(validation.got);
+        try message.append_bytes(", got ");
+        try message.append_bytes(validation.got);
     }
-    try line.append_bytes(" at ");
-    try std::fmt::append_i64(line, validation.line);
-    try line.append_byte(cast<u8>(58));
-    try std::fmt::append_i64(line, validation.column);
-    let bytes = line.as_bytes();
-    try std::io::write_stderr(io, bytes);
-    try output::stderr_newline(allocator, io);
-    line.deinit();
+    let span = std::kizu::diagnostic::file_span(0, path, 0, 0, validation.line, validation.column);
+    try write_owned_prefixed_line(allocator, io, "error", message, span);
+    message.deinit();
     try output::error_line(allocator, io, "error: parse failed");
     return;
 }
@@ -29,11 +29,19 @@ pub fn parse_validation_error(
 pub fn move_error(
     allocator: Allocator,
     io: Io,
+    path: []u8,
+    file_text: []u8,
+    start: i64,
+    end: i64,
     name: []u8
 ) -> !void {
-    try std::io::write_stderr(io, "error: move error: moved value `");
-    try std::io::write_stderr(io, name);
-    try output::error_line(allocator, io, "` was used");
+    let span = primary_span(path, file_text, start, end);
+    var message = std::string::String(allocator);
+    try message.append_bytes("move error: moved value `");
+    try message.append_bytes(name);
+    try message.append_bytes("` was used");
+    try write_owned_prefixed_line(allocator, io, "error", message, span);
+    message.deinit();
     return;
 }
 
@@ -48,99 +56,290 @@ pub fn duplicate_symbol_error(
     return;
 }
 
-pub fn unknown_function_error(
+pub fn function_call_summary_error(
     allocator: Allocator,
     io: Io,
-    name: []u8
-) -> !void {
-    try std::io::write_stderr(io, "error: unknown function `");
-    try std::io::write_stderr(io, name);
-    try output::error_line(allocator, io, "`");
-    return;
-}
-
-pub fn function_call_error(
-    allocator: Allocator,
-    io: Io,
+    path: []u8,
     text: []u8,
     call_error: model::FunctionCallSummary
 ) -> !void {
     let name = text[call_error.start..call_error.end];
+    let span = primary_span(path, text, call_error.start, call_error.end);
     if call_error.kind == 1 {
-        try unknown_function_error(allocator, io, name);
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: undefined function `");
+        try message.append_bytes(name);
+        try message.append_bytes("`");
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
         return;
     }
     if call_error.kind == 2 {
-        try function_arity_error(
-            allocator,
-            io,
-            name,
-            call_error.expected,
-            call_error.observed
-        );
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: `");
+        try message.append_bytes(name);
+        try message.append_bytes("` expects ");
+        try std::fmt::append_i64(message, call_error.expected);
+        try message.append_bytes(" args, got ");
+        try std::fmt::append_i64(message, call_error.observed);
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
         return;
     }
     try output::error_line(allocator, io, "error: check failed");
     return;
 }
 
-pub fn match_error(
+pub fn check_summary_error(
     allocator: Allocator,
     io: Io,
-    diagnostic: model::MatchDiagnosticSummary
-) -> !void {
+    path: []u8,
+    file_text: []u8,
+    diagnostic: &model::CheckDiagnosticSummary
+) -> !bool {
+    if !diagnostic.found {
+        return true;
+    }
     if diagnostic.kind == 1 {
-        try std::io::write_stderr(io, "error: type error: match expects enum or union, got ");
-        try output::error_line(allocator, io, diagnostic.name);
-        return;
+        try write_type_reference_summary_error(allocator, io, path, file_text, diagnostic);
+        return false;
     }
     if diagnostic.kind == 2 {
-        try match_tag_error(
-            allocator,
-            io,
-            "error: type error: unknown match tag `",
-            diagnostic.name,
-            diagnostic.tag
-        );
-        return;
+        try write_match_summary_error(allocator, io, path, diagnostic);
+        return false;
     }
     if diagnostic.kind == 3 {
-        try match_tag_error(
+        try write_expected_got_summary_error(
             allocator,
             io,
-            "error: type error: duplicate match tag `",
+            path,
+            file_text,
+            diagnostic.start,
+            diagnostic.end,
+            "type error: return expects ",
+            diagnostic.expected_text,
+            diagnostic.actual_text
+        );
+        return false;
+    }
+    if diagnostic.kind == 4 {
+        let call_summary = model::FunctionCallSummary {
+            found: true,
+            kind: diagnostic.detail_kind,
+            start: diagnostic.start,
+            end: diagnostic.end,
+            expected: diagnostic.expected,
+            observed: diagnostic.observed
+        };
+        try function_call_summary_error(allocator, io, path, file_text, call_summary);
+        return false;
+    }
+    if diagnostic.kind == 5 {
+        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: undefined variable `");
+        try message.append_bytes(diagnostic.name);
+        try message.append_bytes("`");
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
+        return false;
+    }
+    if diagnostic.kind == 6 {
+        try write_expected_got_summary_error(
+            allocator,
+            io,
+            path,
+            file_text,
+            diagnostic.start,
+            diagnostic.end,
+            "type error: argument expects ",
+            diagnostic.expected_text,
+            diagnostic.actual_text
+        );
+        return false;
+    }
+    if diagnostic.kind == 7 {
+        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: cannot assign to immutable binding `");
+        try message.append_bytes(diagnostic.name);
+        try message.append_bytes("`");
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
+        return false;
+    }
+    if diagnostic.kind == 8 {
+        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: invalid assignment target `");
+        try message.append_bytes(file_text[diagnostic.start..diagnostic.end]);
+        try message.append_bytes("`");
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
+        return false;
+    }
+    if diagnostic.kind == 9 {
+        try write_expected_got_summary_error(
+            allocator,
+            io,
+            path,
+            file_text,
+            diagnostic.start,
+            diagnostic.end,
+            "type error: assignment expects ",
+            diagnostic.expected_text,
+            diagnostic.actual_text
+        );
+        return false;
+    }
+    if diagnostic.kind == 10 {
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: function `");
+        try message.append_bytes(diagnostic.name);
+        try message.append_bytes("` must return ");
+        try message.append_bytes(diagnostic.expected_text);
+        try write_owned_prefixed_line(allocator, io, "error", message, empty_span(path));
+        message.deinit();
+        return false;
+    }
+    if diagnostic.kind == 11 {
+        let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
+        try write_prefixed_line(
+            allocator,
+            io,
+            "error",
+            "type error: operator operands must have same type",
+            span
+        );
+        var left_note = std::string::String(allocator);
+        try left_note.append_bytes("left operand has type ");
+        try left_note.append_bytes(diagnostic.expected_text);
+        try write_owned_prefixed_line(allocator, io, "note", left_note, note_span());
+        left_note.deinit();
+        var right_note = std::string::String(allocator);
+        try right_note.append_bytes("right operand has type ");
+        try right_note.append_bytes(diagnostic.actual_text);
+        try write_owned_prefixed_line(allocator, io, "note", right_note, note_span());
+        right_note.deinit();
+        return false;
+    }
+    try output::error_line(allocator, io, "error: check failed");
+    return false;
+}
+
+fn write_type_reference_summary_error(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    file_text: []u8,
+    diagnostic: &model::CheckDiagnosticSummary
+) -> !void {
+    let name = file_text[diagnostic.start..diagnostic.end];
+    let span = primary_span(path, file_text, diagnostic.start, diagnostic.end);
+    if diagnostic.detail_kind == 1 {
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: unknown type `");
+        try message.append_bytes(name);
+        try message.append_bytes("`");
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
+        return;
+    }
+    if diagnostic.detail_kind == 2 {
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: type `");
+        try message.append_bytes(name);
+        try message.append_bytes("` expects ");
+        try std::fmt::append_i64(message, diagnostic.expected);
+        try message.append_bytes(" type arguments, got ");
+        try std::fmt::append_i64(message, diagnostic.observed);
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
+        return;
+    }
+    try output::error_line(allocator, io, "error: check failed");
+    return;
+}
+
+fn write_match_summary_error(
+    allocator: Allocator,
+    io: Io,
+    path: []u8,
+    diagnostic: &model::CheckDiagnosticSummary
+) -> !void {
+    let span = empty_span(path);
+    if diagnostic.detail_kind == 1 {
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: match expects enum or union, got ");
+        try message.append_bytes(diagnostic.name);
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
+        return;
+    }
+    if diagnostic.detail_kind == 2 {
+        try write_match_tag_message(
+            allocator,
+            io,
+            span,
+            "type error: unknown match tag `",
             diagnostic.name,
             diagnostic.tag
         );
         return;
     }
-    if diagnostic.kind == 4 {
-        try std::io::write_stderr(io, "error: type error: match on `");
-        try std::io::write_stderr(io, diagnostic.name);
-        try output::error_line(allocator, io, "` is not exhaustive");
-        return;
-    }
-    if diagnostic.kind == 5 {
-        try output::error_line(allocator, io, "error: type error: wildcard match arm must be last");
-        return;
-    }
-    if diagnostic.kind == 6 {
-        try output::error_line(
+    if diagnostic.detail_kind == 3 {
+        try write_match_tag_message(
             allocator,
             io,
-            "error: type error: wildcard match arm cannot bind payload"
+            span,
+            "type error: duplicate match tag `",
+            diagnostic.name,
+            diagnostic.tag
         );
         return;
     }
-    if diagnostic.kind == 7 {
-        try output::error_line(allocator, io, "error: type error: duplicate wildcard match arm");
+    if diagnostic.detail_kind == 4 {
+        var message = std::string::String(allocator);
+        try message.append_bytes("type error: match on `");
+        try message.append_bytes(diagnostic.name);
+        try message.append_bytes("` is not exhaustive");
+        try write_owned_prefixed_line(allocator, io, "error", message, span);
+        message.deinit();
         return;
     }
-    if diagnostic.kind == 8 {
-        try match_tag_error(
+    if diagnostic.detail_kind == 5 {
+        try write_message_error(
             allocator,
             io,
-            "error: type error: enum tag has no payload `",
+            span,
+            "type error: wildcard match arm must be last"
+        );
+        return;
+    }
+    if diagnostic.detail_kind == 6 {
+        try write_message_error(
+            allocator,
+            io,
+            span,
+            "type error: wildcard match arm cannot bind payload"
+        );
+        return;
+    }
+    if diagnostic.detail_kind == 7 {
+        try write_message_error(
+            allocator,
+            io,
+            span,
+            "type error: duplicate wildcard match arm"
+        );
+        return;
+    }
+    if diagnostic.detail_kind == 8 {
+        try write_match_tag_message(
+            allocator,
+            io,
+            span,
+            "type error: enum tag has no payload `",
             diagnostic.name,
             diagnostic.tag
         );
@@ -150,70 +349,172 @@ pub fn match_error(
     return;
 }
 
-pub fn unknown_type_error(
+fn write_expected_got_summary_error(
     allocator: Allocator,
     io: Io,
-    name: []u8
+    path: []u8,
+    file_text: []u8,
+    start: i64,
+    end: i64,
+    prefix: []u8,
+    expected: []u8,
+    actual: []u8
 ) -> !void {
-    try std::io::write_stderr(io, "error: unknown type `");
-    try std::io::write_stderr(io, name);
-    try output::error_line(allocator, io, "`");
+    let span = primary_span(path, file_text, start, end);
+    var message = std::string::String(allocator);
+    try message.append_bytes(prefix);
+    try message.append_bytes(expected);
+    try message.append_bytes(", got ");
+    try message.append_bytes(actual);
+    try write_owned_prefixed_line(allocator, io, "error", message, span);
+    message.deinit();
     return;
 }
 
-pub fn function_arity_error(
+fn write_match_tag_message(
     allocator: Allocator,
     io: Io,
-    name: []u8,
-    expected: i64,
-    observed: i64
-) -> !void {
-    try std::io::write_stderr(io, "error: function `");
-    try std::io::write_stderr(io, name);
-    try std::io::write_stderr(io, "` expects ");
-    var line = std::string::String(allocator);
-    try std::fmt::append_i64(line, expected);
-    try line.append_bytes(" argument, got ");
-    try std::fmt::append_i64(line, observed);
-    let bytes = line.as_bytes();
-    try std::io::write_stderr(io, bytes);
-    try output::stderr_newline(allocator, io);
-    line.deinit();
-    return;
-}
-
-pub fn type_arity_error(
-    allocator: Allocator,
-    io: Io,
-    name: []u8,
-    expected: i64,
-    observed: i64
-) -> !void {
-    try std::io::write_stderr(io, "error: type `");
-    try std::io::write_stderr(io, name);
-    try std::io::write_stderr(io, "` expects ");
-    var line = std::string::String(allocator);
-    try std::fmt::append_i64(line, expected);
-    try line.append_bytes(" type arguments, got ");
-    try std::fmt::append_i64(line, observed);
-    let bytes = line.as_bytes();
-    try std::io::write_stderr(io, bytes);
-    try output::stderr_newline(allocator, io);
-    line.deinit();
-    return;
-}
-
-fn match_tag_error(
-    allocator: Allocator,
-    io: Io,
+    span: std::kizu::diagnostic::FileSpan,
     prefix: []u8,
     name: []u8,
     tag: []u8
 ) -> !void {
-    try std::io::write_stderr(io, prefix);
-    try std::io::write_stderr(io, name);
-    try std::io::write_stderr(io, "::");
-    try std::io::write_stderr(io, tag);
-    try output::error_line(allocator, io, "`");
+    var message = std::string::String(allocator);
+    try message.append_bytes(prefix);
+    try message.append_bytes(name);
+    try message.append_bytes("::");
+    try message.append_bytes(tag);
+    try message.append_bytes("`");
+    try write_owned_prefixed_line(allocator, io, "error", message, span);
+    message.deinit();
     return;
+}
+
+fn write_message_error(
+    allocator: Allocator,
+    io: Io,
+    span: std::kizu::diagnostic::FileSpan,
+    message: []u8
+) -> !void {
+    try write_prefixed_line(allocator, io, "error", message, span);
+    return;
+}
+
+fn write_owned_prefixed_line(
+    allocator: Allocator,
+    io: Io,
+    prefix: []u8,
+    message: &var std::string::String,
+    span: std::kizu::diagnostic::FileSpan
+) -> !void {
+    var line = std::string::String(allocator);
+    try line.append_bytes(prefix);
+    try line.append_bytes(": ");
+    let message_bytes = message.as_bytes();
+    try line.append_bytes(message_bytes);
+    try append_span_suffix(line, span);
+    let bytes = line.as_bytes();
+    try std::io::write_stderr(io, bytes);
+    try output::stderr_newline(allocator, io);
+    line.deinit();
+    return;
+}
+
+fn write_prefixed_line(
+    allocator: Allocator,
+    io: Io,
+    prefix: []u8,
+    message: []u8,
+    span: std::kizu::diagnostic::FileSpan
+) -> !void {
+    var line = std::string::String(allocator);
+    try line.append_bytes(prefix);
+    try line.append_bytes(": ");
+    try line.append_bytes(message);
+    try append_span_suffix(line, span);
+    let bytes = line.as_bytes();
+    try std::io::write_stderr(io, bytes);
+    try output::stderr_newline(allocator, io);
+    line.deinit();
+    return;
+}
+
+fn append_span_suffix(
+    out: &var std::string::String,
+    span: std::kizu::diagnostic::FileSpan
+) -> !void {
+    if span.line < 1 or span.column < 1 {
+        return;
+    }
+    try out.append_bytes(" at ");
+    try std::fmt::append_i64(out, span.line);
+    try out.append_byte(cast<u8>(58));
+    try std::fmt::append_i64(out, span.column);
+    return;
+}
+
+fn primary_span(
+    path: []u8,
+    source: []u8,
+    start: i64,
+    end: i64
+) -> std::kizu::diagnostic::FileSpan {
+    let clamped_start = clamp_offset(source, start);
+    let clamped_end = clamp_end(source, clamped_start, end);
+    let position = line_column_for_offset(source, clamped_start);
+    return std::kizu::diagnostic::file_span(
+        0,
+        path,
+        clamped_start,
+        clamped_end,
+        position.line,
+        position.column
+    );
+}
+
+fn empty_span(path: []u8) -> std::kizu::diagnostic::FileSpan {
+    return std::kizu::diagnostic::file_span(0, path, 0, 0, 0, 0);
+}
+
+fn note_span() -> std::kizu::diagnostic::FileSpan {
+    return std::kizu::diagnostic::file_span(0, "", 0, 0, 0, 0);
+}
+
+fn line_column_for_offset(source: []u8, offset: i64) -> LineColumn {
+    let limit = clamp_offset(source, offset);
+    var line = 1;
+    var column = 1;
+    var index = 0;
+    while index < limit {
+        if source[index] == cast<u8>(10) {
+            line = line + 1;
+            column = 1;
+        } else {
+            column = column + 1;
+        }
+        index = index + 1;
+    }
+    return LineColumn {
+        line: line,
+        column: column
+    };
+}
+
+fn clamp_offset(source: []u8, offset: i64) -> i64 {
+    if offset < 0 {
+        return 0;
+    }
+    let length = std::mem::len(source);
+    if offset > length {
+        return length;
+    }
+    return offset;
+}
+
+fn clamp_end(source: []u8, start: i64, end: i64) -> i64 {
+    let clamped_end = clamp_offset(source, end);
+    if clamped_end < start {
+        return start;
+    }
+    return clamped_end;
 }

@@ -16,7 +16,7 @@ import (
 )
 
 // DeclsForSource loads std wrapper declarations referenced by one source.
-func DeclsForSource(source string) ([]ast.Decl, []string, error) {
+func DeclsForSource(source string) ([]ast.Decl, []parser.Diagnostic, error) {
 	modules, err := ResolveModules(source)
 	if err != nil {
 		return nil, nil, err
@@ -28,7 +28,7 @@ func DeclsForSource(source string) ([]ast.Decl, []string, error) {
 }
 
 // DeclsForSources loads std wrapper declarations referenced by many sources.
-func DeclsForSources(sources []string) ([]ast.Decl, []string, error) {
+func DeclsForSources(sources []string) ([]ast.Decl, []parser.Diagnostic, error) {
 	var combined strings.Builder
 	for _, source := range sources {
 		combined.WriteString(source)
@@ -38,7 +38,7 @@ func DeclsForSources(sources []string) ([]ast.Decl, []string, error) {
 }
 
 // DeclsForSourcePath loads std wrapper declarations referenced by one file.
-func DeclsForSourcePath(path string) ([]ast.Decl, []string, error) {
+func DeclsForSourcePath(path string) ([]ast.Decl, []parser.Diagnostic, error) {
 	source, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
@@ -72,7 +72,7 @@ func ResolveModules(source string) ([]string, error) {
 }
 
 // ParseDecls loads selected std wrappers from Kizu source.
-func ParseDecls(modules []string) ([]ast.Decl, []string, error) {
+func ParseDecls(modules []string) ([]ast.Decl, []parser.Diagnostic, error) {
 	decls := []ast.Decl{}
 	for _, module := range modules {
 		moduleDecls, errs, err := parseModuleDecls(module)
@@ -295,7 +295,7 @@ var sourceModuleOrder = []string{
 }
 
 // parseModuleDecls loads one std wrapper module from Kizu source.
-func parseModuleDecls(module string) ([]ast.Decl, []string, error) {
+func parseModuleDecls(module string) ([]ast.Decl, []parser.Diagnostic, error) {
 	path, err := FindRepoFile(moduleFile(module))
 	if err != nil {
 		return nil, nil, err
@@ -327,14 +327,14 @@ func parseModuleDecls(module string) ([]ast.Decl, []string, error) {
 }
 
 // parsePath reads and parses a Kizu source file.
-func parsePath(path string) (*ast.Program, []string, error) {
+func parsePath(path string) (*ast.Program, []parser.Diagnostic, error) {
 	source, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	p := parser.New(lexer.New(string(source)))
 	program := p.ParseProgram()
-	return program, p.Errors(), nil
+	return program, p.Diagnostics(), nil
 }
 
 // moduleFile maps a std namespace module name to its source file path.
