@@ -2174,7 +2174,7 @@ func assertExecutableIRThreading(
 func hostedExecutableABIFacts() []string {
 	return []string{
 		"hosted-executable-abi executable-result-layout-v1",
-		"executable-layout kind:i64 stdout_payload:[]u8",
+		"executable-layout kind:i64 callee:[]u8 payload:[]u8",
 		"executable-kind Unsupported 0",
 		"executable-kind RunReturnVoid 1",
 		"executable-kind Call 2",

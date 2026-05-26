@@ -516,7 +516,7 @@ func requiredLLVMMetadataExternalFragments() []string {
 func requiredLLVMMetadataExecutableABIFragments() []string {
 	return []string{
 		"backend-input hosted-executable-abi executable-result-layout-v1\n",
-		"backend-input executable-layout kind:i64 stdout_payload:[]u8\n",
+		"backend-input executable-layout kind:i64 callee:[]u8 payload:[]u8\n",
 		"backend-input executable-kind Unsupported 0\n",
 		"backend-input executable-kind RunReturnVoid 1\n",
 		"backend-input executable-kind Call 2\n",
