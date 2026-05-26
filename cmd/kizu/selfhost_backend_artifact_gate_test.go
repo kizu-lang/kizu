@@ -343,7 +343,7 @@ func requiredLLVMCLICheckFragments() []string {
 // requiredLLVMExecutableFragments returns mandatory hosted executable fragments.
 func requiredLLVMExecutableFragments() []string {
 	return []string{
-		"%kizu.selfhost.executable.ast = type { i64, %kizu.slice.u8 }",
+		"%kizu.selfhost.executable.ast = type { i64, %kizu.slice.u8, %kizu.slice.u8 }",
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
 		"define %kizu.selfhost.executable.ast " +
 			"@kizu_selfhost__cli_parse_run_executable_ast",
@@ -468,7 +468,7 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 		"backend-input function-signature-return selfhost::backend::executable::" +
 			"parse_run_program_ast !data::ExecutableAst\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
-			"parse_run_print_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
+			"parse_run_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
 		"backend-input function-signature-return selfhost::backend::hosted::" +
@@ -529,13 +529,15 @@ func requiredLLVMMetadataExternalFragments() []string {
 func requiredLLVMMetadataExecutableABIFragments() []string {
 	return []string{
 		"backend-input hosted-executable-abi executable-result-layout-v1\n",
-		"backend-input executable-ast-layout kind:i64 payload:[]u8\n",
+		"backend-input executable-ast-layout kind:i64 callee:[]u8 payload:[]u8\n",
 		"backend-input executable-layout kind:i64 stdout_payload:[]u8\n",
 		"backend-input executable-ast-kind Unsupported 0\n",
-		"backend-input executable-ast-kind RunPrintCall 1\n",
-		"backend-input executable-ast-kind RunReturnVoid 2\n",
-		"backend-input executable-ast-kind TestExpectTrue 3\n",
-		"backend-input executable-ast-kind TestExpectFalse 4\n",
+		"backend-input executable-ast-kind ExprStmt 1\n",
+		"backend-input executable-ast-kind Call 2\n",
+		"backend-input executable-ast-kind StringLiteral 3\n",
+		"backend-input executable-ast-kind RunReturnVoid 4\n",
+		"backend-input executable-ast-kind TestExpectTrue 5\n",
+		"backend-input executable-ast-kind TestExpectFalse 6\n",
 		"backend-input executable-kind Unsupported 0\n",
 		"backend-input executable-kind RunPrintString 1\n",
 		"backend-input executable-kind RunReturnVoid 2\n",

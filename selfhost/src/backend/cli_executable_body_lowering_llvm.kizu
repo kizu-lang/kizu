@@ -1,3 +1,4 @@
+import selfhost::backend::cli_executable_parser_token_llvm;
 import selfhost::backend::executable;
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
@@ -31,7 +32,8 @@ fn append_cli_lower_executable_ast_function(
     try append_line(out, ") {");
     try append_line(out, "entry:");
     try append_line(out, "  %ast_kind = extractvalue %kizu.selfhost.executable.ast %ast, 0");
-    try append_line(out, "  %payload = extractvalue %kizu.selfhost.executable.ast %ast, 1");
+    try append_line(out, "  %source = extractvalue %kizu.selfhost.executable.ast %ast, 1");
+    try append_line(out, "  %payload = extractvalue %kizu.selfhost.executable.ast %ast, 2");
     try append_line(out, "  br label %check_case_0");
     try append_case_dispatch(out, count, is_test);
     try append_line(out, "unsupported:");
@@ -52,10 +54,31 @@ fn append_case_dispatch(
         let result_kind = try lowering_case_result_kind_tag(index, is_test);
         try append_check_label(out, index);
         try append_case_compare(out, index, ast_kind);
+        if !is_test and index == 0 {
+            try append_run_print_callee_compare(out);
+        } else {
+            try append_case_match_alias(out, index);
+        }
         try append_case_branch(out, index, count);
         try append_case_return(out, index, result_kind);
         index = index + 1;
     }
+    return;
+}
+
+fn append_run_print_callee_compare(out: &var std::string::String) -> !void {
+    try append_line(out, "  %callee_len = extractvalue %kizu.slice.u8 %source, 1");
+    try append_line(out, "  %callee_start = add i64 0, 0");
+    try append_line(out, "  %callee_end = add i64 %callee_start, %callee_len");
+    try cli_executable_parser_token_llvm::append_token_word_eq_call(
+        out,
+        "",
+        "callee_is_print",
+        "callee_start",
+        "callee_end",
+        "run-print-callee"
+    );
+    try append_line(out, "  %case_0_match = and i1 %case_0_kind_match, %callee_is_print");
     return;
 }
 
@@ -74,8 +97,18 @@ fn append_case_compare(
 ) -> !void {
     try out.append_bytes("  %case_");
     try std::fmt::append_i64(out, index);
-    try out.append_bytes("_match = icmp eq i64 %ast_kind, ");
+    try out.append_bytes("_kind_match = icmp eq i64 %ast_kind, ");
     try std::fmt::append_i64(out, ast_kind);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_case_match_alias(out: &var std::string::String, index: i64) -> !void {
+    try out.append_bytes("  %case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_match = and i1 %case_");
+    try std::fmt::append_i64(out, index);
+    try out.append_bytes("_kind_match, true");
     try out.append_byte(cast<u8>(10));
     return;
 }

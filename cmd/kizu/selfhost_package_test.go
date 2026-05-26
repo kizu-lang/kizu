@@ -812,7 +812,9 @@ func assertSelfhostExecutableLoweringSplit(
 		"pub fn parse_test_executable_ast(",
 		"pub fn lower_run_executable_ast(",
 		"pub fn lower_test_executable_ast(",
-		"fn parse_run_print_call_ast(",
+		"fn parse_run_expr_stmt_ast(",
+		"fn parse_run_call_ast(",
+		"fn parse_run_string_literal_ast(",
 		"fn parse_expect_call_ast(",
 	} {
 		if !strings.Contains(executable, fragment) {
@@ -1207,7 +1209,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_parse_run_print_payload_function(",
 		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
-		"executable::run_print_executable_ast_kind_tag(",
+		"executable::expr_stmt_executable_ast_kind_tag(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu": {
 		"pub fn require_executable_body_parsing(",
@@ -1355,7 +1357,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn run_literal_quote_byte(",
 		"pub fn run_executable_lowering_case_count(",
 		"pub fn test_expect_true_value(",
-		"fn parse_run_print_call_ast(",
+		"fn parse_run_expr_stmt_ast(",
+		"fn parse_run_call_ast(",
+		"fn parse_run_string_literal_ast(",
 		"fn parse_expect_call_ast(",
 	},
 }
@@ -2021,7 +2025,9 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		"fn require_function_body_token(",
 		"fn node_contains_token(",
 		"parse_run_program_ast",
-		"parse_run_print_call_ast",
+		"parse_run_expr_stmt_ast",
+		"parse_run_call_ast",
+		"parse_run_string_literal_ast",
 		"parse_expect_call_ast",
 	} {
 		if !strings.Contains(bodyParsing, fragment) {
@@ -2094,7 +2100,9 @@ func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser s
 func assertExecutableSelectedBodyParserNoHardcodedResultTags(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		`executable_ast_tag(ir_bytes, "RunPrintCall")`,
+		`executable_ast_tag(ir_bytes, "ExprStmt")`,
+		`executable_ast_tag(ir_bytes, "Call")`,
+		`executable_ast_tag(ir_bytes, "StringLiteral")`,
 		`executable_ast_tag(ir_bytes, "RunReturnVoid")`,
 		`executable_ast_tag(ir_bytes, "TestExpectTrue")`,
 		`executable_ast_tag(ir_bytes, "TestExpectFalse")`,
@@ -2326,7 +2334,7 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"cli_executable_parser_token_llvm::append_named_token_pair_eq_call(",
 		"executable::parser_source_token(",
 		"executable::unsupported_executable_ast_kind_tag(",
-		"executable::run_print_executable_ast_kind_tag(",
+		"executable::expr_stmt_executable_ast_kind_tag(",
 		"executable::run_return_executable_ast_kind_tag(",
 		"executable::test_ok_executable_ast_kind_tag(",
 		"executable::test_failure_executable_ast_kind_tag(",
@@ -2459,7 +2467,7 @@ func assertExecutableASTABIConsumers(
 	}
 	for _, fragment := range []string{
 		"executable::unsupported_executable_ast_kind_tag(",
-		"executable::run_print_executable_ast_kind_tag(",
+		"executable::expr_stmt_executable_ast_kind_tag(",
 		"executable::run_return_executable_ast_kind_tag(",
 		"executable::test_ok_executable_ast_kind_tag(",
 		"executable::test_failure_executable_ast_kind_tag(",
@@ -2648,13 +2656,15 @@ func assertExecutableIRThreading(
 func hostedExecutableABIFacts() []string {
 	return []string{
 		"hosted-executable-abi executable-result-layout-v1",
-		"executable-ast-layout kind:i64 payload:[]u8",
+		"executable-ast-layout kind:i64 callee:[]u8 payload:[]u8",
 		"executable-layout kind:i64 stdout_payload:[]u8",
 		"executable-ast-kind Unsupported 0",
-		"executable-ast-kind RunPrintCall 1",
-		"executable-ast-kind RunReturnVoid 2",
-		"executable-ast-kind TestExpectTrue 3",
-		"executable-ast-kind TestExpectFalse 4",
+		"executable-ast-kind ExprStmt 1",
+		"executable-ast-kind Call 2",
+		"executable-ast-kind StringLiteral 3",
+		"executable-ast-kind RunReturnVoid 4",
+		"executable-ast-kind TestExpectTrue 5",
+		"executable-ast-kind TestExpectFalse 6",
 		"executable-kind Unsupported 0",
 		"executable-kind RunPrintString 1",
 		"executable-kind RunReturnVoid 2",
@@ -2679,7 +2689,7 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 		"function-signature-return selfhost::backend::executable::" +
 			"parse_run_program_ast !data::ExecutableAst",
 		"function-signature-param selfhost::backend::executable::" +
-			"parse_run_print_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
+			"parse_run_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
 		"function-signature-param selfhost::backend::executable::" +
 			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
 		"function-signature-return selfhost::backend::hosted::" +
