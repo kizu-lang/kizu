@@ -22,8 +22,9 @@ boundary, runs the #458 production commands through that artifact, runs the
 supported corpus and bounded CLI parity gates, builds the selfhost package from
 Kizu source as a native executable to exercise checked-AST run/test lowering,
 and keeps the Go project, type, and ownership packages green. The aggregate
-Go/Kizu oracle is an explicit separate preflight because it runs the interpreted
-selfhost production pipeline and has an independent wall-time budget.
+Go/Kizu oracle is intentionally not part of `just selfhost-switch-gate`; it is
+an explicit separate preflight because it runs the interpreted selfhost
+production pipeline and has an independent wall-time budget.
 
 For frontend switch PRs that need Go/Kizu oracle evidence, also run:
 
@@ -128,6 +129,10 @@ changed by #451.
 ## Local Evidence For #461
 
 Recorded on 2026-05-21 after the production boundary gate was added:
+
+Historical note: during #461, `just selfhost-switch-gate` still included the
+aggregate oracle. Current switch-gate policy keeps the aggregate oracle as the
+separate `just selfhost-oracle` preflight described above.
 
 | Command | Result | Notes |
 | --- | --- | --- |
