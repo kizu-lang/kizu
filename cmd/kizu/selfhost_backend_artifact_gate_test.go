@@ -531,14 +531,12 @@ func requiredLLVMMetadataExecutableABIFragments() []string {
 		"backend-input executable-ast-kind ExprStmt 1\n",
 		"backend-input executable-ast-kind Call 2\n",
 		"backend-input executable-ast-kind StringLiteral 3\n",
-		"backend-input executable-ast-kind RunReturnVoid 4\n",
-		"backend-input executable-ast-kind TestExpectTrue 5\n",
-		"backend-input executable-ast-kind TestExpectFalse 6\n",
+		"backend-input executable-ast-kind BoolLiteral 4\n",
+		"backend-input executable-ast-kind RunReturnVoid 5\n",
 		"backend-input executable-kind Unsupported 0\n",
 		"backend-input executable-kind RunPrintString 1\n",
 		"backend-input executable-kind RunReturnVoid 2\n",
-		"backend-input executable-kind TestExpectOk 3\n",
-		"backend-input executable-kind TestExpectFailure 4\n",
+		"backend-input executable-kind Call 3\n",
 	}
 }
 

@@ -51,11 +51,8 @@ fn append_cli_parse_test_executable_ast_function(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
-    let expect_true = executable::test_expect_true_value();
-    let expect_false = executable::test_expect_false_value();
     let unsupported = try executable::unsupported_executable_ast_kind_tag();
-    let test_ok = try executable::test_ok_executable_ast_kind_tag();
-    let test_failure = try executable::test_failure_executable_ast_kind_tag();
+    let call = try executable::call_executable_ast_kind_tag();
     try append_line(out,
         "define %kizu.selfhost.executable.ast @kizu_selfhost__cli_parse_test_executable_ast(");
     try append_line(out, "  %kizu.slice.u8 %source");
@@ -63,16 +60,13 @@ fn append_cli_parse_test_executable_ast_function(
     try append_line(out, "entry:");
     try append_empty_payload(out);
     try append_line(out,
-        "  %expect = call i64 @kizu_selfhost__cli_parse_test_expect_value(%kizu.slice.u8 %source)");
-    try append_i64_constant_line(out, "  %is_ok = icmp eq i64 %expect, ", expect_true);
-    try append_line(out, "  br i1 %is_ok, label %test_ok, label %check_failure");
-    try append_line(out, "test_ok:");
-    try append_executable_ast_return(out, "test_ok", test_ok, "empty", "empty");
-    try append_line(out, "check_failure:");
-    try append_i64_constant_line(out, "  %is_failure = icmp eq i64 %expect, ", expect_false);
-    try append_line(out, "  br i1 %is_failure, label %test_failure, label %unsupported");
-    try append_line(out, "test_failure:");
-    try append_executable_ast_return(out, "test_failure", test_failure, "empty", "empty");
+        "  %expect = call %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value(%kizu.slice.u8 %source)");
+    try append_line(out, "  %expect_ok = extractvalue %kizu.error.slice.u8 %expect, 0");
+    try append_line(out, "  br i1 %expect_ok, label %test_expect, label %unsupported");
+    try append_line(out, "test_expect:");
+    try append_line(out, "  %callee = extractvalue %kizu.error.slice.u8 %expect, 1");
+    try append_line(out, "  %payload = extractvalue %kizu.error.slice.u8 %expect, 2");
+    try append_executable_ast_return(out, "test_expect", call, "callee", "payload");
     try append_line(out, "unsupported:");
     try append_executable_ast_return(out, "unsupported", unsupported, "empty", "empty");
     try append_line(out, "}");
@@ -411,10 +405,7 @@ fn append_cli_parse_test_expect_value_function(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
-    let expect_true = executable::test_expect_true_value();
-    let expect_false = executable::test_expect_false_value();
-    let expect_unsupported = executable::test_expect_unsupported_value();
-    try append_line(out, "define i64 @kizu_selfhost__cli_parse_test_expect_value(");
+    try append_line(out, "define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value(");
     try append_line(out, "  %kizu.slice.u8 %source");
     try append_line(out, ") {");
     try append_line(out, "entry:");
@@ -524,7 +515,10 @@ fn append_cli_parse_test_expect_value_function(
     try append_line(out, "bool_false_value:");
     try append_line(out, "  br label %check_rparen");
     try append_line(out, "check_rparen:");
-    try append_expect_value_phi(out, expect_true, expect_false);
+    try append_line(out,
+        "  %bool_value_start = phi i64 [ %bool_start, %bool_true_value ], [ %bool_start, %bool_false_value ]");
+    try append_line(out,
+        "  %bool_value_end = phi i64 [ %bool_end, %bool_true_value ], [ %bool_end, %bool_false_value ]");
     try append_line(out,
         "  %rparen_start = call i64 @kizu_selfhost__parse_next_semantic_token_index(%kizu.slice.u8 %source, i64 %bool_end)");
     try append_line(out, "  %rparen_in_bounds = icmp slt i64 %rparen_start, %source_len");
@@ -633,11 +627,25 @@ fn append_cli_parse_test_expect_value_function(
     try append_line(out, "  %at_eof = icmp eq i64 %after_rbrace, %source_len");
     try append_line(out, "  br i1 %at_eof, label %return_expect, label %continue");
     try append_line(out, "return_expect:");
-    try append_line(out, "  ret i64 %expect_value");
+    try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
+    try append_line(out, "  %callee_ptr = getelementptr i8, ptr %source_ptr, i64 %std_start");
+    try append_line(out, "  %callee_len = sub i64 %expect_end, %std_start");
+    try append_line(out, "  %callee_base = insertvalue %kizu.slice.u8 poison, ptr %callee_ptr, 0");
+    try append_line(out, "  %callee = insertvalue %kizu.slice.u8 %callee_base, i64 %callee_len, 1");
+    try append_line(out, "  %payload_ptr = getelementptr i8, ptr %source_ptr, i64 %bool_value_start");
+    try append_line(out, "  %payload_len = sub i64 %bool_value_end, %bool_value_start");
+    try append_line(out, "  %payload_base = insertvalue %kizu.slice.u8 poison, ptr %payload_ptr, 0");
+    try append_line(out, "  %payload = insertvalue %kizu.slice.u8 %payload_base, i64 %payload_len, 1");
+    try append_line(out,
+        "  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
+    try append_line(out, "  %callee_result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %callee, 1");
+    try append_line(out,
+        "  %result = insertvalue %kizu.error.slice.u8 %callee_result, %kizu.slice.u8 %payload, 2");
+    try append_line(out, "  ret %kizu.error.slice.u8 %result");
     try append_line(out, "continue:");
     try append_line(out, "  br label %not_found");
     try append_line(out, "not_found:");
-    try append_i64_constant_line(out, "  ret i64 ", expect_unsupported);
+    try append_line(out, "  ret %kizu.error.slice.u8 zeroinitializer");
     try append_line(out, "}");
     try append_line(out, "");
     return;

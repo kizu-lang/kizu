@@ -49,15 +49,10 @@ pub fn parse_test_executable_ast(
 }
 
 pub fn lower_test_executable_ast(executable_ast: data::ExecutableAst) -> data::Executable {
-    if executable_ast.kind == data::ExecutableAstKind::TestExpectTrue {
+    if executable_ast.kind == data::ExecutableAstKind::Call and
+        std::mem::equal_bytes(executable_ast.callee, "std::testing::expect") {
         return data::Executable {
-            kind: test_ok_executable_kind(),
-            stdout_payload: executable_ast.payload
-        };
-    }
-    if executable_ast.kind == data::ExecutableAstKind::TestExpectFalse {
-        return data::Executable {
-            kind: test_failure_executable_kind(),
+            kind: call_executable_kind(),
             stdout_payload: executable_ast.payload
         };
     }
@@ -84,12 +79,8 @@ pub fn run_return_executable_ast_kind_tag() -> !i64 {
     return try data::executable_ast_kind_tag_by_name("RunReturnVoid");
 }
 
-pub fn test_ok_executable_ast_kind_tag() -> !i64 {
-    return try data::executable_ast_kind_tag_by_name("TestExpectTrue");
-}
-
-pub fn test_failure_executable_ast_kind_tag() -> !i64 {
-    return try data::executable_ast_kind_tag_by_name("TestExpectFalse");
+pub fn bool_literal_executable_ast_kind_tag() -> !i64 {
+    return try data::executable_ast_kind_tag_by_name("BoolLiteral");
 }
 
 pub fn unsupported_executable_kind() -> data::ExecutableKind {
@@ -104,12 +95,8 @@ pub fn run_return_executable_kind() -> data::ExecutableKind {
     return data::ExecutableKind::RunReturnVoid;
 }
 
-pub fn test_ok_executable_kind() -> data::ExecutableKind {
-    return data::ExecutableKind::TestExpectOk;
-}
-
-pub fn test_failure_executable_kind() -> data::ExecutableKind {
-    return data::ExecutableKind::TestExpectFailure;
+pub fn call_executable_kind() -> data::ExecutableKind {
+    return data::ExecutableKind::Call;
 }
 
 pub fn unsupported_executable_kind_tag() -> !i64 {
@@ -124,12 +111,8 @@ pub fn run_return_executable_kind_tag() -> !i64 {
     return try data::executable_kind_tag_by_name("RunReturnVoid");
 }
 
-pub fn test_ok_executable_kind_tag() -> !i64 {
-    return try data::executable_kind_tag_by_name("TestExpectOk");
-}
-
-pub fn test_failure_executable_kind_tag() -> !i64 {
-    return try data::executable_kind_tag_by_name("TestExpectFailure");
+pub fn call_executable_kind_tag() -> !i64 {
+    return try data::executable_kind_tag_by_name("Call");
 }
 
 pub fn run_executable_lowering_case_count() -> i64 {
@@ -157,25 +140,19 @@ pub fn run_executable_lowering_case_result_kind_tag(index: i64) -> !i64 {
 }
 
 pub fn test_executable_lowering_case_count() -> i64 {
-    return 2;
+    return 1;
 }
 
 pub fn test_executable_lowering_case_ast_kind_tag(index: i64) -> !i64 {
     if index == 0 {
-        return try test_ok_executable_ast_kind_tag();
-    }
-    if index == 1 {
-        return try test_failure_executable_ast_kind_tag();
+        return try call_executable_ast_kind_tag();
     }
     return error("invalid test executable lowering case");
 }
 
 pub fn test_executable_lowering_case_result_kind_tag(index: i64) -> !i64 {
     if index == 0 {
-        return try test_ok_executable_kind_tag();
-    }
-    if index == 1 {
-        return try test_failure_executable_kind_tag();
+        return try call_executable_kind_tag();
     }
     return error("invalid test executable lowering case");
 }
@@ -218,18 +195,6 @@ pub fn run_payload_max_byte() -> i64 {
 
 pub fn run_payload_forbidden_byte() -> i64 {
     return run_literal_quote_byte();
-}
-
-pub fn test_expect_true_value() -> i64 {
-    return 1;
-}
-
-pub fn test_expect_false_value() -> i64 {
-    return 0;
-}
-
-pub fn test_expect_unsupported_value() -> i64 {
-    return -1;
 }
 
 pub fn parser_source_token(token_key: []u8) -> ![]u8 {
@@ -417,22 +382,15 @@ fn parse_expect_call_ast(
         return unsupported_executable_ast(text);
     }
     let arg = try ast.child_at(args, 0);
-    let expect = expect_bool_value(ast, arg);
-    if expect == test_expect_true_value() {
-        return data::ExecutableAst {
-            kind: data::ExecutableAstKind::TestExpectTrue,
-            callee: text[0..0],
-            payload: text[0..0]
-        };
-    }
-    if expect == test_expect_false_value() {
-        return data::ExecutableAst {
-            kind: data::ExecutableAstKind::TestExpectFalse,
-            callee: text[0..0],
-            payload: text[0..0]
-        };
-    }
-    return unsupported_executable_ast(text);
+    let node = ast.get(arg);
+    return match node.data {
+        Bool(bool_node) => data::ExecutableAst {
+            kind: data::ExecutableAstKind::Call,
+            callee: ast_node_text(text, ast, callee),
+            payload: ast_node_text(text, ast, arg)
+        },
+        _ => unsupported_executable_ast(text),
+    };
 }
 
 fn is_empty_return(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> bool {
@@ -449,21 +407,6 @@ fn is_empty_node(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> b
         Empty => true,
         _ => false,
     };
-}
-
-fn expect_bool_value(ast: std::kizu::ast::Ast, node_id: std::kizu::ast::NodeId) -> i64 {
-    let node = ast.get(node_id);
-    return match node.data {
-        Bool(bool_node) => bool_value_as_i64(bool_node.value),
-        _ => test_expect_unsupported_value(),
-    };
-}
-
-fn bool_value_as_i64(value: bool) -> i64 {
-    if value {
-        return test_expect_true_value();
-    }
-    return test_expect_false_value();
 }
 
 fn unsupported_executable_ast(text: []u8) -> data::ExecutableAst {
