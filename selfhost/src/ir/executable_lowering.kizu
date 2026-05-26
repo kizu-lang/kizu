@@ -31,16 +31,20 @@ pub struct ExecutableExpression {
     pub argument: ExecutableValue,
 }
 
-pub struct ExecutableStatement {
-    pub kind: ExecutableStatementKind,
-    pub local_name: []u8,
-    pub local_value: ExecutableValue,
-    pub expr: ExecutableExpression,
-}
-
-pub struct ExecutableLocalBindings {
+pub struct ExecutableLocalBinding {
     pub name: []u8,
     pub value: ExecutableValue,
+}
+
+pub struct ExecutableLocalBindingTable {
+    pub count: i64,
+    pub first: ExecutableLocalBinding,
+}
+
+pub struct ExecutableStatement {
+    pub kind: ExecutableStatementKind,
+    pub local_binding: ExecutableLocalBinding,
+    pub expr: ExecutableExpression,
 }
 
 pub struct ExecutableBlock {
@@ -246,8 +250,7 @@ fn lower_test_expr_statement(
 ) -> !ExecutableStatement {
     return ExecutableStatement {
         kind: ExecutableStatementKind::ExprStmt,
-        local_name: text[0..0],
-        local_value: unsupported_value(text),
+        local_binding: empty_local_binding(text),
         expr: try lower_test_expr(text, ast, expr)
     };
 }
@@ -323,10 +326,10 @@ fn lower_run_block(
             &locals
         );
         if statement.kind == ExecutableStatementKind::LocalBinding {
-            if !local_bindings_can_insert_string(&locals, &statement.local_value) {
+            if !local_bindings_can_insert_string(&locals, &statement.local_binding) {
                 return unsupported_block(text);
             }
-            locals = local_bindings_insert_string(text, &statement);
+            locals = local_bindings_insert_string(text, &statement.local_binding);
         } else {
             if index + 1 != statements.len {
                 return unsupported_block(text);
@@ -344,7 +347,7 @@ fn lower_run_statement(
     text: []u8,
     ast: std::kizu::ast::Ast,
     statement: std::kizu::ast::NodeId,
-    locals: &ExecutableLocalBindings
+    locals: &ExecutableLocalBindingTable
 ) -> !ExecutableStatement {
     let node = ast.get(statement);
     return match node.data {
@@ -372,8 +375,10 @@ fn lower_let_statement(
     }
     return ExecutableStatement {
         kind: ExecutableStatementKind::LocalBinding,
-        local_name: ast_node_text(text, ast, name),
-        local_value: lowered_value,
+        local_binding: ExecutableLocalBinding {
+            name: ast_node_text(text, ast, name),
+            value: lowered_value
+        },
         expr: unsupported_expr(text)
     };
 }
@@ -388,8 +393,7 @@ fn lower_return_statement(
     }
     return ExecutableStatement {
         kind: ExecutableStatementKind::ReturnVoid,
-        local_name: text[0..0],
-        local_value: unsupported_value(text),
+        local_binding: empty_local_binding(text),
         expr: unsupported_expr(text)
     };
 }
@@ -398,14 +402,13 @@ fn lower_expr_statement(
     text: []u8,
     ast: std::kizu::ast::Ast,
     expr: std::kizu::ast::NodeId,
-    locals: &ExecutableLocalBindings
+    locals: &ExecutableLocalBindingTable
 ) -> !ExecutableStatement {
     let node = ast.get(expr);
     return match node.data {
         Call(call_node) => ExecutableStatement {
             kind: ExecutableStatementKind::ExprStmt,
-            local_name: text[0..0],
-            local_value: unsupported_value(text),
+            local_binding: empty_local_binding(text),
             expr: try lower_call_expr(
                 text,
                 ast,
@@ -423,7 +426,7 @@ fn lower_call_expr(
     ast: std::kizu::ast::Ast,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
-    locals: &ExecutableLocalBindings
+    locals: &ExecutableLocalBindingTable
 ) -> !ExecutableExpression {
     let callee_text = ast_node_text(text, ast, callee);
     if !std::mem::equal_bytes(callee_text, "print") or args.len != 1 {
@@ -446,7 +449,7 @@ fn lower_print_argument(
     text: []u8,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    locals: &ExecutableLocalBindings
+    locals: &ExecutableLocalBindingTable
 ) -> ExecutableValue {
     let node = ast.get(node_id);
     return match node.data {
@@ -460,55 +463,65 @@ fn lower_local_string_argument(
     text: []u8,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId,
-    locals: &ExecutableLocalBindings
+    locals: &ExecutableLocalBindingTable
 ) -> ExecutableValue {
     return local_bindings_lookup_string(text, locals, ast_node_text(text, ast, node_id));
 }
 
-fn empty_local_bindings(text: []u8) -> ExecutableLocalBindings {
-    return ExecutableLocalBindings {
+fn empty_local_binding(text: []u8) -> ExecutableLocalBinding {
+    return ExecutableLocalBinding {
         name: text[0..0],
         value: unsupported_value(text)
     };
 }
 
+fn empty_local_bindings(text: []u8) -> ExecutableLocalBindingTable {
+    return ExecutableLocalBindingTable {
+        count: 0,
+        first: empty_local_binding(text)
+    };
+}
+
 fn local_bindings_can_insert_string(
-    locals: &ExecutableLocalBindings,
-    value: &ExecutableValue
+    locals: &ExecutableLocalBindingTable,
+    binding: &ExecutableLocalBinding
 ) -> bool {
-    return std::mem::len(locals.name) == 0 and
-        value.kind == ExecutableValueKind::StringLiteral;
+    return locals.count == 0 and
+        binding.value.kind == ExecutableValueKind::StringLiteral;
 }
 
 fn local_bindings_insert_string(
     text: []u8,
-    statement: &ExecutableStatement
-) -> ExecutableLocalBindings {
-    return ExecutableLocalBindings {
-        name: statement.local_name,
-        value: ExecutableValue {
-            kind: ExecutableValueKind::StringLiteral,
-            name: text[0..0],
-            payload: statement.local_value.payload
+    binding: &ExecutableLocalBinding
+) -> ExecutableLocalBindingTable {
+    return ExecutableLocalBindingTable {
+        count: 1,
+        first: ExecutableLocalBinding {
+            name: binding.name,
+            value: ExecutableValue {
+                kind: ExecutableValueKind::StringLiteral,
+                name: text[0..0],
+                payload: binding.value.payload
+            }
         }
     };
 }
 
 fn local_bindings_lookup_string(
     text: []u8,
-    locals: &ExecutableLocalBindings,
+    locals: &ExecutableLocalBindingTable,
     name: []u8
 ) -> ExecutableValue {
-    if std::mem::len(locals.name) == 0 {
+    if locals.count != 1 {
         return unsupported_value(text);
     }
-    if !std::mem::equal_bytes(name, locals.name) {
+    if !std::mem::equal_bytes(name, locals.first.name) {
         return unsupported_value(text);
     }
     return ExecutableValue {
         kind: ExecutableValueKind::LocalRef,
-        name: locals.name,
-        payload: locals.value.payload
+        name: locals.first.name,
+        payload: locals.first.value.payload
     };
 }
 
@@ -605,8 +618,7 @@ fn unsupported_block(text: []u8) -> ExecutableBlock {
 fn unsupported_statement(text: []u8) -> ExecutableStatement {
     return ExecutableStatement {
         kind: ExecutableStatementKind::Unsupported,
-        local_name: text[0..0],
-        local_value: unsupported_value(text),
+        local_binding: empty_local_binding(text),
         expr: unsupported_expr(text)
     };
 }
