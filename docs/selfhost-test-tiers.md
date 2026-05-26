@@ -287,8 +287,9 @@ selfhost` and `stage selfhost`, then emits and executes representative `run` and
 artifact metadata marker
 `executable_lowering selfhost::backend::executable checked-ast` and the root
 host runtime path `target/selfhost/selfhost.host.ll`. This proves the Kizu-owned
-checked-AST lowering path works. The hosted stage2 executable parser/lowerer is
-also validated through selected selfhost body IR facts before artifact emission.
+checked-AST lowering path works, including a run fixture with a local string
+`let`, `print(local)`, and multiple statements. The hosted stage2 executable
+path is validated through the direct bounded renderer before artifact emission.
 
 Measured locally on 2026-05-21 during #461:
 

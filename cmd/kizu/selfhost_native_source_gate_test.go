@@ -256,6 +256,16 @@ func nativeSourceRunCases() []runParityCase {
 			artifactMode: "hosted-artifact",
 			artifactStem: "run_return",
 		},
+		{
+			name:         "run_local_string",
+			command:      "run",
+			fixture:      "selfhost/tests/cli/run_local_string.kizu",
+			exitCode:     0,
+			stdoutGolden: "selfhost/tests/cli/golden/run_print_custom.stdout",
+			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+			artifactMode: "hosted-artifact",
+			artifactStem: "run_local_string",
+		},
 	}
 }
 

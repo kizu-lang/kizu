@@ -303,7 +303,7 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
-		"define i64 @kizu_selfhost__cli_parse_test_expect_value",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
@@ -343,14 +343,7 @@ func requiredLLVMCLICheckFragments() []string {
 // requiredLLVMExecutableFragments returns mandatory hosted executable fragments.
 func requiredLLVMExecutableFragments() []string {
 	return []string{
-		"%kizu.selfhost.executable.ast = type { i64, %kizu.slice.u8, %kizu.slice.u8 }",
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
-		"define %kizu.selfhost.executable.ast " +
-			"@kizu_selfhost__cli_parse_run_executable_ast",
-		"define %kizu.selfhost.executable.ast " +
-			"@kizu_selfhost__cli_match_test_source",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_run_executable_ast",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_executable_ast",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
 	}
@@ -463,8 +456,6 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"lower_run_executable !data::Executable\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input function-signature-return selfhost::backend::executable::" +
-			"lower_run_executable_ast data::Executable\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast\n",
 		"backend-input function-signature-return selfhost::backend::hosted::" +
@@ -525,18 +516,10 @@ func requiredLLVMMetadataExternalFragments() []string {
 func requiredLLVMMetadataExecutableABIFragments() []string {
 	return []string{
 		"backend-input hosted-executable-abi executable-result-layout-v1\n",
-		"backend-input executable-ast-layout kind:i64 callee:[]u8 payload:[]u8\n",
 		"backend-input executable-layout kind:i64 stdout_payload:[]u8\n",
-		"backend-input executable-ast-kind Unsupported 0\n",
-		"backend-input executable-ast-kind ExprStmt 1\n",
-		"backend-input executable-ast-kind Call 2\n",
-		"backend-input executable-ast-kind StringLiteral 3\n",
-		"backend-input executable-ast-kind BoolLiteral 4\n",
-		"backend-input executable-ast-kind RunReturnVoid 5\n",
 		"backend-input executable-kind Unsupported 0\n",
-		"backend-input executable-kind RunPrintString 1\n",
-		"backend-input executable-kind RunReturnVoid 2\n",
-		"backend-input executable-kind Call 3\n",
+		"backend-input executable-kind RunReturnVoid 1\n",
+		"backend-input executable-kind Call 2\n",
 	}
 }
 
