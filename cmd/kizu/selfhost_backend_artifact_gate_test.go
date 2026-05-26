@@ -348,7 +348,7 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.selfhost.executable.ast " +
 			"@kizu_selfhost__cli_parse_run_executable_ast",
 		"define %kizu.selfhost.executable.ast " +
-			"@kizu_selfhost__cli_parse_test_executable_ast",
+			"@kizu_selfhost__cli_match_test_source",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_run_executable_ast",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_executable_ast",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
@@ -466,7 +466,7 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 		"backend-input function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable_ast data::Executable\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
-			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
+			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast\n",
 		"backend-input function-signature-return selfhost::backend::hosted::" +
 			"emit_run_executable_artifact !data::RunArtifact\n",
 		"backend-input function-signature-param selfhost::backend::hosted::" +

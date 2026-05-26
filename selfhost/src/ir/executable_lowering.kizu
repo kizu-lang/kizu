@@ -4,6 +4,7 @@ pub enum ExecutableStatementKind {
     Unsupported,
     ReturnVoid,
     PrintString,
+    TestExpectBool,
 }
 
 pub struct ExecutableStatement {
@@ -25,6 +26,15 @@ pub fn lower_run_executable(
     root: std::kizu::ast::NodeId
 ) -> !data::Executable {
     let executable_function = try lower_run_program(text, ast, root);
+    return lower_function(text, executable_function);
+}
+
+pub fn lower_test_executable(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !data::Executable {
+    let executable_function = try lower_test_program(text, ast, root);
     return lower_function(text, executable_function);
 }
 
@@ -77,6 +87,162 @@ fn lower_run_function(
             body: try lower_block(text, ast, block.statements)
         },
         _ => unsupported_function(text),
+    };
+}
+
+fn lower_test_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !ExecutableFunction {
+    let node = ast.get(root);
+    return match node.data {
+        Program(program) => try lower_test_program_declarations(text, ast, program.declarations),
+        _ => unsupported_function(text),
+    };
+}
+
+fn lower_test_program_declarations(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !ExecutableFunction {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let node = ast.get(child);
+        let executable_function = match node.data {
+            FnDecl(fn_decl) => try lower_test_function(
+                text,
+                ast,
+                fn_decl.name,
+                fn_decl.return_type,
+                fn_decl.body
+            ),
+            _ => unsupported_function(text),
+        };
+        if executable_function.body.statement.kind != ExecutableStatementKind::Unsupported {
+            return executable_function;
+        }
+        index = index + 1;
+    }
+    return unsupported_function(text);
+}
+
+fn lower_test_function(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    return_type: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !ExecutableFunction {
+    let name_node = ast.get(name);
+    let is_test_name = match name_node.data {
+        String(string_node) => true,
+        _ => false,
+    };
+    if !is_test_name {
+        return unsupported_function(text);
+    }
+
+    let node = ast.get(body);
+    return match node.data {
+        Block(block) => ExecutableFunction {
+            body: try lower_test_block(text, ast, return_type, block.statements)
+        },
+        _ => unsupported_function(text),
+    };
+}
+
+fn lower_test_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    return_type: std::kizu::ast::NodeId,
+    statements: std::kizu::ast::ChildRange
+) -> !ExecutableBlock {
+    if statements.len == 1 {
+        let return_type_node = ast.get(return_type);
+        let return_type_supported = match return_type_node.data {
+            Empty => true,
+            TypeName(type_name) => std::mem::equal_bytes(
+                ast_node_text(text, ast, return_type),
+                "void"
+            ),
+            _ => false,
+        };
+        if !return_type_supported {
+            return unsupported_block(text);
+        }
+        let statement = try ast.child_at(statements, 0);
+        return ExecutableBlock {
+            statement: try lower_test_expect_statement(text, ast, statement)
+        };
+    }
+    if statements.len != 2 {
+        return unsupported_block(text);
+    }
+    let expect_statement = try ast.child_at(statements, 0);
+    let return_statement = try ast.child_at(statements, 1);
+    let return_node = ast.get(return_statement);
+    let empty_return_statement = match return_node.data {
+        Return(return_node) => is_empty_node(ast, return_node.value),
+        _ => false,
+    };
+    if !empty_return_statement {
+        return unsupported_block(text);
+    }
+    return ExecutableBlock {
+        statement: try lower_test_expect_statement(text, ast, expect_statement)
+    };
+}
+
+fn lower_test_expect_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statement: std::kizu::ast::NodeId
+) -> !ExecutableStatement {
+    let node = ast.get(statement);
+    return match node.data {
+        ExprStmt(expr_stmt) => try lower_test_expect_expr(text, ast, expr_stmt.expr),
+        _ => unsupported_statement(text),
+    };
+}
+
+fn lower_test_expect_expr(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    expr: std::kizu::ast::NodeId
+) -> !ExecutableStatement {
+    let node = ast.get(expr);
+    return match node.data {
+        Call(call_node) => try lower_test_expect_call(
+            text,
+            ast,
+            call_node.callee,
+            call_node.args
+        ),
+        _ => unsupported_statement(text),
+    };
+}
+
+fn lower_test_expect_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !ExecutableStatement {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "std::testing::expect") or
+        args.len != 1 {
+        return unsupported_statement(text);
+    }
+    let arg = try ast.child_at(args, 0);
+    let node = ast.get(arg);
+    return match node.data {
+        Bool(bool_node) => ExecutableStatement {
+            kind: ExecutableStatementKind::TestExpectBool,
+            payload: ast_node_text(text, ast, arg)
+        },
+        _ => unsupported_statement(text),
     };
 }
 
@@ -215,6 +381,12 @@ fn lower_function(text: []u8, executable_function: ExecutableFunction) -> data::
         return data::Executable {
             kind: data::ExecutableKind::RunReturnVoid,
             stdout_payload: text[0..0]
+        };
+    }
+    if executable_function.body.statement.kind == ExecutableStatementKind::TestExpectBool {
+        return data::Executable {
+            kind: data::ExecutableKind::Call,
+            stdout_payload: executable_function.body.statement.payload
         };
     }
     return unsupported_executable(text);
