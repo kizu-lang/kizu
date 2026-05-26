@@ -62,6 +62,47 @@ just perf-cache-isolated
 | #458 selfhost CLI path | `selfhost::{ir, backend}` plus hosted runtime ABI | `target/selfhost/stage2/selfhost` | switched for `check selfhost` and `stage selfhost` | `just selfhost-production-from-scratch` passes; Go remains only in explicit stage0 bootstrap/oracle jobs; general CLI parity remains blocked by #497. |
 | #752 run/test executable lowering | `selfhost::cli::execute`, `selfhost::backend::executable`, `selfhost::backend::hosted` | hosted stage2 uses the direct bounded executable renderer; native selfhost source executable uses checked AST | switched for bounded source path | `just selfhost-native-source-gate` builds the selfhost source package as a native executable and verifies run/test artifacts carry `executable_lowering selfhost::backend::executable checked-ast`, including local string `let` plus `print(local)` multiple-statement run lowering; hosted stage2 no longer depends on the old generated source-shape matcher module. |
 
+## Phase Replacement Checklist
+
+Every phase switch issue must name these evidence fields before it can replace a
+Go-owned production boundary:
+
+| Phase | Current Go-owned boundary | Selfhost component | Required gate or oracle | Open blocker owner |
+| --- | --- | --- | --- | --- |
+| source loading | package root, manifest, file graph, import graph | `selfhost::source`, `selfhost::source::loader` | `just selfhost-oracle` plus `just selfhost-production-from-scratch` when the artifact path changes | invalid manifest/import-cycle diagnostics tracked by frontend replacement issues |
+| lexer | tokenization in Go frontend | `selfhost::lexer` | lexer oracle in `just selfhost-oracle` | none before broader parser replacement |
+| parser | Go AST/parser and parse diagnostics | `selfhost::parser`, `std::kizu::parser` | parser oracle plus parse CLI parity gate | structured parse diagnostics and recovery cases |
+| resolver | Go project resolver and symbol table | `selfhost::resolver` | resolver oracle plus check CLI parity gate for affected sources | duplicate/private/import diagnostics |
+| type checker | Go type checker | `selfhost::types` | type oracle plus check CLI parity gate | full expression/type surface and structured diagnostics |
+| ownership checker | Go ownership and borrow checker | `selfhost::ownership` | ownership oracle plus negative check parity for the switched shape | array/field/mutable borrow coverage |
+| IR handoff | Go IR construction | `selfhost::ir` | `just selfhost-native-source-gate` for executable handoff; backend fingerprint gate for broader IR | package IR boundary after hosted executable mode |
+| backend artifact | Go backend/cache for general builds | `selfhost::backend` | backend artifact gate plus `just selfhost-production-from-scratch` | first real codegen slice after hosted artifact mode |
+| CLI parse/check/run/test | Go `cmd/kizu` dispatch for the general CLI | `selfhost::cli` and stage2 hosted artifact | matching CLI parity gate and no `go.cmd-kizu-fallback` marker except `none` | unsupported source shapes remain issue-linked |
+
+## Backend Boundary After Hosted Artifacts
+
+The current executable path is:
+
+```text
+checked AST -> executable lowering -> data::Executable -> hosted artifact renderer
+```
+
+`data::Executable` is the temporary backend handoff for bounded `run` and `test`
+artifacts. The next backend boundary must be a small package/codegen IR input
+owned by `selfhost::ir`, with backend-owned data for symbols, constants, calls,
+locals, and exits. Hosted artifact mode may remain as an artifact writer while
+that IR is introduced, but these branches are temporary and must not grow new
+source-literal, fixture-path, or static LLVM case dispatch:
+
+- `selfhost::backend::hosted` executable renderer
+- `selfhost::backend::cli_run_llvm`
+- `selfhost::backend::cli_test_llvm`
+- hosted metadata constants for run/test artifacts
+
+The smallest next real codegen slice is a `main` function with a string
+constant, direct `print` call, and void return lowered from the mini IR rather
+than from a run/test-specific hosted template branch.
+
 ## Failure Policy
 
 - Any oracle mismatch blocks a PR that relies on Go/Kizu oracle evidence.

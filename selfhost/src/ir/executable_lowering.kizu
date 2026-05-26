@@ -39,6 +39,7 @@ pub struct ExecutableLocalBinding {
 pub struct ExecutableLocalBindingTable {
     pub count: i64,
     pub first: ExecutableLocalBinding,
+    pub second: ExecutableLocalBinding,
 }
 
 pub struct ExecutableStatement {
@@ -326,21 +327,37 @@ fn lower_run_block(
             &locals
         );
         if statement.kind == ExecutableStatementKind::LocalBinding {
-            if !local_bindings_can_insert_string(&locals, &statement.local_binding) {
+            if !lower_run_local_binding_supported(&locals, &statement.local_binding) {
                 return unsupported_block(text);
             }
-            locals = local_bindings_insert_string(text, &statement.local_binding);
+            locals = local_bindings_insert_string(text, &locals, &statement.local_binding);
         } else {
-            if index + 1 != statements.len {
-                return unsupported_block(text);
-            }
-            return ExecutableBlock {
-                statement: statement
-            };
+            return lower_run_terminal_block(text, statements.len, index, statement);
         }
         index = index + 1;
     }
     return unsupported_block(text);
+}
+
+fn lower_run_local_binding_supported(
+    locals: &ExecutableLocalBindingTable,
+    binding: &ExecutableLocalBinding
+) -> bool {
+    return local_bindings_can_insert_string(locals, binding);
+}
+
+fn lower_run_terminal_block(
+    text: []u8,
+    statement_count: i64,
+    index: i64,
+    statement: ExecutableStatement
+) -> ExecutableBlock {
+    if index + 1 != statement_count {
+        return unsupported_block(text);
+    }
+    return ExecutableBlock {
+        statement: statement
+    };
 }
 
 fn lower_run_statement(
@@ -478,7 +495,8 @@ fn empty_local_binding(text: []u8) -> ExecutableLocalBinding {
 fn empty_local_bindings(text: []u8) -> ExecutableLocalBindingTable {
     return ExecutableLocalBindingTable {
         count: 0,
-        first: empty_local_binding(text)
+        first: empty_local_binding(text),
+        second: empty_local_binding(text)
     };
 }
 
@@ -486,23 +504,47 @@ fn local_bindings_can_insert_string(
     locals: &ExecutableLocalBindingTable,
     binding: &ExecutableLocalBinding
 ) -> bool {
-    return locals.count == 0 and
-        binding.value.kind == ExecutableValueKind::StringLiteral;
+    if binding.value.kind != ExecutableValueKind::StringLiteral {
+        return false;
+    }
+    if locals.count >= local_binding_capacity() {
+        return false;
+    }
+    return !local_bindings_contains_name(locals, binding.name);
 }
 
 fn local_bindings_insert_string(
     text: []u8,
+    locals: &ExecutableLocalBindingTable,
     binding: &ExecutableLocalBinding
 ) -> ExecutableLocalBindingTable {
-    return ExecutableLocalBindingTable {
-        count: 1,
-        first: ExecutableLocalBinding {
-            name: binding.name,
-            value: ExecutableValue {
-                kind: ExecutableValueKind::StringLiteral,
-                name: text[0..0],
-                payload: binding.value.payload
-            }
+    if locals.count == 0 {
+        return ExecutableLocalBindingTable {
+            count: 1,
+            first: local_string_binding(text, binding),
+            second: empty_local_binding(text)
+        };
+    }
+    if locals.count == 1 {
+        return ExecutableLocalBindingTable {
+            count: 2,
+            first: local_binding_copy(&locals.first),
+            second: local_string_binding(text, binding)
+        };
+    }
+    return empty_local_bindings(text);
+}
+
+fn local_string_binding(
+    text: []u8,
+    binding: &ExecutableLocalBinding
+) -> ExecutableLocalBinding {
+    return ExecutableLocalBinding {
+        name: binding.name,
+        value: ExecutableValue {
+            kind: ExecutableValueKind::StringLiteral,
+            name: text[0..0],
+            payload: binding.value.payload
         }
     };
 }
@@ -512,17 +554,49 @@ fn local_bindings_lookup_string(
     locals: &ExecutableLocalBindingTable,
     name: []u8
 ) -> ExecutableValue {
-    if locals.count != 1 {
-        return unsupported_value(text);
+    if locals.count >= 1 and std::mem::equal_bytes(name, locals.first.name) {
+        return local_ref_value(&locals.first);
     }
-    if !std::mem::equal_bytes(name, locals.first.name) {
-        return unsupported_value(text);
+    if locals.count >= 2 and std::mem::equal_bytes(name, locals.second.name) {
+        return local_ref_value(&locals.second);
     }
+    return unsupported_value(text);
+}
+
+fn local_ref_value(binding: &ExecutableLocalBinding) -> ExecutableValue {
     return ExecutableValue {
         kind: ExecutableValueKind::LocalRef,
-        name: locals.first.name,
-        payload: locals.first.value.payload
+        name: binding.name,
+        payload: binding.value.payload
     };
+}
+
+fn local_binding_copy(binding: &ExecutableLocalBinding) -> ExecutableLocalBinding {
+    return ExecutableLocalBinding {
+        name: binding.name,
+        value: ExecutableValue {
+            kind: binding.value.kind,
+            name: binding.value.name,
+            payload: binding.value.payload
+        }
+    };
+}
+
+fn local_bindings_contains_name(
+    locals: &ExecutableLocalBindingTable,
+    name: []u8
+) -> bool {
+    if locals.count >= 1 and std::mem::equal_bytes(name, locals.first.name) {
+        return true;
+    }
+    if locals.count >= 2 and std::mem::equal_bytes(name, locals.second.name) {
+        return true;
+    }
+    return false;
+}
+
+fn local_binding_capacity() -> i64 {
+    return 2;
 }
 
 fn lower_string_literal_argument(
