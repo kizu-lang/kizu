@@ -35,7 +35,7 @@ vscode-extension-package:
 vscode-extension-check:
     cd editors/vscode && npm ci && npm run compile
 
-# Run Go/Kizu selfhost component oracle parity checks.
+# Run explicit Go/Kizu selfhost component oracle parity checks.
 selfhost-oracle:
     GOGC=1000 KIZU_RUN_SELFHOST_ORACLE=1 go test -timeout=20m ./cmd/kizu -run TestSelfhostOracleRunner -count=1 -v
 
@@ -47,11 +47,11 @@ selfhost-oracle-budget:
 selfhost-integration-gates:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhost(ResolverGate|TypeGate|OwnershipGate|IRHandoffGate|IRArtifactGate|BackendArtifactGate|PipelineGate)$' -v
 
-# Run the minimum selfhost CLI contract gate.
+# Run the focused selfhost CLI contract gate.
 selfhost-cli-gate:
     KIZU_RUN_SELFHOST_GATES=1 go test -timeout=10m ./cmd/kizu -run 'TestSelfhostCLIGate$' -count=1 -v
 
-# Run the selfhost production switch review gate.
+# Run the selfhost production switch review gate without the aggregate oracle.
 selfhost-switch-gate:
     just selfhost-production-from-scratch
     just selfhost-native-source-gate
@@ -71,7 +71,7 @@ selfhost-bootstrap:
 selfhost-production-gate:
     KIZU_RUN_SELFHOST_PRODUCTION=1 go test -timeout=20m ./cmd/kizu -run 'TestSelfhostProductionBoundaryGate$' -count=1 -v
 
-# Run hosted artifact production, corpus, and CLI parity gates without rebuilding.
+# Run the daily hosted artifact production, corpus, and CLI parity loop without rebuilding.
 selfhost-fast-gate:
     just selfhost-production-gate
     just selfhost-corpus-gate
