@@ -1113,8 +1113,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/data.kizu": {
 		"pub enum ExecutableAstKind",
+		"pub fn executable_ast_kind_tag_by_name(",
 		"pub struct ExecutableAst",
 		"pub enum ExecutableKind",
+		"pub fn executable_kind_tag_by_name(",
 		"pub struct Executable",
 	},
 	"../../selfhost/src/backend/llvm.kizu": {
@@ -1192,6 +1194,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_executable_ast_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn require_executable_abi(",
+		"fn require_executable_tag_layout(",
 		"cli_executable_body_parsing_llvm::append_functions(",
 		"cli_executable_body_lowering_llvm::append_functions(",
 		"fn append_cli_run_executable_function(",
@@ -1205,6 +1208,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_parse_run_print_payload_function(",
 		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
+		"data::executable_ast_kind_tag_by_name(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu": {
 		"pub fn require_executable_body_parsing(",
@@ -1223,6 +1227,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"cli_executable_body_lowering_contract::case_count(",
 		"cli_executable_body_lowering_contract::case_ast_kind_name(",
 		"cli_executable_body_lowering_contract::case_result_kind_name(",
+		"data::executable_kind_tag_by_name(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_lowering_contract.kizu": {
 		"pub fn require(",
@@ -1230,6 +1235,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn case_ast_kind_name(",
 		"pub fn case_result_kind_name(",
 		"fn require_unsupported_return(",
+		"data::executable_ast_kind_tag_by_name(",
+		"data::executable_kind_tag_by_name(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_child_sequence_or_minus_one(",
 		"ir_contract::body_node_kind(",
@@ -1949,7 +1956,7 @@ func assertExecutableContractFactsComeFromCheckedAST(
 }
 
 // assertExecutableABIValidated checks backend validation keeps layouts exact but
-// reads executable tag ordinals from the IR fact stream.
+// reads executable tag ordinals from backend source-owned ABI helpers.
 func assertExecutableABIValidated(t *testing.T, llvm string, facts []string) {
 	t.Helper()
 	for _, fact := range facts {
@@ -1964,14 +1971,23 @@ func assertExecutableABIValidated(t *testing.T, llvm string, facts []string) {
 		}
 	}
 	for _, fragment := range []string{
-		"ir_contract::require_named_i64_fact(",
-		"append_backend_input_i64_fact(",
-		"ir_contract::named_i64_fact(",
+		"require_executable_tag_layout(",
+		"append_backend_input_executable_tag(",
+		"data::executable_ast_kind_tag_by_name(",
+		"data::executable_kind_tag_by_name(",
 		`"executable-ast-kind "`,
 		`"executable-kind "`,
 	} {
 		if !strings.Contains(llvm, fragment) {
-			t.Fatalf("backend IR validation/metadata does not consume tag facts with %q", fragment)
+			t.Fatalf("backend IR validation/metadata does not consume source-owned tags with %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"ir_contract::require_named_i64_fact(",
+		"ir_contract::named_i64_fact(",
+	} {
+		if strings.Contains(llvm, forbidden) {
+			t.Fatalf("backend IR validation/metadata still consumes executable tag facts with %q", forbidden)
 		}
 	}
 }
@@ -2335,7 +2351,6 @@ func assertExecutableParserConsumers(
 func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"ir_contract::named_i64_fact(",
 		"ir_contract::require_named_fact(",
 		"ir_contract::named_fact_value(",
 		"ir_contract::require_body_call(",
@@ -2349,10 +2364,14 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"append_named_token_char_eq_call(",
 		"append_named_token_pair_eq_call(",
 		"token_byte_value(",
+		"data::executable_ast_kind_tag_by_name(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
 		}
+	}
+	if strings.Contains(parser, "ir_contract::named_i64_fact(") {
+		t.Fatal("hosted executable parser still consumes executable tag facts")
 	}
 	for _, fragment := range []string{
 		`"selfhost::backend::executable::parse_run_executable_ast",
@@ -2383,7 +2402,6 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 func assertExecutableLoweringFactConsumers(t *testing.T, ast string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"ir_contract::named_i64_fact(",
 		"ir_contract::sequence_fact_value(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_child_sequence_or_minus_one(",
@@ -2398,7 +2416,8 @@ func assertExecutableLoweringFactConsumers(t *testing.T, ast string) {
 		"append_case_dispatch(",
 		"lowering_case_ast_kind_name(",
 		"lowering_case_result_kind_name(",
-		`"executable-kind "`,
+		"data::executable_ast_kind_tag_by_name(",
+		"data::executable_kind_tag_by_name(",
 	} {
 		if !strings.Contains(ast, fragment) {
 			t.Fatalf("hosted executable lowerer does not consume fact tags with %q", fragment)
@@ -2456,38 +2475,44 @@ func assertExecutableASTABIConsumers(
 		}
 	}
 	for _, fragment := range []string{
-		"ir_contract::require_named_i64_fact(",
-		`"executable-ast-kind "`,
-		`"executable-kind "`,
+		"require_executable_tag_layout(",
+		"data::executable_ast_kind_tag_by_name(",
+		"data::executable_kind_tag_by_name(",
 	} {
 		if !strings.Contains(ast, fragment) {
-			t.Fatalf("hosted executable AST renderer does not consume tag facts with %q", fragment)
+			t.Fatalf("hosted executable AST renderer does not consume ABI tags with %q", fragment)
 		}
 	}
 	for _, fragment := range []string{
 		"executable_ast_tag(",
-		`"executable-ast-kind "`,
+		"data::executable_ast_kind_tag_by_name(",
 	} {
 		if !strings.Contains(parser, fragment) {
-			t.Fatalf("hosted executable parser does not consume tag facts with %q", fragment)
+			t.Fatalf("hosted executable parser does not consume ABI tags with %q", fragment)
 		}
+	}
+	if strings.Contains(ast, "ir_contract::require_named_i64_fact(") {
+		t.Fatal("hosted executable AST renderer still consumes executable tag facts")
 	}
 }
 
-// assertExecutableLowererABIConsumers checks body lowerer rendering reads tag facts.
+// assertExecutableLowererABIConsumers checks body lowerer rendering reads source-owned ABI tags.
 func assertExecutableLowererABIConsumers(t *testing.T, lowerer string) {
 	t.Helper()
 	for _, fragment := range []string{
 		"executable_kind_tag(",
-		`"executable-kind "`,
+		"data::executable_kind_tag_by_name(",
 	} {
 		if !strings.Contains(lowerer, fragment) {
-			t.Fatalf("hosted executable lowerer does not consume ABI tag facts with %q", fragment)
+			t.Fatalf("hosted executable lowerer does not consume source-owned ABI tags with %q", fragment)
 		}
+	}
+	if strings.Contains(lowerer, "ir_contract::named_i64_fact(") {
+		t.Fatal("hosted executable lowerer still consumes executable tag facts")
 	}
 }
 
-// assertExecutableDispatchABIConsumers checks run/test dispatch reads ABI facts.
+// assertExecutableDispatchABIConsumers checks run/test dispatch reads source-owned ABI tags.
 func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string) {
 	t.Helper()
 	for _, fact := range []string{
@@ -2514,13 +2539,19 @@ func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string)
 		{name: "test", content: test},
 	} {
 		for _, fragment := range []string{
-			"ir_contract::named_i64_fact(",
-			`"executable-kind "`,
+			"data::executable_kind_tag_by_name(",
 			"append_executable_kind_compare(",
 		} {
 			if !strings.Contains(file.content, fragment) {
-				t.Fatalf("hosted %s dispatch does not consume fact tags with %q", file.name, fragment)
+				t.Fatalf(
+					"hosted %s dispatch does not consume source-owned ABI tags with %q",
+					file.name,
+					fragment,
+				)
 			}
+		}
+		if strings.Contains(file.content, "ir_contract::named_i64_fact(") {
+			t.Fatalf("hosted %s dispatch still consumes executable tag facts", file.name)
 		}
 	}
 }
@@ -2611,8 +2642,8 @@ func assertExecutableIRThreading(
 		{name: "run", content: run},
 		{name: "test", content: test},
 	} {
-		if !strings.Contains(file.content, `ir_contract::`) {
-			t.Fatalf("hosted executable %s renderer does not require IR facts", file.name)
+		if !strings.Contains(file.content, "ir_bytes") {
+			t.Fatalf("hosted executable %s renderer does not thread IR bytes", file.name)
 		}
 	}
 	for _, fragment := range []string{
