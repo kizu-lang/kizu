@@ -267,11 +267,40 @@ func linkAndRunRunParityArtifact(
 		t.Errorf("run parity %s metadata missing: %v", item.name, err)
 		return 1
 	}
+	if failures := countRunCodegenMetadataFailures(t, item, result.metadataPath); failures > 0 {
+		return failures
+	}
 	if err := linkRunParityExecutable(clang, result.llPath, result.exePath); err != nil {
 		t.Errorf("link run parity %s: %v", item.name, err)
 		return 1
 	}
 	result.program = runRunParityExecutable(t, result.exePath)
+	return 0
+}
+
+// countRunCodegenMetadataFailures proves selected run artifacts use codegen IR.
+func countRunCodegenMetadataFailures(t *testing.T, item runParityCase, metadataPath string) int {
+	t.Helper()
+	if item.artifactStem == "run_return" {
+		return 0
+	}
+	metadataBytes, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Errorf("run parity %s read metadata: %v", item.name, err)
+		return 1
+	}
+	metadata := string(metadataBytes)
+	required := []string{
+		"codegen_ir selfhost::ir::codegen::Program main-print-v0\n",
+		"run.codegen-ir enabled\n",
+		"go.cmd-kizu-fallback none\n",
+	}
+	for _, fragment := range required {
+		if !strings.Contains(metadata, fragment) {
+			t.Errorf("run parity %s metadata missing %q", item.name, fragment)
+			return 1
+		}
+	}
 	return 0
 }
 

@@ -73,6 +73,10 @@ pub fn metadata_mode_line() -> []u8 {
     return "artifact_mode hosted-artifact";
 }
 
+pub fn metadata_run_codegen_line() -> []u8 {
+    return "run.codegen-ir enabled";
+}
+
 pub fn test_metadata_discovery_line() -> []u8 {
     return "discovery none";
 }
@@ -160,6 +164,53 @@ pub fn emit_run_executable_artifact(
     ll_path.deinit();
     metadata_path.deinit();
     return artifact;
+}
+
+pub fn emit_run_codegen_artifact(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    program: codegen::Program
+) -> !data::RunArtifact {
+    try codegen::require_main_print(&program);
+    try ensure_hosted_artifact_dir(io, run_artifact_dir());
+
+    var ll_path = try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        artifact_ll_suffix()
+    );
+    var metadata_path = try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        artifact_metadata_suffix()
+    );
+    let hosted = hosted_executable_from_codegen(run_print_executable(), program);
+    let ll_path_view = ll_path.as_bytes();
+    let metadata_path_view = metadata_path.as_bytes();
+    let module_len = try write_hosted_module(
+        allocator,
+        io,
+        source_path,
+        ll_path_view,
+        &hosted
+    );
+    let metadata_len = try write_run_metadata(
+        allocator,
+        io,
+        source_path,
+        ll_path_view,
+        metadata_path_view,
+        &hosted
+    );
+    ll_path.deinit();
+    metadata_path.deinit();
+    return data::RunArtifact {
+        bytes: module_len,
+        metadata_bytes: metadata_len
+    };
 }
 
 pub fn emit_test_executable_artifact(
@@ -404,6 +455,9 @@ fn append_common_metadata(
     try append_line(metadata, metadata_abi_line());
     try append_key_value(metadata, metadata_entry_prefix(), hosted.entry);
     try append_key_value(metadata, "codegen_ir ", hosted.codegen_ir);
+    if !std::mem::equal_bytes(hosted.codegen_ir, "none") {
+        try append_line(metadata, metadata_run_codegen_line());
+    }
     try append_line(metadata, metadata_runtime_line());
     try append_line(metadata, metadata_lowering_line());
     try append_line(metadata, metadata_fallback_line());
