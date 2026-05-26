@@ -3,14 +3,39 @@ import selfhost::backend::data;
 pub enum ExecutableStatementKind {
     Unsupported,
     ReturnVoid,
+    ExprStmt,
+    LocalBinding,
+}
+
+pub enum ExecutableExpressionKind {
+    Unsupported,
     Call,
+}
+
+pub enum ExecutableValueKind {
+    Unsupported,
     StringLiteral,
+    BoolLiteral,
+    LocalRef,
+}
+
+pub struct ExecutableValue {
+    pub kind: ExecutableValueKind,
+    pub name: []u8,
+    pub payload: []u8,
+}
+
+pub struct ExecutableExpression {
+    pub kind: ExecutableExpressionKind,
+    pub callee: []u8,
+    pub argument: ExecutableValue,
 }
 
 pub struct ExecutableStatement {
     pub kind: ExecutableStatementKind,
-    pub callee: []u8,
-    pub payload: []u8,
+    pub local_name: []u8,
+    pub local_value: ExecutableValue,
+    pub expr: ExecutableExpression,
 }
 
 pub struct ExecutableBlock {
@@ -214,14 +239,19 @@ fn lower_test_expr_statement(
     ast: std::kizu::ast::Ast,
     expr: std::kizu::ast::NodeId
 ) -> !ExecutableStatement {
-    return try lower_test_expr(text, ast, expr);
+    return ExecutableStatement {
+        kind: ExecutableStatementKind::ExprStmt,
+        local_name: text[0..0],
+        local_value: unsupported_value(text),
+        expr: try lower_test_expr(text, ast, expr)
+    };
 }
 
 fn lower_test_expr(
     text: []u8,
     ast: std::kizu::ast::Ast,
     expr: std::kizu::ast::NodeId
-) -> !ExecutableStatement {
+) -> !ExecutableExpression {
     let node = ast.get(expr);
     return match node.data {
         Call(call_node) => try lower_test_call_expr(
@@ -230,7 +260,7 @@ fn lower_test_expr(
             call_node.callee,
             call_node.args
         ),
-        _ => unsupported_statement(text),
+        _ => unsupported_expr(text),
     };
 }
 
@@ -239,20 +269,20 @@ fn lower_test_call_expr(
     ast: std::kizu::ast::Ast,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange
-) -> !ExecutableStatement {
+) -> !ExecutableExpression {
     if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "std::testing::expect") or
         args.len != 1 {
-        return unsupported_statement(text);
+        return unsupported_expr(text);
     }
     let arg = try ast.child_at(args, 0);
     let argument = lower_test_bool_literal(text, ast, arg);
-    if argument.kind != ExecutableStatementKind::StringLiteral {
-        return unsupported_statement(text);
+    if argument.kind != ExecutableValueKind::BoolLiteral {
+        return unsupported_expr(text);
     }
-    return ExecutableStatement {
-        kind: ExecutableStatementKind::Call,
+    return ExecutableExpression {
+        kind: ExecutableExpressionKind::Call,
         callee: "std::testing::expect",
-        payload: argument.payload
+        argument: argument
     };
 }
 
@@ -260,15 +290,15 @@ fn lower_test_bool_literal(
     text: []u8,
     ast: std::kizu::ast::Ast,
     arg: std::kizu::ast::NodeId
-) -> ExecutableStatement {
+) -> ExecutableValue {
     let node = ast.get(arg);
     return match node.data {
-        Bool(bool_node) => ExecutableStatement {
-            kind: ExecutableStatementKind::StringLiteral,
-            callee: text[0..0],
+        Bool(bool_node) => ExecutableValue {
+            kind: ExecutableValueKind::BoolLiteral,
+            name: text[0..0],
             payload: ast_node_text(text, ast, arg)
         },
-        _ => unsupported_statement(text),
+        _ => unsupported_value(text),
     };
 }
 
@@ -289,12 +319,15 @@ fn lower_run_block(
             local_name,
             local_payload
         );
-        if statement.kind == ExecutableStatementKind::StringLiteral {
+        if statement.kind == ExecutableStatementKind::LocalBinding {
             if std::mem::len(local_name) != 0 {
                 return unsupported_block(text);
             }
-            local_name = statement.callee;
-            local_payload = statement.payload;
+            if statement.local_value.kind != ExecutableValueKind::StringLiteral {
+                return unsupported_block(text);
+            }
+            local_name = statement.local_name;
+            local_payload = statement.local_value.payload;
         } else {
             if index + 1 != statements.len {
                 return unsupported_block(text);
@@ -336,14 +369,15 @@ fn lower_let_statement(
     name: std::kizu::ast::NodeId,
     value: std::kizu::ast::NodeId
 ) -> ExecutableStatement {
-    let value_statement = lower_string_literal_argument(text, ast, value);
-    if value_statement.kind != ExecutableStatementKind::StringLiteral {
+    let lowered_value = lower_string_literal_argument(text, ast, value);
+    if lowered_value.kind != ExecutableValueKind::StringLiteral {
         return unsupported_statement(text);
     }
     return ExecutableStatement {
-        kind: ExecutableStatementKind::StringLiteral,
-        callee: ast_node_text(text, ast, name),
-        payload: value_statement.payload
+        kind: ExecutableStatementKind::LocalBinding,
+        local_name: ast_node_text(text, ast, name),
+        local_value: lowered_value,
+        expr: unsupported_expr(text)
     };
 }
 
@@ -357,8 +391,9 @@ fn lower_return_statement(
     }
     return ExecutableStatement {
         kind: ExecutableStatementKind::ReturnVoid,
-        callee: text[0..0],
-        payload: text[0..0]
+        local_name: text[0..0],
+        local_value: unsupported_value(text),
+        expr: unsupported_expr(text)
     };
 }
 
@@ -371,39 +406,45 @@ fn lower_expr_statement(
 ) -> !ExecutableStatement {
     let node = ast.get(expr);
     return match node.data {
-        Call(call_node) => try lower_call_statement(
-            text,
-            ast,
-            call_node.callee,
-            call_node.args,
-            local_name,
-            local_payload
-        ),
+        Call(call_node) => ExecutableStatement {
+            kind: ExecutableStatementKind::ExprStmt,
+            local_name: text[0..0],
+            local_value: unsupported_value(text),
+            expr: try lower_call_expr(
+                text,
+                ast,
+                call_node.callee,
+                call_node.args,
+                local_name,
+                local_payload
+            )
+        },
         _ => unsupported_statement(text),
     };
 }
 
-fn lower_call_statement(
+fn lower_call_expr(
     text: []u8,
     ast: std::kizu::ast::Ast,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange,
     local_name: []u8,
     local_payload: []u8
-) -> !ExecutableStatement {
+) -> !ExecutableExpression {
     let callee_text = ast_node_text(text, ast, callee);
     if !std::mem::equal_bytes(callee_text, "print") or args.len != 1 {
-        return unsupported_statement(text);
+        return unsupported_expr(text);
     }
     let arg = try ast.child_at(args, 0);
-    let arg_statement = lower_print_argument(text, ast, arg, local_name, local_payload);
-    if arg_statement.kind != ExecutableStatementKind::StringLiteral {
-        return unsupported_statement(text);
+    let argument = lower_print_argument(text, ast, arg, local_name, local_payload);
+    if argument.kind != ExecutableValueKind::StringLiteral and
+        argument.kind != ExecutableValueKind::LocalRef {
+        return unsupported_expr(text);
     }
-    return ExecutableStatement {
-        kind: ExecutableStatementKind::Call,
+    return ExecutableExpression {
+        kind: ExecutableExpressionKind::Call,
         callee: callee_text,
-        payload: arg_statement.payload
+        argument: argument
     };
 }
 
@@ -413,12 +454,12 @@ fn lower_print_argument(
     node_id: std::kizu::ast::NodeId,
     local_name: []u8,
     local_payload: []u8
-) -> ExecutableStatement {
+) -> ExecutableValue {
     let node = ast.get(node_id);
     return match node.data {
         String(string_node) => lower_string_literal(text, ast_node_text(text, ast, node_id)),
         Var(var_node) => lower_local_string_argument(text, ast, node_id, local_name, local_payload),
-        _ => unsupported_statement(text),
+        _ => unsupported_value(text),
     };
 }
 
@@ -428,16 +469,16 @@ fn lower_local_string_argument(
     node_id: std::kizu::ast::NodeId,
     local_name: []u8,
     local_payload: []u8
-) -> ExecutableStatement {
+) -> ExecutableValue {
     if std::mem::len(local_name) == 0 {
-        return unsupported_statement(text);
+        return unsupported_value(text);
     }
     if !std::mem::equal_bytes(ast_node_text(text, ast, node_id), local_name) {
-        return unsupported_statement(text);
+        return unsupported_value(text);
     }
-    return ExecutableStatement {
-        kind: ExecutableStatementKind::StringLiteral,
-        callee: text[0..0],
+    return ExecutableValue {
+        kind: ExecutableValueKind::LocalRef,
+        name: local_name,
         payload: local_payload
     };
 }
@@ -446,30 +487,30 @@ fn lower_string_literal_argument(
     text: []u8,
     ast: std::kizu::ast::Ast,
     node_id: std::kizu::ast::NodeId
-) -> ExecutableStatement {
+) -> ExecutableValue {
     let node = ast.get(node_id);
     return match node.data {
         String(string_node) => lower_string_literal(text, ast_node_text(text, ast, node_id)),
-        _ => unsupported_statement(text),
+        _ => unsupported_value(text),
     };
 }
 
-fn lower_string_literal(text: []u8, literal: []u8) -> ExecutableStatement {
+fn lower_string_literal(text: []u8, literal: []u8) -> ExecutableValue {
     let length = std::mem::len(literal);
     if length < string_literal_min_length() {
-        return unsupported_statement(text);
+        return unsupported_value(text);
     }
     let quote = cast<u8>(string_literal_quote_byte());
     if literal[0] != quote or literal[length - 1] != quote {
-        return unsupported_statement(text);
+        return unsupported_value(text);
     }
     let payload = literal[1..length - 1];
     if !is_print_payload_supported(payload) {
-        return unsupported_statement(text);
+        return unsupported_value(text);
     }
-    return ExecutableStatement {
-        kind: ExecutableStatementKind::StringLiteral,
-        callee: text[0..0],
+    return ExecutableValue {
+        kind: ExecutableValueKind::StringLiteral,
+        name: text[0..0],
         payload: payload
     };
 }
@@ -502,11 +543,12 @@ fn string_literal_min_length() -> i64 {
 }
 
 fn lower_function(text: []u8, executable_function: ExecutableFunction) -> data::Executable {
-    if executable_function.body.statement.kind == ExecutableStatementKind::Call {
+    if executable_function.body.statement.kind == ExecutableStatementKind::ExprStmt and
+        executable_function.body.statement.expr.kind == ExecutableExpressionKind::Call {
         return data::Executable {
             kind: data::ExecutableKind::Call,
-            callee: executable_function.body.statement.callee,
-            payload: executable_function.body.statement.payload
+            callee: executable_function.body.statement.expr.callee,
+            payload: executable_function.body.statement.expr.argument.payload
         };
     }
     if executable_function.body.statement.kind == ExecutableStatementKind::ReturnVoid {
@@ -534,7 +576,24 @@ fn unsupported_block(text: []u8) -> ExecutableBlock {
 fn unsupported_statement(text: []u8) -> ExecutableStatement {
     return ExecutableStatement {
         kind: ExecutableStatementKind::Unsupported,
+        local_name: text[0..0],
+        local_value: unsupported_value(text),
+        expr: unsupported_expr(text)
+    };
+}
+
+fn unsupported_expr(text: []u8) -> ExecutableExpression {
+    return ExecutableExpression {
+        kind: ExecutableExpressionKind::Unsupported,
         callee: text[0..0],
+        argument: unsupported_value(text)
+    };
+}
+
+fn unsupported_value(text: []u8) -> ExecutableValue {
+    return ExecutableValue {
+        kind: ExecutableValueKind::Unsupported,
+        name: text[0..0],
         payload: text[0..0]
     };
 }
