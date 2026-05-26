@@ -291,17 +291,11 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"dispatch_fmt_write_arg:",
 		"dispatch_fmt_write:",
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
-		"define i1 @kizu_selfhost__cli_parse_run_return_void_ok",
-		"%run_executable = call %kizu.selfhost.executable " +
-			"@kizu_selfhost__cli_run_executable",
 		"%test_executable = call %kizu.selfhost.executable " +
 			"@kizu_selfhost__cli_test_executable",
-		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
-		"%run_return_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
-		"%run_return_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
 		"%test_ok_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%test_failure_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
@@ -336,7 +330,6 @@ func requiredLLVMCLICheckFragments() []string {
 func requiredLLVMExecutableFragments() []string {
 	return []string{
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
 	}
 }
@@ -358,6 +351,13 @@ func forbiddenLLVMFragments() []string {
 		"%run_hello_found = call i1 @kizu_selfhost__slice_contains",
 		"%test_ok_found = call i1 @kizu_selfhost__slice_contains",
 		"%test_failure_found = call i1 @kizu_selfhost__slice_contains",
+		"define i1 @kizu_selfhost__cli_parse_run_return_void_ok",
+		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
+		"%run_executable = call %kizu.selfhost.executable " +
+			"@kizu_selfhost__cli_run_executable",
+		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
+		"%run_return_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
+		"%run_return_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_local_print_payload",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_main_print_payload",
@@ -464,16 +464,8 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"emit_run_codegen_artifact !data::RunArtifact\n",
 		"backend-input function-signature-param selfhost::backend::hosted::" +
 			"emit_run_codegen_artifact 3 program:runtime:codegen::Program\n",
-		"backend-input function-signature-return selfhost::backend::executable::" +
-			"lower_run_executable !data::Executable\n",
-		"backend-input function-signature-param selfhost::backend::executable::" +
-			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input function-signature-return selfhost::backend::hosted::" +
-			"emit_run_executable_artifact !data::RunArtifact\n",
-		"backend-input function-signature-param selfhost::backend::hosted::" +
-			"emit_run_executable_artifact 3 executable:runtime:data::Executable\n",
 	}
 }
 
@@ -1462,27 +1454,24 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 // countHostedCompilerCLIRunFailures runs a non-fixture source through `run`.
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
-	failures := countHostedCompilerCLIRunSourceFailures(
+	failures := countHostedCompilerCLIUnsupportedRunSourceFailures(
 		t,
 		exePath,
 		"hosted_run_return.kizu",
 		"hosted_run_return",
 		"fn main(){return;}\n",
-		"define i64 @kizu_run_main()",
-		"@.kizu.run.stdout",
 	)
 	return failures
 }
 
-// countHostedCompilerCLIRunSourceFailures checks one hosted `run` source.
-func countHostedCompilerCLIRunSourceFailures(
+// countHostedCompilerCLIUnsupportedRunSourceFailures checks that hosted `run`
+// sources unsupported by codegen do not fall back to static artifact emission.
+func countHostedCompilerCLIUnsupportedRunSourceFailures(
 	t *testing.T,
 	exePath string,
 	name string,
 	stem string,
 	source string,
-	expectedLLFragment string,
-	rejectedLLFragments ...string,
 ) int {
 	t.Helper()
 	sourcePath := filepath.Join(t.TempDir(), name)
@@ -1490,8 +1479,12 @@ func countHostedCompilerCLIRunSourceFailures(
 		t.Errorf("write hosted run smoke source: %v", err)
 		return 1
 	}
+	llPath := filepath.Join("target", "selfhost", "run", stem+".ll")
+	metaPath := filepath.Join("target", "selfhost", "run", stem+".ll.meta")
+	_ = os.Remove(llPath)
+	_ = os.Remove(metaPath)
 	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "run", sourcePath)
-	if code != 0 {
+	if code != 64 {
 		t.Errorf("hosted compiler run exit=%d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 		return 1
 	}
@@ -1499,41 +1492,15 @@ func countHostedCompilerCLIRunSourceFailures(
 		t.Errorf("hosted compiler run stdout mismatch: %q", stdout)
 		return 1
 	}
-	if stderr != "" {
+	if !strings.Contains(stderr, "usage: selfhost") {
 		t.Errorf("hosted compiler run stderr mismatch: %q", stderr)
 		return 1
 	}
-	llPath := filepath.Join("target", "selfhost", "run", stem+".ll")
-	metaPath := filepath.Join("target", "selfhost", "run", stem+".ll.meta")
-	failures := countHostedCompilerCLIArtifactSourceFailures(
-		t,
-		llPath,
-		metaPath,
-		sourcePath,
-		"target/selfhost/run/runtime.kizu",
-	)
-	llContent, readFailures := readHostedCompilerCLIArtifact(t, llPath)
-	failures += readFailures
-	if readFailures == 0 && !strings.Contains(llContent, expectedLLFragment) {
-		t.Errorf(
-			"hosted compiler run artifact %s missing %q:\n%s",
-			llPath,
-			expectedLLFragment,
-			llContent,
-		)
-		failures++
-	}
-	if readFailures == 0 {
-		for _, rejected := range rejectedLLFragments {
-			if strings.Contains(llContent, rejected) {
-				t.Errorf(
-					"hosted compiler run artifact %s kept rejected %q:\n%s",
-					llPath,
-					rejected,
-					llContent,
-				)
-				failures++
-			}
+	failures := 0
+	for _, path := range []string{llPath, metaPath} {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("hosted compiler run emitted unsupported artifact %s", path)
+			failures++
 		}
 	}
 	return failures

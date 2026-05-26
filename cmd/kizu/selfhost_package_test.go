@@ -775,9 +775,7 @@ func TestSelfhostRunTestReuseCheckedAST(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		"backend::lower_run_executable(",
 		"backend::lower_test_executable(",
-		"backend::emit_run_executable_artifact(",
 		"backend::emit_test_executable_artifact(",
 	} {
 		if !strings.Contains(execute, fragment) {
@@ -796,9 +794,7 @@ func assertSelfhostExecutableLoweringSplit(
 ) {
 	t.Helper()
 	for _, fragment := range []string{
-		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
-		"executable::lower_run_executable(",
 		"executable::lower_test_executable(",
 	} {
 		if !strings.Contains(backend, fragment) {
@@ -806,7 +802,6 @@ func assertSelfhostExecutableLoweringSplit(
 		}
 	}
 	for _, fragment := range []string{
-		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
 	} {
 		if !strings.Contains(executable, fragment) {
@@ -814,7 +809,6 @@ func assertSelfhostExecutableLoweringSplit(
 		}
 	}
 	for _, fragment := range []string{
-		"fn lower_run_executable(",
 		"fn lower_test_executable(",
 		"import selfhost::cli::executable;",
 	} {
@@ -822,18 +816,14 @@ func assertSelfhostExecutableLoweringSplit(
 			t.Fatalf("execute module still owns executable lowering %q", fragment)
 		}
 	}
-	assertSelfhostExecutableLoweringUsesDirectRunIR(t, executable)
+	assertSelfhostExecutableLoweringUsesDirectTestIR(t, executable)
 }
 
-// assertSelfhostExecutableLoweringUsesDirectRunIR keeps run lowering on the
+// assertSelfhostExecutableLoweringUsesDirectTestIR keeps test lowering on the
 // executable IR path.
-func assertSelfhostExecutableLoweringUsesDirectRunIR(t *testing.T, executable string) {
+func assertSelfhostExecutableLoweringUsesDirectTestIR(t *testing.T, executable string) {
 	t.Helper()
-	runBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_run_executable(")
 	testBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_test_executable(")
-	if !strings.Contains(runBody, "executable_lowering::lower_run_executable(text, ast, root)") {
-		t.Fatal("run executable wrapper does not use executable IR lowering")
-	}
 	if !strings.Contains(testBody, "executable_lowering::lower_test_executable(text, ast, root)") {
 		t.Fatal("test executable wrapper does not use executable IR lowering")
 	}
@@ -1155,12 +1145,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn run_artifact_dir(",
 		"pub fn metadata_runtime_line(",
 		"pub fn run_print_executable(",
-		"pub fn run_return_executable(",
 		"pub fn test_ok_executable(",
 		"pub fn test_failure_executable(",
-		"pub fn emit_run_executable_artifact(",
 		"fn ensure_hosted_artifact_dir(",
-		"fn lower_run_hosted_executable(",
 		"fn lower_test_hosted_executable(",
 		"fn hosted_executable_from_codegen(",
 		"fn render_hosted_llvm(",
@@ -1218,10 +1205,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
-		"fn executable_kind_tag(",
-		"fn append_executable_kind_compare(",
-		"fn append_run_return_emit_block(",
-		"@kizu_selfhost__ensure_artifact_dir",
+		"cli_check_gate_llvm::append_static_check_gate(",
+		"br label %usage",
 	},
 	"../../selfhost/src/backend/cli_test_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1245,12 +1230,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_executable_llvm.kizu": {
 		"pub fn append_functions(",
 		"cli_executable_body_parsing_llvm::append_functions(",
-		"fn append_cli_run_executable_function(",
 		"fn append_cli_test_executable_function(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
-		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
@@ -1345,11 +1328,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn test_file_cli(",
 		"backend::lower_run_codegen_program(",
 		"backend::emit_run_codegen_artifact(",
-		"backend::lower_run_executable(",
 		"backend::lower_test_executable(",
 	},
 	"../../selfhost/src/backend/executable.kizu": {
-		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
 		"pub fn unsupported_executable_kind_tag(",
 		"pub fn parser_source_token(",
@@ -1645,7 +1626,6 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 	}
 	for _, fragment := range []string{
 		`"check::checked_ast_node"`,
-		`"backend::emit_run_executable_artifact"`,
 		`"backend::emit_test_executable_artifact"`,
 		`"executable_lowering::lower_test_executable"`,
 		`"ensure_hosted_artifact_dir"`,
@@ -1899,7 +1879,7 @@ func assertExecutableHostedSharedRendererOwners(
 	metadata string,
 ) {
 	t.Helper()
-	for _, content := range []string{run, test, metadata} {
+	for _, content := range []string{test, metadata} {
 		if !strings.Contains(content, "import selfhost::backend::hosted;") {
 			t.Fatal("hosted renderer does not import shared backend::hosted helpers")
 		}
@@ -1926,9 +1906,7 @@ func assertExecutableHostedSharedRendererOwners(
 		}
 	}
 	for _, fragment := range []string{
-		"hosted::run_artifact_dir()",
 		"hosted::test_artifact_dir()",
-		"hosted::run_return_executable()",
 		"hosted::test_ok_executable()",
 		"hosted::test_failure_executable()",
 		"hosted::metadata_output_prefix()",
@@ -2068,7 +2046,6 @@ func assertExecutableLowererABIConsumers(t *testing.T, lowerer string) {
 	t.Helper()
 	for _, fragment := range []string{
 		"executable::unsupported_executable_kind_tag(",
-		"executable::run_return_executable_kind_tag(",
 		"executable::call_executable_kind_tag(",
 	} {
 		if !strings.Contains(lowerer, fragment) {
@@ -2102,6 +2079,14 @@ func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string)
 			t.Fatalf("hosted test dispatch hardcodes executable ABI fact %q", fact)
 		}
 	}
+	for _, fragment := range []string{
+		"data::executable_kind_tag_by_name(",
+		"append_executable_kind_compare(",
+	} {
+		if !strings.Contains(test, fragment) {
+			t.Fatalf("hosted test dispatch does not consume source-owned ABI tags with %q", fragment)
+		}
+	}
 	for _, file := range []struct {
 		name    string
 		content string
@@ -2109,18 +2094,6 @@ func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string)
 		{name: "run", content: run},
 		{name: "test", content: test},
 	} {
-		for _, fragment := range []string{
-			"data::executable_kind_tag_by_name(",
-			"append_executable_kind_compare(",
-		} {
-			if !strings.Contains(file.content, fragment) {
-				t.Fatalf(
-					"hosted %s dispatch does not consume source-owned ABI tags with %q",
-					file.name,
-					fragment,
-				)
-			}
-		}
 		if strings.Contains(file.content, "ir_contract::named_i64_fact(") {
 			t.Fatalf("hosted %s dispatch still consumes executable tag facts", file.name)
 		}
@@ -2254,16 +2227,8 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 			"emit_run_codegen_artifact !data::RunArtifact",
 		"function-signature-param selfhost::backend::hosted::" +
 			"emit_run_codegen_artifact 3 program:runtime:codegen::Program",
-		"function-signature-return selfhost::backend::executable::" +
-			"lower_run_executable !data::Executable",
-		"function-signature-param selfhost::backend::executable::" +
-			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast",
 		"function-signature-param selfhost::backend::executable::" +
 			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast",
-		"function-signature-return selfhost::backend::hosted::" +
-			"emit_run_executable_artifact !data::RunArtifact",
-		"function-signature-param selfhost::backend::hosted::" +
-			"emit_run_executable_artifact 3 executable:runtime:data::Executable",
 	}
 }
 
@@ -2276,15 +2241,11 @@ func hostedExecutableBodyContractFragments() []string {
 		`"check::checked_ast_node"`,
 		`"backend::lower_run_codegen_program"`,
 		`"backend::emit_run_codegen_artifact"`,
-		`"backend::lower_run_executable"`,
 		`"selfhost::cli::execute::test_file_cli"`,
 		`"backend::lower_test_executable"`,
-		`"selfhost::backend::executable::lower_run_executable"`,
 		`"selfhost::backend::executable::lower_test_executable"`,
 		`"executable_lowering::lower_test_executable"`,
 		`"selfhost::backend::hosted::emit_run_codegen_artifact"`,
-		`"selfhost::backend::hosted::emit_run_executable_artifact"`,
-		`"write_run_artifact"`,
 		`"selfhost::backend::hosted::emit_test_executable_artifact"`,
 		`"write_test_artifact"`,
 	}
@@ -2297,9 +2258,7 @@ func hostedExecutableExactBodySequenceFragments() []string {
 		`"body-call selfhost::cli::execute::run_file_cli 82`,
 		`"body-call selfhost::cli::execute::run_file_cli 109`,
 		`"body-call selfhost::cli::execute::test_file_cli 109`,
-		`"body-call selfhost::backend::executable::lower_run_executable 4`,
 		`"body-call selfhost::backend::executable::lower_test_executable 4`,
-		`"body-call selfhost::backend::hosted::emit_run_executable_artifact 28`,
 		`"body-call selfhost::backend::hosted::emit_test_executable_artifact 28`,
 	}
 }

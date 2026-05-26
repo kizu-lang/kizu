@@ -250,11 +250,11 @@ func nativeSourceRunCases() []runParityCase {
 			name:         "run_return",
 			command:      "run",
 			fixture:      "selfhost/tests/cli/run_return.kizu",
-			exitCode:     0,
+			exitCode:     64,
 			stdoutGolden: "selfhost/tests/cli/golden/run_hello.stderr",
-			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+			stderrGolden: "selfhost/tests/cli/golden/usage.stderr",
 			artifactMode: "hosted-artifact",
-			artifactStem: "run_return",
+			artifactStem: "-",
 		},
 		{
 			name:         "run_local_string",
@@ -293,7 +293,11 @@ func runNativeSourceRunCase(
 		t.Errorf("read native source run goldens for %s: %v", item.name, err)
 		return result, 1
 	}
-	if result.compiler.code != 0 || result.compiler.stdout != "" || result.compiler.stderr != "" {
+	if result.compiler.code != 0 {
+		return result, compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr) +
+			countUnexpectedRunArtifacts(t, item)
+	}
+	if result.compiler.stdout != "" || result.compiler.stderr != "" {
 		t.Errorf("native source run %s compiler output mismatch", item.name)
 		return result, 1
 	}
