@@ -153,11 +153,11 @@ func (caps unsafeCaps) with(names []string) (unsafeCaps, error) {
 	}
 	for _, name := range names {
 		if _, ok := unsafecap.Lookup(name); !ok {
-			return nil, fmt.Errorf("unsafe error: unknown capability `%s`", name)
+			return nil, errorf("unsafe error: unknown capability `%s`", name)
 		}
 		cap, ok := knownUnsafeCapabilities[name]
 		if !ok {
-			return nil, fmt.Errorf("unsafe error: unknown capability `%s`", name)
+			return nil, errorf("unsafe error: unknown capability `%s`", name)
 		}
 		next[cap] = true
 	}
@@ -182,7 +182,7 @@ func requireUnsafeCapabilityAt(
 	if !span.IsZero() {
 		return errorAt(span, "%s", message)
 	}
-	return fmt.Errorf("%s", message)
+	return errorf("%s", message)
 }
 
 // Checker validates type rules for a parsed program.
@@ -333,7 +333,7 @@ func (c *Checker) collectTypeDecl(decl ast.Decl) error {
 	case *ast.ImportDecl, *ast.FunctionDecl, *ast.TestDecl, *ast.ImplDecl:
 		return nil
 	default:
-		return fmt.Errorf("type error: unsupported declaration %T", decl)
+		return errorf("type error: unsupported declaration %T", decl)
 	}
 }
 
@@ -473,7 +473,7 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 			continue
 		}
 		if _, exists := c.functions[fn.Name]; exists {
-			return fmt.Errorf("type error: duplicate function `%s`", fn.Name)
+			return errorf("type error: duplicate function `%s`", fn.Name)
 		}
 		fnType, err := c.newFunctionType(fn)
 		if err != nil {
@@ -487,12 +487,12 @@ func (c *Checker) collectTopLevelFunctions(program *ast.Program) error {
 // collectContract registers a required method set.
 func (c *Checker) collectContract(decl *ast.ContractDecl) error {
 	if _, exists := c.contracts[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate contract `%s`", decl.Name)
+		return errorf("type error: duplicate contract `%s`", decl.Name)
 	}
 	methods := map[string]*functionType{}
 	for _, method := range decl.Methods {
 		if _, exists := methods[method.Name]; exists {
-			return fmt.Errorf("type error: duplicate contract method `%s.%s`", decl.Name, method.Name)
+			return errorf("type error: duplicate contract method `%s.%s`", decl.Name, method.Name)
 		}
 		fnType, err := c.newFunctionType(method)
 		if err != nil {
@@ -510,7 +510,7 @@ func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
 		return err
 	}
 	if decl.ContractName != "" && c.contracts[decl.ContractName] == nil {
-		return fmt.Errorf("type error: unknown contract `%s`", decl.ContractName)
+		return errorf("type error: unknown contract `%s`", decl.ContractName)
 	}
 	methods := c.impls[decl.TypeName]
 	if methods == nil {
@@ -519,7 +519,7 @@ func (c *Checker) collectImpl(decl *ast.ImplDecl) error {
 	}
 	for _, method := range decl.Methods {
 		if _, exists := methods[method.Name]; exists {
-			return fmt.Errorf("type error: duplicate impl method `%s.%s`", decl.TypeName, method.Name)
+			return errorf("type error: duplicate impl method `%s.%s`", decl.TypeName, method.Name)
 		}
 		fnType, err := c.newImplFunctionType(decl.TypeName, method)
 		if err != nil {
@@ -540,11 +540,11 @@ func (c *Checker) recordContractImpl(decl *ast.ImplDecl) error {
 	for name, want := range contract.methods {
 		got := c.implMethod(decl.TypeName, name)
 		if got == nil {
-			return fmt.Errorf("type error: `%s` does not satisfy `%s`: missing method `%s`",
+			return errorf("type error: `%s` does not satisfy `%s`: missing method `%s`",
 				decl.TypeName, decl.ContractName, name)
 		}
 		if !methodMatches(decl.TypeName, want, got) {
-			return fmt.Errorf("type error: `%s.%s` does not match contract `%s`",
+			return errorf("type error: `%s.%s` does not match contract `%s`",
 				decl.TypeName, name, decl.ContractName)
 		}
 	}
@@ -574,18 +574,18 @@ func (c *Checker) newImplFunctionType(
 // collectEnum registers and validates a tag enum declaration.
 func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 	if _, exists := c.enums[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate enum `%s`", decl.Name)
+		return errorf("type error: duplicate enum `%s`", decl.Name)
 	}
 	if _, exists := c.structs[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+		return errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	if _, exists := c.unions[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+		return errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	enum := &enumType{name: decl.Name, tags: map[string]bool{}, public: decl.Public}
 	for _, tag := range decl.Tags {
 		if enum.tags[tag] {
-			return fmt.Errorf("type error: duplicate enum tag `%s::%s`", decl.Name, tag)
+			return errorf("type error: duplicate enum tag `%s::%s`", decl.Name, tag)
 		}
 		enum.tags[tag] = true
 	}
@@ -596,13 +596,13 @@ func (c *Checker) collectEnum(decl *ast.EnumDecl) error {
 // collectUnion registers and validates a tagged union declaration.
 func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	if _, exists := c.unions[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate union `%s`", decl.Name)
+		return errorf("type error: duplicate union `%s`", decl.Name)
 	}
 	if _, exists := c.structs[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+		return errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	if _, exists := c.enums[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+		return errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	previousTypeParams := c.typeParams
 	c.typeParams = typeParamSet(decl.TypeParams)
@@ -615,7 +615,7 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 	}
 	for _, variant := range decl.Variants {
 		if _, exists := union.variants[variant.Name]; exists {
-			return fmt.Errorf("type error: duplicate union variant `%s::%s`",
+			return errorf("type error: duplicate union variant `%s::%s`",
 				decl.Name, variant.Name)
 		}
 		if variant.Payload != "" {
@@ -627,11 +627,11 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 				return err
 			}
 			if containsTypeValue(typ) {
-				return fmt.Errorf("type error: union variant `%s::%s` cannot store type value",
+				return errorf("type error: union variant `%s::%s` cannot store type value",
 					decl.Name, variant.Name)
 			}
 			if containsDynType(typ) {
-				return fmt.Errorf("type error: union variant `%s::%s` cannot store dyn value",
+				return errorf("type error: union variant `%s::%s` cannot store dyn value",
 					decl.Name, variant.Name)
 			}
 		}
@@ -644,13 +644,13 @@ func (c *Checker) collectUnion(decl *ast.UnionDecl) error {
 // collectStruct registers and validates a struct declaration.
 func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 	if _, exists := c.structs[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate struct `%s`", decl.Name)
+		return errorf("type error: duplicate struct `%s`", decl.Name)
 	}
 	if _, exists := c.enums[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+		return errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	if _, exists := c.unions[decl.Name]; exists {
-		return fmt.Errorf("type error: duplicate type `%s`", decl.Name)
+		return errorf("type error: duplicate type `%s`", decl.Name)
 	}
 	c.structs[decl.Name] = decl
 	previousTypeParams := c.typeParams
@@ -667,15 +667,15 @@ func (c *Checker) collectStruct(decl *ast.StructDecl) error {
 			return err
 		}
 		if typ == typeFunction {
-			return fmt.Errorf("type error: struct field `%s.%s` cannot store Function",
+			return errorf("type error: struct field `%s.%s` cannot store Function",
 				decl.Name, field.Name)
 		}
 		if containsTypeValue(typ) {
-			return fmt.Errorf("type error: struct field `%s.%s` cannot store type value",
+			return errorf("type error: struct field `%s.%s` cannot store type value",
 				decl.Name, field.Name)
 		}
 		if containsDynType(typ) {
-			return fmt.Errorf("type error: struct field `%s.%s` cannot store dyn value",
+			return errorf("type error: struct field `%s.%s` cannot store dyn value",
 				decl.Name, field.Name)
 		}
 	}
@@ -711,13 +711,13 @@ func (c *Checker) newFunctionType(fn *ast.FunctionDecl) (*functionType, error) {
 		}
 	}
 	if ret == typeFunction {
-		return nil, fmt.Errorf("type error: function `%s` cannot return Function", fn.Name)
+		return nil, errorf("type error: function `%s` cannot return Function", fn.Name)
 	}
 	if containsTypeValue(ret) {
-		return nil, fmt.Errorf("type error: function `%s` cannot return type", fn.Name)
+		return nil, errorf("type error: function `%s` cannot return type", fn.Name)
 	}
 	if containsDynType(ret) {
-		return nil, fmt.Errorf("type error: function `%s` cannot return dyn", fn.Name)
+		return nil, errorf("type error: function `%s` cannot return dyn", fn.Name)
 	}
 	if err := checkReturnBorrowPolicy(fn); err != nil {
 		return nil, err
@@ -763,23 +763,23 @@ func (c *Checker) checkFunctionParam(
 	paramType Type,
 ) error {
 	if paramType == typeVoid {
-		return fmt.Errorf("type error: parameter `%s` cannot have type void", param.Name)
+		return errorf("type error: parameter `%s` cannot have type void", param.Name)
 	}
 	if containsTypeValue(paramType) {
-		return fmt.Errorf("type error: parameter `%s` cannot have type", param.Name)
+		return errorf("type error: parameter `%s` cannot have type", param.Name)
 	}
 	if err := checkFunctionParamPolicy(fn, param, paramType); err != nil {
 		return err
 	}
 	if _, ok := dynContract(paramType); ok {
 		if !param.Borrow {
-			return fmt.Errorf("type error: dyn parameter `%s` must be borrowed", param.Name)
+			return errorf("type error: dyn parameter `%s` must be borrowed", param.Name)
 		}
 		if param.MutBorrow {
-			return fmt.Errorf("type error: dyn parameter `%s` must use immutable borrow in v0", param.Name)
+			return errorf("type error: dyn parameter `%s` must use immutable borrow in v0", param.Name)
 		}
 	} else if containsDynType(paramType) {
-		return fmt.Errorf("type error: dyn parameter `%s` must use &dyn Contract", param.Name)
+		return errorf("type error: dyn parameter `%s` must use &dyn Contract", param.Name)
 	}
 	return nil
 }
@@ -790,13 +790,13 @@ func checkFunctionParamPolicy(fn *ast.FunctionDecl, param ast.Param, typ Type) e
 		return nil
 	}
 	if !fn.Std {
-		return fmt.Errorf("type error: Function parameter `%s` is reserved for std", param.Name)
+		return errorf("type error: Function parameter `%s` is reserved for std", param.Name)
 	}
 	if !param.Comptime {
-		return fmt.Errorf("type error: Function parameter `%s` must be comptime", param.Name)
+		return errorf("type error: Function parameter `%s` must be comptime", param.Name)
 	}
 	if param.Borrow || param.MutBorrow {
-		return fmt.Errorf("type error: Function parameter `%s` cannot be borrowed", param.Name)
+		return errorf("type error: Function parameter `%s` cannot be borrowed", param.Name)
 	}
 	return nil
 }
@@ -805,20 +805,20 @@ func checkFunctionParamPolicy(fn *ast.FunctionDecl, param ast.Param, typ Type) e
 func checkReturnBorrowPolicy(fn *ast.FunctionDecl) error {
 	if fn.ReturnType == "" {
 		if fn.ReturnBorrow != "" {
-			return fmt.Errorf("type error: function `%s` `borrows` requires return type", fn.Name)
+			return errorf("type error: function `%s` `borrows` requires return type", fn.Name)
 		}
 		return nil
 	}
 	if fn.ReturnBorrow == "" {
 		if isBorrowReturnType(Type(fn.ReturnType)) {
-			return fmt.Errorf(
+			return errorf(
 				"type error: function `%s` borrow return requires `borrows <source>`",
 				fn.Name)
 		}
 		return nil
 	}
 	if !isBorrowedViewReturnType(Type(fn.ReturnType)) {
-		return fmt.Errorf("type error: function `%s` `borrows` requires borrowed view return",
+		return errorf("type error: function `%s` `borrows` requires borrowed view return",
 			fn.Name)
 	}
 	for _, param := range fn.Params {
@@ -826,7 +826,7 @@ func checkReturnBorrowPolicy(fn *ast.FunctionDecl) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("type error: function `%s` borrows unknown source `%s`",
+	return errorf("type error: function `%s` borrows unknown source `%s`",
 		fn.Name, fn.ReturnBorrow)
 }
 
@@ -835,7 +835,7 @@ func checkStructFieldBorrowPolicy(decl *ast.StructDecl, field ast.Field) error {
 	if !field.Borrow {
 		return nil
 	}
-	return fmt.Errorf("type error: borrow field `%s.%s` cannot store borrow",
+	return errorf("type error: borrow field `%s.%s` cannot store borrow",
 		decl.Name, field.Name)
 }
 
@@ -844,7 +844,7 @@ func checkBorrowFieldPolicy(typeName string, fieldName string, payload string) e
 	if !strings.HasPrefix(payload, "&") {
 		return nil
 	}
-	return fmt.Errorf("type error: borrow payload `%s.%s` cannot store borrow",
+	return errorf("type error: borrow payload `%s.%s` cannot store borrow",
 		typeName, fieldName)
 }
 
@@ -979,7 +979,7 @@ func (c *Checker) parseNamedType(name string) (Type, error) {
 	}
 	if !knownTypes[typ] && !c.declaredTypes[name] && c.structs[name] == nil &&
 		c.enums[name] == nil && c.unions[name] == nil {
-		return "", fmt.Errorf("type error: unknown type `%s`", name)
+		return "", errorf("type error: unknown type `%s`", name)
 	}
 	return typ, nil
 }
@@ -989,7 +989,7 @@ func (c *Checker) parseBorrowType(name string) (Type, error) {
 	inner := strings.TrimPrefix(name, "&")
 	inner = strings.TrimPrefix(inner, "var ")
 	if inner == "" {
-		return "", fmt.Errorf("type error: & must wrap a type")
+		return "", errorf("type error: & must wrap a type")
 	}
 	if _, err := c.parseType(inner); err != nil {
 		return "", err
@@ -1001,7 +1001,7 @@ func (c *Checker) parseBorrowType(name string) (Type, error) {
 func (c *Checker) parseSliceType(name string) (Type, error) {
 	rest := strings.TrimPrefix(name, "[]")
 	if rest == "" {
-		return "", fmt.Errorf("type error: [] must wrap a type")
+		return "", errorf("type error: [] must wrap a type")
 	}
 	if _, err := c.parseType(rest); err != nil {
 		return "", err
@@ -1013,7 +1013,7 @@ func (c *Checker) parseSliceType(name string) (Type, error) {
 func (c *Checker) parseErrorUnionType(name string) (Type, error) {
 	inner := strings.TrimPrefix(name, "!")
 	if inner == "" {
-		return "", fmt.Errorf("type error: ! must wrap a type")
+		return "", errorf("type error: ! must wrap a type")
 	}
 	if _, err := c.parseType(inner); err != nil {
 		return "", err
@@ -1025,7 +1025,7 @@ func (c *Checker) parseErrorUnionType(name string) (Type, error) {
 func (c *Checker) parseGenericType(name string, base string, arg string) (Type, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok {
-		return "", fmt.Errorf("type error: invalid static arguments for `%s`", base)
+		return "", errorf("type error: invalid static arguments for `%s`", base)
 	}
 	switch base {
 	case "std::mem::Box":
@@ -1055,7 +1055,7 @@ func (c *Checker) parseGenericType(name string, base string, arg string) (Type, 
 	}
 
 	if !isKnownSingleArgGeneric(base) {
-		return "", fmt.Errorf("type error: unknown generic type `%s`", base)
+		return "", errorf("type error: unknown generic type `%s`", base)
 	}
 	arg, err := singleGenericArg(base, args)
 	if err != nil {
@@ -1076,7 +1076,7 @@ func (c *Checker) parseUserGenericType(
 ) (Type, error) {
 	want := len(types)
 	if len(args) != want {
-		return "", fmt.Errorf("type error: `%s` expects %d static arguments", base, want)
+		return "", errorf("type error: `%s` expects %d static arguments", base, want)
 	}
 	for _, arg := range args {
 		if _, err := c.parseType(arg); err != nil {
@@ -1090,10 +1090,10 @@ func (c *Checker) parseUserGenericType(
 func (c *Checker) parseDynType(name string) (Type, error) {
 	contractName := strings.TrimPrefix(name, "dyn ")
 	if contractName == "" {
-		return "", fmt.Errorf("type error: dyn must name a contract")
+		return "", errorf("type error: dyn must name a contract")
 	}
 	if c.contracts[contractName] == nil {
-		return "", fmt.Errorf("type error: unknown contract `%s`", contractName)
+		return "", errorf("type error: unknown contract `%s`", contractName)
 	}
 	return Type(name), nil
 }
@@ -1101,16 +1101,16 @@ func (c *Checker) parseDynType(name string) (Type, error) {
 // parseMapType validates the v0.2 symbol-table map spelling.
 func (c *Checker) parseMapType(name string, args []string) (Type, error) {
 	if len(args) != 2 {
-		return "", fmt.Errorf("type error: std::map::Map expects 2 static arguments")
+		return "", errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(Type(args[0]), typeByteString) && !c.typeParams[args[0]] {
-		return "", fmt.Errorf("type error: std::map::Map key type must be []u8 in v0.2")
+		return "", errorf("type error: std::map::Map key type must be []u8 in v0.2")
 	}
 	if _, err := c.parseType(args[1]); err != nil {
 		return "", err
 	}
 	if !c.typeParams[args[1]] && !c.isCopyType(Type(args[1])) {
-		return "", fmt.Errorf("type error: std::map::Map value type must be copy in v0.2")
+		return "", errorf("type error: std::map::Map value type must be copy in v0.2")
 	}
 	return Type(name), nil
 }
@@ -1131,7 +1131,7 @@ func (c *Checker) parseNullableType(name string) (Type, error) {
 	inner := strings.TrimPrefix(name, "?")
 	base, arg, ok := splitGenericType(inner)
 	if !ok || base != "ptr" {
-		return "", fmt.Errorf("type error: nullable type `%s` must wrap ptr<T>", name)
+		return "", errorf("type error: nullable type `%s` must wrap ptr<T>", name)
 	}
 	if _, err := c.parsePointerType(inner, arg); err != nil {
 		return "", err
@@ -1159,7 +1159,7 @@ func (c *Checker) rejectPrivateType(typeName string, context string) error {
 		if c.isPublicType(name) {
 			continue
 		}
-		return fmt.Errorf("type error: public %s exposes private type `%s`", context, name)
+		return errorf("type error: public %s exposes private type `%s`", context, name)
 	}
 	return nil
 }
@@ -1262,7 +1262,7 @@ func (c *Checker) checkFunction(fn *functionType) error {
 		return err
 	}
 	if fn.returnType != typeVoid && !fn.implicitReturn && !returns {
-		return fmt.Errorf("type error: function `%s` must return %s", fn.name, fn.returnType)
+		return errorf("type error: function `%s` must return %s", fn.name, fn.returnType)
 	}
 	return nil
 }
@@ -1283,7 +1283,7 @@ func (c *Checker) checkImpl(decl *ast.ImplDecl) error {
 	for _, method := range decl.Methods {
 		fnType := c.implMethod(decl.TypeName, method.Name)
 		if fnType == nil {
-			return fmt.Errorf("type error: missing impl method `%s.%s`", decl.TypeName, method.Name)
+			return errorf("type error: missing impl method `%s.%s`", decl.TypeName, method.Name)
 		}
 		if err := c.checkFunction(fnType); err != nil {
 			return err
@@ -1348,7 +1348,7 @@ func (c *Checker) checkStmt(
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
 	default:
-		return false, fmt.Errorf("type error: unsupported statement %T", stmt)
+		return false, errorf("type error: unsupported statement %T", stmt)
 	}
 }
 
@@ -1362,7 +1362,7 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe unsafeC
 		return false, err
 	}
 	if got != typeVoid {
-		return false, fmt.Errorf("type error: defer cleanup must return void, got %s", got)
+		return false, errorf("type error: defer cleanup must return void, got %s", got)
 	}
 	return false, nil
 }
@@ -1371,11 +1371,11 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe unsafeC
 func validateDeferCleanupExpr(expr ast.Expression) error {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return fmt.Errorf("type error: defer expects cleanup method call")
+		return errorf("type error: defer expects cleanup method call")
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || field.Name != "deinit" {
-		return fmt.Errorf("type error: defer expects cleanup method call")
+		return errorf("type error: defer expects cleanup method call")
 	}
 	return nil
 }
@@ -1391,7 +1391,7 @@ func (c *Checker) checkLetStmt(stmt *ast.LetStmt, env *scope, unsafe unsafeCaps)
 		return false, err
 	}
 	if containsTypeValue(typ) {
-		return false, fmt.Errorf("type error: type value cannot be stored in local `%s`", stmt.Name)
+		return false, errorf("type error: type value cannot be stored in local `%s`", stmt.Name)
 	}
 	if _, mutable, inner, ok := explicitBorrowType(typ); ok {
 		source := c.singleBorrowSource(stmt.Value, env, unsafe)
@@ -1462,15 +1462,15 @@ func (c *Checker) checkBoxBorrowInitializer(
 	}
 	base, elem, ok := splitGenericType(string(receiver))
 	if !ok || base != "std::mem::Box" {
-		return "", false, true, fmt.Errorf("type error: `Box.%s` expects Box receiver",
+		return "", false, true, errorf("type error: `Box.%s` expects Box receiver",
 			field.Name)
 	}
 	if len(call.Args) != 0 {
-		return "", false, true, fmt.Errorf("type error: `Box.%s` expects 0 args, got %d",
+		return "", false, true, errorf("type error: `Box.%s` expects 0 args, got %d",
 			field.Name, len(call.Args))
 	}
 	if field.Name == "borrow_mut" && !boxBorrowMutReceiverIsMutable(field.Receiver, env) {
-		return "", false, true, fmt.Errorf("type error: `Box.borrow_mut` requires mutable Box receiver")
+		return "", false, true, errorf("type error: `Box.borrow_mut` requires mutable Box receiver")
 	}
 	return Type(elem), field.Name == "borrow_mut", true, nil
 }
@@ -1507,10 +1507,10 @@ func (c *Checker) checkStringViewInitializer(
 		return "", true, err
 	}
 	if receiver != "std::string::String" {
-		return "", true, fmt.Errorf("type error: `String.as_bytes` expects String receiver")
+		return "", true, errorf("type error: `String.as_bytes` expects String receiver")
 	}
 	if len(call.Args) != 0 {
-		return "", true, fmt.Errorf("type error: `String.as_bytes` expects 0 args, got %d",
+		return "", true, errorf("type error: `String.as_bytes` expects 0 args, got %d",
 			len(call.Args))
 	}
 	source := c.singleBorrowSource(field.Receiver, env, unsafe)
@@ -1541,11 +1541,11 @@ func (c *Checker) checkArrayBorrowInitializer(
 	}
 	base, elem, ok := splitGenericType(string(receiver))
 	if !ok || base != "std::array::Array" {
-		return "", false, true, fmt.Errorf("type error: `Array.%s` expects Array receiver", field.Name)
+		return "", false, true, errorf("type error: `Array.%s` expects Array receiver", field.Name)
 	}
 	if field.Name == "at_mut" {
 		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", false, true, fmt.Errorf("type error: `Array.at_mut` requires mutable array binding")
+			return "", false, true, errorf("type error: `Array.at_mut` requires mutable array binding")
 		}
 	}
 	if err := c.checkArrayIndexArg(field.Name, call.Args, env, unsafe); err != nil {
@@ -1592,7 +1592,7 @@ func (c *Checker) checkAssignableTarget(
 	case *ast.CallExpr:
 		return c.checkAssignableCall(target, env, unsafe)
 	default:
-		return "", fmt.Errorf("type error: invalid assignment target `%s`", expr.String())
+		return "", errorf("type error: invalid assignment target `%s`", expr.String())
 	}
 }
 
@@ -1604,14 +1604,14 @@ func (c *Checker) checkAssignableCall(
 ) (Type, error) {
 	field, ok := expr.Callee.(*ast.FieldExpr)
 	if !ok {
-		return "", fmt.Errorf("type error: invalid assignment target `%s`", expr.String())
+		return "", errorf("type error: invalid assignment target `%s`", expr.String())
 	}
 	receiver, err := c.checkExpr(field.Receiver, env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if receiver != "Partition" || field.Name != "at" {
-		return "", fmt.Errorf("type error: invalid assignment target `%s`", expr.String())
+		return "", errorf("type error: invalid assignment target `%s`", expr.String())
 	}
 	return c.checkPartitionMethod(field.Name, expr.Args, env, unsafe)
 }
@@ -1620,10 +1620,10 @@ func (c *Checker) checkAssignableCall(
 func checkAssignableIdent(expr *ast.IdentExpr, env *scope) (Type, error) {
 	want, ok := env.lookup(expr.Name)
 	if !ok {
-		return "", fmt.Errorf("type error: undefined variable `%s`", expr.Name)
+		return "", errorf("type error: undefined variable `%s`", expr.Name)
 	}
 	if !env.isMutable(expr.Name) {
-		return "", fmt.Errorf("type error: cannot assign to immutable binding `%s`", expr.Name)
+		return "", errorf("type error: cannot assign to immutable binding `%s`", expr.Name)
 	}
 	return want, nil
 }
@@ -1639,10 +1639,10 @@ func (c *Checker) checkReturnStmt(
 		if acceptsBareReturn(want) {
 			return true, nil
 		}
-		return false, fmt.Errorf("type error: return expects %s, got void", want)
+		return false, errorf("type error: return expects %s, got void", want)
 	}
 	if ident, ok := stmt.Value.(*ast.IdentExpr); ok && ident.Name == "void" {
-		return false, fmt.Errorf("type error: void is not a value; use `return;`")
+		return false, errorf("type error: void is not a value; use `return;`")
 	}
 	got, err := c.checkExpr(stmt.Value, env, unsafe)
 	if err != nil {
@@ -1674,7 +1674,7 @@ func (c *Checker) checkReturnValue(
 	}
 	got = coerced
 	if !sameType(got, want) {
-		return false, fmt.Errorf("type error: return expects %s, got %s", want, got)
+		return false, errorf("type error: return expects %s, got %s", want, got)
 	}
 	if err := c.checkReturnBorrowSources(expr, env, want, unsafe); err != nil {
 		return false, err
@@ -1786,7 +1786,7 @@ func (c *Checker) checkReturnBorrowSources(
 	if sources[source] {
 		return nil
 	}
-	return fmt.Errorf("type error: return borrows `%s` but returned value is not tied to that source",
+	return errorf("type error: return borrows `%s` but returned value is not tied to that source",
 		source)
 }
 
@@ -1849,7 +1849,7 @@ func (c *Checker) callBorrowSources(
 	}
 	idx := borrowReturnParamIndex(fn)
 	if idx < 0 || idx >= len(expr.Args) {
-		return map[string]bool{}, fmt.Errorf("type error: `%s` borrows unknown source `%s`",
+		return map[string]bool{}, errorf("type error: `%s` borrows unknown source `%s`",
 			fn.name, fn.returnBorrow)
 	}
 	return c.exprBorrowSources(expr.Args[idx], env, unsafe)
@@ -2054,7 +2054,7 @@ func (c *Checker) checkIfStmt(
 		return false, err
 	}
 	if cond != typeBool {
-		return false, fmt.Errorf("type error: if condition must be bool, got %s", cond)
+		return false, errorf("type error: if condition must be bool, got %s", cond)
 	}
 	leftReturns, err := c.checkBlock(stmt.Consequence, env.child(), wantReturn, unsafe)
 	if err != nil {
@@ -2082,7 +2082,7 @@ func (c *Checker) checkWhileStmt(
 		return false, err
 	}
 	if cond != typeBool {
-		return false, fmt.Errorf("type error: while condition must be bool, got %s", cond)
+		return false, errorf("type error: while condition must be bool, got %s", cond)
 	}
 	leave, err := c.enterLoop(stmt.Label)
 	if err != nil {
@@ -2127,7 +2127,7 @@ func (c *Checker) checkForBounds(stmt *ast.ForStmt, env *scope, unsafe unsafeCap
 		return err
 	}
 	if start != typeI64 || end != typeI64 {
-		return fmt.Errorf("type error: for range expects i64 bounds, got %s..%s", start, end)
+		return errorf("type error: for range expects i64 bounds, got %s..%s", start, end)
 	}
 	return nil
 }
@@ -2135,7 +2135,7 @@ func (c *Checker) checkForBounds(stmt *ast.ForStmt, env *scope, unsafe unsafeCap
 // enterLoop records an active loop label for branch target validation.
 func (c *Checker) enterLoop(label string) (func(), error) {
 	if label != "" && c.hasLoopLabel(label) {
-		return nil, fmt.Errorf("type error: duplicate loop label `%s`", label)
+		return nil, errorf("type error: duplicate loop label `%s`", label)
 	}
 	c.loopLabels = append(c.loopLabels, label)
 	return func() {
@@ -2146,10 +2146,10 @@ func (c *Checker) enterLoop(label string) (func(), error) {
 // checkLoopBranch validates break and continue placement.
 func (c *Checker) checkLoopBranch(kind string, label string) error {
 	if len(c.loopLabels) == 0 {
-		return fmt.Errorf("type error: `%s` used outside loop", kind)
+		return errorf("type error: `%s` used outside loop", kind)
 	}
 	if label != "" && !c.hasLoopLabel(label) {
-		return fmt.Errorf("type error: unknown loop label `%s`", label)
+		return errorf("type error: unknown loop label `%s`", label)
 	}
 	return nil
 }
@@ -2182,7 +2182,7 @@ func (c *Checker) checkMatchStmt(
 	if unionType != nil {
 		return c.checkMatchArms(stmt.Arms, nil, unionType, env, wantReturn, unsafe)
 	}
-	return false, fmt.Errorf("type error: match expects enum or union, got %s", valueType)
+	return false, errorf("type error: match expects enum or union, got %s", valueType)
 }
 
 // checkMatchArms validates tag patterns and return flow for match arms.
@@ -2204,7 +2204,7 @@ func (c *Checker) checkMatchArms(
 				return false, err
 			}
 			if wildcard {
-				return false, fmt.Errorf("type error: duplicate wildcard match arm")
+				return false, errorf("type error: duplicate wildcard match arm")
 			}
 			wildcard = true
 		} else {
@@ -2214,7 +2214,7 @@ func (c *Checker) checkMatchArms(
 			}
 			typeName := matchTypeName(enumType, unionType)
 			if seen[arm.Tag] {
-				return false, fmt.Errorf("type error: duplicate match tag `%s::%s`",
+				return false, errorf("type error: duplicate match tag `%s::%s`",
 					typeName, arm.Tag)
 			}
 			seen[arm.Tag] = true
@@ -2233,7 +2233,7 @@ func (c *Checker) checkMatchArms(
 		allReturn = allReturn && returns
 	}
 	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return false, fmt.Errorf("type error: match on `%s` is not exhaustive",
+		return false, errorf("type error: match on `%s` is not exhaustive",
 			matchTypeName(enumType, unionType))
 	}
 	return allReturn, nil
@@ -2242,10 +2242,10 @@ func (c *Checker) checkMatchArms(
 // validateWildcardMatchArm checks the restricted fallback pattern shape.
 func validateWildcardMatchArm(arm ast.MatchArm, idx int, count int) error {
 	if arm.Binding != "" {
-		return fmt.Errorf("type error: wildcard match arm cannot bind payload")
+		return errorf("type error: wildcard match arm cannot bind payload")
 	}
 	if idx != count-1 {
-		return fmt.Errorf("type error: wildcard match arm must be last")
+		return errorf("type error: wildcard match arm must be last")
 	}
 	return nil
 }
@@ -2254,20 +2254,20 @@ func validateWildcardMatchArm(arm ast.MatchArm, idx int, count int) error {
 func matchPayloadType(enumType *enumType, unionType *unionType, arm ast.MatchArm) (string, error) {
 	if enumType != nil {
 		if !enumType.tags[arm.Tag] {
-			return "", fmt.Errorf("type error: unknown match tag `%s::%s`", enumType.name, arm.Tag)
+			return "", errorf("type error: unknown match tag `%s::%s`", enumType.name, arm.Tag)
 		}
 		if arm.Binding != "" {
-			return "", fmt.Errorf("type error: enum tag `%s::%s` has no payload",
+			return "", errorf("type error: enum tag `%s::%s` has no payload",
 				enumType.name, arm.Tag)
 		}
 		return "", nil
 	}
 	payload, ok := unionType.variants[arm.Tag]
 	if !ok {
-		return "", fmt.Errorf("type error: unknown match tag `%s::%s`", unionType.name, arm.Tag)
+		return "", errorf("type error: unknown match tag `%s::%s`", unionType.name, arm.Tag)
 	}
 	if payload == "" && arm.Binding != "" {
-		return "", fmt.Errorf("type error: union variant `%s::%s` has no payload",
+		return "", errorf("type error: union variant `%s::%s` has no payload",
 			unionType.name, arm.Tag)
 	}
 	return payload, nil
@@ -2346,7 +2346,7 @@ func (c *Checker) checkControlExpr(
 	case *ast.MatchStmt:
 		return c.checkMatchExpr(e, env, unsafe)
 	default:
-		return "", fmt.Errorf("type error: unsupported expression %T", expr)
+		return "", errorf("type error: unsupported expression %T", expr)
 	}
 }
 
@@ -2357,10 +2357,10 @@ func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeCaps) (
 		return "", err
 	}
 	if cond != typeBool {
-		return "", fmt.Errorf("type error: if condition must be bool, got %s", cond)
+		return "", errorf("type error: if condition must be bool, got %s", cond)
 	}
 	if stmt.Alternative == nil {
-		return "", fmt.Errorf("type error: if expression requires else branch")
+		return "", errorf("type error: if expression requires else branch")
 	}
 	left, err := c.checkBlockValue(stmt.Consequence, env.child(), unsafe)
 	if err != nil {
@@ -2371,7 +2371,7 @@ func (c *Checker) checkIfExpr(stmt *ast.IfStmt, env *scope, unsafe unsafeCaps) (
 		return "", err
 	}
 	if left != right {
-		return "", fmt.Errorf("type error: if expression branch types differ: %s vs %s",
+		return "", errorf("type error: if expression branch types differ: %s vs %s",
 			left, right)
 	}
 	return left, nil
@@ -2384,7 +2384,7 @@ func (c *Checker) checkBlockValue(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if block == nil || len(block.Statements) == 0 {
-		return "", fmt.Errorf("type error: expression block must end with a value")
+		return "", errorf("type error: expression block must end with a value")
 	}
 	for _, stmt := range block.Statements[:len(block.Statements)-1] {
 		returns, err := c.checkStmt(stmt, env, c.currentReturn, unsafe)
@@ -2392,7 +2392,7 @@ func (c *Checker) checkBlockValue(
 			return "", err
 		}
 		if returns {
-			return "", fmt.Errorf("type error: expression block cannot contain early return")
+			return "", errorf("type error: expression block cannot contain early return")
 		}
 	}
 	return c.checkStmtValue(block.Statements[len(block.Statements)-1], env, unsafe)
@@ -2403,7 +2403,7 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeCa
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if s.Semicolon {
-			return "", fmt.Errorf("type error: expression block must end with a value")
+			return "", errorf("type error: expression block must end with a value")
 		}
 		return c.checkExpr(s.Expr, env, unsafe)
 	case *ast.IfStmt:
@@ -2411,7 +2411,7 @@ func (c *Checker) checkStmtValue(stmt ast.Statement, env *scope, unsafe unsafeCa
 	case *ast.MatchStmt:
 		return c.checkMatchExpr(s, env, unsafe)
 	default:
-		return "", fmt.Errorf("type error: expression block must end with a value")
+		return "", errorf("type error: expression block must end with a value")
 	}
 }
 
@@ -2424,7 +2424,7 @@ func (c *Checker) checkMatchExpr(stmt *ast.MatchStmt, env *scope, unsafe unsafeC
 	enumType := c.enums[string(valueType)]
 	unionType := c.unions[string(valueType)]
 	if enumType == nil && unionType == nil {
-		return "", fmt.Errorf("type error: match expects enum or union, got %s", valueType)
+		return "", errorf("type error: match expects enum or union, got %s", valueType)
 	}
 	return c.checkMatchExprArms(stmt.Arms, enumType, unionType, env, unsafe)
 }
@@ -2447,7 +2447,7 @@ func (c *Checker) checkMatchExprArms(
 				return "", err
 			}
 			if wildcard {
-				return "", fmt.Errorf("type error: duplicate wildcard match arm")
+				return "", errorf("type error: duplicate wildcard match arm")
 			}
 			wildcard = true
 			var err error
@@ -2462,7 +2462,7 @@ func (c *Checker) checkMatchExprArms(
 				return "", err
 			}
 			if seen[arm.Tag] {
-				return "", fmt.Errorf("type error: duplicate match tag `%s::%s`",
+				return "", errorf("type error: duplicate match tag `%s::%s`",
 					matchTypeName(enumType, unionType), arm.Tag)
 			}
 			seen[arm.Tag] = true
@@ -2470,11 +2470,11 @@ func (c *Checker) checkMatchExprArms(
 		if idx == 0 {
 			result = got
 		} else if got != result {
-			return "", fmt.Errorf("type error: match arm types differ: %s vs %s", result, got)
+			return "", errorf("type error: match arm types differ: %s vs %s", result, got)
 		}
 	}
 	if !wildcard && len(seen) != matchVariantCount(enumType, unionType) {
-		return "", fmt.Errorf("type error: match on `%s` is not exhaustive",
+		return "", errorf("type error: match on `%s` is not exhaustive",
 			matchTypeName(enumType, unionType))
 	}
 	return result, nil
@@ -2511,7 +2511,7 @@ func (c *Checker) checkIndexExpr(expr *ast.IndexExpr, env *scope, unsafe unsafeC
 		return "", err
 	}
 	if !sameType(target, typeByteString) {
-		return "", fmt.Errorf("type error: index/slice target expects []u8, got %s", target)
+		return "", errorf("type error: index/slice target expects []u8, got %s", target)
 	}
 	if !expr.Slice {
 		if err := c.checkIndexBound("index", expr.Index, env, unsafe); err != nil {
@@ -2540,14 +2540,14 @@ func (c *Checker) checkIndexBound(
 	unsafe unsafeCaps,
 ) error {
 	if expr == nil {
-		return fmt.Errorf("type error: %s is missing", name)
+		return errorf("type error: %s is missing", name)
 	}
 	got, err := c.checkExpr(expr, env, unsafe)
 	if err != nil {
 		return err
 	}
 	if got != typeI64 {
-		return fmt.Errorf("type error: %s expects i64, got %s", name, got)
+		return errorf("type error: %s expects i64, got %s", name, got)
 	}
 	return nil
 }
@@ -2562,7 +2562,7 @@ func literalType(expr ast.Expression) (Type, error) {
 	case *ast.BoolExpr:
 		return typeBool, nil
 	default:
-		return "", fmt.Errorf("type error: unsupported literal %T", expr)
+		return "", errorf("type error: unsupported literal %T", expr)
 	}
 }
 
@@ -2594,7 +2594,7 @@ func (c *Checker) coerceContextualIntegerLiteral(
 		return got, nil
 	}
 	if !integerLiteralFitsType(value, want) {
-		return "", fmt.Errorf("type error: integer literal `%s` does not fit %s",
+		return "", errorf("type error: integer literal `%s` does not fit %s",
 			expr.String(), want)
 	}
 	return want, nil
@@ -2654,9 +2654,9 @@ func (c *Checker) checkIdentExpr(expr *ast.IdentExpr, env *scope) (Type, error) 
 		return typeType, nil
 	}
 	if expr.Name == "void" {
-		return "", fmt.Errorf("type error: void is not a value")
+		return "", errorf("type error: void is not a value")
 	}
-	return "", fmt.Errorf("type error: undefined variable `%s`", expr.Name)
+	return "", errorf("type error: undefined variable `%s`", expr.Name)
 }
 
 // checkPrefixExpr validates unary operators.
@@ -2676,16 +2676,16 @@ func (c *Checker) checkPrefixExpr(
 	switch expr.Operator {
 	case "-":
 		if !signedNumericTypes[right] {
-			return "", fmt.Errorf("type error: unary - expects signed numeric, got %s", right)
+			return "", errorf("type error: unary - expects signed numeric, got %s", right)
 		}
 		return right, nil
 	case "!":
 		if right != typeBool {
-			return "", fmt.Errorf("type error: unary ! expects bool, got %s", right)
+			return "", errorf("type error: unary ! expects bool, got %s", right)
 		}
 		return typeBool, nil
 	default:
-		return "", fmt.Errorf("type error: unsupported unary `%s`", expr.Operator)
+		return "", errorf("type error: unsupported unary `%s`", expr.Operator)
 	}
 }
 
@@ -2838,7 +2838,7 @@ func (c *Checker) checkCastExpr(expr *ast.CastExpr, env *scope, unsafe unsafeCap
 		}
 		return target, nil
 	}
-	return "", fmt.Errorf("type error: cannot cast %s to %s", source, target)
+	return "", errorf("type error: cannot cast %s to %s", source, target)
 }
 
 // checkErrorUnionCast validates explicit untyped-to-typed error adaptation.
@@ -2852,7 +2852,7 @@ func (c *Checker) checkErrorUnionCast(source Type, target Type) (bool, error) {
 		return false, nil
 	}
 	if !c.unionHasMessageVariant(targetError) {
-		return true, fmt.Errorf(
+		return true, errorf(
 			"type error: typed error cast requires %s::Message([]u8)",
 			targetError,
 		)
@@ -2872,7 +2872,7 @@ func (c *Checker) unionHasMessageVariant(name string) bool {
 // checkTryExpr validates error-union propagation and returns the success type.
 func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if _, _, ok := errorUnionParts(c.currentReturn); !ok {
-		return "", fmt.Errorf("type error: try requires function to return !T")
+		return "", errorf("type error: try requires function to return !T")
 	}
 	source, err := c.checkExpr(expr.Value, env, unsafe)
 	if err != nil {
@@ -2880,11 +2880,11 @@ func (c *Checker) checkTryExpr(expr *ast.TryExpr, env *scope, unsafe unsafeCaps)
 	}
 	sourceError, elem, ok := errorUnionParts(source)
 	if !ok {
-		return "", fmt.Errorf("type error: try expects !T, got %s", source)
+		return "", errorf("type error: try expects !T, got %s", source)
 	}
 	targetError, _, _ := errorUnionParts(c.currentReturn)
 	if sourceError != targetError {
-		return "", fmt.Errorf("type error: try cannot propagate %s from %s", sourceError, source)
+		return "", errorf("type error: try cannot propagate %s from %s", sourceError, source)
 	}
 	return Type(elem), nil
 }
@@ -2899,7 +2899,7 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeCap
 	}
 	name, ok := expr.Callee.(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("type error: callee must be a function name")
+		return "", errorf("type error: callee must be a function name")
 	}
 	if name.Name == "print" {
 		return c.checkPrintCall(expr, env, unsafe)
@@ -2920,10 +2920,10 @@ func (c *Checker) checkCallExpr(expr *ast.CallExpr, env *scope, unsafe unsafeCap
 		return c.checkErrorCall(expr, env, unsafe)
 	}
 	if name.Name == "Io" {
-		return "", fmt.Errorf("type error: use `std::io::blocking()`")
+		return "", errorf("type error: use `std::io::blocking()`")
 	}
 	if name.Name == "TaskGroup" {
-		return "", fmt.Errorf("type error: use `std::task::Group(io)`")
+		return "", errorf("type error: use `std::task::Group(io)`")
 	}
 	return c.checkUserCall(name.Name, name.Span, expr.Args, env, unsafe)
 }
@@ -2978,7 +2978,7 @@ func (c *Checker) rejectPrivateStdFunction(name string, fn *functionType) error 
 		return nil
 	}
 	sourceName := strings.ReplaceAll(name, ".", "::")
-	return fmt.Errorf("type error: function `%s` is private", sourceName)
+	return errorf("type error: function `%s` is private", sourceName)
 }
 
 // checkQualifiedBuiltin validates std:: namespace prototype calls.
@@ -3028,7 +3028,7 @@ func (c *Checker) checkStdRuntimeBuiltin(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if replacement, ok := stdprim.RemovedBuiltinReplacement(name); ok {
-		return "", true, fmt.Errorf("type error: `%s` was removed; use %s", name, replacement)
+		return "", true, errorf("type error: `%s` was removed; use %s", name, replacement)
 	}
 	if typ, ok, err := c.checkTaskBuiltin(name, args, env, unsafe); ok || err != nil {
 		return typ, ok, err
@@ -3046,19 +3046,19 @@ func (c *Checker) checkStdConstructorBuiltin(
 		typ, err := checkNoArgConstructor(name, args, "Io")
 		return typ, true, err
 	case "std.io.evented", "std.builtin.io_evented":
-		return "", true, fmt.Errorf("type error: `std::io::evented` is not implemented in v0.1")
+		return "", true, errorf("type error: `std::io::evented` is not implemented in v0.1")
 	case "std.array.Array":
-		return "", true, fmt.Errorf("type error: use `std::array::Array<T>(allocator)`")
+		return "", true, errorf("type error: use `std::array::Array<T>(allocator)`")
 	case "std.map.Map":
-		return "", true, fmt.Errorf("type error: use `std::map::Map<K, V>(allocator)`")
+		return "", true, errorf("type error: use `std::map::Map<K, V>(allocator)`")
 	case "std.channel.Channel":
-		return "", true, fmt.Errorf("type error: use `std::channel::Channel<T>()`")
+		return "", true, errorf("type error: use `std::channel::Channel<T>()`")
 	case "std.atomic.Atomic":
-		return "", true, fmt.Errorf("type error: use `std::atomic::Atomic<T>(value)`")
+		return "", true, errorf("type error: use `std::atomic::Atomic<T>(value)`")
 	case "std.atomic.AtomicI64":
-		return "", true, fmt.Errorf("type error: use `std::atomic::Atomic<i64>(value)`")
+		return "", true, errorf("type error: use `std::atomic::Atomic<i64>(value)`")
 	case "std.sync.Mutex":
-		return "", true, fmt.Errorf("type error: use `std::sync::Mutex<T>(value)`")
+		return "", true, errorf("type error: use `std::sync::Mutex<T>(value)`")
 	default:
 		return "", false, nil
 	}
@@ -3096,7 +3096,7 @@ func (c *Checker) checkSimpleCoreBuiltin(
 		return "", false, nil
 	}
 	if len(args) != len(signature.Args) {
-		return "", true, fmt.Errorf("type error: `%s` expects %s", name,
+		return "", true, errorf("type error: `%s` expects %s", name,
 			coreSignatureArgsText(signature.Args))
 	}
 	for idx, arg := range args {
@@ -3124,7 +3124,7 @@ func (c *Checker) checkCoreArg(
 		return err
 	}
 	if !sameType(got, Type(want)) {
-		return fmt.Errorf("type error: `%s` arg %d expects %s, got %s",
+		return errorf("type error: `%s` arg %d expects %s, got %s",
 			name, index+1, want, got)
 	}
 	return nil
@@ -3192,7 +3192,7 @@ func (c *Checker) checkTaskBuiltin(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if strings.HasPrefix(name, "std.builtin.task_") && !c.currentStd {
-		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::task", name)
+		return "", true, errorf("type error: `%s` is reserved; use std::task", name)
 	}
 	switch name {
 	case "std.builtin.task_group":
@@ -3220,7 +3220,7 @@ func (c *Checker) checkFsReadFile(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects io and path")
+		return "", true, errorf("type error: `std::fs::read_file` expects io and path")
 	}
 	if err := c.checkIoArg(args[0], env, unsafe, "std::fs::read_file"); err != nil {
 		return "", true, err
@@ -3230,7 +3230,7 @@ func (c *Checker) checkFsReadFile(
 		return "", true, err
 	}
 	if !sameType(path, typeByteString) {
-		return "", true, fmt.Errorf("type error: `std::fs::read_file` expects []u8 path, got %s",
+		return "", true, errorf("type error: `std::fs::read_file` expects []u8 path, got %s",
 			path)
 	}
 	return "![]u8", true, nil
@@ -3243,7 +3243,7 @@ func (c *Checker) checkFsWriteFile(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 3 {
-		return "", true, fmt.Errorf("type error: `std::fs::write_file` expects io, path, and bytes")
+		return "", true, errorf("type error: `std::fs::write_file` expects io, path, and bytes")
 	}
 	if err := c.checkIoArg(args[0], env, unsafe, "std::fs::write_file"); err != nil {
 		return "", true, err
@@ -3254,7 +3254,7 @@ func (c *Checker) checkFsWriteFile(
 			return "", true, err
 		}
 		if !sameType(got, typeByteString) {
-			return "", true, fmt.Errorf(
+			return "", true, errorf(
 				"type error: `std::fs::write_file` expects []u8 %s, got %s", label, got)
 		}
 	}
@@ -3311,7 +3311,7 @@ func (c *Checker) checkFsPathArgs(
 	unsafe unsafeCaps,
 ) (Type, Type, error) {
 	if len(args) != 2 {
-		return "", "", fmt.Errorf("type error: `%s` expects io and path", name)
+		return "", "", errorf("type error: `%s` expects io and path", name)
 	}
 	if err := c.checkIoArg(args[0], env, unsafe, name); err != nil {
 		return "", "", err
@@ -3321,7 +3321,7 @@ func (c *Checker) checkFsPathArgs(
 		return "", "", err
 	}
 	if !sameType(path, typeByteString) {
-		return "", "", fmt.Errorf("type error: `%s` expects []u8 path, got %s", name, path)
+		return "", "", errorf("type error: `%s` expects []u8 path, got %s", name, path)
 	}
 	return "Io", path, nil
 }
@@ -3339,14 +3339,14 @@ func (c *Checker) checkArrayConstructor(
 		}
 	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::array::Array<%s>` expects allocator", elem)
+		return "", true, errorf("type error: `std::array::Array<%s>` expects allocator", elem)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if got != "Allocator" {
-		return "", true, fmt.Errorf("type error: `std::array::Array<%s>` expects Allocator, got %s",
+		return "", true, errorf("type error: `std::array::Array<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	return Type(fmt.Sprintf("std::array::Array<%s>", elem)), true, nil
@@ -3355,7 +3355,7 @@ func (c *Checker) checkArrayConstructor(
 // rejectArrayElementType rejects element types that need unresolved lifetime rules.
 func (c *Checker) rejectArrayElementType(elem Type) error {
 	if err := c.rejectArrayStorageType(elem, map[Type]bool{}); err != nil {
-		return fmt.Errorf("type error: Array element is not safe in v0.2: %w", err)
+		return errorf("type error: Array element is not safe in v0.2: %w", err)
 	}
 	return nil
 }
@@ -3370,10 +3370,10 @@ func (c *Checker) rejectArrayStorageType(typ Type, seen map[Type]bool) error {
 		return nil
 	}
 	if isPointerType(typ) {
-		return fmt.Errorf("type error: Array element cannot be raw pointer in v0.2")
+		return errorf("type error: Array element cannot be raw pointer in v0.2")
 	}
 	if _, ok := dynContract(typ); ok {
-		return fmt.Errorf("type error: Array element cannot be dyn in v0.2")
+		return errorf("type error: Array element cannot be dyn in v0.2")
 	}
 	if err := c.rejectArrayStorageGeneric(typ, seen); err != nil {
 		return err
@@ -3394,7 +3394,7 @@ func (c *Checker) rejectArrayStorageGeneric(typ Type, seen map[Type]bool) error 
 	case "std::arena::Arena", "std::arena::Handle", "std::array::Array", "std::map::Map":
 		return nil
 	case "Task", "Channel", "Mutex", "Atomic":
-		return fmt.Errorf("type error: Array element cannot be %s in v0.2", base)
+		return errorf("type error: Array element cannot be %s in v0.2", base)
 	case "option":
 		argType, err := c.parseType(arg)
 		if err != nil {
@@ -3418,7 +3418,7 @@ func (c *Checker) rejectArrayStorageStruct(typ Type, seen map[Type]bool) error {
 			return err
 		}
 		if err := c.rejectArrayStorageType(fieldType, seen); err != nil {
-			return fmt.Errorf("type error: struct `%s.%s` cannot be Array element: %w",
+			return errorf("type error: struct `%s.%s` cannot be Array element: %w",
 				typ, field.Name, err)
 		}
 	}
@@ -3440,7 +3440,7 @@ func (c *Checker) rejectArrayStorageUnion(typ Type, seen map[Type]bool) error {
 			return err
 		}
 		if err := c.rejectArrayStorageType(payloadType, seen); err != nil {
-			return fmt.Errorf("type error: union `%s::%s` cannot be Array element: %w",
+			return errorf("type error: union `%s::%s` cannot be Array element: %w",
 				typ, variant, err)
 		}
 	}
@@ -3454,7 +3454,7 @@ func (c *Checker) checkIoArg(arg ast.Expression, env *scope, unsafe unsafeCaps, 
 		return err
 	}
 	if got != "Io" {
-		return fmt.Errorf("type error: `%s` expects Io, got %s", name, got)
+		return errorf("type error: `%s` expects Io, got %s", name, got)
 	}
 	return nil
 }
@@ -3468,7 +3468,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 ) (Type, error) {
 	name, ok := qualifiedName(expr.Callee)
 	if !ok {
-		return "", fmt.Errorf("type error: unsupported type application `%s`", expr.String())
+		return "", errorf("type error: unsupported type application `%s`", expr.String())
 	}
 	typeArg := c.instantiateTypeArgText(expr.TypeArg)
 	if name == "ptr_from_int" {
@@ -3509,7 +3509,7 @@ func (c *Checker) checkTypeApplyCallExpr(
 		typ, _, err := c.checkMutex(arg, args, env, unsafe)
 		return typ, err
 	default:
-		return "", fmt.Errorf("type error: `%s` does not take static arguments", name)
+		return "", errorf("type error: `%s` does not take static arguments", name)
 	}
 }
 
@@ -3522,14 +3522,14 @@ func (c *Checker) checkArenaTypeApply(
 ) (Type, error) {
 	parts, ok := splitGenericArgs(typeArg)
 	if !ok || len(parts) != 1 {
-		return "", fmt.Errorf("type error: std::arena::Arena expects 1 type argument")
+		return "", errorf("type error: std::arena::Arena expects 1 type argument")
 	}
 	elem, err := c.parseType(parts[0])
 	if err != nil {
 		return "", err
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf(
+		return "", errorf(
 			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
 			elem)
 	}
@@ -3538,7 +3538,7 @@ func (c *Checker) checkArenaTypeApply(
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
+		return "", errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	return Type(fmt.Sprintf("std::arena::Arena<%s>", elem)), nil
@@ -3577,7 +3577,7 @@ func (c *Checker) checkBuiltinTestingTypeApply(
 		return "", false, nil
 	}
 	if !c.currentStd {
-		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::testing", name)
+		return "", true, errorf("type error: `%s` is reserved; use std::testing", name)
 	}
 	arg, err := c.parseType(typeArg)
 	if err != nil {
@@ -3598,7 +3598,7 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 	switch name {
 	case "std.builtin.channel":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::channel", name)
+			return "", true, errorf("type error: `%s` is reserved; use std::channel", name)
 		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
@@ -3608,7 +3608,7 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 		return typ, true, err
 	case "std.builtin.atomic":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::atomic", name)
+			return "", true, errorf("type error: `%s` is reserved; use std::atomic", name)
 		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
@@ -3618,7 +3618,7 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 		return typ, true, err
 	case "std.builtin.mutex":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::sync", name)
+			return "", true, errorf("type error: `%s` is reserved; use std::sync", name)
 		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
@@ -3628,7 +3628,7 @@ func (c *Checker) checkBuiltinConstructorTypeApply(
 		return typ, true, err
 	case "std.builtin.array":
 		if !c.currentStd {
-			return "", true, fmt.Errorf("type error: `%s` is reserved; use std::array", name)
+			return "", true, errorf("type error: `%s` is reserved; use std::array", name)
 		}
 		arg, err := c.parseType(typeArg)
 		if err != nil {
@@ -3649,7 +3649,7 @@ func (c *Checker) checkBuiltinTestFailEqual(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 2 {
-		return "", fmt.Errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
+		return "", errorf("type error: `std::testing::expect_equal<%s>` expects 2 args", typ)
 	}
 	for idx, arg := range args {
 		got, err := c.checkContextualExpr(arg, typ, env, unsafe)
@@ -3657,7 +3657,7 @@ func (c *Checker) checkBuiltinTestFailEqual(
 			return "", err
 		}
 		if !sameType(got, typ) {
-			return "", fmt.Errorf(
+			return "", errorf(
 				"type error: arg %d of `std::testing::expect_equal<%s>` expects %s, got %s",
 				idx+1,
 				typ,
@@ -3724,10 +3724,10 @@ func (c *Checker) checkBoxConstructor(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !c.currentStd {
-		return "", true, fmt.Errorf("type error: `std.builtin.box` is reserved; use std::mem::Box")
+		return "", true, errorf("type error: `std.builtin.box` is reserved; use std::mem::Box")
 	}
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects allocator and value",
+		return "", true, errorf("type error: `std::mem::Box<%s>` expects allocator and value",
 			elem)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
@@ -3735,7 +3735,7 @@ func (c *Checker) checkBoxConstructor(
 		return "", true, err
 	}
 	if got != "Allocator" {
-		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects Allocator, got %s",
+		return "", true, errorf("type error: `std::mem::Box<%s>` expects Allocator, got %s",
 			elem, got)
 	}
 	got, err = c.checkExpr(args[1], env, unsafe)
@@ -3747,7 +3747,7 @@ func (c *Checker) checkBoxConstructor(
 		return "", true, err
 	}
 	if !sameType(got, elem) {
-		return "", true, fmt.Errorf("type error: `std::mem::Box<%s>` expects %s value, got %s",
+		return "", true, errorf("type error: `std::mem::Box<%s>` expects %s value, got %s",
 			elem, elem, got)
 	}
 	return Type(fmt.Sprintf("!std::mem::Box<%s>", elem)), true, nil
@@ -3765,7 +3765,7 @@ func (c *Checker) checkBuiltinBoxMethod(
 	receiver := Type(fmt.Sprintf("std::mem::Box<%s>", elem))
 	return c.checkBuiltinReceiverMethod(name, receiver, func(rest []ast.Expression) (Type, error) {
 		if len(rest) != 0 {
-			return "", fmt.Errorf("type error: `Box.%s` expects 0 args, got %d",
+			return "", errorf("type error: `Box.%s` expects 0 args, got %d",
 				method, len(rest))
 		}
 		switch method {
@@ -3883,17 +3883,17 @@ func (c *Checker) checkBuiltinReceiverMethod(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !c.currentStd {
-		return "", true, fmt.Errorf("type error: `%s` is reserved", name)
+		return "", true, errorf("type error: `%s` is reserved", name)
 	}
 	if len(args) == 0 {
-		return "", true, fmt.Errorf("type error: `%s` expects receiver", name)
+		return "", true, errorf("type error: `%s` expects receiver", name)
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if got != receiver {
-		return "", true, fmt.Errorf("type error: `%s` expects %s receiver, got %s",
+		return "", true, errorf("type error: `%s` expects %s receiver, got %s",
 			name, receiver, got)
 	}
 	typ, err := checkRest(args[1:])
@@ -3911,7 +3911,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 	switch name {
 	case "pop":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
 		}
 		return Type("!" + string(elem)), nil
 	case "at":
@@ -3929,7 +3929,7 @@ func (c *Checker) checkArrayPrimitiveMethod(
 			return "", err
 		}
 		if !isGenericParamType(elem) && !c.isCopyType(elem) {
-			return "", fmt.Errorf("type error: `Array.%s` requires copy element in v0.2", name)
+			return "", errorf("type error: `Array.%s` requires copy element in v0.2", name)
 		}
 		if name == "get" {
 			return Type("!" + string(elem)), nil
@@ -3964,7 +3964,7 @@ func (c *Checker) checkBuiltinMapTypeApply(
 		return "", false, nil
 	}
 	if !c.currentStd {
-		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::map", name)
+		return "", true, errorf("type error: `%s` is reserved; use std::map", name)
 	}
 	mapArgs, err := c.checkedMapArgsAllowTypeParams(typeArg)
 	if err != nil {
@@ -4012,19 +4012,19 @@ func (c *Checker) checkMapPrimitiveMethod(
 	switch name {
 	case "insert":
 		if len(args) != 2 {
-			return "", fmt.Errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
+			return "", errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
 		}
 		if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
 			return "", err
 		} else if !sameType(got, Type(keyType)) {
-			return "", fmt.Errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
+			return "", errorf("type error: `Map.insert` expects %s key, got %s", keyType, got)
 		}
 		got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
 		if err != nil {
 			return "", err
 		}
 		if !sameType(got, valueType) {
-			return "", fmt.Errorf("type error: `Map.insert` expects %s value, got %s",
+			return "", errorf("type error: `Map.insert` expects %s value, got %s",
 				valueType, got)
 		}
 		return "!void", nil
@@ -4052,14 +4052,14 @@ func (c *Checker) checkMapPrimitiveKeyArg(
 	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
-		return fmt.Errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.checkContextualExpr(args[0], Type(keyType), env, unsafe)
 	if err != nil {
 		return err
 	}
 	if !sameType(got, Type(keyType)) {
-		return fmt.Errorf("type error: `Map.%s` expects %s key, got %s", name, keyType, got)
+		return errorf("type error: `Map.%s` expects %s key, got %s", name, keyType, got)
 	}
 	return nil
 }
@@ -4076,7 +4076,7 @@ func (c *Checker) checkBuiltinThreadScopedTypeApply(
 		return "", false, nil
 	}
 	if !c.currentStd {
-		return "", true, fmt.Errorf("type error: `%s` is reserved; use std::thread", name)
+		return "", true, errorf("type error: `%s` is reserved; use std::thread", name)
 	}
 	arg, err := c.parseType(typeArg)
 	if err != nil {
@@ -4103,7 +4103,7 @@ func (c *Checker) checkGenericUserTypeApply(
 	}
 	argsText, ok := splitGenericArgs(typeArg)
 	if !ok || len(argsText) != len(fn.typeParams) {
-		return "", true, fmt.Errorf("type error: `%s` expects %d static arguments",
+		return "", true, errorf("type error: `%s` expects %d static arguments",
 			name, len(fn.typeParams))
 	}
 	typeArgs, err := c.parseGenericWrapperTypeArgs(argsText)
@@ -4166,7 +4166,7 @@ func (c *Checker) checkGenericInstantiation(fn *functionType, subst map[string]T
 		return err
 	}
 	if returnType != typeVoid && !returns {
-		return fmt.Errorf("type error: function `%s` must return %s", fn.name, returnType)
+		return errorf("type error: function `%s` must return %s", fn.name, returnType)
 	}
 	return nil
 }
@@ -4193,11 +4193,11 @@ func (c *Checker) checkGenericWrapperTypeArgs(name string, args []Type) error {
 		return c.rejectArrayElementType(args[0])
 	case "std.atomic.Atomic":
 		if !isAtomicSupportedType(args[0]) {
-			return fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", args[0])
+			return errorf("type error: unsupported atomic type `%s` in v0.1", args[0])
 		}
 	case "std.sync.Mutex":
 		if !c.isCopyType(args[0]) {
-			return fmt.Errorf(
+			return errorf(
 				"type error: `std::sync::Mutex<%s>` requires copy value in v0.1", args[0])
 		}
 	case "std.map.Map":
@@ -4245,7 +4245,7 @@ func (c *Checker) checkGenericUserArg(
 	}
 	if !sameType(got, want) {
 		if name == "std.sync.Mutex" {
-			return fmt.Errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
+			return errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
 				want, want, got)
 		}
 		return userCallArgError(name, fn, idx, got)
@@ -4263,11 +4263,11 @@ func (c *Checker) checkGenericFunctionNameArg(
 ) error {
 	target, ok := arg.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("type error: `%s` expects function name", diagnosticName(name))
+		return errorf("type error: `%s` expects function name", diagnosticName(name))
 	}
 	targetFn := c.functions[target.Name]
 	if targetFn == nil {
-		return fmt.Errorf("type error: undefined function `%s`", target.Name)
+		return errorf("type error: undefined function `%s`", target.Name)
 	}
 	if name == "std.thread.scoped" && typeFunctionParamName(fn, idx) == "worker" {
 		return c.checkThreadScopedWorker(
@@ -4288,21 +4288,21 @@ func typeFunctionParamName(fn *functionType, idx int) string {
 // checkErrorCall validates error-union error construction.
 func (c *Checker) checkErrorCall(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if len(expr.Args) != 1 {
-		return "", fmt.Errorf("type error: `error` expects 1 arg, got %d", len(expr.Args))
+		return "", errorf("type error: `error` expects 1 arg, got %d", len(expr.Args))
 	}
 	got, err := c.checkExpr(expr.Args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !sameType(got, typeByteString) {
-		return "", fmt.Errorf("type error: `error` expects []u8, got %s", got)
+		return "", errorf("type error: `error` expects []u8, got %s", got)
 	}
 	errorType, _, ok := errorUnionParts(c.currentReturn)
 	if !ok {
-		return "", fmt.Errorf("type error: `error` requires function to return !T")
+		return "", errorf("type error: `error` requires function to return !T")
 	}
 	if errorType != "" {
-		return "", fmt.Errorf("type error: `error` cannot construct typed error %s", errorType)
+		return "", errorf("type error: `error` cannot construct typed error %s", errorType)
 	}
 	return c.currentReturn, nil
 }
@@ -4317,7 +4317,7 @@ func (c *Checker) checkUserCall(
 ) (Type, error) {
 	fn, ok := c.functions[name]
 	if !ok {
-		return "", fmt.Errorf("type error: undefined function `%s`", name)
+		return "", errorf("type error: undefined function `%s`", name)
 	}
 	operation := fmt.Sprintf("call to `%s`", name)
 	if fn.externABI != "" {
@@ -4331,7 +4331,7 @@ func (c *Checker) checkUserCall(
 		}
 	}
 	if len(fn.typeParams) > 0 {
-		return "", fmt.Errorf("type error: `%s` requires explicit static arguments", name)
+		return "", errorf("type error: `%s` requires explicit static arguments", name)
 	}
 	if len(args) != len(fn.params) {
 		return "", userCallArityError(name, fn, len(args))
@@ -4380,7 +4380,7 @@ func (c *Checker) checkUserCallArg(
 	}
 	if contractName, ok := dynContract(fn.params[idx]); ok {
 		if !c.satisfies(contractName, got) {
-			return fmt.Errorf("type error: %s does not satisfy `%s`", got, contractName)
+			return errorf("type error: %s does not satisfy `%s`", got, contractName)
 		}
 		return nil
 	}
@@ -4399,11 +4399,11 @@ func (c *Checker) checkFunctionNameParam(
 ) error {
 	target, ok := arg.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("type error: `%s` expects function name", diagnosticName(name))
+		return errorf("type error: `%s` expects function name", diagnosticName(name))
 	}
 	targetFn := c.functions[target.Name]
 	if targetFn == nil {
-		return fmt.Errorf("type error: undefined function `%s`", target.Name)
+		return errorf("type error: undefined function `%s`", target.Name)
 	}
 	return c.checkStdFunctionNameParam(name, fn, idx, target.Name, targetFn)
 }
@@ -4423,7 +4423,7 @@ func (c *Checker) checkStdFunctionNameParam(
 	switch {
 	case name == "std.task.parallel_for" && paramName == "worker":
 		if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
-			return fmt.Errorf("type error: parallel worker `%s` must accept i64", target)
+			return errorf("type error: parallel worker `%s` must accept i64", target)
 		}
 		_, err := c.parallelReturnType(targetFn)
 		return err
@@ -4436,16 +4436,16 @@ func (c *Checker) checkStdFunctionNameParam(
 // userCallArityError reports declared function arity using source signatures when useful.
 func userCallArityError(name string, fn *functionType, got int) error {
 	if name == "std.string.String" {
-		return fmt.Errorf("type error: `std::string::String` expects allocator")
+		return errorf("type error: `std::string::String` expects allocator")
 	}
 	if len(fn.params) == 1 && fn.decl != nil {
 		paramName := fn.decl.Params[0].Name
 		if paramName != "" {
-			return fmt.Errorf("type error: `%s` expects %s",
+			return errorf("type error: `%s` expects %s",
 				diagnosticName(name), paramName)
 		}
 	}
-	return fmt.Errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), got)
+	return errorf("type error: `%s` expects %d args, got %d", name, len(fn.params), got)
 }
 
 // userCallArgError reports source-call argument type mismatches.
@@ -4454,14 +4454,14 @@ func userCallArgError(name string, fn *functionType, idx int, got Type) error {
 		paramName := fn.decl.Params[idx].Name
 		if paramName != "" {
 			if strings.HasPrefix(name, "std.fs.") {
-				return fmt.Errorf("type error: `%s` expects %s %s, got %s",
+				return errorf("type error: `%s` expects %s %s, got %s",
 					diagnosticName(name), fn.params[idx], paramName, got)
 			}
-			return fmt.Errorf("type error: `%s` %s expects %s, got %s",
+			return errorf("type error: `%s` %s expects %s, got %s",
 				diagnosticName(name), paramName, fn.params[idx], got)
 		}
 	}
-	return fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+	return errorf("type error: arg %d of `%s` expects %s, got %s",
 		idx+1, name, fn.params[idx], got)
 }
 
@@ -4482,11 +4482,11 @@ func (c *Checker) checkUnionConstructorCall(
 ) (Type, bool, error) {
 	if !field.Namespace {
 		if enumType, ok := enumReceiver(field.Receiver, c.enums); ok {
-			return "", true, fmt.Errorf("type error: enum tag `%s.%s` must use `::`",
+			return "", true, errorf("type error: enum tag `%s.%s` must use `::`",
 				enumType.name, field.Name)
 		}
 		if unionType, ok := unionReceiver(field.Receiver, c.unions); ok {
-			return "", true, fmt.Errorf("type error: union variant `%s.%s` must use `::`",
+			return "", true, errorf("type error: union variant `%s.%s` must use `::`",
 				unionType.name, field.Name)
 		}
 		return "", false, nil
@@ -4497,15 +4497,15 @@ func (c *Checker) checkUnionConstructorCall(
 	}
 	payload, exists := unionType.variants[field.Name]
 	if !exists {
-		return "", true, fmt.Errorf("type error: unknown union variant `%s::%s`",
+		return "", true, errorf("type error: unknown union variant `%s::%s`",
 			unionType.name, field.Name)
 	}
 	if payload == "" {
-		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects 0 args",
+		return "", true, errorf("type error: union variant `%s::%s` expects 0 args",
 			unionType.name, field.Name)
 	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects 1 arg, got %d",
+		return "", true, errorf("type error: union variant `%s::%s` expects 1 arg, got %d",
 			unionType.name, field.Name, len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
@@ -4518,7 +4518,7 @@ func (c *Checker) checkUnionConstructorCall(
 	}
 	if !sameType(got, Type(payload)) &&
 		!c.returnValueMatchesBorrowParam(args[0], env, Type(payload), got) {
-		return "", true, fmt.Errorf("type error: union variant `%s::%s` expects %s, got %s",
+		return "", true, errorf("type error: union variant `%s::%s` expects %s, got %s",
 			unionType.name, field.Name, payload, got)
 	}
 	return Type(unionType.name), true, nil
@@ -4534,7 +4534,7 @@ func (c *Checker) checkArenaNewExpr(
 		return "", err
 	}
 	if expr.Allocator == nil {
-		return "", fmt.Errorf(
+		return "", errorf(
 			"type error: `std::arena::Arena<%s>` expects exactly one allocator argument",
 			expr.TypeName)
 	}
@@ -4543,7 +4543,7 @@ func (c *Checker) checkArenaNewExpr(
 		return "", err
 	}
 	if got != "Allocator" {
-		return "", fmt.Errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
+		return "", errorf("type error: `std::arena::Arena<%s>` expects Allocator, got %s",
 			expr.TypeName, got)
 	}
 	return Type(fmt.Sprintf("std::arena::Arena<%s>", expr.TypeName)), nil
@@ -4557,7 +4557,7 @@ func (c *Checker) checkStructLiteralExpr(
 ) (Type, error) {
 	decl := c.structs[expr.TypeName]
 	if decl == nil {
-		return "", fmt.Errorf("type error: unknown struct `%s`", expr.TypeName)
+		return "", errorf("type error: unknown struct `%s`", expr.TypeName)
 	}
 	values := map[string]Type{}
 	exprs := map[string]ast.Expression{}
@@ -4572,7 +4572,7 @@ func (c *Checker) checkStructLiteralExpr(
 	for _, field := range decl.Fields {
 		got, ok := values[field.Name]
 		if !ok {
-			return "", fmt.Errorf("type error: missing field `%s.%s`", expr.TypeName, field.Name)
+			return "", errorf("type error: missing field `%s.%s`", expr.TypeName, field.Name)
 		}
 		if err := c.checkPrivateFieldAccess(expr.TypeName, field); err != nil {
 			return "", err
@@ -4584,13 +4584,13 @@ func (c *Checker) checkStructLiteralExpr(
 		}
 		if !sameType(got, want) &&
 			!c.returnValueMatchesBorrowParam(exprs[field.Name], env, want, got) {
-			return "", fmt.Errorf("type error: field `%s.%s` expects %s, got %s",
+			return "", errorf("type error: field `%s.%s` expects %s, got %s",
 				expr.TypeName, field.Name, want, got)
 		}
 		delete(values, field.Name)
 	}
 	for name := range values {
-		return "", fmt.Errorf("type error: unknown field `%s.%s`", expr.TypeName, name)
+		return "", errorf("type error: unknown field `%s.%s`", expr.TypeName, name)
 	}
 	return Type(expr.TypeName), nil
 }
@@ -4601,11 +4601,11 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeC
 		return c.checkNamespaceExpr(expr)
 	}
 	if enumType, ok := enumReceiver(expr.Receiver, c.enums); ok {
-		return "", fmt.Errorf("type error: enum tag `%s.%s` must use `::`",
+		return "", errorf("type error: enum tag `%s.%s` must use `::`",
 			enumType.name, expr.Name)
 	}
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
-		return "", fmt.Errorf("type error: union variant `%s.%s` must use `::`",
+		return "", errorf("type error: union variant `%s.%s` must use `::`",
 			unionType.name, expr.Name)
 	}
 	receiver, err := c.checkExpr(expr.Receiver, env, unsafe)
@@ -4620,7 +4620,7 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeC
 	}
 	decl := c.structs[string(receiver)]
 	if decl == nil {
-		return "", fmt.Errorf("type error: `%s` has no fields", receiver)
+		return "", errorf("type error: `%s` has no fields", receiver)
 	}
 	for _, field := range decl.Fields {
 		if field.Name == expr.Name {
@@ -4630,7 +4630,7 @@ func (c *Checker) checkFieldExpr(expr *ast.FieldExpr, env *scope, unsafe unsafeC
 			return Type(field.TypeName), nil
 		}
 	}
-	return "", fmt.Errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
+	return "", errorf("type error: unknown field `%s.%s`", receiver, expr.Name)
 }
 
 // checkPrivateFieldAccess enforces std and user module field visibility.
@@ -4642,12 +4642,12 @@ func (c *Checker) checkPrivateFieldAccess(typeName string, field ast.Field) erro
 		if c.currentStd {
 			return nil
 		}
-		return fmt.Errorf("type error: field `%s.%s` is private", typeName, field.Name)
+		return errorf("type error: field `%s.%s` is private", typeName, field.Name)
 	}
 	if c.sameUserModule(typeName) {
 		return nil
 	}
-	return fmt.Errorf("type error: field `%s.%s` is private", typeName, field.Name)
+	return errorf("type error: field `%s.%s` is private", typeName, field.Name)
 }
 
 // sameUserModule reports whether the current function belongs to typeName's module.
@@ -4680,7 +4680,7 @@ func checkFsMetadataField(name string) (Type, error) {
 	case "is_dir":
 		return typeBool, nil
 	default:
-		return "", fmt.Errorf("type error: unknown field `std::fs::Metadata.%s`", name)
+		return "", errorf("type error: unknown field `std::fs::Metadata.%s`", name)
 	}
 }
 
@@ -4692,7 +4692,7 @@ func checkFsDirEntryField(name string) (Type, error) {
 	case "is_dir":
 		return typeBool, nil
 	default:
-		return "", fmt.Errorf("type error: unknown field `std::fs::DirEntry.%s`", name)
+		return "", errorf("type error: unknown field `std::fs::DirEntry.%s`", name)
 	}
 }
 
@@ -4700,7 +4700,7 @@ func checkFsDirEntryField(name string) (Type, error) {
 func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 	if enumType, ok := enumReceiver(expr.Receiver, c.enums); ok {
 		if !enumType.tags[expr.Name] {
-			return "", fmt.Errorf("type error: unknown enum tag `%s::%s`",
+			return "", errorf("type error: unknown enum tag `%s::%s`",
 				enumType.name, expr.Name)
 		}
 		return Type(enumType.name), nil
@@ -4708,11 +4708,11 @@ func (c *Checker) checkNamespaceExpr(expr *ast.FieldExpr) (Type, error) {
 	if unionType, ok := unionReceiver(expr.Receiver, c.unions); ok {
 		payload, exists := unionType.variants[expr.Name]
 		if !exists {
-			return "", fmt.Errorf("type error: unknown union variant `%s::%s`",
+			return "", errorf("type error: unknown union variant `%s::%s`",
 				unionType.name, expr.Name)
 		}
 		if payload != "" {
-			return "", fmt.Errorf("type error: union variant `%s::%s` expects payload",
+			return "", errorf("type error: union variant `%s::%s` expects payload",
 				unionType.name, expr.Name)
 		}
 		return Type(unionType.name), nil
@@ -4730,7 +4730,7 @@ func (c *Checker) unknownNamespaceError(name string, span ast.Span) error {
 	if !span.IsZero() {
 		return errorAt(span, "%s", message)
 	}
-	return fmt.Errorf("%s", message)
+	return errorf("%s", message)
 }
 
 // knownNamespaceSummary returns a short display list of enum and union namespaces.
@@ -4774,7 +4774,7 @@ func (c *Checker) checkDerefExpr(expr *ast.DerefExpr, env *scope, unsafe unsafeC
 		}
 		return typ, nil
 	}
-	return "", fmt.Errorf(
+	return "", errorf(
 		"type error: `%s` is not a borrow or raw pointer and cannot be dereferenced",
 		receiver,
 	)
@@ -4789,13 +4789,13 @@ func (c *Checker) checkAssignableField(
 	if ident, ok := expr.Receiver.(*ast.IdentExpr); ok {
 		if env.isBorrowed(ident.Name) {
 			if !env.isMutBorrowed(ident.Name) {
-				return "", fmt.Errorf(
+				return "", errorf(
 					"type error: cannot assign field through shared borrow `%s`",
 					ident.Name,
 				)
 			}
 		} else if !env.isMutable(ident.Name) {
-			return "", fmt.Errorf(
+			return "", errorf(
 				"type error: cannot assign field of immutable binding `%s`",
 				ident.Name,
 			)
@@ -4833,7 +4833,7 @@ func (c *Checker) checkAssignableDeref(
 		}
 		return assignableRawPointerDerefType(receiver)
 	}
-	return "", fmt.Errorf("type error: `%s` is not a mutable borrow", expr.Receiver.String())
+	return "", errorf("type error: `%s` is not a mutable borrow", expr.Receiver.String())
 }
 
 // enumReceiver returns an enum namespace used by EnumName.Tag expressions.
@@ -4884,12 +4884,12 @@ func (c *Checker) checkMethodReceiverPath(field *ast.FieldExpr, env *scope) erro
 		return nil
 	}
 	if _, ok := receiver.Receiver.(*ast.IdentExpr); !ok {
-		return fmt.Errorf("type error: field method receiver only supports one direct field")
+		return errorf("type error: field method receiver only supports one direct field")
 	}
 	if field.Name != "deinit" || c.allowsDirectFieldCleanup(receiver, env) {
 		return nil
 	}
-	return fmt.Errorf(
+	return errorf(
 		"type error: field cleanup `%s.deinit` is only allowed inside owner deinit",
 		receiver.String(),
 	)
@@ -4978,18 +4978,18 @@ func (c *Checker) checkBoxReceiverMethod(
 ) (Type, error) {
 	switch field.Name {
 	case "borrow":
-		return "", fmt.Errorf(
+		return "", errorf(
 			"type error: `Box.borrow` must be bound with `let name = box.borrow()`")
 	case "borrow_mut":
-		return "", fmt.Errorf(
+		return "", errorf(
 			"type error: `Box.borrow_mut` must be bound with `let name = box.borrow_mut()`")
 	case "deinit":
 		if _, ok := field.Receiver.(*ast.IdentExpr); !ok &&
 			!c.directFieldCleanupReceiver(field.Receiver, env) {
-			return "", fmt.Errorf("type error: `Box.deinit` requires local Box receiver")
+			return "", errorf("type error: `Box.deinit` requires local Box receiver")
 		}
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Box.deinit` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `Box.deinit` expects 0 args, got %d", len(args))
 		}
 		return typeVoid, nil
 	default:
@@ -4998,7 +4998,7 @@ func (c *Checker) checkBoxReceiverMethod(
 		if method != nil {
 			return c.checkMethodArgs(method, receiver, expressionSpan(field), args, env, unsafe)
 		}
-		return "", fmt.Errorf("type error: Box has no method `%s`", field.Name)
+		return "", errorf("type error: Box has no method `%s`", field.Name)
 	}
 }
 
@@ -5016,7 +5016,7 @@ func (c *Checker) checkArenaOrImplMethod(
 		if method != nil {
 			return c.checkMethodArgs(method, receiver, expressionSpan(field), args, env, unsafe)
 		}
-		return "", fmt.Errorf("type error: `%s` has no method `%s`", receiver, field.Name)
+		return "", errorf("type error: `%s` has no method `%s`", receiver, field.Name)
 	}
 	switch field.Name {
 	case "add":
@@ -5026,7 +5026,7 @@ func (c *Checker) checkArenaOrImplMethod(
 	case "deinit":
 		return c.checkArenaDeinit(field, args, env)
 	default:
-		return "", fmt.Errorf("type error: unknown arena method `%s`", field.Name)
+		return "", errorf("type error: unknown arena method `%s`", field.Name)
 	}
 }
 
@@ -5039,11 +5039,11 @@ func (c *Checker) checkStringReceiverMethod(
 ) (Type, error) {
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if field.Name == "deinit" && ok && env.isBorrowed(ident.Name) {
-		return "", fmt.Errorf("type error: `String.deinit` requires owned String receiver")
+		return "", errorf("type error: `String.deinit` requires owned String receiver")
 	}
 	if isStringMutatingMethod(field.Name) && ok &&
 		env.isBorrowed(ident.Name) && !env.isMutBorrowed(ident.Name) {
-		return "", fmt.Errorf("type error: `String.%s` requires mutable String receiver", field.Name)
+		return "", errorf("type error: `String.%s` requires mutable String receiver", field.Name)
 	}
 	return c.checkStringMethod(field.Name, args, env, unsafe)
 }
@@ -5073,11 +5073,11 @@ func (c *Checker) checkStringMethod(
 		return "!void", nil
 	case "len", "capacity":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
+			return "", errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeI64, nil
 	case "as_bytes":
-		return "", fmt.Errorf(
+		return "", errorf(
 			"type error: `String.as_bytes` must be bound with `let name = string.as_bytes()`")
 	case "truncate":
 		if err := c.checkStringReserveArg(name, args, env, unsafe); err != nil {
@@ -5086,11 +5086,11 @@ func (c *Checker) checkStringMethod(
 		return "!void", nil
 	case "clear", "deinit":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
+			return "", errorf("type error: `String.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeVoid, nil
 	default:
-		return "", fmt.Errorf("type error: String has no method `%s`", name)
+		return "", errorf("type error: String has no method `%s`", name)
 	}
 }
 
@@ -5112,14 +5112,14 @@ func (c *Checker) checkStringBytesArg(
 	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
-		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return err
 	}
 	if !sameType(got, typeByteString) {
-		return fmt.Errorf("type error: `String.%s` expects []u8, got %s", name, got)
+		return errorf("type error: `String.%s` expects []u8, got %s", name, got)
 	}
 	return nil
 }
@@ -5132,14 +5132,14 @@ func (c *Checker) checkStringReserveArg(
 	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
-		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return err
 	}
 	if got != typeI64 {
-		return fmt.Errorf("type error: `String.%s` expects i64, got %s", name, got)
+		return errorf("type error: `String.%s` expects i64, got %s", name, got)
 	}
 	return nil
 }
@@ -5152,14 +5152,14 @@ func (c *Checker) checkStringByteArg(
 	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
-		return fmt.Errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `String.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.checkContextualExpr(args[0], typeU8, env, unsafe)
 	if err != nil {
 		return err
 	}
 	if got != typeU8 {
-		return fmt.Errorf("type error: `String.%s` expects u8, got %s", name, got)
+		return errorf("type error: `String.%s` expects u8, got %s", name, got)
 	}
 	return nil
 }
@@ -5174,7 +5174,7 @@ func (c *Checker) checkArrayReceiverMethod(
 ) (Type, error) {
 	if field.Name == "at_mut" {
 		if ident, ok := field.Receiver.(*ast.IdentExpr); !ok || !env.isMutable(ident.Name) {
-			return "", fmt.Errorf("type error: `Array.at_mut` requires mutable array binding")
+			return "", errorf("type error: `Array.at_mut` requires mutable array binding")
 		}
 	}
 	return c.checkArrayMethod(elem, field.Name, args, env, unsafe)
@@ -5205,10 +5205,10 @@ func checkMapReceiverBorrow(field *ast.FieldExpr, env *scope) error {
 		return nil
 	}
 	if field.Name == "deinit" && env.isBorrowed(ident.Name) {
-		return fmt.Errorf("type error: `Map.deinit` requires owned Map receiver")
+		return errorf("type error: `Map.deinit` requires owned Map receiver")
 	}
 	if field.Name == "insert" && env.isBorrowed(ident.Name) && !env.isMutBorrowed(ident.Name) {
-		return fmt.Errorf("type error: `Map.insert` requires mutable Map receiver")
+		return errorf("type error: `Map.insert` requires mutable Map receiver")
 	}
 	return nil
 }
@@ -5266,28 +5266,28 @@ func (c *Checker) checkArrayMethod(
 		return c.checkArrayAppendArg(elem, args, env, unsafe)
 	case "pop":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `Array.pop` expects 0 args, got %d", len(args))
 		}
 		return Type("!" + string(elem)), nil
 	case "len", "capacity":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
+			return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeI64, nil
 	case "get", "get_or_panic":
 		return c.checkArrayGet(elem, name, args, env, unsafe)
 	case "at", "at_mut":
-		return "", fmt.Errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
+		return "", errorf("type error: `Array.%s` must be bound with `let name = try array.%s(...)`",
 			name, name)
 	case "set":
 		return c.checkArraySet(elem, args, env, unsafe)
 	case "deinit":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
+			return "", errorf("type error: `Array.%s` expects 0 args, got %d", name, len(args))
 		}
 		return typeVoid, nil
 	default:
-		return "", fmt.Errorf("type error: Array has no method `%s`", name)
+		return "", errorf("type error: Array has no method `%s`", name)
 	}
 }
 
@@ -5300,7 +5300,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if !c.currentStd {
-		return "", fmt.Errorf("type error: Array has no method `%s`", name)
+		return "", errorf("type error: Array has no method `%s`", name)
 	}
 	switch name {
 	case "reserve", "truncate":
@@ -5310,7 +5310,7 @@ func (c *Checker) checkStdArrayStorageMethod(
 		return "!void", nil
 	case "clear":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Array.clear` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `Array.clear` expects 0 args, got %d", len(args))
 		}
 		return typeVoid, nil
 	default:
@@ -5331,14 +5331,14 @@ func (c *Checker) checkArrayAppendArg(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
+		return "", errorf("type error: `Array.append` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !sameType(got, elem) {
-		return "", fmt.Errorf("type error: `Array.append` expects %s, got %s", elem, got)
+		return "", errorf("type error: `Array.append` expects %s, got %s", elem, got)
 	}
 	return "!void", nil
 }
@@ -5346,10 +5346,10 @@ func (c *Checker) checkArrayAppendArg(
 // checkArrayAsBytes validates Array<u8> to byte-slice view conversion.
 func checkArrayAsBytes(elem Type, args []ast.Expression) (Type, error) {
 	if elem != typeU8 {
-		return "", fmt.Errorf("type error: `Array.as_bytes` requires Array<u8>")
+		return "", errorf("type error: `Array.as_bytes` requires Array<u8>")
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("type error: `Array.as_bytes` expects 0 args, got %d", len(args))
+		return "", errorf("type error: `Array.as_bytes` expects 0 args, got %d", len(args))
 	}
 	return typeByteString, nil
 }
@@ -5366,7 +5366,7 @@ func (c *Checker) checkArrayGet(
 		return "", err
 	}
 	if !c.isCopyType(elem) {
-		return "", fmt.Errorf("type error: `Array.%s` requires copy element in v0.2", name)
+		return "", errorf("type error: `Array.%s` requires copy element in v0.2", name)
 	}
 	if name == "get" {
 		return Type("!" + string(elem)), nil
@@ -5387,14 +5387,14 @@ func (c *Checker) checkArrayIndexArg(
 	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
-		return fmt.Errorf("type error: `Array.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `Array.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return err
 	}
 	if got != typeI64 {
-		return fmt.Errorf("type error: `Array.%s` expects i64 index, got %s", name, got)
+		return errorf("type error: `Array.%s` expects i64 index, got %s", name, got)
 	}
 	return nil
 }
@@ -5407,19 +5407,19 @@ func (c *Checker) checkArraySet(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 2 {
-		return "", fmt.Errorf("type error: `Array.set` expects 2 args, got %d", len(args))
+		return "", errorf("type error: `Array.set` expects 2 args, got %d", len(args))
 	}
 	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
 		return "", err
 	} else if got != typeI64 {
-		return "", fmt.Errorf("type error: `Array.set` expects i64 index, got %s", got)
+		return "", errorf("type error: `Array.set` expects i64 index, got %s", got)
 	}
 	got, err := c.checkContextualExpr(args[1], elem, env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !sameType(got, elem) {
-		return "", fmt.Errorf("type error: `Array.set` expects %s value, got %s", elem, got)
+		return "", errorf("type error: `Array.set` expects %s value, got %s", elem, got)
 	}
 	return "!void", nil
 }
@@ -5433,14 +5433,14 @@ func (c *Checker) checkMapConstructorForArgs(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::map::Map` expects allocator")
+		return "", true, errorf("type error: `std::map::Map` expects allocator")
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if got != "Allocator" {
-		return "", true, fmt.Errorf("type error: `std::map::Map` expects Allocator, got %s", got)
+		return "", true, errorf("type error: `std::map::Map` expects Allocator, got %s", got)
 	}
 	return Type(fmt.Sprintf("std::map::Map<%s, %s>", keyType, valueType)), true, nil
 }
@@ -5468,16 +5468,16 @@ func (c *Checker) checkMapMethod(
 		return typeBool, nil
 	case "len":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Map.len` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `Map.len` expects 0 args, got %d", len(args))
 		}
 		return typeI64, nil
 	case "deinit":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `Map.deinit` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `Map.deinit` expects 0 args, got %d", len(args))
 		}
 		return typeVoid, nil
 	default:
-		return "", fmt.Errorf("type error: Map has no method `%s`", name)
+		return "", errorf("type error: Map has no method `%s`", name)
 	}
 }
 
@@ -5489,19 +5489,19 @@ func (c *Checker) checkMapInsert(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 2 {
-		return "", fmt.Errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
+		return "", errorf("type error: `Map.insert` expects 2 args, got %d", len(args))
 	}
 	if got, err := c.checkExpr(args[0], env, unsafe); err != nil {
 		return "", err
 	} else if !sameType(got, typeByteString) {
-		return "", fmt.Errorf("type error: `Map.insert` expects []u8 key, got %s", got)
+		return "", errorf("type error: `Map.insert` expects []u8 key, got %s", got)
 	}
 	got, err := c.checkContextualExpr(args[1], valueType, env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !sameType(got, valueType) {
-		return "", fmt.Errorf("type error: `Map.insert` expects %s value, got %s", valueType, got)
+		return "", errorf("type error: `Map.insert` expects %s value, got %s", valueType, got)
 	}
 	return "!void", nil
 }
@@ -5514,14 +5514,14 @@ func (c *Checker) checkMapKeyArg(
 	unsafe unsafeCaps,
 ) error {
 	if len(args) != 1 {
-		return fmt.Errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
+		return errorf("type error: `Map.%s` expects 1 arg, got %d", name, len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return err
 	}
 	if !sameType(got, typeByteString) {
-		return fmt.Errorf("type error: `Map.%s` expects []u8 key, got %s", name, got)
+		return errorf("type error: `Map.%s` expects []u8 key, got %s", name, got)
 	}
 	return nil
 }
@@ -5530,7 +5530,7 @@ func (c *Checker) checkMapKeyArg(
 func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("type error: std::map::Map expects 2 static arguments")
+		return nil, errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
 		return nil, err
@@ -5542,7 +5542,7 @@ func (c *Checker) checkedMapArgs(arg string) ([]string, error) {
 func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
 	args, ok := splitGenericArgs(arg)
 	if !ok || len(args) != 2 {
-		return nil, fmt.Errorf("type error: std::map::Map expects 2 static arguments")
+		return nil, errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if _, err := c.parseMapType(fmt.Sprintf("std::map::Map<%s>", arg), args); err != nil {
 		return nil, err
@@ -5553,13 +5553,13 @@ func (c *Checker) checkedMapArgsAllowTypeParams(arg string) ([]string, error) {
 // checkMapTypeArgContract enforces v0.2 public Map constructor restrictions.
 func (c *Checker) checkMapTypeArgContract(args []Type) error {
 	if len(args) != 2 {
-		return fmt.Errorf("type error: std::map::Map expects 2 static arguments")
+		return errorf("type error: std::map::Map expects 2 static arguments")
 	}
 	if !sameType(args[0], typeByteString) {
-		return fmt.Errorf("type error: std::map::Map key type must be []u8 in v0.2")
+		return errorf("type error: std::map::Map key type must be []u8 in v0.2")
 	}
 	if !c.isCopyType(args[1]) {
-		return fmt.Errorf("type error: std::map::Map value type must be copy in v0.2")
+		return errorf("type error: std::map::Map value type must be copy in v0.2")
 	}
 	return nil
 }
@@ -5572,21 +5572,21 @@ func (c *Checker) checkTaskGroupMethod(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if name != "spawn" {
-		return "", fmt.Errorf("type error: TaskGroup has no method `%s`", name)
+		return "", errorf("type error: TaskGroup has no method `%s`", name)
 	}
 	if len(args) < 1 {
-		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects function and args")
+		return "", errorf("type error: `TaskGroup.spawn` expects function and args")
 	}
 	target, ok := args[0].(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("type error: `TaskGroup.spawn` expects function name")
+		return "", errorf("type error: `TaskGroup.spawn` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
 		if _, ok := env.lookup(target.Name); ok {
-			return "", fmt.Errorf("type error: `TaskGroup.spawn` expects function name")
+			return "", errorf("type error: `TaskGroup.spawn` expects function name")
 		}
-		return "", fmt.Errorf("type error: undefined function `%s`", target.Name)
+		return "", errorf("type error: undefined function `%s`", target.Name)
 	}
 	if err := c.checkSpawnArgs(target.Name, fn, args[1:], env, unsafe); err != nil {
 		return "", err
@@ -5601,14 +5601,14 @@ func (c *Checker) checkTaskGroup(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::task::Group` expects io")
+		return "", true, errorf("type error: `std::task::Group` expects io")
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if got != "Io" {
-		return "", true, fmt.Errorf("type error: `std::task::Group` expects Io, got %s", got)
+		return "", true, errorf("type error: `std::task::Group` expects Io, got %s", got)
 	}
 	return "TaskGroup", true, nil
 }
@@ -5623,17 +5623,17 @@ func (c *Checker) checkSpawnArgs(
 ) error {
 	if len(fn.params) == 0 || fn.params[0] != "Io" ||
 		fn.borrowParams[0] || fn.mutBorrowParams[0] {
-		return fmt.Errorf("type error: spawned function `%s` must accept owned Io as first parameter",
+		return errorf("type error: spawned function `%s` must accept owned Io as first parameter",
 			name)
 	}
 	if len(args) != len(fn.params)-1 {
-		return fmt.Errorf("type error: `%s` expects %d args, got %d",
+		return errorf("type error: `%s` expects %d args, got %d",
 			name, len(fn.params)-1, len(args))
 	}
 	for idx, arg := range args {
 		paramIdx := idx + 1
 		if fn.borrowParams[paramIdx] || fn.mutBorrowParams[paramIdx] {
-			return fmt.Errorf("type error: task cannot capture borrow parameter `%s`", name)
+			return errorf("type error: task cannot capture borrow parameter `%s`", name)
 		}
 		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
 			return err
@@ -5643,7 +5643,7 @@ func (c *Checker) checkSpawnArgs(
 			return err
 		}
 		if !sameType(got, fn.params[paramIdx]) {
-			return fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+			return errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, name, fn.params[paramIdx], got)
 		}
 	}
@@ -5662,11 +5662,11 @@ func (c *Checker) checkQueueMethod(
 		return c.checkQueueEnqueue(args, env, unsafe)
 	case "drain":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `queue.drain` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `queue.drain` expects 0 args, got %d", len(args))
 		}
 		return typeVoid, nil
 	default:
-		return "", fmt.Errorf("type error: Queue has no method `%s`", name)
+		return "", errorf("type error: Queue has no method `%s`", name)
 	}
 }
 
@@ -5677,31 +5677,31 @@ func (c *Checker) checkQueueEnqueue(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) < 2 {
-		return "", fmt.Errorf("type error: `queue.enqueue` expects io, function, and args")
+		return "", errorf("type error: `queue.enqueue` expects io, function, and args")
 	}
 	ioType, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if ioType != "Io" {
-		return "", fmt.Errorf("type error: `queue.enqueue` expects Io, got %s", ioType)
+		return "", errorf("type error: `queue.enqueue` expects Io, got %s", ioType)
 	}
 	target, ok := args[1].(*ast.IdentExpr)
 	if !ok {
-		return "", fmt.Errorf("type error: `queue.enqueue` expects function name")
+		return "", errorf("type error: `queue.enqueue` expects function name")
 	}
 	fn := c.functions[target.Name]
 	if fn == nil {
-		return "", fmt.Errorf("type error: undefined function `%s`", target.Name)
+		return "", errorf("type error: undefined function `%s`", target.Name)
 	}
 	spawnArgs := append([]ast.Expression{args[0]}, args[2:]...)
 	if len(spawnArgs) != len(fn.params) {
-		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
+		return "", errorf("type error: `%s` expects %d args, got %d",
 			target.Name, len(fn.params), len(spawnArgs))
 	}
 	for idx, arg := range spawnArgs {
 		if fn.borrowParams[idx] || fn.mutBorrowParams[idx] {
-			return "", fmt.Errorf("type error: queue cannot capture borrow parameter `%s`", target.Name)
+			return "", errorf("type error: queue cannot capture borrow parameter `%s`", target.Name)
 		}
 		if err := c.rejectThreadBoundaryArg(arg, env, unsafe); err != nil {
 			return "", err
@@ -5711,7 +5711,7 @@ func (c *Checker) checkQueueEnqueue(
 			return "", err
 		}
 		if !sameType(got, fn.params[idx]) {
-			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+			return "", errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, target.Name, fn.params[idx], got)
 		}
 	}
@@ -5729,7 +5729,7 @@ func (c *Checker) checkChannelMethod(
 	switch name {
 	case "send":
 		if len(args) != 1 {
-			return "", fmt.Errorf("type error: `channel.send` expects 1 arg, got %d", len(args))
+			return "", errorf("type error: `channel.send` expects 1 arg, got %d", len(args))
 		}
 		if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
 			return "", err
@@ -5739,21 +5739,21 @@ func (c *Checker) checkChannelMethod(
 			return "", err
 		}
 		if !sameType(got, elem) {
-			return "", fmt.Errorf("type error: `channel.send` expects %s, got %s", elem, got)
+			return "", errorf("type error: `channel.send` expects %s, got %s", elem, got)
 		}
 		return typeVoid, nil
 	case "recv":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `channel.recv` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `channel.recv` expects 0 args, got %d", len(args))
 		}
 		return elem, nil
 	case "close":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `channel.close` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `channel.close` expects 0 args, got %d", len(args))
 		}
 		return typeVoid, nil
 	default:
-		return "", fmt.Errorf("type error: Channel has no method `%s`", name)
+		return "", errorf("type error: Channel has no method `%s`", name)
 	}
 }
 
@@ -5765,17 +5765,17 @@ func (c *Checker) checkPartitionMethod(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if name != "at" {
-		return "", fmt.Errorf("type error: Partition has no method `%s`", name)
+		return "", errorf("type error: Partition has no method `%s`", name)
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `partition.at` expects 1 arg, got %d", len(args))
+		return "", errorf("type error: `partition.at` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if got != typeI64 {
-		return "", fmt.Errorf("type error: `partition.at` expects i64, got %s", got)
+		return "", errorf("type error: `partition.at` expects i64, got %s", got)
 	}
 	return typeI64, nil
 }
@@ -5788,17 +5788,17 @@ func (c *Checker) checkLocalBufferMethod(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if name != "get" {
-		return "", fmt.Errorf("type error: LocalBuffer has no method `%s`", name)
+		return "", errorf("type error: LocalBuffer has no method `%s`", name)
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `LocalBuffer.get` expects 1 arg, got %d", len(args))
+		return "", errorf("type error: `LocalBuffer.get` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if got != typeI64 {
-		return "", fmt.Errorf("type error: `LocalBuffer.get` expects i64, got %s", got)
+		return "", errorf("type error: `LocalBuffer.get` expects i64, got %s", got)
 	}
 	return typeI64, nil
 }
@@ -5814,33 +5814,33 @@ func (c *Checker) checkAtomicMethod(
 	switch name {
 	case "load":
 		if len(args) != 0 {
-			return "", fmt.Errorf("type error: `atomic.load` expects 0 args, got %d", len(args))
+			return "", errorf("type error: `atomic.load` expects 0 args, got %d", len(args))
 		}
 		return elem, nil
 	case "store":
 		if len(args) != 1 {
-			return "", fmt.Errorf("type error: `atomic.store` expects 1 arg, got %d", len(args))
+			return "", errorf("type error: `atomic.store` expects 1 arg, got %d", len(args))
 		}
 		got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 		if err != nil {
 			return "", err
 		}
 		if !sameType(got, elem) {
-			return "", fmt.Errorf("type error: `atomic.store` expects %s, got %s", elem, got)
+			return "", errorf("type error: `atomic.store` expects %s, got %s", elem, got)
 		}
 		return typeVoid, nil
 	default:
-		return "", fmt.Errorf("type error: Atomic has no method `%s`", name)
+		return "", errorf("type error: Atomic has no method `%s`", name)
 	}
 }
 
 // checkMutexMethod validates the minimal synchronized wrapper API.
 func (c *Checker) checkMutexMethod(elem Type, name string, args []ast.Expression) (Type, error) {
 	if name != "get" {
-		return "", fmt.Errorf("type error: Mutex has no method `%s`", name)
+		return "", errorf("type error: Mutex has no method `%s`", name)
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("type error: `mutex.get` expects 0 args, got %d", len(args))
+		return "", errorf("type error: `mutex.get` expects 0 args, got %d", len(args))
 	}
 	return elem, nil
 }
@@ -5848,7 +5848,7 @@ func (c *Checker) checkMutexMethod(elem Type, name string, args []ast.Expression
 // checkTaskMethod validates await/cancel on a task value.
 func checkTaskMethod(name string, elem string, args []ast.Expression) (Type, error) {
 	if len(args) != 0 {
-		return "", fmt.Errorf("type error: `task.%s` expects 0 args, got %d", name, len(args))
+		return "", errorf("type error: `task.%s` expects 0 args, got %d", name, len(args))
 	}
 	switch name {
 	case "await":
@@ -5856,7 +5856,7 @@ func checkTaskMethod(name string, elem string, args []ast.Expression) (Type, err
 	case "cancel":
 		return typeVoid, nil
 	default:
-		return "", fmt.Errorf("type error: Task has no method `%s`", name)
+		return "", errorf("type error: Task has no method `%s`", name)
 	}
 }
 
@@ -5867,21 +5867,21 @@ func (c *Checker) checkPartitionMut(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `std::task::partition_mut` expects 2 args")
+		return "", true, errorf("type error: `std::task::partition_mut` expects 2 args")
 	}
 	init, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if init != typeI64 {
-		return "", true, fmt.Errorf("type error: partition init expects i64, got %s", init)
+		return "", true, errorf("type error: partition init expects i64, got %s", init)
 	}
 	count, err := c.checkExpr(args[1], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if count != typeI64 {
-		return "", true, fmt.Errorf("type error: partition count expects i64, got %s", count)
+		return "", true, errorf("type error: partition count expects i64, got %s", count)
 	}
 	return "Partition", true, nil
 }
@@ -5893,14 +5893,14 @@ func (c *Checker) checkLocalBuffer(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 2 {
-		return "", true, fmt.Errorf("type error: `std::task::LocalBuffer` expects 2 args")
+		return "", true, errorf("type error: `std::task::LocalBuffer` expects 2 args")
 	}
 	count, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if count != typeI64 {
-		return "", true, fmt.Errorf("type error: LocalBuffer count expects i64, got %s", count)
+		return "", true, errorf("type error: LocalBuffer count expects i64, got %s", count)
 	}
 	if _, err := c.checkExpr(args[1], env, unsafe); err != nil {
 		return "", true, err
@@ -5915,23 +5915,23 @@ func (c *Checker) checkParallelFor(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 4 {
-		return "", true, fmt.Errorf("type error: `std::task::parallel_for` expects 4 args")
+		return "", true, errorf("type error: `std::task::parallel_for` expects 4 args")
 	}
 	if err := c.checkIoAndRange(args, env, unsafe, "std::task::parallel_for"); err != nil {
 		return "", true, err
 	}
 	target, targetFn, forwarded, ok := c.resolveFunctionNameArg(args[3], env)
 	if !ok {
-		return "", true, fmt.Errorf("type error: `std::task::parallel_for` expects function name")
+		return "", true, errorf("type error: `std::task::parallel_for` expects function name")
 	}
 	if targetFn == nil && !forwarded {
-		return "", true, fmt.Errorf("type error: undefined function `%s`", target)
+		return "", true, errorf("type error: undefined function `%s`", target)
 	}
 	if forwarded {
 		return "!void", true, nil
 	}
 	if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
-		return "", true, fmt.Errorf("type error: parallel worker `%s` must accept i64", target)
+		return "", true, errorf("type error: parallel worker `%s` must accept i64", target)
 	}
 	typ, err := c.parallelReturnType(targetFn)
 	return typ, true, err
@@ -5944,17 +5944,17 @@ func (c *Checker) checkParallelMap(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 5 {
-		return "", true, fmt.Errorf("type error: `std::task::parallel_map` expects 5 args")
+		return "", true, errorf("type error: `std::task::parallel_map` expects 5 args")
 	}
 	if err := c.checkIoAndPartitionRange(args, env, unsafe); err != nil {
 		return "", true, err
 	}
 	target, targetFn, forwarded, ok := c.resolveFunctionNameArg(args[4], env)
 	if !ok {
-		return "", true, fmt.Errorf("type error: `std::task::parallel_map` expects function name")
+		return "", true, errorf("type error: `std::task::parallel_map` expects function name")
 	}
 	if targetFn == nil && !forwarded {
-		return "", true, fmt.Errorf("type error: undefined function `%s`", target)
+		return "", true, errorf("type error: undefined function `%s`", target)
 	}
 	if forwarded {
 		return typeVoid, true, nil
@@ -5968,10 +5968,10 @@ func (c *Checker) checkParallelMap(
 // checkParallelMapWorker validates the disjoint-output map worker signature.
 func (c *Checker) checkParallelMapWorker(target string, targetFn *functionType) error {
 	if len(targetFn.params) != 1 || targetFn.params[0] != typeI64 {
-		return fmt.Errorf("type error: parallel map worker `%s` must accept i64", target)
+		return errorf("type error: parallel map worker `%s` must accept i64", target)
 	}
 	if targetFn.returnType != typeI64 {
-		return fmt.Errorf("type error: parallel map worker `%s` must return i64", target)
+		return errorf("type error: parallel map worker `%s` must return i64", target)
 	}
 	return nil
 }
@@ -6002,20 +6002,20 @@ func (c *Checker) checkThreadScopedTyped(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 3 {
-		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects io, function, and arg")
+		return "", true, errorf("type error: `std::thread::scoped` expects io, function, and arg")
 	}
 	if err := c.checkIoArg(args[0], env, unsafe, "std::thread::scoped"); err != nil {
 		return "", true, err
 	}
 	if _, _, _, ok := c.resolveFunctionNameArg(args[1], env); !ok {
-		return "", true, fmt.Errorf("type error: `std::thread::scoped` expects function name")
+		return "", true, errorf("type error: `std::thread::scoped` expects function name")
 	}
 	got, err := c.checkContextualExpr(args[2], argType, env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if !sameType(got, argType) {
-		return "", true, fmt.Errorf("type error: arg 1 of `std::thread::scoped` expects %s, got %s",
+		return "", true, errorf("type error: arg 1 of `std::thread::scoped` expects %s, got %s",
 			argType, got)
 	}
 	return argType, true, nil
@@ -6029,17 +6029,17 @@ func (c *Checker) checkAtomic(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if !c.typeParams[string(elem)] && !isAtomicSupportedType(elem) {
-		return "", true, fmt.Errorf("type error: unsupported atomic type `%s` in v0.1", elem)
+		return "", true, errorf("type error: unsupported atomic type `%s` in v0.1", elem)
 	}
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
+		return "", true, errorf("type error: `std::atomic::Atomic<%s>` expects 1 arg", elem)
 	}
 	got, err := c.checkContextualExpr(args[0], elem, env, unsafe)
 	if err != nil {
 		return "", true, err
 	}
 	if !sameType(got, elem) {
-		return "", true, fmt.Errorf("type error: `std::atomic::Atomic<%s>` expects %s, got %s",
+		return "", true, errorf("type error: `std::atomic::Atomic<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
 	return Type(fmt.Sprintf("Atomic<%s>", elem)), true, nil
@@ -6053,7 +6053,7 @@ func (c *Checker) checkMutex(
 	unsafe unsafeCaps,
 ) (Type, bool, error) {
 	if len(args) != 1 {
-		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects 1 arg", elem)
+		return "", true, errorf("type error: `std::sync::Mutex<%s>` expects 1 arg", elem)
 	}
 	if !c.typeParams[string(elem)] {
 		if err := c.rejectThreadBoundaryArg(args[0], env, unsafe); err != nil {
@@ -6065,11 +6065,11 @@ func (c *Checker) checkMutex(
 		return "", true, err
 	}
 	if !sameType(got, elem) {
-		return "", true, fmt.Errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
+		return "", true, errorf("type error: `std::sync::Mutex<%s>` expects %s, got %s",
 			elem, elem, got)
 	}
 	if !c.typeParams[string(elem)] && !c.isCopyType(elem) {
-		return "", true, fmt.Errorf(
+		return "", true, errorf(
 			"type error: `std::sync::Mutex<%s>` requires copy value in v0.1", elem)
 	}
 	return Type(fmt.Sprintf("Mutex<%s>", elem)), true, nil
@@ -6086,7 +6086,7 @@ func (c *Checker) checkDynMethodCall(
 ) (Type, error) {
 	contract := c.contracts[contractName]
 	if contract == nil || contract.methods[name] == nil {
-		return "", fmt.Errorf("type error: `dyn %s` has no method `%s`", contractName, name)
+		return "", errorf("type error: `dyn %s` has no method `%s`", contractName, name)
 	}
 	return c.checkMethodArgs(contract.methods[name], typeSelf, span, args, env, unsafe)
 }
@@ -6101,14 +6101,14 @@ func (c *Checker) checkMethodArgs(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(method.params) == 0 {
-		return "", fmt.Errorf("type error: method `%s` must have self parameter", method.name)
+		return "", errorf("type error: method `%s` must have self parameter", method.name)
 	}
 	if len(args) != len(method.params)-1 {
-		return "", fmt.Errorf("type error: `%s` expects %d args, got %d",
+		return "", errorf("type error: `%s` expects %d args, got %d",
 			method.name, len(method.params)-1, len(args))
 	}
 	if method.params[0] != receiver && method.params[0] != typeSelf {
-		return "", fmt.Errorf("type error: method `%s` self expects %s, got %s",
+		return "", errorf("type error: method `%s` self expects %s, got %s",
 			method.name, method.params[0], receiver)
 	}
 	if method.requiresUnsafe {
@@ -6142,7 +6142,7 @@ func (c *Checker) checkMethodArgs(
 			return "", err
 		}
 		if !sameType(got, want) {
-			return "", fmt.Errorf("type error: arg %d of `%s` expects %s, got %s",
+			return "", errorf("type error: arg %d of `%s` expects %s, got %s",
 				idx+1, method.name, want, got)
 		}
 	}
@@ -6156,20 +6156,20 @@ func requireMutableBorrowArg(expr ast.Expression, env *scope) error {
 		if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
 			return nil
 		}
-		return fmt.Errorf("type error: &var argument `%s` must be mutable", ident.Name)
+		return errorf("type error: &var argument `%s` must be mutable", ident.Name)
 	}
 	field, fieldOK := expr.(*ast.FieldExpr)
 	if !fieldOK {
-		return fmt.Errorf("type error: &var argument must be a mutable local binding")
+		return errorf("type error: &var argument must be a mutable local binding")
 	}
 	ident, ok = field.Receiver.(*ast.IdentExpr)
 	if !ok {
-		return fmt.Errorf("type error: &var argument must be a mutable local binding")
+		return errorf("type error: &var argument must be a mutable local binding")
 	}
 	if env.isMutable(ident.Name) || env.isMutBorrowed(ident.Name) {
 		return nil
 	}
-	return fmt.Errorf("type error: &var argument `%s` must be mutable", ident.Name)
+	return errorf("type error: &var argument `%s` must be mutable", ident.Name)
 }
 
 // prepareBorrowArgument unwraps explicit &/&var syntax only for borrowed parameters.
@@ -6184,16 +6184,16 @@ func prepareBorrowArgument(
 		return arg, nil
 	}
 	if !wantBorrow {
-		return nil, fmt.Errorf("type error: borrow argument cannot be passed to owning parameter")
+		return nil, errorf("type error: borrow argument cannot be passed to owning parameter")
 	}
 	if err := checkBorrowTargetShape(prefix.Right); err != nil {
 		return nil, err
 	}
 	if prefix.Operator == "&var" && !wantMutable {
-		return nil, fmt.Errorf("type error: argument expects &T, got &var")
+		return nil, errorf("type error: argument expects &T, got &var")
 	}
 	if prefix.Operator == "&" && wantMutable {
-		return nil, fmt.Errorf("type error: argument expects &var T, got &T")
+		return nil, errorf("type error: argument expects &var T, got &T")
 	}
 	if wantMutable {
 		if err := requireMutableBorrowArg(prefix.Right, env); err != nil {
@@ -6221,9 +6221,9 @@ func checkBorrowTargetShape(expr ast.Expression) error {
 		if _, ok := target.Receiver.(*ast.IdentExpr); ok {
 			return nil
 		}
-		return fmt.Errorf("type error: v0.1 field borrow only supports one direct field")
+		return errorf("type error: v0.1 field borrow only supports one direct field")
 	default:
-		return fmt.Errorf("type error: borrow target must be a local binding or direct field")
+		return errorf("type error: borrow target must be a local binding or direct field")
 	}
 }
 
@@ -6235,14 +6235,14 @@ func (c *Checker) checkArenaAdd(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `arena.add` expects 1 arg, got %d", len(args))
+		return "", errorf("type error: `arena.add` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !sameType(got, Type(arg)) {
-		return "", fmt.Errorf("type error: `arena.add` expects %s, got %s", arg, got)
+		return "", errorf("type error: `arena.add` expects %s, got %s", arg, got)
 	}
 	return Type(fmt.Sprintf("std::arena::Handle<%s>", arg)), nil
 }
@@ -6255,7 +6255,7 @@ func (c *Checker) checkArenaGet(
 	unsafe unsafeCaps,
 ) (Type, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `arena.get` expects 1 arg, got %d", len(args))
+		return "", errorf("type error: `arena.get` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
@@ -6263,7 +6263,7 @@ func (c *Checker) checkArenaGet(
 	}
 	want := Type(fmt.Sprintf("std::arena::Handle<%s>", arg))
 	if !sameType(got, want) {
-		return "", fmt.Errorf("type error: `arena.get` expects %s, got %s", want, got)
+		return "", errorf("type error: `arena.get` expects %s, got %s", want, got)
 	}
 	return Type(arg), nil
 }
@@ -6276,13 +6276,13 @@ func (c *Checker) checkArenaDeinit(
 ) (Type, error) {
 	ident, ok := field.Receiver.(*ast.IdentExpr)
 	if !ok && !c.directFieldCleanupReceiver(field.Receiver, env) {
-		return "", fmt.Errorf("type error: `arena.deinit` requires local arena receiver")
+		return "", errorf("type error: `arena.deinit` requires local arena receiver")
 	}
 	if ok && env.isBorrowed(ident.Name) {
-		return "", fmt.Errorf("type error: `arena.deinit` requires owned arena receiver")
+		return "", errorf("type error: `arena.deinit` requires owned arena receiver")
 	}
 	if len(args) != 0 {
-		return "", fmt.Errorf("type error: `arena.deinit` expects 0 args, got %d", len(args))
+		return "", errorf("type error: `arena.deinit` expects 0 args, got %d", len(args))
 	}
 	return typeVoid, nil
 }
@@ -6304,7 +6304,7 @@ func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeCaps
 		return "", err
 	}
 	if len(expr.Args) != 1 {
-		return "", fmt.Errorf("type error: `ptr_read` expects 1 arg, got %d", len(expr.Args))
+		return "", errorf("type error: `ptr_read` expects 1 arg, got %d", len(expr.Args))
 	}
 	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
 	if err != nil {
@@ -6312,7 +6312,7 @@ func (c *Checker) checkPtrRead(expr *ast.CallExpr, env *scope, unsafe unsafeCaps
 	}
 	elem, ok := pointerElement(ptrType)
 	if !ok || strings.HasPrefix(string(ptrType), "?") {
-		return "", fmt.Errorf("type error: `ptr_read` expects non-null raw pointer, got %s", ptrType)
+		return "", errorf("type error: `ptr_read` expects non-null raw pointer, got %s", ptrType)
 	}
 	return Type(strings.TrimPrefix(elem, "const ")), nil
 }
@@ -6328,7 +6328,7 @@ func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe unsafeCap
 		return "", err
 	}
 	if len(expr.Args) != 2 {
-		return "", fmt.Errorf("type error: `ptr_write` expects 2 args, got %d", len(expr.Args))
+		return "", errorf("type error: `ptr_write` expects 2 args, got %d", len(expr.Args))
 	}
 	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
 	if err != nil {
@@ -6336,14 +6336,14 @@ func (c *Checker) checkPtrWrite(expr *ast.CallExpr, env *scope, unsafe unsafeCap
 	}
 	elem, ok := pointerElement(ptrType)
 	if !ok || strings.HasPrefix(string(ptrType), "?") || strings.HasPrefix(elem, "const ") {
-		return "", fmt.Errorf("type error: `ptr_write` expects mutable non-null raw pointer")
+		return "", errorf("type error: `ptr_write` expects mutable non-null raw pointer")
 	}
 	valueType, err := c.checkContextualExpr(expr.Args[1], Type(elem), env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !sameType(valueType, Type(elem)) {
-		return "", fmt.Errorf("type error: `ptr_write` expects %s, got %s", elem, valueType)
+		return "", errorf("type error: `ptr_write` expects %s, got %s", elem, valueType)
 	}
 	return typeVoid, nil
 }
@@ -6364,17 +6364,17 @@ func (c *Checker) checkPtrFromInt(
 		return "", err
 	}
 	if !isPointerType(target) || strings.HasPrefix(string(target), "?") {
-		return "", fmt.Errorf("type error: `ptr_from_int` target must be non-null raw pointer")
+		return "", errorf("type error: `ptr_from_int` target must be non-null raw pointer")
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `ptr_from_int` expects 1 arg, got %d", len(args))
+		return "", errorf("type error: `ptr_from_int` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !integerTypes[got] {
-		return "", fmt.Errorf("type error: `ptr_from_int` expects integer, got %s", got)
+		return "", errorf("type error: `ptr_from_int` expects integer, got %s", got)
 	}
 	return target, nil
 }
@@ -6395,17 +6395,17 @@ func (c *Checker) checkIntFromPtr(
 		return "", err
 	}
 	if !integerTypes[target] {
-		return "", fmt.Errorf("type error: `int_from_ptr` target must be integer")
+		return "", errorf("type error: `int_from_ptr` target must be integer")
 	}
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `int_from_ptr` expects 1 arg, got %d", len(args))
+		return "", errorf("type error: `int_from_ptr` expects 1 arg, got %d", len(args))
 	}
 	got, err := c.checkExpr(args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !isPointerType(got) {
-		return "", fmt.Errorf("type error: `int_from_ptr` expects raw pointer, got %s", got)
+		return "", errorf("type error: `int_from_ptr` expects raw pointer, got %s", got)
 	}
 	return target, nil
 }
@@ -6425,7 +6425,7 @@ func (c *Checker) checkVolatileRead(
 		return "", err
 	}
 	if len(expr.Args) != 1 {
-		return "", fmt.Errorf("type error: `volatile_read` expects 1 arg, got %d", len(expr.Args))
+		return "", errorf("type error: `volatile_read` expects 1 arg, got %d", len(expr.Args))
 	}
 	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
 	if err != nil {
@@ -6433,7 +6433,7 @@ func (c *Checker) checkVolatileRead(
 	}
 	elem, ok := pointerElement(ptrType)
 	if !ok || strings.HasPrefix(string(ptrType), "?") {
-		return "", fmt.Errorf("type error: `volatile_read` expects non-null raw pointer, got %s", ptrType)
+		return "", errorf("type error: `volatile_read` expects non-null raw pointer, got %s", ptrType)
 	}
 	return Type(strings.TrimPrefix(elem, "const ")), nil
 }
@@ -6453,7 +6453,7 @@ func (c *Checker) checkVolatileWrite(
 		return "", err
 	}
 	if len(expr.Args) != 2 {
-		return "", fmt.Errorf("type error: `volatile_write` expects 2 args, got %d", len(expr.Args))
+		return "", errorf("type error: `volatile_write` expects 2 args, got %d", len(expr.Args))
 	}
 	ptrType, err := c.checkExpr(expr.Args[0], env, unsafe)
 	if err != nil {
@@ -6461,14 +6461,14 @@ func (c *Checker) checkVolatileWrite(
 	}
 	elem, ok := pointerElement(ptrType)
 	if !ok || strings.HasPrefix(string(ptrType), "?") || strings.HasPrefix(elem, "const ") {
-		return "", fmt.Errorf("type error: `volatile_write` expects mutable non-null raw pointer")
+		return "", errorf("type error: `volatile_write` expects mutable non-null raw pointer")
 	}
 	valueType, err := c.checkContextualExpr(expr.Args[1], Type(elem), env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if !sameType(valueType, Type(elem)) {
-		return "", fmt.Errorf("type error: `volatile_write` expects %s, got %s", elem, valueType)
+		return "", errorf("type error: `volatile_write` expects %s, got %s", elem, valueType)
 	}
 	return typeVoid, nil
 }
@@ -6487,10 +6487,10 @@ func pointerElement(typ Type) (string, bool) {
 func rawPointerDerefType(typ Type) (Type, error) {
 	elem, ok := pointerElement(typ)
 	if !ok {
-		return "", fmt.Errorf("type error: `%s` is not a raw pointer", typ)
+		return "", errorf("type error: `%s` is not a raw pointer", typ)
 	}
 	if strings.HasPrefix(string(typ), "?") {
-		return "", fmt.Errorf("type error: nullable raw pointer `%s` cannot be dereferenced", typ)
+		return "", errorf("type error: nullable raw pointer `%s` cannot be dereferenced", typ)
 	}
 	return Type(strings.TrimPrefix(elem, "const ")), nil
 }
@@ -6499,13 +6499,13 @@ func rawPointerDerefType(typ Type) (Type, error) {
 func assignableRawPointerDerefType(typ Type) (Type, error) {
 	elem, ok := pointerElement(typ)
 	if !ok {
-		return "", fmt.Errorf("type error: `%s` is not a raw pointer", typ)
+		return "", errorf("type error: `%s` is not a raw pointer", typ)
 	}
 	if strings.HasPrefix(string(typ), "?") {
-		return "", fmt.Errorf("type error: nullable raw pointer `%s` cannot be dereferenced", typ)
+		return "", errorf("type error: nullable raw pointer `%s` cannot be dereferenced", typ)
 	}
 	if strings.HasPrefix(elem, "const ") {
-		return "", fmt.Errorf("type error: cannot assign through const raw pointer `%s`", typ)
+		return "", errorf("type error: cannot assign through const raw pointer `%s`", typ)
 	}
 	return Type(elem), nil
 }
@@ -6622,7 +6622,7 @@ func isAtomicSupportedType(typ Type) bool {
 // checkNoArgConstructor validates a zero-argument builtin constructor.
 func checkNoArgConstructor(name string, args []ast.Expression, typ Type) (Type, error) {
 	if len(args) != 0 {
-		return "", fmt.Errorf("type error: `%s` expects 0 args, got %d", name, len(args))
+		return "", errorf("type error: `%s` expects 0 args, got %d", name, len(args))
 	}
 	return typ, nil
 }
@@ -6648,7 +6648,7 @@ func (c *Checker) checkIoAndRange(
 		return err
 	}
 	if ioType != "Io" {
-		return fmt.Errorf("type error: `%s` expects Io, got %s", name, ioType)
+		return errorf("type error: `%s` expects Io, got %s", name, ioType)
 	}
 	for idx := 1; idx <= 2; idx++ {
 		got, err := c.checkExpr(args[idx], env, unsafe)
@@ -6656,7 +6656,7 @@ func (c *Checker) checkIoAndRange(
 			return err
 		}
 		if got != typeI64 {
-			return fmt.Errorf("type error: `%s` range expects i64, got %s", name, got)
+			return errorf("type error: `%s` range expects i64, got %s", name, got)
 		}
 	}
 	return nil
@@ -6673,14 +6673,14 @@ func (c *Checker) checkIoAndPartitionRange(
 		return err
 	}
 	if ioType != "Io" {
-		return fmt.Errorf("type error: `std::task::parallel_map` expects Io, got %s", ioType)
+		return errorf("type error: `std::task::parallel_map` expects Io, got %s", ioType)
 	}
 	partitionType, err := c.checkExpr(args[1], env, unsafe)
 	if err != nil {
 		return err
 	}
 	if partitionType != "Partition" {
-		return fmt.Errorf("type error: `std::task::parallel_map` expects Partition, got %s",
+		return errorf("type error: `std::task::parallel_map` expects Partition, got %s",
 			partitionType)
 	}
 	for idx := 2; idx <= 3; idx++ {
@@ -6689,7 +6689,7 @@ func (c *Checker) checkIoAndPartitionRange(
 			return err
 		}
 		if got != typeI64 {
-			return fmt.Errorf("type error: `std::task::parallel_map` range expects i64, got %s", got)
+			return errorf("type error: `std::task::parallel_map` range expects i64, got %s", got)
 		}
 	}
 	return nil
@@ -6703,7 +6703,7 @@ func (c *Checker) parallelReturnType(fn *functionType) (Type, error) {
 	if elem, ok := errorUnionElement(fn.returnType); ok && elem == string(typeVoid) {
 		return fn.returnType, nil
 	}
-	return "", fmt.Errorf("type error: parallel worker `%s` must return void or !void", fn.name)
+	return "", errorf("type error: parallel worker `%s` must return void or !void", fn.name)
 }
 
 // checkThreadScopedWorker validates the one-argument scoped worker signature.
@@ -6713,13 +6713,13 @@ func (c *Checker) checkThreadScopedWorker(
 	targetFn *functionType,
 ) error {
 	if len(targetFn.params) != 1 || targetFn.params[0] != typ {
-		return fmt.Errorf("type error: thread worker `%s` must accept %s", target, typ)
+		return errorf("type error: thread worker `%s` must accept %s", target, typ)
 	}
 	if targetFn.borrowParams[0] || targetFn.mutBorrowParams[0] {
-		return fmt.Errorf("type error: thread cannot capture borrow parameter `%s`", target)
+		return errorf("type error: thread cannot capture borrow parameter `%s`", target)
 	}
 	if targetFn.returnType != typ {
-		return fmt.Errorf("type error: thread worker `%s` must return %s", target, typ)
+		return errorf("type error: thread worker `%s` must return %s", target, typ)
 	}
 	return nil
 }
@@ -6727,7 +6727,7 @@ func (c *Checker) checkThreadScopedWorker(
 // rejectThreadBoundaryArg rejects values unsafe to move across concurrency boundaries.
 func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe unsafeCaps) error {
 	if ident, ok := arg.(*ast.IdentExpr); ok && env.isBorrowed(ident.Name) {
-		return fmt.Errorf("type error: borrow cannot cross concurrency boundary")
+		return errorf("type error: borrow cannot cross concurrency boundary")
 	}
 	got, err := c.checkExpr(arg, env, unsafe)
 	if err != nil {
@@ -6739,10 +6739,10 @@ func (c *Checker) rejectThreadBoundaryArg(arg ast.Expression, env *scope, unsafe
 // rejectThreadBoundaryType rejects types that cannot cross safe concurrency boundaries.
 func (c *Checker) rejectThreadBoundaryType(typ Type, seen map[Type]bool) error {
 	if isPointerType(typ) {
-		return fmt.Errorf("type error: raw pointer cannot cross concurrency boundary")
+		return errorf("type error: raw pointer cannot cross concurrency boundary")
 	}
 	if _, ok := dynContract(typ); ok {
-		return fmt.Errorf("type error: dyn cannot cross concurrency boundary")
+		return errorf("type error: dyn cannot cross concurrency boundary")
 	}
 	if seen[typ] {
 		return nil
@@ -6765,17 +6765,17 @@ func (c *Checker) rejectThreadBoundaryGeneric(typ Type, seen map[Type]bool) erro
 	}
 	switch base {
 	case "std::arena::Arena":
-		return fmt.Errorf("type error: arena cannot cross concurrency boundary")
+		return errorf("type error: arena cannot cross concurrency boundary")
 	case "std::array::Array":
-		return fmt.Errorf("type error: Array cannot cross concurrency boundary in v0.2")
+		return errorf("type error: Array cannot cross concurrency boundary in v0.2")
 	case "std::map::Map":
-		return fmt.Errorf("type error: Map cannot cross concurrency boundary in v0.2")
+		return errorf("type error: Map cannot cross concurrency boundary in v0.2")
 	case "std::arena::Handle":
-		return fmt.Errorf("type error: handle cannot cross concurrency boundary")
+		return errorf("type error: handle cannot cross concurrency boundary")
 	case "Mutex":
-		return fmt.Errorf("type error: Mutex cannot cross concurrency boundary in v0.1")
+		return errorf("type error: Mutex cannot cross concurrency boundary in v0.1")
 	case "Task":
-		return fmt.Errorf("type error: Task cannot cross concurrency boundary")
+		return errorf("type error: Task cannot cross concurrency boundary")
 	case "Channel", "option":
 		return c.rejectThreadBoundaryNamedArg(arg, seen)
 	case "Atomic":
@@ -6801,7 +6801,7 @@ func (c *Checker) rejectThreadBoundaryAtomic(name string, seen map[Type]bool) er
 		return err
 	}
 	if !isAtomicSupportedType(typ) {
-		return fmt.Errorf("type error: Atomic<%s> cannot cross concurrency boundary in v0.1", typ)
+		return errorf("type error: Atomic<%s> cannot cross concurrency boundary in v0.1", typ)
 	}
 	return c.rejectThreadBoundaryType(typ, seen)
 }
@@ -6818,7 +6818,7 @@ func (c *Checker) rejectThreadBoundaryStruct(typ Type, seen map[Type]bool) error
 			return err
 		}
 		if err := c.rejectThreadBoundaryType(fieldType, seen); err != nil {
-			return fmt.Errorf("type error: struct `%s.%s` cannot cross concurrency boundary: %w",
+			return errorf("type error: struct `%s.%s` cannot cross concurrency boundary: %w",
 				typ, field.Name, err)
 		}
 	}
@@ -6840,7 +6840,7 @@ func (c *Checker) rejectThreadBoundaryUnion(typ Type, seen map[Type]bool) error 
 			return err
 		}
 		if err := c.rejectThreadBoundaryType(payloadType, seen); err != nil {
-			return fmt.Errorf("type error: union `%s::%s` cannot cross concurrency boundary: %w",
+			return errorf("type error: union `%s::%s` cannot cross concurrency boundary: %w",
 				typ, variant, err)
 		}
 	}
@@ -7022,14 +7022,14 @@ func typedErrorUnionParts(name string) (string, string, bool) {
 // checkPrintCall validates the print builtin.
 func (c *Checker) checkPrintCall(expr *ast.CallExpr, env *scope, unsafe unsafeCaps) (Type, error) {
 	if len(expr.Args) != 1 {
-		return "", fmt.Errorf("type error: `print` expects 1 arg, got %d", len(expr.Args))
+		return "", errorf("type error: `print` expects 1 arg, got %d", len(expr.Args))
 	}
 	got, err := c.checkExpr(expr.Args[0], env, unsafe)
 	if err != nil {
 		return "", err
 	}
 	if got == typeVoid {
-		return "", fmt.Errorf("type error: `print` cannot print void")
+		return "", errorf("type error: `print` cannot print void")
 	}
 	return typeVoid, nil
 }
@@ -7051,7 +7051,7 @@ func (s *scope) child() *scope {
 // define binds a local name to a type in the current scope.
 func (s *scope) define(name string, typ Type, mutable bool) error {
 	if _, exists := s.values[name]; exists {
-		return fmt.Errorf("type error: duplicate variable `%s`", name)
+		return errorf("type error: duplicate variable `%s`", name)
 	}
 	s.values[name] = typ
 	s.mutable[name] = mutable
@@ -7199,7 +7199,7 @@ func splitGenericArgs(arg string) ([]string, bool) {
 // singleGenericArg returns the only argument for one-parameter generic types.
 func singleGenericArg(base string, args []string) (string, error) {
 	if len(args) != 1 {
-		return "", fmt.Errorf("type error: `%s` expects 1 static argument", base)
+		return "", errorf("type error: `%s` expects 1 static argument", base)
 	}
 	return args[0], nil
 }

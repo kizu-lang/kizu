@@ -16,7 +16,7 @@ pub fn file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
     let validation_ok = parsed_validation.ok;
     if !validation_ok {
-        return try write_parse_failure_exit(allocator, io, parsed_validation);
+        return try write_parse_failure_exit(allocator, io, path, parsed_validation);
     }
 
     var files = try loader::load_file_sources(allocator, io, path, file_text);
@@ -196,7 +196,7 @@ fn parse_package_fast_diagnostic_source(
         );
         let validation_ok = parsed_validation.ok;
         if !validation_ok {
-            return try write_parse_failure(allocator, io, parsed_validation);
+            return try write_parse_failure(allocator, io, file.path, parsed_validation);
         }
         let parsed = try parser::parse_validated_file(
             allocator,
@@ -278,7 +278,7 @@ pub fn fast_diagnostics(
     let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
     let validation_ok = parsed_validation.ok;
     if !validation_ok {
-        return try write_parse_failure(allocator, io, parsed_validation);
+        return try write_parse_failure(allocator, io, path, parsed_validation);
     }
     var files = try loader::load_file_sources(allocator, io, path, file_text);
     defer files.deinit();
@@ -393,19 +393,27 @@ fn fast_diagnostics_ast_node_with_context(
         &var facts.type_arities,
         &var facts.copyable_types
     );
-    if !(try write_check_diagnostic(allocator, io, file.text, &pre_move)) {
+    if !(try write_check_diagnostic(allocator, io, file.path, file.text, &pre_move)) {
         return false;
     }
 
-    let moved_name = try ownership::first_use_after_move_name_ast_node_with_borrow_params(
+    let moved = try ownership::first_use_after_move_summary_ast_node_with_borrow_params(
         allocator,
         file,
         ast,
         root,
         &facts.borrow_params
     );
-    if !std::mem::equal_bytes(moved_name, "") {
-        try diagnostics::move_error(allocator, io, moved_name);
+    if moved.found {
+        try diagnostics::move_error(
+            allocator,
+            io,
+            file.path,
+            file.text,
+            moved.start,
+            moved.end,
+            moved.name
+        );
         return false;
     }
 
@@ -415,7 +423,7 @@ fn fast_diagnostics_ast_node_with_context(
         ast,
         root
     );
-    if !(try write_check_diagnostic(allocator, io, file.text, &post_move)) {
+    if !(try write_check_diagnostic(allocator, io, file.path, file.text, &post_move)) {
         return false;
     }
     if use_cached_arities and !(try write_cached_package_function_call_diagnostic(
@@ -444,124 +452,37 @@ fn fast_diagnostics_ast_node_with_context(
 fn write_parse_failure(
     allocator: Allocator,
     io: Io,
+    path: []u8,
     parsed_validation: validation::ParseValidation
 ) -> !bool {
-    try diagnostics::parse_validation_error(allocator, io, parsed_validation);
+    try diagnostics::parse_validation_error(allocator, io, path, parsed_validation);
     return false;
 }
 
 fn write_parse_failure_exit(
     allocator: Allocator,
     io: Io,
+    path: []u8,
     parsed_validation: validation::ParseValidation
 ) -> !i64 {
-    try diagnostics::parse_validation_error(allocator, io, parsed_validation);
+    try diagnostics::parse_validation_error(allocator, io, path, parsed_validation);
     return std::process::exit_code(1);
 }
 
 fn write_check_diagnostic(
     allocator: Allocator,
     io: Io,
+    path: []u8,
     file_text: []u8,
     diagnostic: &model::CheckDiagnosticSummary
 ) -> !bool {
-    if !diagnostic.found {
-        return true;
-    }
-    if diagnostic.kind == 1 {
-        return try write_check_type_reference_diagnostic(allocator, io, file_text, diagnostic);
-    }
-    if diagnostic.kind == 2 {
-        let match_summary = model::MatchDiagnosticSummary {
-            found: true,
-            kind: diagnostic.detail_kind,
-            name: diagnostic.name,
-            tag: diagnostic.tag
-        };
-        try diagnostics::match_error(allocator, io, match_summary);
-        return false;
-    }
-    if diagnostic.kind == 3 {
-        try output::error_line(allocator, io, "error: type error: return type mismatch");
-        return false;
-    }
-    if diagnostic.kind == 4 {
-        let call_summary = model::FunctionCallSummary {
-            found: true,
-            kind: diagnostic.detail_kind,
-            start: diagnostic.start,
-            end: diagnostic.end,
-            expected: diagnostic.expected,
-            observed: diagnostic.observed
-        };
-        try diagnostics::function_call_error(allocator, io, file_text, call_summary);
-        return false;
-    }
-    if diagnostic.kind == 5 {
-        try std::io::write_stderr(io, "error: type error: undefined variable `");
-        try std::io::write_stderr(io, diagnostic.name);
-        try output::error_line(allocator, io, "`");
-        return false;
-    }
-    if diagnostic.kind == 6 {
-        try output::error_line(allocator, io, "error: type error: argument type mismatch");
-        return false;
-    }
-    if diagnostic.kind == 7 {
-        try std::io::write_stderr(io, "error: type error: cannot assign to immutable binding `");
-        try std::io::write_stderr(io, diagnostic.name);
-        try output::error_line(allocator, io, "`");
-        return false;
-    }
-    if diagnostic.kind == 8 {
-        try std::io::write_stderr(io, "error: type error: invalid assignment target `");
-        try std::io::write_stderr(io, file_text[diagnostic.start..diagnostic.end]);
-        try output::error_line(allocator, io, "`");
-        return false;
-    }
-    if diagnostic.kind == 9 {
-        try output::error_line(allocator, io, "error: type error: assignment type mismatch");
-        return false;
-    }
-    if diagnostic.kind == 10 {
-        try std::io::write_stderr(io, "error: type error: function `");
-        try std::io::write_stderr(io, diagnostic.name);
-        try std::io::write_stderr(io, "` must return ");
-        try std::io::write_stderr(io, diagnostic.expected_text);
-        try output::stderr_newline(allocator, io);
-        return false;
-    }
-    if diagnostic.kind == 11 {
-        try output::error_line(allocator, io, "error: type error: operator operands must have same type");
-        return false;
-    }
-    try output::error_line(allocator, io, "error: check failed");
-    return false;
-}
-
-fn write_check_type_reference_diagnostic(
-    allocator: Allocator,
-    io: Io,
-    file_text: []u8,
-    diagnostic: &model::CheckDiagnosticSummary
-) -> !bool {
-    let name = file_text[diagnostic.start..diagnostic.end];
-    if diagnostic.detail_kind == 1 {
-        try diagnostics::unknown_type_error(allocator, io, name);
-        return false;
-    }
-    if diagnostic.detail_kind == 2 {
-        try diagnostics::type_arity_error(
-            allocator,
-            io,
-            name,
-            diagnostic.expected,
-            diagnostic.observed
-        );
-        return false;
-    }
-    try output::error_line(allocator, io, "error: check failed");
-    return false;
+    return try diagnostics::check_summary_error(
+        allocator,
+        io,
+        path,
+        file_text,
+        diagnostic
+    );
 }
 
 fn write_package_function_call_diagnostic(
@@ -580,7 +501,13 @@ fn write_package_function_call_diagnostic(
         root
     );
     if call_error.found {
-        try diagnostics::function_call_error(allocator, io, file.text, call_error);
+        try diagnostics::function_call_summary_error(
+            allocator,
+            io,
+            file.path,
+            file.text,
+            call_error
+        );
         return false;
     }
     return true;
@@ -603,7 +530,13 @@ fn write_cached_package_function_call_diagnostic(
         false
     );
     if call_error.found {
-        try diagnostics::function_call_error(allocator, io, file.text, call_error);
+        try diagnostics::function_call_summary_error(
+            allocator,
+            io,
+            file.path,
+            file.text,
+            call_error
+        );
         return false;
     }
     return true;

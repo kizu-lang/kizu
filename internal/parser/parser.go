@@ -15,7 +15,7 @@ type Parser struct {
 	l      *lexer.Lexer
 	cur    token.Token
 	peek   token.Token
-	errors []string
+	errors []Diagnostic
 }
 
 // New creates a parser over l.
@@ -28,6 +28,15 @@ func New(l *lexer.Lexer) *Parser {
 
 // Errors returns parse errors collected so far.
 func (p *Parser) Errors() []string {
+	errs := make([]string, 0, len(p.errors))
+	for _, diag := range p.errors {
+		errs = append(errs, diag.Error())
+	}
+	return errs
+}
+
+// Diagnostics returns parse diagnostics collected so far.
+func (p *Parser) Diagnostics() []Diagnostic {
 	return p.errors
 }
 
@@ -1671,7 +1680,7 @@ func (p *Parser) peekPrecedence() int {
 // errorf records a parse error at the current token.
 func (p *Parser) errorf(format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
-	p.errors = append(p.errors, fmt.Sprintf("error: %s at %d:%d", message, p.cur.Line, p.cur.Column))
+	p.errors = append(p.errors, diagnosticAtToken(p.cur, message))
 }
 
 // errorExpectedDeclaration reports the accepted top-level declaration starts.

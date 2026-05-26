@@ -674,7 +674,7 @@ func assertSelfhostFastDiagnosticsASTNode(t *testing.T, wrapperBody string, astB
 		"resolver::first_duplicate_declaration_ast_node(",
 		"types::first_pre_move_check_diagnostic_ast_node_with_types(",
 		"types::first_post_move_check_diagnostic_ast_node(",
-		"ownership::first_use_after_move_name_ast_node_with_borrow_params(",
+		"ownership::first_use_after_move_summary_ast_node_with_borrow_params(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(astBody, fragment) {
@@ -936,6 +936,7 @@ func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
 	functionCalls := readSelfhostFile(t, "../../selfhost/src/types/function_calls.kizu")
 	functionScan := readSelfhostFile(t, "../../selfhost/src/types/function_call_scan_ast.kizu")
 	checkCLI := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	diagnosticsCLI := readSelfhostFile(t, "../../selfhost/src/cli/diagnostics.kizu")
 	required := []string{
 		"var import_alias_starts = std::map::Map<[]u8, i64>(allocator)",
 		"var import_alias_ends = std::map::Map<[]u8, i64>(allocator)",
@@ -945,7 +946,7 @@ func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
 		"file.text[module_start..module_end]",
 		"try output::stderr_newline(allocator, io);",
 	}
-	content := functionCalls + functionScan + checkCLI
+	content := functionCalls + functionScan + checkCLI + diagnosticsCLI
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("selfhost import alias call resolution missing %q", fragment)
@@ -2864,7 +2865,7 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
 		"let validation_ok = parsed_validation.ok",
 		"if !validation_ok {",
-		"diagnostics::parse_validation_error(allocator, io, parsed_validation)",
+		"diagnostics::parse_validation_error(allocator, io, path, parsed_validation)",
 		"let parsed = try parser::parse_validated_file(",
 		"validation_ok",
 		"parsed.deinit();",

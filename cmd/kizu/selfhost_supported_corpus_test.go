@@ -161,7 +161,7 @@ func supportedCorpusText(key string) string {
 	case "check-ok":
 		return "check: ok\n"
 	case "moved-value-error":
-		return "error: move error: moved value `name` was used\n"
+		return "error: move error: moved value `name` was used at 12:11\n"
 	default:
 		return "unsupported expected output key: " + key + "\n"
 	}

@@ -1,7 +1,6 @@
 package ownership
 
 import (
-	"fmt"
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -112,7 +111,7 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 		if _, ok := c.typeArgValues[e.Name]; ok {
 			return "type", nil
 		}
-		return "", fmt.Errorf("borrow error: runtime value cannot cross comptime boundary")
+		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
 	case *ast.PrefixExpr:
 		return c.readComptimeOnly(e.Right)
 	case *ast.BinaryExpr:
@@ -125,7 +124,7 @@ func (c *Checker) readComptimeOnly(expr ast.Expression) (string, error) {
 		}
 		return left, nil
 	default:
-		return "", fmt.Errorf("borrow error: runtime value cannot cross comptime boundary")
+		return "", errorf("borrow error: runtime value cannot cross comptime boundary")
 	}
 }
 
