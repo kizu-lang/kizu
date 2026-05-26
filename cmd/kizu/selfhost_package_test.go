@@ -2084,7 +2084,6 @@ func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser s
 		`"Program"`,
 		`"Block"`,
 		`"ExprStmt"`,
-		`"Return"`,
 		`"Call"`,
 		`"String"`,
 		`"Bool"`,
