@@ -266,6 +266,16 @@ func nativeSourceRunCases() []runParityCase {
 			artifactMode: "hosted-artifact",
 			artifactStem: "run_local_string",
 		},
+		{
+			name:         "run_two_local_strings",
+			command:      "run",
+			fixture:      "selfhost/tests/cli/run_two_local_strings.kizu",
+			exitCode:     0,
+			stdoutGolden: "selfhost/tests/cli/golden/run_two_local_strings.stdout",
+			stderrGolden: "selfhost/tests/cli/golden/run_hello.stderr",
+			artifactMode: "hosted-artifact",
+			artifactStem: "run_two_local_strings",
+		},
 	}
 }
 

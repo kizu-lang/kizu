@@ -248,6 +248,33 @@ report; it does not rebuild bootstrap artifacts inside the parity test.
 Heavy cache/perf measurements remain explicit jobs unless a switch issue changes
 the CI policy with recorded timing and cache-size evidence.
 
+## Local Gate And Recovery Checklist
+
+Use the narrowest gate that proves the changed boundary:
+
+| Change kind | First gate | Checkpoint gate |
+| --- | --- | --- |
+| selfhost source without backend/runtime changes | `just selfhost-fast-gate` when `target/selfhost/stage2/selfhost` exists | `just selfhost-production-from-scratch` before merge |
+| executable run/test lowering | targeted Go test or `just selfhost-run-parity-gate` / `just selfhost-test-parity-gate` | `just selfhost-native-source-gate` and `just selfhost-fast-gate` |
+| backend/native/runtime artifact behavior | focused backend artifact test or native source gate | `just selfhost-production-from-scratch` |
+| frontend parity or oracle evidence | affected parity gate | `just selfhost-oracle` when the PR claims Go/Kizu oracle parity |
+| gate timing budget work | targeted timing command | `just selfhost-oracle-budget` |
+
+When a selfhost gate fails, classify it before rebuilding everything:
+
+| Symptom | Likely boundary | First recovery step |
+| --- | --- | --- |
+| parse/check diagnostic changed for one fixture | parser, resolver, type, or ownership | run the matching parity gate and inspect the checked-in golden |
+| `target/selfhost/stage2/selfhost` is missing | stale or absent bootstrap artifact | run `just selfhost-production-from-scratch` |
+| stage1/stage2 fingerprint mismatch | IR, backend, runtime, or nondeterministic artifact metadata | inspect `target/selfhost/reports/bootstrap.txt` and rerun `just selfhost-bootstrap` from a clean `target/selfhost` |
+| hosted artifact links but CLI exits 64 | executable lowering or supported block shape | run the affected run/test parity case and inspect emitted `.ll.meta` |
+| artifact contains a forbidden fallback marker | production boundary regression | remove the fallback path; do not add dispatch to Go |
+| runtime storage or host capability smoke fails | runtime ABI or host wrapper | run the focused backend artifact gate before broader gates |
+
+If artifact staleness is suspected, remove only `target/selfhost` and rebuild
+with `just selfhost-production-from-scratch`. Do not add automatic fallback from
+the hosted artifact to Go compiler phases to recover a local gate.
+
 ## Failure And Rollback Policy
 
 - Any stage comparison mismatch blocks the production switch.

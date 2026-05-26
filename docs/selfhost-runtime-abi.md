@@ -360,6 +360,26 @@ concrete reachable call site.
 The first argument is the explicit `Io` capability. The runtime must not use a
 hidden global default capability.
 
+## Stdlib And Runtime Capability Inventory
+
+This inventory records which capabilities are available before shrinking
+Go-owned compiler helpers further:
+
+| Capability | Status | Boundary |
+| --- | --- | --- |
+| file loading | available | `std::fs::{exists, metadata, read_dir, read_file}` through explicit `Io` |
+| artifact writing | available | `std::fs::write_file`, `std::fs::create_dir`, and publish/rename runtime boundary |
+| path handling | available | Kizu `std::path` and `std::path_bits`; no host path fallback |
+| arrays | available | `std::array::Array<T>` over opaque runtime storage |
+| strings | available | `std::string::String` over opaque runtime storage |
+| maps | available for current compiler tables | `std::map::Map<[]u8, i64>` style copy payloads; broader payloads need issue-linked ABI work |
+| allocator capability | available | explicit `std::mem::page_allocator()`; no implicit allocator fallback |
+| diagnostics rendering | available for current CLI gates | structured source diagnostics remain a replacement blocker for broader frontend switches |
+| process args/env/exit | available | `std::process::{arg_count, arg, env, exit_code}` and explicit process exit boundary |
+| stdout/stderr | available | `std::io::blocking`, `write_stdout`, and `write_stderr` |
+| future embed/builtin needs | blocked | `@embed` and broader `@` builtin syntax remain tracked by #610 |
+| fixed-buffer/user allocators | needs issue | allocator API design remains tracked by #549 |
+
 ## Host Capability Binding
 
 #457 binds the host-facing side of the ABI through
