@@ -1,14 +1,16 @@
+import selfhost::backend::data;
+import selfhost::backend::executable;
 import selfhost::backend::ir_contract;
 
 pub fn require(ir_bytes: []u8) -> !void {
     let run_function = "selfhost::backend::executable::lower_run_executable_ast";
     let test_function = "selfhost::backend::executable::lower_test_executable_ast";
-    try require_cases(ir_bytes, run_function);
-    try require_cases(ir_bytes, test_function);
+    try require_cases(ir_bytes, run_function, false);
+    try require_cases(ir_bytes, test_function, true);
     return;
 }
 
-pub fn case_count(ir_bytes: []u8, function_name: []u8) -> !i64 {
+fn case_count(ir_bytes: []u8, function_name: []u8) -> !i64 {
     try require_body_node_kind(ir_bytes, function_name, 0, "Block");
 
     let node_count = try ir_contract::body_node_count(ir_bytes, function_name);
@@ -43,7 +45,7 @@ pub fn case_count(ir_bytes: []u8, function_name: []u8) -> !i64 {
     return error("missing selected body lowering fallback");
 }
 
-pub fn case_ast_kind_name(
+fn case_ast_kind_name(
     ir_bytes: []u8,
     function_name: []u8,
     index: i64
@@ -66,11 +68,11 @@ pub fn case_ast_kind_name(
     return try field_expr_name(ir_bytes, function_name, right, "namespace");
 }
 
-pub fn case_result_kind_name(
+fn case_result_kind_name(
     ir_bytes: []u8,
     function_name: []u8,
     index: i64
-) -> ![]u8 borrows ir_bytes {
+) -> ![]u8 {
     let if_sequence = try lowering_case_if_sequence(ir_bytes, function_name, index);
     let then_block = try ir_contract::body_child_sequence(
         ir_bytes,
@@ -102,9 +104,10 @@ pub fn case_result_kind_name(
     return try struct_literal_kind_field(ir_bytes, function_name, value);
 }
 
-fn require_cases(ir_bytes: []u8, function_name: []u8) -> !void {
+fn require_cases(ir_bytes: []u8, function_name: []u8, is_test: bool) -> !void {
     let count = try case_count(ir_bytes, function_name);
-    if count < 1 {
+    let expected_count = expected_case_count(is_test);
+    if count < 1 or count != expected_count {
         return error("missing selected body lowering cases");
     }
 
@@ -112,15 +115,38 @@ fn require_cases(ir_bytes: []u8, function_name: []u8) -> !void {
     while index < count {
         let ast_kind_name = try case_ast_kind_name(ir_bytes, function_name, index);
         let result_kind_name = try case_result_kind_name(ir_bytes, function_name, index);
-        let ast_kind = try ir_contract::named_i64_fact(ir_bytes, "executable-ast-kind ", ast_kind_name);
-        let result_kind = try ir_contract::named_i64_fact(ir_bytes, "executable-kind ", result_kind_name);
-        if ast_kind < 0 or result_kind < 0 {
+        let actual_ast_kind = try data::executable_ast_kind_tag_by_name(ast_kind_name);
+        let actual_result_kind = try data::executable_kind_tag_by_name(result_kind_name);
+        let expected_ast_kind = try expected_case_ast_kind_tag(index, is_test);
+        let expected_result_kind = try expected_case_result_kind_tag(index, is_test);
+        if actual_ast_kind != expected_ast_kind or actual_result_kind != expected_result_kind {
             return error("invalid selected body lowering cases");
         }
         index = index + 1;
     }
     try require_unsupported_return(ir_bytes, function_name, count);
     return;
+}
+
+fn expected_case_count(is_test: bool) -> i64 {
+    if is_test {
+        return executable::test_executable_lowering_case_count();
+    }
+    return executable::run_executable_lowering_case_count();
+}
+
+fn expected_case_ast_kind_tag(index: i64, is_test: bool) -> !i64 {
+    if is_test {
+        return try executable::test_executable_lowering_case_ast_kind_tag(index);
+    }
+    return try executable::run_executable_lowering_case_ast_kind_tag(index);
+}
+
+fn expected_case_result_kind_tag(index: i64, is_test: bool) -> !i64 {
+    if is_test {
+        return try executable::test_executable_lowering_case_result_kind_tag(index);
+    }
+    return try executable::run_executable_lowering_case_result_kind_tag(index);
 }
 
 fn require_unsupported_return(
@@ -185,7 +211,7 @@ fn struct_literal_kind_field(
     ir_bytes: []u8,
     function_name: []u8,
     struct_literal: i64
-) -> ![]u8 borrows ir_bytes {
+) -> ![]u8 {
     let node_count = try ir_contract::body_node_count(ir_bytes, function_name);
     var ordinal = 0;
     while ordinal < node_count {
@@ -213,11 +239,43 @@ fn struct_literal_kind_field(
                 "value",
                 0
             );
-            return try field_expr_name(ir_bytes, function_name, value, "namespace");
+            return try result_kind_value_name(ir_bytes, function_name, value);
         }
         ordinal = ordinal + 1;
     }
     return error("missing selected body lowering result field");
+}
+
+fn result_kind_value_name(
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64
+) -> ![]u8 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        return try field_expr_name(ir_bytes, function_name, sequence, "namespace");
+    }
+    if std::mem::equal_bytes(kind, "Call") {
+        let callee = try ir_contract::body_call_callee_or_empty(ir_bytes, function_name, sequence);
+        return try result_kind_name_for_helper(callee);
+    }
+    return error("invalid selected body lowering body IR");
+}
+
+fn result_kind_name_for_helper(callee: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(callee, "run_print_executable_kind") {
+        return "RunPrintString";
+    }
+    if std::mem::equal_bytes(callee, "run_return_executable_kind") {
+        return "RunReturnVoid";
+    }
+    if std::mem::equal_bytes(callee, "test_ok_executable_kind") {
+        return "TestExpectOk";
+    }
+    if std::mem::equal_bytes(callee, "test_failure_executable_kind") {
+        return "TestExpectFailure";
+    }
+    return error("invalid selected body lowering body IR");
 }
 
 fn field_expr_name(

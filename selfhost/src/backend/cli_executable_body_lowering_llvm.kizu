@@ -1,19 +1,19 @@
 import selfhost::backend::cli_executable_body_lowering_contract;
-import selfhost::backend::ir_contract;
+import selfhost::backend::executable;
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try require_selected_body_lowering(ir_bytes);
     try append_cli_lower_executable_ast_function(
         out,
-        ir_bytes,
         "kizu_selfhost__cli_lower_run_executable_ast",
-        "selfhost::backend::executable::lower_run_executable_ast"
+        executable::run_executable_lowering_case_count(),
+        false
     );
     try append_cli_lower_executable_ast_function(
         out,
-        ir_bytes,
         "kizu_selfhost__cli_lower_test_executable_ast",
-        "selfhost::backend::executable::lower_test_executable_ast"
+        executable::test_executable_lowering_case_count(),
+        true
     );
     return;
 }
@@ -23,34 +23,13 @@ fn require_selected_body_lowering(ir_bytes: []u8) -> !void {
     return;
 }
 
-fn require_lowering_cases(ir_bytes: []u8, function_name: []u8) -> !void {
-    let count = try lowering_case_count(ir_bytes, function_name);
-    if count < 1 {
-        return error("missing selected body lowering cases");
-    }
-
-    var index = 0;
-    while index < count {
-        let ast_kind_name = try lowering_case_ast_kind_name(ir_bytes, function_name, index);
-        let result_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, index);
-        let ast_kind = try executable_ast_tag(ir_bytes, ast_kind_name);
-        let result_kind = try executable_kind_tag(ir_bytes, result_kind_name);
-        if ast_kind < 0 or result_kind < 0 {
-            return error("invalid selected body lowering cases");
-        }
-        index = index + 1;
-    }
-    return;
-}
-
 fn append_cli_lower_executable_ast_function(
     out: &var std::string::String,
-    ir_bytes: []u8,
     llvm_name: []u8,
-    function_name: []u8
+    count: i64,
+    is_test: bool
 ) -> !void {
-    let unsupported = try executable_kind_tag(ir_bytes, "Unsupported");
-    let count = try lowering_case_count(ir_bytes, function_name);
+    let unsupported = try executable::unsupported_executable_kind_tag();
     try out.append_bytes("define %kizu.selfhost.executable @");
     try out.append_bytes(llvm_name);
     try out.append_bytes("(");
@@ -61,7 +40,7 @@ fn append_cli_lower_executable_ast_function(
     try append_line(out, "  %ast_kind = extractvalue %kizu.selfhost.executable.ast %ast, 0");
     try append_line(out, "  %payload = extractvalue %kizu.selfhost.executable.ast %ast, 1");
     try append_line(out, "  br label %check_case_0");
-    try append_case_dispatch(out, ir_bytes, function_name, count);
+    try append_case_dispatch(out, count, is_test);
     try append_line(out, "unsupported:");
     try append_executable_return(out, "unsupported", unsupported, "payload");
     try append_line(out, "}");
@@ -71,16 +50,13 @@ fn append_cli_lower_executable_ast_function(
 
 fn append_case_dispatch(
     out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    count: i64
+    count: i64,
+    is_test: bool
 ) -> !void {
     var index = 0;
     while index < count {
-        let ast_kind_name = try lowering_case_ast_kind_name(ir_bytes, function_name, index);
-        let result_kind_name = try lowering_case_result_kind_name(ir_bytes, function_name, index);
-        let ast_kind = try executable_ast_tag(ir_bytes, ast_kind_name);
-        let result_kind = try executable_kind_tag(ir_bytes, result_kind_name);
+        let ast_kind = try lowering_case_ast_kind_tag(index, is_test);
+        let result_kind = try lowering_case_result_kind_tag(index, is_test);
         try append_check_label(out, index);
         try append_case_compare(out, index, ast_kind);
         try append_case_branch(out, index, count);
@@ -179,40 +155,18 @@ fn append_executable_return(
     return;
 }
 
-fn executable_ast_tag(ir_bytes: []u8, name: []u8) -> !i64 {
-    return try ir_contract::named_i64_fact(ir_bytes, "executable-ast-kind ", name);
+fn lowering_case_ast_kind_tag(index: i64, is_test: bool) -> !i64 {
+    if is_test {
+        return try executable::test_executable_lowering_case_ast_kind_tag(index);
+    }
+    return try executable::run_executable_lowering_case_ast_kind_tag(index);
 }
 
-fn executable_kind_tag(ir_bytes: []u8, name: []u8) -> !i64 {
-    return try ir_contract::named_i64_fact(ir_bytes, "executable-kind ", name);
-}
-
-fn lowering_case_count(ir_bytes: []u8, function_name: []u8) -> !i64 {
-    return try cli_executable_body_lowering_contract::case_count(ir_bytes, function_name);
-}
-
-fn lowering_case_ast_kind_name(
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64
-) -> ![]u8 borrows ir_bytes {
-    return try cli_executable_body_lowering_contract::case_ast_kind_name(
-        ir_bytes,
-        function_name,
-        index
-    );
-}
-
-fn lowering_case_result_kind_name(
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64
-) -> ![]u8 borrows ir_bytes {
-    return try cli_executable_body_lowering_contract::case_result_kind_name(
-        ir_bytes,
-        function_name,
-        index
-    );
+fn lowering_case_result_kind_tag(index: i64, is_test: bool) -> !i64 {
+    if is_test {
+        return try executable::test_executable_lowering_case_result_kind_tag(index);
+    }
+    return try executable::run_executable_lowering_case_result_kind_tag(index);
 }
 
 fn append_line(out: &var std::string::String, text: []u8) -> !void {
