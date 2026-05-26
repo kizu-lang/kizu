@@ -1244,6 +1244,7 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		return 1
 	}
 	failures := countHostedCompilerCLICommentParseFailures(t, exePath, dir, expected)
+	failures += countHostedCompilerCLIBorrowParseFailures(t, exePath, dir)
 	failures += countHostedCompilerCLIRealSourceParseFailures(t, exePath)
 
 	invalidAssignPath := filepath.Join(dir, "hosted_parse_missing_assign.kizu")
@@ -1262,6 +1263,42 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		"missing assign parse",
 	)
 	return failures
+}
+
+// countHostedCompilerCLIBorrowParseFailures checks explicit &var call arguments do
+// not trip missing-assign diagnostics in the hosted parse path.
+func countHostedCompilerCLIBorrowParseFailures(t *testing.T, exePath string, dir string) int {
+	t.Helper()
+	sourcePath := filepath.Join(dir, "hosted_parse_borrow_arg.kizu")
+	source := "fn take(report: &var Report) {}\nfn main() {\n    take(&var report);\n}\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted parse borrow source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "parse", sourcePath)
+	if code != 0 {
+		t.Errorf(
+			"hosted compiler parse borrow arg exit=%d\nstdout:\n%s\nstderr:\n%s",
+			code,
+			stdout,
+			stderr,
+		)
+		return 1
+	}
+	expected := "fn take(report: &var Report) { }\nfn main() { take(&var report); }\n"
+	if stdout != expected {
+		t.Errorf(
+			"hosted compiler parse borrow arg stdout mismatch:\nwant:\n%s\ngot:\n%s",
+			expected,
+			stdout,
+		)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler parse borrow arg stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
 }
 
 // countHostedCompilerCLICommentParseFailures checks comments do not trigger parse scans.
