@@ -4,40 +4,23 @@ import (
 	"fmt"
 
 	"github.com/kizu-lang/kizu/internal/ast"
-	compilerdiag "github.com/kizu-lang/kizu/internal/diagnostic"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 )
 
-// DiagnosticError carries a type-checking error with a source span.
-type DiagnosticError = compilerdiag.Error
+// DiagnosticError carries a structured type-checking diagnostic.
+type DiagnosticError = diag.Diagnostic
 
-// typeDiagnosticAt builds a structured type-checking diagnostic.
-func typeDiagnosticAt(
-	span ast.Span,
-	code string,
-	format string,
-	args ...any,
-) compilerdiag.Diagnostic {
-	return compilerdiag.New(
-		compilerdiag.SeverityError,
-		compilerdiag.CategoryType,
-		code,
-		fmt.Sprintf(format, args...),
-		span,
-	)
+// errorAt builds a span-aware structured diagnostic from existing ADR-style text.
+func errorAt(span ast.Span, format string, args ...any) error {
+	return diag.FromText(diag.SeverityError, span, fmt.Sprintf(format, args...))
 }
 
-// unsafeDiagnosticAt builds a structured unsafe capability diagnostic.
-func unsafeDiagnosticAt(
-	span ast.Span,
-	code string,
-	format string,
-	args ...any,
-) compilerdiag.Diagnostic {
-	return compilerdiag.New(
-		compilerdiag.SeverityError,
-		compilerdiag.CategoryUnsafe,
-		code,
-		fmt.Sprintf(format, args...),
-		span,
-	)
+// errorAtCode builds a span-aware structured diagnostic with a stable code.
+func errorAtCode(span ast.Span, code string, format string, args ...any) error {
+	return diag.FromText(diag.SeverityError, span, fmt.Sprintf(format, args...)).WithCode(code)
+}
+
+// errorf builds one structured diagnostic without source span information.
+func errorf(format string, args ...any) error {
+	return diag.FromText(diag.SeverityError, ast.Span{}, fmt.Errorf(format, args...).Error())
 }

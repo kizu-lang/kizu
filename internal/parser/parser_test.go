@@ -61,6 +61,28 @@ func TestParseExpectedGotDescribesTokenText(t *testing.T) {
 	}
 }
 
+// TestParseDiagnosticsCarryStructuredSpan keeps parser failures structured for LSP and CLI.
+func TestParseDiagnosticsCarryStructuredSpan(t *testing.T) {
+	p := New(lexer.New("foo\n"))
+	p.ParseProgram()
+	if len(p.Diagnostics()) == 0 {
+		t.Fatal("expected parser diagnostics")
+	}
+	got := p.Diagnostics()[0]
+	if strings.HasPrefix(got.Message, "error:") {
+		t.Fatalf("message = %q, want summary without CLI severity", got.Message)
+	}
+	if got.Span.Start.Line != 1 || got.Span.Start.Column != 1 {
+		t.Fatalf("got start %d:%d, want 1:1", got.Span.Start.Line, got.Span.Start.Column)
+	}
+	if got.Span.End.Line != 1 || got.Span.End.Column != 4 {
+		t.Fatalf("got end %d:%d, want 1:4", got.Span.End.Line, got.Span.End.Column)
+	}
+	if cli := got.CLIError(); !strings.HasPrefix(cli, "error: expected declaration") {
+		t.Fatalf("cli = %q, want CLI severity prefix", cli)
+	}
+}
+
 // TestParseTestDecl checks top-level test block parsing.
 func TestParseTestDecl(t *testing.T) {
 	input := `test "basic assertion" {

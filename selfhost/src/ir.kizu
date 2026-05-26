@@ -1,5 +1,6 @@
 import selfhost::ownership;
 import selfhost::ownership::data;
+import selfhost::parser;
 import selfhost::resolver;
 import selfhost::ir::executable_contract;
 import selfhost::ir::executable_functions;
@@ -32,11 +33,30 @@ pub fn emit_selfhost_artifacts(
     root: []u8
 ) -> !IrArtifact {
     var files = try loader::load_selfhost_sources(allocator, io, root);
-    let resolved = try resolver::resolve_sources(allocator, files);
-    let typed = try types::check_sources(allocator, files, resolved);
-    let checked = try ownership::check_package(allocator, files, typed);
+    var parsed_sources = try parser::parse_source_files(allocator, files);
+    let resolved = try resolver::resolve_parsed_sources(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes
+    );
+    let typed = try types::check_parsed_sources(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        resolved
+    );
+    let checked = try ownership::check_parsed_package(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        typed
+    );
     std::testing::expect_equal<i64>(0, checked.diagnostics);
     let artifact = try emit_checked_artifacts(allocator, io, files, checked);
+    try parser::deinit_parsed_source_files(parsed_sources);
     files.deinit();
     return artifact;
 }
@@ -82,9 +102,27 @@ pub fn handoff_gate() -> !void {
     let allocator = std::mem::page_allocator();
     let io = std::io::blocking();
     var files = try loader::load_selfhost_sources(allocator, io, "selfhost");
-    let resolved = try resolver::resolve_sources(allocator, files);
-    let typed = try types::check_sources(allocator, files, resolved);
-    let checked = try ownership::check_package(allocator, files, typed);
+    var parsed_sources = try parser::parse_source_files(allocator, files);
+    let resolved = try resolver::resolve_parsed_sources(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes
+    );
+    let typed = try types::check_parsed_sources(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        resolved
+    );
+    let checked = try ownership::check_parsed_package(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        typed
+    );
     std::testing::expect_equal<i64>(0, checked.diagnostics);
     std::testing::expect(checked.resources > 0);
     let lowered = lower(checked);
@@ -98,6 +136,7 @@ pub fn handoff_gate() -> !void {
     print("ir-handoff-diagnostics");
     print(0);
 
+    try parser::deinit_parsed_source_files(parsed_sources);
     files.deinit();
     return;
 }

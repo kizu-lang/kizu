@@ -102,11 +102,11 @@ func parseModuleFile(module Module) (*ast.Program, error) {
 }
 
 // parseModuleSource parses one graph module source string.
-func parseModuleSource(modulePath string, source string) (*ast.Program, error) {
+func parseModuleSource(_ string, source string) (*ast.Program, error) {
 	p := parser.New(lexer.New(source))
 	program := p.ParseProgram()
-	if len(p.Errors()) > 0 {
-		return nil, fmt.Errorf("parse error in module `%s`: %s", modulePath, p.Errors()[0])
+	if diagnostics := p.Diagnostics(); len(diagnostics) > 0 {
+		return nil, &diagnostics[0]
 	}
 	return program, nil
 }

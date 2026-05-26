@@ -723,9 +723,9 @@ fn main() {
 	if !errors.As(err, &diagnostic) {
 		t.Fatalf("got %T, want DiagnosticError", err)
 	}
-	if diagnostic.CompilerDiagnostic().Code != "type.operator_type_mismatch" {
+	if diagnostic.Code != "type.operator_type_mismatch" {
 		t.Fatalf("code = %q, want type.operator_type_mismatch",
-			diagnostic.CompilerDiagnostic().Code)
+			diagnostic.Code)
 	}
 	if diagnostic.Span.Start.Line != 6 || diagnostic.Span.Start.Column != 14 {
 		t.Fatalf("start = %d:%d, want 6:14",
@@ -1787,9 +1787,9 @@ func TestCheckUnsafeBoundaryErrorReportsCapabilityHelp(t *testing.T) {
 	if !errors.As(err, &diagnostic) {
 		t.Fatalf("got %T, want DiagnosticError", err)
 	}
-	if diagnostic.CompilerDiagnostic().Code != "unsafe.missing_capability" {
+	if diagnostic.Code != "unsafe.missing_capability" {
 		t.Fatalf("code = %q, want unsafe.missing_capability",
-			diagnostic.CompilerDiagnostic().Code)
+			diagnostic.Code)
 	}
 	for _, want := range []string{
 		"`ptr_read` requires @unsafe(ptr_read)",

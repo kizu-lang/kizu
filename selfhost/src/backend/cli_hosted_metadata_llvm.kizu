@@ -1,18 +1,12 @@
-import selfhost::backend::ir_contract;
+import selfhost::backend::hosted;
 
 pub fn append_prefix_constant(
     out: &var std::string::String,
     name: []u8,
-    ir_bytes: []u8,
-    function_name: []u8
+    title: []u8,
+    issue: []u8
 ) -> !void {
-    let title = try metadata_fact(ir_bytes, "hosted-artifact-metadata-title ", function_name);
-    let issue = try metadata_fact(ir_bytes, "hosted-artifact-metadata-issue ", function_name);
-    let source_prefix = try metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-source-prefix ",
-        "selfhost::backend::hosted::append_common_metadata"
-    );
+    let source_prefix = hosted::metadata_source_prefix();
     let size = prefix_decoded_size(title, issue, source_prefix);
     try append_llvm_constant_header(out, name, size);
     try append_llvm_c_string_payload(out, title);
@@ -24,23 +18,16 @@ pub fn append_prefix_constant(
     return;
 }
 
-pub fn prefix_size(ir_bytes: []u8, function_name: []u8) -> !i64 {
-    let title = try metadata_fact(ir_bytes, "hosted-artifact-metadata-title ", function_name);
-    let issue = try metadata_fact(ir_bytes, "hosted-artifact-metadata-issue ", function_name);
-    let source_prefix = try metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-source-prefix ",
-        "selfhost::backend::hosted::append_common_metadata"
-    );
+pub fn prefix_size(title: []u8, issue: []u8) -> !i64 {
+    let source_prefix = hosted::metadata_source_prefix();
     return prefix_decoded_size(title, issue, source_prefix);
 }
 
 pub fn append_output_prefix_constant(
     out: &var std::string::String,
-    name: []u8,
-    ir_bytes: []u8
+    name: []u8
 ) -> !void {
-    let output_prefix = try output_prefix_fact(ir_bytes);
+    let output_prefix = hosted::metadata_output_prefix();
     let size = output_prefix_size_from_value(output_prefix);
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("\0A");
@@ -49,26 +36,19 @@ pub fn append_output_prefix_constant(
     return;
 }
 
-pub fn output_prefix_size(ir_bytes: []u8) -> !i64 {
-    let output_prefix = try output_prefix_fact(ir_bytes);
-    return output_prefix_size_from_value(output_prefix);
+pub fn output_prefix_size() -> !i64 {
+    return output_prefix_size_from_value(hosted::metadata_output_prefix());
 }
 
 pub fn append_before_runtime_constant(
     out: &var std::string::String,
     name: []u8,
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64
+    entry: []u8
 ) -> !void {
-    let size = try before_runtime_size(ir_bytes, function_name, index);
-    let entry = try lowering_case_entry(ir_bytes, function_name, index);
-    let abi_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-abi-line ");
-    let entry_prefix = try common_metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-entry-prefix "
-    );
-    let runtime_prefix = try runtime_line_prefix(ir_bytes);
+    let size = try before_runtime_size(entry);
+    let abi_line = hosted::metadata_abi_line();
+    let entry_prefix = hosted::metadata_entry_prefix();
+    let runtime_prefix = try runtime_line_prefix();
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("\0A");
     try append_line_value(out, abi_line);
@@ -83,118 +63,48 @@ pub fn append_before_runtime_constant(
 pub fn append_after_runtime_constant(
     out: &var std::string::String,
     name: []u8,
-    ir_bytes: []u8,
     include_discovery: bool
 ) -> !void {
-    let size = try after_runtime_size(ir_bytes, include_discovery);
-    let fallback_line = try common_metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-fallback-line "
-    );
-    let lowering_line = try common_metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-lowering-line "
-    );
-    let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
+    let size = try after_runtime_size(include_discovery);
+    let fallback_line = hosted::metadata_fallback_line();
+    let lowering_line = hosted::metadata_lowering_line();
+    let mode_line = hosted::metadata_mode_line();
     try append_llvm_constant_header(out, name, size);
     try out.append_bytes("\0A");
     try append_line_value(out, lowering_line);
     try append_line_value(out, fallback_line);
     try append_line_value(out, mode_line);
     if include_discovery {
-        let discovery_line = try metadata_fact(
-            ir_bytes,
-            "hosted-artifact-metadata-discovery-line ",
-            "selfhost::backend::hosted::write_test_metadata"
-        );
-        try append_line_value(out, discovery_line);
+        try append_line_value(out, hosted::test_metadata_discovery_line());
     }
     try append_llvm_constant_footer(out);
     return;
 }
 
 pub fn before_runtime_size(
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64
+    entry: []u8
 ) -> !i64 {
-    let entry = try lowering_case_entry(ir_bytes, function_name, index);
-    let abi_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-abi-line ");
-    let entry_prefix = try common_metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-entry-prefix "
-    );
-    let runtime_prefix = try runtime_line_prefix(ir_bytes);
+    let abi_line = hosted::metadata_abi_line();
+    let entry_prefix = hosted::metadata_entry_prefix();
+    let runtime_prefix = try runtime_line_prefix();
     return 1 + line_value_size(abi_line) + std::mem::len(entry_prefix) +
         std::mem::len(entry) + 1 + std::mem::len(runtime_prefix);
 }
 
-pub fn after_runtime_size(ir_bytes: []u8, include_discovery: bool) -> !i64 {
-    let fallback_line = try common_metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-fallback-line "
-    );
-    let lowering_line = try common_metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-lowering-line "
-    );
-    let mode_line = try common_metadata_fact(ir_bytes, "hosted-artifact-metadata-mode-line ");
+pub fn after_runtime_size(include_discovery: bool) -> !i64 {
+    let fallback_line = hosted::metadata_fallback_line();
+    let lowering_line = hosted::metadata_lowering_line();
+    let mode_line = hosted::metadata_mode_line();
     var size = 1 + line_value_size(lowering_line) + line_value_size(fallback_line) +
         line_value_size(mode_line);
     if include_discovery {
-        let discovery_line = try metadata_fact(
-            ir_bytes,
-            "hosted-artifact-metadata-discovery-line ",
-            "selfhost::backend::hosted::write_test_metadata"
-        );
-        size = size + line_value_size(discovery_line);
+        size = size + line_value_size(hosted::test_metadata_discovery_line());
     }
     return size;
 }
 
-fn metadata_fact(
-    ir_bytes: []u8,
-    prefix: []u8,
-    fact_name: []u8
-) -> ![]u8 borrows ir_bytes {
-    return try ir_contract::named_fact_line_value(ir_bytes, prefix, fact_name);
-}
-
-fn common_metadata_fact(ir_bytes: []u8, prefix: []u8) -> ![]u8 borrows ir_bytes {
-    return try metadata_fact(
-        ir_bytes,
-        prefix,
-        "selfhost::backend::hosted::append_common_metadata"
-    );
-}
-
-fn lowering_case_entry(
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64
-) -> ![]u8 borrows ir_bytes {
-    return try ir_contract::sequence_fact_value(
-        ir_bytes,
-        "hosted-lowering-case-entry ",
-        function_name,
-        index
-    );
-}
-
-fn runtime_line_prefix(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
-    let runtime_line = try common_metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-runtime-line "
-    );
-    return try line_prefix_through_space(runtime_line);
-}
-
-fn output_prefix_fact(ir_bytes: []u8) -> ![]u8 borrows ir_bytes {
-    return try metadata_fact(
-        ir_bytes,
-        "hosted-artifact-metadata-output-prefix ",
-        "selfhost::backend::hosted::append_common_metadata"
-    );
+fn runtime_line_prefix() -> ![]u8 {
+    return try line_prefix_through_space(hosted::metadata_runtime_line());
 }
 
 fn prefix_decoded_size(title: []u8, issue: []u8, source_prefix: []u8) -> i64 {

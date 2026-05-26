@@ -194,7 +194,7 @@ func TestSelfhostTypeDeclarationsUseParsedAST(t *testing.T) {
 		}
 	}
 	requiredChecker := []string{
-		"parser::parse_checked_file(allocator, file.path, file.text)",
+		"parser::parse_source_files(allocator, files)",
 		"type_refs::collect_declared_types_from_ast(",
 		"type_refs::collect_type_parameters_from_ast(",
 	}
@@ -674,7 +674,7 @@ func assertSelfhostFastDiagnosticsASTNode(t *testing.T, wrapperBody string, astB
 		"resolver::first_duplicate_declaration_ast_node(",
 		"types::first_pre_move_check_diagnostic_ast_node_with_types(",
 		"types::first_post_move_check_diagnostic_ast_node(",
-		"ownership::first_use_after_move_name_ast_node_with_borrow_params(",
+		"ownership::first_use_after_move_summary_ast_node_with_borrow_params(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(astBody, fragment) {
@@ -808,15 +808,9 @@ func assertSelfhostExecutableLoweringSplit(
 	for _, fragment := range []string{
 		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
-		"pub fn parse_run_executable_ast(",
-		"pub fn parse_test_executable_ast(",
-		"pub fn lower_run_executable_ast(",
-		"pub fn lower_test_executable_ast(",
-		"fn parse_run_print_call_ast(",
-		"fn parse_expect_call_ast(",
 	} {
 		if !strings.Contains(executable, fragment) {
-			t.Fatalf("executable module missing AST executable lowering %q", fragment)
+			t.Fatalf("executable module missing executable lowering %q", fragment)
 		}
 	}
 	for _, fragment := range []string{
@@ -828,30 +822,20 @@ func assertSelfhostExecutableLoweringSplit(
 			t.Fatalf("execute module still owns executable lowering %q", fragment)
 		}
 	}
-	assertSelfhostExecutableLoweringUsesBoundedAST(t, executable)
+	assertSelfhostExecutableLoweringUsesDirectRunIR(t, executable)
 }
 
-// assertSelfhostExecutableLoweringUsesBoundedAST keeps source AST matching
-// separate from executable artifact lowering.
-func assertSelfhostExecutableLoweringUsesBoundedAST(t *testing.T, executable string) {
+// assertSelfhostExecutableLoweringUsesDirectRunIR keeps run lowering on the
+// executable IR path.
+func assertSelfhostExecutableLoweringUsesDirectRunIR(t *testing.T, executable string) {
 	t.Helper()
 	runBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_run_executable(")
 	testBody := selfhostKizuFunctionBody(t, executable, "pub fn lower_test_executable(")
-	for _, fragment := range []string{
-		"let executable_ast = try parse_run_executable_ast(text, ast, root)",
-		"return lower_run_executable_ast(executable_ast)",
-	} {
-		if !strings.Contains(runBody, fragment) {
-			t.Fatalf("run executable wrapper missing bounded AST step %q", fragment)
-		}
+	if !strings.Contains(runBody, "executable_lowering::lower_run_executable(text, ast, root)") {
+		t.Fatal("run executable wrapper does not use executable IR lowering")
 	}
-	for _, fragment := range []string{
-		"let executable_ast = try parse_test_executable_ast(text, ast, root)",
-		"return lower_test_executable_ast(executable_ast)",
-	} {
-		if !strings.Contains(testBody, fragment) {
-			t.Fatalf("test executable wrapper missing bounded AST step %q", fragment)
-		}
+	if !strings.Contains(testBody, "executable_lowering::lower_test_executable(text, ast, root)") {
+		t.Fatal("test executable wrapper does not use executable IR lowering")
 	}
 }
 
@@ -862,12 +846,15 @@ func TestSelfhostTypeCheckSkipsStdDiagnosticPass(t *testing.T) {
 		t.Fatalf("read selfhost types: %v", err)
 	}
 	content := string(bytes)
-	body := selfhostKizuFunctionBody(t, content, "pub fn check_sources(")
+	body := selfhostKizuFunctionBody(t, content, "fn check_parsed_sources_core(")
 	if !strings.Contains(body, "if source::is_frontend_source(file.kind) {") {
 		t.Fatal("type checker second pass does not limit diagnostics to frontend sources")
 	}
-	if count := strings.Count(body, "if source::is_source_code(file.kind) {"); count != 1 {
-		t.Fatalf("type checker has %d source-code passes, want declarations-only pass", count)
+	if count := strings.Count(body, "while index < parsed_sources.len() {"); count != 2 {
+		t.Fatalf(
+			"type checker has %d parsed-source passes, want declarations plus frontend diagnostics",
+			count,
+		)
 	}
 }
 
@@ -879,21 +866,18 @@ func TestSelfhostTypeCheckReusesParsedFrontendAST(t *testing.T) {
 	}
 	body := selfhostKizuFunctionBody(t, string(bytes), "pub fn check_sources(")
 	required := []string{
-		"var parsed_frontend = std::array::Array<std::kizu::ast::ParseResult>(allocator)",
-		"var parsed_frontend_files = std::array::Array<i64>(allocator)",
-		"try parsed_frontend.append(result)",
-		"try parsed_frontend_files.append(index)",
-		"let result = try parsed_frontend.pop()",
-		"let file_index = try parsed_frontend_files.pop()",
-		"result.deinit()",
+		"var parsed_sources = try parser::parse_source_files(allocator, files)",
+		"&parsed_sources.parsed",
+		"&parsed_sources.source_indexes",
+		"try parser::deinit_parsed_source_files(parsed_sources)",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(body, fragment) {
-			t.Fatalf("type checker does not cache frontend ASTs with %q", fragment)
+			t.Fatalf("type checker does not reuse package parsed sources with %q", fragment)
 		}
 	}
-	if count := strings.Count(body, "parser::parse_checked_file("); count != 1 {
-		t.Fatalf("type checker parses source in %d syntactic sites, want 1", count)
+	if strings.Contains(body, "parser::parse_checked_file(") {
+		t.Fatal("type checker reparses source after parsing package sources")
 	}
 }
 
@@ -936,6 +920,7 @@ func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
 	functionCalls := readSelfhostFile(t, "../../selfhost/src/types/function_calls.kizu")
 	functionScan := readSelfhostFile(t, "../../selfhost/src/types/function_call_scan_ast.kizu")
 	checkCLI := readSelfhostFile(t, "../../selfhost/src/cli/check.kizu")
+	diagnosticsCLI := readSelfhostFile(t, "../../selfhost/src/cli/diagnostics.kizu")
 	required := []string{
 		"var import_alias_starts = std::map::Map<[]u8, i64>(allocator)",
 		"var import_alias_ends = std::map::Map<[]u8, i64>(allocator)",
@@ -945,7 +930,7 @@ func TestSelfhostFunctionCallsResolveImportAliases(t *testing.T) {
 		"file.text[module_start..module_end]",
 		"try output::stderr_newline(allocator, io);",
 	}
-	content := functionCalls + functionScan + checkCLI
+	content := functionCalls + functionScan + checkCLI + diagnosticsCLI
 	for _, fragment := range required {
 		if !strings.Contains(content, fragment) {
 			t.Fatalf("selfhost import alias call resolution missing %q", fragment)
@@ -997,7 +982,7 @@ func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
 var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/types/model.kizu": {
 		"pub enum TypeKind",
-		"pub struct CheckDiagnosticSummary",
+		"pub struct MissingReturnSummary",
 	},
 	"../../selfhost/src/types/diagnostic.kizu": {
 		"pub fn unknown_type(",
@@ -1101,6 +1086,12 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn render_host_metadata(",
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
+		"pub fn run_artifact_dir(",
+		"pub fn metadata_runtime_line(",
+		"pub fn run_print_executable(",
+		"pub fn run_return_executable(",
+		"pub fn test_ok_executable(",
+		"pub fn test_failure_executable(",
 		"pub fn emit_run_executable_artifact(",
 		"fn ensure_hosted_artifact_dir(",
 		"fn lower_run_hosted_executable(",
@@ -1108,9 +1099,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn render_hosted_llvm(",
 	},
 	"../../selfhost/src/backend/data.kizu": {
-		"pub enum ExecutableAstKind",
-		"pub struct ExecutableAst",
 		"pub enum ExecutableKind",
+		"pub fn executable_kind_tag_by_name(",
 		"pub struct Executable",
 	},
 	"../../selfhost/src/backend/llvm.kizu": {
@@ -1137,6 +1127,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_artifact_path_function(",
 	},
 	"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu": {
+		"import selfhost::backend::hosted;",
 		"pub fn append_prefix_constant(",
 		"pub fn prefix_size(",
 		"pub fn append_output_prefix_constant(",
@@ -1146,15 +1137,15 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_after_runtime_constant(",
 		"pub fn after_runtime_size(",
 		"fn runtime_line_prefix(",
-		"fn metadata_fact(",
-		"fn common_metadata_fact(",
+		"fn prefix_decoded_size(",
+		"fn output_prefix_size_from_value(",
+		"hosted::metadata_entry_prefix()",
 		"fn append_llvm_c_string_payload(",
 		"fn line_prefix_through_space(",
-		"hosted-artifact-metadata-title ",
-		"hosted-artifact-metadata-source-prefix ",
-		"hosted-artifact-metadata-output-prefix ",
-		"hosted-artifact-metadata-fallback-line ",
-		"hosted-artifact-metadata-lowering-line ",
+		"hosted::metadata_source_prefix()",
+		"hosted::metadata_output_prefix()",
+		"hosted::metadata_fallback_line()",
+		"hosted::metadata_lowering_line()",
 	},
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1184,53 +1175,18 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_test_block_body_start_function(",
 		"fn append_cli_test_main_body_start_function(",
 	},
-	"../../selfhost/src/backend/cli_executable_ast_llvm.kizu": {
+	"../../selfhost/src/backend/cli_executable_llvm.kizu": {
 		"pub fn append_functions(",
-		"fn require_executable_abi(",
 		"cli_executable_body_parsing_llvm::append_functions(",
-		"cli_executable_body_lowering_llvm::append_functions(",
 		"fn append_cli_run_executable_function(",
 		"fn append_cli_test_executable_function(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
-		"cli_executable_body_parser_contract::require_executable_body_parsing(",
-		"fn append_cli_parse_run_executable_ast_function(",
-		"fn append_cli_parse_test_executable_ast_function(",
+		"import selfhost::backend::executable;",
 		"fn append_cli_parse_run_print_payload_function(",
 		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
-	},
-	"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu": {
-		"pub fn require_executable_body_parsing(",
-		"fn require_run_parser_body_shape(",
-		"fn require_test_parser_body_shape(",
-		"fn require_parser_body_call(",
-		"ir_contract::require_body_call(",
-	},
-	"../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu": {
-		"pub fn append_functions(",
-		"fn require_selected_body_lowering(",
-		"fn append_cli_lower_executable_ast_function(",
-		"fn append_case_dispatch(",
-		"fn lowering_case_count(",
-		"cli_executable_body_lowering_contract::require(",
-		"cli_executable_body_lowering_contract::case_count(",
-		"cli_executable_body_lowering_contract::case_ast_kind_name(",
-		"cli_executable_body_lowering_contract::case_result_kind_name(",
-	},
-	"../../selfhost/src/backend/cli_executable_body_lowering_contract.kizu": {
-		"pub fn require(",
-		"pub fn case_count(",
-		"pub fn case_ast_kind_name(",
-		"pub fn case_result_kind_name(",
-		"fn require_unsupported_return(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_child_sequence_or_minus_one(",
-		"ir_contract::body_node_kind(",
-		"ir_contract::body_node_count(",
-		"body-field-expr ",
-		"body-struct-literal ",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
@@ -1256,7 +1212,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/ir/executable_contract.kizu": {
 		"pub fn append_facts(",
-		"fn append_enum_kind_facts(",
 		"fn require_struct_fields(",
 		"fn require_function(",
 		"frontend-executable-lowering checked-body-ir",
@@ -1273,7 +1228,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"executable_body::append_function_body_ir(",
 		"executable_body::append_helper_body_ir(",
 		"fn append_selected_helper_body(",
-		"executable_body_parsing::append_run_parsing_facts(",
 	},
 	"../../selfhost/src/ir/function_signature.kizu": {
 		"pub fn append(",
@@ -1284,28 +1238,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"function-signature-return ",
 		"function-signature-param ",
 	},
-	"../../selfhost/src/ir/hosted_artifact_paths.kizu": {
-		"pub fn append_facts(",
-		"pub fn append_metadata_facts(",
-		"pub fn append_common_metadata_facts(",
-		"fn call_from_statement(",
-		"fn append_named_call_string_arg_fact(",
-		"fn append_named_call_line_string_arg_fact(",
-		"fn append_string_literal_value(",
-		"fn append_line_string_literal_value(",
-		"hosted-artifact-dir ",
-		"hosted-artifact-ll-prefix ",
-		"hosted-artifact-metadata-title ",
-	},
-	"../../selfhost/src/ir/hosted_executable_lowering.kizu": {
-		"pub fn append_facts(",
-		"fn lowering_case_kind(",
-		"fn lowering_case_return_struct(",
-		"fn struct_field_enum_value(",
-		"fn struct_field_payload_kind(",
-		"hosted-lowering-case-kind ",
-		"hosted-lowering-case-entry ",
-	},
 	"../../selfhost/src/ir/executable_body.kizu": {
 		"pub fn append_function_body_ir(",
 		"pub fn append_helper_body_ir(",
@@ -1314,14 +1246,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_body_edge(",
 		"fn append_body_call_fact(",
 		"fn body_node_kind(",
-	},
-	"../../selfhost/src/ir/executable_body_parsing.kizu": {
-		"pub fn append_main_scan_fact(",
-		"pub fn append_run_parsing_facts(",
-		"pub fn append_test_parsing_facts(",
-		"fn require_function_body_kind(",
-		"fn require_function_body_token(",
-		"fn node_contains_token(",
 	},
 	"../../selfhost/src/backend/cli_parse_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1359,12 +1283,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/executable.kizu": {
 		"pub fn lower_run_executable(",
 		"pub fn lower_test_executable(",
-		"pub fn parse_run_executable_ast(",
-		"pub fn parse_test_executable_ast(",
-		"pub fn lower_run_executable_ast(",
-		"pub fn lower_test_executable_ast(",
-		"fn parse_run_print_call_ast(",
-		"fn parse_expect_call_ast(",
+		"pub fn unsupported_executable_kind_tag(",
+		"pub fn parser_source_token(",
+		"pub fn run_literal_quote_byte(",
 	},
 }
 
@@ -1379,18 +1300,6 @@ func assertSelfhostSplitFiles(t *testing.T) {
 			}
 		}
 	}
-	parser := readSelfhostFile(
-		t,
-		"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu",
-	)
-	for _, fragment := range []string{
-		"fn append_cli_lower_run_executable_ast_function(",
-		"fn append_cli_run_executable_function(",
-	} {
-		if strings.Contains(parser, fragment) {
-			t.Fatalf("executable parser module still owns lowering/wrapper renderer %q", fragment)
-		}
-	}
 }
 
 // TestSelfhostHostedExecutableRulesUseIRContract keeps hosted executable
@@ -1400,9 +1309,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 	facts := hostedExecutableContractFacts{
 		abi:                      hostedExecutableABIFacts(),
 		selectedSignatureDetails: hostedExecutableSelectedSignatureDetailFacts(),
-		selectedBodyParsingFacts: hostedExecutableSelectedBodyParsingFacts(),
-		hostedArtifactPathFacts:  hostedExecutableHostedArtifactPathFacts(),
-		hostedLoweringFacts:      hostedExecutableHostedLoweringFacts(),
 	}
 	assertHostedExecutableBackendInputs(t, sources, facts)
 	assertHostedExecutableFactOrigins(t, sources, facts)
@@ -1414,9 +1320,6 @@ func TestSelfhostHostedExecutableRulesUseIRContract(t *testing.T) {
 type hostedExecutableContractFacts struct {
 	abi                      []string
 	selectedSignatureDetails []string
-	selectedBodyParsingFacts []string
-	hostedArtifactPathFacts  []string
-	hostedLoweringFacts      []string
 }
 
 // assertHostedExecutableBackendInputs checks backend validation and metadata
@@ -1435,15 +1338,6 @@ func assertHostedExecutableBackendInputs(
 		facts.selectedSignatureDetails,
 	)
 	assertExecutableSelectedBodiesValidated(t, llvm)
-	assertExecutableSelectedBodyParsingValidated(
-		t,
-		llvm,
-		sources.parser,
-		facts.selectedBodyParsingFacts,
-	)
-	assertExecutableSelectedBodyLoweringValidated(t, llvm)
-	assertExecutableHostedArtifactPathsValidated(t, llvm, facts.hostedArtifactPathFacts)
-	assertExecutableHostedLoweringValidated(t, llvm, facts.hostedLoweringFacts)
 	assertExecutableABIValidated(t, llvm, facts.abi)
 }
 
@@ -1488,49 +1382,6 @@ func assertHostedExecutableFactOrigins(
 		sources.body,
 		sources.llvm,
 	)
-	assertExecutableSelectedBodyParsingComesFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.bodyParsing,
-		sources.parser,
-		sources.llvm,
-		facts.selectedBodyParsingFacts,
-	)
-	assertExecutableSelectedBodyLoweringComesFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.loweringContract,
-		sources.llvm,
-	)
-	assertHostedExecutableArtifactOrigins(t, sources, facts)
-}
-
-// assertHostedExecutableArtifactOrigins checks hosted artifact facts are
-// sourced from selected checked AST bodies.
-func assertHostedExecutableArtifactOrigins(
-	t *testing.T,
-	sources hostedExecutableContractSources,
-	facts hostedExecutableContractFacts,
-) {
-	t.Helper()
-	assertExecutableHostedArtifactPathsComeFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.hostedPaths,
-		sources.llvm,
-		facts.hostedArtifactPathFacts,
-	)
-	assertExecutableHostedLoweringComesFromCheckedAST(
-		t,
-		sources.ir,
-		sources.selected,
-		sources.hostedLowering,
-		sources.llvm,
-		facts.hostedLoweringFacts,
-	)
 }
 
 // assertHostedExecutableRendererConsumers checks generated renderers consume
@@ -1544,18 +1395,17 @@ func assertHostedExecutableRendererConsumers(
 	assertExecutableParserConsumers(
 		t,
 		sources.parser,
-		sources.lowerer+sources.loweringContract,
+		sources.lowerer,
 	)
 	assertExecutableABIConsumers(
 		t,
 		sources.parser,
 		sources.ast,
-		sources.lowerer,
 		sources.run,
 		sources.test,
 		facts.abi,
 	)
-	assertExecutableHostedArtifactPathConsumers(
+	assertExecutableHostedSharedRendererOwners(
 		t,
 		sources.llvm,
 		sources.cli,
@@ -1563,36 +1413,30 @@ func assertHostedExecutableRendererConsumers(
 		sources.test,
 		sources.metadata,
 	)
-	assertExecutableHostedLoweringConsumers(t, sources.llvm, sources.run, sources.test)
 	assertExecutableIRThreading(
 		t,
 		sources.llvm,
 		sources.cli,
 		sources.parser,
 		sources.ast,
-		sources.lowerer,
 	)
 }
 
 // hostedExecutableContractSources groups the selfhost files used by executable
 // path contract assertions.
 type hostedExecutableContractSources struct {
-	ir               string
-	contract         string
-	selected         string
-	hostedPaths      string
-	hostedLowering   string
-	body             string
-	bodyParsing      string
-	loweringContract string
-	llvm             string
-	cli              string
-	parser           string
-	ast              string
-	lowerer          string
-	run              string
-	test             string
-	metadata         string
+	ir       string
+	contract string
+	selected string
+	body     string
+	llvm     string
+	cli      string
+	parser   string
+	ast      string
+	lowerer  string
+	run      string
+	test     string
+	metadata string
 }
 
 // readHostedExecutableContractSources loads the split selfhost files involved
@@ -1604,17 +1448,7 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 		contract: readSelfhostFile(t, "../../selfhost/src/ir/executable_contract.kizu"),
 		selected: readSelfhostFile(t, "../../selfhost/src/ir/executable_functions.kizu") +
 			readSelfhostFile(t, "../../selfhost/src/ir/function_signature.kizu"),
-		hostedPaths: readSelfhostFile(t, "../../selfhost/src/ir/hosted_artifact_paths.kizu"),
-		hostedLowering: readSelfhostFile(
-			t,
-			"../../selfhost/src/ir/hosted_executable_lowering.kizu",
-		),
-		body:        readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu"),
-		bodyParsing: readSelfhostFile(t, "../../selfhost/src/ir/executable_body_parsing.kizu"),
-		loweringContract: readSelfhostFile(
-			t,
-			"../../selfhost/src/backend/cli_executable_body_lowering_contract.kizu",
-		),
+		body: readSelfhostFile(t, "../../selfhost/src/ir/executable_body.kizu"),
 		llvm: readSelfhostFile(t, "../../selfhost/src/backend/llvm.kizu"),
 		cli:  readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu"),
 		parser: readSelfhostFile(
@@ -1622,18 +1456,12 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 			"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu",
 		) + readSelfhostFile(
 			t,
-			"../../selfhost/src/backend/cli_executable_body_parser_contract.kizu",
-		) + readSelfhostFile(
-			t,
 			"../../selfhost/src/backend/cli_executable_parser_token_llvm.kizu",
 		),
-		ast: readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_ast_llvm.kizu"),
-		lowerer: readSelfhostFile(
-			t,
-			"../../selfhost/src/backend/cli_executable_body_lowering_llvm.kizu",
-		),
-		run:  readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
-		test: readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
+		ast:     readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_llvm.kizu"),
+		lowerer: "",
+		run:     readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
+		test:    readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
 		metadata: readSelfhostFile(
 			t,
 			"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu",
@@ -1649,17 +1477,14 @@ func assertExecutableStageMarkersRemoved(t *testing.T, sources hostedExecutableC
 		"executable-selected-signatures checked-ast-signature-v1",
 		"executable-selected-body-ir checked-ast-body-v1",
 		"executable-selected-helper-body-ir checked-ast-helper-body-v1",
-		"executable-selected-body-parsing checked-ast-body-parsing-v1",
 		"executable-selected-body-lowering checked-ast-body-lowering-v1",
 		"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1",
 		"executable-hosted-lowering checked-ast-hosted-lowering-v1",
 	}
 	files := map[string]string{
-		"ir root":           sources.ir,
-		"selected facts":    sources.selected,
-		"backend llvm":      sources.llvm,
-		"parser contract":   sources.parser,
-		"lowering contract": sources.loweringContract,
+		"ir root":        sources.ir,
+		"selected facts": sources.selected,
+		"backend llvm":   sources.llvm,
 	}
 	for name, content := range files {
 		for _, marker := range markers {
@@ -1710,63 +1535,6 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string) {
 	}
 }
 
-// assertExecutableSelectedBodyParsingValidated keeps parser facts tied to
-// selected checked AST bodies before hosted parser rendering consumes them.
-func assertExecutableSelectedBodyParsingValidated(
-	t *testing.T,
-	llvm string,
-	parser string,
-	facts []string,
-) {
-	t.Helper()
-	for _, fact := range facts {
-		if strings.HasPrefix(fact, "executable-parser-token ") {
-			assertNamedFactConsumer(t, parser, "backend selected-body-parsing validation", fact)
-			continue
-		}
-		if !strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend selected-body-parsing validation missing %q", fact)
-		}
-	}
-	if !strings.Contains(
-		llvm,
-		"cli_executable_body_parser_contract::require_executable_body_parsing(",
-	) {
-		t.Fatal("backend selected-body-parsing validation does not use parser contract")
-	}
-}
-
-// assertExecutableSelectedBodyLoweringValidated keeps selected body lowering
-// contract validation required before the hosted lowerer can consume body IR.
-func assertExecutableSelectedBodyLoweringValidated(t *testing.T, llvm string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"cli_executable_body_lowering_contract::require(",
-	} {
-		if !strings.Contains(llvm, fragment) {
-			t.Fatalf("backend selected-body-lowering validation missing body IR use %q", fragment)
-		}
-	}
-}
-
-// assertExecutableHostedArtifactPathsValidated keeps stage2 artifact paths tied
-// to the selected hosted writer bodies instead of renderer-local constants.
-func assertExecutableHostedArtifactPathsValidated(t *testing.T, llvm string, facts []string) {
-	t.Helper()
-	for _, fact := range facts {
-		assertNamedFactConsumer(t, llvm, "backend hosted artifact path validation", fact)
-	}
-}
-
-// assertExecutableHostedLoweringValidated keeps hosted artifact behavior facts
-// required by the backend before stage2 dispatch can consume them.
-func assertExecutableHostedLoweringValidated(t *testing.T, llvm string, facts []string) {
-	t.Helper()
-	for _, fact := range facts {
-		assertSequenceFactConsumer(t, llvm, "backend hosted lowering validation", fact)
-	}
-}
-
 // assertExecutableSelectedFunctionsComeFromCheckedAST keeps selected hosted
 // executable functions tied to parsed selfhost source function bodies.
 func assertExecutableSelectedFunctionsComeFromCheckedAST(
@@ -1787,7 +1555,6 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 		"fn append_hosted_function_facts(",
 		"fn append_selected_function_with_body(",
 		"executable_body::append_function_body_ir(",
-		"hosted_executable_lowering::append_facts(",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(selected, fragment) {
@@ -1812,8 +1579,7 @@ func assertExecutableSelectedFunctionsComeFromCheckedAST(
 		`"check::checked_ast_node"`,
 		`"backend::emit_run_executable_artifact"`,
 		`"backend::emit_test_executable_artifact"`,
-		`"lower_run_executable_ast"`,
-		`"lower_test_executable_ast"`,
+		`"executable_lowering::lower_test_executable"`,
 		`"ensure_hosted_artifact_dir"`,
 	} {
 		if !strings.Contains(llvm, fragment) {
@@ -1953,9 +1719,8 @@ func assertExecutableSelectedHelperBodiesComeFromCheckedAST(
 		"append_selected_helper_body(",
 		"function_body_node(",
 		"executable_body::append_helper_body_ir(",
-		"parse_run_program_ast",
-		"parse_test_program_ast",
-		"parse_expect_call_ast",
+		"unsupported_executable",
+		"ast_node_text",
 	} {
 		if !strings.Contains(selected, fragment) {
 			t.Fatalf("selected helper body IR is not rooted in checked AST via %q", fragment)
@@ -1991,8 +1756,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 ) {
 	t.Helper()
 	for _, fragment := range []string{
-		`"executable-ast-kind Unsupported 0"`,
-		`"executable-kind RunPrintString 1"`,
 		`"frontend-executable-lowering checked-ast-selected-body-ir"`,
 	} {
 		if strings.Contains(ir, fragment) {
@@ -2001,11 +1764,8 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	}
 	for _, fragment := range []string{
 		"parser::parse_checked_file(",
-		"append_enum_kind_facts(",
-		"append_enum_tag_facts(",
 		"require_struct_fields(",
 		"require_function(",
-		"ExecutableAstKind",
 		"ExecutableKind",
 		"executable-contract-source data selfhost::backend::data",
 		"executable-contract-source lowering selfhost::backend::executable",
@@ -2026,7 +1786,7 @@ func assertExecutableContractFactsComeFromCheckedAST(
 }
 
 // assertExecutableABIValidated checks backend validation keeps layouts exact but
-// reads executable tag ordinals from the IR fact stream.
+// reads executable tag ordinals from backend source-owned ABI helpers.
 func assertExecutableABIValidated(t *testing.T, llvm string, facts []string) {
 	t.Helper()
 	for _, fact := range facts {
@@ -2041,391 +1801,28 @@ func assertExecutableABIValidated(t *testing.T, llvm string, facts []string) {
 		}
 	}
 	for _, fragment := range []string{
-		"ir_contract::require_named_i64_fact(",
-		"append_backend_input_i64_fact(",
-		"ir_contract::named_i64_fact(",
-		`"executable-ast-kind "`,
+		"require_executable_tag_layout(",
+		"append_backend_input_executable_tag(",
+		"data::executable_kind_tag_by_name(",
 		`"executable-kind "`,
 	} {
 		if !strings.Contains(llvm, fragment) {
-			t.Fatalf("backend IR validation/metadata does not consume tag facts with %q", fragment)
+			t.Fatalf("backend IR validation/metadata does not consume source-owned tags with %q", fragment)
 		}
 	}
-}
-
-// assertExecutableSelectedBodyParsingComesFromCheckedAST keeps hosted parser
-// facts rooted in the selected executable AST parser implementation.
-func assertExecutableSelectedBodyParsingComesFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	bodyParsing string,
-	parser string,
-	llvm string,
-	facts []string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-selected-body-parsing checked-ast-body-parsing-v1"`) {
-		t.Fatal("IR root hardcodes selected body parsing facts")
-	}
-	for _, fragment := range []string{
-		"executable_body_parsing::append_main_scan_fact(",
-		"executable_body_parsing::append_run_parsing_facts(",
-		"executable_body_parsing::append_test_parsing_facts(",
+	for _, forbidden := range []string{
+		"ir_contract::require_named_i64_fact(",
+		"ir_contract::named_i64_fact(",
 	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected body parsing is not rooted in checked AST via %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"pub fn append_main_scan_fact(",
-		"pub fn append_run_parsing_facts(",
-		"pub fn append_test_parsing_facts(",
-		"fn require_function_body_kind(",
-		"fn require_function_body_token(",
-		"fn node_contains_token(",
-		"parse_run_program_ast",
-		"parse_run_print_call_ast",
-		"parse_expect_call_ast",
-	} {
-		if !strings.Contains(bodyParsing, fragment) {
-			t.Fatalf("selected body parsing emitter missing %q", fragment)
-		}
-	}
-	emitter := selected + bodyParsing
-	for _, fact := range facts {
-		assertSelectedBodyParsingFactOrigin(t, emitter, llvm, fact)
-	}
-	assertExecutableSelectedBodyParsingParserContract(t, parser)
-	for _, content := range []string{bodyParsing, parser, llvm} {
-		if strings.Contains(content, `"selected-body-parsing `) {
-			t.Fatal("selected body parsing still depends on dedicated named facts")
-		}
-	}
-	for _, fragment := range []string{
-		"fn require_function_body_fragment(",
-		"node_text_contains(",
-	} {
-		if strings.Contains(bodyParsing, fragment) {
-			t.Fatalf("selected body parsing still uses source substring validation %q", fragment)
-		}
-	}
-}
-
-// assertExecutableSelectedBodyParsingParserContract checks the hosted parser
-// renderer is gated by generic body IR shape, not only broad call presence.
-func assertExecutableSelectedBodyParsingParserContract(t *testing.T, parser string) {
-	t.Helper()
-	assertExecutableSelectedBodyParsingContractFragments(t, parser)
-	assertExecutableSelectedBodyParserNoHardcodedResultTags(t, parser)
-	assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules(t, parser)
-	assertExecutableSelectedBodyParserNoHardcodedExpectValueRules(t, parser)
-}
-
-// assertExecutableSelectedBodyParsingContractFragments checks required body IR
-// contract helper use in the hosted executable parser path.
-func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"ir_contract::require_body_call(",
-		"require_match_arm_dispatch(",
-		"find_match_arm_with_pattern(",
-		"executable_ast_result_kind_name(",
-		"run_print_ast_kind_name(",
-		"run_return_ast_kind_name(",
-		"test_ok_ast_kind_name(",
-		"test_failure_ast_kind_name(",
-		"run_literal_quote_byte(",
-		"run_literal_min_length(",
-		"run_literal_start_quote_offset(",
-		"run_literal_end_quote_offset_from_end(",
-		"run_literal_payload_start_offset(",
-		"run_literal_payload_end_margin(",
-		"run_literal_payload_delimiter_width(",
-		"run_payload_min_byte(",
-		"run_payload_max_byte(",
-		"run_payload_forbidden_byte(",
-		"test_expect_true_value(",
-		"test_expect_false_value(",
-		"test_expect_unsupported_value(",
-		"payload_guard_byte_constant(",
-		"run_literal_payload_index_expr(",
-		"let_value_with_name(",
-		"index_start_i64_value(",
-		"length_minus_i64_value(",
-		"literal_boundary_quote_byte(",
-		"bool_value_return_value(",
-		"match_arm_i64_value(",
-		"expression_i64_value(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_parent_with_child_token(",
-		"ir_contract::body_struct_literal_of_type(",
-		"ir_contract::body_struct_field_value(",
-		"ir_contract::body_field_expr_name(",
-		"ir_contract::body_int_value(",
-		"ir_contract::body_call_callee_or_empty(",
-		`"body-binary "`,
-		"parse_run_executable_ast",
-		"parse_test_executable_ast",
-		`"Program"`,
-		`"Block"`,
-		`"ExprStmt"`,
-		`"Return"`,
-		`"Call"`,
-		`"String"`,
-		`"Bool"`,
-	} {
-		if !strings.Contains(parser, fragment) {
-			t.Fatalf("selected body parsing contract missing body-call validation %q", fragment)
-		}
-	}
-}
-
-// assertExecutableSelectedBodyParserNoHardcodedResultTags rejects direct
-// executable AST result tag literals in the hosted parser renderer.
-func assertExecutableSelectedBodyParserNoHardcodedResultTags(t *testing.T, parser string) {
-	t.Helper()
-	for _, fragment := range []string{
-		`executable_ast_tag(ir_bytes, "RunPrintCall")`,
-		`executable_ast_tag(ir_bytes, "RunReturnVoid")`,
-		`executable_ast_tag(ir_bytes, "TestExpectTrue")`,
-		`executable_ast_tag(ir_bytes, "TestExpectFalse")`,
-	} {
-		if strings.Contains(parser, fragment) {
-			t.Fatalf("selected body parser hardcodes executable AST result tag %q", fragment)
-		}
-	}
-}
-
-// assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules rejects direct
-// payload byte rule literals in the hosted parser renderer.
-func assertExecutableSelectedBodyParserNoHardcodedPayloadByteRules(t *testing.T, parser string) {
-	t.Helper()
-	for _, fragment := range []string{
-		`"  %min_ok = icmp uge i8 %byte, 32"`,
-		`"  %max_ok = icmp ule i8 %byte, 126"`,
-		`"  %is_quote = icmp eq i8 %byte, 34"`,
-		`"  %quote_start_ok = icmp eq i8 %quote_start, 34"`,
-		`"  %quote_end_ok = icmp eq i8 %quote_end, 34"`,
-		`"  %arg_has_quotes = icmp sge i64 %arg_len, 2"`,
-		`"  %quote_end_index = sub i64 %arg_end, 1"`,
-		`"  %payload_start = add i64 %arg_start, 1"`,
-		`"  %payload_len = sub i64 %arg_len, 2"`,
-	} {
-		if strings.Contains(parser, fragment) {
-			t.Fatalf("selected body parser hardcodes payload byte rule %q", fragment)
-		}
-	}
-}
-
-// assertExecutableSelectedBodyParserNoHardcodedExpectValueRules rejects direct
-// expect value encoding literals in the hosted parser renderer.
-func assertExecutableSelectedBodyParserNoHardcodedExpectValueRules(t *testing.T, parser string) {
-	t.Helper()
-	for _, fragment := range []string{
-		`"  %is_ok = icmp eq i64 %expect, 1"`,
-		`"  %is_failure = icmp eq i64 %expect, 0"`,
-		`"  %expect_value = phi i64 [ 1, %bool_true_value ], [ 0, %bool_false_value ]"`,
-		`"  ret i64 -1"`,
-	} {
-		if strings.Contains(parser, fragment) {
-			t.Fatalf("selected body parser hardcodes expect value rule %q", fragment)
-		}
-	}
-}
-
-// assertSelectedBodyParsingFactOrigin checks parser facts are assembled from
-// selected helper body evidence rather than copied as backend literals.
-func assertSelectedBodyParsingFactOrigin(t *testing.T, emitter string, llvm string, fact string) {
-	t.Helper()
-	parts := strings.Fields(fact)
-	if len(parts) == 2 {
-		if !strings.Contains(emitter, `"`+fact+`"`) {
-			t.Fatalf("selected body parsing emitter does not publish %q", fact)
-		}
-		return
-	}
-	if strings.Contains(llvm, `"`+fact+`"`) {
-		t.Fatalf("backend hardcodes complete selected body parsing fact %q", fact)
-	}
-	if len(parts) != 3 {
-		t.Fatalf("invalid selected-body-parsing fixture %q", fact)
-	}
-	requiredFragments := selectedBodyParsingOriginFragments(t, parts)
-	for _, fragment := range requiredFragments {
-		if !strings.Contains(emitter, fragment) {
-			t.Fatalf("selected body parsing emitter does not publish %q via %q", fact, fragment)
-		}
-	}
-}
-
-// selectedBodyParsingOriginFragments returns source-side fragments expected to
-// assemble a parser fact.
-func selectedBodyParsingOriginFragments(t *testing.T, parts []string) []string {
-	t.Helper()
-	fragments := []string{`"` + parts[0] + ` "`, `"` + parts[2] + `"`}
-	return append(fragments, `"`+parts[1]+`"`)
-}
-
-// assertExecutableSelectedBodyLoweringComesFromCheckedAST keeps lowering facts
-// tied to the checked AST body traversal instead of backend-side fixtures.
-func assertExecutableSelectedBodyLoweringComesFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	loweringContract string,
-	llvm string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-selected-body-lowering checked-ast-body-lowering-v1"`) {
-		t.Fatal("IR root hardcodes selected body lowering facts")
-	}
-	for _, fragment := range []string{
-		"function_body_node(",
-		"append_selected_function_with_body_node(",
-	} {
-		if !strings.Contains(selected, fragment) {
-			t.Fatalf("selected body lowering is not rooted in checked AST via %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"pub fn require(",
-		"pub fn case_count(",
-		"pub fn case_ast_kind_name(",
-		"pub fn case_result_kind_name(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_node_kind(",
-		"require_unsupported_return(",
-	} {
-		if !strings.Contains(loweringContract, fragment) {
-			t.Fatalf("selected body lowering contract missing %q", fragment)
-		}
-	}
-	for _, content := range []string{selected, llvm, loweringContract} {
-		if strings.Contains(content, `"selected-body-lowering `) {
-			t.Fatal("selected body lowering still depends on dedicated named facts")
-		}
-	}
-}
-
-// assertExecutableHostedArtifactPathsComeFromCheckedAST keeps hosted artifact
-// output locations sourced from emit_*_executable_artifact bodies.
-func assertExecutableHostedArtifactPathsComeFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	hostedPaths string,
-	llvm string,
-	facts []string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-hosted-artifact-paths checked-ast-hosted-artifact-v1"`) {
-		t.Fatal("IR root hardcodes hosted artifact path facts")
-	}
-	if !strings.Contains(selected, "hosted_artifact_paths::append_facts(") {
-		t.Fatal("selected executable functions do not delegate hosted artifact path facts")
-	}
-	for _, fragment := range []string{
-		"pub fn append_facts(",
-		"pub fn append_metadata_facts(",
-		"pub fn append_common_metadata_facts(",
-		"call_from_statement(",
-		"append_named_call_string_arg_fact(",
-		"append_named_call_line_string_arg_fact(",
-		"call_callee(",
-		"append_string_literal_value(",
-		"append_line_string_literal_value(",
-		"bytes_contains_byte(",
-		"hosted-artifact-dir ",
-		"hosted-artifact-ll-prefix ",
-		"hosted-artifact-writer ",
-		"hosted-artifact-metadata-title ",
-		"hosted-artifact-metadata-issue ",
-		"hosted-artifact-metadata-source-prefix ",
-		"hosted-artifact-metadata-output-prefix ",
-		"hosted-artifact-metadata-abi-line ",
-		"hosted-artifact-metadata-entry-prefix ",
-		"hosted-artifact-metadata-runtime-line ",
-		"hosted-artifact-metadata-lowering-line ",
-		"hosted-artifact-metadata-fallback-line ",
-		"hosted-artifact-metadata-mode-line ",
-		"hosted-artifact-metadata-discovery-line ",
-	} {
-		if !strings.Contains(hostedPaths, fragment) {
-			t.Fatalf("hosted artifact path facts are not checked AST-derived via %q", fragment)
-		}
-	}
-	emitter := selected + hostedPaths
-	for _, fact := range facts {
-		parts := strings.Fields(fact)
-		if len(parts) < 3 {
-			t.Fatalf("invalid hosted artifact path fixture %q", fact)
-		}
-		if strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend hardcodes complete hosted artifact path fact %q", fact)
-		}
-		for _, fragment := range []string{`"` + parts[0] + ` "`, `"` + parts[1] + `"`} {
-			if !strings.Contains(emitter, fragment) {
-				t.Fatalf("hosted artifact path emitter does not publish %q via %q", fact, fragment)
-			}
-		}
-	}
-}
-
-// assertExecutableHostedLoweringComesFromCheckedAST keeps hosted executable
-// behavior facts sourced from lower_*_hosted_executable bodies.
-func assertExecutableHostedLoweringComesFromCheckedAST(
-	t *testing.T,
-	ir string,
-	selected string,
-	hostedLowering string,
-	llvm string,
-	facts []string,
-) {
-	t.Helper()
-	if strings.Contains(ir, `"executable-hosted-lowering checked-ast-hosted-lowering-v1"`) {
-		t.Fatal("IR root hardcodes hosted lowering facts")
-	}
-	if !strings.Contains(selected, "hosted_executable_lowering::append_facts(") {
-		t.Fatal("selected executable functions do not delegate hosted lowering facts")
-	}
-	for _, fragment := range []string{
-		"pub fn append_facts(",
-		"lowering_case_kind(",
-		"lowering_case_return_struct(",
-		"struct_field_enum_value(",
-		"struct_field_payload_kind(",
-		"append_case_fact(",
-		"hosted-lowering-case-kind ",
-		"hosted-lowering-case-comment ",
-		"hosted-lowering-case-entry ",
-		"hosted-lowering-case-payload ",
-		"hosted-lowering-case-payload-literal ",
-	} {
-		if !strings.Contains(hostedLowering, fragment) {
-			t.Fatalf("hosted lowering facts are not checked AST-derived via %q", fragment)
-		}
-	}
-	emitter := selected + hostedLowering
-	for _, fact := range facts {
-		parts := strings.Fields(fact)
-		if len(parts) < 4 {
-			t.Fatalf("invalid hosted lowering fixture %q", fact)
-		}
-		if strings.Contains(llvm, `"`+fact+`"`) {
-			t.Fatalf("backend hardcodes complete hosted lowering fact %q", fact)
-		}
-		for _, fragment := range []string{`"` + parts[0] + ` "`, `"` + parts[1] + `"`} {
-			if !strings.Contains(emitter, fragment) {
-				t.Fatalf("hosted lowering emitter does not publish %q via %q", fact, fragment)
-			}
+		if strings.Contains(llvm, forbidden) {
+			t.Fatalf("backend IR validation/metadata still consumes executable tag facts with %q", forbidden)
 		}
 	}
 }
 
 // assertExecutableHostedArtifactPathConsumers checks stage2 globals use IR
 // facts for hosted artifact directories instead of renderer-local literals.
-func assertExecutableHostedArtifactPathConsumers(
+func assertExecutableHostedSharedRendererOwners(
 	t *testing.T,
 	llvm string,
 	cli string,
@@ -2434,309 +1831,64 @@ func assertExecutableHostedArtifactPathConsumers(
 	metadata string,
 ) {
 	t.Helper()
-	if !strings.Contains(llvm, "try cli_llvm::append_globals(out, ir_bytes)") {
-		t.Fatal("IR bytes are not threaded from LLVM renderer to CLI globals")
+	for _, content := range []string{run, test, metadata} {
+		if !strings.Contains(content, "import selfhost::backend::hosted;") {
+			t.Fatal("hosted renderer does not import shared backend::hosted helpers")
+		}
+	}
+	for _, forbidden := range []string{
+		"ir_contract::named_fact_value(",
+		"ir_contract::named_fact_line_value(",
+		"ir_contract::sequence_fact_value(",
+		"ir_contract::sequence_fact_line_value(",
+	} {
+		if strings.Contains(metadata, forbidden) {
+			t.Fatalf("hosted metadata renderer still reads IR facts via %q", forbidden)
+		}
+	}
+	for _, content := range []string{run, test} {
+		for _, forbidden := range []string{
+			"ir_contract::named_fact_value(",
+			"ir_contract::sequence_fact_value(",
+			"ir_contract::sequence_fact_line_value(",
+		} {
+			if strings.Contains(content, forbidden) {
+				t.Fatalf("hosted artifact renderer still reads IR facts via %q", forbidden)
+			}
+		}
 	}
 	for _, fragment := range []string{
+		"hosted::run_artifact_dir()",
+		"hosted::test_artifact_dir()",
+		"hosted::run_print_executable()",
+		"hosted::run_return_executable()",
+		"hosted::test_ok_executable()",
+		"hosted::test_failure_executable()",
+		"hosted::metadata_output_prefix()",
+		"hosted::test_metadata_discovery_line()",
+	} {
+		if !strings.Contains(run+test+metadata, fragment) {
+			t.Fatalf("shared hosted renderer helper missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"try append_selected_hosted_artifact_path_metadata(out, ir_bytes)",
+		"try append_selected_hosted_executable_lowering_metadata(out, ir_bytes)",
+		"fn require_selected_hosted_artifact_paths(",
+		"fn require_selected_hosted_executable_lowering(",
+	} {
+		if strings.Contains(llvm, forbidden) {
+			t.Fatalf("backend llvm still owns removed hosted IR matcher %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{
+		"cli_hosted_metadata_llvm::append_output_prefix_constant(",
 		"try cli_run_llvm::append_globals(out, ir_bytes)",
 		"try cli_test_llvm::append_globals(out, ir_bytes)",
 	} {
-		if !strings.Contains(cli, fragment) {
-			t.Fatalf("IR bytes are not threaded to hosted artifact globals with %q", fragment)
+		if !strings.Contains(cli, forbidden) {
+			t.Fatalf("CLI renderer lost hosted artifact threading fragment %q", forbidden)
 		}
-	}
-	for _, fragment := range []string{
-		`append_llvm_constant(out, "ll_suffix"`,
-		`append_llvm_constant(out, "meta_suffix"`,
-	} {
-		if strings.Contains(cli, fragment) {
-			t.Fatalf("CLI globals still keep renderer-local artifact suffix %q", fragment)
-		}
-	}
-	if !strings.Contains(cli, "cli_hosted_metadata_llvm::append_output_prefix_constant(") {
-		t.Fatal("CLI globals do not derive artifact output prefix from hosted metadata facts")
-	}
-	if strings.Contains(cli, `append_llvm_constant(out, "artifact_output_prefix", "8"`) {
-		t.Fatal("CLI globals still keep renderer-local artifact output prefix")
-	}
-	assertExecutableHostedArtifactGlobalConsumers(t, run, test, metadata)
-	assertExecutableHostedMetadataPrefixNotRendererLocal(t, run, test)
-}
-
-// assertExecutableHostedArtifactGlobalConsumers checks run/test emitters read
-// hosted artifact globals from IR facts.
-func assertExecutableHostedArtifactGlobalConsumers(
-	t *testing.T,
-	run string,
-	test string,
-	metadata string,
-) {
-	t.Helper()
-	for _, fragment := range []string{
-		"ir_contract::named_fact_line_value(",
-		`"hosted-artifact-metadata-title "`,
-		`"hosted-artifact-metadata-issue "`,
-		`"hosted-artifact-metadata-source-prefix "`,
-		`"hosted-artifact-metadata-output-prefix "`,
-		`"hosted-artifact-metadata-abi-line "`,
-		`"hosted-artifact-metadata-entry-prefix "`,
-		`"hosted-artifact-metadata-fallback-line "`,
-		`"hosted-artifact-metadata-lowering-line "`,
-		`"hosted-artifact-metadata-mode-line "`,
-		`"hosted-artifact-metadata-discovery-line "`,
-	} {
-		if !strings.Contains(metadata, fragment) {
-			t.Fatalf("hosted metadata globals do not consume IR fact %q", fragment)
-		}
-	}
-	for _, file := range []struct {
-		name    string
-		content string
-	}{
-		{name: "run", content: run},
-		{name: "test", content: test},
-	} {
-		for _, fragment := range []string{
-			"append_llvm_fact_constant(",
-			`"hosted-artifact-dir "`,
-			`"hosted-artifact-ll-prefix "`,
-			`"hosted-artifact-ll-suffix "`,
-			`"hosted-artifact-metadata-prefix "`,
-			`"hosted-artifact-metadata-suffix "`,
-			"cli_hosted_metadata_llvm::append_prefix_constant(",
-			"cli_hosted_metadata_llvm::prefix_size(",
-			"cli_hosted_metadata_llvm::output_prefix_size(",
-			"cli_hosted_metadata_llvm::append_before_runtime_constant(",
-			"cli_hosted_metadata_llvm::append_after_runtime_constant(",
-			"cli_hosted_metadata_llvm::before_runtime_size(",
-			"cli_hosted_metadata_llvm::after_runtime_size(",
-			"stage2_host_path",
-			"metadata_path_prefix",
-			"metadata_path_suffix",
-		} {
-			if !strings.Contains(file.content, fragment) {
-				t.Fatalf("hosted %s artifact globals do not consume IR fact %q", file.name, fragment)
-			}
-		}
-	}
-}
-
-// assertExecutableHostedMetadataPrefixNotRendererLocal keeps metadata prefixes
-// sourced from backend::hosted facts instead of local renderer literals.
-func assertExecutableHostedMetadataPrefixNotRendererLocal(t *testing.T, run string, test string) {
-	t.Helper()
-	for _, forbidden := range []struct {
-		name     string
-		content  string
-		fragment string
-	}{
-		{
-			name:     "run",
-			content:  run,
-			fragment: `"kizu-run-artifact-v0\0Aissue #569\0Asource "`,
-		},
-		{
-			name:     "test",
-			content:  test,
-			fragment: `"kizu-test-artifact-v0\0Aissue #570\0Asource "`,
-		},
-		{
-			name:     "run",
-			content:  run,
-			fragment: `append_llvm_constant(out, "run_meta_prefix"`,
-		},
-		{
-			name:     "test",
-			content:  test,
-			fragment: `append_llvm_constant(out, "test_meta_prefix"`,
-		},
-		{
-			name:     "run",
-			content:  run,
-			fragment: `fn append_hosted_meta_suffix_constant(`,
-		},
-		{
-			name:     "test",
-			content:  test,
-			fragment: `fn append_hosted_meta_suffix_constant(`,
-		},
-		{
-			name:     "run",
-			content:  run,
-			fragment: `go.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact`,
-		},
-		{
-			name:     "test",
-			content:  test,
-			fragment: `go.cmd-kizu-fallback none\0Aartifact_mode hosted-artifact`,
-		},
-		{
-			name:     "test",
-			content:  test,
-			fragment: `discovery none\0A`,
-		},
-		{
-			name:     "run",
-			content:  run,
-			fragment: `runtime\20target/selfhost/stage2/selfhost.host.ll`,
-		},
-		{
-			name:     "test",
-			content:  test,
-			fragment: `runtime\20target/selfhost/stage2/selfhost.host.ll`,
-		},
-	} {
-		if strings.Contains(forbidden.content, forbidden.fragment) {
-			t.Fatalf("hosted %s metadata prefix remains renderer-local: %q",
-				forbidden.name, forbidden.fragment)
-		}
-	}
-}
-
-// assertExecutableHostedLoweringConsumers checks hosted stage2 dispatch reads
-// executable kind cases from the selected hosted lowering facts.
-func assertExecutableHostedLoweringConsumers(
-	t *testing.T,
-	llvm string,
-	run string,
-	test string,
-) {
-	t.Helper()
-	for _, fragment := range []string{
-		"try append_selected_hosted_executable_lowering_metadata(out, ir_bytes)",
-		"fn require_selected_hosted_executable_lowering(",
-		"ir_contract::sequence_fact_count(",
-		"ir_contract::sequence_fact_line_value(",
-		`"hosted-lowering-case-kind "`,
-		`"hosted-lowering-case-comment "`,
-		`"hosted-lowering-case-payload-literal "`,
-	} {
-		if !strings.Contains(llvm, fragment) {
-			t.Fatalf("backend hosted lowering consumer missing %q", fragment)
-		}
-	}
-	for _, file := range []struct {
-		name    string
-		content string
-	}{
-		{name: "run", content: run},
-		{name: "test", content: test},
-	} {
-		for _, fragment := range []string{
-			"hosted_lowering_case_kind_tag(",
-			"ir_contract::sequence_fact_value(",
-			"ir_contract::sequence_fact_line_value(",
-			`"hosted-lowering-case-kind "`,
-			`"hosted-lowering-case-comment "`,
-			`"hosted-lowering-case-entry "`,
-			`"hosted-lowering-case-stream "`,
-			`"hosted-lowering-case-exit "`,
-		} {
-			if !strings.Contains(file.content, fragment) {
-				t.Fatalf("hosted %s dispatch does not consume hosted lowering fact %q", file.name, fragment)
-			}
-		}
-	}
-	for _, fragment := range []string{`"RunPrintString"`, `"TestExpectOk"`} {
-		if strings.Contains(run, fragment) || strings.Contains(test, fragment) {
-			t.Fatalf("hosted dispatch still hardcodes executable kind name %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		`"; kizu run artifact ll v0\0Asource_filename = \22"`,
-		`"; kizu test artifact ll v0\0Asource_filename = \22"`,
-		`"test: ok\5C0A"`,
-		`"error: runtime error: expected condition to be true\5C0A"`,
-		`"declare %kizu.error.void @kizu_rt_io_write_stdout`,
-		`"declare %kizu.error.void @kizu_rt_io_write_stderr`,
-	} {
-		if strings.Contains(run, fragment) || strings.Contains(test, fragment) {
-			t.Fatalf("hosted artifact renderer still hardcodes body literal %q", fragment)
-		}
-	}
-	assertHostedLoweringSliceSizesUseFacts(t, run, test)
-}
-
-// assertHostedLoweringSliceSizesUseFacts keeps global declarations and their
-// slice use sites sized from the same selected hosted lowering facts.
-func assertHostedLoweringSliceSizesUseFacts(t *testing.T, run string, test string) {
-	t.Helper()
-	for _, fragment := range []string{
-		"hosted_artifact_fact_len(",
-		"hosted_prefix_source_size(",
-		"run_dynamic_global_prefix_size(",
-		"run_dynamic_body_prefix_size(",
-		"run_dynamic_body_suffix_size(",
-		"hosted_return_body_suffix_size(",
-		"cli_hosted_metadata_llvm::before_runtime_size(",
-		"cli_hosted_metadata_llvm::after_runtime_size(",
-		`"run_return_ll_prefix_source"`,
-		`"run_return_meta_before_runtime"`,
-	} {
-		if !strings.Contains(run, fragment) {
-			t.Fatalf("hosted run artifact slices are not fact-sized with %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"hosted_artifact_fact_len(",
-		"hosted_prefix_source_size(",
-		"test_case_ll_suffix_size(",
-		"cli_hosted_metadata_llvm::before_runtime_size(",
-		"cli_hosted_metadata_llvm::after_runtime_size(",
-		`"test_ok_ll_prefix"`,
-		`"test_failure_ll_prefix"`,
-	} {
-		if !strings.Contains(test, fragment) {
-			t.Fatalf("hosted test artifact slices are not fact-sized with %q", fragment)
-		}
-	}
-	for _, file := range []struct {
-		name      string
-		content   string
-		forbidden []string
-	}{
-		{name: "run", content: run, forbidden: hostedRunFixedSliceSizes()},
-		{name: "test", content: test, forbidden: hostedTestFixedSliceSizes()},
-	} {
-		for _, fragment := range file.forbidden {
-			if strings.Contains(file.content, fragment) {
-				t.Fatalf("hosted %s artifact slice keeps fixed size %q", file.name, fragment)
-			}
-		}
-	}
-}
-
-// hostedRunFixedSliceSizes returns fixed sizes that must stay fact-derived.
-func hostedRunFixedSliceSizes() []string {
-	return []string{
-		`"run_dir", "19"`,
-		`"run_path_prefix", "20"`,
-		`"run_ll_suffix", "3"`,
-		`"run_metadata_path_prefix", "20"`,
-		`"run_metadata_path_suffix", "8"`,
-		`"run_print_ll_prefix_source", "45"`,
-		`"run_print_ll_prefix_len", "164"`,
-		`"run_print_ll_prefix_payload", "9"`,
-		`"run_print_ll_prefix_len2", "377"`,
-		`"run_print_ll_suffix", "173"`,
-		`"run_return_ll_suffix", "156"`,
-		`"run_meta_suffix", "146"`,
-	}
-}
-
-// hostedTestFixedSliceSizes returns fixed sizes that must stay fact-derived.
-func hostedTestFixedSliceSizes() []string {
-	return []string{
-		`"test_dir", "20"`,
-		`"test_path_prefix", "21"`,
-		`"test_ll_suffix", "3"`,
-		`"test_ll_prefix", "46"`,
-		`"test_ok_ll_suffix", "793"`,
-		`"test_failure_ll_suffix", "849"`,
-		`"test_metadata_path_prefix", "21"`,
-		`"test_metadata_path_suffix", "8"`,
-		`"test_ok_meta_suffix", "162"`,
-		`"test_failure_meta_suffix", "162"`,
 	}
 }
 
@@ -2744,47 +1896,45 @@ func hostedTestFixedSliceSizes() []string {
 func assertExecutableParserConsumers(
 	t *testing.T,
 	parser string,
-	ast string,
+	lowerer string,
 ) {
 	t.Helper()
 	assertExecutableParserFactConsumers(t, parser)
-	assertExecutableLoweringFactConsumers(t, ast)
+	assertExecutableLoweringFactConsumers(t, lowerer)
 }
 
 // assertExecutableParserFactConsumers checks parser renderer fact contracts.
 func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"ir_contract::named_i64_fact(",
-		"ir_contract::require_named_fact(",
-		"ir_contract::named_fact_value(",
-		"ir_contract::require_body_call(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_parent_with_child_token(",
-		"ir_contract::body_struct_literal_of_type(",
-		"ir_contract::body_struct_field_value(",
-		"ir_contract::body_field_expr_name(",
-		"executable-parser-token ",
-		"parser_source_token(",
+		"cli_executable_parser_token_llvm::append_named_token_char_eq_call(",
+		"cli_executable_parser_token_llvm::append_named_token_pair_eq_call(",
+		"executable::parser_source_token(",
+		"executable::run_payload_min_byte(",
+		"executable::run_payload_max_byte(",
+		"executable::run_payload_forbidden_byte(",
+		"executable::run_literal_quote_byte(",
+		"executable::run_literal_min_length(",
+		"executable::run_literal_start_quote_offset(",
+		"executable::run_literal_end_quote_offset_from_end(",
+		"executable::run_literal_payload_start_offset(",
+		"executable::run_literal_payload_delimiter_width(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
 		}
 	}
-	for _, fragment := range []string{
-		`"selfhost::backend::executable::parse_run_executable_ast",
-        18,`,
-		`"selfhost::backend::executable::parse_run_program_ast",
-        39,`,
-		`"selfhost::backend::executable::parse_run_fn_ast",
-        38,`,
-		`"selfhost::backend::executable::parse_run_block_ast",
-        39,`,
-		`"selfhost::backend::executable::parse_test_block_ast",
-        62,`,
+	for _, forbidden := range []string{
+		"executable-parser-token ",
+		"cli_executable_body_parser_contract::unsupported_ast_kind_name(",
+		"cli_executable_body_parser_contract::run_print_ast_kind_name(",
+		"cli_executable_body_parser_contract::run_return_ast_kind_name(",
+		"cli_executable_body_parser_contract::test_ok_ast_kind_name(",
+		"cli_executable_body_parser_contract::test_failure_ast_kind_name(",
+		"ir_contract::named_i64_fact(",
 	} {
-		if strings.Contains(parser, fragment) {
-			t.Fatalf("hosted executable parser still uses fixed body sequence %q", fragment)
+		if strings.Contains(parser, forbidden) {
+			t.Fatalf("hosted executable parser keeps backend-owned contract lookup %q", forbidden)
 		}
 	}
 	for _, fragment := range []string{
@@ -2800,28 +1950,7 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 func assertExecutableLoweringFactConsumers(t *testing.T, ast string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"ir_contract::named_i64_fact(",
-		"ir_contract::sequence_fact_value(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_child_sequence_or_minus_one(",
-		"ir_contract::body_node_kind(",
-		"ir_contract::body_node_count(",
-		"cli_executable_body_lowering_contract::case_count(",
-		"cli_executable_body_lowering_contract::case_ast_kind_name(",
-		"cli_executable_body_lowering_contract::case_result_kind_name(",
-		"body-field-expr ",
-		"body-struct-literal ",
-		"append_cli_lower_executable_ast_function(",
-		"append_case_dispatch(",
-		"lowering_case_ast_kind_name(",
-		"lowering_case_result_kind_name(",
-		`"executable-kind "`,
-	} {
-		if !strings.Contains(ast, fragment) {
-			t.Fatalf("hosted executable lowerer does not consume fact tags with %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
+		"data::executable_kind_tag_by_name(",
 		"selected-body-lowering-case-count ",
 		"selected-body-lowering-case-ast ",
 		"selected-body-lowering-case-result ",
@@ -2842,14 +1971,13 @@ func assertExecutableABIConsumers(
 	t *testing.T,
 	parser string,
 	ast string,
-	lowerer string,
 	run string,
 	test string,
 	abiFacts []string,
 ) {
 	t.Helper()
 	assertExecutableASTABIConsumers(t, parser, ast, abiFacts)
-	assertExecutableLowererABIConsumers(t, lowerer)
+	assertExecutableLowererABIConsumers(t, ast)
 	assertExecutableDispatchABIConsumers(t, run, test)
 }
 
@@ -2862,62 +1990,55 @@ func assertExecutableASTABIConsumers(
 ) {
 	t.Helper()
 	for _, fact := range abiFacts {
-		if isExecutableTagFact(fact) {
-			if strings.Contains(parser, `"`+fact+`"`) || strings.Contains(ast, `"`+fact+`"`) {
-				t.Fatalf("hosted executable renderer hardcodes ABI tag fact %q", fact)
-			}
-			continue
-		}
-		if !strings.Contains(ast, `"`+fact+`"`) {
-			t.Fatalf("hosted executable AST renderer does not consume ABI fact %q", fact)
+		if isExecutableTagFact(fact) &&
+			(strings.Contains(parser, `"`+fact+`"`) || strings.Contains(ast, `"`+fact+`"`)) {
+			t.Fatalf("hosted executable renderer hardcodes ABI tag fact %q", fact)
 		}
 	}
-	for _, fragment := range []string{
-		"ir_contract::require_named_i64_fact(",
-		`"executable-ast-kind "`,
-		`"executable-kind "`,
-	} {
-		if !strings.Contains(ast, fragment) {
-			t.Fatalf("hosted executable AST renderer does not consume tag facts with %q", fragment)
-		}
-	}
-	for _, fragment := range []string{
-		"executable_ast_tag(",
-		`"executable-ast-kind "`,
-	} {
+	for _, fragment := range []string{} {
 		if !strings.Contains(parser, fragment) {
-			t.Fatalf("hosted executable parser does not consume tag facts with %q", fragment)
+			t.Fatalf("hosted executable parser does not consume ABI tags with %q", fragment)
 		}
+	}
+	if strings.Contains(ast, "ir_contract::require_named_i64_fact(") {
+		t.Fatal("hosted executable AST renderer still consumes executable tag facts")
 	}
 }
 
-// assertExecutableLowererABIConsumers checks body lowerer rendering reads tag facts.
+// assertExecutableLowererABIConsumers checks body lowerer rendering reads source-owned ABI tags.
 func assertExecutableLowererABIConsumers(t *testing.T, lowerer string) {
 	t.Helper()
 	for _, fragment := range []string{
-		"executable_kind_tag(",
-		`"executable-kind "`,
+		"executable::unsupported_executable_kind_tag(",
+		"executable::run_return_executable_kind_tag(",
+		"executable::call_executable_kind_tag(",
 	} {
 		if !strings.Contains(lowerer, fragment) {
-			t.Fatalf("hosted executable lowerer does not consume ABI tag facts with %q", fragment)
+			t.Fatalf("hosted executable lowerer does not consume source-owned ABI tags with %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"ir_contract::named_i64_fact(",
+		"data::executable_kind_tag_by_name(",
+	} {
+		if strings.Contains(lowerer, forbidden) {
+			t.Fatalf("hosted executable lowerer still consumes backend-owned ABI tag lookup %q", forbidden)
 		}
 	}
 }
 
-// assertExecutableDispatchABIConsumers checks run/test dispatch reads ABI facts.
+// assertExecutableDispatchABIConsumers checks run/test dispatch reads source-owned ABI tags.
 func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string) {
 	t.Helper()
 	for _, fact := range []string{
-		"executable-kind RunPrintString 1",
-		"executable-kind RunReturnVoid 2",
+		"executable-kind RunReturnVoid 1",
 	} {
 		if strings.Contains(run, `"`+fact+`"`) {
 			t.Fatalf("hosted run dispatch hardcodes executable ABI fact %q", fact)
 		}
 	}
 	for _, fact := range []string{
-		"executable-kind TestExpectOk 3",
-		"executable-kind TestExpectFailure 4",
+		"executable-kind Call 3",
 	} {
 		if strings.Contains(test, `"`+fact+`"`) {
 			t.Fatalf("hosted test dispatch hardcodes executable ABI fact %q", fact)
@@ -2931,21 +2052,26 @@ func assertExecutableDispatchABIConsumers(t *testing.T, run string, test string)
 		{name: "test", content: test},
 	} {
 		for _, fragment := range []string{
-			"ir_contract::named_i64_fact(",
-			`"executable-kind "`,
+			"data::executable_kind_tag_by_name(",
 			"append_executable_kind_compare(",
 		} {
 			if !strings.Contains(file.content, fragment) {
-				t.Fatalf("hosted %s dispatch does not consume fact tags with %q", file.name, fragment)
+				t.Fatalf(
+					"hosted %s dispatch does not consume source-owned ABI tags with %q",
+					file.name,
+					fragment,
+				)
 			}
+		}
+		if strings.Contains(file.content, "ir_contract::named_i64_fact(") {
+			t.Fatalf("hosted %s dispatch still consumes executable tag facts", file.name)
 		}
 	}
 }
 
 // isExecutableTagFact reports whether a contract fact carries an executable tag ordinal.
 func isExecutableTagFact(fact string) bool {
-	return strings.HasPrefix(fact, "executable-ast-kind ") ||
-		strings.HasPrefix(fact, "executable-kind ")
+	return strings.HasPrefix(fact, "executable-kind ")
 }
 
 // assertNamedFactConsumer checks rule consumers read mapped facts by prefix and key.
@@ -3013,7 +2139,6 @@ func assertExecutableIRThreading(
 	cli string,
 	parser string,
 	ast string,
-	lowerer string,
 ) {
 	t.Helper()
 	run := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
@@ -3024,19 +2149,17 @@ func assertExecutableIRThreading(
 	}{
 		{name: "parser", content: parser},
 		{name: "ast", content: ast},
-		{name: "lowerer", content: lowerer},
 		{name: "run", content: run},
 		{name: "test", content: test},
 	} {
-		if !strings.Contains(file.content, `ir_contract::`) {
-			t.Fatalf("hosted executable %s renderer does not require IR facts", file.name)
+		if !strings.Contains(file.content, "ir_bytes") {
+			t.Fatalf("hosted executable %s renderer does not thread IR bytes", file.name)
 		}
 	}
 	for _, fragment := range []string{
 		"try cli_llvm::append_functions(out, ir_bytes)",
-		"try cli_executable_ast_llvm::append_functions(out, ir_bytes)",
+		"try cli_executable_llvm::append_functions(out, ir_bytes)",
 		"try cli_executable_body_parsing_llvm::append_functions(out, ir_bytes)",
-		"try cli_executable_body_lowering_llvm::append_functions(out, ir_bytes)",
 		"try cli_test_llvm::append_cli_test_blocks(out, ir_bytes)",
 		"try cli_run_llvm::append_cli_run_blocks(out, ir_bytes)",
 	} {
@@ -3051,18 +2174,10 @@ func assertExecutableIRThreading(
 func hostedExecutableABIFacts() []string {
 	return []string{
 		"hosted-executable-abi executable-result-layout-v1",
-		"executable-ast-layout kind:i64 payload:[]u8",
-		"executable-layout kind:i64 stdout_payload:[]u8",
-		"executable-ast-kind Unsupported 0",
-		"executable-ast-kind RunPrintCall 1",
-		"executable-ast-kind RunReturnVoid 2",
-		"executable-ast-kind TestExpectTrue 3",
-		"executable-ast-kind TestExpectFalse 4",
+		"executable-layout kind:i64 callee:[]u8 payload:[]u8",
 		"executable-kind Unsupported 0",
-		"executable-kind RunPrintString 1",
-		"executable-kind RunReturnVoid 2",
-		"executable-kind TestExpectOk 3",
-		"executable-kind TestExpectFailure 4",
+		"executable-kind RunReturnVoid 1",
+		"executable-kind Call 2",
 	}
 }
 
@@ -3077,184 +2192,13 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 			"lower_run_executable !data::Executable",
 		"function-signature-param selfhost::backend::executable::" +
 			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast",
-		"function-signature-return selfhost::backend::executable::" +
-			"lower_run_executable_ast data::Executable",
-		"function-signature-return selfhost::backend::executable::" +
-			"parse_run_program_ast !data::ExecutableAst",
 		"function-signature-param selfhost::backend::executable::" +
-			"parse_run_print_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
-		"function-signature-param selfhost::backend::executable::" +
-			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange",
+			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast",
 		"function-signature-return selfhost::backend::hosted::" +
 			"emit_run_executable_artifact !data::RunArtifact",
 		"function-signature-param selfhost::backend::hosted::" +
 			"emit_run_executable_artifact 3 executable:runtime:data::Executable",
 	}
-}
-
-// hostedExecutableHostedArtifactPathFacts returns path facts derived from the
-// selected hosted artifact writer bodies and consumed by stage2 globals.
-func hostedExecutableHostedArtifactPathFacts() []string {
-	return []string{
-		"hosted-artifact-dir selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run",
-		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run/",
-		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact .ll",
-		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run/",
-		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact .ll.meta",
-		"hosted-artifact-writer selfhost::backend::hosted::" +
-			"emit_run_executable_artifact write_run_artifact",
-		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
-			"write_run_metadata kizu-run-artifact-v0",
-		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_run_metadata issue #569",
-		"hosted-artifact-dir selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test",
-		"hosted-artifact-ll-prefix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test/",
-		"hosted-artifact-ll-suffix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact .ll",
-		"hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test/",
-		"hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact .ll.meta",
-		"hosted-artifact-writer selfhost::backend::hosted::" +
-			"emit_test_executable_artifact write_test_artifact",
-		"hosted-artifact-metadata-title selfhost::backend::hosted::" +
-			"write_test_metadata kizu-test-artifact-v0",
-		"hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_test_metadata issue #570",
-		"hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
-			"append_common_metadata source ",
-		"hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
-			"append_common_metadata output ",
-		"hosted-artifact-metadata-abi-line selfhost::backend::hosted::" +
-			"append_common_metadata abi selfhost-abi-v0",
-		"hosted-artifact-metadata-entry-prefix selfhost::backend::hosted::" +
-			"append_common_metadata entry @",
-		"hosted-artifact-metadata-runtime-line selfhost::backend::hosted::" +
-			"append_common_metadata runtime target/selfhost/selfhost.host.ll",
-		"hosted-artifact-metadata-lowering-line selfhost::backend::hosted::" +
-			"append_common_metadata executable_lowering selfhost::backend::" +
-			"executable checked-ast",
-		"hosted-artifact-metadata-fallback-line selfhost::backend::hosted::" +
-			"append_common_metadata go.cmd-kizu-fallback none",
-		"hosted-artifact-metadata-mode-line selfhost::backend::hosted::" +
-			"append_common_metadata artifact_mode hosted-artifact",
-		"hosted-artifact-metadata-discovery-line selfhost::backend::hosted::" +
-			"write_test_metadata discovery none",
-	}
-}
-
-// hostedExecutableHostedLoweringFacts returns behavior facts derived from
-// lower_*_hosted_executable bodies and consumed by hosted stage2 dispatch.
-func hostedExecutableHostedLoweringFacts() []string {
-	facts := hostedExecutableRunHostedLoweringFacts()
-	return append(facts, hostedExecutableTestHostedLoweringFacts()...)
-}
-
-// hostedExecutableRunHostedLoweringFacts returns run artifact behavior facts.
-func hostedExecutableRunHostedLoweringFacts() []string {
-	return []string{
-		"hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 RunPrintString",
-		"hosted-lowering-case-comment selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu run artifact ll v0",
-		"hosted-lowering-case-entry selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu_run_main",
-		"hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu.run.stdout",
-		"hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 Stdout",
-		"hosted-lowering-case-newline selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 true",
-		"hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 0",
-		"hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 executable-field",
-		"hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 RunReturnVoid",
-		"hosted-lowering-case-comment selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 kizu run artifact ll v0",
-		"hosted-lowering-case-entry selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 kizu_run_main",
-		"hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 none",
-		"hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 None",
-		"hosted-lowering-case-newline selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 false",
-		"hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 0",
-		"hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 empty-source-slice",
-	}
-}
-
-// hostedExecutableTestHostedLoweringFacts returns test artifact behavior facts.
-func hostedExecutableTestHostedLoweringFacts() []string {
-	return []string{
-		"hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 TestExpectOk",
-		"hosted-lowering-case-comment selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 kizu test artifact ll v0",
-		"hosted-lowering-case-entry selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 kizu_test_main",
-		"hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 kizu.test.ok",
-		"hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 Stdout",
-		"hosted-lowering-case-newline selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 true",
-		"hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 0",
-		"hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 literal",
-		"hosted-lowering-case-payload-literal selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 test: ok",
-		"hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 TestExpectFailure",
-		"hosted-lowering-case-comment selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 kizu test artifact ll v0",
-		"hosted-lowering-case-entry selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 kizu_test_main",
-		"hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 kizu.test.failure",
-		"hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 Stderr",
-		"hosted-lowering-case-newline selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 true",
-		"hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 1",
-		"hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 literal",
-		"hosted-lowering-case-payload-literal selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 error: runtime error:" +
-			" expected condition to be true",
-	}
-}
-
-// hostedExecutableSelectedBodyParsingFacts returns checked parser facts derived
-// from the selected executable AST parser implementation.
-func hostedExecutableSelectedBodyParsingFacts() []string {
-	facts := []string{
-		"executable-parser-token syntax-fn fn",
-		"executable-parser-token syntax-test test",
-		"executable-parser-token syntax-return return",
-		"executable-parser-token syntax-void void",
-		"executable-parser-token value-main main",
-		"executable-parser-token run-print-callee print",
-		"executable-parser-token expect-callee-root std",
-		"executable-parser-token expect-callee-module testing",
-		"executable-parser-token expect-callee-function expect",
-		"executable-parser-token literal-true true",
-		"executable-parser-token literal-false false",
-	}
-	return facts
 }
 
 // hostedExecutableBodyContractFragments returns representative generic body IR
@@ -3268,9 +2212,8 @@ func hostedExecutableBodyContractFragments() []string {
 		`"selfhost::cli::execute::test_file_cli"`,
 		`"backend::lower_test_executable"`,
 		`"selfhost::backend::executable::lower_run_executable"`,
-		`"parse_run_executable_ast"`,
 		`"selfhost::backend::executable::lower_test_executable"`,
-		`"parse_test_executable_ast"`,
+		`"executable_lowering::lower_test_executable"`,
 		`"selfhost::backend::hosted::emit_run_executable_artifact"`,
 		`"write_run_artifact"`,
 		`"selfhost::backend::hosted::emit_test_executable_artifact"`,
@@ -3287,8 +2230,6 @@ func hostedExecutableExactBodySequenceFragments() []string {
 		`"body-call selfhost::cli::execute::test_file_cli 109`,
 		`"body-call selfhost::backend::executable::lower_run_executable 4`,
 		`"body-call selfhost::backend::executable::lower_test_executable 4`,
-		`"body-struct-literal selfhost::backend::executable::lower_run_executable_ast 13`,
-		`"body-struct-literal selfhost::backend::executable::lower_test_executable_ast 13`,
 		`"body-call selfhost::backend::hosted::emit_run_executable_artifact 28`,
 		`"body-call selfhost::backend::hosted::emit_test_executable_artifact 28`,
 	}
@@ -3405,7 +2346,7 @@ func TestSelfhostCLIParseUsesParserDiagnosticFacade(t *testing.T) {
 		"parser::validate_diagnostic_file(allocator, path, file_text)",
 		"let validation_ok = parsed_validation.ok",
 		"if !validation_ok {",
-		"diagnostics::parse_validation_error(allocator, io, parsed_validation)",
+		"diagnostics::parse_validation_error(allocator, io, path, &var parsed_validation)",
 		"let parsed = try parser::parse_validated_file(",
 		"validation_ok",
 		"parsed.deinit();",

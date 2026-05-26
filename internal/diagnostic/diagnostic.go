@@ -1,4 +1,3 @@
-// Package diagnostic defines structured compiler diagnostics and text rendering.
 package diagnostic
 
 import (
@@ -8,195 +7,140 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 )
 
-// Severity describes whether a diagnostic stops compilation.
-type Severity string
+// Severity identifies whether a diagnostic blocks compilation or is advisory.
+type Severity int
 
 const (
-	// SeverityError stops the current compile/check/run operation.
-	SeverityError Severity = "error"
-	// SeverityWarning reports a non-fatal issue.
-	SeverityWarning Severity = "warning"
+	// SeverityError reports a diagnostic that fails the current command.
+	SeverityError Severity = iota + 1
+	// SeverityWarning reports a diagnostic that does not fail the current command.
+	SeverityWarning
 )
 
-// Category names the first user-facing diagnostic prefix.
-type Category string
-
-const (
-	// CategoryParse is used by parser diagnostics rendered with the generic error prefix.
-	CategoryParse Category = "error"
-	// CategoryType is used by type-checker diagnostics.
-	CategoryType Category = "type error"
-	// CategoryMove is used by ownership / move-checker diagnostics.
-	CategoryMove Category = "move error"
-	// CategoryUnsafe is used by unsafe capability diagnostics.
-	CategoryUnsafe Category = "unsafe error"
-)
-
-// DetailKind names a structured follow-up line.
-type DetailKind string
-
-const (
-	// DetailNote explains why the compiler reached the diagnostic.
-	DetailNote DetailKind = "note"
-	// DetailHelp describes an actionable next step.
-	DetailHelp DetailKind = "help"
-)
-
-// Detail is one structured follow-up line such as note or help.
-type Detail struct {
-	Kind    DetailKind
-	Message string
-}
-
-// RelatedSpan points at an additional source range related to a diagnostic.
-type RelatedSpan struct {
-	Message string
-	Span    ast.Span
-}
-
-// Diagnostic is the compiler-internal diagnostic model.
+// Diagnostic carries structured diagnostic data shared by CLI and LSP renderers.
 type Diagnostic struct {
 	Severity Severity
-	Category Category
+	Category string
 	Code     string
-	Summary  string
-	Primary  ast.Span
-	Details  []Detail
-	Related  []RelatedSpan
+	Message  string
+	Span     ast.Span
+	Notes    []string
+	Help     string
 }
 
-// New builds a diagnostic without rendering it.
-func New(
-	severity Severity,
-	category Category,
-	code string,
-	summary string,
-	primary ast.Span,
-) Diagnostic {
-	return Diagnostic{
+// New constructs one structured diagnostic from its summary fields.
+func New(severity Severity, category string, span ast.Span, message string) *Diagnostic {
+	return &Diagnostic{
 		Severity: severity,
 		Category: category,
-		Code:     code,
-		Summary:  summary,
-		Primary:  primary,
+		Message:  message,
+		Span:     span,
 	}
 }
 
-// FromRendered parses an existing rendered message into a structured diagnostic.
-func FromRendered(message string, primary ast.Span) Diagnostic {
-	lines := strings.Split(message, "\n")
-	summary := ""
+// FromText parses ADR-style diagnostic text into structured fields.
+func FromText(severity Severity, span ast.Span, text string) *Diagnostic {
+	lines := strings.Split(text, "\n")
+	first := ""
 	if len(lines) > 0 {
-		summary = lines[0]
+		first = lines[0]
 	}
-	category, summary := splitCategory(summary)
-	diag := New(SeverityError, category, "", summary, primary)
+	parsedSeverity, category, message := splitFirstLine(severity, first)
+	diag := New(parsedSeverity, category, span, message)
 	for _, line := range lines[1:] {
-		kind, detail, ok := splitDetail(line)
-		if ok {
-			diag.Details = append(diag.Details, Detail{Kind: kind, Message: detail})
+		switch {
+		case strings.HasPrefix(line, "note: "):
+			diag.Notes = append(diag.Notes, strings.TrimPrefix(line, "note: "))
+		case strings.HasPrefix(line, "help: "):
+			help := strings.TrimPrefix(line, "help: ")
+			if diag.Help == "" {
+				diag.Help = help
+			} else {
+				diag.Help += "\n" + help
+			}
+		case line == "":
 			continue
-		}
-		if line != "" {
-			diag.Details = append(diag.Details, Detail{Message: line})
+		default:
+			if diag.Message == "" {
+				diag.Message = line
+			} else {
+				diag.Notes = append(diag.Notes, line)
+			}
 		}
 	}
 	return diag
 }
 
-// WithNote appends explanatory context.
-func (d Diagnostic) WithNote(message string) Diagnostic {
-	d.Details = append(d.Details, Detail{Kind: DetailNote, Message: message})
-	return d
-}
-
-// WithNotef appends formatted explanatory context.
-func (d Diagnostic) WithNotef(format string, args ...any) Diagnostic {
-	return d.WithNote(fmt.Sprintf(format, args...))
-}
-
-// WithHelp appends an actionable next step.
-func (d Diagnostic) WithHelp(message string) Diagnostic {
-	d.Details = append(d.Details, Detail{Kind: DetailHelp, Message: message})
-	return d
-}
-
-// WithHelpf appends a formatted actionable next step.
-func (d Diagnostic) WithHelpf(format string, args ...any) Diagnostic {
-	return d.WithHelp(fmt.Sprintf(format, args...))
-}
-
-// AsError returns d as an error value.
-func (d Diagnostic) AsError() *Error {
-	return &Error{Diagnostic: d, Span: d.Primary}
-}
-
-// RenderText renders the stable human-readable diagnostic text.
-func (d Diagnostic) RenderText() string {
-	first := d.Summary
-	if d.Category != "" {
-		first = string(d.Category) + ": " + first
+// Error renders the diagnostic in ADR-0072 message form without CLI severity wrapping.
+func (d *Diagnostic) Error() string {
+	first := d.Message
+	switch {
+	case d.Category != "":
+		first = d.Category + ": " + d.Message
+	case d.Severity == SeverityWarning:
+		first = "warning: " + d.Message
 	}
-	if !d.Primary.IsZero() {
-		first = fmt.Sprintf("%s at %d:%d", first, d.Primary.Start.Line, d.Primary.Start.Column)
+	if !d.Span.IsZero() {
+		first += fmt.Sprintf(" at %d:%d", d.Span.Start.Line, d.Span.Start.Column)
 	}
 	lines := []string{first}
-	for _, detail := range d.Details {
-		if detail.Kind == "" {
-			lines = append(lines, detail.Message)
-			continue
+	for _, note := range d.Notes {
+		lines = append(lines, "note: "+note)
+	}
+	if d.Help != "" {
+		for _, line := range strings.Split(d.Help, "\n") {
+			lines = append(lines, "help: "+line)
 		}
-		lines = append(lines, string(detail.Kind)+": "+detail.Message)
 	}
 	return strings.Join(lines, "\n")
 }
 
-// Error carries a structured compiler diagnostic as an error.
-type Error struct {
-	Diagnostic Diagnostic
-	Span       ast.Span
+// CLIError renders the diagnostic with the CLI severity prefix when needed.
+func (d *Diagnostic) CLIError() string {
+	if d.Severity == SeverityWarning {
+		return d.Error()
+	}
+	return "error: " + d.Error()
 }
 
-// Error renders the diagnostic as stable text.
-func (e *Error) Error() string {
-	return e.Diagnostic.RenderText()
+// SourceSpan returns the primary source span for the diagnostic.
+func (d *Diagnostic) SourceSpan() ast.Span {
+	return d.Span
 }
 
-// SourceSpan returns the primary span associated with the diagnostic.
-func (e *Error) SourceSpan() ast.Span {
-	return e.Span
+// SeverityLevel returns the diagnostic severity for LSP and other renderers.
+func (d *Diagnostic) SeverityLevel() Severity {
+	return d.Severity
 }
 
-// CompilerDiagnostic returns the structured diagnostic payload.
-func (e *Error) CompilerDiagnostic() Diagnostic {
-	diag := e.Diagnostic
-	diag.Primary = e.Span
-	return diag
+// WithCode records one stable machine-readable diagnostic code.
+func (d *Diagnostic) WithCode(code string) *Diagnostic {
+	d.Code = code
+	return d
 }
 
-// splitCategory removes a known rendered category prefix from summary.
-func splitCategory(summary string) (Category, string) {
-	for _, category := range []Category{
-		CategoryType,
-		CategoryMove,
-		CategoryUnsafe,
-		CategoryParse,
-	} {
-		prefix := string(category) + ": "
-		if strings.HasPrefix(summary, prefix) {
-			return category, strings.TrimPrefix(summary, prefix)
+// WithNote appends one structured note line and returns the same diagnostic.
+func (d *Diagnostic) WithNote(note string) *Diagnostic {
+	d.Notes = append(d.Notes, note)
+	return d
+}
+
+// WithHelp records one help message and returns the same diagnostic.
+func (d *Diagnostic) WithHelp(help string) *Diagnostic {
+	d.Help = help
+	return d
+}
+
+// splitFirstLine extracts severity, category, and summary from the first text line.
+func splitFirstLine(defaultSeverity Severity, first string) (Severity, string, string) {
+	if strings.HasPrefix(first, "warning: ") {
+		return SeverityWarning, "", strings.TrimPrefix(first, "warning: ")
+	}
+	if index := strings.Index(first, ": "); index > 0 {
+		category := first[:index]
+		if strings.HasSuffix(category, "error") {
+			return defaultSeverity, category, first[index+2:]
 		}
 	}
-	return "", summary
-}
-
-// splitDetail removes a known rendered detail prefix from line.
-func splitDetail(line string) (DetailKind, string, bool) {
-	for _, kind := range []DetailKind{DetailNote, DetailHelp} {
-		prefix := string(kind) + ": "
-		if strings.HasPrefix(line, prefix) {
-			return kind, strings.TrimPrefix(line, prefix), true
-		}
-	}
-	return "", "", false
+	return defaultSeverity, "", first
 }

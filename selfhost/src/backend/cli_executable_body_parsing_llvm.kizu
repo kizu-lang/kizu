@@ -1,148 +1,23 @@
 import selfhost::backend::cli_executable_main_llvm;
-import selfhost::backend::cli_executable_body_parser_contract;
 import selfhost::backend::cli_executable_parser_token_llvm;
-import selfhost::backend::ir_contract;
+import selfhost::backend::executable;
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
-    try cli_executable_body_parser_contract::require_executable_body_parsing(ir_bytes);
     try cli_executable_main_llvm::append_functions(out, ir_bytes);
     try append_cli_is_supported_run_print_payload_function(out, ir_bytes);
     try append_cli_parse_run_print_payload_function(out, ir_bytes);
     try append_cli_parse_run_return_void_ok_function(out, ir_bytes);
     try append_cli_parse_test_expect_value_function(out, ir_bytes);
-    try append_cli_parse_run_executable_ast_function(out, ir_bytes);
-    try append_cli_parse_test_executable_ast_function(out, ir_bytes);
     return;
-}
-
-fn append_cli_parse_run_executable_ast_function(
-    out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    let unsupported_name = try cli_executable_body_parser_contract::unsupported_ast_kind_name(
-        ir_bytes
-    );
-    let run_print_name = try cli_executable_body_parser_contract::run_print_ast_kind_name(
-        ir_bytes
-    );
-    let run_return_name = try cli_executable_body_parser_contract::run_return_ast_kind_name(
-        ir_bytes
-    );
-    let unsupported = try executable_ast_tag(ir_bytes, unsupported_name);
-    let run_print = try executable_ast_tag(ir_bytes, run_print_name);
-    let run_return = try executable_ast_tag(ir_bytes, run_return_name);
-    try append_line(out,
-        "define %kizu.selfhost.executable.ast @kizu_selfhost__cli_parse_run_executable_ast(");
-    try append_line(out, "  %kizu.slice.u8 %source");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_empty_payload(out);
-    try append_line(out,
-        "  %payload_result = call %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload(%kizu.slice.u8 %source)");
-    try append_line(out, "  %payload_ok = extractvalue %kizu.error.slice.u8 %payload_result, 0");
-    try append_line(out, "  br i1 %payload_ok, label %run_print, label %check_return");
-    try append_line(out, "run_print:");
-    try append_line(out, "  %payload = extractvalue %kizu.error.slice.u8 %payload_result, 1");
-    try append_executable_ast_return(out, "run_print", run_print, "payload");
-    try append_line(out, "check_return:");
-    try append_line(out,
-        "  %return_ok = call i1 @kizu_selfhost__cli_parse_run_return_void_ok(%kizu.slice.u8 %source)");
-    try append_line(out, "  br i1 %return_ok, label %run_return, label %unsupported");
-    try append_line(out, "run_return:");
-    try append_executable_ast_return(out, "run_return", run_return, "empty");
-    try append_line(out, "unsupported:");
-    try append_executable_ast_return(out, "unsupported", unsupported, "empty");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_cli_parse_test_executable_ast_function(
-    out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    let expect_true = try cli_executable_body_parser_contract::test_expect_true_value(ir_bytes);
-    let expect_false = try cli_executable_body_parser_contract::test_expect_false_value(ir_bytes);
-    let unsupported_name = try cli_executable_body_parser_contract::unsupported_ast_kind_name(
-        ir_bytes
-    );
-    let test_ok_name = try cli_executable_body_parser_contract::test_ok_ast_kind_name(ir_bytes);
-    let test_failure_name = try cli_executable_body_parser_contract::test_failure_ast_kind_name(
-        ir_bytes
-    );
-    let unsupported = try executable_ast_tag(ir_bytes, unsupported_name);
-    let test_ok = try executable_ast_tag(ir_bytes, test_ok_name);
-    let test_failure = try executable_ast_tag(ir_bytes, test_failure_name);
-    try append_line(out,
-        "define %kizu.selfhost.executable.ast @kizu_selfhost__cli_parse_test_executable_ast(");
-    try append_line(out, "  %kizu.slice.u8 %source");
-    try append_line(out, ") {");
-    try append_line(out, "entry:");
-    try append_empty_payload(out);
-    try append_line(out,
-        "  %expect = call i64 @kizu_selfhost__cli_parse_test_expect_value(%kizu.slice.u8 %source)");
-    try append_i64_constant_line(out, "  %is_ok = icmp eq i64 %expect, ", expect_true);
-    try append_line(out, "  br i1 %is_ok, label %test_ok, label %check_failure");
-    try append_line(out, "test_ok:");
-    try append_executable_ast_return(out, "test_ok", test_ok, "empty");
-    try append_line(out, "check_failure:");
-    try append_i64_constant_line(out, "  %is_failure = icmp eq i64 %expect, ", expect_false);
-    try append_line(out, "  br i1 %is_failure, label %test_failure, label %unsupported");
-    try append_line(out, "test_failure:");
-    try append_executable_ast_return(out, "test_failure", test_failure, "empty");
-    try append_line(out, "unsupported:");
-    try append_executable_ast_return(out, "unsupported", unsupported, "empty");
-    try append_line(out, "}");
-    try append_line(out, "");
-    return;
-}
-
-fn append_empty_payload(out: &var std::string::String) -> !void {
-    try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
-    try append_line(out, "  %empty_base = insertvalue %kizu.slice.u8 poison, ptr %source_ptr, 0");
-    try append_line(out, "  %empty = insertvalue %kizu.slice.u8 %empty_base, i64 0, 1");
-    return;
-}
-
-fn append_executable_ast_return(
-    out: &var std::string::String,
-    suffix: []u8,
-    kind: i64,
-    payload: []u8
-) -> !void {
-    try out.append_bytes("  %ast_kinded_");
-    try out.append_bytes(suffix);
-    try out.append_bytes(" = insertvalue %kizu.selfhost.executable.ast zeroinitializer, i64 ");
-    try std::fmt::append_i64(out, kind);
-    try out.append_bytes(", 0");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %ast_result_");
-    try out.append_bytes(suffix);
-    try out.append_bytes(" = insertvalue %kizu.selfhost.executable.ast %ast_kinded_");
-    try out.append_bytes(suffix);
-    try out.append_bytes(", %kizu.slice.u8 %");
-    try out.append_bytes(payload);
-    try out.append_bytes(", 1");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  ret %kizu.selfhost.executable.ast %ast_result_");
-    try out.append_bytes(suffix);
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn executable_ast_tag(ir_bytes: []u8, name: []u8) -> !i64 {
-    return try ir_contract::named_i64_fact(ir_bytes, "executable-ast-kind ", name);
 }
 
 fn append_cli_is_supported_run_print_payload_function(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
-    let min_byte = try cli_executable_body_parser_contract::run_payload_min_byte(ir_bytes);
-    let max_byte = try cli_executable_body_parser_contract::run_payload_max_byte(ir_bytes);
-    let forbidden_byte = try cli_executable_body_parser_contract::run_payload_forbidden_byte(
-        ir_bytes
-    );
+    let min_byte = executable::run_payload_min_byte();
+    let max_byte = executable::run_payload_max_byte();
+    let forbidden_byte = executable::run_payload_forbidden_byte();
     try append_line(out, "define i1 @kizu_selfhost__cli_is_supported_run_print_payload(");
     try append_line(out, "  %kizu.slice.u8 %source,");
     try append_line(out, "  i64 %start,");
@@ -182,20 +57,12 @@ fn append_cli_parse_run_print_payload_function(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
-    let quote_byte = try cli_executable_body_parser_contract::run_literal_quote_byte(ir_bytes);
-    let min_length = try cli_executable_body_parser_contract::run_literal_min_length(ir_bytes);
-    let start_quote_offset = try cli_executable_body_parser_contract::run_literal_start_quote_offset(
-        ir_bytes
-    );
-    let end_quote_margin = try cli_executable_body_parser_contract::run_literal_end_quote_offset_from_end(
-        ir_bytes
-    );
-    let payload_start_offset = try cli_executable_body_parser_contract::run_literal_payload_start_offset(
-        ir_bytes
-    );
-    let payload_width = try cli_executable_body_parser_contract::run_literal_payload_delimiter_width(
-        ir_bytes
-    );
+    let quote_byte = executable::run_literal_quote_byte();
+    let min_length = executable::run_literal_min_length();
+    let start_quote_offset = executable::run_literal_start_quote_offset();
+    let end_quote_margin = executable::run_literal_end_quote_offset_from_end();
+    let payload_start_offset = executable::run_literal_payload_start_offset();
+    let payload_width = executable::run_literal_payload_delimiter_width();
     try append_line(out,
         "define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload(");
     try append_line(out, "  %kizu.slice.u8 %source");
@@ -230,9 +97,10 @@ fn append_cli_parse_run_print_payload_function(
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "print_lparen",
         "print_end",
-        "40",
+        "syntax-lparen",
         "check_arg",
         "continue"
     );
@@ -269,25 +137,28 @@ fn append_cli_parse_run_print_payload_function(
     try append_line(out, "  br i1 %payload_ok, label %check_print_rparen, label %continue");
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "print_rparen",
         "arg_end",
-        "41",
+        "syntax-rparen",
         "check_print_semicolon",
         "continue"
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "print_semicolon",
         "print_rparen_end",
-        "59",
+        "syntax-semicolon",
         "check_rbrace",
         "continue"
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "rbrace",
         "print_semicolon_end",
-        "125",
+        "syntax-rbrace",
         "check_eof",
         "continue"
     );
@@ -299,12 +170,18 @@ fn append_cli_parse_run_print_payload_function(
     try append_line(out, "continue:");
     try append_line(out, "  br label %not_found");
     try append_line(out, "found:");
+    try append_line(out, "  %callee_ptr = getelementptr i8, ptr %source_ptr, i64 %print_start");
+    try append_line(out, "  %callee_len = sub i64 %print_end, %print_start");
+    try append_line(out, "  %callee_base = insertvalue %kizu.slice.u8 poison, ptr %callee_ptr, 0");
+    try append_line(out, "  %callee = insertvalue %kizu.slice.u8 %callee_base, i64 %callee_len, 1");
     try append_line(out, "  %payload_ptr = getelementptr i8, ptr %source_ptr, i64 %payload_start");
     try append_line(out, "  %payload_base = insertvalue %kizu.slice.u8 poison, ptr %payload_ptr, 0");
     try append_line(out, "  %payload = insertvalue %kizu.slice.u8 %payload_base, i64 %payload_len, 1");
     try append_line(out,
         "  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
-    try append_line(out, "  %result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %payload, 1");
+    try append_line(out, "  %callee_result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %callee, 1");
+    try append_line(out,
+        "  %result = insertvalue %kizu.error.slice.u8 %callee_result, %kizu.slice.u8 %payload, 2");
     try append_line(out, "  ret %kizu.error.slice.u8 %result");
     try append_line(out, "not_found:");
     try append_line(out, "  ret %kizu.error.slice.u8 zeroinitializer");
@@ -387,17 +264,19 @@ fn append_cli_parse_run_return_void_ok_function(
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "return_semicolon",
         "return_end",
-        "59",
+        "syntax-semicolon",
         "check_rbrace",
         "continue"
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "rbrace",
         "return_semicolon_end",
-        "125",
+        "syntax-rbrace",
         "check_eof",
         "continue"
     );
@@ -421,12 +300,7 @@ fn append_cli_parse_test_expect_value_function(
     out: &var std::string::String,
     ir_bytes: []u8
 ) -> !void {
-    let expect_true = try cli_executable_body_parser_contract::test_expect_true_value(ir_bytes);
-    let expect_false = try cli_executable_body_parser_contract::test_expect_false_value(ir_bytes);
-    let expect_unsupported = try cli_executable_body_parser_contract::test_expect_unsupported_value(
-        ir_bytes
-    );
-    try append_line(out, "define i64 @kizu_selfhost__cli_parse_test_expect_value(");
+    try append_line(out, "define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value(");
     try append_line(out, "  %kizu.slice.u8 %source");
     try append_line(out, ") {");
     try append_line(out, "entry:");
@@ -461,10 +335,10 @@ fn append_cli_parse_test_expect_value_function(
     );
     try append_test_next_token_pair_check(
         out,
+        ir_bytes,
         "colon_one",
         "std_end",
-        "58",
-        "58",
+        "syntax-colon-pair",
         "check_testing",
         "continue"
     );
@@ -479,10 +353,10 @@ fn append_cli_parse_test_expect_value_function(
     );
     try append_test_next_token_pair_check(
         out,
+        ir_bytes,
         "colon_two",
         "testing_end",
-        "58",
-        "58",
+        "syntax-colon-pair",
         "check_expect",
         "continue"
     );
@@ -495,7 +369,15 @@ fn append_cli_parse_test_expect_value_function(
         "check_lparen",
         "continue"
     );
-    try append_test_next_token_char_check(out, "lparen", "expect_end", "40", "check_bool", "continue");
+    try append_test_next_token_char_check(
+        out,
+        ir_bytes,
+        "lparen",
+        "expect_end",
+        "syntax-lparen",
+        "check_bool",
+        "continue"
+    );
     try append_line(out, "check_bool:");
     try append_line(out,
         "  %bool_start = call i64 @kizu_selfhost__parse_next_semantic_token_index(%kizu.slice.u8 %source, i64 %lparen_end)");
@@ -528,7 +410,10 @@ fn append_cli_parse_test_expect_value_function(
     try append_line(out, "bool_false_value:");
     try append_line(out, "  br label %check_rparen");
     try append_line(out, "check_rparen:");
-    try append_expect_value_phi(out, expect_true, expect_false);
+    try append_line(out,
+        "  %bool_value_start = phi i64 [ %bool_start, %bool_true_value ], [ %bool_start, %bool_false_value ]");
+    try append_line(out,
+        "  %bool_value_end = phi i64 [ %bool_end, %bool_true_value ], [ %bool_end, %bool_false_value ]");
     try append_line(out,
         "  %rparen_start = call i64 @kizu_selfhost__parse_next_semantic_token_index(%kizu.slice.u8 %source, i64 %bool_end)");
     try append_line(out, "  %rparen_in_bounds = icmp slt i64 %rparen_start, %source_len");
@@ -536,14 +421,21 @@ fn append_cli_parse_test_expect_value_function(
     try append_line(out, "load_rparen:");
     try append_line(out,
         "  %rparen_end = call i64 @kizu_selfhost__parse_token_end(%kizu.slice.u8 %source, i64 %rparen_start)");
-    try append_line(out,
-        "  %rparen_ok = call i1 @kizu_selfhost__cli_token_char_eq(%kizu.slice.u8 %source, i64 %rparen_start, i64 %rparen_end, i8 41)");
+    try cli_executable_parser_token_llvm::append_token_char_eq_call(
+        out,
+        ir_bytes,
+        "rparen_ok",
+        "rparen",
+        "rparen",
+        "syntax-rparen"
+    );
     try append_line(out, "  br i1 %rparen_ok, label %check_expect_semicolon, label %continue");
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "expect_semicolon",
         "rparen_end",
-        "59",
+        "syntax-semicolon",
         "after_expect_semicolon",
         "continue"
     );
@@ -552,9 +444,10 @@ fn append_cli_parse_test_expect_value_function(
         "  br i1 %requires_return, label %check_return, label %check_void_rbrace");
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "void_rbrace",
         "expect_semicolon_end",
-        "125",
+        "syntax-rbrace",
         "check_void_eof",
         "check_void_return"
     );
@@ -574,17 +467,19 @@ fn append_cli_parse_test_expect_value_function(
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "void_return_semicolon",
         "void_return_end",
-        "59",
+        "syntax-semicolon",
         "check_void_return_rbrace",
         "continue"
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "void_return_rbrace",
         "void_return_semicolon_end",
-        "125",
+        "syntax-rbrace",
         "check_void_return_eof",
         "continue"
     );
@@ -605,17 +500,19 @@ fn append_cli_parse_test_expect_value_function(
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "return_semicolon",
         "return_end",
-        "59",
+        "syntax-semicolon",
         "check_rbrace",
         "continue"
     );
     try append_test_next_token_char_check(
         out,
+        ir_bytes,
         "rbrace",
         "return_semicolon_end",
-        "125",
+        "syntax-rbrace",
         "check_eof",
         "continue"
     );
@@ -625,11 +522,25 @@ fn append_cli_parse_test_expect_value_function(
     try append_line(out, "  %at_eof = icmp eq i64 %after_rbrace, %source_len");
     try append_line(out, "  br i1 %at_eof, label %return_expect, label %continue");
     try append_line(out, "return_expect:");
-    try append_line(out, "  ret i64 %expect_value");
+    try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
+    try append_line(out, "  %callee_ptr = getelementptr i8, ptr %source_ptr, i64 %std_start");
+    try append_line(out, "  %callee_len = sub i64 %expect_end, %std_start");
+    try append_line(out, "  %callee_base = insertvalue %kizu.slice.u8 poison, ptr %callee_ptr, 0");
+    try append_line(out, "  %callee = insertvalue %kizu.slice.u8 %callee_base, i64 %callee_len, 1");
+    try append_line(out, "  %payload_ptr = getelementptr i8, ptr %source_ptr, i64 %bool_value_start");
+    try append_line(out, "  %payload_len = sub i64 %bool_value_end, %bool_value_start");
+    try append_line(out, "  %payload_base = insertvalue %kizu.slice.u8 poison, ptr %payload_ptr, 0");
+    try append_line(out, "  %payload = insertvalue %kizu.slice.u8 %payload_base, i64 %payload_len, 1");
+    try append_line(out,
+        "  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
+    try append_line(out, "  %callee_result = insertvalue %kizu.error.slice.u8 %ok, %kizu.slice.u8 %callee, 1");
+    try append_line(out,
+        "  %result = insertvalue %kizu.error.slice.u8 %callee_result, %kizu.slice.u8 %payload, 2");
+    try append_line(out, "  ret %kizu.error.slice.u8 %result");
     try append_line(out, "continue:");
     try append_line(out, "  br label %not_found");
     try append_line(out, "not_found:");
-    try append_i64_constant_line(out, "  ret i64 ", expect_unsupported);
+    try append_line(out, "  ret %kizu.error.slice.u8 zeroinitializer");
     try append_line(out, "}");
     try append_line(out, "");
     return;
@@ -637,51 +548,42 @@ fn append_cli_parse_test_expect_value_function(
 
 fn append_test_next_token_pair_check(
     out: &var std::string::String,
+    ir_bytes: []u8,
     name: []u8,
     previous_end: []u8,
-    b0: []u8,
-    b1: []u8,
+    token_key: []u8,
     ok_label: []u8,
     fail_label: []u8
 ) -> !void {
     try append_check_label(out, name);
     try append_next_token_load(out, name, previous_end);
-    try out.append_bytes("  %");
-    try out.append_bytes(name);
-    try out.append_bytes("_ok = call i1 @kizu_selfhost__cli_token_pair_eq(%kizu.slice.u8 %source, i64 %");
-    try out.append_bytes(name);
-    try out.append_bytes("_start, i64 %");
-    try out.append_bytes(name);
-    try out.append_bytes("_end, i8 ");
-    try out.append_bytes(b0);
-    try out.append_bytes(", i8 ");
-    try out.append_bytes(b1);
-    try out.append_bytes(")");
-    try out.append_byte(cast<u8>(10));
+    try cli_executable_parser_token_llvm::append_named_token_pair_eq_call(
+        out,
+        ir_bytes,
+        name,
+        token_key
+    );
     try append_named_branch(out, name, ok_label, fail_label);
     return;
 }
 
 fn append_test_next_token_char_check(
     out: &var std::string::String,
+    ir_bytes: []u8,
     name: []u8,
     previous_end: []u8,
-    want: []u8,
+    token_key: []u8,
     ok_label: []u8,
     fail_label: []u8
 ) -> !void {
     try append_check_label(out, name);
     try append_next_token_load(out, name, previous_end);
-    try out.append_bytes("  %");
-    try out.append_bytes(name);
-    try out.append_bytes("_ok = call i1 @kizu_selfhost__cli_token_char_eq(%kizu.slice.u8 %source, i64 %");
-    try out.append_bytes(name);
-    try out.append_bytes("_start, i64 %");
-    try out.append_bytes(name);
-    try out.append_bytes("_end, i8 ");
-    try out.append_bytes(want);
-    try out.append_bytes(")");
-    try out.append_byte(cast<u8>(10));
+    try cli_executable_parser_token_llvm::append_named_token_char_eq_call(
+        out,
+        ir_bytes,
+        name,
+        token_key
+    );
     try append_named_branch(out, name, ok_label, fail_label);
     return;
 }

@@ -1,24 +1,148 @@
 import selfhost::backend::data;
 
+pub fn run_artifact_dir() -> []u8 {
+    return "target/selfhost/run";
+}
+
+pub fn run_artifact_path_prefix() -> []u8 {
+    return "target/selfhost/run/";
+}
+
+pub fn test_artifact_dir() -> []u8 {
+    return "target/selfhost/test";
+}
+
+pub fn test_artifact_path_prefix() -> []u8 {
+    return "target/selfhost/test/";
+}
+
+pub fn artifact_ll_suffix() -> []u8 {
+    return ".ll";
+}
+
+pub fn artifact_metadata_suffix() -> []u8 {
+    return ".ll.meta";
+}
+
+pub fn run_metadata_title() -> []u8 {
+    return "kizu-run-artifact-v0";
+}
+
+pub fn run_metadata_issue() -> []u8 {
+    return "issue #569";
+}
+
+pub fn test_metadata_title() -> []u8 {
+    return "kizu-test-artifact-v0";
+}
+
+pub fn test_metadata_issue() -> []u8 {
+    return "issue #570";
+}
+
+pub fn metadata_source_prefix() -> []u8 {
+    return "source ";
+}
+
+pub fn metadata_output_prefix() -> []u8 {
+    return "output ";
+}
+
+pub fn metadata_abi_line() -> []u8 {
+    return "abi selfhost-abi-v0";
+}
+
+pub fn metadata_entry_prefix() -> []u8 {
+    return "entry @";
+}
+
+pub fn metadata_runtime_line() -> []u8 {
+    return "runtime target/selfhost/selfhost.host.ll";
+}
+
+pub fn metadata_lowering_line() -> []u8 {
+    return "executable_lowering selfhost::backend::executable checked-ast";
+}
+
+pub fn metadata_fallback_line() -> []u8 {
+    return "go.cmd-kizu-fallback none";
+}
+
+pub fn metadata_mode_line() -> []u8 {
+    return "artifact_mode hosted-artifact";
+}
+
+pub fn test_metadata_discovery_line() -> []u8 {
+    return "discovery none";
+}
+
+pub fn run_print_executable() -> data::HostedExecutable {
+    return data::HostedExecutable {
+        comment: "kizu run artifact ll v0",
+        entry: "kizu_run_main",
+        global: "kizu.run.stdout",
+        output_stream: data::HostedOutputStream::Stdout,
+        output_payload: "",
+        append_newline: true,
+        exit_code: 0
+    };
+}
+
+pub fn run_return_executable() -> data::HostedExecutable {
+    return data::HostedExecutable {
+        comment: "kizu run artifact ll v0",
+        entry: "kizu_run_main",
+        global: "",
+        output_stream: data::HostedOutputStream::None,
+        output_payload: "",
+        append_newline: false,
+        exit_code: 0
+    };
+}
+
+pub fn test_ok_executable() -> data::HostedExecutable {
+    return data::HostedExecutable {
+        comment: "kizu test artifact ll v0",
+        entry: "kizu_test_main",
+        global: "kizu.test.ok",
+        output_stream: data::HostedOutputStream::Stdout,
+        output_payload: "test: ok",
+        append_newline: true,
+        exit_code: 0
+    };
+}
+
+pub fn test_failure_executable() -> data::HostedExecutable {
+    return data::HostedExecutable {
+        comment: "kizu test artifact ll v0",
+        entry: "kizu_test_main",
+        global: "kizu.test.failure",
+        output_stream: data::HostedOutputStream::Stderr,
+        output_payload: "error: runtime error: expected condition to be true",
+        append_newline: true,
+        exit_code: 1
+    };
+}
+
 pub fn emit_run_executable_artifact(
     allocator: Allocator,
     io: Io,
     source_path: []u8,
     executable: data::Executable
 ) -> !data::RunArtifact {
-    try ensure_hosted_artifact_dir(io, "target/selfhost/run");
+    try ensure_hosted_artifact_dir(io, run_artifact_dir());
 
     var ll_path = try artifact_path(
         allocator,
-        "target/selfhost/run/",
+        run_artifact_path_prefix(),
         source_path,
-        ".ll"
+        artifact_ll_suffix()
     );
     var metadata_path = try artifact_path(
         allocator,
-        "target/selfhost/run/",
+        run_artifact_path_prefix(),
         source_path,
-        ".ll.meta"
+        artifact_metadata_suffix()
     );
     let artifact = try write_run_artifact(
         allocator,
@@ -39,19 +163,19 @@ pub fn emit_test_executable_artifact(
     source_path: []u8,
     executable: data::Executable
 ) -> !data::TestArtifact {
-    try ensure_hosted_artifact_dir(io, "target/selfhost/test");
+    try ensure_hosted_artifact_dir(io, test_artifact_dir());
 
     var ll_path = try artifact_path(
         allocator,
-        "target/selfhost/test/",
+        test_artifact_path_prefix(),
         source_path,
-        ".ll"
+        artifact_ll_suffix()
     );
     var metadata_path = try artifact_path(
         allocator,
-        "target/selfhost/test/",
+        test_artifact_path_prefix(),
         source_path,
-        ".ll.meta"
+        artifact_metadata_suffix()
     );
     let artifact = try write_test_artifact(
         allocator,
@@ -149,13 +273,14 @@ fn lower_run_hosted_executable(
     source_path: []u8,
     executable: data::Executable
 ) -> !data::HostedExecutable {
-    if executable.kind == data::ExecutableKind::RunPrintString {
+    if executable.kind == data::ExecutableKind::Call and
+        std::mem::equal_bytes(executable.callee, "print") {
         return data::HostedExecutable {
             comment: "kizu run artifact ll v0",
             entry: "kizu_run_main",
             global: "kizu.run.stdout",
             output_stream: data::HostedOutputStream::Stdout,
-            output_payload: executable.stdout_payload,
+            output_payload: executable.payload,
             append_newline: true,
             exit_code: 0
         };
@@ -178,7 +303,9 @@ fn lower_test_hosted_executable(
     source_path: []u8,
     executable: data::Executable
 ) -> !data::HostedExecutable {
-    if executable.kind == data::ExecutableKind::TestExpectOk {
+    if executable.kind == data::ExecutableKind::Call and
+        std::mem::equal_bytes(executable.callee, "std::testing::expect") and
+        std::mem::equal_bytes(executable.payload, "true") {
         return data::HostedExecutable {
             comment: "kizu test artifact ll v0",
             entry: "kizu_test_main",
@@ -189,7 +316,9 @@ fn lower_test_hosted_executable(
             exit_code: 0
         };
     }
-    if executable.kind == data::ExecutableKind::TestExpectFailure {
+    if executable.kind == data::ExecutableKind::Call and
+        std::mem::equal_bytes(executable.callee, "std::testing::expect") and
+        std::mem::equal_bytes(executable.payload, "false") {
         return data::HostedExecutable {
             comment: "kizu test artifact ll v0",
             entry: "kizu_test_main",
@@ -231,8 +360,8 @@ fn write_run_metadata(
     entry: []u8
 ) -> !i64 {
     var metadata = std::string::String(allocator);
-    try append_line(metadata, "kizu-run-artifact-v0");
-    try append_line(metadata, "issue #569");
+    try append_line(metadata, run_metadata_title());
+    try append_line(metadata, run_metadata_issue());
     try append_common_metadata(metadata, source_path, ll_path, entry);
     let metadata_len = try write_metadata(io, metadata_path, metadata);
     metadata.deinit();
@@ -248,10 +377,10 @@ fn write_test_metadata(
     entry: []u8
 ) -> !i64 {
     var metadata = std::string::String(allocator);
-    try append_line(metadata, "kizu-test-artifact-v0");
-    try append_line(metadata, "issue #570");
+    try append_line(metadata, test_metadata_title());
+    try append_line(metadata, test_metadata_issue());
     try append_common_metadata(metadata, source_path, ll_path, entry);
-    try append_line(metadata, "discovery none");
+    try append_line(metadata, test_metadata_discovery_line());
     let metadata_len = try write_metadata(io, metadata_path, metadata);
     metadata.deinit();
     return metadata_len;
@@ -263,16 +392,16 @@ fn append_common_metadata(
     ll_path: &[]u8,
     entry: []u8
 ) -> !void {
-    try append_key_value(metadata, "source ", source_path);
-    try metadata.append_bytes("output ");
+    try append_key_value(metadata, metadata_source_prefix(), source_path);
+    try metadata.append_bytes(metadata_output_prefix());
     try metadata.append_bytes(ll_path);
     try metadata.append_byte(cast<u8>(10));
-    try append_line(metadata, "abi selfhost-abi-v0");
-    try append_key_value(metadata, "entry @", entry);
-    try append_line(metadata, "runtime target/selfhost/selfhost.host.ll");
-    try append_line(metadata, "executable_lowering selfhost::backend::executable checked-ast");
-    try append_line(metadata, "go.cmd-kizu-fallback none");
-    try append_line(metadata, "artifact_mode hosted-artifact");
+    try append_line(metadata, metadata_abi_line());
+    try append_key_value(metadata, metadata_entry_prefix(), entry);
+    try append_line(metadata, metadata_runtime_line());
+    try append_line(metadata, metadata_lowering_line());
+    try append_line(metadata, metadata_fallback_line());
+    try append_line(metadata, metadata_mode_line());
     return;
 }
 

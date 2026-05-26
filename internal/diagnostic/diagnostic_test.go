@@ -6,49 +6,57 @@ import (
 	"github.com/kizu-lang/kizu/internal/ast"
 )
 
-// TestRenderText checks stable text rendering from structured fields.
-func TestRenderText(t *testing.T) {
-	diag := New(
+// TestFromTextKeepsADRPartsStructured keeps category, note, and help split for renderers.
+func TestFromTextKeepsADRPartsStructured(t *testing.T) {
+	span := ast.Span{
+		Start: ast.Position{Line: 6, Column: 14},
+		End:   ast.Position{Line: 6, Column: 16},
+	}
+	diag := FromText(
 		SeverityError,
-		CategoryType,
-		"type.operator_type_mismatch",
-		"operator `==` operands must have same type",
-		ast.Span{Start: ast.Position{Line: 3, Column: 14}},
-	).WithNote("left operand has type Color").
-		WithNote("right operand has type Animal").
-		WithHelp("use matching enum types")
-
-	want := "type error: operator `==` operands must have same type at 3:14\n" +
+		span,
+		"type error: operator `==` operands must have same type\n"+
+			"note: left operand has type Color\n"+
+			"note: right operand has type Animal\n"+
+			"help: compare values of the same enum",
+	)
+	if diag.Category != "type error" {
+		t.Fatalf("category = %q, want type error", diag.Category)
+	}
+	if diag.Message != "operator `==` operands must have same type" {
+		t.Fatalf("message = %q", diag.Message)
+	}
+	if len(diag.Notes) != 2 {
+		t.Fatalf("got %d notes, want 2", len(diag.Notes))
+	}
+	if diag.Help != "compare values of the same enum" {
+		t.Fatalf("help = %q", diag.Help)
+	}
+	want := "type error: operator `==` operands must have same type at 6:14\n" +
 		"note: left operand has type Color\n" +
 		"note: right operand has type Animal\n" +
-		"help: use matching enum types"
-	if got := diag.RenderText(); got != want {
-		t.Fatalf("got %q, want %q", got, want)
+		"help: compare values of the same enum"
+	if diag.Error() != want {
+		t.Fatalf("got %q, want %q", diag.Error(), want)
+	}
+	if diag.CLIError() != "error: "+want {
+		t.Fatalf("got %q, want %q", diag.CLIError(), "error: "+want)
 	}
 }
 
-// TestFromRendered keeps the migration path from existing rendered messages structured.
-func TestFromRendered(t *testing.T) {
-	diag := FromRendered(
-		"type error: unknown namespace `Color`\n"+
-			"note: known namespaces: Animal\n"+
-			"help: import a module that defines this namespace",
-		ast.Span{Start: ast.Position{Line: 2, Column: 19}},
+// TestWarningRendersSeverity keeps warning diagnostics user-facing without error wrapping.
+func TestWarningRendersSeverity(t *testing.T) {
+	diag := New(
+		SeverityWarning,
+		"",
+		ast.Span{Start: ast.Position{Line: 1, Column: 1}},
+		"deprecated syntax will be removed",
 	)
-	if diag.Category != CategoryType {
-		t.Fatalf("category = %q, want %q", diag.Category, CategoryType)
+	want := "warning: deprecated syntax will be removed at 1:1"
+	if diag.Error() != want {
+		t.Fatalf("got %q, want %q", diag.Error(), want)
 	}
-	if diag.Summary != "unknown namespace `Color`" {
-		t.Fatalf("summary = %q", diag.Summary)
-	}
-	if len(diag.Details) != 2 || diag.Details[0].Kind != DetailNote ||
-		diag.Details[1].Kind != DetailHelp {
-		t.Fatalf("details = %#v", diag.Details)
-	}
-	want := "type error: unknown namespace `Color` at 2:19\n" +
-		"note: known namespaces: Animal\n" +
-		"help: import a module that defines this namespace"
-	if got := diag.RenderText(); got != want {
-		t.Fatalf("got %q, want %q", got, want)
+	if diag.CLIError() != want {
+		t.Fatalf("got %q, want %q", diag.CLIError(), want)
 	}
 }

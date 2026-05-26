@@ -22,8 +22,9 @@ boundary, runs the #458 production commands through that artifact, runs the
 supported corpus and bounded CLI parity gates, builds the selfhost package from
 Kizu source as a native executable to exercise checked-AST run/test lowering,
 and keeps the Go project, type, and ownership packages green. The aggregate
-Go/Kizu oracle is an explicit separate preflight because it runs the interpreted
-selfhost production pipeline and has an independent wall-time budget.
+Go/Kizu oracle is intentionally not part of `just selfhost-switch-gate`; it is
+an explicit separate preflight because it runs the interpreted selfhost
+production pipeline and has an independent wall-time budget.
 
 For frontend switch PRs that need Go/Kizu oracle evidence, also run:
 
@@ -59,7 +60,7 @@ just perf-cache-isolated
 | IR / backend | `selfhost::{ir, backend}` skeleton | Go IR / backend | Go-owned | Requires a separate backend fingerprint and artifact/cache issue before any production switch. |
 | build cache / artifacts | none | Go cache / target paths | Go-owned | Requires explicit cache-key, prune, status, no-op rebuild, and artifact-size evidence. |
 | #458 selfhost CLI path | `selfhost::{ir, backend}` plus hosted runtime ABI | `target/selfhost/stage2/selfhost` | switched for `check selfhost` and `stage selfhost` | `just selfhost-production-from-scratch` passes; Go remains only in explicit stage0 bootstrap/oracle jobs; general CLI parity remains blocked by #497. |
-| #752 run/test executable lowering | `selfhost::cli::execute`, `selfhost::backend::executable`, `selfhost::backend::hosted` | hosted stage2 uses selected selfhost body IR facts for executable parsing/lowering; native selfhost source executable uses checked AST | partially switched source path | `just selfhost-native-source-gate` builds the selfhost source package as a native executable and verifies run/test artifacts carry `executable_lowering selfhost::backend::executable checked-ast`; hosted stage2 no longer depends on the old generated source-shape matcher module. |
+| #752 run/test executable lowering | `selfhost::cli::execute`, `selfhost::backend::executable`, `selfhost::backend::hosted` | hosted stage2 uses the direct bounded executable renderer; native selfhost source executable uses checked AST | switched for bounded source path | `just selfhost-native-source-gate` builds the selfhost source package as a native executable and verifies run/test artifacts carry `executable_lowering selfhost::backend::executable checked-ast`, including local string `let` plus `print(local)` multiple-statement run lowering; hosted stage2 no longer depends on the old generated source-shape matcher module. |
 
 ## Failure Policy
 
@@ -128,6 +129,10 @@ changed by #451.
 ## Local Evidence For #461
 
 Recorded on 2026-05-21 after the production boundary gate was added:
+
+Historical note: during #461, `just selfhost-switch-gate` still included the
+aggregate oracle. Current switch-gate policy keeps the aggregate oracle as the
+separate `just selfhost-oracle` preflight described above.
 
 | Command | Result | Notes |
 | --- | --- | --- |

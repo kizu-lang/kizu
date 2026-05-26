@@ -30,27 +30,55 @@ pub fn check_package(
     files: &std::array::Array<source::SourceFile>,
     typed: model::TypeSummary
 ) -> !data::CheckedPackage {
+    var parsed_sources = try parser::parse_source_files(allocator, files);
+    let checked = try check_parsed_package(
+        allocator,
+        files,
+        &parsed_sources.parsed,
+        &parsed_sources.source_indexes,
+        typed
+    );
+    try parser::deinit_parsed_source_files(parsed_sources);
+    return checked;
+}
+
+pub fn check_parsed_package(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_sources: &std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_source_indexes: &std::array::Array<i64>,
+    typed: model::TypeSummary
+) -> !data::CheckedPackage {
     var summary = ownership_summary(typed.symbols, typed.typed_nodes, 0, typed.diagnostics);
     var checked_module = try first_checked_module(files);
     var checked_entry = entry_function_ref();
     var checked_entry_rank = 0;
     var index = 0;
-    while index < files.len() {
-        let file = try files.at(index);
+    while index < parsed_sources.len() {
+        let parsed_source = try parsed_sources.at(index);
+        let source_index = try parsed_source_indexes.get(index);
+        let file = try files.at(source_index);
         if source::is_frontend_source(file.kind) {
-            let result = try parser::parse_checked_file(allocator, file.path, file.text);
             summary = merge_ownership_summaries(
                 summary,
-                try check_ownership_ast_node(allocator, file, result.ast, result.root)
+                try check_ownership_ast_node(
+                    allocator,
+                    file,
+                    parsed_source.ast,
+                    parsed_source.root
+                )
             );
-            let entry = try find_package_entry_function(file, result.ast, result.root);
+            let entry = try find_package_entry_function(
+                file,
+                parsed_source.ast,
+                parsed_source.root
+            );
             let entry_rank = package_entry_rank(&entry);
             if entry_rank > checked_entry_rank {
                 checked_module = checked_module_ref(file);
                 checked_entry = entry;
                 checked_entry_rank = entry_rank;
             }
-            result.deinit();
         }
         index = index + 1;
     }

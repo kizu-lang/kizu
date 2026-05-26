@@ -4,6 +4,22 @@ This document defines the test tiers for Kizu-owned selfhost compiler work.
 The goal is to keep daily development fast while preserving explicit,
 bootstrap-critical selfhost checks.
 
+## Gate Taxonomy
+
+Use the smallest gate that proves the changed boundary. Do not chain oracle or
+direct heavyweight gates into routine hosted artifact validation.
+
+| Change type | Primary gate | Tier | Notes |
+| --- | --- | --- | --- |
+| Ordinary Go/compiler edit | `go test ./...` and `pre-commit run --all-files` | daily | Default validation path. |
+| Existing stage2 selfhost artifact validation | `just selfhost-fast-gate` | daily selfhost loop | Reuses `target/selfhost/stage2/selfhost`; does not rebuild bootstrap artifacts. |
+| Selfhost source checkpoint | `just selfhost-production-from-scratch` | checkpoint | Rebuilds through `just selfhost-bootstrap`, then runs the fast hosted artifact gates. |
+| Run/test executable lowering, backend executable metadata, or native selfhost source behavior | `just selfhost-native-source-gate` | focused source-path gate | Builds the selfhost package from Kizu source as a native executable and exercises checked-AST executable artifacts. |
+| Production ownership switch review | `just selfhost-switch-gate` | production switch | Runs production-from-scratch, native-source-gate, package skeleton checks, and project/type/ownership package tests. It intentionally excludes `just selfhost-oracle`. |
+| Frontend parity or Go/Kizu oracle evidence | `just selfhost-oracle` | explicit oracle | Functional parity gate; logs but does not enforce the wall-time budget. |
+| Oracle performance or budget changes | `just selfhost-oracle-budget` | explicit performance gate | Same oracle with budget enforcement enabled. |
+| Debugging one selfhost stage or the CLI contract | `just selfhost-integration-gates` or `just selfhost-cli-gate` | focused debugging | Direct heavyweight gates; not routine preflight. |
+
 ## Daily Gate
 
 Daily validation is the default path:
@@ -235,11 +251,12 @@ just selfhost-bootstrap
 ```
 
 The preflight runs `just selfhost-switch-gate` and then runs cache smoke
-coverage. After #461, the switch gate includes production-from-scratch and the
-small Go package checks required by the switch review. The aggregate selfhost
-oracle is kept as an explicit parity/performance preflight instead of being
-chained into the switch gate, because it executes the interpreted production
-pipeline and has a separate wall-time budget.
+coverage. After #461 and #752, the switch gate includes
+production-from-scratch, the native selfhost source gate, package skeleton
+checks, and the small Go package checks required by the switch review. The
+aggregate selfhost oracle is kept as an explicit parity/performance preflight
+instead of being chained into the switch gate, because it executes the
+interpreted production pipeline and has a separate wall-time budget.
 
 `just selfhost-bootstrap` is the #459 stage0-stage1-stage2 comparison runner. It
 uses the explicit stage0 bootstrap/oracle gate to build the supported selfhost
@@ -287,8 +304,9 @@ selfhost` and `stage selfhost`, then emits and executes representative `run` and
 artifact metadata marker
 `executable_lowering selfhost::backend::executable checked-ast` and the root
 host runtime path `target/selfhost/selfhost.host.ll`. This proves the Kizu-owned
-checked-AST lowering path works. The hosted stage2 executable parser/lowerer is
-also validated through selected selfhost body IR facts before artifact emission.
+checked-AST lowering path works, including a run fixture with a local string
+`let`, `print(local)`, and multiple statements. The hosted stage2 executable
+path is validated through the direct bounded renderer before artifact emission.
 
 Measured locally on 2026-05-21 during #461:
 
@@ -402,6 +420,8 @@ The accepted policy for now is:
 - aggregate oracle budget: explicit performance gate, not a routine switch gate;
 - direct heavyweight gates: explicit debugging commands;
 - hosted artifact fast gate: routine selfhost CLI parity loop after bootstrap;
+- production switch gate: production-from-scratch plus native source-path and
+  package checks, without aggregate oracle;
 - aggregate production checks: one pass through `selfhost::pipeline_oracle`;
 - CLI contract checks: one pass through `selfhost::cli_contract_gate`;
 - no routine recipe runs both aggregate oracle and direct heavyweight gates.

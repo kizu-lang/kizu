@@ -5,8 +5,8 @@ import "encoding/json"
 const (
 	textDocumentSyncKindFull = 1
 
-	diagnosticSeverityError = 1
-	diagnosticSeverityWarn  = 2
+	diagnosticSeverityError   = 1
+	diagnosticSeverityWarning = 2
 
 	completionItemKindMethod        = 2
 	completionItemKindFunction      = 3

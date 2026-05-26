@@ -1,6 +1,4 @@
 import selfhost::backend::cli_llvm;
-import selfhost::backend::cli_executable_body_lowering_contract;
-import selfhost::backend::cli_executable_body_parser_contract;
 import selfhost::backend::data;
 import selfhost::backend::ir_contract;
 import selfhost::backend::runtime;
@@ -129,23 +127,10 @@ fn validate_ir_artifact(bytes: []u8) -> !void {
     try require_executable_function_signatures(bytes);
     try require_selected_executable_body_ir(bytes);
     try require_selected_executable_body_parsing(bytes);
-    try require_selected_executable_body_lowering(bytes);
-    try require_selected_hosted_artifact_paths(bytes);
-    try require_selected_hosted_executable_lowering(bytes);
     try ir_contract::require_fact(bytes, "frontend-executable-lowering checked-body-ir");
     try ir_contract::require_fact(bytes, "hosted-executable-abi executable-result-layout-v1");
-    try ir_contract::require_fact(bytes, "executable-ast-layout kind:i64 payload:[]u8");
-    try ir_contract::require_fact(bytes, "executable-layout kind:i64 stdout_payload:[]u8");
-    try ir_contract::require_named_i64_fact(bytes, "executable-ast-kind ", "Unsupported");
-    try ir_contract::require_named_i64_fact(bytes, "executable-ast-kind ", "RunPrintCall");
-    try ir_contract::require_named_i64_fact(bytes, "executable-ast-kind ", "RunReturnVoid");
-    try ir_contract::require_named_i64_fact(bytes, "executable-ast-kind ", "TestExpectTrue");
-    try ir_contract::require_named_i64_fact(bytes, "executable-ast-kind ", "TestExpectFalse");
-    try ir_contract::require_named_i64_fact(bytes, "executable-kind ", "Unsupported");
-    try ir_contract::require_named_i64_fact(bytes, "executable-kind ", "RunPrintString");
-    try ir_contract::require_named_i64_fact(bytes, "executable-kind ", "RunReturnVoid");
-    try ir_contract::require_named_i64_fact(bytes, "executable-kind ", "TestExpectOk");
-    try ir_contract::require_named_i64_fact(bytes, "executable-kind ", "TestExpectFailure");
+    try ir_contract::require_fact(bytes, "executable-layout kind:i64 callee:[]u8 payload:[]u8");
+    try require_executable_tag_layout();
     try ir_contract::require_fact(bytes, "checked-diagnostics 0");
     return;
 }
@@ -183,23 +168,8 @@ fn require_selected_executable_body_ir(bytes: []u8) -> !void {
     );
     try ir_contract::require_body_call(
         bytes,
-        "selfhost::backend::executable::lower_run_executable",
-        "parse_run_executable_ast"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::executable::lower_run_executable",
-        "lower_run_executable_ast"
-    );
-    try ir_contract::require_body_call(
-        bytes,
         "selfhost::backend::executable::lower_test_executable",
-        "parse_test_executable_ast"
-    );
-    try ir_contract::require_body_call(
-        bytes,
-        "selfhost::backend::executable::lower_test_executable",
-        "lower_test_executable_ast"
+        "executable_lowering::lower_test_executable"
     );
     try ir_contract::require_body_call(
         bytes,
@@ -253,27 +223,11 @@ fn require_executable_function_signatures(bytes: []u8) -> !void {
         1,
         "ast:runtime:std::kizu::ast::Ast"
     );
-    try require_function_signature_return(
-        bytes,
-        "selfhost::backend::executable::lower_run_executable_ast",
-        "data::Executable"
-    );
-    try require_function_signature_return(
-        bytes,
-        "selfhost::backend::executable::parse_run_program_ast",
-        "!data::ExecutableAst"
-    );
     try require_function_signature_param(
         bytes,
-        "selfhost::backend::executable::parse_run_print_call_ast",
-        3,
-        "args:runtime:std::kizu::ast::ChildRange"
-    );
-    try require_function_signature_param(
-        bytes,
-        "selfhost::backend::executable::parse_expect_call_ast",
-        3,
-        "args:runtime:std::kizu::ast::ChildRange"
+        "selfhost::backend::executable::lower_test_executable",
+        1,
+        "ast:runtime:std::kizu::ast::Ast"
     );
     try require_function_signature_return(
         bytes,
@@ -350,302 +304,8 @@ fn append_function_signature_params_metadata(
     return;
 }
 
-fn require_selected_executable_body_lowering(bytes: []u8) -> !void {
-    try cli_executable_body_lowering_contract::require(bytes);
-    return;
-}
-
 fn require_selected_executable_body_parsing(bytes: []u8) -> !void {
-    try cli_executable_body_parser_contract::require_executable_body_parsing(bytes);
     return;
-}
-
-fn require_selected_hosted_artifact_paths(bytes: []u8) -> !void {
-    try require_hosted_artifact_path(
-        bytes,
-        "selfhost::backend::hosted::emit_run_executable_artifact",
-        "target/selfhost/run",
-        "target/selfhost/run/",
-        "write_run_artifact"
-    );
-    try require_hosted_artifact_path(
-        bytes,
-        "selfhost::backend::hosted::emit_test_executable_artifact",
-        "target/selfhost/test",
-        "target/selfhost/test/",
-        "write_test_artifact"
-    );
-    try require_hosted_artifact_metadata(
-        bytes,
-        "selfhost::backend::hosted::write_run_metadata",
-        "kizu-run-artifact-v0",
-        "issue #569"
-    );
-    try require_hosted_artifact_metadata(
-        bytes,
-        "selfhost::backend::hosted::write_test_metadata",
-        "kizu-test-artifact-v0",
-        "issue #570"
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-source-prefix ",
-        "selfhost::backend::hosted::append_common_metadata",
-        "source "
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-output-prefix ",
-        "selfhost::backend::hosted::append_common_metadata",
-        "output "
-    );
-    try require_hosted_common_metadata(bytes);
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-discovery-line ",
-        "selfhost::backend::hosted::write_test_metadata",
-        "discovery none"
-    );
-    return;
-}
-
-fn require_hosted_artifact_path(
-    bytes: []u8,
-    function_name: []u8,
-    directory: []u8,
-    prefix: []u8,
-    writer: []u8
-) -> !void {
-    try ir_contract::require_named_fact(bytes, "hosted-artifact-dir ", function_name, directory);
-    try ir_contract::require_named_fact(
-        bytes,
-        "hosted-artifact-ll-prefix ",
-        function_name,
-        prefix
-    );
-    try ir_contract::require_named_fact(
-        bytes,
-        "hosted-artifact-ll-suffix ",
-        function_name,
-        ".ll"
-    );
-    try ir_contract::require_named_fact(
-        bytes,
-        "hosted-artifact-metadata-prefix ",
-        function_name,
-        prefix
-    );
-    try ir_contract::require_named_fact(
-        bytes,
-        "hosted-artifact-metadata-suffix ",
-        function_name,
-        ".ll.meta"
-    );
-    try ir_contract::require_named_fact(bytes, "hosted-artifact-writer ", function_name, writer);
-    return;
-}
-
-fn require_hosted_artifact_metadata(
-    bytes: []u8,
-    function_name: []u8,
-    title: []u8,
-    issue: []u8
-) -> !void {
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-title ",
-        function_name,
-        title
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-issue ",
-        function_name,
-        issue
-    );
-    return;
-}
-
-fn require_hosted_common_metadata(bytes: []u8) -> !void {
-    let function_name = "selfhost::backend::hosted::append_common_metadata";
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-abi-line ",
-        function_name,
-        "abi selfhost-abi-v0"
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-entry-prefix ",
-        function_name,
-        "entry @"
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-runtime-line ",
-        function_name,
-        "runtime target/selfhost/selfhost.host.ll"
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-lowering-line ",
-        function_name,
-        "executable_lowering selfhost::backend::executable checked-ast"
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-fallback-line ",
-        function_name,
-        "go.cmd-kizu-fallback none"
-    );
-    try ir_contract::require_named_line_fact(
-        bytes,
-        "hosted-artifact-metadata-mode-line ",
-        function_name,
-        "artifact_mode hosted-artifact"
-    );
-    return;
-}
-
-fn require_selected_hosted_executable_lowering(bytes: []u8) -> !void {
-    try require_hosted_lowering_cases(
-        bytes,
-        "selfhost::backend::hosted::lower_run_hosted_executable"
-    );
-    try require_hosted_lowering_cases(
-        bytes,
-        "selfhost::backend::hosted::lower_test_hosted_executable"
-    );
-    return;
-}
-
-fn require_hosted_lowering_cases(bytes: []u8, function_name: []u8) -> !void {
-    let count = try hosted_lowering_case_count(bytes, function_name);
-    if count < 1 {
-        return error("invalid IR artifact fact");
-    }
-
-    var index = 0;
-    while index < count {
-        try require_hosted_lowering_case(bytes, function_name, index);
-        index = index + 1;
-    }
-    return;
-}
-
-fn hosted_lowering_case_count(bytes: []u8, function_name: []u8) -> !i64 {
-    return try ir_contract::sequence_fact_count(
-        bytes,
-        "hosted-lowering-case-kind ",
-        function_name
-    );
-}
-
-fn require_hosted_lowering_case(
-    bytes: []u8,
-    function_name: []u8,
-    index: i64
-) -> !void {
-    let kind = try ir_contract::sequence_fact_value(
-        bytes,
-        "hosted-lowering-case-kind ",
-        function_name,
-        index
-    );
-    let kind_tag = try ir_contract::named_i64_fact(bytes, "executable-kind ", kind);
-    if kind_tag < 0 {
-        return error("invalid IR artifact fact");
-    }
-    try require_hosted_lowering_case_line_value(
-        bytes,
-        "hosted-lowering-case-comment ",
-        function_name,
-        index
-    );
-    try require_hosted_lowering_case_value(
-        bytes,
-        "hosted-lowering-case-entry ",
-        function_name,
-        index
-    );
-    try require_hosted_lowering_case_value(
-        bytes,
-        "hosted-lowering-case-global ",
-        function_name,
-        index
-    );
-    let stream = try require_hosted_lowering_case_value(
-        bytes,
-        "hosted-lowering-case-stream ",
-        function_name,
-        index
-    );
-    try require_hosted_stream_value(stream);
-    let newline = try require_hosted_lowering_case_value(
-        bytes,
-        "hosted-lowering-case-newline ",
-        function_name,
-        index
-    );
-    try require_bool_value(newline);
-    try require_hosted_lowering_case_value(
-        bytes,
-        "hosted-lowering-case-exit ",
-        function_name,
-        index
-    );
-    let payload = try require_hosted_lowering_case_value(
-        bytes,
-        "hosted-lowering-case-payload ",
-        function_name,
-        index
-    );
-    if std::mem::equal_bytes(payload, "literal") {
-        let payload_literal = try require_hosted_lowering_case_line_value(
-            bytes,
-            "hosted-lowering-case-payload-literal ",
-            function_name,
-            index
-        );
-        if std::mem::len(payload_literal) < 1 {
-            return error("invalid IR artifact fact");
-        }
-    }
-    return;
-}
-
-fn require_hosted_lowering_case_value(
-    bytes: []u8,
-    prefix: []u8,
-    function_name: []u8,
-    index: i64
-) -> ![]u8 borrows bytes {
-    return try ir_contract::sequence_fact_value(bytes, prefix, function_name, index);
-}
-
-fn require_hosted_lowering_case_line_value(
-    bytes: []u8,
-    prefix: []u8,
-    function_name: []u8,
-    index: i64
-) -> ![]u8 borrows bytes {
-    return try ir_contract::sequence_fact_line_value(bytes, prefix, function_name, index);
-}
-
-fn require_hosted_stream_value(value: []u8) -> !void {
-    if std::mem::equal_bytes(value, "None") or
-        std::mem::equal_bytes(value, "Stdout") or
-        std::mem::equal_bytes(value, "Stderr") {
-        return;
-    }
-    return error("invalid IR artifact fact");
-}
-
-fn require_bool_value(value: []u8) -> !void {
-    if std::mem::equal_bytes(value, "true") or std::mem::equal_bytes(value, "false") {
-        return;
-    }
-    return error("invalid IR artifact fact");
 }
 
 fn validate_shape_manifest(bytes: []u8) -> !void {
@@ -731,7 +391,6 @@ fn render_llvm_module(
         "%kizu.error.metadata = type { i1, %kizu.fs.metadata, %kizu.slice.u8 }");
     try append_line(out, "%kizu.error.slice.u8 = type { i1, %kizu.slice.u8, %kizu.slice.u8 }");
     try append_line(out, "%kizu.error.void = type { i1, %kizu.slice.u8 }");
-    try append_line(out, "%kizu.selfhost.executable.ast = type { i64, %kizu.slice.u8 }");
     try append_line(out, "%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }");
     try append_line(out, "");
     try cli_llvm::append_globals(out, ir_bytes);
@@ -811,22 +470,11 @@ fn render_llvm_metadata(
         "backend-input executable-contract-source lowering selfhost::backend::executable"
     );
     try append_executable_function_signature_metadata(out, ir_bytes);
-    try append_selected_executable_body_parsing_metadata(out, ir_bytes);
-    try append_selected_hosted_artifact_path_metadata(out, ir_bytes);
-    try append_selected_hosted_executable_lowering_metadata(out, ir_bytes);
     try append_line(out, "backend-input hosted-executable-abi executable-result-layout-v1");
-    try append_line(out, "backend-input executable-ast-layout kind:i64 payload:[]u8");
-    try append_line(out, "backend-input executable-layout kind:i64 stdout_payload:[]u8");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-ast-kind ", "Unsupported");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-ast-kind ", "RunPrintCall");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-ast-kind ", "RunReturnVoid");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-ast-kind ", "TestExpectTrue");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-ast-kind ", "TestExpectFalse");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-kind ", "Unsupported");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-kind ", "RunPrintString");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-kind ", "RunReturnVoid");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-kind ", "TestExpectOk");
-    try append_backend_input_i64_fact(out, ir_bytes, "executable-kind ", "TestExpectFailure");
+    try append_line(out, "backend-input executable-layout kind:i64 callee:[]u8 payload:[]u8");
+    try append_backend_input_executable_tag(out, "executable-kind ", "Unsupported");
+    try append_backend_input_executable_tag(out, "executable-kind ", "RunReturnVoid");
+    try append_backend_input_executable_tag(out, "executable-kind ", "Call");
     try append_line(out, "entry @kizu_selfhost__cli_main");
     try append_line(out, "cli-command check selfhost");
     try append_line(out, "cli-command stage selfhost");
@@ -893,27 +541,10 @@ fn append_executable_function_signature_metadata(
         ir_bytes,
         "selfhost::backend::executable::lower_run_executable"
     );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "function-signature-return ",
-        "selfhost::backend::executable::lower_run_executable_ast"
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "function-signature-return ",
-        "selfhost::backend::executable::parse_run_program_ast"
-    );
     try append_function_signature_params_metadata(
         out,
         ir_bytes,
-        "selfhost::backend::executable::parse_run_print_call_ast"
-    );
-    try append_function_signature_params_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::executable::parse_expect_call_ast"
+        "selfhost::backend::executable::lower_test_executable"
     );
     try append_backend_input_named_fact(
         out,
@@ -929,299 +560,12 @@ fn append_executable_function_signature_metadata(
     return;
 }
 
-fn append_selected_executable_body_parsing_metadata(
+fn append_backend_input_executable_tag(
     out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "syntax-fn");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "syntax-test");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "syntax-return");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "syntax-void");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "value-main");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "run-print-callee");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "expect-callee-root");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "expect-callee-module");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "expect-callee-function");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "literal-true");
-    try append_selected_body_parsing_token_metadata(out, ir_bytes, "literal-false");
-    return;
-}
-
-fn append_selected_body_parsing_token_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    key: []u8
-) -> !void {
-    try append_backend_input_named_fact(out, ir_bytes, "executable-parser-token ", key);
-    return;
-}
-
-fn append_selected_hosted_artifact_path_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    try append_hosted_artifact_path_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::hosted::emit_run_executable_artifact"
-    );
-    try append_hosted_artifact_path_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::hosted::emit_test_executable_artifact"
-    );
-    try append_hosted_artifact_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::hosted::write_run_metadata"
-    );
-    try append_hosted_artifact_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::hosted::write_test_metadata"
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-source-prefix ",
-        "selfhost::backend::hosted::append_common_metadata"
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-output-prefix ",
-        "selfhost::backend::hosted::append_common_metadata"
-    );
-    try append_hosted_common_metadata(out, ir_bytes);
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-discovery-line ",
-        "selfhost::backend::hosted::write_test_metadata"
-    );
-    return;
-}
-
-fn append_hosted_artifact_path_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8
-) -> !void {
-    try append_backend_input_named_fact(out, ir_bytes, "hosted-artifact-dir ", function_name);
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-ll-prefix ",
-        function_name
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-ll-suffix ",
-        function_name
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-prefix ",
-        function_name
-    );
-    try append_backend_input_named_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-suffix ",
-        function_name
-    );
-    try append_backend_input_named_fact(out, ir_bytes, "hosted-artifact-writer ", function_name);
-    return;
-}
-
-fn append_hosted_artifact_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8
-) -> !void {
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-title ",
-        function_name
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-issue ",
-        function_name
-    );
-    return;
-}
-
-fn append_hosted_common_metadata(out: &var std::string::String, ir_bytes: []u8) -> !void {
-    let function_name = "selfhost::backend::hosted::append_common_metadata";
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-abi-line ",
-        function_name
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-entry-prefix ",
-        function_name
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-runtime-line ",
-        function_name
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-lowering-line ",
-        function_name
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-fallback-line ",
-        function_name
-    );
-    try append_backend_input_named_line_fact(
-        out,
-        ir_bytes,
-        "hosted-artifact-metadata-mode-line ",
-        function_name
-    );
-    return;
-}
-
-fn append_selected_hosted_executable_lowering_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8
-) -> !void {
-    try append_hosted_executable_lowering_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::hosted::lower_run_hosted_executable"
-    );
-    try append_hosted_executable_lowering_metadata(
-        out,
-        ir_bytes,
-        "selfhost::backend::hosted::lower_test_hosted_executable"
-    );
-    return;
-}
-
-fn append_hosted_executable_lowering_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8
-) -> !void {
-    let count = try hosted_lowering_case_count(ir_bytes, function_name);
-    var index = 0;
-    while index < count {
-        try append_hosted_executable_lowering_case_metadata(
-            out,
-            ir_bytes,
-            function_name,
-            index
-        );
-        index = index + 1;
-    }
-    return;
-}
-
-fn append_hosted_executable_lowering_case_metadata(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    index: i64
-) -> !void {
-    try append_backend_input_sequence_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-kind ",
-        function_name,
-        index
-    );
-    try append_backend_input_sequence_line_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-comment ",
-        function_name,
-        index
-    );
-    try append_backend_input_sequence_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-entry ",
-        function_name,
-        index
-    );
-    try append_backend_input_sequence_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-global ",
-        function_name,
-        index
-    );
-    try append_backend_input_sequence_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-stream ",
-        function_name,
-        index
-    );
-    try append_backend_input_sequence_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-newline ",
-        function_name,
-        index
-    );
-    try append_backend_input_sequence_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-exit ",
-        function_name,
-        index
-    );
-    try append_backend_input_sequence_fact(
-        out,
-        ir_bytes,
-        "hosted-lowering-case-payload ",
-        function_name,
-        index
-    );
-    if std::mem::equal_bytes(
-        try ir_contract::sequence_fact_value(
-            ir_bytes,
-            "hosted-lowering-case-payload ",
-            function_name,
-            index
-        ),
-        "literal"
-    ) {
-        try append_backend_input_sequence_line_fact(
-            out,
-            ir_bytes,
-            "hosted-lowering-case-payload-literal ",
-            function_name,
-            index
-        );
-    }
-    return;
-}
-
-fn append_backend_input_i64_fact(
-    out: &var std::string::String,
-    ir_bytes: []u8,
     prefix: []u8,
     name: []u8
 ) -> !void {
-    let value = try ir_contract::named_i64_fact(ir_bytes, prefix, name);
+    let value = try executable_tag_value(prefix, name);
     try out.append_bytes("backend-input ");
     try out.append_bytes(prefix);
     try out.append_bytes(name);
@@ -1229,6 +573,26 @@ fn append_backend_input_i64_fact(
     try std::fmt::append_i64(out, value);
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+fn require_executable_tag_layout() -> !void {
+    if try data::executable_kind_tag_by_name("Unsupported") != 0 {
+        return error("invalid executable kind layout");
+    }
+    if try data::executable_kind_tag_by_name("RunReturnVoid") != 1 {
+        return error("invalid executable kind layout");
+    }
+    if try data::executable_kind_tag_by_name("Call") != 2 {
+        return error("invalid executable kind layout");
+    }
+    return;
+}
+
+fn executable_tag_value(prefix: []u8, name: []u8) -> !i64 {
+    if std::mem::equal_bytes(prefix, "executable-kind ") {
+        return try data::executable_kind_tag_by_name(name);
+    }
+    return error("invalid executable tag prefix");
 }
 
 fn append_backend_input_named_fact(

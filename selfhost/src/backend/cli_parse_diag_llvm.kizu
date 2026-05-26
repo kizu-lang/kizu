@@ -25,6 +25,7 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_parse_missing_assign_index_function(out);
     try append_parse_write_digit_stderr_function(out);
     try append_parse_write_i64_stderr_function(out);
+    try append_parse_write_position_suffix_function(out);
     try append_parse_write_expected_one_token_function(out);
     try append_parse_write_missing_expr_function(out);
     try append_parse_write_missing_assign_function(out);
@@ -131,8 +132,20 @@ fn append_parse_is_binding_keyword_function(out: &var std::string::String) -> !v
     try append_line(out, "  %var_r = icmp eq i8 %b2, 114");
     try append_line(out, "  %var_va = and i1 %var_v, %var_a");
     try append_line(out, "  %is_var = and i1 %var_va, %var_r");
-    try append_line(out, "  %result = or i1 %is_let, %is_var");
-    try append_line(out, "  ret i1 %result");
+    try append_line(out, "  br i1 %is_var, label %check_borrow_var, label %return_let");
+    try append_line(out, "check_borrow_var:");
+    try append_line(out, "  %at_start = icmp eq i64 %start, 0");
+    try append_line(out, "  br i1 %at_start, label %true, label %load_previous");
+    try append_line(out, "load_previous:");
+    try append_line(out, "  %previous_index = sub i64 %start, 1");
+    try append_line(out, "  %previous_ptr = getelementptr i8, ptr %source_ptr, i64 %previous_index");
+    try append_line(out, "  %previous_byte = load i8, ptr %previous_ptr");
+    try append_line(out, "  %previous_is_amp = icmp eq i8 %previous_byte, 38");
+    try append_line(out, "  br i1 %previous_is_amp, label %false, label %true");
+    try append_line(out, "return_let:");
+    try append_line(out, "  br i1 %is_let, label %true, label %false");
+    try append_line(out, "true:");
+    try append_line(out, "  ret i1 true");
     try append_line(out, "false:");
     try append_line(out, "  ret i1 false");
     try append_line(out, "}");
@@ -312,6 +325,68 @@ fn append_parse_write_i64_stderr_function(out: &var std::string::String) -> !voi
     try append_line(out, "ones:");
     try append_line(out, "  %ones_ok = call i1 @kizu_selfhost__parse_write_digit_stderr(%kizu.owned %io, i64 %value)");
     try append_line(out, "  br i1 %ones_ok, label %true, label %false");
+    try append_line(out, "true:");
+    try append_line(out, "  ret i1 true");
+    try append_line(out, "false:");
+    try append_line(out, "  ret i1 false");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_parse_write_position_suffix_function(out: &var std::string::String) -> !void {
+    try append_line(out, "define i1 @kizu_selfhost__parse_write_position_suffix(");
+    try append_line(out, "  %kizu.owned %io,");
+    try append_line(out, "  %kizu.slice.u8 %source,");
+    try append_line(out, "  i64 %index_target");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
+    try append_line(out, "  br label %position_loop");
+    try append_line(out, "position_loop:");
+    try append_line(out, "  %index = phi i64 [ 0, %entry ], [ %next_index, %position_advance ]");
+    try append_line(out, "  %line = phi i64 [ 1, %entry ], [ %next_line, %position_advance ]");
+    try append_line(out, "  %column = phi i64 [ 1, %entry ], [ %next_column, %position_advance ]");
+    try append_line(out, "  %at_index = icmp eq i64 %index, %index_target");
+    try append_line(out, "  br i1 %at_index, label %write_at, label %position_load");
+    try append_line(out, "position_load:");
+    try append_line(out, "  %byte_ptr = getelementptr i8, ptr %source_ptr, i64 %index");
+    try append_line(out, "  %byte = load i8, ptr %byte_ptr");
+    try append_line(out, "  %is_newline = icmp eq i8 %byte, 10");
+    try append_line(out, "  %advanced_line = add i64 %line, 1");
+    try append_line(out, "  %advanced_column = add i64 %column, 1");
+    try append_line(out, "  %next_line = select i1 %is_newline, i64 %advanced_line, i64 %line");
+    try append_line(out, "  %next_column = select i1 %is_newline, i64 1, i64 %advanced_column");
+    try append_line(out, "  br label %position_advance");
+    try append_line(out, "position_advance:");
+    try append_line(out, "  %next_index = add i64 %index, 1");
+    try append_line(out, "  br label %position_loop");
+    try append_line(out, "write_at:");
+    try append_global_slice(out, "parse_error", "at", "parse_error_at", "4");
+    try append_line(out,
+        "  %at_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %parse_error_at_slice)");
+    try append_line(out, "  %at_ok = extractvalue %kizu.error.void %at_write, 0");
+    try append_line(out, "  br i1 %at_ok, label %write_line, label %false");
+    try append_line(out, "write_line:");
+    try append_line(out,
+        "  %line_ok = call i1 @kizu_selfhost__parse_write_i64_stderr(%kizu.owned %io, i64 %line)");
+    try append_line(out, "  br i1 %line_ok, label %write_colon, label %false");
+    try append_line(out, "write_colon:");
+    try append_global_slice(out, "parse_error", "colon", "parse_error_colon", "1");
+    try append_line(out,
+        "  %colon_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %parse_error_colon_slice)");
+    try append_line(out, "  %colon_ok = extractvalue %kizu.error.void %colon_write, 0");
+    try append_line(out, "  br i1 %colon_ok, label %write_column, label %false");
+    try append_line(out, "write_column:");
+    try append_line(out,
+        "  %column_ok = call i1 @kizu_selfhost__parse_write_i64_stderr(%kizu.owned %io, i64 %column)");
+    try append_line(out, "  br i1 %column_ok, label %write_newline, label %false");
+    try append_line(out, "write_newline:");
+    try append_global_slice(out, "parse_error", "newline", "parse_newline", "1");
+    try append_line(out,
+        "  %newline_write = call %kizu.error.void @kizu_rt_io_write_stderr(%kizu.owned %io, %kizu.slice.u8 %parse_error_newline_slice)");
+    try append_line(out, "  %newline_ok = extractvalue %kizu.error.void %newline_write, 0");
+    try append_line(out, "  br i1 %newline_ok, label %true, label %false");
     try append_line(out, "true:");
     try append_line(out, "  ret i1 true");
     try append_line(out, "false:");

@@ -3,6 +3,9 @@ package lsp
 import (
 	"strings"
 	"testing"
+
+	"github.com/kizu-lang/kizu/internal/ast"
+	diag "github.com/kizu-lang/kizu/internal/diagnostic"
 )
 
 // TestAnalyzeReportsParsePosition checks parser diagnostics keep token positions.
@@ -14,6 +17,9 @@ func TestAnalyzeReportsParsePosition(t *testing.T) {
 	got := diagnostics[0]
 	if got.Range.Start.Line != 0 || got.Range.Start.Character != 0 {
 		t.Fatalf("got position %d:%d, want 0:0", got.Range.Start.Line, got.Range.Start.Character)
+	}
+	if got.Range.End.Line != 0 || got.Range.End.Character != 3 {
+		t.Fatalf("got end %d:%d, want 0:3", got.Range.End.Line, got.Range.End.Character)
 	}
 	if got.Source != diagnosticSource {
 		t.Fatalf("got source %q, want %q", got.Source, diagnosticSource)
@@ -152,5 +158,24 @@ func TestAnalyzeAcceptsStdTestingSource(t *testing.T) {
 	diagnostics := Analyze(source)
 	if len(diagnostics) != 0 {
 		t.Fatalf("got diagnostics %#v, want none", diagnostics)
+	}
+}
+
+// TestDiagnosticFromErrorPreservesWarningSeverity keeps future warning infrastructure renderable.
+func TestDiagnosticFromErrorPreservesWarningSeverity(t *testing.T) {
+	got := diagnosticFromError(diag.New(
+		diag.SeverityWarning,
+		"",
+		ast.Span{Start: ast.Position{Line: 2, Column: 3}, End: ast.Position{Line: 2, Column: 4}},
+		"deprecated syntax will be removed",
+	))
+	if got.Severity != diagnosticSeverityWarning {
+		t.Fatalf("severity = %d, want %d", got.Severity, diagnosticSeverityWarning)
+	}
+	if got.Range.Start.Line != 1 || got.Range.Start.Character != 2 {
+		t.Fatalf("got start %d:%d, want 1:2", got.Range.Start.Line, got.Range.Start.Character)
+	}
+	if !strings.Contains(got.Message, "warning: deprecated syntax will be removed at 2:3") {
+		t.Fatalf("message = %q", got.Message)
 	}
 }

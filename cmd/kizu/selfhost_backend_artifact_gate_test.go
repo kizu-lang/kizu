@@ -303,7 +303,7 @@ func requiredLLVMCLIRunTestFragments() []string {
 			"@kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
-		"define i64 @kizu_selfhost__cli_parse_test_expect_value",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
@@ -343,14 +343,7 @@ func requiredLLVMCLICheckFragments() []string {
 // requiredLLVMExecutableFragments returns mandatory hosted executable fragments.
 func requiredLLVMExecutableFragments() []string {
 	return []string{
-		"%kizu.selfhost.executable.ast = type { i64, %kizu.slice.u8 }",
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
-		"define %kizu.selfhost.executable.ast " +
-			"@kizu_selfhost__cli_parse_run_executable_ast",
-		"define %kizu.selfhost.executable.ast " +
-			"@kizu_selfhost__cli_parse_test_executable_ast",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_run_executable_ast",
-		"define %kizu.selfhost.executable @kizu_selfhost__cli_lower_test_executable_ast",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_run_executable",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
 	}
@@ -428,8 +421,6 @@ func requiredLLVMMetadataFragments() []string {
 	fragments = append(fragments, requiredLLVMMetadataSelectedHelperBodyFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyParsingFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataSelectedBodyLoweringFragments()...)
-	fragments = append(fragments, requiredLLVMMetadataHostedArtifactPathFragments()...)
-	fragments = append(fragments, requiredLLVMMetadataHostedLoweringFragments()...)
 	fragments = append(fragments, requiredLLVMMetadataExecutableABIFragments()...)
 	fragments = append(fragments, []string{
 		"entry @kizu_selfhost__cli_main\n",
@@ -465,14 +456,8 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"lower_run_executable !data::Executable\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input function-signature-return selfhost::backend::executable::" +
-			"lower_run_executable_ast data::Executable\n",
-		"backend-input function-signature-return selfhost::backend::executable::" +
-			"parse_run_program_ast !data::ExecutableAst\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
-			"parse_run_print_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
-		"backend-input function-signature-param selfhost::backend::executable::" +
-			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
+			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast\n",
 		"backend-input function-signature-return selfhost::backend::hosted::" +
 			"emit_run_executable_artifact !data::RunArtifact\n",
 		"backend-input function-signature-param selfhost::backend::hosted::" +
@@ -492,125 +477,12 @@ func requiredLLVMMetadataSelectedHelperBodyFragments() []string {
 
 // requiredLLVMMetadataSelectedBodyParsingFragments returns body parser inputs.
 func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
-	return []string{
-		"backend-input executable-parser-token syntax-fn fn\n",
-		"backend-input executable-parser-token syntax-test test\n",
-		"backend-input executable-parser-token syntax-return return\n",
-		"backend-input executable-parser-token syntax-void void\n",
-		"backend-input executable-parser-token value-main main\n",
-		"backend-input executable-parser-token run-print-callee print\n",
-		"backend-input executable-parser-token expect-callee-root std\n",
-		"backend-input executable-parser-token expect-callee-module testing\n",
-		"backend-input executable-parser-token expect-callee-function expect\n",
-		"backend-input executable-parser-token literal-true true\n",
-		"backend-input executable-parser-token literal-false false\n",
-	}
+	return nil
 }
 
 // requiredLLVMMetadataSelectedBodyLoweringFragments returns body lowering inputs.
 func requiredLLVMMetadataSelectedBodyLoweringFragments() []string {
 	return nil
-}
-
-// requiredLLVMMetadataHostedArtifactPathFragments returns selected hosted
-// artifact path facts consumed by the backend.
-func requiredLLVMMetadataHostedArtifactPathFragments() []string {
-	return []string{
-		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run\n",
-		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run/\n",
-		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact .ll\n",
-		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact target/selfhost/run/\n",
-		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
-			"emit_run_executable_artifact .ll.meta\n",
-		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
-			"emit_run_executable_artifact write_run_artifact\n",
-		"backend-input hosted-artifact-metadata-title selfhost::backend::hosted::" +
-			"write_run_metadata kizu-run-artifact-v0\n",
-		"backend-input hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_run_metadata issue #569\n",
-		"backend-input hosted-artifact-dir selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test\n",
-		"backend-input hosted-artifact-ll-prefix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test/\n",
-		"backend-input hosted-artifact-ll-suffix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact .ll\n",
-		"backend-input hosted-artifact-metadata-prefix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact target/selfhost/test/\n",
-		"backend-input hosted-artifact-metadata-suffix selfhost::backend::hosted::" +
-			"emit_test_executable_artifact .ll.meta\n",
-		"backend-input hosted-artifact-writer selfhost::backend::hosted::" +
-			"emit_test_executable_artifact write_test_artifact\n",
-		"backend-input hosted-artifact-metadata-title selfhost::backend::hosted::" +
-			"write_test_metadata kizu-test-artifact-v0\n",
-		"backend-input hosted-artifact-metadata-issue selfhost::backend::hosted::" +
-			"write_test_metadata issue #570\n",
-		"backend-input hosted-artifact-metadata-source-prefix selfhost::backend::hosted::" +
-			"append_common_metadata source \n",
-		"backend-input hosted-artifact-metadata-output-prefix selfhost::backend::hosted::" +
-			"append_common_metadata output \n",
-		"backend-input hosted-artifact-metadata-abi-line selfhost::backend::hosted::" +
-			"append_common_metadata abi selfhost-abi-v0\n",
-		"backend-input hosted-artifact-metadata-entry-prefix selfhost::backend::hosted::" +
-			"append_common_metadata entry @\n",
-		"backend-input hosted-artifact-metadata-runtime-line selfhost::backend::hosted::" +
-			"append_common_metadata runtime target/selfhost/selfhost.host.ll\n",
-		"backend-input hosted-artifact-metadata-lowering-line selfhost::backend::hosted::" +
-			"append_common_metadata executable_lowering selfhost::backend::" +
-			"executable checked-ast\n",
-		"backend-input hosted-artifact-metadata-fallback-line selfhost::backend::hosted::" +
-			"append_common_metadata go.cmd-kizu-fallback none\n",
-		"backend-input hosted-artifact-metadata-mode-line selfhost::backend::hosted::" +
-			"append_common_metadata artifact_mode hosted-artifact\n",
-		"backend-input hosted-artifact-metadata-discovery-line selfhost::backend::hosted::" +
-			"write_test_metadata discovery none\n",
-	}
-}
-
-// requiredLLVMMetadataHostedLoweringFragments returns selected hosted artifact
-// lowering facts consumed by the backend.
-func requiredLLVMMetadataHostedLoweringFragments() []string {
-	return []string{
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 RunPrintString\n",
-		"backend-input hosted-lowering-case-entry selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu_run_main\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 kizu.run.stdout\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 Stdout\n",
-		"backend-input hosted-lowering-case-newline selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 true\n",
-		"backend-input hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 0\n",
-		"backend-input hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 0 executable-field\n",
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 RunReturnVoid\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 none\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 None\n",
-		"backend-input hosted-lowering-case-payload selfhost::backend::hosted::" +
-			"lower_run_hosted_executable 1 empty-source-slice\n",
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 TestExpectOk\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 kizu.test.ok\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 0 Stdout\n",
-		"backend-input hosted-lowering-case-kind selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 TestExpectFailure\n",
-		"backend-input hosted-lowering-case-global selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 kizu.test.failure\n",
-		"backend-input hosted-lowering-case-stream selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 Stderr\n",
-		"backend-input hosted-lowering-case-exit selfhost::backend::hosted::" +
-			"lower_test_hosted_executable 1 1\n",
-	}
 }
 
 // requiredLLVMMetadataExternalFragments returns runtime symbols the artifact declares.
@@ -644,18 +516,10 @@ func requiredLLVMMetadataExternalFragments() []string {
 func requiredLLVMMetadataExecutableABIFragments() []string {
 	return []string{
 		"backend-input hosted-executable-abi executable-result-layout-v1\n",
-		"backend-input executable-ast-layout kind:i64 payload:[]u8\n",
-		"backend-input executable-layout kind:i64 stdout_payload:[]u8\n",
-		"backend-input executable-ast-kind Unsupported 0\n",
-		"backend-input executable-ast-kind RunPrintCall 1\n",
-		"backend-input executable-ast-kind RunReturnVoid 2\n",
-		"backend-input executable-ast-kind TestExpectTrue 3\n",
-		"backend-input executable-ast-kind TestExpectFalse 4\n",
+		"backend-input executable-layout kind:i64 callee:[]u8 payload:[]u8\n",
 		"backend-input executable-kind Unsupported 0\n",
-		"backend-input executable-kind RunPrintString 1\n",
-		"backend-input executable-kind RunReturnVoid 2\n",
-		"backend-input executable-kind TestExpectOk 3\n",
-		"backend-input executable-kind TestExpectFailure 4\n",
+		"backend-input executable-kind RunReturnVoid 1\n",
+		"backend-input executable-kind Call 2\n",
 	}
 }
 
@@ -1309,7 +1173,7 @@ func countHostedCompilerCLIMovedCheckFailures(t *testing.T, exePath string, dir 
 		exePath,
 		"check",
 		movedPath,
-		"error: move error: moved value `name` was used\n",
+		"error: move error: moved value `name` was used at 6:13\n",
 		"moved value spacing check",
 	)
 }
@@ -1359,6 +1223,7 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		return 1
 	}
 	failures := countHostedCompilerCLICommentParseFailures(t, exePath, dir, expected)
+	failures += countHostedCompilerCLIBorrowParseFailures(t, exePath, dir)
 	failures += countHostedCompilerCLIRealSourceParseFailures(t, exePath)
 
 	invalidAssignPath := filepath.Join(dir, "hosted_parse_missing_assign.kizu")
@@ -1377,6 +1242,42 @@ func countHostedCompilerCLIParseFailures(t *testing.T, exePath string) int {
 		"missing assign parse",
 	)
 	return failures
+}
+
+// countHostedCompilerCLIBorrowParseFailures checks explicit &var call arguments do
+// not trip missing-assign diagnostics in the hosted parse path.
+func countHostedCompilerCLIBorrowParseFailures(t *testing.T, exePath string, dir string) int {
+	t.Helper()
+	sourcePath := filepath.Join(dir, "hosted_parse_borrow_arg.kizu")
+	source := "fn take(report: &var Report) {}\nfn main() {\n    take(&var report);\n}\n"
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Errorf("write hosted parse borrow source: %v", err)
+		return 1
+	}
+	stdout, stderr, code := runHostedCompilerCLI(t, exePath, "parse", sourcePath)
+	if code != 0 {
+		t.Errorf(
+			"hosted compiler parse borrow arg exit=%d\nstdout:\n%s\nstderr:\n%s",
+			code,
+			stdout,
+			stderr,
+		)
+		return 1
+	}
+	expected := "fn take(report: &var Report) { }\nfn main() { take(&var report); }\n"
+	if stdout != expected {
+		t.Errorf(
+			"hosted compiler parse borrow arg stdout mismatch:\nwant:\n%s\ngot:\n%s",
+			expected,
+			stdout,
+		)
+		return 1
+	}
+	if stderr != "" {
+		t.Errorf("hosted compiler parse borrow arg stderr mismatch: %q", stderr)
+		return 1
+	}
+	return 0
 }
 
 // countHostedCompilerCLICommentParseFailures checks comments do not trigger parse scans.

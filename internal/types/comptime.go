@@ -1,7 +1,6 @@
 package types
 
 import (
-	"fmt"
 	"strconv"
 
 	"github.com/kizu-lang/kizu/internal/ast"
@@ -29,7 +28,7 @@ func (c *Checker) checkComptimeExpr(
 		return "", err
 	}
 	if value.typ != typ {
-		return "", fmt.Errorf("comptime error: expected %s, got %s", typ, value.typ)
+		return "", errorf("comptime error: expected %s, got %s", typ, value.typ)
 	}
 	return typ, nil
 }
@@ -46,7 +45,7 @@ func (c *Checker) checkComptimeIfStmt(
 		return false, err
 	}
 	if cond.typ != typeBool {
-		return false, fmt.Errorf("comptime error: if condition must be bool, got %s", cond.typ)
+		return false, errorf("comptime error: if condition must be bool, got %s", cond.typ)
 	}
 	if cond.b {
 		return c.checkBlock(stmt.Consequence, env.child(), wantReturn, unsafe)
@@ -65,7 +64,7 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 	case *ast.IntExpr:
 		value, err := strconv.ParseInt(e.Value, 10, 64)
 		if err != nil {
-			return comptimeValue{}, fmt.Errorf("comptime error: invalid integer `%s`", e.Value)
+			return comptimeValue{}, errorf("comptime error: invalid integer `%s`", e.Value)
 		}
 		return comptimeValue{typ: typeI64, i: value}, nil
 	case *ast.BoolExpr:
@@ -83,13 +82,13 @@ func (c *Checker) evalComptime(expr ast.Expression) (comptimeValue, error) {
 		if ok {
 			return comptimeValue{typ: typeType, s: string(typ)}, nil
 		}
-		return comptimeValue{}, fmt.Errorf("comptime error: runtime value cannot be used")
+		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
 	case *ast.PrefixExpr:
 		return c.evalComptimePrefix(e)
 	case *ast.BinaryExpr:
 		return c.evalComptimeBinary(e)
 	default:
-		return comptimeValue{}, fmt.Errorf("comptime error: runtime value cannot be used")
+		return comptimeValue{}, errorf("comptime error: runtime value cannot be used")
 	}
 }
 
@@ -102,16 +101,16 @@ func (c *Checker) evalComptimePrefix(expr *ast.PrefixExpr) (comptimeValue, error
 	switch expr.Operator {
 	case "-":
 		if right.typ != typeI64 {
-			return comptimeValue{}, fmt.Errorf("comptime error: unary - expects integer")
+			return comptimeValue{}, errorf("comptime error: unary - expects integer")
 		}
 		return comptimeValue{typ: typeI64, i: -right.i}, nil
 	case "!":
 		if right.typ != typeBool {
-			return comptimeValue{}, fmt.Errorf("comptime error: unary ! expects bool")
+			return comptimeValue{}, errorf("comptime error: unary ! expects bool")
 		}
 		return comptimeValue{typ: typeBool, b: !right.b}, nil
 	default:
-		return comptimeValue{}, fmt.Errorf("comptime error: unsupported unary `%s`", expr.Operator)
+		return comptimeValue{}, errorf("comptime error: unsupported unary `%s`", expr.Operator)
 	}
 }
 
@@ -132,7 +131,7 @@ func (c *Checker) evalComptimeBinary(expr *ast.BinaryExpr) (comptimeValue, error
 		return evalComptimeEquality(expr.Operator, left, right)
 	}
 	if left.typ != typeI64 || right.typ != typeI64 {
-		return comptimeValue{}, fmt.Errorf(
+		return comptimeValue{}, errorf(
 			"comptime error: operator `%s` expects integers",
 			expr.Operator,
 		)
@@ -147,7 +146,7 @@ func (c *Checker) evalComptimeLogical(expr *ast.BinaryExpr) (comptimeValue, erro
 		return comptimeValue{}, err
 	}
 	if left.typ != typeBool {
-		return comptimeValue{}, fmt.Errorf("comptime error: operator `%s` expects bools", expr.Operator)
+		return comptimeValue{}, errorf("comptime error: operator `%s` expects bools", expr.Operator)
 	}
 	if expr.Operator == "and" && !left.b {
 		return comptimeValue{typ: typeBool, b: false}, nil
@@ -160,7 +159,7 @@ func (c *Checker) evalComptimeLogical(expr *ast.BinaryExpr) (comptimeValue, erro
 		return comptimeValue{}, err
 	}
 	if right.typ != typeBool {
-		return comptimeValue{}, fmt.Errorf("comptime error: operator `%s` expects bools", expr.Operator)
+		return comptimeValue{}, errorf("comptime error: operator `%s` expects bools", expr.Operator)
 	}
 	return comptimeValue{typ: typeBool, b: right.b}, nil
 }
@@ -172,7 +171,7 @@ func evalComptimeEquality(
 	right comptimeValue,
 ) (comptimeValue, error) {
 	if left.typ != right.typ {
-		return comptimeValue{}, fmt.Errorf("comptime error: equality operands must have same type")
+		return comptimeValue{}, errorf("comptime error: equality operands must have same type")
 	}
 	equal := left.i == right.i && left.b == right.b && left.s == right.s
 	if op == "!=" {
@@ -197,14 +196,14 @@ func evalComptimeIntBinary(op string, left int64, right int64) (comptimeValue, e
 	case "<", "<=", ">", ">=":
 		return comptimeValue{typ: typeBool, b: compareInts(op, left, right)}, nil
 	default:
-		return comptimeValue{}, fmt.Errorf("comptime error: unsupported operator `%s`", op)
+		return comptimeValue{}, errorf("comptime error: unsupported operator `%s`", op)
 	}
 }
 
 // evalComptimeDivision evaluates checked integer division.
 func evalComptimeDivision(left int64, right int64) (comptimeValue, error) {
 	if right == 0 {
-		return comptimeValue{}, fmt.Errorf("comptime error: division by zero")
+		return comptimeValue{}, errorf("comptime error: division by zero")
 	}
 	return comptimeValue{typ: typeI64, i: left / right}, nil
 }
@@ -212,7 +211,7 @@ func evalComptimeDivision(left int64, right int64) (comptimeValue, error) {
 // evalComptimeModulo evaluates checked integer remainder.
 func evalComptimeModulo(left int64, right int64) (comptimeValue, error) {
 	if right == 0 {
-		return comptimeValue{}, fmt.Errorf("comptime error: modulo by zero")
+		return comptimeValue{}, errorf("comptime error: modulo by zero")
 	}
 	return comptimeValue{typ: typeI64, i: left % right}, nil
 }
