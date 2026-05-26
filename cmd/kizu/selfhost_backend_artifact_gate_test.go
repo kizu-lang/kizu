@@ -291,23 +291,15 @@ func requiredLLVMCLIRunTestFragments() []string {
 		"dispatch_fmt_write_arg:",
 		"dispatch_fmt_write:",
 		"%fmt_write_format_ok = call i1 @kizu_selfhost__parse_format_file_write",
-		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload",
 		"define i1 @kizu_selfhost__cli_parse_run_return_void_ok",
-		"define i1 @kizu_selfhost__cli_is_supported_run_print_payload",
-		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
 		"%run_executable = call %kizu.selfhost.executable " +
 			"@kizu_selfhost__cli_run_executable",
 		"%test_executable = call %kizu.selfhost.executable " +
 			"@kizu_selfhost__cli_test_executable",
-		"%run_print_payload_llvm_result = call %kizu.error.slice.u8 " +
-			"@kizu_selfhost__cli_run_payload_llvm_c_string",
-		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_return_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_test_expect_value",
 		"%test_ok_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%test_failure_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
-		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
-		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%run_return_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
 		"%run_return_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%test_ok_ll_write = call %kizu.error.void @kizu_selfhost__write_concat3",
@@ -366,6 +358,18 @@ func forbiddenLLVMFragments() []string {
 		"%run_hello_found = call i1 @kizu_selfhost__slice_contains",
 		"%test_ok_found = call i1 @kizu_selfhost__slice_contains",
 		"%test_failure_found = call i1 @kizu_selfhost__slice_contains",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_local_print_payload",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_main_print_payload",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_local_print_payload",
+		"define i1 @kizu_selfhost__cli_is_supported_run_print_payload",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_run_codegen_program",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
+		"%kizu.selfhost.codegen.program = type",
+		"%run_codegen = call %kizu.selfhost.codegen.program",
+		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
+		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
+		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"target/selfhost/run/runtime.kizu",
 		"target/selfhost/run/run_hello.ll",
 		"target/selfhost/run/run_hello.ll.meta",
@@ -452,6 +456,14 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"run_file_cli !i64\n",
 		"backend-input function-signature-param selfhost::cli::execute::" +
 			"run_file_cli 0 allocator:runtime:Allocator\n",
+		"backend-input function-signature-return selfhost::backend::" +
+			"lower_run_codegen_program !codegen::Program\n",
+		"backend-input function-signature-param selfhost::backend::" +
+			"lower_run_codegen_program 1 ast:runtime:std::kizu::ast::Ast\n",
+		"backend-input function-signature-return selfhost::backend::hosted::" +
+			"emit_run_codegen_artifact !data::RunArtifact\n",
+		"backend-input function-signature-param selfhost::backend::hosted::" +
+			"emit_run_codegen_artifact 3 program:runtime:codegen::Program\n",
 		"backend-input function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable !data::Executable\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
@@ -1451,22 +1463,6 @@ func countHostedCompilerCLIFmtWriteFailures(t *testing.T, exePath string) int {
 func countHostedCompilerCLIRunFailures(t *testing.T, exePath string) int {
 	t.Helper()
 	failures := countHostedCompilerCLIRunSourceFailures(
-		t,
-		exePath,
-		"hosted_run_generic.kizu",
-		"hosted_run_generic",
-		"fn main(){print ( \"from hosted\" );}\n",
-		`c"from hosted\0A"`,
-	)
-	failures += countHostedCompilerCLIRunSourceFailures(
-		t,
-		exePath,
-		"hosted_run_backslash.kizu",
-		"hosted_run_backslash",
-		"fn main(){print(\"path\\value\");}\n",
-		`c"path\5Cvalue\0A"`,
-	)
-	failures += countHostedCompilerCLIRunSourceFailures(
 		t,
 		exePath,
 		"hosted_run_return.kizu",

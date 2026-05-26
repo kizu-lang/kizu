@@ -983,18 +983,35 @@ func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
 // an explicit selfhost-owned codegen boundary.
 func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	hosted := readSelfhostFile(t, "../../selfhost/src/backend/hosted.kizu")
+	execute := readSelfhostFile(t, "../../selfhost/src/cli/execute.kizu")
 	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	requiredExecute := []string{
+		"backend::lower_run_codegen_program(file_text, parsed.ast, parsed.root)",
+		"backend::emit_run_codegen_artifact(",
+	}
+	for _, fragment := range requiredExecute {
+		if !strings.Contains(execute, fragment) {
+			t.Fatalf("execute module does not route run through codegen IR with %q", fragment)
+		}
+	}
 	requiredHosted := []string{
 		"import selfhost::ir::codegen;",
-		"let program = codegen::main_print_program(executable.payload);",
 		"try codegen::require_main_print(&program);",
-		"return hosted_executable_from_codegen(run_print_executable(), program);",
+		"let hosted = hosted_executable_from_codegen(run_print_executable(), program);",
 		"codegen_ir: codegen::metadata_line(),",
 		"try append_key_value(metadata, \"codegen_ir \", hosted.codegen_ir);",
 	}
 	for _, fragment := range requiredHosted {
 		if !strings.Contains(hosted, fragment) {
 			t.Fatalf("hosted backend does not consume codegen IR through %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"codegen::main_print_program(executable.payload)",
+		"hosted_executable_from_codegen(run_print_executable(), executable",
+	} {
+		if strings.Contains(hosted, forbidden) {
+			t.Fatalf("hosted backend keeps static executable-to-codegen bridge %q", forbidden)
 		}
 	}
 	requiredCodegen := []string{
@@ -1178,7 +1195,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu": {
 		"import selfhost::backend::hosted;",
-		"import selfhost::ir::codegen;",
 		"pub fn append_prefix_constant(",
 		"pub fn prefix_size(",
 		"pub fn append_output_prefix_constant(",
@@ -1187,7 +1203,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn before_runtime_size(",
 		"pub fn append_after_runtime_constant(",
 		"pub fn after_runtime_size(",
-		"pub fn run_print_codegen_ir(",
 		"pub fn no_codegen_ir(",
 		"fn runtime_line_prefix(",
 		"fn prefix_decoded_size(",
@@ -1205,7 +1220,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_cli_run_blocks(",
 		"fn executable_kind_tag(",
 		"fn append_executable_kind_compare(",
-		"fn append_run_print_emit_block(",
 		"fn append_run_return_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
 	},
@@ -1236,8 +1250,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
-		"import selfhost::backend::executable;",
-		"fn append_cli_parse_run_print_payload_function(",
 		"fn append_cli_parse_run_return_void_ok_function(",
 		"fn append_cli_parse_test_expect_value_function(",
 	},
@@ -1272,6 +1284,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/ir/executable_functions.kizu": {
 		"pub fn append_facts(",
 		"fn append_execute_function_facts(",
+		"fn append_backend_function_facts(",
 		"fn append_executable_function_facts(",
 		"fn append_executable_helper_body_facts(",
 		"fn append_hosted_function_facts(",
@@ -1330,6 +1343,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/cli/execute.kizu": {
 		"pub fn run_file_cli(",
 		"pub fn test_file_cli(",
+		"backend::lower_run_codegen_program(",
+		"backend::emit_run_codegen_artifact(",
 		"backend::lower_run_executable(",
 		"backend::lower_test_executable(",
 	},
@@ -1913,7 +1928,6 @@ func assertExecutableHostedSharedRendererOwners(
 	for _, fragment := range []string{
 		"hosted::run_artifact_dir()",
 		"hosted::test_artifact_dir()",
-		"hosted::run_print_executable()",
 		"hosted::run_return_executable()",
 		"hosted::test_ok_executable()",
 		"hosted::test_failure_executable()",
@@ -1963,15 +1977,6 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"cli_executable_parser_token_llvm::append_named_token_char_eq_call(",
 		"cli_executable_parser_token_llvm::append_named_token_pair_eq_call(",
 		"executable::parser_source_token(",
-		"executable::run_payload_min_byte(",
-		"executable::run_payload_max_byte(",
-		"executable::run_payload_forbidden_byte(",
-		"executable::run_literal_quote_byte(",
-		"executable::run_literal_min_length(",
-		"executable::run_literal_start_quote_offset(",
-		"executable::run_literal_end_quote_offset_from_end(",
-		"executable::run_literal_payload_start_offset(",
-		"executable::run_literal_payload_delimiter_width(",
 	} {
 		if !strings.Contains(parser, fragment) {
 			t.Fatalf("hosted executable parser does not consume fact tags with %q", fragment)
@@ -2241,6 +2246,14 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 		"function-signature-return selfhost::cli::execute::run_file_cli !i64",
 		"function-signature-param selfhost::cli::execute::run_file_cli 0 " +
 			"allocator:runtime:Allocator",
+		"function-signature-return selfhost::backend::" +
+			"lower_run_codegen_program !codegen::Program",
+		"function-signature-param selfhost::backend::" +
+			"lower_run_codegen_program 1 ast:runtime:std::kizu::ast::Ast",
+		"function-signature-return selfhost::backend::hosted::" +
+			"emit_run_codegen_artifact !data::RunArtifact",
+		"function-signature-param selfhost::backend::hosted::" +
+			"emit_run_codegen_artifact 3 program:runtime:codegen::Program",
 		"function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable !data::Executable",
 		"function-signature-param selfhost::backend::executable::" +
@@ -2261,12 +2274,15 @@ func hostedExecutableBodyContractFragments() []string {
 		"ir_contract::require_body_call(",
 		`"selfhost::cli::execute::run_file_cli"`,
 		`"check::checked_ast_node"`,
+		`"backend::lower_run_codegen_program"`,
+		`"backend::emit_run_codegen_artifact"`,
 		`"backend::lower_run_executable"`,
 		`"selfhost::cli::execute::test_file_cli"`,
 		`"backend::lower_test_executable"`,
 		`"selfhost::backend::executable::lower_run_executable"`,
 		`"selfhost::backend::executable::lower_test_executable"`,
 		`"executable_lowering::lower_test_executable"`,
+		`"selfhost::backend::hosted::emit_run_codegen_artifact"`,
 		`"selfhost::backend::hosted::emit_run_executable_artifact"`,
 		`"write_run_artifact"`,
 		`"selfhost::backend::hosted::emit_test_executable_artifact"`,
