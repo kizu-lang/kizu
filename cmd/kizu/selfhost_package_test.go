@@ -979,6 +979,48 @@ func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
 	assertSelfhostRootOmitsResponsibilities(t)
 }
 
+// TestSelfhostHostedRunConsumesCodegenIR keeps the first backend slice behind
+// an explicit selfhost-owned codegen boundary.
+func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
+	hosted := readSelfhostFile(t, "../../selfhost/src/backend/hosted.kizu")
+	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	requiredHosted := []string{
+		"import selfhost::ir::codegen;",
+		"let program = codegen::main_print_program(executable.payload);",
+		"try codegen::require_main_print(&program);",
+		"return hosted_executable_from_codegen(run_print_executable(), program);",
+		"codegen_ir: codegen::metadata_line(),",
+		"try append_key_value(metadata, \"codegen_ir \", hosted.codegen_ir);",
+	}
+	for _, fragment := range requiredHosted {
+		if !strings.Contains(hosted, fragment) {
+			t.Fatalf("hosted backend does not consume codegen IR through %q", fragment)
+		}
+	}
+	requiredCodegen := []string{
+		"pub struct Program",
+		"pub fn main_print_program(payload: []u8) -> Program",
+		"function_name: \"main\"",
+		"calls_print: true",
+		"returns_void: true",
+		"pub fn require_main_print(program: &Program) -> !void",
+		"return \"selfhost::ir::codegen::Program main-print-v0\";",
+	}
+	for _, fragment := range requiredCodegen {
+		if !strings.Contains(codegen, fragment) {
+			t.Fatalf("codegen IR boundary missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"selfhost/tests/cli/run_hello.kizu",
+		"std::fs::read_file(io, \"examples/hello.kizu\")",
+	} {
+		if strings.Contains(hosted, forbidden) || strings.Contains(codegen, forbidden) {
+			t.Fatalf("codegen slice keeps fixture/source dispatch %q", forbidden)
+		}
+	}
+}
+
 var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/types/model.kizu": {
 		"pub enum TypeKind",
@@ -1081,11 +1123,18 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn collect_borrow_param_keys(",
 		"pub fn function_param_key(",
 	},
+	"../../selfhost/src/ir/codegen.kizu": {
+		"pub struct Program",
+		"pub fn main_print_program(",
+		"pub fn require_main_print(",
+		"pub fn metadata_line(",
+	},
 	"../../selfhost/src/backend/runtime.kizu": {
 		"pub fn load_storage_module(",
 		"pub fn render_host_metadata(",
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
+		"import selfhost::ir::codegen;",
 		"pub fn run_artifact_dir(",
 		"pub fn metadata_runtime_line(",
 		"pub fn run_print_executable(",
@@ -1096,6 +1145,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn ensure_hosted_artifact_dir(",
 		"fn lower_run_hosted_executable(",
 		"fn lower_test_hosted_executable(",
+		"fn hosted_executable_from_codegen(",
 		"fn render_hosted_llvm(",
 	},
 	"../../selfhost/src/backend/data.kizu": {
@@ -1128,6 +1178,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/cli_hosted_metadata_llvm.kizu": {
 		"import selfhost::backend::hosted;",
+		"import selfhost::ir::codegen;",
 		"pub fn append_prefix_constant(",
 		"pub fn prefix_size(",
 		"pub fn append_output_prefix_constant(",
@@ -1136,6 +1187,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn before_runtime_size(",
 		"pub fn append_after_runtime_constant(",
 		"pub fn after_runtime_size(",
+		"pub fn run_print_codegen_ir(",
+		"pub fn no_codegen_ir(",
 		"fn runtime_line_prefix(",
 		"fn prefix_decoded_size(",
 		"fn output_prefix_size_from_value(",

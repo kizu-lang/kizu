@@ -378,7 +378,7 @@ Go-owned compiler helpers further:
 | process args/env/exit | available | `std::process::{arg_count, arg, env, exit_code}` and explicit process exit boundary |
 | stdout/stderr | available | `std::io::blocking`, `write_stdout`, and `write_stderr` |
 | future embed/builtin needs | blocked | `@embed` and broader `@` builtin syntax remain tracked by #610 |
-| fixed-buffer/user allocators | needs issue | allocator API design remains tracked by #549 |
+| fixed-buffer/user allocators | blocked | allocator API design remains tracked by #549 |
 
 ## Host Capability Binding
 

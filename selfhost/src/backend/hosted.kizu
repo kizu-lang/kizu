@@ -1,4 +1,5 @@
 import selfhost::backend::data;
+import selfhost::ir::codegen;
 
 pub fn run_artifact_dir() -> []u8 {
     return "target/selfhost/run";
@@ -81,6 +82,7 @@ pub fn run_print_executable() -> data::HostedExecutable {
         comment: "kizu run artifact ll v0",
         entry: "kizu_run_main",
         global: "kizu.run.stdout",
+        codegen_ir: "none",
         output_stream: data::HostedOutputStream::Stdout,
         output_payload: "",
         append_newline: true,
@@ -93,6 +95,7 @@ pub fn run_return_executable() -> data::HostedExecutable {
         comment: "kizu run artifact ll v0",
         entry: "kizu_run_main",
         global: "",
+        codegen_ir: "none",
         output_stream: data::HostedOutputStream::None,
         output_payload: "",
         append_newline: false,
@@ -105,6 +108,7 @@ pub fn test_ok_executable() -> data::HostedExecutable {
         comment: "kizu test artifact ll v0",
         entry: "kizu_test_main",
         global: "kizu.test.ok",
+        codegen_ir: "none",
         output_stream: data::HostedOutputStream::Stdout,
         output_payload: "test: ok",
         append_newline: true,
@@ -117,6 +121,7 @@ pub fn test_failure_executable() -> data::HostedExecutable {
         comment: "kizu test artifact ll v0",
         entry: "kizu_test_main",
         global: "kizu.test.failure",
+        codegen_ir: "none",
         output_stream: data::HostedOutputStream::Stderr,
         output_payload: "error: runtime error: expected condition to be true",
         append_newline: true,
@@ -212,7 +217,6 @@ fn write_run_artifact(
     executable: data::Executable
 ) -> !data::RunArtifact {
     let hosted = try lower_run_hosted_executable(source_path, executable);
-    let entry = hosted.entry;
     let ll_path_view = ll_path.as_bytes();
     let metadata_path_view = metadata_path.as_bytes();
     let module_len = try write_hosted_module(
@@ -220,7 +224,7 @@ fn write_run_artifact(
         io,
         source_path,
         ll_path_view,
-        hosted
+        &hosted
     );
     let metadata_len = try write_run_metadata(
         allocator,
@@ -228,7 +232,7 @@ fn write_run_artifact(
         source_path,
         ll_path_view,
         metadata_path_view,
-        entry
+        &hosted
     );
     return data::RunArtifact {
         bytes: module_len,
@@ -245,7 +249,6 @@ fn write_test_artifact(
     executable: data::Executable
 ) -> !data::TestArtifact {
     let hosted = try lower_test_hosted_executable(source_path, executable);
-    let entry = hosted.entry;
     let ll_path_view = ll_path.as_bytes();
     let metadata_path_view = metadata_path.as_bytes();
     let module_len = try write_hosted_module(
@@ -253,7 +256,7 @@ fn write_test_artifact(
         io,
         source_path,
         ll_path_view,
-        hosted
+        &hosted
     );
     let metadata_len = try write_test_metadata(
         allocator,
@@ -261,7 +264,7 @@ fn write_test_artifact(
         source_path,
         ll_path_view,
         metadata_path_view,
-        entry
+        &hosted
     );
     return data::TestArtifact {
         bytes: module_len,
@@ -275,7 +278,9 @@ fn lower_run_hosted_executable(
 ) -> !data::HostedExecutable {
     if executable.kind == data::ExecutableKind::Call and
         std::mem::equal_bytes(executable.callee, "print") {
-        return hosted_executable_with_payload(run_print_executable(), executable.payload);
+        let program = codegen::main_print_program(executable.payload);
+        try codegen::require_main_print(&program);
+        return hosted_executable_from_codegen(run_print_executable(), program);
     }
     if executable.kind == data::ExecutableKind::RunReturnVoid {
         return hosted_executable_with_payload(run_return_executable(), source_path[0..0]);
@@ -308,8 +313,25 @@ fn hosted_executable_with_payload(
         comment: template.comment,
         entry: template.entry,
         global: template.global,
+        codegen_ir: template.codegen_ir,
         output_stream: template.output_stream,
         output_payload: payload,
+        append_newline: template.append_newline,
+        exit_code: template.exit_code
+    };
+}
+
+fn hosted_executable_from_codegen(
+    template: data::HostedExecutable,
+    program: codegen::Program
+) -> data::HostedExecutable {
+    return data::HostedExecutable {
+        comment: template.comment,
+        entry: template.entry,
+        global: template.global,
+        codegen_ir: codegen::metadata_line(),
+        output_stream: template.output_stream,
+        output_payload: program.string_constant,
         append_newline: template.append_newline,
         exit_code: template.exit_code
     };
@@ -320,7 +342,7 @@ fn write_hosted_module(
     io: Io,
     source_path: []u8,
     ll_path: &[]u8,
-    hosted: data::HostedExecutable
+    hosted: &data::HostedExecutable
 ) -> !i64 {
     var module = try render_hosted_llvm(allocator, source_path, hosted);
     let module_view = module.as_bytes();
@@ -340,12 +362,12 @@ fn write_run_metadata(
     source_path: []u8,
     ll_path: &[]u8,
     metadata_path: &[]u8,
-    entry: []u8
+    hosted: &data::HostedExecutable
 ) -> !i64 {
     var metadata = std::string::String(allocator);
     try append_line(metadata, run_metadata_title());
     try append_line(metadata, run_metadata_issue());
-    try append_common_metadata(metadata, source_path, ll_path, entry);
+    try append_common_metadata(metadata, source_path, ll_path, hosted);
     let metadata_len = try write_metadata(io, metadata_path, metadata);
     metadata.deinit();
     return metadata_len;
@@ -357,12 +379,12 @@ fn write_test_metadata(
     source_path: []u8,
     ll_path: &[]u8,
     metadata_path: &[]u8,
-    entry: []u8
+    hosted: &data::HostedExecutable
 ) -> !i64 {
     var metadata = std::string::String(allocator);
     try append_line(metadata, test_metadata_title());
     try append_line(metadata, test_metadata_issue());
-    try append_common_metadata(metadata, source_path, ll_path, entry);
+    try append_common_metadata(metadata, source_path, ll_path, hosted);
     try append_line(metadata, test_metadata_discovery_line());
     let metadata_len = try write_metadata(io, metadata_path, metadata);
     metadata.deinit();
@@ -373,14 +395,15 @@ fn append_common_metadata(
     metadata: &var std::string::String,
     source_path: []u8,
     ll_path: &[]u8,
-    entry: []u8
+    hosted: &data::HostedExecutable
 ) -> !void {
     try append_key_value(metadata, metadata_source_prefix(), source_path);
     try metadata.append_bytes(metadata_output_prefix());
     try metadata.append_bytes(ll_path);
     try metadata.append_byte(cast<u8>(10));
     try append_line(metadata, metadata_abi_line());
-    try append_key_value(metadata, metadata_entry_prefix(), entry);
+    try append_key_value(metadata, metadata_entry_prefix(), hosted.entry);
+    try append_key_value(metadata, "codegen_ir ", hosted.codegen_ir);
     try append_line(metadata, metadata_runtime_line());
     try append_line(metadata, metadata_lowering_line());
     try append_line(metadata, metadata_fallback_line());
@@ -439,7 +462,7 @@ fn write_backend_bytes(
 fn render_hosted_llvm(
     allocator: Allocator,
     source_path: []u8,
-    hosted: data::HostedExecutable
+    hosted: &data::HostedExecutable
 ) -> !std::string::String {
     let comment = hosted.comment;
     let entry = hosted.entry;
