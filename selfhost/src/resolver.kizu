@@ -33,21 +33,45 @@ pub fn resolve_sources(
     allocator: Allocator,
     files: &std::array::Array<source::SourceFile>
 ) -> !ResolveSummary {
+    var parsed_files = try parser::parse_source_files(allocator, files);
+    let summary = try resolve_parsed_sources(
+        allocator,
+        files,
+        &parsed_files.parsed,
+        &parsed_files.source_indexes
+    );
+    try parser::deinit_parsed_source_files(parsed_files);
+    return summary;
+}
+
+pub fn resolve_parsed_sources(
+    allocator: Allocator,
+    files: &std::array::Array<source::SourceFile>,
+    parsed_files: &std::array::Array<std::kizu::ast::ParseResult>,
+    parsed_file_indexes: &std::array::Array<i64>
+) -> !ResolveSummary {
     var symbols = std::map::Map<[]u8, BindingKind>(allocator);
     var visibility = std::map::Map<[]u8, bool>(allocator);
     var modules = 0;
     var index = 0;
-    while index < files.len() {
-        let file = try files.at(index);
-        if source::is_source_code(file.kind) {
-            var module = try qualified_module_name(allocator, file);
-            let module_key = module.as_bytes();
-            try symbols.insert(module_key, BindingKind::Module);
-            try visibility.insert(module_key, true);
-            module.deinit();
-            try resolve_source_declarations(allocator, file, symbols, visibility);
-            modules = modules + 1;
-        }
+    while index < parsed_files.len() {
+        let parsed_file = try parsed_files.at(index);
+        let source_index = try parsed_file_indexes.get(index);
+        let file = try files.at(source_index);
+        var module = try qualified_module_name(allocator, file);
+        let module_key = module.as_bytes();
+        try symbols.insert(module_key, BindingKind::Module);
+        try visibility.insert(module_key, true);
+        module.deinit();
+        try resolve_ast_root_declarations(
+            allocator,
+            file,
+            parsed_file.ast,
+            parsed_file.root,
+            symbols,
+            visibility
+        );
+        modules = modules + 1;
         index = index + 1;
     }
     let summary = ResolveSummary {
