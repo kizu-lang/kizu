@@ -72,7 +72,7 @@ fn case_result_kind_name(
     ir_bytes: []u8,
     function_name: []u8,
     index: i64
-) -> ![]u8 borrows ir_bytes {
+) -> ![]u8 {
     let if_sequence = try lowering_case_if_sequence(ir_bytes, function_name, index);
     let then_block = try ir_contract::body_child_sequence(
         ir_bytes,
@@ -211,7 +211,7 @@ fn struct_literal_kind_field(
     ir_bytes: []u8,
     function_name: []u8,
     struct_literal: i64
-) -> ![]u8 borrows ir_bytes {
+) -> ![]u8 {
     let node_count = try ir_contract::body_node_count(ir_bytes, function_name);
     var ordinal = 0;
     while ordinal < node_count {
@@ -239,11 +239,43 @@ fn struct_literal_kind_field(
                 "value",
                 0
             );
-            return try field_expr_name(ir_bytes, function_name, value, "namespace");
+            return try result_kind_value_name(ir_bytes, function_name, value);
         }
         ordinal = ordinal + 1;
     }
     return error("missing selected body lowering result field");
+}
+
+fn result_kind_value_name(
+    ir_bytes: []u8,
+    function_name: []u8,
+    sequence: i64
+) -> ![]u8 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, sequence);
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        return try field_expr_name(ir_bytes, function_name, sequence, "namespace");
+    }
+    if std::mem::equal_bytes(kind, "Call") {
+        let callee = try ir_contract::body_call_callee_or_empty(ir_bytes, function_name, sequence);
+        return try result_kind_name_for_helper(callee);
+    }
+    return error("invalid selected body lowering body IR");
+}
+
+fn result_kind_name_for_helper(callee: []u8) -> ![]u8 {
+    if std::mem::equal_bytes(callee, "run_print_executable_kind") {
+        return "RunPrintString";
+    }
+    if std::mem::equal_bytes(callee, "run_return_executable_kind") {
+        return "RunReturnVoid";
+    }
+    if std::mem::equal_bytes(callee, "test_ok_executable_kind") {
+        return "TestExpectOk";
+    }
+    if std::mem::equal_bytes(callee, "test_failure_executable_kind") {
+        return "TestExpectFailure";
+    }
+    return error("invalid selected body lowering body IR");
 }
 
 fn field_expr_name(

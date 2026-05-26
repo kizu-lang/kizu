@@ -490,27 +490,7 @@ func requiredLLVMMetadataSelectedHelperBodyFragments() []string {
 
 // requiredLLVMMetadataSelectedBodyParsingFragments returns body parser inputs.
 func requiredLLVMMetadataSelectedBodyParsingFragments() []string {
-	return []string{
-		"backend-input executable-parser-token syntax-fn fn\n",
-		"backend-input executable-parser-token syntax-test test\n",
-		"backend-input executable-parser-token syntax-lparen (\n",
-		"backend-input executable-parser-token syntax-rparen )\n",
-		"backend-input executable-parser-token syntax-lbrace {\n",
-		"backend-input executable-parser-token syntax-rbrace }\n",
-		"backend-input executable-parser-token syntax-semicolon ;\n",
-		"backend-input executable-parser-token syntax-colon-pair ::\n",
-		"backend-input executable-parser-token syntax-return-arrow ->\n",
-		"backend-input executable-parser-token syntax-bang !\n",
-		"backend-input executable-parser-token syntax-return return\n",
-		"backend-input executable-parser-token syntax-void void\n",
-		"backend-input executable-parser-token value-main main\n",
-		"backend-input executable-parser-token run-print-callee print\n",
-		"backend-input executable-parser-token expect-callee-root std\n",
-		"backend-input executable-parser-token expect-callee-module testing\n",
-		"backend-input executable-parser-token expect-callee-function expect\n",
-		"backend-input executable-parser-token literal-true true\n",
-		"backend-input executable-parser-token literal-false false\n",
-	}
+	return nil
 }
 
 // requiredLLVMMetadataSelectedBodyLoweringFragments returns body lowering inputs.

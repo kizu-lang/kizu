@@ -1355,6 +1355,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn lower_test_executable_ast(",
 		"pub fn unsupported_executable_ast_kind_tag(",
 		"pub fn unsupported_executable_kind_tag(",
+		"pub fn parser_source_token(",
 		"pub fn run_literal_quote_byte(",
 		"pub fn run_executable_lowering_case_count(",
 		"pub fn test_expect_true_value(",
@@ -1429,7 +1430,6 @@ func assertHostedExecutableBackendInputs(
 	assertExecutableSelectedBodyParsingValidated(
 		t,
 		llvm,
-		sources.parser,
 		facts.selectedBodyParsingFacts,
 	)
 	assertExecutableSelectedBodyLoweringValidated(t, llvm)
@@ -1669,18 +1669,16 @@ func assertExecutableSelectedBodiesValidated(t *testing.T, llvm string) {
 func assertExecutableSelectedBodyParsingValidated(
 	t *testing.T,
 	llvm string,
-	parser string,
 	facts []string,
 ) {
 	t.Helper()
 	for _, fact := range facts {
-		if strings.HasPrefix(fact, "executable-parser-token ") {
-			assertNamedFactConsumer(t, parser, "backend selected-body-parsing validation", fact)
-			continue
-		}
 		if !strings.Contains(llvm, `"`+fact+`"`) {
 			t.Fatalf("backend selected-body-parsing validation missing %q", fact)
 		}
+	}
+	if strings.Contains(llvm, "executable-parser-token ") {
+		t.Fatal("backend selected-body-parsing validation still threads parser token facts")
 	}
 	if !strings.Contains(
 		llvm,
@@ -2043,6 +2041,9 @@ func assertExecutableSelectedBodyParsingComesFromCheckedAST(
 		if strings.Contains(content, `"selected-body-parsing `) {
 			t.Fatal("selected body parsing still depends on dedicated named facts")
 		}
+		if strings.Contains(content, "executable-parser-token ") {
+			t.Fatal("selected body parsing still depends on parser token facts")
+		}
 	}
 	for _, fragment := range []string{
 		"fn require_function_body_fragment(",
@@ -2073,35 +2074,12 @@ func assertExecutableSelectedBodyParsingContractFragments(t *testing.T, parser s
 		"ir_contract::require_body_call(",
 		"require_match_arm_dispatch(",
 		"find_match_arm_with_pattern(",
-		"run_literal_quote_byte(",
-		"run_literal_min_length(",
-		"run_literal_start_quote_offset(",
-		"run_literal_end_quote_offset_from_end(",
-		"run_literal_payload_start_offset(",
-		"run_literal_payload_end_margin(",
-		"run_literal_payload_delimiter_width(",
-		"run_payload_min_byte(",
-		"run_payload_max_byte(",
-		"run_payload_forbidden_byte(",
-		"test_expect_true_value(",
-		"test_expect_false_value(",
-		"test_expect_unsupported_value(",
-		"payload_guard_byte_constant(",
-		"run_literal_payload_index_expr(",
-		"let_value_with_name(",
-		"index_start_i64_value(",
-		"length_minus_i64_value(",
-		"literal_boundary_quote_byte(",
-		"bool_value_return_value(",
-		"match_arm_i64_value(",
-		"expression_i64_value(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_parent_with_child_token(",
-		"ir_contract::body_int_value(",
 		"ir_contract::body_call_callee_or_empty(",
-		`"body-binary "`,
 		"parse_run_executable_ast",
 		"parse_test_executable_ast",
+		"executable::parser_source_token(",
 		`"Program"`,
 		`"Block"`,
 		`"ExprStmt"`,
@@ -2352,6 +2330,7 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		"cli_executable_body_parser_contract::require_executable_body_parsing(",
 		"cli_executable_parser_token_llvm::append_named_token_char_eq_call(",
 		"cli_executable_parser_token_llvm::append_named_token_pair_eq_call(",
+		"executable::parser_source_token(",
 		"executable::unsupported_executable_ast_kind_tag(",
 		"executable::run_print_executable_ast_kind_tag(",
 		"executable::run_return_executable_ast_kind_tag(",
@@ -2375,6 +2354,7 @@ func assertExecutableParserFactConsumers(t *testing.T, parser string) {
 		}
 	}
 	for _, forbidden := range []string{
+		"executable-parser-token ",
 		"data::executable_ast_kind_tag_by_name(",
 		"cli_executable_body_parser_contract::unsupported_ast_kind_name(",
 		"cli_executable_body_parser_contract::run_print_ast_kind_name(",
@@ -2733,28 +2713,7 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 // hostedExecutableSelectedBodyParsingFacts returns checked parser facts derived
 // from the selected executable AST parser implementation.
 func hostedExecutableSelectedBodyParsingFacts() []string {
-	facts := []string{
-		"executable-parser-token syntax-fn fn",
-		"executable-parser-token syntax-test test",
-		"executable-parser-token syntax-lparen (",
-		"executable-parser-token syntax-rparen )",
-		"executable-parser-token syntax-lbrace {",
-		"executable-parser-token syntax-rbrace }",
-		"executable-parser-token syntax-semicolon ;",
-		"executable-parser-token syntax-colon-pair ::",
-		"executable-parser-token syntax-return-arrow ->",
-		"executable-parser-token syntax-bang !",
-		"executable-parser-token syntax-return return",
-		"executable-parser-token syntax-void void",
-		"executable-parser-token value-main main",
-		"executable-parser-token run-print-callee print",
-		"executable-parser-token expect-callee-root std",
-		"executable-parser-token expect-callee-module testing",
-		"executable-parser-token expect-callee-function expect",
-		"executable-parser-token literal-true true",
-		"executable-parser-token literal-false false",
-	}
-	return facts
+	return []string{}
 }
 
 // hostedExecutableBodyContractFragments returns representative generic body IR
