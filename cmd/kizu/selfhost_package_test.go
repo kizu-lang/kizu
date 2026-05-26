@@ -1268,7 +1268,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/ir/executable_contract.kizu": {
 		"pub fn append_facts(",
-		"fn append_enum_kind_facts(",
 		"fn require_struct_fields(",
 		"fn require_function(",
 		"frontend-executable-lowering checked-body-ir",
@@ -1931,8 +1930,6 @@ func assertExecutableContractFactsComeFromCheckedAST(
 	}
 	for _, fragment := range []string{
 		"parser::parse_checked_file(",
-		"append_enum_kind_facts(",
-		"append_enum_tag_facts(",
 		"require_struct_fields(",
 		"require_function(",
 		"ExecutableAstKind",
