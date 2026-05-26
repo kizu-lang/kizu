@@ -465,10 +465,6 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"lower_run_executable 1 ast:runtime:std::kizu::ast::Ast\n",
 		"backend-input function-signature-return selfhost::backend::executable::" +
 			"lower_run_executable_ast data::Executable\n",
-		"backend-input function-signature-return selfhost::backend::executable::" +
-			"parse_run_program_ast !data::ExecutableAst\n",
-		"backend-input function-signature-param selfhost::backend::executable::" +
-			"parse_run_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"parse_expect_call_ast 3 args:runtime:std::kizu::ast::ChildRange\n",
 		"backend-input function-signature-return selfhost::backend::hosted::" +
