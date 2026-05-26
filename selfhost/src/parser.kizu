@@ -67,22 +67,16 @@ pub fn validate_diagnostic_file(
     allocator: Allocator,
     path: []u8,
     source: []u8
-) -> !validation::ParseValidation {
+) -> !diagnostic::Report {
     var tokens = try lexer::tokenize(allocator, source);
     defer tokens.deinit();
     let validation_result = try validation::validate_tokens(allocator, source, &tokens);
     if !validation_result.ok {
-        return validation_result;
+        return try parse_validation_report(allocator, path, validation_result);
     }
     let token_check = require_checked_tokens(&tokens);
     try token_check;
-    return validation::ParseValidation {
-        ok: true,
-        message: "",
-        line: 0,
-        column: 0,
-        got: ""
-    };
+    return diagnostic::no_report(allocator);
 }
 
 fn parse_program_file(
@@ -158,4 +152,25 @@ fn require_checked_tokens(tokens: &std::array::Array<std::kizu::lexer::Token>) -
         return error("parser requires EOF token");
     }
     return;
+}
+
+fn parse_validation_report(
+    allocator: Allocator,
+    path: []u8,
+    validation_result: validation::ParseValidation
+) -> !diagnostic::Report {
+    let primary = diagnostic::file_span_at(
+        path,
+        0,
+        0,
+        validation_result.line,
+        validation_result.column
+    );
+    var report = diagnostic::error_report(allocator, primary);
+    try report.message.append_bytes(validation_result.message);
+    if !std::mem::equal_bytes(validation_result.got, "") {
+        try report.message.append_bytes(", got ");
+        try report.message.append_bytes(validation_result.got);
+    }
+    return report;
 }

@@ -1,8 +1,8 @@
 import selfhost::cli::diagnostics;
 import selfhost::cli::output;
+import selfhost::diagnostic;
 import selfhost::ownership;
 import selfhost::parser;
-import selfhost::parser::validation;
 import selfhost::resolver;
 import selfhost::source;
 import selfhost::source::loader;
@@ -13,10 +13,11 @@ import selfhost::types::type_refs;
 
 pub fn file_cli(allocator: Allocator, io: Io, path: []u8) -> !i64 {
     let file_text = try std::fs::read_file(io, path);
-    let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
+    var parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
+    defer parsed_validation.deinit();
     let validation_ok = parsed_validation.ok;
     if !validation_ok {
-        return try write_parse_failure_exit(allocator, io, path, parsed_validation);
+        return try write_parse_failure_exit(allocator, io, path, &var parsed_validation);
     }
 
     var files = try loader::load_file_sources(allocator, io, path, file_text);
@@ -189,14 +190,15 @@ fn parse_package_fast_diagnostic_source(
     facts: &var FastDiagnosticContext
 ) -> !bool {
     if source::is_frontend_source(file.kind) {
-        let parsed_validation = try parser::validate_diagnostic_file(
+        var parsed_validation = try parser::validate_diagnostic_file(
             allocator,
             file.path,
             file.text
         );
+        defer parsed_validation.deinit();
         let validation_ok = parsed_validation.ok;
         if !validation_ok {
-            return try write_parse_failure(allocator, io, file.path, parsed_validation);
+            return try write_parse_failure(allocator, io, file.path, &var parsed_validation);
         }
         let parsed = try parser::parse_validated_file(
             allocator,
@@ -275,10 +277,11 @@ pub fn fast_diagnostics(
     path: []u8,
     file_text: []u8
 ) -> !bool {
-    let parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
+    var parsed_validation = try parser::validate_diagnostic_file(allocator, path, file_text);
+    defer parsed_validation.deinit();
     let validation_ok = parsed_validation.ok;
     if !validation_ok {
-        return try write_parse_failure(allocator, io, path, parsed_validation);
+        return try write_parse_failure(allocator, io, path, &var parsed_validation);
     }
     var files = try loader::load_file_sources(allocator, io, path, file_text);
     defer files.deinit();
@@ -393,7 +396,7 @@ fn fast_diagnostics_ast_node_with_context(
         &var facts.type_arities,
         &var facts.copyable_types
     );
-    if !(try write_check_diagnostic(allocator, io, file.path, file.text, &pre_move)) {
+    if !(try write_check_diagnostic(allocator, io, file.path, file.text, pre_move)) {
         return false;
     }
 
@@ -423,7 +426,7 @@ fn fast_diagnostics_ast_node_with_context(
         ast,
         root
     );
-    if !(try write_check_diagnostic(allocator, io, file.path, file.text, &post_move)) {
+    if !(try write_check_diagnostic(allocator, io, file.path, file.text, post_move)) {
         return false;
     }
     if use_cached_arities and !(try write_cached_package_function_call_diagnostic(
@@ -453,7 +456,7 @@ fn write_parse_failure(
     allocator: Allocator,
     io: Io,
     path: []u8,
-    parsed_validation: validation::ParseValidation
+    parsed_validation: &var diagnostic::Report
 ) -> !bool {
     try diagnostics::parse_validation_error(allocator, io, path, parsed_validation);
     return false;
@@ -463,7 +466,7 @@ fn write_parse_failure_exit(
     allocator: Allocator,
     io: Io,
     path: []u8,
-    parsed_validation: validation::ParseValidation
+    parsed_validation: &var diagnostic::Report
 ) -> !i64 {
     try diagnostics::parse_validation_error(allocator, io, path, parsed_validation);
     return std::process::exit_code(1);
@@ -474,7 +477,7 @@ fn write_check_diagnostic(
     io: Io,
     path: []u8,
     file_text: []u8,
-    diagnostic: &model::CheckDiagnosticSummary
+    diagnostic: diagnostic::Report
 ) -> !bool {
     return try diagnostics::check_summary_error(
         allocator,
