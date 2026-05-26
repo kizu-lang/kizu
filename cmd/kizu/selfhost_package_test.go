@@ -998,7 +998,7 @@ func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
 var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/types/model.kizu": {
 		"pub enum TypeKind",
-		"pub struct CheckDiagnosticSummary",
+		"pub struct MissingReturnSummary",
 	},
 	"../../selfhost/src/types/diagnostic.kizu": {
 		"pub fn unknown_type(",
