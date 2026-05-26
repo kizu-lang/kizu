@@ -1,4 +1,10 @@
+pub enum ProgramKind {
+    Unsupported,
+    MainPrint,
+}
+
 pub struct Program {
+    pub kind: ProgramKind,
     pub function_name: []u8,
     pub string_constant: []u8,
     pub calls_print: bool,
@@ -7,6 +13,7 @@ pub struct Program {
 
 pub fn main_print_program(payload: []u8) -> Program {
     return Program {
+        kind: ProgramKind::MainPrint,
         function_name: "main",
         string_constant: payload,
         calls_print: true,
@@ -14,7 +21,24 @@ pub fn main_print_program(payload: []u8) -> Program {
     };
 }
 
+pub fn unsupported_program(empty: []u8) -> Program {
+    return Program {
+        kind: ProgramKind::Unsupported,
+        function_name: empty,
+        string_constant: empty,
+        calls_print: false,
+        returns_void: false
+    };
+}
+
+pub fn program_supported(program: &Program) -> bool {
+    return program.kind == ProgramKind::MainPrint;
+}
+
 pub fn require_main_print(program: &Program) -> !void {
+    if program.kind != ProgramKind::MainPrint {
+        return error("unsupported codegen program");
+    }
     if !std::mem::equal_bytes(program.function_name, "main") {
         return error("unsupported codegen function");
     }
@@ -25,6 +49,304 @@ pub fn require_main_print(program: &Program) -> !void {
         return error("unsupported codegen return");
     }
     return;
+}
+
+pub fn lower_run_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !Program {
+    let node = ast.get(root);
+    return match node.data {
+        Program(program) => try lower_run_program_declarations(text, ast, program.declarations),
+        _ => unsupported_program(text[0..0]),
+    };
+}
+
+fn lower_run_program_declarations(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange
+) -> !Program {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        let node = ast.get(child);
+        let program = match node.data {
+            FnDecl(fn_decl) => try lower_run_function(text, ast, fn_decl.name, fn_decl.body),
+            _ => unsupported_program(text[0..0]),
+        };
+        if program_supported(&program) {
+            return program;
+        }
+        index = index + 1;
+    }
+    return unsupported_program(text[0..0]);
+}
+
+fn lower_run_function(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    name: std::kizu::ast::NodeId,
+    body: std::kizu::ast::NodeId
+) -> !Program {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
+        return unsupported_program(text[0..0]);
+    }
+
+    let node = ast.get(body);
+    return match node.data {
+        Block(block) => try lower_run_block(text, ast, block.statements),
+        _ => unsupported_program(text[0..0]),
+    };
+}
+
+struct LocalBinding {
+    name: []u8,
+    payload_start: i64,
+    payload_end: i64,
+}
+
+struct LocalTable {
+    count: i64,
+    first: LocalBinding,
+    second: LocalBinding,
+}
+
+fn lower_run_block(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange
+) -> !Program {
+    var locals = empty_local_table(text);
+    var index = 0;
+    while index < statements.len {
+        let statement = try ast.child_at(statements, index);
+        let node = ast.get(statement);
+        let terminal = index + 1 == statements.len;
+        if !terminal {
+            let binding = match node.data {
+                Let(let_node) => lower_let_binding(text, ast, &locals, let_node.name, let_node.value),
+                _ => empty_local(text),
+            };
+            if std::mem::len(binding.name) == 0 {
+                return unsupported_program(text[0..0]);
+            }
+            locals = insert_local(text, &locals, &binding);
+            index = index + 1;
+        } else {
+            return match node.data {
+                ExprStmt(expr_stmt) => try lower_print_statement(text, ast, &locals, expr_stmt.expr),
+                _ => unsupported_program(text[0..0]),
+            };
+        }
+    }
+    return unsupported_program(text[0..0]);
+}
+
+fn lower_let_binding(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    locals: &LocalTable,
+    name: std::kizu::ast::NodeId,
+    value: std::kizu::ast::NodeId
+) -> LocalBinding {
+    let local_name = ast_node_text(text, ast, name);
+    if local_table_contains(locals, local_name) or locals.count >= 2 {
+        return empty_local(text);
+    }
+    let payload = string_literal_span(text, ast, value);
+    if payload.start < 0 {
+        return empty_local(text);
+    }
+    return LocalBinding {
+        name: local_name,
+        payload_start: payload.start,
+        payload_end: payload.end
+    };
+}
+
+fn lower_print_statement(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    locals: &LocalTable,
+    expr: std::kizu::ast::NodeId
+) -> !Program {
+    let node = ast.get(expr);
+    return match node.data {
+        Call(call_node) => try lower_print_call(text, ast, locals, call_node.callee, call_node.args),
+        _ => unsupported_program(text[0..0]),
+    };
+}
+
+fn lower_print_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    locals: &LocalTable,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !Program {
+    if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
+        return unsupported_program(text[0..0]);
+    }
+    let arg = try ast.child_at(args, 0);
+    let payload = print_payload(text, ast, locals, arg);
+    if payload.start < 0 {
+        return unsupported_program(text[0..0]);
+    }
+    let payload_text = text[payload.start..payload.end];
+    if std::mem::len(payload_text) == 0 {
+        return unsupported_program(text[0..0]);
+    }
+    return main_print_program(payload_text);
+}
+
+struct PayloadSpan {
+    start: i64,
+    end: i64,
+}
+
+fn print_payload(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    locals: &LocalTable,
+    arg: std::kizu::ast::NodeId
+) -> PayloadSpan {
+    let node = ast.get(arg);
+    return match node.data {
+        String(string_node) => string_literal_span(text, ast, arg),
+        Var(var_node) => local_payload_span(locals, ast_node_text(text, ast, arg)),
+        _ => empty_payload_span(),
+    };
+}
+
+fn string_literal_span(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> PayloadSpan {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    let literal = text[span.start..span.end];
+    let length = span.end - span.start;
+    if length < 2 {
+        return empty_payload_span();
+    }
+    let quote = cast<u8>(34);
+    if literal[0] != quote or literal[length - 1] != quote {
+        return empty_payload_span();
+    }
+    let payload_start = span.start + 1;
+    let payload_end = span.end - 1;
+    let payload = text[payload_start..payload_end];
+    if !is_payload_supported(payload) {
+        return empty_payload_span();
+    }
+    return PayloadSpan {
+        start: payload_start,
+        end: payload_end
+    };
+}
+
+fn empty_payload_span() -> PayloadSpan {
+    return PayloadSpan {
+        start: -1,
+        end: -1
+    };
+}
+
+fn is_payload_supported(payload: []u8) -> bool {
+    var index = 0;
+    let min = cast<u8>(32);
+    let max = cast<u8>(126);
+    let quote = cast<u8>(34);
+    while index < std::mem::len(payload) {
+        let byte = payload[index];
+        if byte < min or byte > max or byte == quote {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn empty_local_table(text: []u8) -> LocalTable {
+    return LocalTable {
+        count: 0,
+        first: empty_local(text),
+        second: empty_local(text)
+    };
+}
+
+fn empty_local(text: []u8) -> LocalBinding {
+    return LocalBinding {
+        name: text[0..0],
+        payload_start: -1,
+        payload_end: -1
+    };
+}
+
+fn insert_local(text: []u8, locals: &LocalTable, binding: &LocalBinding) -> LocalTable {
+    if locals.count == 0 {
+        return LocalTable {
+            count: 1,
+            first: LocalBinding {
+                name: binding.name,
+                payload_start: binding.payload_start,
+                payload_end: binding.payload_end
+            },
+            second: empty_local(text)
+        };
+    }
+    return LocalTable {
+        count: 2,
+        first: LocalBinding {
+            name: locals.first.name,
+            payload_start: locals.first.payload_start,
+            payload_end: locals.first.payload_end
+        },
+        second: LocalBinding {
+            name: binding.name,
+            payload_start: binding.payload_start,
+            payload_end: binding.payload_end
+        }
+    };
+}
+
+fn local_table_contains(locals: &LocalTable, name: []u8) -> bool {
+    if locals.count >= 1 and std::mem::equal_bytes(locals.first.name, name) {
+        return true;
+    }
+    if locals.count >= 2 and std::mem::equal_bytes(locals.second.name, name) {
+        return true;
+    }
+    return false;
+}
+
+fn local_payload_span(locals: &LocalTable, name: []u8) -> PayloadSpan {
+    if locals.count >= 1 and std::mem::equal_bytes(locals.first.name, name) {
+        return PayloadSpan {
+            start: locals.first.payload_start,
+            end: locals.first.payload_end
+        };
+    }
+    if locals.count >= 2 and std::mem::equal_bytes(locals.second.name, name) {
+        return PayloadSpan {
+            start: locals.second.payload_start,
+            end: locals.second.payload_end
+        };
+    }
+    return empty_payload_span();
+}
+
+fn ast_node_text(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId
+) -> []u8 borrows text {
+    let node = ast.get(node_id);
+    let span = &node.span;
+    return std::mem::trim_ascii(text[span.start..span.end]);
 }
 
 pub fn metadata_line() -> []u8 {

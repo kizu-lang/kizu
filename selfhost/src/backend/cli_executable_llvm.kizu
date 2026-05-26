@@ -3,8 +3,37 @@ import selfhost::backend::executable;
 
 pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try cli_executable_body_parsing_llvm::append_functions(out, ir_bytes);
+    try append_cli_run_codegen_program_function(out, ir_bytes);
     try append_cli_run_executable_function(out, ir_bytes);
     try append_cli_test_executable_function(out, ir_bytes);
+    return;
+}
+
+fn append_cli_run_codegen_program_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    try append_line(out, "define %kizu.selfhost.codegen.program @kizu_selfhost__cli_run_codegen_program(");
+    try append_line(out, "  %kizu.slice.u8 %source");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_empty_payload(out);
+    try append_line(out,
+        "  %payload_result = call %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_print_payload(%kizu.slice.u8 %source)");
+    try append_line(out, "  %payload_ok = extractvalue %kizu.error.slice.u8 %payload_result, 0");
+    try append_line(out, "  br i1 %payload_ok, label %run_print, label %check_local_print");
+    try append_line(out, "run_print:");
+    try append_line(out, "  %payload = extractvalue %kizu.error.slice.u8 %payload_result, 2");
+    try append_codegen_return(out, "run_print", 1, "payload");
+    try append_line(out, "check_local_print:");
+    try append_line(out,
+        "  %local_result = call %kizu.error.slice.u8 @kizu_selfhost__cli_parse_run_local_print_payload(%kizu.slice.u8 %source)");
+    try append_line(out, "  %local_ok = extractvalue %kizu.error.slice.u8 %local_result, 0");
+    try append_line(out, "  br i1 %local_ok, label %run_local_print, label %unsupported");
+    try append_line(out, "run_local_print:");
+    try append_line(out, "  %local_payload = extractvalue %kizu.error.slice.u8 %local_result, 2");
+    try append_codegen_return(out, "run_local_print", 1, "local_payload");
+    try append_line(out, "unsupported:");
+    try append_codegen_return(out, "unsupported", 0, "empty");
+    try append_line(out, "}");
+    try append_line(out, "");
     return;
 }
 
@@ -63,6 +92,32 @@ fn append_empty_payload(out: &var std::string::String) -> !void {
     try append_line(out, "  %source_ptr = extractvalue %kizu.slice.u8 %source, 0");
     try append_line(out, "  %empty_base = insertvalue %kizu.slice.u8 poison, ptr %source_ptr, 0");
     try append_line(out, "  %empty = insertvalue %kizu.slice.u8 %empty_base, i64 0, 1");
+    return;
+}
+
+fn append_codegen_return(
+    out: &var std::string::String,
+    suffix: []u8,
+    kind: i64,
+    payload: []u8
+) -> !void {
+    try out.append_bytes("  %codegen_kinded_");
+    try out.append_bytes(suffix);
+    try out.append_bytes(" = insertvalue %kizu.selfhost.codegen.program zeroinitializer, i64 ");
+    try std::fmt::append_i64(out, kind);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %codegen_result_");
+    try out.append_bytes(suffix);
+    try out.append_bytes(" = insertvalue %kizu.selfhost.codegen.program %codegen_kinded_");
+    try out.append_bytes(suffix);
+    try out.append_bytes(", %kizu.slice.u8 %");
+    try out.append_bytes(payload);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.selfhost.codegen.program %codegen_result_");
+    try out.append_bytes(suffix);
+    try out.append_byte(cast<u8>(10));
     return;
 }
 
