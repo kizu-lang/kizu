@@ -35,6 +35,26 @@ pub fn append_compiled_function(
         );
         return;
     }
+    if std::mem::equal_bytes(value_kind, "Int") {
+        try append_int_return_function(
+            out,
+            ir_bytes,
+            function_name,
+            llvm_symbol,
+            value
+        );
+        return;
+    }
+    if std::mem::equal_bytes(value_kind, "FieldExpr") {
+        try append_field_expr_return_function(
+            out,
+            ir_bytes,
+            function_name,
+            llvm_symbol,
+            value
+        );
+        return;
+    }
     return error("compiled function: unsupported return value kind");
 }
 
@@ -94,6 +114,181 @@ fn append_string_return_function(
     try out.append_byte(cast<u8>(10));
     try out.append_byte(cast<u8>(10));
     return;
+}
+
+fn append_int_return_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    value_node: i64
+) -> !void {
+    let int_value = try ir_contract::body_int_value(
+        ir_bytes,
+        function_name,
+        value_node
+    );
+    try out.append_bytes("define i64 @");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes("() {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret i64 ");
+    try std::fmt::append_i64(out, int_value);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_field_expr_return_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    value_node: i64
+) -> !void {
+    let field_name = try ir_contract::body_field_expr_name(
+        ir_bytes,
+        function_name,
+        value_node,
+        "namespace"
+    );
+    let receiver = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        value_node,
+        "receiver",
+        0
+    );
+    let receiver_token = try ir_contract::body_token_or_empty(
+        ir_bytes,
+        function_name,
+        receiver
+    );
+    let module_prefix = module_prefix_of(function_name);
+    let tag = try enum_variant_tag_by_prefix(
+        ir_bytes,
+        module_prefix,
+        receiver_token,
+        field_name
+    );
+    try out.append_bytes("define i64 @");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes("() {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret i64 ");
+    try std::fmt::append_i64(out, tag);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn module_prefix_of(function_name: []u8) -> []u8 {
+    let fn_len = std::mem::len(function_name);
+    var index = fn_len;
+    while index > 0 {
+        index = index - 1;
+        if function_name[index] == cast<u8>(58) and
+            index > 0 and
+            function_name[index - 1] == cast<u8>(58) {
+            return function_name[0..index + 1];
+        }
+    }
+    return function_name[0..0];
+}
+
+fn enum_variant_tag_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_enum: []u8,
+    variant: []u8
+) -> !i64 {
+    let prefix_len = std::mem::len(module_prefix);
+    let short_len = std::mem::len(short_enum);
+    let qualified_len = prefix_len + short_len;
+    let byte_len = std::mem::len(ir_bytes);
+    let marker = "enum-variant ";
+    let marker_len = std::mem::len(marker);
+    var index = 0;
+    while index + marker_len + qualified_len < byte_len {
+        if is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + marker_len], marker) {
+            let name_start = index + marker_len;
+            let prefix_end = name_start + prefix_len;
+            let enum_end = prefix_end + short_len;
+            if enum_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[name_start..prefix_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[prefix_end..enum_end], short_enum) and
+                ir_bytes[enum_end] == cast<u8>(32) {
+                let tag = try match_enum_variant_suffix(
+                    ir_bytes,
+                    enum_end,
+                    variant
+                );
+                if tag >= 0 {
+                    return tag;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: enum variant not found");
+}
+
+fn match_enum_variant_suffix(
+    ir_bytes: []u8,
+    after_enum: i64,
+    variant: []u8
+) -> !i64 {
+    let byte_len = std::mem::len(ir_bytes);
+    let variant_len = std::mem::len(variant);
+    var pos = after_enum;
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    let variant_end = pos + variant_len;
+    if variant_end >= byte_len {
+        return -1;
+    }
+    if !std::mem::equal_bytes(ir_bytes[pos..variant_end], variant) {
+        return -1;
+    }
+    if ir_bytes[variant_end] != cast<u8>(32) {
+        return -1;
+    }
+    var tag_start = variant_end;
+    while tag_start < byte_len and ir_bytes[tag_start] == cast<u8>(32) {
+        tag_start = tag_start + 1;
+    }
+    var tag_value = 0;
+    var found = false;
+    while tag_start < byte_len {
+        let byte = ir_bytes[tag_start];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            break;
+        }
+        tag_value = tag_value * 10 + cast<i64>(byte) - 48;
+        found = true;
+        tag_start = tag_start + 1;
+    }
+    if !found {
+        return -1;
+    }
+    return tag_value;
+}
+
+fn is_line_start(bytes: []u8, index: i64) -> bool {
+    if index == 0 {
+        return true;
+    }
+    return bytes[index - 1] == cast<u8>(10);
 }
 
 fn append_llvm_c_string_payload(
