@@ -1229,55 +1229,20 @@ func assertCallInstructionBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 // assertBuildMainPrintProgramBodyDerivedCodegen keeps the program builder slice active.
 func assertBuildMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	t.Helper()
-	for _, fragment := range []string{
-		"fn append_codegen_build_main_print_program_function(",
-		"fn build_main_print_program_string_field(",
-		"fn build_main_print_program_call_string_arg(",
-		"fn build_main_print_program_int_field(",
-		"fn require_build_main_print_program_var_field(",
-		"selfhost::ir::codegen::build_main_print_program",
-		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_build_main_print_program",
-	} {
-		if !strings.Contains(cliCodegen, fragment) {
-			t.Fatalf(
-				"codegen LLVM path does not derive build_main_print_program from body facts with %q",
-				fragment,
-			)
-		}
-	}
-	for _, forbidden := range []string{
-		`append_llvm_constant(out, "codegen_main", "4", "main")`,
-		`append_llvm_constant(out, "codegen_entry", "5", "entry")`,
-		`append_llvm_constant(out, "codegen_s0", "2", "s0")`,
-		`append_llvm_constant(out, "codegen_print", "5", "print")`,
-		"%field15 = insertvalue %kizu.selfhost.codegen.program %field14, i1 true, 15",
-	} {
-		if strings.Contains(cliCodegen, forbidden) {
-			t.Fatalf("build_main_print_program LLVM path still owns hardcoded route %q", forbidden)
-		}
+	if strings.Contains(cliCodegen,
+		"define %kizu.selfhost.codegen.program "+
+			"@kizu_selfhost__cli_codegen_build_main_print_program") {
+		t.Fatal("build_main_print_program hand-written generator should be removed")
 	}
 }
 
 // assertLoweredMainPrintProgramBodyDerivedCodegen keeps the lowered wrapper slice active.
 func assertLoweredMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	t.Helper()
-	for _, fragment := range []string{
-		"fn lowered_main_print_program_flag_from_body(",
-		"selfhost::ir::codegen::lowered_main_print_program",
-		"body_call_callee_or_empty(",
-		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lowered_main_print_program",
-	} {
-		if !strings.Contains(cliCodegen, fragment) {
-			t.Fatalf(
-				"codegen LLVM path does not derive lowered_main_print_program from body facts with %q",
-				fragment,
-			)
-		}
-	}
-	oldLoweredCallRoute := "%program = call %kizu.selfhost.codegen.program " +
-		"@kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 true)"
-	if strings.Contains(cliCodegen, oldLoweredCallRoute) {
-		t.Fatal("lowered_main_print_program LLVM generator still directly hardcodes true")
+	if strings.Contains(cliCodegen,
+		"define %kizu.selfhost.codegen.program "+
+			"@kizu_selfhost__cli_codegen_lowered_main_print_program") {
+		t.Fatal("lowered_main_print_program hand-written generator should be removed")
 	}
 }
 
@@ -1382,6 +1347,12 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 	}
 	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_call_instruction") {
 		t.Fatal("cli_llvm does not emit compiled call_instruction symbol")
+	}
+	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_build_main_print_program") {
+		t.Fatal("cli_llvm does not emit compiled build_main_print_program symbol")
+	}
+	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_lowered_main_print_program") {
+		t.Fatal("cli_llvm does not emit compiled lowered_main_print_program symbol")
 	}
 }
 
@@ -1650,9 +1621,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn const_string_instruction_kind_tag_from_body(",
 		"fn call_instruction_kind_tag_from_body(",
 		"fn return_void_instruction_kind_tag_from_body(",
-		"fn append_codegen_build_main_print_program_function(",
-		"fn append_codegen_lowered_main_print_program_function(",
-		"fn lowered_main_print_program_flag_from_body(",
 		"fn append_codegen_lower_run_ast_function(",
 		"fn print_run_ast_statement_kind_tag_from_body(",
 		"fn print_run_ast_argument_kind_tag_from_body(",
@@ -1662,14 +1630,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_codegen_stdout_payload_function(",
 		"fn append_codegen_payload_llvm_c_string_function(",
 		"fn append_write_llvm_escape_function(",
-		"%kizu.selfhost.codegen.block",
-		"%kizu.selfhost.codegen.function",
 		"%kizu.selfhost.codegen.run_ast %ast",
 		"%kizu.selfhost.codegen.program %program",
-		"@kizu_compiled__ir_codegen_const_string_value",
-		"@kizu_compiled__ir_codegen_const_string_instruction",
-		"@kizu_compiled__ir_codegen_call_instruction",
-		"@kizu_selfhost__cli_codegen_lowered_main_print_program",
 		"@kizu_selfhost__cli_codegen_lower_run_ast",
 		"@kizu_selfhost__cli_codegen_stdout_payload",
 	},
