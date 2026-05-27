@@ -37,7 +37,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try append_codegen_lowered_main_print_program_function(out, ir_bytes);
     try append_codegen_lower_run_ast_function(out);
     try append_codegen_program_supported_function(out);
-    try append_codegen_stdout_payload_function(out);
+    try append_codegen_stdout_payload_function(out, ir_bytes);
     try append_codegen_payload_llvm_c_string_function(out);
     return;
 }
@@ -1191,17 +1191,36 @@ fn append_codegen_program_supported_function(out: &var std::string::String) -> !
     return;
 }
 
-fn append_codegen_stdout_payload_function(out: &var std::string::String) -> !void {
+fn append_codegen_stdout_payload_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let main_len = try string_token_decoded_len(
+        try build_main_print_program_string_field(ir_bytes, "CodegenFunction", "name"),
+        "invalid build_main_print_program body"
+    );
+    let entry_len = try string_token_decoded_len(
+        try build_main_print_program_string_field(ir_bytes, "CodegenBlock", "label"),
+        "invalid build_main_print_program body"
+    );
+    let s0_len = try string_token_decoded_len(
+        try build_main_print_program_call_string_arg(ir_bytes, "const_string_value", 0, 0),
+        "invalid build_main_print_program body"
+    );
+    let print_len = try string_token_decoded_len(
+        try build_main_print_program_call_string_arg(ir_bytes, "call_instruction", 0, 0),
+        "invalid build_main_print_program body"
+    );
     try append_line(out, "define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_stdout_payload(");
     try append_line(out, "  %kizu.selfhost.codegen.program %program");
     try append_line(out, ") {");
     try append_line(out, "entry:");
     try append_program_shape_extracts(out);
-    try append_global_slice(out, "main", "codegen_main", 4);
-    try append_global_slice(out, "entry", "codegen_entry", 5);
-    try append_global_slice(out, "s0", "codegen_s0", 2);
-    try append_global_slice(out, "print", "codegen_print", 5);
-    try append_program_shape_checks(out);
+    try append_global_slice(out, "main", "codegen_main", main_len);
+    try append_global_slice(out, "entry", "codegen_entry", entry_len);
+    try append_global_slice(out, "s0", "codegen_s0", s0_len);
+    try append_global_slice(out, "print", "codegen_print", print_len);
+    try append_program_shape_checks(out, ir_bytes);
     try append_line(out, "  br i1 %shape_ok, label %return_payload, label %unsupported");
     try append_line(out, "return_payload:");
     try append_line(out, "  %ok = insertvalue %kizu.error.slice.u8 zeroinitializer, i1 true, 0");
@@ -1382,20 +1401,43 @@ fn append_program_shape_extracts(out: &var std::string::String) -> !void {
     return;
 }
 
-fn append_program_shape_checks(out: &var std::string::String) -> !void {
-    try append_line(out, "  %one_function = icmp eq i64 %function_count, 1");
+fn append_program_shape_checks(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let function_count = try build_main_print_program_int_field(ir_bytes, "Program", "function_count");
+    let block_count = try build_main_print_program_int_field(ir_bytes, "CodegenFunction", "block_count");
+    let instruction_count = try build_main_print_program_int_field(ir_bytes, "CodegenBlock", "instruction_count");
+    let const_string_kind = try const_string_instruction_kind_tag_from_body(ir_bytes);
+    let const_string_value_kind = try const_string_value_kind_tag_from_body(ir_bytes);
+    let call_kind = try call_instruction_kind_tag_from_body(ir_bytes);
+    let return_void_kind = try return_void_instruction_kind_tag_from_body(ir_bytes);
+    try out.append_bytes("  %one_function = icmp eq i64 %function_count, ");
+    try std::fmt::append_i64(out, function_count);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %main_name = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %function_name, %kizu.slice.u8 %main_slice)");
-    try append_line(out, "  %one_block = icmp eq i64 %block_count, 1");
+    try out.append_bytes("  %one_block = icmp eq i64 %block_count, ");
+    try std::fmt::append_i64(out, block_count);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %entry_label = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %block_label, %kizu.slice.u8 %entry_slice)");
-    try append_line(out, "  %three_instructions = icmp eq i64 %instruction_count, 3");
-    try append_line(out, "  %first_const = icmp eq i64 %first_kind, 1");
-    try append_line(out, "  %first_value_const = icmp eq i64 %first_result_kind, 1");
+    try out.append_bytes("  %three_instructions = icmp eq i64 %instruction_count, ");
+    try std::fmt::append_i64(out, instruction_count);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %first_const = icmp eq i64 %first_kind, ");
+    try std::fmt::append_i64(out, const_string_kind);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %first_value_const = icmp eq i64 %first_result_kind, ");
+    try std::fmt::append_i64(out, const_string_value_kind);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %first_name_s0 = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %first_name, %kizu.slice.u8 %s0_slice)");
-    try append_line(out, "  %second_call = icmp eq i64 %second_kind, 2");
+    try out.append_bytes("  %second_call = icmp eq i64 %second_kind, ");
+    try std::fmt::append_i64(out, call_kind);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %second_print = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %second_callee, %kizu.slice.u8 %print_slice)");
-    try append_line(out, "  %second_arg_const = icmp eq i64 %second_argument_kind, 1");
+    try out.append_bytes("  %second_arg_const = icmp eq i64 %second_argument_kind, ");
+    try std::fmt::append_i64(out, const_string_value_kind);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %second_name_s0 = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %second_argument_name, %kizu.slice.u8 %s0_slice)");
-    try append_line(out, "  %third_return = icmp eq i64 %third_kind, 3");
+    try out.append_bytes("  %third_return = icmp eq i64 %third_kind, ");
+    try std::fmt::append_i64(out, return_void_kind);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %shape_01 = and i1 %one_function, %main_name");
     try append_line(out, "  %shape_02 = and i1 %shape_01, %one_block");
     try append_line(out, "  %shape_03 = and i1 %shape_02, %entry_label");
