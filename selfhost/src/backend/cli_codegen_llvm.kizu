@@ -17,7 +17,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try append_codegen_metadata_line_function(out, ir_bytes);
     try append_codegen_const_string_value_function(out, ir_bytes);
     try append_codegen_const_string_instruction_function(out, ir_bytes);
-    try append_codegen_call_instruction_function(out);
+    try append_codegen_call_instruction_function(out, ir_bytes);
     try append_codegen_return_void_instruction_function(out, ir_bytes);
     try append_codegen_lowered_main_print_program_function(out);
     try append_codegen_lower_run_ast_function(out);
@@ -523,7 +523,18 @@ fn const_string_instruction_return_literal(ir_bytes: []u8) -> !i64 {
     return value;
 }
 
-fn append_codegen_call_instruction_function(out: &var std::string::String) -> !void {
+fn append_codegen_call_instruction_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let kind_tag = try call_instruction_kind_tag_from_body(ir_bytes);
+    let none_tag = try call_instruction_none_tag_from_body(ir_bytes);
+    try require_call_instruction_callee_empty_slice_field(ir_bytes, "result_name");
+    try require_call_instruction_callee_empty_slice_field(ir_bytes, "result_payload");
+    try require_call_instruction_var_field(ir_bytes, "callee", "callee");
+    try require_call_instruction_argument_field(ir_bytes, "argument_kind", "kind");
+    try require_call_instruction_argument_field(ir_bytes, "argument_name", "name");
+    try require_call_instruction_argument_field(ir_bytes, "argument_payload", "string_payload");
     try append_line(out, "define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_call_instruction(");
     try append_line(out, "  %kizu.slice.u8 %callee,");
     try append_line(out, "  %kizu.selfhost.codegen.value %argument");
@@ -533,8 +544,14 @@ fn append_codegen_call_instruction_function(out: &var std::string::String) -> !v
     try append_line(out, "  %argument_name = extractvalue %kizu.selfhost.codegen.value %argument, 1");
     try append_line(out, "  %argument_payload = extractvalue %kizu.selfhost.codegen.value %argument, 2");
     try append_line(out, "  %empty = insertvalue %kizu.slice.u8 zeroinitializer, i64 0, 1");
-    try append_line(out, "  %field0 = insertvalue %kizu.selfhost.codegen.instruction poison, i64 2, 0");
-    try append_line(out, "  %field1 = insertvalue %kizu.selfhost.codegen.instruction %field0, i64 0, 1");
+    try out.append_bytes("  %field0 = insertvalue %kizu.selfhost.codegen.instruction poison, i64 ");
+    try std::fmt::append_i64(out, kind_tag);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %field1 = insertvalue %kizu.selfhost.codegen.instruction %field0, i64 ");
+    try std::fmt::append_i64(out, none_tag);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %field2 = insertvalue %kizu.selfhost.codegen.instruction %field1, %kizu.slice.u8 %empty, 2");
     try append_line(out, "  %field3 = insertvalue %kizu.selfhost.codegen.instruction %field2, %kizu.slice.u8 %empty, 3");
     try append_line(out, "  %field4 = insertvalue %kizu.selfhost.codegen.instruction %field3, %kizu.slice.u8 %callee, 4");
@@ -545,6 +562,154 @@ fn append_codegen_call_instruction_function(out: &var std::string::String) -> !v
     try append_line(out, "}");
     try append_line(out, "");
     return;
+}
+
+fn call_instruction_kind_tag_from_body(ir_bytes: []u8) -> !i64 {
+    let variant = try call_instruction_namespace_field(
+        ir_bytes,
+        "kind",
+        "InstructionKind",
+        "Call"
+    );
+    return try ir_contract::enum_variant_tag(
+        ir_bytes,
+        "selfhost::ir::codegen::InstructionKind",
+        variant
+    );
+}
+
+fn call_instruction_none_tag_from_body(ir_bytes: []u8) -> !i64 {
+    let variant = try call_instruction_namespace_field(
+        ir_bytes,
+        "result_kind",
+        "ValueKind",
+        "None"
+    );
+    return try ir_contract::enum_variant_tag(
+        ir_bytes,
+        "selfhost::ir::codegen::ValueKind",
+        variant
+    );
+}
+
+fn call_instruction_namespace_field(
+    ir_bytes: []u8,
+    field_name: []u8,
+    expected_receiver: []u8,
+    expected_variant: []u8
+) -> ![]u8 {
+    let function_name = "selfhost::ir::codegen::call_instruction";
+    let literal = try call_instruction_return_literal(ir_bytes);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "FieldExpr") {
+        return error("invalid call_instruction body");
+    }
+    let receiver = try ir_contract::body_child_sequence(ir_bytes, function_name, value, "receiver", 0);
+    let receiver_name = try ir_contract::body_token_or_empty(ir_bytes, function_name, receiver);
+    let variant = try ir_contract::body_field_expr_name(ir_bytes, function_name, value, "namespace");
+    if !std::mem::equal_bytes(receiver_name, expected_receiver) or
+        !std::mem::equal_bytes(variant, expected_variant) {
+        return error("invalid call_instruction body");
+    }
+    return variant;
+}
+
+fn require_call_instruction_callee_empty_slice_field(
+    ir_bytes: []u8,
+    field_name: []u8
+) -> !void {
+    let function_name = "selfhost::ir::codegen::call_instruction";
+    let literal = try call_instruction_return_literal(ir_bytes);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "IndexExpr") {
+        return error("invalid call_instruction body");
+    }
+    let target = try ir_contract::body_child_sequence(ir_bytes, function_name, value, "target", 0);
+    let target_kind = try ir_contract::body_node_kind(ir_bytes, function_name, target);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return error("invalid call_instruction body");
+    }
+    let target_name = try ir_contract::body_token_or_empty(ir_bytes, function_name, target);
+    if !std::mem::equal_bytes(target_name, "callee") {
+        return error("invalid call_instruction body");
+    }
+    try require_int_child(ir_bytes, function_name, value, "start", 0);
+    try require_int_child(ir_bytes, function_name, value, "end", 0);
+    return;
+}
+
+fn require_call_instruction_var_field(
+    ir_bytes: []u8,
+    field_name: []u8,
+    expected_var: []u8
+) -> !void {
+    let function_name = "selfhost::ir::codegen::call_instruction";
+    let literal = try call_instruction_return_literal(ir_bytes);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "Var") {
+        return error("invalid call_instruction body");
+    }
+    let actual = try ir_contract::body_token_or_empty(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(actual, expected_var) {
+        return error("invalid call_instruction body");
+    }
+    return;
+}
+
+fn require_call_instruction_argument_field(
+    ir_bytes: []u8,
+    field_name: []u8,
+    expected_argument_field: []u8
+) -> !void {
+    let function_name = "selfhost::ir::codegen::call_instruction";
+    let literal = try call_instruction_return_literal(ir_bytes);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    try require_named_field_expr(ir_bytes, function_name, value, "argument", expected_argument_field);
+    return;
+}
+
+fn require_named_field_expr(
+    ir_bytes: []u8,
+    function_name: []u8,
+    value: i64,
+    expected_receiver: []u8,
+    expected_field: []u8
+) -> !void {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "FieldExpr") {
+        return error("invalid call_instruction body");
+    }
+    let receiver = try ir_contract::body_child_sequence(ir_bytes, function_name, value, "receiver", 0);
+    let receiver_name = try ir_contract::body_token_or_empty(ir_bytes, function_name, receiver);
+    let field = try ir_contract::body_field_expr_name(ir_bytes, function_name, value, "field");
+    if !std::mem::equal_bytes(receiver_name, expected_receiver) or
+        !std::mem::equal_bytes(field, expected_field) {
+        return error("invalid call_instruction body");
+    }
+    return;
+}
+
+fn call_instruction_return_literal(ir_bytes: []u8) -> !i64 {
+    let function_name = "selfhost::ir::codegen::call_instruction";
+    let statement = try ir_contract::body_child_sequence(ir_bytes, function_name, 0, "statement", 0);
+    let statement_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+    if !std::mem::equal_bytes(statement_kind, "Return") {
+        return error("invalid call_instruction body");
+    }
+    let value = try ir_contract::body_child_sequence(ir_bytes, function_name, statement, "value", 0);
+    let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+        return error("invalid call_instruction body");
+    }
+    let type_name = try ir_contract::body_child_sequence(ir_bytes, function_name, value, "type", 0);
+    let actual_type = try ir_contract::body_token_or_empty(ir_bytes, function_name, type_name);
+    if !std::mem::equal_bytes(actual_type, "Instruction") {
+        return error("invalid call_instruction body");
+    }
+    return value;
 }
 
 fn append_codegen_return_void_instruction_function(
