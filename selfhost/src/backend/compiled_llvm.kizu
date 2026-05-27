@@ -6,6 +6,23 @@ pub fn append_compiled_function(
     function_name: []u8,
     llvm_symbol: []u8
 ) -> !void {
+    try append_compiled_function_typed(
+        out,
+        ir_bytes,
+        function_name,
+        llvm_symbol,
+        function_name[0..0]
+    );
+    return;
+}
+
+pub fn append_compiled_function_typed(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8
+) -> !void {
     let statement = try ir_contract::body_child_sequence(
         ir_bytes,
         function_name,
@@ -51,6 +68,20 @@ pub fn append_compiled_function(
             ir_bytes,
             function_name,
             llvm_symbol,
+            value
+        );
+        return;
+    }
+    if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+        if std::mem::len(llvm_return_type) == 0 {
+            return error("compiled function: struct literal requires llvm_return_type");
+        }
+        try append_struct_literal_return_function(
+            out,
+            ir_bytes,
+            function_name,
+            llvm_symbol,
+            llvm_return_type,
             value
         );
         return;
@@ -187,6 +218,356 @@ fn append_field_expr_return_function(
     try out.append_bytes("}");
     try out.append_byte(cast<u8>(10));
     try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_struct_literal_return_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    value_node: i64
+) -> !void {
+    let field_count = try count_struct_fields(
+        ir_bytes,
+        function_name,
+        value_node
+    );
+    try append_struct_globals(
+        out,
+        ir_bytes,
+        function_name,
+        llvm_symbol,
+        value_node,
+        field_count
+    );
+    try out.append_bytes("define ");
+    try out.append_bytes(llvm_return_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes("() {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    let module_prefix = module_prefix_of(function_name);
+    var field_index = 0;
+    while field_index < field_count {
+        let field_node = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            value_node,
+            "field",
+            field_index
+        );
+        let field_value = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            field_node,
+            "value",
+            0
+        );
+        let field_value_kind = try ir_contract::body_node_kind(
+            ir_bytes,
+            function_name,
+            field_value
+        );
+        try append_struct_field_insertvalue(
+            out,
+            ir_bytes,
+            function_name,
+            llvm_symbol,
+            llvm_return_type,
+            module_prefix,
+            field_index,
+            field_count,
+            field_value,
+            field_value_kind
+        );
+        field_index = field_index + 1;
+    }
+    try out.append_bytes("  ret ");
+    try out.append_bytes(llvm_return_type);
+    if field_count == 0 {
+        try out.append_bytes(" poison");
+    } else {
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, field_count - 1);
+    }
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn count_struct_fields(
+    ir_bytes: []u8,
+    function_name: []u8,
+    struct_node: i64
+) -> !i64 {
+    var count = 0;
+    while true {
+        let child = try ir_contract::body_child_sequence_or_minus_one(
+            ir_bytes,
+            function_name,
+            struct_node,
+            "field",
+            count
+        );
+        if child < 0 {
+            return count;
+        }
+        count = count + 1;
+    }
+    return count;
+}
+
+fn append_struct_globals(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    struct_node: i64,
+    field_count: i64
+) -> !void {
+    var field_index = 0;
+    while field_index < field_count {
+        let field_node = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            struct_node,
+            "field",
+            field_index
+        );
+        let field_value = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            field_node,
+            "value",
+            0
+        );
+        let value_kind = try ir_contract::body_node_kind(
+            ir_bytes,
+            function_name,
+            field_value
+        );
+        if std::mem::equal_bytes(value_kind, "String") {
+            let token = try ir_contract::body_token_or_empty(
+                ir_bytes,
+                function_name,
+                field_value
+            );
+            let token_len = std::mem::len(token);
+            if token_len >= 2 {
+                let quote = cast<u8>(34);
+                let payload = token[1..token_len - 1];
+                let payload_len = token_len - 2;
+                try out.append_bytes("@.kizu.compiled.");
+                try out.append_bytes(llvm_symbol);
+                try out.append_bytes(".f");
+                try std::fmt::append_i64(out, field_index);
+                try out.append_bytes(" = private unnamed_addr constant [");
+                try std::fmt::append_i64(out, payload_len);
+                try out.append_bytes(" x i8] c");
+                try out.append_byte(quote);
+                try append_llvm_c_string_payload(out, payload);
+                try out.append_byte(quote);
+                try out.append_byte(cast<u8>(10));
+            }
+        }
+        field_index = field_index + 1;
+    }
+    return;
+}
+
+fn append_struct_field_insertvalue(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    module_prefix: []u8,
+    field_index: i64,
+    field_count: i64,
+    field_value: i64,
+    field_value_kind: []u8
+) -> !void {
+    if std::mem::equal_bytes(field_value_kind, "String") {
+        try append_struct_string_field(
+            out,
+            ir_bytes,
+            function_name,
+            llvm_symbol,
+            llvm_return_type,
+            field_index,
+            field_value
+        );
+        return;
+    }
+    if std::mem::equal_bytes(field_value_kind, "Int") {
+        let int_value = try ir_contract::body_int_value(
+            ir_bytes,
+            function_name,
+            field_value
+        );
+        try append_insertvalue_line(
+            out,
+            llvm_return_type,
+            field_index,
+            "i64",
+            field_index
+        );
+        try std::fmt::append_i64(out, int_value);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, field_index);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if std::mem::equal_bytes(field_value_kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty(
+            ir_bytes,
+            function_name,
+            field_value
+        );
+        try append_insertvalue_line(
+            out,
+            llvm_return_type,
+            field_index,
+            "i1",
+            field_index
+        );
+        if std::mem::equal_bytes(token, "true") {
+            try out.append_bytes("true");
+        } else {
+            try out.append_bytes("false");
+        }
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, field_index);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if std::mem::equal_bytes(field_value_kind, "FieldExpr") {
+        let variant_name = try ir_contract::body_field_expr_name(
+            ir_bytes,
+            function_name,
+            field_value,
+            "namespace"
+        );
+        let receiver = try ir_contract::body_child_sequence(
+            ir_bytes,
+            function_name,
+            field_value,
+            "receiver",
+            0
+        );
+        let receiver_token = try ir_contract::body_token_or_empty(
+            ir_bytes,
+            function_name,
+            receiver
+        );
+        let tag = try enum_variant_tag_by_prefix(
+            ir_bytes,
+            module_prefix,
+            receiver_token,
+            variant_name
+        );
+        try append_insertvalue_line(
+            out,
+            llvm_return_type,
+            field_index,
+            "i64",
+            field_index
+        );
+        try std::fmt::append_i64(out, tag);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, field_index);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    return error("compiled function: unsupported struct field value kind");
+}
+
+fn append_struct_string_field(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    field_index: i64,
+    field_value: i64
+) -> !void {
+    let token = try ir_contract::body_token_or_empty(
+        ir_bytes,
+        function_name,
+        field_value
+    );
+    let token_len = std::mem::len(token);
+    let quote = cast<u8>(34);
+    if token_len < 2 or token[0] != quote or token[token_len - 1] != quote {
+        return error("compiled function: invalid string token in struct field");
+    }
+    let payload_len = token_len - 2;
+    try out.append_bytes("  %f");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_ptr = getelementptr [");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes(".f");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes(", i64 0, i64 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %f");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %f");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_ptr, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %f");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_slice = insertvalue %kizu.slice.u8 %f");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_base, i64 ");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try append_insertvalue_line(
+        out,
+        llvm_return_type,
+        field_index,
+        "%kizu.slice.u8",
+        field_index
+    );
+    try out.append_bytes("%f");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_slice, ");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_insertvalue_line(
+    out: &var std::string::String,
+    llvm_type: []u8,
+    field_index: i64,
+    field_type: []u8,
+    struct_field_index: i64
+) -> !void {
+    try out.append_bytes("  %v");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes(" = insertvalue ");
+    try out.append_bytes(llvm_type);
+    try out.append_byte(cast<u8>(32));
+    if field_index == 0 {
+        try out.append_bytes("poison");
+    } else {
+        try out.append_bytes("%v");
+        try std::fmt::append_i64(out, field_index - 1);
+    }
+    try out.append_bytes(", ");
+    try out.append_bytes(field_type);
+    try out.append_byte(cast<u8>(32));
     return;
 }
 

@@ -1375,9 +1375,17 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 	cliLlvm := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
 	for _, fragment := range []string{
 		"pub fn append_compiled_function(",
+		"pub fn append_compiled_function_typed(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_node_kind(",
 		"ir_contract::body_token_or_empty(",
+		"ir_contract::body_int_value(",
+		"ir_contract::body_field_expr_name(",
+		"fn append_struct_literal_return_function(",
+		"fn append_field_expr_return_function(",
+		"fn append_int_return_function(",
+		"fn enum_variant_tag_by_prefix(",
+		"fn module_prefix_of(",
 	} {
 		if !strings.Contains(compiled, fragment) {
 			t.Fatalf("compiled_llvm missing generic compiler fragment %q", fragment)
@@ -1387,6 +1395,10 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 		"metadata_line",
 		"codegen_metadata_line",
 		"function-block-instruction",
+		"return_void_instruction",
+		"ReturnVoid",
+		"InstructionKind",
+		"ValueKind",
 	} {
 		if strings.Contains(compiled, forbidden) {
 			t.Fatalf("compiled_llvm hardcodes function-specific literal %q", forbidden)
@@ -1395,8 +1407,14 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function(") {
 		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function")
 	}
+	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_typed(") {
+		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_typed")
+	}
 	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_metadata_line") {
 		t.Fatal("cli_llvm does not emit compiled metadata_line symbol")
+	}
+	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_return_void_instruction") {
+		t.Fatal("cli_llvm does not emit compiled return_void_instruction symbol")
 	}
 }
 
