@@ -1,10 +1,6 @@
-import selfhost::backend::compiled_util;
-import selfhost::backend::compiled_fact_lookup;
-import selfhost::backend::compiled_type_lower;
 import selfhost::backend::compiled_signature;
-import selfhost::backend::compiled_struct_emit;
-import selfhost::backend::compiled_call_emit;
-import selfhost::backend::compiled_expr_emit;
+import selfhost::backend::compiled_mir_lower;
+import selfhost::backend::compiled_mir_llvm;
 import selfhost::backend::ir_contract;
 
 pub fn append_compiled_function(
@@ -63,53 +59,63 @@ pub fn append_compiled_function_params(
         );
         let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
         if std::mem::equal_bytes(value_kind, "String") {
-            try append_string_return_function(
-                out, ir_bytes, function_name, llvm_symbol, value
+            let mir = try compiled_mir_lower::lower_string_return_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, value
             );
+            try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "Int") {
-            try append_int_return_function(
-                out, ir_bytes, function_name, llvm_symbol, value
+            let mir = try compiled_mir_lower::lower_int_return_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, value
             );
+            try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "FieldExpr") {
-            try append_field_expr_return_function(
-                out, ir_bytes, function_name, llvm_symbol, value
+            let mir = try compiled_mir_lower::lower_enum_field_return_function(
+                ir_bytes, function_name, llvm_symbol, llvm_return_type, value
             );
+            try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
             if std::mem::len(llvm_return_type) == 0 {
                 return error("compiled function: struct literal requires llvm_return_type");
             }
-            try append_struct_literal_return_function_with_params(
-                out, ir_bytes, function_name, llvm_symbol,
+            let mir = try compiled_mir_lower::lower_struct_return_function(
+                ir_bytes, function_name, llvm_symbol,
                 llvm_return_type, params_spec, value
             );
+            try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::equal_bytes(value_kind, "Call") {
-            try append_call_return_function(
-                out, ir_bytes, function_name, llvm_symbol,
-                llvm_return_type, params_spec, value
+            let mir = try compiled_mir_lower::lower_call_return_function(
+                ir_bytes, function_name, llvm_symbol, params_spec, value
             );
+            try compiled_mir_llvm::append_function(out, mir);
             return;
         }
         if std::mem::len(llvm_return_type) == 0 {
             return error("compiled function: unsupported return value kind");
         }
-        try append_expr_return_function(
-            out, ir_bytes, function_name, llvm_symbol,
+        let mir = try compiled_mir_lower::lower_expr_return_function(
+            ir_bytes, function_name, llvm_symbol,
             llvm_return_type, params_spec, value
         );
+        try compiled_mir_llvm::append_function(out, mir);
         return;
     }
-    try append_multi_statement_function(
-        out, ir_bytes, function_name, llvm_symbol,
-        llvm_return_type, params_spec, statement_count
+    let mir = try compiled_mir_lower::lower_multi_statement_function(
+        ir_bytes,
+        function_name,
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        statement_count
     );
+    try compiled_mir_llvm::append_function(out, mir);
     return;
 }
 
@@ -140,535 +146,4 @@ fn count_block_statements(ir_bytes: []u8, function_name: []u8) -> !i64 {
         count = count + 1;
     }
     return count;
-}
-
-fn append_string_return_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    value_node: i64
-) -> !void {
-    let token = try ir_contract::body_token_or_empty(
-        ir_bytes,
-        function_name,
-        value_node
-    );
-    let token_len = std::mem::len(token);
-    if token_len < 2 {
-        return error("compiled function: invalid string token");
-    }
-    let quote = cast<u8>(34);
-    if token[0] != quote or token[token_len - 1] != quote {
-        return error("compiled function: string token must be quoted");
-    }
-    let payload = token[1..token_len - 1];
-    let payload_len = token_len - 2;
-    try out.append_bytes("@.kizu.compiled.");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes(" = private unnamed_addr constant [");
-    try std::fmt::append_i64(out, payload_len);
-    try out.append_bytes(" x i8] c");
-    try out.append_byte(quote);
-    try compiled_util::append_llvm_c_string_payload(out, payload);
-    try out.append_byte(quote);
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("define %kizu.slice.u8 @");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes("() {");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("entry:");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %ptr = getelementptr [");
-    try std::fmt::append_i64(out, payload_len);
-    try out.append_bytes(" x i8], ptr @.kizu.compiled.");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes(", i64 0, i64 0");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes(
-        "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  %slice = insertvalue %kizu.slice.u8 %base, i64 ");
-    try std::fmt::append_i64(out, payload_len);
-    try out.append_bytes(", 1");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  ret %kizu.slice.u8 %slice");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("}");
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn append_int_return_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    value_node: i64
-) -> !void {
-    let int_value = try ir_contract::body_int_value(
-        ir_bytes,
-        function_name,
-        value_node
-    );
-    try out.append_bytes("define i64 @");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes("() {");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("entry:");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  ret i64 ");
-    try std::fmt::append_i64(out, int_value);
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("}");
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn append_field_expr_return_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    value_node: i64
-) -> !void {
-    let field_name = try ir_contract::body_field_expr_name(
-        ir_bytes,
-        function_name,
-        value_node,
-        "namespace"
-    );
-    let receiver = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        value_node,
-        "receiver",
-        0
-    );
-    let receiver_token = try ir_contract::body_token_or_empty(
-        ir_bytes,
-        function_name,
-        receiver
-    );
-    let module_prefix = compiled_util::module_prefix_of(function_name);
-    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
-        ir_bytes,
-        module_prefix,
-        receiver_token,
-        field_name
-    );
-    try out.append_bytes("define i64 @");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes("() {");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("entry:");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("  ret i64 ");
-    try std::fmt::append_i64(out, tag);
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("}");
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn append_struct_literal_return_function_with_params(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    llvm_return_type: []u8,
-    params_spec: []u8,
-    value_node: i64
-) -> !void {
-    let field_count = try compiled_struct_emit::count_struct_fields(
-        ir_bytes,
-        function_name,
-        value_node
-    );
-    try compiled_struct_emit::append_struct_globals_with_params(
-        out,
-        ir_bytes,
-        function_name,
-        llvm_symbol,
-        params_spec,
-        value_node,
-        field_count
-    );
-    try out.append_bytes("define ");
-    try out.append_bytes(llvm_return_type);
-    try out.append_bytes(" @");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes("(");
-    try compiled_signature::append_params_signature(out, params_spec);
-    try out.append_bytes(") {");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("entry:");
-    try out.append_byte(cast<u8>(10));
-    let module_prefix = compiled_util::module_prefix_of(function_name);
-    var extract_counter = 0;
-    var field_index = 0;
-    while field_index < field_count {
-        let field_node = try ir_contract::body_child_sequence(
-            ir_bytes,
-            function_name,
-            value_node,
-            "field",
-            field_index
-        );
-        let field_value = try ir_contract::body_child_sequence(
-            ir_bytes,
-            function_name,
-            field_node,
-            "value",
-            0
-        );
-        let field_value_kind = try ir_contract::body_node_kind(
-            ir_bytes,
-            function_name,
-            field_value
-        );
-        extract_counter = try compiled_struct_emit::append_struct_field_with_params(
-            out,
-            ir_bytes,
-            function_name,
-            llvm_symbol,
-            llvm_return_type,
-            module_prefix,
-            params_spec,
-            field_index,
-            field_count,
-            field_value,
-            field_value_kind,
-            extract_counter
-        );
-        field_index = field_index + 1;
-    }
-    try out.append_bytes("  ret ");
-    try out.append_bytes(llvm_return_type);
-    if field_count == 0 {
-        try out.append_bytes(" poison");
-    } else {
-        try out.append_bytes(" %v");
-        try std::fmt::append_i64(out, field_count - 1);
-    }
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("}");
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn append_call_return_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    llvm_return_type: []u8,
-    params_spec: []u8,
-    call_node: i64
-) -> !void {
-    let module_prefix = compiled_util::module_prefix_of(function_name);
-    try compiled_call_emit::append_call_string_globals(out, ir_bytes, function_name, llvm_symbol, call_node, 0);
-    try out.append_bytes("define ");
-    try out.append_bytes(llvm_return_type);
-    try out.append_bytes(" @");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes("(");
-    try compiled_signature::append_params_signature(out, params_spec);
-    try out.append_bytes(") {");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("entry:");
-    try out.append_byte(cast<u8>(10));
-    let call_result_type = try compiled_signature::resolve_call_return_type(
-        ir_bytes, function_name, module_prefix, call_node
-    );
-    try compiled_call_emit::append_call_instruction(
-        out, ir_bytes, function_name, llvm_symbol,
-        module_prefix, params_spec, params_spec,
-        call_node, "result", 0, call_result_type
-    );
-    try out.append_bytes("  ret ");
-    try out.append_bytes(call_result_type);
-    try out.append_bytes(" %result");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("}");
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn append_multi_statement_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    llvm_return_type: []u8,
-    params_spec: []u8,
-    statement_count: i64
-) -> !void {
-    let module_prefix = compiled_util::module_prefix_of(function_name);
-    try append_multi_statement_globals(
-        out, ir_bytes, function_name, llvm_symbol, statement_count
-    );
-    try out.append_bytes("define ");
-    try out.append_bytes(llvm_return_type);
-    try out.append_bytes(" @");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes("(");
-    try compiled_signature::append_params_signature(out, params_spec);
-    try out.append_bytes(") {");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("entry:");
-    try out.append_byte(cast<u8>(10));
-    var locals_spec = params_spec;
-    var string_counter = 0;
-    var extract_counter = 0;
-    var stmt_index = 0;
-    while stmt_index < statement_count {
-        let statement = try ir_contract::body_child_sequence(
-            ir_bytes, function_name, 0, "statement", stmt_index
-        );
-        let stmt_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
-        if std::mem::equal_bytes(stmt_kind, "Return") {
-            let value = try ir_contract::body_child_sequence(
-                ir_bytes, function_name, statement, "value", 0
-            );
-            let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
-            if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
-                let field_count = try compiled_struct_emit::count_struct_fields(ir_bytes, function_name, value);
-                extract_counter = try compiled_struct_emit::append_struct_return_body(
-                    out, ir_bytes, function_name, llvm_symbol,
-                    llvm_return_type, module_prefix, locals_spec,
-                    value, field_count, extract_counter
-                );
-                try out.append_bytes("  ret ");
-                try out.append_bytes(llvm_return_type);
-                if field_count == 0 {
-                    try out.append_bytes(" poison");
-                } else {
-                    try out.append_bytes(" %v");
-                    try std::fmt::append_i64(out, field_count - 1);
-                }
-                try out.append_byte(cast<u8>(10));
-            } else {
-                if std::mem::equal_bytes(value_kind, "Call") {
-                    let call_result_type = try compiled_signature::resolve_call_return_type(
-                        ir_bytes, function_name, module_prefix, value
-                    );
-                    try compiled_call_emit::append_call_instruction(
-                        out, ir_bytes, function_name, llvm_symbol,
-                        module_prefix, locals_spec, params_spec,
-                        value, "ret_val", string_counter, call_result_type
-                    );
-                    try out.append_bytes("  ret ");
-                    try out.append_bytes(call_result_type);
-                    try out.append_bytes(" %ret_val");
-                    try out.append_byte(cast<u8>(10));
-                } else {
-                    var tc2 = try compiled_expr_emit::emit_expr(
-                        out, ir_bytes, function_name, llvm_symbol,
-                        module_prefix, locals_spec, params_spec,
-                        value, extract_counter, string_counter
-                    );
-                    try out.append_bytes("  ret ");
-                    try out.append_bytes(llvm_return_type);
-                    try out.append_bytes(" %t");
-                    try std::fmt::append_i64(out, tc2 - 1);
-                    try out.append_byte(cast<u8>(10));
-                }
-            }
-        } else {
-            if std::mem::equal_bytes(stmt_kind, "Let") {
-                let let_name_node = try ir_contract::body_child_sequence(
-                    ir_bytes, function_name, statement, "name", 0
-                );
-                let let_name = try ir_contract::body_token_or_empty(
-                    ir_bytes, function_name, let_name_node
-                );
-                let let_value = try ir_contract::body_child_sequence(
-                    ir_bytes, function_name, statement, "value", 0
-                );
-                let let_value_kind = try ir_contract::body_node_kind(
-                    ir_bytes, function_name, let_value
-                );
-                if std::mem::equal_bytes(let_value_kind, "Call") {
-                    let call_type = try compiled_signature::resolve_call_return_type(
-                        ir_bytes, function_name, module_prefix, let_value
-                    );
-                    try compiled_call_emit::append_call_instruction(
-                        out, ir_bytes, function_name, llvm_symbol,
-                        module_prefix, locals_spec, params_spec,
-                        let_value, let_name, string_counter, call_type
-                    );
-                    string_counter = string_counter + try compiled_call_emit::count_call_string_args(
-                        ir_bytes, function_name, let_value
-                    );
-                    locals_spec = try compiled_signature::extend_locals_spec(
-                        ir_bytes, locals_spec, let_name, call_type
-                    );
-                } else {
-                    if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
-                        let struct_type = try compiled_signature::resolve_struct_literal_type(
-                            ir_bytes, function_name, module_prefix, let_value
-                        );
-                        let field_count = try compiled_struct_emit::count_struct_fields(
-                            ir_bytes, function_name, let_value
-                        );
-                        try compiled_struct_emit::append_let_struct_literal(
-                            out, ir_bytes, function_name, llvm_symbol,
-                            module_prefix, locals_spec, let_name,
-                            struct_type, let_value, field_count,
-                            string_counter
-                        );
-                        string_counter = string_counter + field_count;
-                        locals_spec = try compiled_signature::extend_locals_spec(
-                            ir_bytes, locals_spec, let_name, struct_type
-                        );
-                    } else {
-                        return error("compiled function: unsupported let value kind");
-                    }
-                }
-            } else {
-                if std::mem::equal_bytes(stmt_kind, "If") {
-                    let if_result = try compiled_expr_emit::emit_if_statement(
-                        out, ir_bytes, function_name, llvm_symbol,
-                        module_prefix, locals_spec, params_spec,
-                        llvm_return_type, statement,
-                        extract_counter, string_counter, stmt_index
-                    );
-                    extract_counter = if_result;
-                } else {
-                    return error("compiled function: unsupported statement kind");
-                }
-            }
-        }
-        stmt_index = stmt_index + 1;
-    }
-    try out.append_bytes("}");
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    return;
-}
-
-fn append_multi_statement_globals(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    statement_count: i64
-) -> !void {
-    var global_index = 0;
-    var stmt_index = 0;
-    while stmt_index < statement_count {
-        let statement = try ir_contract::body_child_sequence(
-            ir_bytes, function_name, 0, "statement", stmt_index
-        );
-        let stmt_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
-        if std::mem::equal_bytes(stmt_kind, "Let") {
-            let let_value = try ir_contract::body_child_sequence(
-                ir_bytes, function_name, statement, "value", 0
-            );
-            let let_value_kind = try ir_contract::body_node_kind(
-                ir_bytes, function_name, let_value
-            );
-            if std::mem::equal_bytes(let_value_kind, "Call") {
-                try compiled_call_emit::append_call_string_globals(
-                    out, ir_bytes, function_name, llvm_symbol, let_value, global_index
-                );
-                global_index = global_index + try compiled_call_emit::count_call_string_args(
-                    ir_bytes, function_name, let_value
-                );
-            } else {
-                if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
-                    let field_count = try compiled_struct_emit::count_struct_fields(ir_bytes, function_name, let_value);
-                    try compiled_struct_emit::append_struct_globals_with_params(
-                        out, ir_bytes, function_name, llvm_symbol,
-                        "", let_value, field_count
-                    );
-                    global_index = global_index + field_count;
-                }
-            }
-        } else {
-            if std::mem::equal_bytes(stmt_kind, "Return") {
-                let ret_value = try ir_contract::body_child_sequence(
-                    ir_bytes, function_name, statement, "value", 0
-                );
-                let ret_value_kind = try ir_contract::body_node_kind(
-                    ir_bytes, function_name, ret_value
-                );
-                if std::mem::equal_bytes(ret_value_kind, "StructLiteralExpr") {
-                    let field_count = try compiled_struct_emit::count_struct_fields(ir_bytes, function_name, ret_value);
-                    try compiled_struct_emit::append_struct_globals_with_params(
-                        out, ir_bytes, function_name, llvm_symbol,
-                        "", ret_value, field_count
-                    );
-                } else {
-                    if std::mem::equal_bytes(ret_value_kind, "String") {
-                        let token = try ir_contract::body_token_or_empty(
-                            ir_bytes, function_name, ret_value
-                        );
-                        let token_len = std::mem::len(token);
-                        if token_len >= 2 {
-                            let quote = cast<u8>(34);
-                            let payload = token[1..token_len - 1];
-                            let payload_len = token_len - 2;
-                            try out.append_bytes("@.kizu.compiled.");
-                            try out.append_bytes(llvm_symbol);
-                            try out.append_bytes(".s");
-                            try std::fmt::append_i64(out, global_index);
-                            try out.append_bytes(" = private unnamed_addr constant [");
-                            try std::fmt::append_i64(out, payload_len);
-                            try out.append_bytes(" x i8] c");
-                            try out.append_byte(quote);
-                            try compiled_util::append_llvm_c_string_payload(out, payload);
-                            try out.append_byte(quote);
-                            try out.append_byte(cast<u8>(10));
-                            global_index = global_index + 1;
-                        }
-                    }
-                }
-            }
-        }
-        stmt_index = stmt_index + 1;
-    }
-    return;
-}
-
-fn append_expr_return_function(
-    out: &var std::string::String,
-    ir_bytes: []u8,
-    function_name: []u8,
-    llvm_symbol: []u8,
-    llvm_return_type: []u8,
-    params_spec: []u8,
-    value_node: i64
-) -> !void {
-    let module_prefix = compiled_util::module_prefix_of(function_name);
-    try out.append_bytes("define ");
-    try out.append_bytes(llvm_return_type);
-    try out.append_bytes(" @");
-    try out.append_bytes(llvm_symbol);
-    try out.append_bytes("(");
-    try compiled_signature::append_params_signature(out, params_spec);
-    try out.append_bytes(") {");
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("entry:");
-    try out.append_byte(cast<u8>(10));
-    let tc = try compiled_expr_emit::emit_expr(
-        out, ir_bytes, function_name, llvm_symbol,
-        module_prefix, params_spec, params_spec,
-        value_node, 0, 0
-    );
-    try out.append_bytes("  ret ");
-    try out.append_bytes(llvm_return_type);
-    try out.append_bytes(" %t");
-    try std::fmt::append_i64(out, tc - 1);
-    try out.append_byte(cast<u8>(10));
-    try out.append_bytes("}");
-    try out.append_byte(cast<u8>(10));
-    try out.append_byte(cast<u8>(10));
-    return;
 }

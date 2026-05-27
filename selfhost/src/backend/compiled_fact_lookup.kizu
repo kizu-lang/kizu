@@ -1,5 +1,11 @@
 import selfhost::backend::compiled_util;
 
+pub struct StructFieldLookup {
+    pub found: bool,
+    pub index: i64,
+    pub field_type: []u8,
+}
+
 pub fn lookup_type_llvm_by_prefix(
     ir_bytes: []u8,
     module_prefix: []u8,
@@ -29,7 +35,7 @@ pub fn lookup_type_llvm_by_prefix(
                 return ir_bytes[pos..value_end];
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: type-llvm mapping not found");
 }
@@ -40,31 +46,11 @@ pub fn lookup_struct_field_index_by_prefix(
     short_type: []u8,
     field_name: []u8
 ) -> !i64 {
-    let byte_len = std::mem::len(ir_bytes);
-    let prefix = "struct-field ";
-    let prefix_len = std::mem::len(prefix);
-    let mp_len = std::mem::len(module_prefix);
-    let type_len = std::mem::len(short_type);
-    var index = 0;
-    while index + prefix_len + mp_len + type_len < byte_len {
-        if compiled_util::is_line_start(ir_bytes, index) and
-            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let mp_start = index + prefix_len;
-            let mp_end = mp_start + mp_len;
-            let type_end = mp_end + type_len;
-            if type_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..type_end], short_type) and
-                ir_bytes[type_end] == cast<u8>(32) {
-                let field_index = try extract_struct_field_match(
-                    ir_bytes, type_end, field_name
-                );
-                if field_index >= 0 {
-                    return field_index;
-                }
-            }
-        }
-        index = index + 1;
+    let lookup = try lookup_struct_field_by_prefix(
+        ir_bytes, module_prefix, short_type, field_name
+    );
+    if lookup.found {
+        return lookup.index;
     }
     return error("compiled function: struct field not found");
 }
@@ -75,33 +61,122 @@ pub fn lookup_struct_field_type_by_prefix(
     short_type: []u8,
     target_index: i64
 ) -> ![]u8 {
+    let field_type = try lookup_struct_field_type_by_prefix_or_empty(
+        ir_bytes, module_prefix, short_type, target_index
+    );
+    if std::mem::len(field_type) > 0 {
+        return field_type;
+    }
+    return error("compiled function: struct field type not found");
+}
+
+pub fn lookup_struct_field_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    field_name: []u8
+) -> !StructFieldLookup {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "struct-field ";
     let prefix_len = std::mem::len(prefix);
     let mp_len = std::mem::len(module_prefix);
     let type_len = std::mem::len(short_type);
+    var suffix_match = empty_struct_field_lookup(ir_bytes);
     var index = 0;
     while index + prefix_len + mp_len + type_len < byte_len {
         if compiled_util::is_line_start(ir_bytes, index) and
             std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let mp_start = index + prefix_len;
+            let type_start = index + prefix_len;
+            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
+            let mp_start = type_start;
             let mp_end = mp_start + mp_len;
-            let type_end = mp_end + type_len;
-            if type_end < byte_len and
+            let short_end = mp_end + type_len;
+            if short_end == type_end and
                 std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
-                std::mem::equal_bytes(ir_bytes[mp_end..type_end], short_type) and
-                ir_bytes[type_end] == cast<u8>(32) {
+                std::mem::equal_bytes(ir_bytes[mp_end..short_end], short_type) {
+                let field = try extract_struct_field_by_name(
+                    ir_bytes, type_end, field_name
+                );
+                if field.found {
+                    return field;
+                }
+            } else {
+                if !suffix_match.found and
+                    type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
+                    let field = try extract_struct_field_by_name(
+                        ir_bytes, type_end, field_name
+                    );
+                    if field.found {
+                        suffix_match = field;
+                    }
+                }
+            }
+        }
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
+    }
+    return suffix_match;
+}
+
+fn lookup_struct_field_type_by_prefix_or_empty(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "struct-field ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let type_len = std::mem::len(short_type);
+    var suffix_type = ir_bytes[0..0];
+    var index = 0;
+    while index + prefix_len + mp_len + type_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let type_start = index + prefix_len;
+            let type_end = compiled_util::find_byte(ir_bytes, cast<u8>(32), type_start);
+            let mp_start = type_start;
+            let mp_end = mp_start + mp_len;
+            let short_end = mp_end + type_len;
+            if short_end == type_end and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..short_end], short_type) {
                 let field_type = try extract_struct_field_type_at_index(
                     ir_bytes, type_end, target_index
                 );
                 if std::mem::len(field_type) > 0 {
                     return field_type;
                 }
+            } else {
+                if std::mem::len(suffix_type) == 0 and
+                    type_matches_suffix(ir_bytes[type_start..type_end], short_type) {
+                    let field_type = try extract_struct_field_type_at_index(
+                        ir_bytes, type_end, target_index
+                    );
+                    if std::mem::len(field_type) > 0 {
+                        suffix_type = field_type;
+                    }
+                }
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
-    return error("compiled function: struct field type not found");
+    return suffix_type;
+}
+
+fn type_matches_suffix(full_type: []u8, short_type: []u8) -> bool {
+    if std::mem::equal_bytes(full_type, short_type) {
+        return true;
+    }
+    let full_len = std::mem::len(full_type);
+    let short_len = std::mem::len(short_type);
+    if full_len <= short_len + 2 {
+        return false;
+    }
+    let suffix_start = full_len - short_len;
+    return full_type[suffix_start - 2] == cast<u8>(58) and
+        full_type[suffix_start - 1] == cast<u8>(58) and
+        std::mem::equal_bytes(full_type[suffix_start..full_len], short_type);
 }
 
 pub fn lookup_fact_value_by_prefix(
@@ -110,6 +185,21 @@ pub fn lookup_fact_value_by_prefix(
     module_prefix: []u8,
     short_name: []u8
 ) -> ![]u8 {
+    let value = lookup_fact_value_by_prefix_or_empty(
+        ir_bytes, fact_prefix, module_prefix, short_name
+    );
+    if std::mem::len(value) > 0 {
+        return value;
+    }
+    return error("compiled function: fact not found");
+}
+
+pub fn lookup_fact_value_by_prefix_or_empty(
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> []u8 {
     let byte_len = std::mem::len(ir_bytes);
     let fp_len = std::mem::len(fact_prefix);
     let mp_len = std::mem::len(module_prefix);
@@ -133,9 +223,9 @@ pub fn lookup_fact_value_by_prefix(
                 return ir_bytes[pos..value_end];
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
-    return error("compiled function: fact not found");
+    return ir_bytes[0..0];
 }
 
 pub fn lookup_stdlib_symbol(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
@@ -163,7 +253,7 @@ pub fn lookup_stdlib_symbol(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
                 return ir_bytes[sym_start..pos];
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: stdlib symbol not found");
 }
@@ -197,7 +287,7 @@ pub fn lookup_stdlib_return(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
                 return ir_bytes[ret_start..ret_end];
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: stdlib return not found");
 }
@@ -235,7 +325,7 @@ pub fn enum_variant_tag_by_prefix(
                 }
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: enum variant not found");
 }
@@ -288,6 +378,36 @@ fn match_enum_variant_suffix(
         return -1;
     }
     return tag_value;
+}
+
+fn empty_struct_field_lookup(ir_bytes: []u8) -> StructFieldLookup {
+    return StructFieldLookup {
+        found: false,
+        index: -1,
+        field_type: ir_bytes[0..0]
+    };
+}
+
+fn extract_struct_field_by_name(
+    ir_bytes: []u8,
+    after_type: i64,
+    field_name: []u8
+) -> !StructFieldLookup {
+    let field_index = try extract_struct_field_match(ir_bytes, after_type, field_name);
+    if field_index < 0 {
+        return empty_struct_field_lookup(ir_bytes);
+    }
+    let field_type = try extract_struct_field_type_at_index(
+        ir_bytes, after_type, field_index
+    );
+    if std::mem::len(field_type) == 0 {
+        return empty_struct_field_lookup(ir_bytes);
+    }
+    return StructFieldLookup {
+        found: true,
+        index: field_index,
+        field_type: field_type
+    };
 }
 
 pub fn extract_struct_field_match(
@@ -378,7 +498,7 @@ pub fn is_enum_type(ir_bytes: []u8, module_prefix: []u8, short_name: []u8) -> bo
                 return true;
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return false;
 }

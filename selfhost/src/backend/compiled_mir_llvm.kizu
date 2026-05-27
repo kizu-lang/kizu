@@ -1,0 +1,834 @@
+import selfhost::backend::compiled_mir;
+import selfhost::backend::compiled_mir_llvm_call;
+import selfhost::backend::compiled_mir_llvm_const;
+import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_util;
+pub fn append_function(
+    out: &var std::string::String,
+    function: compiled_mir::MirFunction
+) -> !void {
+    if function.block_count != 1 {
+        return error("compiled mir llvm: function must have one block");
+    }
+    if function.entry.instruction_count != 1 {
+        return error("compiled mir llvm: block must have one instruction");
+    }
+    if function.entry.terminator.kind != compiled_mir::MirTerminatorKind::Return {
+        return error("compiled mir llvm: unsupported terminator");
+    }
+    if function.entry.first_instruction.kind == compiled_mir::MirInstKind::Call {
+        if function.entry.terminator.value.kind != compiled_mir::MirValKind::CallResult {
+            return error("compiled mir llvm: call return value must be call result");
+        }
+        try compiled_mir_llvm_call::append_call_return(out, &function);
+        return;
+    }
+    if function.entry.first_instruction.kind == compiled_mir::MirInstKind::StructLiteral {
+        if function.entry.terminator.value.kind != compiled_mir::MirValKind::StructResult {
+            return error("compiled mir llvm: struct return value must be struct result");
+        }
+        try append_struct_return(out, &function);
+        return;
+    }
+    if function.entry.first_instruction.kind == compiled_mir::MirInstKind::Expr {
+        if function.entry.terminator.value.kind != compiled_mir::MirValKind::ExprResult {
+            return error("compiled mir llvm: expr return value must be expr result");
+        }
+        try append_expr_return(out, &function);
+        return;
+    }
+    if function.entry.first_instruction.kind == compiled_mir::MirInstKind::MultiStatement {
+        if function.entry.terminator.value.kind != compiled_mir::MirValKind::MultiResult {
+            return error("compiled mir llvm: multi return value must be multi result");
+        }
+        try append_multi_statement_mir(out, &function);
+        return;
+    }
+    if function.return_type.kind == compiled_mir::MirTypeKind::SliceU8 {
+        if function.entry.first_instruction.kind != compiled_mir::MirInstKind::ConstString {
+            return error("compiled mir llvm: unsupported slice instruction");
+        }
+        if function.entry.terminator.value.kind != compiled_mir::MirValKind::ConstString {
+            return error("compiled mir llvm: return value must be const string");
+        }
+        try compiled_mir_llvm_const::append_const_string_return(
+            out, function.name, function.entry.terminator.value.payload
+        );
+        return;
+    }
+    if function.return_type.kind == compiled_mir::MirTypeKind::I64 {
+        if function.entry.first_instruction.kind != compiled_mir::MirInstKind::ConstInt {
+            return error("compiled mir llvm: unsupported i64 instruction");
+        }
+        if function.entry.terminator.value.kind != compiled_mir::MirValKind::ConstInt {
+            return error("compiled mir llvm: return value must be const int");
+        }
+        try compiled_mir_llvm_const::append_const_int_return(
+            out, function.name, function.entry.terminator.value.int_value
+        );
+        return;
+    }
+    return error("compiled mir llvm: unsupported return type");
+}
+fn append_multi_statement_mir(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction
+) -> !void {
+    try append_multi_statement_globals(out, function);
+    try out.append_bytes("define ");
+    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try out.append_bytes(") {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    let stmts = &function.multi_stmts;
+    var stmt_index = 0;
+    while stmt_index < stmts.len() {
+        let stmt = try stmts.at(stmt_index);
+        try append_multi_stmt(out, function, stmt);
+        stmt_index = stmt_index + 1;
+    }
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_multi_stmt(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    if stmt.kind == compiled_mir::MirStmtKind::LetCall {
+        try append_multi_call(out, function.name, stmt);
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::LetStruct {
+        try append_multi_let_struct(out, function.name, stmt);
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::ReturnCall {
+        try append_multi_call(out, function.name, stmt);
+        try out.append_bytes("  ret ");
+        try out.append_bytes(stmt.llvm_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(stmt.name);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::ReturnStruct {
+        try append_struct_body_at(
+            out,
+            function.name,
+            function.return_type.llvm_name,
+            &stmt.struct_fields,
+            stmt.string_index
+        );
+        try out.append_bytes("  ret ");
+        try out.append_bytes(function.return_type.llvm_name);
+        if stmt.struct_fields.len() == 0 {
+            try out.append_bytes(" poison");
+        } else {
+            try out.append_bytes(" %v");
+            try std::fmt::append_i64(out, stmt.struct_fields.len() - 1);
+        }
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::ReturnExpr {
+        try append_expr_insts(out, function.name, &stmt.expr_insts);
+        try out.append_bytes("  ret ");
+        try out.append_bytes(function.return_type.llvm_name);
+        try out.append_bytes(" %t");
+        try std::fmt::append_i64(out, stmt.expr_result_id);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::ReturnError {
+        try out.append_bytes("  unreachable");
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::If {
+        try append_multi_if(out, function, stmt);
+        return;
+    }
+    return error("compiled mir llvm: unsupported statement kind");
+}
+fn append_multi_statement_globals(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction
+) -> !void {
+    let stmts = &function.multi_stmts;
+    var stmt_index = 0;
+    while stmt_index < stmts.len() {
+        let stmt = try stmts.at(stmt_index);
+        try append_stmt_globals(out, function.name, stmt);
+        stmt_index = stmt_index + 1;
+    }
+    return;
+}
+fn append_stmt_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    if stmt.kind == compiled_mir::MirStmtKind::LetCall or
+        stmt.kind == compiled_mir::MirStmtKind::ReturnCall {
+        try compiled_mir_llvm_call::append_call_string_globals(
+            out, llvm_symbol, &stmt.call_args
+        );
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::LetStruct or
+        stmt.kind == compiled_mir::MirStmtKind::ReturnStruct {
+        try append_struct_globals_at(out, llvm_symbol, &stmt.struct_fields, stmt.string_index);
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::ReturnExpr {
+        try append_expr_globals(out, llvm_symbol, &stmt.expr_insts);
+        return;
+    }
+    if stmt.kind == compiled_mir::MirStmtKind::If {
+        try append_expr_globals(out, llvm_symbol, &stmt.expr_insts);
+        try compiled_mir_llvm_call::append_call_string_globals(
+            out, llvm_symbol, &stmt.then_call_args
+        );
+        try append_expr_globals(out, llvm_symbol, &stmt.then_expr_insts);
+    }
+    return;
+}
+fn append_multi_call(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup(out, llvm_symbol, &stmt.call_args);
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.call_module_prefix, stmt.call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args(out, &stmt.call_args);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_multi_let_struct(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    try append_struct_body_at(
+        out,
+        llvm_symbol,
+        stmt.llvm_type,
+        &stmt.struct_fields,
+        stmt.string_index
+    );
+    try out.append_bytes("  %");
+    try out.append_bytes(stmt.name);
+    try out.append_bytes(" = add i64 0, 0");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_multi_if(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    try append_expr_insts(out, function.name, &stmt.expr_insts);
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, stmt.expr_result_id);
+    try out.append_bytes(", label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_then, label %if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_cont");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_then:");
+    try out.append_byte(cast<u8>(10));
+    if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnBool {
+        try out.append_bytes("  ret ");
+        try out.append_bytes(function.return_type.llvm_name);
+        try out.append_bytes(" ");
+        if stmt.bool_value {
+            try out.append_bytes("true");
+        } else {
+            try out.append_bytes("false");
+        }
+        try out.append_byte(cast<u8>(10));
+    } else {
+        if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnCall {
+            try append_multi_then_call(out, function.name, stmt);
+            try out.append_bytes("  ret ");
+            try out.append_bytes(stmt.llvm_type);
+            try out.append_bytes(" %t");
+            try std::fmt::append_i64(out, stmt.expr_result_id + 1);
+            try out.append_byte(cast<u8>(10));
+        } else {
+            if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
+                try append_expr_insts(out, function.name, &stmt.then_expr_insts);
+                try out.append_bytes("  ret ");
+                try out.append_bytes(function.return_type.llvm_name);
+                try out.append_bytes(" %t");
+                try std::fmt::append_i64(out, stmt.then_expr_result_id);
+                try out.append_byte(cast<u8>(10));
+            } else {
+                if stmt.if_then_kind == compiled_mir::MirIfThenKind::ReturnError {
+                    try out.append_bytes("  unreachable");
+                    try out.append_byte(cast<u8>(10));
+                } else {
+                    return error("compiled mir llvm: unsupported if then kind");
+                }
+            }
+        }
+    }
+    try out.append_bytes("if");
+    try std::fmt::append_i64(out, stmt.if_index);
+    try out.append_bytes("_cont:");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_multi_then_call(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    stmt: &compiled_mir::MirStmt
+) -> !void {
+    try compiled_mir_llvm_call::append_call_arg_setup(
+        out, llvm_symbol, &stmt.then_call_args
+    );
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, stmt.expr_result_id + 1);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(stmt.llvm_type);
+    try out.append_bytes(" @");
+    try compiled_mir_llvm_call::append_callee_symbol(
+        out, stmt.then_call_module_prefix, stmt.then_call_callee_name
+    );
+    try out.append_bytes("(");
+    try compiled_mir_llvm_call::append_call_args(out, &stmt.then_call_args);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_expr_return(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction
+) -> !void {
+    try out.append_bytes("define ");
+    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try out.append_bytes(") {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    try append_expr_insts(out, function.name, &function.expr_insts);
+    try out.append_bytes("  ret ");
+    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, function.entry.terminator.value.id);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+fn append_expr_insts(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        try append_expr_inst(out, llvm_symbol, inst);
+        index = index + 1;
+    }
+    return;
+}
+fn append_expr_inst(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    inst: &compiled_mir::MirExprInst
+) -> !void {
+    if inst.kind == compiled_mir::MirExprInstKind::ConstString {
+        let payload_len = try compiled_util::string_token_decoded_len(
+            inst.value,
+            "compiled mir llvm: invalid expression string token"
+        );
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes("_ptr = getelementptr [");
+        try std::fmt::append_i64(out, payload_len);
+        try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+        try out.append_bytes(llvm_symbol);
+        try out.append_bytes(".s");
+        try std::fmt::append_i64(out, inst.int_value);
+        try out.append_bytes(", i64 0, i64 0");
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes("_ptr, 0");
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = insertvalue %kizu.slice.u8 %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes("_base, i64 ");
+        try std::fmt::append_i64(out, payload_len);
+        try out.append_bytes(", 1");
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if inst.kind == compiled_mir::MirExprInstKind::Var {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = select i1 true, ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(inst.value);
+        try out.append_bytes(", ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(inst.value);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if inst.kind == compiled_mir::MirExprInstKind::ConstBool {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = select i1 true, i1 ");
+        if inst.bool_value {
+            try out.append_bytes("true, i1 true");
+        } else {
+            try out.append_bytes("false, i1 false");
+        }
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if inst.kind == compiled_mir::MirExprInstKind::ConstInt or
+        inst.kind == compiled_mir::MirExprInstKind::ConstEnumTag {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = add i64 0, ");
+        try std::fmt::append_i64(out, inst.int_value);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if inst.kind == compiled_mir::MirExprInstKind::PrefixNot {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = xor i1 %t");
+        try std::fmt::append_i64(out, inst.left);
+        try out.append_bytes(", true");
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if inst.kind == compiled_mir::MirExprInstKind::Binary {
+        try append_binary_expr_inst(out, inst);
+        return;
+    }
+    if inst.kind == compiled_mir::MirExprInstKind::FieldAccess {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = extractvalue ");
+        try out.append_bytes(inst.source_type);
+        if inst.left >= 0 {
+            try out.append_bytes(" %t");
+            try std::fmt::append_i64(out, inst.left);
+        } else {
+            try out.append_bytes(" %");
+            try out.append_bytes(inst.value);
+        }
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, inst.source_field_index);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    if inst.kind == compiled_mir::MirExprInstKind::Call {
+        try compiled_mir_llvm_call::append_call_arg_setup(
+            out, llvm_symbol, &inst.call_args
+        );
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, inst.id);
+        try out.append_bytes(" = call ");
+        try out.append_bytes(inst.llvm_type);
+        try out.append_bytes(" @");
+        try compiled_mir_llvm_call::append_callee_symbol(
+            out, inst.call_module_prefix, inst.call_callee_name
+        );
+        try out.append_bytes("(");
+        try compiled_mir_llvm_call::append_call_args(out, &inst.call_args);
+        try out.append_bytes(")");
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    return error("compiled mir llvm: unsupported expr inst");
+}
+fn append_expr_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !void {
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if inst.kind == compiled_mir::MirExprInstKind::ConstString {
+            let quote = cast<u8>(34);
+            let payload_len = try compiled_util::string_token_decoded_len(
+                inst.value,
+                "compiled mir llvm: invalid expression string token"
+            );
+            try out.append_bytes("@.kizu.compiled.");
+            try out.append_bytes(llvm_symbol);
+            try out.append_bytes(".s");
+            try std::fmt::append_i64(out, inst.int_value);
+            try out.append_bytes(" = private unnamed_addr constant [");
+            try std::fmt::append_i64(out, payload_len);
+            try out.append_bytes(" x i8] c");
+            try out.append_byte(quote);
+            try compiled_util::append_string_token_payload(
+                out,
+                inst.value,
+                "compiled mir llvm: invalid expression string token"
+            );
+            try out.append_byte(quote);
+            try out.append_byte(cast<u8>(10));
+        }
+        if inst.kind == compiled_mir::MirExprInstKind::Call {
+            try compiled_mir_llvm_call::append_call_string_globals(
+                out, llvm_symbol, &inst.call_args
+            );
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_binary_expr_inst(
+    out: &var std::string::String,
+    inst: &compiled_mir::MirExprInst
+) -> !void {
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, inst.id);
+    if std::mem::equal_bytes(inst.op, "and") or std::mem::equal_bytes(inst.op, "or") {
+        try out.append_bytes(" = ");
+        try out.append_bytes(inst.op);
+        try out.append_bytes(" i1 %t");
+        try std::fmt::append_i64(out, inst.left);
+        try out.append_bytes(", %t");
+        try std::fmt::append_i64(out, inst.right);
+        try out.append_byte(cast<u8>(10));
+        return;
+    }
+    try out.append_bytes(" = icmp ");
+    if std::mem::equal_bytes(inst.op, "eq") {
+        try out.append_bytes("eq");
+    } else {
+        if std::mem::equal_bytes(inst.op, "not-eq") {
+            try out.append_bytes("ne");
+        } else {
+            if std::mem::equal_bytes(inst.op, "lt") {
+                try out.append_bytes("slt");
+            } else {
+                if std::mem::equal_bytes(inst.op, "lte") {
+                    try out.append_bytes("sle");
+                } else {
+                    if std::mem::equal_bytes(inst.op, "gt") {
+                        try out.append_bytes("sgt");
+                    } else {
+                        if std::mem::equal_bytes(inst.op, "gte") {
+                            try out.append_bytes("sge");
+                        } else {
+                            return error("compiled mir llvm: unsupported binary op");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    try out.append_bytes(" i64 %t");
+    try std::fmt::append_i64(out, inst.left);
+    try out.append_bytes(", %t");
+    try std::fmt::append_i64(out, inst.right);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_struct_return(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction
+) -> !void {
+    try append_struct_globals(out, function.name, &function.struct_fields);
+    try out.append_bytes("define ");
+    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try out.append_bytes(") {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    try append_struct_body(out, function.name, function.return_type.llvm_name, &function.struct_fields);
+    try out.append_bytes("  ret ");
+    try out.append_bytes(function.return_type.llvm_name);
+    if function.struct_fields.len() == 0 {
+        try out.append_bytes(" poison");
+    } else {
+        try out.append_bytes(" %v");
+        try std::fmt::append_i64(out, function.struct_fields.len() - 1);
+    }
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_struct_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    fields: &std::array::Array<compiled_mir::MirStructField>
+) -> !void {
+    try append_struct_globals_at(out, llvm_symbol, fields, 0);
+    return;
+}
+
+fn append_struct_globals_at(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    fields: &std::array::Array<compiled_mir::MirStructField>,
+    string_index: i64
+) -> !void {
+    var index = 0;
+    while index < fields.len() {
+        let field = try fields.at(index);
+        if field.kind == compiled_mir::MirStructFieldKind::ConstString {
+            let quote = cast<u8>(34);
+            let payload_len = try compiled_util::string_token_decoded_len(
+                field.value,
+                "compiled mir llvm: invalid struct string token"
+            );
+            try out.append_bytes("@.kizu.compiled.");
+            try out.append_bytes(llvm_symbol);
+            try out.append_bytes(".f");
+            try std::fmt::append_i64(out, string_index + field.index);
+            try out.append_bytes(" = private unnamed_addr constant [");
+            try std::fmt::append_i64(out, payload_len);
+            try out.append_bytes(" x i8] c");
+            try out.append_byte(quote);
+            try compiled_util::append_string_token_payload(
+                out,
+                field.value,
+                "compiled mir llvm: invalid struct string token"
+            );
+            try out.append_byte(quote);
+            try out.append_byte(cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_struct_body(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    fields: &std::array::Array<compiled_mir::MirStructField>
+) -> !void {
+    try append_struct_body_at(out, llvm_symbol, llvm_return_type, fields, 0);
+    return;
+}
+
+fn append_struct_body_at(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    fields: &std::array::Array<compiled_mir::MirStructField>,
+    string_index: i64
+) -> !void {
+    var index = 0;
+    var extract_counter = 0;
+    while index < fields.len() {
+        let field = try fields.at(index);
+        if field.kind == compiled_mir::MirStructFieldKind::ConstString {
+            try append_struct_string_field_at(
+                out, llvm_symbol, llvm_return_type, field, string_index + field.index
+            );
+        } else {
+            if field.kind == compiled_mir::MirStructFieldKind::FieldAccess {
+                extract_counter = try append_struct_field_access(
+                    out,
+                    llvm_return_type,
+                    field,
+                    extract_counter
+                );
+            } else {
+                try append_struct_simple_field(out, llvm_return_type, field);
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_struct_simple_field(
+    out: &var std::string::String,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField
+) -> !void {
+    try compiled_util::append_insertvalue_line(
+        out,
+        llvm_return_type,
+        field.index,
+        field.llvm_type,
+        field.index
+    );
+    if field.kind == compiled_mir::MirStructFieldKind::Var {
+        try out.append_bytes("%");
+        try out.append_bytes(field.value);
+    } else {
+        if field.kind == compiled_mir::MirStructFieldKind::ConstInt or
+            field.kind == compiled_mir::MirStructFieldKind::ConstEnumTag {
+            try std::fmt::append_i64(out, field.int_value);
+        } else {
+            if field.kind == compiled_mir::MirStructFieldKind::ConstBool {
+                if field.bool_value {
+                    try out.append_bytes("true");
+                } else {
+                    try out.append_bytes("false");
+                }
+            } else {
+                if field.kind == compiled_mir::MirStructFieldKind::EmptySlice {
+                    try out.append_bytes("zeroinitializer");
+                } else {
+                    return error("compiled mir llvm: unsupported struct field");
+                }
+            }
+        }
+    }
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_struct_string_field(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField
+) -> !void {
+    try append_struct_string_field_at(out, llvm_symbol, llvm_return_type, field, field.index);
+    return;
+}
+
+fn append_struct_string_field_at(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField,
+    global_index: i64
+) -> !void {
+    let payload_len = try compiled_util::string_token_decoded_len(
+        field.value,
+        "compiled mir llvm: invalid struct string token"
+    );
+    try out.append_bytes("  %f");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_ptr = getelementptr [");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes(".f");
+    try std::fmt::append_i64(out, global_index);
+    try out.append_bytes(", i64 0, i64 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %f");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %f");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_ptr, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %f");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_slice = insertvalue %kizu.slice.u8 %f");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_base, i64 ");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try compiled_util::append_insertvalue_line(
+        out,
+        llvm_return_type,
+        field.index,
+        "%kizu.slice.u8",
+        field.index
+    );
+    try out.append_bytes("%f");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_bytes("_slice, ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_struct_field_access(
+    out: &var std::string::String,
+    llvm_return_type: []u8,
+    field: &compiled_mir::MirStructField,
+    extract_counter: i64
+) -> !i64 {
+    try out.append_bytes("  %ex");
+    try std::fmt::append_i64(out, extract_counter);
+    try out.append_bytes(" = extractvalue ");
+    try out.append_bytes(field.source_type);
+    try out.append_bytes(" %");
+    try out.append_bytes(field.value);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.source_field_index);
+    try out.append_byte(cast<u8>(10));
+    var result_counter = extract_counter;
+    if field.int_value >= 0 {
+        let next_counter = extract_counter + 1;
+        try out.append_bytes("  %ex");
+        try std::fmt::append_i64(out, next_counter);
+        try out.append_bytes(" = extractvalue ");
+        try out.append_bytes(field.nested_source_type);
+        try out.append_bytes(" %ex");
+        try std::fmt::append_i64(out, extract_counter);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, field.int_value);
+        try out.append_byte(cast<u8>(10));
+        result_counter = next_counter;
+    }
+    try compiled_util::append_insertvalue_line(
+        out,
+        llvm_return_type,
+        field.index,
+        field.llvm_type,
+        field.index
+    );
+    try out.append_bytes("%ex");
+    try std::fmt::append_i64(out, result_counter);
+    try out.append_bytes(", ");
+    try std::fmt::append_i64(out, field.index);
+    try out.append_byte(cast<u8>(10));
+    return result_counter + 1;
+}

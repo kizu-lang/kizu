@@ -1266,12 +1266,6 @@ func assertCompiledEntryModule(t *testing.T, compiled string) {
 		"pub fn append_compiled_function_auto(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_node_kind(",
-		"ir_contract::body_token_or_empty(",
-		"ir_contract::body_int_value(",
-		"ir_contract::body_field_expr_name(",
-		"fn append_struct_literal_return_function_with_params(",
-		"fn append_field_expr_return_function(",
-		"fn append_int_return_function(",
 	} {
 		if !strings.Contains(compiled, fragment) {
 			t.Fatalf("compiled_llvm missing generic compiler fragment %q", fragment)
@@ -1292,6 +1286,29 @@ func assertCompiledSubModules(t *testing.T) {
 		"pub fn kizu_type_to_llvm(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_struct_emit.kizu",
 		"pub fn append_field_access_insertvalue(", "pub fn append_index_expr_insertvalue(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir.kizu",
+		"pub struct MirFunction", "pub struct MirBlock", "pub struct MirValue",
+		"pub struct MirInstruction", "pub struct MirTerminator", "pub struct MirType",
+		"pub struct MirCallArg", "pub struct MirStructField",
+		"pub struct MirExprInst")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_lower.kizu",
+		"pub fn lower_string_return_function(", "pub fn lower_int_return_function(",
+		"pub fn lower_enum_field_return_function(",
+		"pub fn lower_call_return_function(", "pub fn lower_struct_return_function(",
+		"pub fn lower_expr_return_function(", "pub fn lower_multi_statement_function(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_lower_struct.kizu",
+		"pub fn lower_struct_fields(", "fn lower_struct_field(",
+		"fn lower_nested_struct_field_expr(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_types.kizu",
+		"pub fn resolve_value_llvm_type(", "pub fn resolve_value_kizu_type(",
+		"pub fn struct_lookup_kizu_type(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_llvm.kizu",
+		"pub fn append_function(", "fn append_struct_return(", "fn append_expr_return(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_llvm_call.kizu",
+		"pub fn append_call_return(", "pub fn append_call_arg_setup(",
+		"pub fn append_call_args(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_llvm_const.kizu",
+		"pub fn append_const_string_return(", "pub fn append_const_int_return(")
 }
 
 // assertCompiledModulesNoHardcoding checks no function-specific literals leak.
@@ -1305,6 +1322,13 @@ func assertCompiledModulesNoHardcoding(t *testing.T, compiled string) {
 		"../../selfhost/src/backend/compiled_signature.kizu",
 		"../../selfhost/src/backend/compiled_struct_emit.kizu",
 		"../../selfhost/src/backend/compiled_expr_emit.kizu",
+		"../../selfhost/src/backend/compiled_mir.kizu",
+		"../../selfhost/src/backend/compiled_mir_lower.kizu",
+		"../../selfhost/src/backend/compiled_mir_lower_struct.kizu",
+		"../../selfhost/src/backend/compiled_mir_types.kizu",
+		"../../selfhost/src/backend/compiled_mir_llvm.kizu",
+		"../../selfhost/src/backend/compiled_mir_llvm_call.kizu",
+		"../../selfhost/src/backend/compiled_mir_llvm_const.kizu",
 	} {
 		allCompiled += readSelfhostFile(t, path)
 	}
@@ -1339,6 +1363,66 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 	assertCompiledEntryModule(t, compiled)
 	assertCompiledSubModules(t)
 	assertCompiledModulesNoHardcoding(t, compiled)
+	assertNoLegacyCompiledEmitters(t, compiled)
+	assertCompiledMirPaths(t, compiled)
+	assertCliCompiledSymbols(t, cliLlvm)
+}
+
+// assertNoLegacyCompiledEmitters rejects direct per-shape LLVM emitters.
+func assertNoLegacyCompiledEmitters(t *testing.T, compiled string) {
+	t.Helper()
+	if strings.Contains(compiled, "fn append_string_return_function(") {
+		t.Fatal("string returns should lower through MIR")
+	}
+	if strings.Contains(compiled, "fn append_int_return_function(") {
+		t.Fatal("int returns should lower through MIR")
+	}
+	if strings.Contains(compiled, "fn append_field_expr_return_function(") {
+		t.Fatal("enum field returns should lower through MIR")
+	}
+	if strings.Contains(compiled, "fn append_call_return_function(") {
+		t.Fatal("call returns should lower through MIR")
+	}
+	if strings.Contains(compiled, "fn append_struct_literal_return_function_with_params(") {
+		t.Fatal("struct returns should lower through MIR")
+	}
+	if strings.Contains(compiled, "fn append_expr_return_function(") {
+		t.Fatal("expression returns should lower through MIR")
+	}
+}
+
+// assertCompiledMirPaths keeps compiled_llvm routed through MIR lowering.
+func assertCompiledMirPaths(t *testing.T, compiled string) {
+	t.Helper()
+	if !strings.Contains(compiled, "compiled_mir_lower::lower_string_return_function(") {
+		t.Fatal("compiled_llvm does not lower string returns through MIR")
+	}
+	if !strings.Contains(compiled, "compiled_mir_lower::lower_int_return_function(") {
+		t.Fatal("compiled_llvm does not lower int returns through MIR")
+	}
+	if !strings.Contains(compiled, "compiled_mir_lower::lower_enum_field_return_function(") {
+		t.Fatal("compiled_llvm does not lower enum field returns through MIR")
+	}
+	if !strings.Contains(compiled, "compiled_mir_lower::lower_call_return_function(") {
+		t.Fatal("compiled_llvm does not lower call returns through MIR")
+	}
+	if !strings.Contains(compiled, "compiled_mir_lower::lower_struct_return_function(") {
+		t.Fatal("compiled_llvm does not lower struct returns through MIR")
+	}
+	if !strings.Contains(compiled, "compiled_mir_lower::lower_expr_return_function(") {
+		t.Fatal("compiled_llvm does not lower expression returns through MIR")
+	}
+	if !strings.Contains(compiled, "compiled_mir_lower::lower_multi_statement_function(") {
+		t.Fatal("compiled_llvm does not lower multi-statement functions through MIR")
+	}
+	if !strings.Contains(compiled, "compiled_mir_llvm::append_function(") {
+		t.Fatal("compiled_llvm does not emit migrated MIR functions through MIR-to-LLVM")
+	}
+}
+
+// assertCliCompiledSymbols keeps the compiled helper symbol list wired.
+func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
+	t.Helper()
 	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto(") {
 		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto")
 	}
@@ -1629,10 +1713,55 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/compiled_llvm.kizu": {
 		"pub fn append_compiled_function(",
-		"fn append_string_return_function(",
 		"ir_contract::body_child_sequence(",
 		"ir_contract::body_node_kind(",
+	},
+	"../../selfhost/src/backend/compiled_mir.kizu": {
+		"pub struct MirFunction",
+		"pub struct MirBlock",
+		"pub struct MirValue",
+		"pub struct MirInstruction",
+		"pub struct MirTerminator",
+		"pub struct MirType",
+		"pub struct MirCallArg",
+		"pub struct MirStructField",
+		"pub struct MirExprInst",
+	},
+	"../../selfhost/src/backend/compiled_mir_lower.kizu": {
+		"pub fn lower_string_return_function(",
+		"pub fn lower_int_return_function(",
+		"pub fn lower_enum_field_return_function(",
+		"pub fn lower_call_return_function(",
+		"pub fn lower_struct_return_function(",
+		"pub fn lower_expr_return_function(",
+		"pub fn lower_multi_statement_function(",
 		"ir_contract::body_token_or_empty(",
+		"ir_contract::body_int_value(",
+		"ir_contract::body_field_expr_name(",
+	},
+	"../../selfhost/src/backend/compiled_mir_lower_struct.kizu": {
+		"pub fn lower_struct_fields(",
+		"fn lower_struct_field(",
+		"fn lower_nested_struct_field_expr(",
+	},
+	"../../selfhost/src/backend/compiled_mir_types.kizu": {
+		"pub fn resolve_value_llvm_type(",
+		"pub fn resolve_value_kizu_type(",
+		"pub fn struct_lookup_kizu_type(",
+	},
+	"../../selfhost/src/backend/compiled_mir_llvm.kizu": {
+		"pub fn append_function(",
+		"fn append_struct_return(",
+		"fn append_expr_return(",
+	},
+	"../../selfhost/src/backend/compiled_mir_llvm_call.kizu": {
+		"pub fn append_call_return(",
+		"pub fn append_call_arg_setup(",
+		"pub fn append_call_args(",
+	},
+	"../../selfhost/src/backend/compiled_mir_llvm_const.kizu": {
+		"pub fn append_const_string_return(",
+		"pub fn append_const_int_return(",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
