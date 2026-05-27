@@ -1339,7 +1339,7 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 		"fn find_param_type(",
 		"fn append_field_access_insertvalue(",
 		"fn append_index_expr_insertvalue(",
-		"fn lookup_struct_field_index(",
+		"fn lookup_struct_field_index_by_prefix(",
 		"fn kizu_type_to_llvm(",
 	} {
 		if !strings.Contains(compiled, fragment) {

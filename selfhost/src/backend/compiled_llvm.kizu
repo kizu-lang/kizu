@@ -42,71 +42,75 @@ pub fn append_compiled_function_params(
     llvm_return_type: []u8,
     params_spec: []u8
 ) -> !void {
-    let statement = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        0,
-        "statement",
-        0
-    );
-    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
-    if !std::mem::equal_bytes(kind, "Return") {
-        return error("compiled function: body must start with return");
-    }
-    let value = try ir_contract::body_child_sequence(
-        ir_bytes,
-        function_name,
-        statement,
-        "value",
-        0
-    );
-    let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
-    if std::mem::equal_bytes(value_kind, "String") {
-        try append_string_return_function(
-            out,
-            ir_bytes,
-            function_name,
-            llvm_symbol,
-            value
+    let statement_count = try count_block_statements(ir_bytes, function_name);
+    if statement_count == 1 {
+        let statement = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, 0, "statement", 0
         );
-        return;
-    }
-    if std::mem::equal_bytes(value_kind, "Int") {
-        try append_int_return_function(
-            out,
-            ir_bytes,
-            function_name,
-            llvm_symbol,
-            value
-        );
-        return;
-    }
-    if std::mem::equal_bytes(value_kind, "FieldExpr") {
-        try append_field_expr_return_function(
-            out,
-            ir_bytes,
-            function_name,
-            llvm_symbol,
-            value
-        );
-        return;
-    }
-    if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
-        if std::mem::len(llvm_return_type) == 0 {
-            return error("compiled function: struct literal requires llvm_return_type");
+        let kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+        if !std::mem::equal_bytes(kind, "Return") {
+            return error("compiled function: single statement must be return");
         }
-        try append_struct_literal_return_function_with_params(
-            out,
-            ir_bytes,
-            function_name,
-            llvm_symbol,
-            llvm_return_type,
-            params_spec,
-            value
+        let value = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, statement, "value", 0
         );
-        return;
+        let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+        if std::mem::equal_bytes(value_kind, "String") {
+            try append_string_return_function(
+                out, ir_bytes, function_name, llvm_symbol, value
+            );
+            return;
+        }
+        if std::mem::equal_bytes(value_kind, "Int") {
+            try append_int_return_function(
+                out, ir_bytes, function_name, llvm_symbol, value
+            );
+            return;
+        }
+        if std::mem::equal_bytes(value_kind, "FieldExpr") {
+            try append_field_expr_return_function(
+                out, ir_bytes, function_name, llvm_symbol, value
+            );
+            return;
+        }
+        if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+            if std::mem::len(llvm_return_type) == 0 {
+                return error("compiled function: struct literal requires llvm_return_type");
+            }
+            try append_struct_literal_return_function_with_params(
+                out, ir_bytes, function_name, llvm_symbol,
+                llvm_return_type, params_spec, value
+            );
+            return;
+        }
+        if std::mem::equal_bytes(value_kind, "Call") {
+            try append_call_return_function(
+                out, ir_bytes, function_name, llvm_symbol,
+                llvm_return_type, params_spec, value
+            );
+            return;
+        }
+        return error("compiled function: unsupported return value kind");
     }
-    return error("compiled function: unsupported return value kind");
+    try append_multi_statement_function(
+        out, ir_bytes, function_name, llvm_symbol,
+        llvm_return_type, params_spec, statement_count
+    );
+    return;
+}
+
+fn count_block_statements(ir_bytes: []u8, function_name: []u8) -> !i64 {
+    var count = 0;
+    while true {
+        let child = try ir_contract::body_child_sequence_or_minus_one(
+            ir_bytes, function_name, 0, "statement", count
+        );
+        if child < 0 {
+            return count;
+        }
+        count = count + 1;
+    }
+    return count;
 }
 
 fn append_string_return_function(
@@ -1132,8 +1136,9 @@ fn struct_field_index_by_name(
     field_name: []u8
 ) -> !i64 {
     let kizu_type = try find_param_kizu_type(ir_bytes, module_prefix, var_name, params_spec);
-    let qualified_type = try resolve_qualified_type(module_prefix, kizu_type);
-    return try lookup_struct_field_index(ir_bytes, qualified_type, field_name);
+    return try lookup_struct_field_index_by_prefix(
+        ir_bytes, module_prefix, kizu_type, field_name
+    );
 }
 
 fn struct_field_llvm_type(
@@ -1144,8 +1149,9 @@ fn struct_field_llvm_type(
     field_index: i64
 ) -> ![]u8 {
     let kizu_type = try find_param_kizu_type(ir_bytes, module_prefix, var_name, params_spec);
-    let qualified_type = try resolve_qualified_type(module_prefix, kizu_type);
-    let field_type = try lookup_struct_field_type(ir_bytes, qualified_type, field_index);
+    let field_type = try lookup_struct_field_type_by_prefix(
+        ir_bytes, module_prefix, kizu_type, field_index
+    );
     return try kizu_type_to_llvm(ir_bytes, module_prefix, field_type);
 }
 
@@ -1227,41 +1233,61 @@ fn find_line_end(bytes: []u8, start: i64) -> i64 {
     return index;
 }
 
-fn resolve_qualified_type(module_prefix: []u8, kizu_type: []u8) -> ![]u8 {
-    let type_len = std::mem::len(kizu_type);
-    if type_len == 0 {
-        return error("compiled function: empty type");
+fn lookup_type_llvm_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "type-llvm ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let name_len = std::mem::len(short_name);
+    var index = 0;
+    while index + prefix_len + mp_len + name_len < byte_len {
+        if is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let name_end = mp_end + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                var pos = name_end;
+                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                let value_end = find_line_end(ir_bytes, pos);
+                return ir_bytes[pos..value_end];
+            }
+        }
+        index = index + 1;
     }
-    if kizu_type[0] == cast<u8>(91) {
-        return kizu_type;
-    }
-    let prefix_len = std::mem::len(module_prefix);
-    if prefix_len == 0 {
-        return kizu_type;
-    }
-    if type_len > 2 and find_byte(kizu_type, cast<u8>(58), 0) < type_len {
-        return kizu_type;
-    }
-    return error("compiled function: type resolution requires allocation");
+    return error("compiled function: type-llvm mapping not found");
 }
 
-fn lookup_struct_field_index(
+fn lookup_struct_field_index_by_prefix(
     ir_bytes: []u8,
-    qualified_type: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
     field_name: []u8
 ) -> !i64 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "struct-field ";
     let prefix_len = std::mem::len(prefix);
-    let type_len = std::mem::len(qualified_type);
+    let mp_len = std::mem::len(module_prefix);
+    let type_len = std::mem::len(short_type);
     var index = 0;
-    while index + prefix_len + type_len < byte_len {
+    while index + prefix_len + mp_len + type_len < byte_len {
         if is_line_start(ir_bytes, index) and
             std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let type_start = index + prefix_len;
-            let type_end = type_start + type_len;
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let type_end = mp_end + type_len;
             if type_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[type_start..type_end], qualified_type) and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..type_end], short_type) and
                 ir_bytes[type_end] == cast<u8>(32) {
                 let field_index = try extract_struct_field_match(
                     ir_bytes, type_end, field_name
@@ -1276,23 +1302,27 @@ fn lookup_struct_field_index(
     return error("compiled function: struct field not found");
 }
 
-fn lookup_struct_field_type(
+fn lookup_struct_field_type_by_prefix(
     ir_bytes: []u8,
-    qualified_type: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
     target_index: i64
 ) -> ![]u8 {
     let byte_len = std::mem::len(ir_bytes);
     let prefix = "struct-field ";
     let prefix_len = std::mem::len(prefix);
-    let type_len = std::mem::len(qualified_type);
+    let mp_len = std::mem::len(module_prefix);
+    let type_len = std::mem::len(short_type);
     var index = 0;
-    while index + prefix_len + type_len < byte_len {
+    while index + prefix_len + mp_len + type_len < byte_len {
         if is_line_start(ir_bytes, index) and
             std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
-            let type_start = index + prefix_len;
-            let type_end = type_start + type_len;
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let type_end = mp_end + type_len;
             if type_end < byte_len and
-                std::mem::equal_bytes(ir_bytes[type_start..type_end], qualified_type) and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..type_end], short_type) and
                 ir_bytes[type_end] == cast<u8>(32) {
                 let field_type = try extract_struct_field_type_at_index(
                     ir_bytes, type_end, target_index
@@ -1392,11 +1422,13 @@ fn kizu_type_to_llvm(
     if std::mem::equal_bytes(kizu_type, "[]u8") {
         return "%kizu.slice.u8";
     }
-    let resolved = try resolve_qualified_type(module_prefix, kizu_type);
+    if std::mem::equal_bytes(kizu_type, "void") {
+        return "void";
+    }
     if is_enum_type(ir_bytes, module_prefix, kizu_type) {
         return "i64";
     }
-    return error("compiled function: cannot map kizu type to LLVM");
+    return try lookup_type_llvm_by_prefix(ir_bytes, module_prefix, kizu_type);
 }
 
 fn is_enum_type(ir_bytes: []u8, module_prefix: []u8, short_name: []u8) -> bool {
@@ -1422,6 +1454,770 @@ fn is_enum_type(ir_bytes: []u8, module_prefix: []u8, short_name: []u8) -> bool {
         index = index + 1;
     }
     return false;
+}
+
+fn append_call_return_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    call_node: i64
+) -> !void {
+    let module_prefix = module_prefix_of(function_name);
+    try append_call_string_globals(out, ir_bytes, function_name, llvm_symbol, call_node, 0);
+    try out.append_bytes("define ");
+    try out.append_bytes(llvm_return_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes("(");
+    try append_params_signature(out, params_spec);
+    try out.append_bytes(") {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    let call_result_type = try resolve_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node
+    );
+    try append_call_instruction(
+        out, ir_bytes, function_name, llvm_symbol,
+        module_prefix, params_spec, params_spec,
+        call_node, "result", 0, call_result_type
+    );
+    try out.append_bytes("  ret ");
+    try out.append_bytes(call_result_type);
+    try out.append_bytes(" %result");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_multi_statement_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    statement_count: i64
+) -> !void {
+    let module_prefix = module_prefix_of(function_name);
+    try append_multi_statement_globals(
+        out, ir_bytes, function_name, llvm_symbol, statement_count
+    );
+    try out.append_bytes("define ");
+    try out.append_bytes(llvm_return_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes("(");
+    try append_params_signature(out, params_spec);
+    try out.append_bytes(") {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    var locals_spec = params_spec;
+    var string_counter = 0;
+    var extract_counter = 0;
+    var stmt_index = 0;
+    while stmt_index < statement_count {
+        let statement = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, 0, "statement", stmt_index
+        );
+        let stmt_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+        if std::mem::equal_bytes(stmt_kind, "Return") {
+            let value = try ir_contract::body_child_sequence(
+                ir_bytes, function_name, statement, "value", 0
+            );
+            let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+            if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+                let field_count = try count_struct_fields(ir_bytes, function_name, value);
+                extract_counter = try append_struct_return_body(
+                    out, ir_bytes, function_name, llvm_symbol,
+                    llvm_return_type, module_prefix, locals_spec,
+                    value, field_count, extract_counter
+                );
+                try out.append_bytes("  ret ");
+                try out.append_bytes(llvm_return_type);
+                if field_count == 0 {
+                    try out.append_bytes(" poison");
+                } else {
+                    try out.append_bytes(" %v");
+                    try std::fmt::append_i64(out, field_count - 1);
+                }
+                try out.append_byte(cast<u8>(10));
+            } else {
+                if std::mem::equal_bytes(value_kind, "Call") {
+                    let call_result_type = try resolve_call_return_type(
+                        ir_bytes, function_name, module_prefix, value
+                    );
+                    try append_call_instruction(
+                        out, ir_bytes, function_name, llvm_symbol,
+                        module_prefix, locals_spec, params_spec,
+                        value, "ret_val", string_counter, call_result_type
+                    );
+                    try out.append_bytes("  ret ");
+                    try out.append_bytes(call_result_type);
+                    try out.append_bytes(" %ret_val");
+                    try out.append_byte(cast<u8>(10));
+                } else {
+                    return error("compiled function: unsupported return value kind");
+                }
+            }
+        } else {
+            if std::mem::equal_bytes(stmt_kind, "Let") {
+                let let_name_node = try ir_contract::body_child_sequence(
+                    ir_bytes, function_name, statement, "name", 0
+                );
+                let let_name = try ir_contract::body_token_or_empty(
+                    ir_bytes, function_name, let_name_node
+                );
+                let let_value = try ir_contract::body_child_sequence(
+                    ir_bytes, function_name, statement, "value", 0
+                );
+                let let_value_kind = try ir_contract::body_node_kind(
+                    ir_bytes, function_name, let_value
+                );
+                if std::mem::equal_bytes(let_value_kind, "Call") {
+                    let call_type = try resolve_call_return_type(
+                        ir_bytes, function_name, module_prefix, let_value
+                    );
+                    try append_call_instruction(
+                        out, ir_bytes, function_name, llvm_symbol,
+                        module_prefix, locals_spec, params_spec,
+                        let_value, let_name, string_counter, call_type
+                    );
+                    string_counter = string_counter + try count_call_string_args(
+                        ir_bytes, function_name, let_value
+                    );
+                    locals_spec = try extend_locals_spec(
+                        ir_bytes, locals_spec, let_name, call_type
+                    );
+                } else {
+                    if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
+                        let struct_type = try resolve_struct_literal_type(
+                            ir_bytes, function_name, module_prefix, let_value
+                        );
+                        let field_count = try count_struct_fields(
+                            ir_bytes, function_name, let_value
+                        );
+                        try append_let_struct_literal(
+                            out, ir_bytes, function_name, llvm_symbol,
+                            module_prefix, locals_spec, let_name,
+                            struct_type, let_value, field_count,
+                            string_counter
+                        );
+                        string_counter = string_counter + field_count;
+                        locals_spec = try extend_locals_spec(
+                            ir_bytes, locals_spec, let_name, struct_type
+                        );
+                    } else {
+                        return error("compiled function: unsupported let value kind");
+                    }
+                }
+            } else {
+                return error("compiled function: unsupported statement kind");
+            }
+        }
+        stmt_index = stmt_index + 1;
+    }
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_multi_statement_globals(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    statement_count: i64
+) -> !void {
+    var global_index = 0;
+    var stmt_index = 0;
+    while stmt_index < statement_count {
+        let statement = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, 0, "statement", stmt_index
+        );
+        let stmt_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+        if std::mem::equal_bytes(stmt_kind, "Let") {
+            let let_value = try ir_contract::body_child_sequence(
+                ir_bytes, function_name, statement, "value", 0
+            );
+            let let_value_kind = try ir_contract::body_node_kind(
+                ir_bytes, function_name, let_value
+            );
+            if std::mem::equal_bytes(let_value_kind, "Call") {
+                try append_call_string_globals(
+                    out, ir_bytes, function_name, llvm_symbol, let_value, global_index
+                );
+                global_index = global_index + try count_call_string_args(
+                    ir_bytes, function_name, let_value
+                );
+            } else {
+                if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
+                    let field_count = try count_struct_fields(ir_bytes, function_name, let_value);
+                    try append_struct_globals_with_params(
+                        out, ir_bytes, function_name, llvm_symbol,
+                        "", let_value, field_count
+                    );
+                    global_index = global_index + field_count;
+                }
+            }
+        } else {
+            if std::mem::equal_bytes(stmt_kind, "Return") {
+                let ret_value = try ir_contract::body_child_sequence(
+                    ir_bytes, function_name, statement, "value", 0
+                );
+                let ret_value_kind = try ir_contract::body_node_kind(
+                    ir_bytes, function_name, ret_value
+                );
+                if std::mem::equal_bytes(ret_value_kind, "StructLiteralExpr") {
+                    let field_count = try count_struct_fields(ir_bytes, function_name, ret_value);
+                    try append_struct_globals_with_params(
+                        out, ir_bytes, function_name, llvm_symbol,
+                        "", ret_value, field_count
+                    );
+                }
+            }
+        }
+        stmt_index = stmt_index + 1;
+    }
+    return;
+}
+
+fn append_struct_return_body(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    value_node: i64,
+    field_count: i64,
+    extract_counter: i64
+) -> !i64 {
+    var ec = extract_counter;
+    var field_index = 0;
+    while field_index < field_count {
+        let field_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, value_node, "field", field_index
+        );
+        let field_value = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, field_node, "value", 0
+        );
+        let field_value_kind = try ir_contract::body_node_kind(
+            ir_bytes, function_name, field_value
+        );
+        ec = try append_struct_field_with_params(
+            out, ir_bytes, function_name, llvm_symbol,
+            llvm_return_type, module_prefix, locals_spec,
+            field_index, field_count, field_value, field_value_kind, ec
+        );
+        field_index = field_index + 1;
+    }
+    return ec;
+}
+
+fn resolve_call_return_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64
+) -> ![]u8 {
+    let callee_name = try ir_contract::body_call_callee_or_empty(
+        ir_bytes, function_name, call_node
+    );
+    let ret_type = try lookup_fact_value_by_prefix(
+        ir_bytes, "function-signature-return ", module_prefix, callee_name
+    );
+    return try kizu_type_to_llvm(ir_bytes, module_prefix, ret_type);
+}
+
+fn lookup_fact_value_by_prefix(
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let fp_len = std::mem::len(fact_prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let name_len = std::mem::len(short_name);
+    var index = 0;
+    while index + fp_len + mp_len + name_len < byte_len {
+        if is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + fp_len], fact_prefix) {
+            let mp_start = index + fp_len;
+            let mp_end = mp_start + mp_len;
+            let name_end = mp_end + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                var pos = name_end;
+                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                let value_end = find_line_end(ir_bytes, pos);
+                return ir_bytes[pos..value_end];
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: fact not found");
+}
+
+fn resolve_struct_literal_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    struct_literal_node: i64
+) -> ![]u8 {
+    let type_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, struct_literal_node, "type", 0
+    );
+    let type_name = try ir_contract::body_token_or_empty(
+        ir_bytes, function_name, type_node
+    );
+    return try lookup_type_llvm_by_prefix(ir_bytes, module_prefix, type_name);
+}
+
+fn derive_callee_llvm_symbol(
+    out: &var std::string::String,
+    module_prefix: []u8,
+    callee_name: []u8
+) -> !void {
+    try out.append_bytes("kizu_compiled__");
+    let prefix_len = std::mem::len(module_prefix);
+    if prefix_len > 11 and std::mem::equal_bytes(module_prefix[0..11], "selfhost::") {
+        var pos = 11;
+        while pos < prefix_len {
+            let byte = module_prefix[pos];
+            if byte == cast<u8>(58) {
+                pos = pos + 1;
+            } else {
+                try out.append_byte(byte);
+                pos = pos + 1;
+            }
+        }
+    } else {
+        try out.append_bytes(module_prefix);
+    }
+    try out.append_bytes(callee_name);
+    return;
+}
+
+fn append_call_instruction(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    result_name: []u8,
+    string_global_offset: i64,
+    call_result_type: []u8
+) -> !void {
+    let callee_name = try ir_contract::body_call_callee_or_empty(
+        ir_bytes, function_name, call_node
+    );
+    let arg_count = try count_call_args(ir_bytes, function_name, call_node);
+    try append_call_arg_setup(
+        out, ir_bytes, function_name, llvm_symbol, module_prefix,
+        locals_spec, call_node, arg_count, string_global_offset
+    );
+    try out.append_bytes("  %");
+    try out.append_bytes(result_name);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(call_result_type);
+    try out.append_bytes(" @");
+    try derive_callee_llvm_symbol(out, module_prefix, callee_name);
+    try out.append_bytes("(");
+    var arg_index = 0;
+    while arg_index < arg_count {
+        if arg_index > 0 {
+            try out.append_bytes(", ");
+        }
+        let arg_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, call_node, "arg", arg_index
+        );
+        let arg_kind = try ir_contract::body_node_kind(ir_bytes, function_name, arg_node);
+        let arg_type = try resolve_call_arg_type(
+            ir_bytes, module_prefix, callee_name, arg_index
+        );
+        try out.append_bytes(arg_type);
+        try out.append_bytes(" ");
+        if std::mem::equal_bytes(arg_kind, "Var") {
+            let var_name = try ir_contract::body_token_or_empty(
+                ir_bytes, function_name, arg_node
+            );
+            try out.append_bytes("%");
+            try out.append_bytes(var_name);
+        } else {
+            if std::mem::equal_bytes(arg_kind, "String") {
+                try out.append_bytes("%arg");
+                try std::fmt::append_i64(out, arg_index);
+                try out.append_bytes("_slice");
+            } else {
+                if std::mem::equal_bytes(arg_kind, "Bool") {
+                    let token = try ir_contract::body_token_or_empty(
+                        ir_bytes, function_name, arg_node
+                    );
+                    if std::mem::equal_bytes(token, "true") {
+                        try out.append_bytes("true");
+                    } else {
+                        try out.append_bytes("false");
+                    }
+                } else {
+                    return error("compiled function: unsupported call arg kind");
+                }
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn count_call_args(ir_bytes: []u8, function_name: []u8, call_node: i64) -> !i64 {
+    var count = 0;
+    while true {
+        let child = try ir_contract::body_child_sequence_or_minus_one(
+            ir_bytes, function_name, call_node, "arg", count
+        );
+        if child < 0 {
+            return count;
+        }
+        count = count + 1;
+    }
+    return count;
+}
+
+fn count_call_string_args(ir_bytes: []u8, function_name: []u8, call_node: i64) -> !i64 {
+    let arg_count = try count_call_args(ir_bytes, function_name, call_node);
+    var count = 0;
+    var index = 0;
+    while index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, call_node, "arg", index
+        );
+        let arg_kind = try ir_contract::body_node_kind(ir_bytes, function_name, arg_node);
+        if std::mem::equal_bytes(arg_kind, "String") {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+fn resolve_call_arg_type(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    arg_index: i64
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "function-signature-param ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let name_len = std::mem::len(callee_name);
+    var index = 0;
+    var matched = 0;
+    while index + prefix_len + mp_len + name_len < byte_len {
+        if is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let cn_end = mp_end + name_len;
+            if cn_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..cn_end], callee_name) and
+                ir_bytes[cn_end] == cast<u8>(32) {
+                if matched == arg_index {
+                    let line_end_pos = find_line_end(ir_bytes, cn_end);
+                    let entry = ir_bytes[cn_end..line_end_pos];
+                    let entry_len = std::mem::len(entry);
+                    let colon2 = find_last_colon(entry);
+                    if colon2 < entry_len {
+                        let kizu_type = entry[colon2 + 1..entry_len];
+                        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+                    }
+                }
+                matched = matched + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: call arg type not found");
+}
+
+fn find_last_colon(bytes: []u8) -> i64 {
+    let byte_len = std::mem::len(bytes);
+    var index = byte_len;
+    while index > 0 {
+        index = index - 1;
+        if bytes[index] == cast<u8>(58) {
+            return index;
+        }
+    }
+    return byte_len;
+}
+
+fn append_call_arg_setup(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    call_node: i64,
+    arg_count: i64,
+    string_global_offset: i64
+) -> !void {
+    var string_index = string_global_offset;
+    var arg_index = 0;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, call_node, "arg", arg_index
+        );
+        let arg_kind = try ir_contract::body_node_kind(ir_bytes, function_name, arg_node);
+        if std::mem::equal_bytes(arg_kind, "String") {
+            let token = try ir_contract::body_token_or_empty(
+                ir_bytes, function_name, arg_node
+            );
+            let token_len = std::mem::len(token);
+            if token_len >= 2 {
+                let payload_len = token_len - 2;
+                try out.append_bytes("  %arg");
+                try std::fmt::append_i64(out, arg_index);
+                try out.append_bytes("_ptr = getelementptr [");
+                try std::fmt::append_i64(out, payload_len);
+                try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+                try out.append_bytes(llvm_symbol);
+                try out.append_bytes(".s");
+                try std::fmt::append_i64(out, string_index);
+                try out.append_bytes(", i64 0, i64 0");
+                try out.append_byte(cast<u8>(10));
+                try out.append_bytes("  %arg");
+                try std::fmt::append_i64(out, arg_index);
+                try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %arg");
+                try std::fmt::append_i64(out, arg_index);
+                try out.append_bytes("_ptr, 0");
+                try out.append_byte(cast<u8>(10));
+                try out.append_bytes("  %arg");
+                try std::fmt::append_i64(out, arg_index);
+                try out.append_bytes("_slice = insertvalue %kizu.slice.u8 %arg");
+                try std::fmt::append_i64(out, arg_index);
+                try out.append_bytes("_base, i64 ");
+                try std::fmt::append_i64(out, payload_len);
+                try out.append_bytes(", 1");
+                try out.append_byte(cast<u8>(10));
+            }
+            string_index = string_index + 1;
+        }
+        arg_index = arg_index + 1;
+    }
+    return;
+}
+
+fn append_call_string_globals(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    call_node: i64,
+    offset: i64
+) -> !void {
+    let arg_count = try count_call_args(ir_bytes, function_name, call_node);
+    var string_index = offset;
+    var arg_index = 0;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, call_node, "arg", arg_index
+        );
+        let arg_kind = try ir_contract::body_node_kind(ir_bytes, function_name, arg_node);
+        if std::mem::equal_bytes(arg_kind, "String") {
+            let token = try ir_contract::body_token_or_empty(
+                ir_bytes, function_name, arg_node
+            );
+            let token_len = std::mem::len(token);
+            if token_len >= 2 {
+                let quote = cast<u8>(34);
+                let payload = token[1..token_len - 1];
+                let payload_len = token_len - 2;
+                try out.append_bytes("@.kizu.compiled.");
+                try out.append_bytes(llvm_symbol);
+                try out.append_bytes(".s");
+                try std::fmt::append_i64(out, string_index);
+                try out.append_bytes(" = private unnamed_addr constant [");
+                try std::fmt::append_i64(out, payload_len);
+                try out.append_bytes(" x i8] c");
+                try out.append_byte(quote);
+                try append_llvm_c_string_payload(out, payload);
+                try out.append_byte(quote);
+                try out.append_byte(cast<u8>(10));
+            }
+            string_index = string_index + 1;
+        }
+        arg_index = arg_index + 1;
+    }
+    return;
+}
+
+fn append_let_struct_literal(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    let_name: []u8,
+    struct_type: []u8,
+    struct_node: i64,
+    field_count: i64,
+    string_global_offset: i64
+) -> !void {
+    var field_index = 0;
+    var extract_counter = 0;
+    while field_index < field_count {
+        let field_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, struct_node, "field", field_index
+        );
+        let field_value = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, field_node, "value", 0
+        );
+        let field_value_kind = try ir_contract::body_node_kind(
+            ir_bytes, function_name, field_value
+        );
+        try out.append_bytes("  %");
+        try out.append_bytes(let_name);
+        try out.append_bytes("_f");
+        try std::fmt::append_i64(out, field_index);
+        try out.append_bytes(" = insertvalue ");
+        try out.append_bytes(struct_type);
+        try out.append_byte(cast<u8>(32));
+        if field_index == 0 {
+            try out.append_bytes("poison");
+        } else {
+            try out.append_bytes("%");
+            try out.append_bytes(let_name);
+            try out.append_bytes("_f");
+            try std::fmt::append_i64(out, field_index - 1);
+        }
+        try out.append_bytes(", ");
+        if std::mem::equal_bytes(field_value_kind, "String") {
+            let token = try ir_contract::body_token_or_empty(
+                ir_bytes, function_name, field_value
+            );
+            let token_len = std::mem::len(token);
+            let payload_len = token_len - 2;
+            try out.append_bytes("%kizu.slice.u8 %");
+            try out.append_bytes(let_name);
+            try out.append_bytes("_s");
+            try std::fmt::append_i64(out, field_index);
+            try out.append_bytes("_slice, ");
+            try std::fmt::append_i64(out, field_index);
+            try out.append_byte(cast<u8>(10));
+            try append_string_slice_setup(
+                out, llvm_symbol, let_name, field_index, payload_len,
+                string_global_offset + field_index
+            );
+        } else {
+            if std::mem::equal_bytes(field_value_kind, "Int") {
+                let int_value = try ir_contract::body_int_value(
+                    ir_bytes, function_name, field_value
+                );
+                try out.append_bytes("i64 ");
+                try std::fmt::append_i64(out, int_value);
+                try out.append_bytes(", ");
+                try std::fmt::append_i64(out, field_index);
+                try out.append_byte(cast<u8>(10));
+            } else {
+                if std::mem::equal_bytes(field_value_kind, "Var") {
+                    let var_name = try ir_contract::body_token_or_empty(
+                        ir_bytes, function_name, field_value
+                    );
+                    let var_type = try find_param_type(locals_spec, var_name);
+                    try out.append_bytes(var_type);
+                    try out.append_bytes(" %");
+                    try out.append_bytes(var_name);
+                    try out.append_bytes(", ");
+                    try std::fmt::append_i64(out, field_index);
+                    try out.append_byte(cast<u8>(10));
+                } else {
+                    return error("compiled function: unsupported let struct field kind");
+                }
+            }
+        }
+        field_index = field_index + 1;
+    }
+    try out.append_bytes("  %");
+    try out.append_bytes(let_name);
+    try out.append_bytes(" = add i64 0, 0");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_string_slice_setup(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    local_name: []u8,
+    field_index: i64,
+    payload_len: i64,
+    global_index: i64
+) -> !void {
+    try out.append_bytes("  %");
+    try out.append_bytes(local_name);
+    try out.append_bytes("_s");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_ptr = getelementptr [");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes(".f");
+    try std::fmt::append_i64(out, global_index);
+    try out.append_bytes(", i64 0, i64 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(local_name);
+    try out.append_bytes("_s");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %");
+    try out.append_bytes(local_name);
+    try out.append_bytes("_s");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_ptr, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %");
+    try out.append_bytes(local_name);
+    try out.append_bytes("_s");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_slice = insertvalue %kizu.slice.u8 %");
+    try out.append_bytes(local_name);
+    try out.append_bytes("_s");
+    try std::fmt::append_i64(out, field_index);
+    try out.append_bytes("_base, i64 ");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn extend_locals_spec(
+    ir_bytes: []u8,
+    current_spec: []u8,
+    name: []u8,
+    llvm_type: []u8
+) -> ![]u8 {
+    return current_spec;
 }
 
 fn append_llvm_c_string_payload(
