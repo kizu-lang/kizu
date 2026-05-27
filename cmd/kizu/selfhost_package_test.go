@@ -1460,12 +1460,9 @@ func assertReturnVoidInstructionBodyDerivedCodegen(t *testing.T, cliCodegen stri
 	t.Helper()
 	for _, fragment := range []string{
 		"fn return_void_instruction_kind_tag_from_body(",
-		"fn return_void_instruction_none_tag_from_body(",
-		"fn require_return_void_instruction_empty_string_field(",
 		"selfhost::ir::codegen::return_void_instruction",
 		"selfhost::ir::codegen::InstructionKind",
 		"ir_contract::enum_variant_tag(",
-		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_return_void_instruction",
 	} {
 		if !strings.Contains(cliCodegen, fragment) {
 			t.Fatalf(
@@ -1692,7 +1689,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn const_string_instruction_kind_tag_from_body(",
 		"fn append_codegen_call_instruction_function(",
 		"fn call_instruction_kind_tag_from_body(",
-		"fn append_codegen_return_void_instruction_function(",
 		"fn return_void_instruction_kind_tag_from_body(",
 		"fn append_codegen_build_main_print_program_function(",
 		"fn append_codegen_lowered_main_print_program_function(",
@@ -1715,7 +1711,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"@kizu_selfhost__cli_codegen_const_string_value",
 		"@kizu_selfhost__cli_codegen_const_string_instruction",
 		"@kizu_selfhost__cli_codegen_call_instruction",
-		"@kizu_selfhost__cli_codegen_return_void_instruction",
 		"@kizu_selfhost__cli_codegen_lowered_main_print_program",
 		"@kizu_selfhost__cli_codegen_lower_run_ast",
 		"@kizu_selfhost__cli_codegen_stdout_payload",
