@@ -1256,6 +1256,79 @@ func assertLowerRunAstBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	}
 }
 
+// assertCompiledEntryModule checks compiled_llvm.kizu entry-point fragments.
+func assertCompiledEntryModule(t *testing.T, compiled string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"pub fn append_compiled_function(",
+		"pub fn append_compiled_function_typed(",
+		"pub fn append_compiled_function_params(",
+		"pub fn append_compiled_function_auto(",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_node_kind(",
+		"ir_contract::body_token_or_empty(",
+		"ir_contract::body_int_value(",
+		"ir_contract::body_field_expr_name(",
+		"fn append_struct_literal_return_function_with_params(",
+		"fn append_field_expr_return_function(",
+		"fn append_int_return_function(",
+	} {
+		if !strings.Contains(compiled, fragment) {
+			t.Fatalf("compiled_llvm missing generic compiler fragment %q", fragment)
+		}
+	}
+}
+
+// assertCompiledSubModules checks responsibility sub-modules exist.
+func assertCompiledSubModules(t *testing.T) {
+	t.Helper()
+	assertFileContains(t, "../../selfhost/src/backend/compiled_fact_lookup.kizu",
+		"pub fn enum_variant_tag_by_prefix(", "pub fn lookup_struct_field_index_by_prefix(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_util.kizu",
+		"pub fn module_prefix_of(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_signature.kizu",
+		"pub fn find_param_type(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_type_lower.kizu",
+		"pub fn kizu_type_to_llvm(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_struct_emit.kizu",
+		"pub fn append_field_access_insertvalue(", "pub fn append_index_expr_insertvalue(")
+}
+
+// assertCompiledModulesNoHardcoding checks no function-specific literals leak.
+func assertCompiledModulesNoHardcoding(t *testing.T, compiled string) {
+	t.Helper()
+	allCompiled := compiled
+	for _, path := range []string{
+		"../../selfhost/src/backend/compiled_util.kizu",
+		"../../selfhost/src/backend/compiled_fact_lookup.kizu",
+		"../../selfhost/src/backend/compiled_type_lower.kizu",
+		"../../selfhost/src/backend/compiled_signature.kizu",
+		"../../selfhost/src/backend/compiled_struct_emit.kizu",
+		"../../selfhost/src/backend/compiled_expr_emit.kizu",
+	} {
+		allCompiled += readSelfhostFile(t, path)
+	}
+	for _, forbidden := range []string{
+		"metadata_line", "codegen_metadata_line", "function-block-instruction",
+		"return_void_instruction", "ReturnVoid", "InstructionKind", "ValueKind",
+	} {
+		if strings.Contains(allCompiled, forbidden) {
+			t.Fatalf("compiled modules hardcode function-specific literal %q", forbidden)
+		}
+	}
+}
+
+// assertFileContains checks a selfhost file contains all given fragments.
+func assertFileContains(t *testing.T, path string, fragments ...string) {
+	t.Helper()
+	content := readSelfhostFile(t, path)
+	for _, fragment := range fragments {
+		if !strings.Contains(content, fragment) {
+			t.Fatalf("%s missing fragment %q", path, fragment)
+		}
+	}
+}
+
 // assertCompiledFunctionGeneric verifies the compiled_llvm module is a generic
 // body-fact-to-LLVM compiler that does not hardcode any specific function names
 // or string literals from the target function.
@@ -1263,51 +1336,11 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 	t.Helper()
 	compiled := readSelfhostFile(t, "../../selfhost/src/backend/compiled_llvm.kizu")
 	cliLlvm := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
-	for _, fragment := range []string{
-		"pub fn append_compiled_function(",
-		"pub fn append_compiled_function_typed(",
-		"pub fn append_compiled_function_params(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_node_kind(",
-		"ir_contract::body_token_or_empty(",
-		"ir_contract::body_int_value(",
-		"ir_contract::body_field_expr_name(",
-		"fn append_struct_literal_return_function(",
-		"fn append_field_expr_return_function(",
-		"fn append_int_return_function(",
-		"fn enum_variant_tag_by_prefix(",
-		"fn module_prefix_of(",
-		"fn find_param_type(",
-		"fn append_field_access_insertvalue(",
-		"fn append_index_expr_insertvalue(",
-		"fn lookup_struct_field_index_by_prefix(",
-		"fn kizu_type_to_llvm(",
-	} {
-		if !strings.Contains(compiled, fragment) {
-			t.Fatalf("compiled_llvm missing generic compiler fragment %q", fragment)
-		}
-	}
-	for _, forbidden := range []string{
-		"metadata_line",
-		"codegen_metadata_line",
-		"function-block-instruction",
-		"return_void_instruction",
-		"ReturnVoid",
-		"InstructionKind",
-		"ValueKind",
-	} {
-		if strings.Contains(compiled, forbidden) {
-			t.Fatalf("compiled_llvm hardcodes function-specific literal %q", forbidden)
-		}
-	}
-	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function(") {
-		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function")
-	}
-	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_typed(") {
-		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_typed")
-	}
-	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_params(") {
-		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_params")
+	assertCompiledEntryModule(t, compiled)
+	assertCompiledSubModules(t)
+	assertCompiledModulesNoHardcoding(t, compiled)
+	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto(") {
+		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto")
 	}
 	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_metadata_line") {
 		t.Fatal("cli_llvm does not emit compiled metadata_line symbol")
@@ -1497,7 +1530,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"cli_artifact_dir_llvm::append_functions(",
 		"cli_frontend_llvm::append_functions(",
 		"cli_hosted_renderer_llvm::append_functions(",
-		"compiled_llvm::append_compiled_function(",
+		"compiled_llvm::append_compiled_function_auto(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
 		"pub fn append_globals(",

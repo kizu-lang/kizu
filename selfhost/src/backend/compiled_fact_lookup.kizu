@@ -1,0 +1,384 @@
+import selfhost::backend::compiled_util;
+
+pub fn lookup_type_llvm_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "type-llvm ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let name_len = std::mem::len(short_name);
+    var index = 0;
+    while index + prefix_len + mp_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let name_end = mp_end + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                var pos = name_end;
+                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                let value_end = compiled_util::find_line_end(ir_bytes, pos);
+                return ir_bytes[pos..value_end];
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: type-llvm mapping not found");
+}
+
+pub fn lookup_struct_field_index_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    field_name: []u8
+) -> !i64 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "struct-field ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let type_len = std::mem::len(short_type);
+    var index = 0;
+    while index + prefix_len + mp_len + type_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let type_end = mp_end + type_len;
+            if type_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..type_end], short_type) and
+                ir_bytes[type_end] == cast<u8>(32) {
+                let field_index = try extract_struct_field_match(
+                    ir_bytes, type_end, field_name
+                );
+                if field_index >= 0 {
+                    return field_index;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: struct field not found");
+}
+
+pub fn lookup_struct_field_type_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_type: []u8,
+    target_index: i64
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "struct-field ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let type_len = std::mem::len(short_type);
+    var index = 0;
+    while index + prefix_len + mp_len + type_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let type_end = mp_end + type_len;
+            if type_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..type_end], short_type) and
+                ir_bytes[type_end] == cast<u8>(32) {
+                let field_type = try extract_struct_field_type_at_index(
+                    ir_bytes, type_end, target_index
+                );
+                if std::mem::len(field_type) > 0 {
+                    return field_type;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: struct field type not found");
+}
+
+pub fn lookup_fact_value_by_prefix(
+    ir_bytes: []u8,
+    fact_prefix: []u8,
+    module_prefix: []u8,
+    short_name: []u8
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let fp_len = std::mem::len(fact_prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let name_len = std::mem::len(short_name);
+    var index = 0;
+    while index + fp_len + mp_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + fp_len], fact_prefix) {
+            let mp_start = index + fp_len;
+            let mp_end = mp_start + mp_len;
+            let name_end = mp_end + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                var pos = name_end;
+                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                let value_end = compiled_util::find_line_end(ir_bytes, pos);
+                return ir_bytes[pos..value_end];
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: fact not found");
+}
+
+pub fn lookup_stdlib_symbol(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "stdlib-symbol ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(callee_name);
+    var index = 0;
+    while index + prefix_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[name_start..name_end], callee_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                var pos = name_end;
+                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                let sym_start = pos;
+                while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
+                    pos = pos + 1;
+                }
+                return ir_bytes[sym_start..pos];
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: stdlib symbol not found");
+}
+
+pub fn lookup_stdlib_return(ir_bytes: []u8, callee_name: []u8) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "stdlib-symbol ";
+    let prefix_len = std::mem::len(prefix);
+    let name_len = std::mem::len(callee_name);
+    var index = 0;
+    while index + prefix_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let name_start = index + prefix_len;
+            let name_end = name_start + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[name_start..name_end], callee_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                var pos = name_end;
+                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
+                    pos = pos + 1;
+                }
+                while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+                    pos = pos + 1;
+                }
+                let ret_start = pos;
+                let ret_end = compiled_util::find_line_end(ir_bytes, pos);
+                return ir_bytes[ret_start..ret_end];
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: stdlib return not found");
+}
+
+pub fn enum_variant_tag_by_prefix(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    short_enum: []u8,
+    variant: []u8
+) -> !i64 {
+    let prefix_len = std::mem::len(module_prefix);
+    let short_len = std::mem::len(short_enum);
+    let qualified_len = prefix_len + short_len;
+    let byte_len = std::mem::len(ir_bytes);
+    let marker = "enum-variant ";
+    let marker_len = std::mem::len(marker);
+    var index = 0;
+    while index + marker_len + qualified_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + marker_len], marker) {
+            let name_start = index + marker_len;
+            let prefix_end = name_start + prefix_len;
+            let enum_end = prefix_end + short_len;
+            if enum_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[name_start..prefix_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[prefix_end..enum_end], short_enum) and
+                ir_bytes[enum_end] == cast<u8>(32) {
+                let tag = try match_enum_variant_suffix(
+                    ir_bytes,
+                    enum_end,
+                    variant
+                );
+                if tag >= 0 {
+                    return tag;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: enum variant not found");
+}
+
+pub fn is_stdlib_callee(callee_name: []u8) -> bool {
+    let len = std::mem::len(callee_name);
+    if len > 5 and std::mem::equal_bytes(callee_name[0..5], "std::") {
+        return true;
+    }
+    return false;
+}
+
+fn match_enum_variant_suffix(
+    ir_bytes: []u8,
+    after_enum: i64,
+    variant: []u8
+) -> !i64 {
+    let byte_len = std::mem::len(ir_bytes);
+    let variant_len = std::mem::len(variant);
+    var pos = after_enum;
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    let variant_end = pos + variant_len;
+    if variant_end >= byte_len {
+        return -1;
+    }
+    if !std::mem::equal_bytes(ir_bytes[pos..variant_end], variant) {
+        return -1;
+    }
+    if ir_bytes[variant_end] != cast<u8>(32) {
+        return -1;
+    }
+    var tag_start = variant_end;
+    while tag_start < byte_len and ir_bytes[tag_start] == cast<u8>(32) {
+        tag_start = tag_start + 1;
+    }
+    var tag_value = 0;
+    var found = false;
+    while tag_start < byte_len {
+        let byte = ir_bytes[tag_start];
+        if byte < cast<u8>(48) or byte > cast<u8>(57) {
+            break;
+        }
+        tag_value = tag_value * 10 + cast<i64>(byte) - 48;
+        found = true;
+        tag_start = tag_start + 1;
+    }
+    if !found {
+        return -1;
+    }
+    return tag_value;
+}
+
+pub fn extract_struct_field_match(
+    ir_bytes: []u8,
+    after_type: i64,
+    field_name: []u8
+) -> !i64 {
+    let byte_len = std::mem::len(ir_bytes);
+    var pos = after_type;
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    var field_index = 0;
+    var found_digit = false;
+    while pos < byte_len and ir_bytes[pos] >= cast<u8>(48) and ir_bytes[pos] <= cast<u8>(57) {
+        field_index = field_index * 10 + cast<i64>(ir_bytes[pos]) - 48;
+        found_digit = true;
+        pos = pos + 1;
+    }
+    if !found_digit {
+        return -1;
+    }
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    let name_start = pos;
+    while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
+        pos = pos + 1;
+    }
+    let actual_name = ir_bytes[name_start..pos];
+    if std::mem::equal_bytes(actual_name, field_name) {
+        return field_index;
+    }
+    return -1;
+}
+
+pub fn extract_struct_field_type_at_index(
+    ir_bytes: []u8,
+    after_type: i64,
+    target_index: i64
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    var pos = after_type;
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    var field_index = 0;
+    var found_digit = false;
+    while pos < byte_len and ir_bytes[pos] >= cast<u8>(48) and ir_bytes[pos] <= cast<u8>(57) {
+        field_index = field_index * 10 + cast<i64>(ir_bytes[pos]) - 48;
+        found_digit = true;
+        pos = pos + 1;
+    }
+    if !found_digit or field_index != target_index {
+        return ir_bytes[0..0];
+    }
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    while pos < byte_len and ir_bytes[pos] != cast<u8>(32) and ir_bytes[pos] != cast<u8>(10) {
+        pos = pos + 1;
+    }
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    let type_start = pos;
+    let type_end = compiled_util::find_line_end(ir_bytes, pos);
+    return ir_bytes[type_start..type_end];
+}
+
+pub fn is_enum_type(ir_bytes: []u8, module_prefix: []u8, short_name: []u8) -> bool {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "enum-variant ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let name_len = std::mem::len(short_name);
+    var index = 0;
+    while index + prefix_len + mp_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let name_end = mp_end + name_len;
+            if name_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..name_end], short_name) and
+                ir_bytes[name_end] == cast<u8>(32) {
+                return true;
+            }
+        }
+        index = index + 1;
+    }
+    return false;
+}
