@@ -97,7 +97,14 @@ pub fn append_compiled_function_params(
             );
             return;
         }
-        return error("compiled function: unsupported return value kind");
+        if std::mem::len(llvm_return_type) == 0 {
+            return error("compiled function: unsupported return value kind");
+        }
+        try append_expr_return_function(
+            out, ir_bytes, function_name, llvm_symbol,
+            llvm_return_type, params_spec, value
+        );
+        return;
     }
     try append_multi_statement_function(
         out, ir_bytes, function_name, llvm_symbol,
@@ -461,7 +468,16 @@ fn append_multi_statement_function(
                     try out.append_bytes(" %ret_val");
                     try out.append_byte(cast<u8>(10));
                 } else {
-                    return error("compiled function: unsupported return value kind");
+                    var tc2 = try compiled_expr_emit::emit_expr(
+                        out, ir_bytes, function_name, llvm_symbol,
+                        module_prefix, locals_spec, params_spec,
+                        value, extract_counter, string_counter
+                    );
+                    try out.append_bytes("  ret ");
+                    try out.append_bytes(llvm_return_type);
+                    try out.append_bytes(" %t");
+                    try std::fmt::append_i64(out, tc2 - 1);
+                    try out.append_byte(cast<u8>(10));
                 }
             }
         } else {
@@ -589,10 +605,70 @@ fn append_multi_statement_globals(
                         out, ir_bytes, function_name, llvm_symbol,
                         "", ret_value, field_count
                     );
+                } else {
+                    if std::mem::equal_bytes(ret_value_kind, "String") {
+                        let token = try ir_contract::body_token_or_empty(
+                            ir_bytes, function_name, ret_value
+                        );
+                        let token_len = std::mem::len(token);
+                        if token_len >= 2 {
+                            let quote = cast<u8>(34);
+                            let payload = token[1..token_len - 1];
+                            let payload_len = token_len - 2;
+                            try out.append_bytes("@.kizu.compiled.");
+                            try out.append_bytes(llvm_symbol);
+                            try out.append_bytes(".s");
+                            try std::fmt::append_i64(out, global_index);
+                            try out.append_bytes(" = private unnamed_addr constant [");
+                            try std::fmt::append_i64(out, payload_len);
+                            try out.append_bytes(" x i8] c");
+                            try out.append_byte(quote);
+                            try compiled_util::append_llvm_c_string_payload(out, payload);
+                            try out.append_byte(quote);
+                            try out.append_byte(cast<u8>(10));
+                            global_index = global_index + 1;
+                        }
+                    }
                 }
             }
         }
         stmt_index = stmt_index + 1;
     }
+    return;
+}
+
+fn append_expr_return_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    value_node: i64
+) -> !void {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    try out.append_bytes("define ");
+    try out.append_bytes(llvm_return_type);
+    try out.append_bytes(" @");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, params_spec);
+    try out.append_bytes(") {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    let tc = try compiled_expr_emit::emit_expr(
+        out, ir_bytes, function_name, llvm_symbol,
+        module_prefix, params_spec, params_spec,
+        value_node, 0, 0
+    );
+    try out.append_bytes("  ret ");
+    try out.append_bytes(llvm_return_type);
+    try out.append_bytes(" %t");
+    try std::fmt::append_i64(out, tc - 1);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
     return;
 }
