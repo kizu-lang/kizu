@@ -1335,61 +1335,20 @@ func assertCompiledFunctionGeneric(t *testing.T) {
 // assertStdoutPayloadBodyDerivedCodegen keeps the stdout payload shape checks body-fact derived.
 func assertStdoutPayloadBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	t.Helper()
-	for _, fragment := range []string{
-		"fn append_codegen_stdout_payload_function(",
-		"build_main_print_program_string_field(",
-		"build_main_print_program_call_string_arg(",
-		"build_main_print_program_int_field(",
-		"const_string_instruction_kind_tag_from_body(",
-		"const_string_value_kind_tag_from_body(",
-		"call_instruction_kind_tag_from_body(",
-		"return_void_instruction_kind_tag_from_body(",
-	} {
-		if !strings.Contains(cliCodegen, fragment) {
-			t.Fatalf(
-				"codegen LLVM path does not derive stdout_payload from body facts with %q",
-				fragment,
-			)
-		}
-	}
-	for _, forbidden := range []string{
-		"%first_const = icmp eq i64 %first_kind, 1",
-		"%first_value_const = icmp eq i64 %first_result_kind, 1",
-		"%second_call = icmp eq i64 %second_kind, 2",
-		"%second_arg_const = icmp eq i64 %second_argument_kind, 1",
-		"%third_return = icmp eq i64 %third_kind, 3",
-	} {
-		if strings.Contains(cliCodegen, forbidden) {
-			t.Fatalf("stdout_payload LLVM path still owns hardcoded route %q", forbidden)
-		}
+	if strings.Contains(cliCodegen,
+		"define %kizu.error.slice.u8 "+
+			"@kizu_selfhost__cli_codegen_stdout_payload") {
+		t.Fatal("stdout_payload hand-written generator should be removed")
 	}
 }
 
 // assertReturnVoidInstructionBodyDerivedCodegen keeps the return instruction slice active.
 func assertReturnVoidInstructionBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	t.Helper()
-	for _, fragment := range []string{
-		"fn return_void_instruction_kind_tag_from_body(",
-		"selfhost::ir::codegen::return_void_instruction",
-		"selfhost::ir::codegen::InstructionKind",
-		"ir_contract::enum_variant_tag(",
-	} {
-		if !strings.Contains(cliCodegen, fragment) {
-			t.Fatalf(
-				"codegen LLVM path does not derive return_void_instruction from body facts with %q",
-				fragment,
-			)
-		}
-	}
-	oldInstructionKindRoute := "%field0 = insertvalue " +
-		"%kizu.selfhost.codegen.instruction poison, i64 3, 0"
-	if strings.Contains(cliCodegen, oldInstructionKindRoute) {
-		t.Fatal(
-			"return_void_instruction LLVM generator still directly hardcodes the instruction kind tag",
-		)
-	}
-	if strings.Contains(cliCodegen, "return 3;") {
-		t.Fatal("return_void_instruction LLVM generator still hardcodes the instruction kind tag helper")
+	if strings.Contains(cliCodegen,
+		"define %kizu.selfhost.codegen.instruction "+
+			"@kizu_selfhost__cli_codegen_return_void_instruction") {
+		t.Fatal("return_void_instruction hand-written generator should be removed")
 	}
 }
 
@@ -1578,7 +1537,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
-		"@kizu_selfhost__cli_codegen_stdout_payload",
+		"@kizu_compiled__ir_codegen_stdout_payload",
 		"cli_check_gate_llvm::append_static_check_gate(",
 		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
 		"@kizu_compiled__ir_codegen_lower_run_ast_to_program",
@@ -1594,15 +1553,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_codegen_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_functions(",
-		"fn const_string_instruction_kind_tag_from_body(",
-		"fn call_instruction_kind_tag_from_body(",
-		"fn return_void_instruction_kind_tag_from_body(",
-		"fn append_codegen_program_supported_function(",
-		"fn append_codegen_stdout_payload_function(",
 		"fn append_codegen_payload_llvm_c_string_function(",
 		"fn append_write_llvm_escape_function(",
-		"%kizu.selfhost.codegen.program %program",
-		"@kizu_selfhost__cli_codegen_stdout_payload",
 	},
 	"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu": {
 		"pub fn append_globals(",
