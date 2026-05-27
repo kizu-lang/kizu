@@ -344,6 +344,8 @@ func requiredLLVMExecutableFragments() []string {
 		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_const_string_instruction",
 		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_call_instruction",
 		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_return_void_instruction",
+		"@.kizu.cli.codegen_metadata_line = private unnamed_addr constant",
+		"define %kizu.slice.u8 @kizu_selfhost__ir_codegen_metadata_line()",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lowered_main_print_program",
 		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__cli_frontend_lower_checked_run_ast",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast",
@@ -520,6 +522,8 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"stdout_payload ![]u8\n",
 		"backend-input function-signature-param selfhost::ir::codegen::" +
 			"stdout_payload 0 program:runtime:&Program\n",
+		"backend-input function-signature-return selfhost::ir::codegen::" +
+			"metadata_line []u8\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast\n",
 	}

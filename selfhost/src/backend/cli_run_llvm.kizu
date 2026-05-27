@@ -1,4 +1,5 @@
 import selfhost::backend::cli_check_gate_llvm;
+import selfhost::backend::cli_codegen_llvm;
 import selfhost::backend::cli_hosted_metadata_llvm;
 import selfhost::backend::hosted;
 
@@ -23,17 +24,17 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
         "run_meta_before_runtime",
         "kizu_run_main"
     );
-    try cli_hosted_metadata_llvm::append_after_runtime_constant(
+    try append_after_runtime_constant_from_body(
         out,
         "run_meta_after_runtime",
-        "selfhost::ir::codegen::Program function-block-instruction-v0",
+        ir_bytes,
         false
     );
     return;
 }
 
-pub fn append_functions(out: &var std::string::String) -> !void {
-    try append_emit_run_codegen_artifact_function(out);
+pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    try append_emit_run_codegen_artifact_function(out, ir_bytes);
     return;
 }
 
@@ -106,7 +107,7 @@ pub fn append_cli_run_blocks(out: &var std::string::String, ir_bytes: []u8) -> !
     return;
 }
 
-fn append_emit_run_codegen_artifact_function(out: &var std::string::String) -> !void {
+fn append_emit_run_codegen_artifact_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
     try append_line(out, "define i1 @kizu_selfhost__cli_emit_run_codegen_artifact(");
     try append_line(out, "  %kizu.owned %io,");
     try append_line(out, "  %kizu.slice.u8 %target,");
@@ -170,7 +171,7 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String) -> !
     try append_global_slice(out, "run_emit", "meta_output_prefix", "artifact_output_prefix", try cli_hosted_metadata_llvm::output_prefix_size());
     try append_global_slice(out, "run_emit", "meta_before_runtime", "run_meta_before_runtime", try cli_hosted_metadata_llvm::before_runtime_size("kizu_run_main"));
     try append_global_slice(out, "run_emit", "stage2_host", "stage2_host_path", 39);
-    try append_global_slice(out, "run_emit", "meta_after_runtime", "run_meta_after_runtime", try cli_hosted_metadata_llvm::after_runtime_size("selfhost::ir::codegen::Program function-block-instruction-v0", false));
+    try append_global_slice(out, "run_emit", "meta_after_runtime", "run_meta_after_runtime", try after_runtime_size_from_body(ir_bytes, false));
     try append_line(out,
         "  %meta_write = call %kizu.error.void @kizu_selfhost__write_concat9(%kizu.owned %io, %kizu.slice.u8 %meta_path, %kizu.slice.u8 %run_emit_meta_prefix_slice, %kizu.slice.u8 %target, %kizu.slice.u8 %run_emit_meta_output_prefix_slice, %kizu.slice.u8 %ll_path, %kizu.slice.u8 %run_emit_meta_before_runtime_slice, %kizu.slice.u8 %run_emit_stage2_host_slice, %kizu.slice.u8 %run_emit_meta_after_runtime_slice, %kizu.slice.u8 %empty_slice, %kizu.slice.u8 %empty_slice)");
     try append_line(out, "  %meta_write_ok = extractvalue %kizu.error.void %meta_write, 0");
@@ -181,6 +182,55 @@ fn append_emit_run_codegen_artifact_function(out: &var std::string::String) -> !
     try append_line(out, "  ret i1 false");
     try append_line(out, "}");
     try append_line(out, "");
+    return;
+}
+
+fn append_after_runtime_constant_from_body(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    include_discovery: bool
+) -> !void {
+    let size = try after_runtime_size_from_body(ir_bytes, include_discovery);
+    try out.append_bytes("@.kizu.cli.");
+    try out.append_bytes(name);
+    try out.append_bytes(" = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, size);
+    try out.append_bytes(" x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try out.append_bytes("\0A");
+    try out.append_bytes("codegen_ir ");
+    try cli_codegen_llvm::append_metadata_line_body_payload(out, ir_bytes);
+    try out.append_bytes("\0A");
+    try append_line_value(out, hosted::metadata_run_codegen_line());
+    try append_line_value(out, hosted::metadata_lowering_line());
+    try append_line_value(out, hosted::metadata_fallback_line());
+    try append_line_value(out, hosted::metadata_mode_line());
+    if include_discovery {
+        try append_line_value(out, hosted::test_metadata_discovery_line());
+    }
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn after_runtime_size_from_body(ir_bytes: []u8, include_discovery: bool) -> !i64 {
+    let metadata_len = try cli_codegen_llvm::metadata_line_body_decoded_len(ir_bytes);
+    var size = 1 + std::mem::len("codegen_ir ") +
+        metadata_len + 1 +
+        std::mem::len(hosted::metadata_run_codegen_line()) + 1 +
+        std::mem::len(hosted::metadata_lowering_line()) + 1 +
+        std::mem::len(hosted::metadata_fallback_line()) + 1 +
+        std::mem::len(hosted::metadata_mode_line()) + 1;
+    if include_discovery {
+        size = size + std::mem::len(hosted::test_metadata_discovery_line()) + 1;
+    }
+    return size;
+}
+
+fn append_line_value(out: &var std::string::String, value: []u8) -> !void {
+    try append_llvm_c_string_payload(out, value);
+    try out.append_bytes("\0A");
     return;
 }
 
@@ -250,6 +300,29 @@ fn append_llvm_constant_decoded(
     try out.append_bytes(text);
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_llvm_c_string_payload(out: &var std::string::String, payload: []u8) -> !void {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        if byte == cast<u8>(34) {
+            try out.append_bytes("\22");
+        } else {
+            if byte == cast<u8>(92) {
+                try out.append_bytes("\5C");
+            } else {
+                if byte == cast<u8>(10) {
+                    try out.append_bytes("\0A");
+                } else {
+                    try out.append_byte(byte);
+                }
+            }
+        }
+        index = index + 1;
+    }
     return;
 }
 

@@ -1,4 +1,11 @@
-pub fn append_globals(out: &var std::string::String) -> !void {
+import selfhost::backend::ir_contract;
+
+pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    try append_llvm_constant_from_metadata_line_body(
+        out,
+        "codegen_metadata_line",
+        ir_bytes
+    );
     try append_llvm_constant(out, "codegen_main", "4", "main");
     try append_llvm_constant(out, "codegen_entry", "5", "entry");
     try append_llvm_constant(out, "codegen_s0", "2", "s0");
@@ -6,7 +13,8 @@ pub fn append_globals(out: &var std::string::String) -> !void {
     return;
 }
 
-pub fn append_functions(out: &var std::string::String) -> !void {
+pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    try append_codegen_metadata_line_function(out, ir_bytes);
     try append_codegen_const_string_value_function(out);
     try append_codegen_const_string_instruction_function(out);
     try append_codegen_call_instruction_function(out);
@@ -17,6 +25,155 @@ pub fn append_functions(out: &var std::string::String) -> !void {
     try append_codegen_stdout_payload_function(out);
     try append_codegen_payload_llvm_c_string_function(out);
     return;
+}
+
+fn metadata_line_token_from_body(ir_bytes: []u8) -> ![]u8 {
+    let function_name = "selfhost::ir::codegen::metadata_line";
+    let statement = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        0,
+        "statement",
+        0
+    );
+    let statement_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+    if !std::mem::equal_bytes(statement_kind, "Return") {
+        return error("invalid metadata_line body");
+    }
+    let value = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        statement,
+        "value",
+        0
+    );
+    let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(value_kind, "String") {
+        return error("invalid metadata_line body");
+    }
+    return try ir_contract::body_token_or_empty(ir_bytes, function_name, value);
+}
+
+pub fn metadata_line_body_decoded_len(ir_bytes: []u8) -> !i64 {
+    let token = try metadata_line_token_from_body(ir_bytes);
+    let token_len = std::mem::len(token);
+    if token_len >= 4 and std::mem::equal_bytes(token[0..4], "hex:") {
+        let decoded_len = try hex_token_decoded_len(token);
+        if decoded_len < 2 {
+            return error("invalid metadata_line body");
+        }
+        if try hex_pair_byte(token, 4) != cast<u8>(34) or
+            try hex_pair_byte(token, token_len - 2) != cast<u8>(34) {
+            return error("invalid metadata_line body");
+        }
+        return decoded_len - 2;
+    }
+    if token_len < 2 or token[0] != cast<u8>(34) or token[token_len - 1] != cast<u8>(34) {
+        return error("invalid metadata_line body");
+    }
+    return token_len - 2;
+}
+
+pub fn append_metadata_line_body_payload(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let token = try metadata_line_token_from_body(ir_bytes);
+    let token_len = std::mem::len(token);
+    if token_len >= 4 and std::mem::equal_bytes(token[0..4], "hex:") {
+        try append_hex_token_payload_without_quotes(out, token);
+        return;
+    }
+    if token_len < 2 or token[0] != cast<u8>(34) or token[token_len - 1] != cast<u8>(34) {
+        return error("invalid metadata_line body");
+    }
+    try append_llvm_c_string_payload(out, token[1..token_len - 1]);
+    return;
+}
+
+fn append_codegen_metadata_line_function(out: &var std::string::String, ir_bytes: []u8) -> !void {
+    let metadata_len = try metadata_line_body_decoded_len(ir_bytes);
+    try append_line(out, "define %kizu.slice.u8 @kizu_selfhost__ir_codegen_metadata_line() {");
+    try append_line(out, "entry:");
+    try append_global_slice(
+        out,
+        "metadata_line",
+        "codegen_metadata_line",
+        metadata_len
+    );
+    try append_line(out, "  ret %kizu.slice.u8 %metadata_line_slice");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_llvm_constant_from_metadata_line_body(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8
+) -> !void {
+    let size = try metadata_line_body_decoded_len(ir_bytes);
+    try out.append_bytes("@.kizu.cli.");
+    try out.append_bytes(name);
+    try out.append_bytes(" = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, size);
+    try out.append_bytes(" x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try append_metadata_line_body_payload(out, ir_bytes);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_hex_token_payload_without_quotes(out: &var std::string::String, token: []u8) -> !void {
+    let decoded_len = try hex_token_decoded_len(token);
+    if decoded_len < 2 {
+        return error("invalid metadata_line body");
+    }
+    var index = 0;
+    while index < decoded_len {
+        let byte = try hex_pair_byte(token, 4 + index * 2);
+        if index == 0 or index + 1 == decoded_len {
+            if byte != cast<u8>(34) {
+                return error("invalid metadata_line body");
+            }
+        } else {
+            try append_llvm_c_string_byte(out, byte);
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn hex_token_decoded_len(token: []u8) -> !i64 {
+    let token_len = std::mem::len(token);
+    if token_len < 4 or !std::mem::equal_bytes(token[0..4], "hex:") {
+        return error("invalid metadata_line body");
+    }
+    let hex_len = token_len - 4;
+    if hex_len < 2 or (hex_len / 2) * 2 != hex_len {
+        return error("invalid metadata_line body");
+    }
+    return hex_len / 2;
+}
+
+fn hex_pair_byte(token: []u8, index: i64) -> !u8 {
+    let high = try hex_digit_value(token[index]);
+    let low = try hex_digit_value(token[index + 1]);
+    return cast<u8>(high * 16 + low);
+}
+
+fn hex_digit_value(byte: u8) -> !i64 {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return cast<i64>(byte - cast<u8>(48));
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
+        return cast<i64>(byte - cast<u8>(55));
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
+        return cast<i64>(byte - cast<u8>(87));
+    }
+    return error("invalid metadata_line body");
 }
 
 fn append_codegen_lowered_main_print_program_function(out: &var std::string::String) -> !void {
@@ -485,6 +642,33 @@ fn append_llvm_constant(
     try out.append_bytes(text);
     try out.append_byte(cast<u8>(34));
     try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_llvm_c_string_payload(out: &var std::string::String, payload: []u8) -> !void {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        try append_llvm_c_string_byte(out, payload[index]);
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_llvm_c_string_byte(out: &var std::string::String, byte: u8) -> !void {
+    if byte == cast<u8>(34) {
+        try out.append_bytes("\22");
+    } else {
+        if byte == cast<u8>(92) {
+            try out.append_bytes("\5C");
+        } else {
+            if byte == cast<u8>(10) {
+                try out.append_bytes("\0A");
+            } else {
+                try out.append_byte(byte);
+            }
+        }
+    }
     return;
 }
 
