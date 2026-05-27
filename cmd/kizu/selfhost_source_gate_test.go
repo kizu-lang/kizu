@@ -9,9 +9,9 @@ import (
 )
 
 const selfhostSourceOracleOutput = `source-files
-100
+101
 source-selfhost
-84
+85
 source-std
 15
 source-diagnostics

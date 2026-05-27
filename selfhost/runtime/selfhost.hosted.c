@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 typedef struct {
     const uint8_t *ptr;
@@ -124,6 +126,46 @@ static kizu_error_slice_u8 error_slice(const char *message) {
     out.value = borrowed_slice("");
     out.message = borrowed_slice(message);
     return out;
+}
+
+static kizu_error_i64 ok_i64(int64_t value) {
+    kizu_error_i64 out;
+    out.ok = 1;
+    out.value = value;
+    out.message = borrowed_slice("");
+    return out;
+}
+
+static kizu_error_i64 error_i64(const char *message) {
+    kizu_error_i64 out;
+    out.ok = 0;
+    out.value = 1;
+    out.message = borrowed_slice(message);
+    return out;
+}
+
+static int run_child_process(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        return 127;
+    }
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return 127;
+        }
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return 127;
 }
 
 void *kizu_host_page_allocator(void) {
@@ -383,6 +425,48 @@ int64_t kizu_host_process_exit_code(int64_t code) {
 
 void kizu_host_process_exit(int64_t code) {
     exit((int)code);
+}
+
+void kizu_host_process_spawn_wait8(
+    kizu_error_i64 *out,
+    int64_t argc,
+    kizu_slice_u8 arg0,
+    kizu_slice_u8 arg1,
+    kizu_slice_u8 arg2,
+    kizu_slice_u8 arg3,
+    kizu_slice_u8 arg4,
+    kizu_slice_u8 arg5,
+    kizu_slice_u8 arg6,
+    kizu_slice_u8 arg7
+) {
+    kizu_slice_u8 raw_args[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7};
+    char *owned_args[8] = {0};
+    char *argv[9] = {0};
+    if (argc < 1 || argc > 8) {
+        *out = error_i64("invalid process argument count");
+        return;
+    }
+    if (raw_args[0].len == 0) {
+        *out = error_i64("missing process executable");
+        return;
+    }
+    for (int index = 0; index < argc; index++) {
+        owned_args[index] = slice_c_string(raw_args[index]);
+        if (owned_args[index] == NULL) {
+            for (int free_index = 0; free_index < 8; free_index++) {
+                free(owned_args[free_index]);
+            }
+            *out = error_i64("allocation failed");
+            return;
+        }
+        argv[index] = owned_args[index];
+    }
+    int code = run_child_process(argv);
+    for (int free_index = 0; free_index < 8; free_index++) {
+        free(owned_args[free_index]);
+    }
+    *out = ok_i64((int64_t)code);
+    return;
 }
 
 void kizu_host_trap(kizu_slice_u8 message) {

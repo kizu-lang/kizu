@@ -289,8 +289,6 @@ func selfhostCLIFrontendRunHappyCases(
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runSource,
 				selfhostArtifactStem(fixtures.runSource),
-				"hello, kizu",
-				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
 		{
@@ -300,8 +298,6 @@ func selfhostCLIFrontendRunHappyCases(
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runCustom,
 				selfhostArtifactStem(fixtures.runCustom),
-				"from selfhost",
-				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
 		{
@@ -311,8 +307,6 @@ func selfhostCLIFrontendRunHappyCases(
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runBackslash,
 				selfhostArtifactStem(fixtures.runBackslash),
-				`path\5Cvalue`,
-				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
 		{
@@ -328,8 +322,6 @@ func selfhostCLIFrontendRunHappyCases(
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runExplicitVoid,
 				selfhostArtifactStem(fixtures.runExplicitVoid),
-				"hello, kizu",
-				"selfhost/tests/cli/run_hello.kizu",
 			),
 		},
 	}
@@ -357,25 +349,31 @@ func selfhostCLIFrontendHeavyCheckCases(
 func selfhostRunArtifactExpectations(
 	sourcePath string,
 	stem string,
-	stdoutPayload string,
-	rejectedSourcePath string,
 ) []selfhostCLIArtifactExpectation {
+	llPath := filepath.Join("target", "selfhost", "cache", "run", stem+".ll")
 	return []selfhostCLIArtifactExpectation{
 		{
-			path: filepath.Join("target", "selfhost", "run", stem+".ll"),
+			path: llPath,
 			contains: []string{
 				`source_filename = "` + sourcePath + `"`,
-				`c"` + stdoutPayload + `\0A"`,
+				"@.kizu.run.stdout",
 			},
-			rejects: []string{rejectedSourcePath},
+			rejects: []string{
+				"selfhost/tests/cli/run_hello.kizu",
+				"target/selfhost/cache/run/run_hello.ll",
+			},
 		},
 		{
-			path: filepath.Join("target", "selfhost", "run", stem+".ll.meta"),
+			path: filepath.Join("target", "selfhost", "cache", "run", stem+".ll.meta"),
 			contains: []string{
 				"source " + sourcePath + "\n",
-				"output " + filepath.ToSlash(filepath.Join("target", "selfhost", "run", stem+".ll")) + "\n",
+				"output " + filepath.ToSlash(llPath) + "\n",
+				"codegen_ir selfhost::ir::codegen::Program function-block-instruction-v0\n",
 			},
-			rejects: []string{rejectedSourcePath},
+			rejects: []string{
+				"selfhost/tests/cli/run_hello.kizu",
+				"target/selfhost/cache/run/run_hello.ll\n",
+			},
 		},
 	}
 }
@@ -1772,7 +1770,7 @@ func writeTempKizuSource(t *testing.T, name string, source string) string {
 
 // runSelfhostCLIFileFrontendCase runs cli_gate while capturing stdout and stderr.
 func runSelfhostCLIFileFrontendCase(program *ast.Program, args []string) (string, string, error) {
-	if err := os.RemoveAll("target/selfhost/run"); err != nil {
+	if err := os.RemoveAll("target/selfhost/cache/run"); err != nil {
 		return "", "", err
 	}
 	if err := os.RemoveAll("target/selfhost/test"); err != nil {
