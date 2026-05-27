@@ -30,7 +30,21 @@ var SimpleCoreSignatures = map[string]CoreSignature{
 	"std.builtin.process_arg_count":  {Return: "i64"},
 	"std.builtin.process_arg":        {Args: []ArgKind{ArgI64}, Return: "![]u8"},
 	"std.builtin.process_env":        {Args: []ArgKind{ArgBytes}, Return: "![]u8"},
-	"std.builtin.test_fail":          {Args: []ArgKind{ArgBytes}, Return: "void"},
+	"std.builtin.process_spawn_wait8": {
+		Args: []ArgKind{
+			ArgI64,
+			ArgBytes,
+			ArgBytes,
+			ArgBytes,
+			ArgBytes,
+			ArgBytes,
+			ArgBytes,
+			ArgBytes,
+			ArgBytes,
+		},
+		Return: "!i64",
+	},
+	"std.builtin.test_fail": {Args: []ArgKind{ArgBytes}, Return: "void"},
 }
 
 // TypedCoreBuiltins lists typed primitives that require explicit type application.

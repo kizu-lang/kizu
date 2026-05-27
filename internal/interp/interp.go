@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1557,6 +1558,7 @@ func (i *Interpreter) evalMemOneBytes(
 	if err != nil {
 		return "", err
 	}
+	bytes = unwrapRefValue(bytes)
 	if bytes.kind != kindString {
 		return "", fmt.Errorf("runtime error: %s expects []u8", name)
 	}
@@ -1609,6 +1611,7 @@ func (i *Interpreter) evalMemArg(expr ast.Expression, env *Env, name string) (st
 	if err != nil {
 		return "", err
 	}
+	bytes = unwrapRefValue(bytes)
 	if bytes.kind != kindString {
 		return "", fmt.Errorf("runtime error: %s expects []u8", name)
 	}
@@ -1711,6 +1714,9 @@ func (i *Interpreter) evalProcessBuiltin(
 		return value, true, err
 	case "std.builtin.process_env":
 		value, err := i.evalProcessEnv(args, env)
+		return value, true, err
+	case "std.builtin.process_spawn_wait8":
+		value, err := i.evalProcessSpawnWait8(args, env)
 		return value, true, err
 	default:
 		return voidValue(), false, nil
@@ -2023,6 +2029,38 @@ func (i *Interpreter) evalProcessEnv(args []ast.Expression, env *Env) (Value, er
 		return errorUnionValue("environment variable not found"), nil
 	}
 	return stringValue(value), nil
+}
+
+// evalProcessSpawnWait8 runs a fixed-arity host process command.
+func (i *Interpreter) evalProcessSpawnWait8(args []ast.Expression, env *Env) (Value, error) {
+	if len(args) != 9 {
+		return errorUnionValue("std::process::spawn_wait8 expected 9 args"), nil
+	}
+	argc, err := i.evalI64Arg(args[0], env, "std::process::spawn_wait8")
+	if err != nil {
+		return voidValue(), err
+	}
+	if argc < 1 || argc > 8 {
+		return errorUnionValue("invalid process argument count"), nil
+	}
+	argv := make([]string, 0, argc)
+	for idx := int64(0); idx < argc; idx++ {
+		arg, err := i.evalMemArg(args[idx+1], env, "std::process::spawn_wait8")
+		if err != nil {
+			return voidValue(), err
+		}
+		argv = append(argv, arg)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout = i.out
+	cmd.Stderr = i.out
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return intValue(int64(exitErr.ExitCode())), nil
+		}
+		return errorUnionValue(err.Error()), nil
+	}
+	return intValue(0), nil
 }
 
 // evalProcessIndex evaluates one i64 process helper argument.

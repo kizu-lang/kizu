@@ -1,54 +1,269 @@
-pub enum ProgramKind {
-    Unsupported,
-    MainPrint,
+pub enum ValueKind {
+    None,
+    ConstString,
+}
+
+pub struct Value {
+    pub kind: ValueKind,
+    pub name: []u8,
+    pub string_payload: []u8,
+}
+
+pub enum InstructionKind {
+    None,
+    ConstString,
+    Call,
+    ReturnVoid,
+}
+
+pub struct Instruction {
+    pub kind: InstructionKind,
+    pub result_kind: ValueKind,
+    pub result_name: []u8,
+    pub result_payload: []u8,
+    pub callee: []u8,
+    pub argument_kind: ValueKind,
+    pub argument_name: []u8,
+    pub argument_payload: []u8,
+}
+
+pub struct CodegenBlock {
+    pub label: []u8,
+    pub instruction_count: i64,
+}
+
+pub struct CodegenFunction {
+    pub name: []u8,
+    pub block_count: i64,
 }
 
 pub struct Program {
-    pub kind: ProgramKind,
+    pub function_count: i64,
     pub function_name: []u8,
-    pub string_constant: []u8,
-    pub calls_print: bool,
-    pub returns_void: bool,
+    pub block_count: i64,
+    pub block_label: []u8,
+    pub instruction_count: i64,
+    pub first_kind: InstructionKind,
+    pub first_result_kind: ValueKind,
+    pub first_result_name: []u8,
+    pub first_result_payload: []u8,
+    pub second_kind: InstructionKind,
+    pub second_callee: []u8,
+    pub second_argument_kind: ValueKind,
+    pub second_argument_name: []u8,
+    pub second_argument_payload: []u8,
+    pub third_kind: InstructionKind,
+    pub from_codegen_lowering: bool,
+}
+
+pub enum RunStatementKind {
+    None,
+    Print,
+}
+
+pub enum RunArgumentKind {
+    None,
+    ConstString,
+}
+
+pub struct RunAst {
+    pub ok: bool,
+    pub function_count: i64,
+    pub function_name: []u8,
+    pub block_count: i64,
+    pub statement_count: i64,
+    pub final_statement_kind: RunStatementKind,
+    pub final_callee: []u8,
+    pub final_argument_kind: RunArgumentKind,
+    pub final_argument_payload: []u8,
 }
 
 pub fn main_print_program(payload: []u8) -> Program {
+    return build_main_print_program(payload, false);
+}
+
+fn lowered_main_print_program(payload: []u8) -> Program {
+    return build_main_print_program(payload, true);
+}
+
+fn build_main_print_program(payload: []u8, from_codegen_lowering: bool) -> Program {
+    let function = CodegenFunction {
+        name: "main",
+        block_count: 1
+    };
+    let block = CodegenBlock {
+        label: "entry",
+        instruction_count: 3
+    };
+    let value = const_string_value("s0", payload);
+    let first = const_string_instruction(value);
+    let argument = const_string_value("s0", payload);
+    let second = call_instruction("print", argument);
+    let third = return_void_instruction();
     return Program {
-        kind: ProgramKind::MainPrint,
-        function_name: "main",
-        string_constant: payload,
-        calls_print: true,
-        returns_void: true
+        function_count: 1,
+        function_name: function.name,
+        block_count: function.block_count,
+        block_label: block.label,
+        instruction_count: block.instruction_count,
+        first_kind: first.kind,
+        first_result_kind: first.result_kind,
+        first_result_name: first.result_name,
+        first_result_payload: first.result_payload,
+        second_kind: second.kind,
+        second_callee: second.callee,
+        second_argument_kind: second.argument_kind,
+        second_argument_name: second.argument_name,
+        second_argument_payload: second.argument_payload,
+        third_kind: third.kind,
+        from_codegen_lowering: from_codegen_lowering
     };
 }
 
 pub fn unsupported_program(empty: []u8) -> Program {
     return Program {
-        kind: ProgramKind::Unsupported,
-        function_name: empty,
-        string_constant: empty,
-        calls_print: false,
-        returns_void: false
+        function_count: 0,
+        function_name: empty[0..0],
+        block_count: 0,
+        block_label: empty[0..0],
+        instruction_count: 0,
+        first_kind: InstructionKind::None,
+        first_result_kind: ValueKind::None,
+        first_result_name: empty[0..0],
+        first_result_payload: empty[0..0],
+        second_kind: InstructionKind::None,
+        second_callee: empty[0..0],
+        second_argument_kind: ValueKind::None,
+        second_argument_name: empty[0..0],
+        second_argument_payload: empty[0..0],
+        third_kind: InstructionKind::None,
+        from_codegen_lowering: false
     };
 }
 
 pub fn program_supported(program: &Program) -> bool {
-    return program.kind == ProgramKind::MainPrint;
+    return main_print_payload(program).kind == ValueKind::ConstString;
+}
+
+pub fn lowered_program_supported(program: &Program) -> bool {
+    return program_supported(program) and program.from_codegen_lowering;
 }
 
 pub fn require_main_print(program: &Program) -> !void {
-    if program.kind != ProgramKind::MainPrint {
+    let payload = main_print_payload(program);
+    if payload.kind != ValueKind::ConstString {
         return error("unsupported codegen program");
     }
     if !std::mem::equal_bytes(program.function_name, "main") {
         return error("unsupported codegen function");
     }
-    if !program.calls_print {
-        return error("unsupported codegen call");
-    }
-    if !program.returns_void {
-        return error("unsupported codegen return");
+    return;
+}
+
+pub fn require_lowered_main_print(program: &Program) -> !void {
+    try require_main_print(program);
+    if !program.from_codegen_lowering {
+        return error("codegen program was not produced by checked AST lowering");
     }
     return;
+}
+
+pub fn stdout_payload(program: &Program) -> ![]u8 {
+    let payload = main_print_payload(program);
+    if payload.kind != ValueKind::ConstString {
+        return error("unsupported codegen stdout payload");
+    }
+    return payload.string_payload;
+}
+
+pub fn metadata_for_program(program: &Program) -> []u8 {
+    if program.from_codegen_lowering {
+        return metadata_line();
+    }
+    return "none";
+}
+
+fn main_print_payload(program: &Program) -> Value {
+    if program.function_count != 1 or program.block_count != 1 {
+        return none_value(program.function_name);
+    }
+    if !std::mem::equal_bytes(program.block_label, "entry") {
+        return none_value(program.function_name);
+    }
+    if program.instruction_count != 3 {
+        return none_value(program.function_name);
+    }
+    if program.first_kind != InstructionKind::ConstString {
+        return none_value(program.function_name);
+    }
+    if program.second_kind != InstructionKind::Call or !std::mem::equal_bytes(program.second_callee, "print") {
+        return none_value(program.function_name);
+    }
+    if program.third_kind != InstructionKind::ReturnVoid {
+        return none_value(program.function_name);
+    }
+    if program.first_result_kind != ValueKind::ConstString or program.second_argument_kind != ValueKind::ConstString {
+        return none_value(program.function_name);
+    }
+    if !std::mem::equal_bytes(program.first_result_name, program.second_argument_name) {
+        return none_value(program.function_name);
+    }
+    return const_string_value(program.first_result_name, program.first_result_payload);
+}
+
+fn const_string_value(name: []u8, payload: []u8) -> Value {
+    return Value {
+        kind: ValueKind::ConstString,
+        name: name,
+        string_payload: payload
+    };
+}
+
+fn none_value(empty: []u8) -> Value {
+    return Value {
+        kind: ValueKind::None,
+        name: empty[0..0],
+        string_payload: empty[0..0]
+    };
+}
+
+fn const_string_instruction(value: Value) -> Instruction {
+    return Instruction {
+        kind: InstructionKind::ConstString,
+        result_kind: value.kind,
+        result_name: value.name,
+        result_payload: value.string_payload,
+        callee: "",
+        argument_kind: ValueKind::None,
+        argument_name: value.name[0..0],
+        argument_payload: value.string_payload[0..0]
+    };
+}
+
+fn call_instruction(callee: []u8, argument: Value) -> Instruction {
+    return Instruction {
+        kind: InstructionKind::Call,
+        result_kind: ValueKind::None,
+        result_name: callee[0..0],
+        result_payload: callee[0..0],
+        callee: callee,
+        argument_kind: argument.kind,
+        argument_name: argument.name,
+        argument_payload: argument.string_payload
+    };
+}
+
+fn return_void_instruction() -> Instruction {
+    return Instruction {
+        kind: InstructionKind::ReturnVoid,
+        result_kind: ValueKind::None,
+        result_name: "",
+        result_payload: "",
+        callee: "",
+        argument_kind: ValueKind::None,
+        argument_name: "",
+        argument_payload: ""
+    };
 }
 
 pub fn lower_run_program(
@@ -56,48 +271,57 @@ pub fn lower_run_program(
     ast: std::kizu::ast::Ast,
     root: std::kizu::ast::NodeId
 ) -> !Program {
+    let run_ast = try lower_run_ast(text, ast, root);
+    return lower_run_ast_to_program(text, &run_ast);
+}
+
+pub fn lower_run_ast(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId
+) -> !RunAst {
     let node = ast.get(root);
     return match node.data {
-        Program(program) => try lower_run_program_declarations(text, ast, program.declarations),
-        _ => unsupported_program(text[0..0]),
+        Program(program) => try lower_run_ast_declarations(text, ast, program.declarations),
+        _ => unsupported_run_ast(text[0..0]),
     };
 }
 
-fn lower_run_program_declarations(
+fn lower_run_ast_declarations(
     text: []u8,
     ast: std::kizu::ast::Ast,
     declarations: std::kizu::ast::ChildRange
-) -> !Program {
+) -> !RunAst {
     var index = 0;
     while index < declarations.len {
         let child = try ast.child_at(declarations, index);
         let node = ast.get(child);
-        let program = match node.data {
-            FnDecl(fn_decl) => try lower_run_function(text, ast, fn_decl.name, fn_decl.body),
-            _ => unsupported_program(text[0..0]),
+        let run_ast = match node.data {
+            FnDecl(fn_decl) => try lower_run_ast_function(text, ast, fn_decl.name, fn_decl.body),
+            _ => unsupported_run_ast(text[0..0]),
         };
-        if program_supported(&program) {
-            return program;
+        if run_ast_supported(&run_ast) {
+            return run_ast;
         }
         index = index + 1;
     }
-    return unsupported_program(text[0..0]);
+    return unsupported_run_ast(text[0..0]);
 }
 
-fn lower_run_function(
+fn lower_run_ast_function(
     text: []u8,
     ast: std::kizu::ast::Ast,
     name: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId
-) -> !Program {
+) -> !RunAst {
     if !std::mem::equal_bytes(ast_node_text(text, ast, name), "main") {
-        return unsupported_program(text[0..0]);
+        return unsupported_run_ast(text[0..0]);
     }
 
     let node = ast.get(body);
     return match node.data {
-        Block(block) => try lower_run_block(text, ast, block.statements),
-        _ => unsupported_program(text[0..0]),
+        Block(block) => try lower_run_ast_block(text, ast, ast_node_text(text, ast, name), block.statements),
+        _ => unsupported_run_ast(text[0..0]),
     };
 }
 
@@ -113,11 +337,12 @@ struct LocalTable {
     second: LocalBinding,
 }
 
-fn lower_run_block(
+fn lower_run_ast_block(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    function_name: []u8,
     statements: std::kizu::ast::ChildRange
-) -> !Program {
+) -> !RunAst {
     var locals = empty_local_table(text);
     var index = 0;
     while index < statements.len {
@@ -130,18 +355,25 @@ fn lower_run_block(
                 _ => empty_local(text),
             };
             if std::mem::len(binding.name) == 0 {
-                return unsupported_program(text[0..0]);
+                return unsupported_run_ast(text[0..0]);
             }
             locals = insert_local(text, &locals, &binding);
             index = index + 1;
         } else {
             return match node.data {
-                ExprStmt(expr_stmt) => try lower_print_statement(text, ast, &locals, expr_stmt.expr),
-                _ => unsupported_program(text[0..0]),
+                ExprStmt(expr_stmt) => try lower_print_statement(
+                    text,
+                    ast,
+                    function_name,
+                    statements.len,
+                    &locals,
+                    expr_stmt.expr
+                ),
+                _ => unsupported_run_ast(text[0..0]),
             };
         }
     }
-    return unsupported_program(text[0..0]);
+    return unsupported_run_ast(text[0..0]);
 }
 
 fn lower_let_binding(
@@ -169,36 +401,110 @@ fn lower_let_binding(
 fn lower_print_statement(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
     locals: &LocalTable,
     expr: std::kizu::ast::NodeId
-) -> !Program {
+) -> !RunAst {
     let node = ast.get(expr);
     return match node.data {
-        Call(call_node) => try lower_print_call(text, ast, locals, call_node.callee, call_node.args),
-        _ => unsupported_program(text[0..0]),
+        Call(call_node) => try lower_print_call(
+            text,
+            ast,
+            function_name,
+            statement_count,
+            locals,
+            call_node.callee,
+            call_node.args
+        ),
+        _ => unsupported_run_ast(text[0..0]),
     };
 }
 
 fn lower_print_call(
     text: []u8,
     ast: std::kizu::ast::Ast,
+    function_name: []u8,
+    statement_count: i64,
     locals: &LocalTable,
     callee: std::kizu::ast::NodeId,
     args: std::kizu::ast::ChildRange
-) -> !Program {
+) -> !RunAst {
     if !std::mem::equal_bytes(ast_node_text(text, ast, callee), "print") or args.len != 1 {
-        return unsupported_program(text[0..0]);
+        return unsupported_run_ast(text[0..0]);
     }
     let arg = try ast.child_at(args, 0);
     let payload = print_payload(text, ast, locals, arg);
     if payload.start < 0 {
-        return unsupported_program(text[0..0]);
+        return unsupported_run_ast(text[0..0]);
     }
     let payload_text = text[payload.start..payload.end];
     if std::mem::len(payload_text) == 0 {
+        return unsupported_run_ast(text[0..0]);
+    }
+    return print_run_ast(function_name, statement_count, ast_node_text(text, ast, callee), payload_text);
+}
+
+fn lower_run_ast_to_program(text: []u8, run_ast: &RunAst) -> Program {
+    if !run_ast_supported(run_ast) {
         return unsupported_program(text[0..0]);
     }
-    return main_print_program(payload_text);
+    return lowered_main_print_program(run_ast.final_argument_payload);
+}
+
+fn run_ast_supported(run_ast: &RunAst) -> bool {
+    if !run_ast.ok {
+        return false;
+    }
+    if run_ast.function_count != 1 or run_ast.block_count != 1 {
+        return false;
+    }
+    if !std::mem::equal_bytes(run_ast.function_name, "main") {
+        return false;
+    }
+    if run_ast.statement_count < 1 {
+        return false;
+    }
+    if run_ast.final_statement_kind != RunStatementKind::Print {
+        return false;
+    }
+    if !std::mem::equal_bytes(run_ast.final_callee, "print") {
+        return false;
+    }
+    return run_ast.final_argument_kind == RunArgumentKind::ConstString;
+}
+
+fn print_run_ast(
+    function_name: []u8,
+    statement_count: i64,
+    callee: []u8,
+    payload: []u8
+) -> RunAst {
+    return RunAst {
+        ok: true,
+        function_count: 1,
+        function_name: function_name,
+        block_count: 1,
+        statement_count: statement_count,
+        final_statement_kind: RunStatementKind::Print,
+        final_callee: callee,
+        final_argument_kind: RunArgumentKind::ConstString,
+        final_argument_payload: payload
+    };
+}
+
+fn unsupported_run_ast(empty: []u8) -> RunAst {
+    return RunAst {
+        ok: false,
+        function_count: 0,
+        function_name: empty[0..0],
+        block_count: 0,
+        statement_count: 0,
+        final_statement_kind: RunStatementKind::None,
+        final_callee: empty[0..0],
+        final_argument_kind: RunArgumentKind::None,
+        final_argument_payload: empty[0..0]
+    };
 }
 
 struct PayloadSpan {
@@ -350,5 +656,5 @@ fn ast_node_text(
 }
 
 pub fn metadata_line() -> []u8 {
-    return "selfhost::ir::codegen::Program main-print-v0";
+    return "selfhost::ir::codegen::Program function-block-instruction-v0";
 }

@@ -246,6 +246,7 @@ func requiredLLVMRuntimeFragments() []string {
 		"declare %kizu.error.slice.u8 @kizu_rt_process_env",
 		"declare i64 @kizu_rt_process_exit_code",
 		"declare void @kizu_rt_process_exit(i64) noreturn\n",
+		"declare %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 		"declare void @kizu_rt_owned_deinit(%kizu.owned)\n",
 		"declare void @kizu_rt_trap(%kizu.slice.u8) noreturn\n",
 		"declare i64 @kizu_selfhost__runtime_storage_smoke()\n",
@@ -330,7 +331,37 @@ func requiredLLVMCLICheckFragments() []string {
 func requiredLLVMExecutableFragments() []string {
 	return []string{
 		"%kizu.selfhost.executable = type { i64, %kizu.slice.u8 }",
+		"%kizu.selfhost.codegen.binding = type { i1, %kizu.slice.u8, %kizu.slice.u8, i64 }",
+		"%kizu.selfhost.codegen.payload = type { i1, %kizu.slice.u8, i64 }",
+		"%kizu.selfhost.codegen.run_ast = type { i1, i64, %kizu.slice.u8",
+		"%kizu.selfhost.codegen.value = type { i64, %kizu.slice.u8, %kizu.slice.u8 }",
+		"%kizu.selfhost.codegen.instruction = type { i64, i64, %kizu.slice.u8",
+		"%kizu.selfhost.codegen.block = type { %kizu.slice.u8, i64 }",
+		"%kizu.selfhost.codegen.function = type { %kizu.slice.u8, i64 }",
+		"%kizu.selfhost.codegen.program = type { i64, %kizu.slice.u8",
 		"define %kizu.selfhost.executable @kizu_selfhost__cli_test_executable",
+		"define %kizu.selfhost.codegen.value @kizu_selfhost__cli_codegen_const_string_value",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_const_string_instruction",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_call_instruction",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_return_void_instruction",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lowered_main_print_program",
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast",
+		"define %kizu.selfhost.codegen.binding @kizu_selfhost__cli_frontend_parse_let_binding",
+		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_frontend_parse_print_statement",
+		"define i1 @kizu_selfhost__cli_codegen_program_supported",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_stdout_payload",
+		"define %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_payload_llvm_c_string",
+		"define i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
+		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
+		"%payload = call %kizu.error.slice.u8 @kizu_selfhost__cli_codegen_stdout_payload",
+		"%from_codegen_lowering = extractvalue %kizu.selfhost.codegen.program %program, 15",
+		"%shape_ok = and i1 %shape_12, %from_codegen_lowering",
+		"%escape_next_write = call i64 @kizu_selfhost__cli_codegen_write_llvm_escape",
+		"define i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
+		"%run_emitted = call i1 @kizu_selfhost__cli_emit_run_codegen_artifact",
+		"%run_link_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
+		"%run_artifact_result = call %kizu.error.i64 @kizu_rt_process_spawn_wait8",
 	}
 }
 
@@ -365,11 +396,22 @@ func forbiddenLLVMFragments() []string {
 		"define i1 @kizu_selfhost__cli_is_supported_run_print_payload",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_run_codegen_program",
 		"define %kizu.error.slice.u8 @kizu_selfhost__cli_run_payload_llvm_c_string",
-		"%kizu.selfhost.codegen.program = type",
 		"%run_codegen = call %kizu.selfhost.codegen.program",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_checked_program",
+		"@kizu_selfhost__cli_codegen_parse_checked_run_ast",
+		"@kizu_selfhost__cli_codegen_parse_let_binding",
+		"@kizu_selfhost__cli_codegen_parse_print_statement",
+		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_codegen_parse_print_payload",
 		"%run_print_mkdir = call %kizu.error.void @kizu_selfhost__ensure_artifact_dir",
 		"%run_print_ll_write = call %kizu.error.void @kizu_selfhost__write_concat9",
 		"%run_print_meta_write = call %kizu.error.void @kizu_selfhost__write_concat9",
+		"run_ll_prefix",
+		"run_ll_middle",
+		"run_module_prefix",
+		"run_module_len_middle",
+		"run_module_payload_middle",
+		"run_module_slice_middle",
+		"run_module_suffix",
 		"target/selfhost/run/runtime.kizu",
 		"target/selfhost/run/run_hello.ll",
 		"target/selfhost/run/run_hello.ll.meta",
@@ -412,7 +454,7 @@ func requiredLLVMMetadataFragments() []string {
 		"abi-call direct-record-roundtrip\n",
 		"go-stdprim-storage none\n",
 		"go-stdprim-host none\n",
-		"linker-process deferred issue-459\n",
+		"linker-process hosted-artifact-runner\n",
 		"backend-input ir-contract selfhost-checked-package-v1\n",
 		"backend-input checked-entry selfhost::cli_main\n",
 		"backend-input hosted-entry @kizu_selfhost__cli_main\n",
@@ -460,10 +502,24 @@ func requiredLLVMMetadataSelectedSignatureFragments() []string {
 			"lower_run_codegen_program !codegen::Program\n",
 		"backend-input function-signature-param selfhost::backend::" +
 			"lower_run_codegen_program 1 ast:runtime:std::kizu::ast::Ast\n",
-		"backend-input function-signature-return selfhost::backend::hosted::" +
-			"emit_run_codegen_artifact !data::RunArtifact\n",
-		"backend-input function-signature-param selfhost::backend::hosted::" +
-			"emit_run_codegen_artifact 3 program:runtime:codegen::Program\n",
+		"backend-input function-signature-return selfhost::ir::codegen::" +
+			"lower_run_program !Program\n",
+		"backend-input function-signature-param selfhost::ir::codegen::" +
+			"lower_run_program 1 ast:runtime:std::kizu::ast::Ast\n",
+		"backend-input function-signature-return selfhost::ir::codegen::" +
+			"lower_run_ast !RunAst\n",
+		"backend-input function-signature-param selfhost::ir::codegen::" +
+			"lower_run_ast 1 ast:runtime:std::kizu::ast::Ast\n",
+		"backend-input function-signature-return selfhost::ir::codegen::" +
+			"lower_run_ast_to_program Program\n",
+		"backend-input function-signature-return selfhost::ir::codegen::" +
+			"main_print_program Program\n",
+		"backend-input function-signature-param selfhost::ir::codegen::" +
+			"main_print_program 0 payload:runtime:[]u8\n",
+		"backend-input function-signature-return selfhost::ir::codegen::" +
+			"stdout_payload ![]u8\n",
+		"backend-input function-signature-param selfhost::ir::codegen::" +
+			"stdout_payload 0 program:runtime:&Program\n",
 		"backend-input function-signature-param selfhost::backend::executable::" +
 			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast\n",
 	}
@@ -947,10 +1003,11 @@ func countHostCapabilityMetadataFailures(t *testing.T, metaContent string) int {
 		"external @kizu_host_process_env\n",
 		"external @kizu_host_process_exit_code\n",
 		"external @kizu_host_process_exit\n",
+		"external @kizu_host_process_spawn_wait8\n",
 		"external @kizu_host_trap\n",
 		"go-stdprim-host none\n",
 		"interpreter-host none\n",
-		"linker-process deferred issue-459\n",
+		"linker-process hosted-artifact-runner\n",
 	}
 	for _, fragment := range requiredMeta {
 		if !strings.Contains(metaContent, fragment) {

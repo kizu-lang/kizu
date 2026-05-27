@@ -2,11 +2,31 @@ import selfhost::backend::data;
 import selfhost::ir::codegen;
 
 pub fn run_artifact_dir() -> []u8 {
-    return "target/selfhost/run";
+    return "target/selfhost/cache/run";
 }
 
 pub fn run_artifact_path_prefix() -> []u8 {
-    return "target/selfhost/run/";
+    return "target/selfhost/cache/run/";
+}
+
+pub fn run_artifact_cache_dir() -> []u8 {
+    return "target/selfhost/cache";
+}
+
+pub fn run_linker_tool() -> []u8 {
+    return "clang";
+}
+
+pub fn run_linker_llvm_module_flag() -> []u8 {
+    return "-Wno-override-module";
+}
+
+pub fn run_host_runtime_source() -> []u8 {
+    return "selfhost/runtime/selfhost.hosted.c";
+}
+
+pub fn run_linker_output_flag() -> []u8 {
+    return "-o";
 }
 
 pub fn test_artifact_dir() -> []u8 {
@@ -83,7 +103,7 @@ pub fn test_metadata_discovery_line() -> []u8 {
 
 pub fn run_print_executable() -> data::HostedExecutable {
     return data::HostedExecutable {
-        comment: "kizu run artifact ll v0",
+        comment: "kizu codegen run artifact ll v0",
         entry: "kizu_run_main",
         global: "kizu.run.stdout",
         codegen_ir: "none",
@@ -126,7 +146,7 @@ pub fn emit_run_codegen_artifact(
     source_path: []u8,
     program: codegen::Program
 ) -> !data::RunArtifact {
-    try codegen::require_main_print(&program);
+    try codegen::require_lowered_main_print(&program);
     try ensure_hosted_artifact_dir(io, run_artifact_dir());
 
     var ll_path = try artifact_path(
@@ -141,7 +161,7 @@ pub fn emit_run_codegen_artifact(
         source_path,
         artifact_metadata_suffix()
     );
-    let hosted = hosted_executable_from_codegen(run_print_executable(), program);
+    let hosted = try hosted_executable_from_codegen(run_print_executable(), program);
     let ll_path_view = ll_path.as_bytes();
     let metadata_path_view = metadata_path.as_bytes();
     let module_len = try write_hosted_module(
@@ -165,6 +185,61 @@ pub fn emit_run_codegen_artifact(
         bytes: module_len,
         metadata_bytes: metadata_len
     };
+}
+
+pub fn run_artifact_ll_path(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    return try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        artifact_ll_suffix()
+    );
+}
+
+pub fn run_artifact_executable_path(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    return try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        ""
+    );
+}
+
+pub fn link_run_artifact(
+    ll_path: &[]u8,
+    executable_path: &[]u8
+) -> !i64 {
+    return try std::process::spawn_wait8(
+        7,
+        run_linker_tool(),
+        run_linker_llvm_module_flag(),
+        ll_path,
+        "target/selfhost/stage2/selfhost.host.ll",
+        run_host_runtime_source(),
+        run_linker_output_flag(),
+        executable_path,
+        ""
+    );
+}
+
+pub fn execute_run_artifact(executable_path: &[]u8) -> !i64 {
+    return try std::process::spawn_wait8(
+        1,
+        executable_path,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+    );
 }
 
 pub fn emit_test_executable_artifact(
@@ -200,6 +275,24 @@ pub fn emit_test_executable_artifact(
     return artifact;
 }
 
+fn hosted_executable_from_codegen(
+    template: data::HostedExecutable,
+    program: codegen::Program
+) -> !data::HostedExecutable {
+    let payload = try codegen::stdout_payload(&program);
+    let codegen_ir = codegen::metadata_for_program(&program);
+    return data::HostedExecutable {
+        comment: template.comment,
+        entry: template.entry,
+        global: template.global,
+        codegen_ir: codegen_ir,
+        output_stream: template.output_stream,
+        output_payload: payload,
+        append_newline: template.append_newline,
+        exit_code: template.exit_code
+    };
+}
+
 fn ensure_hosted_artifact_dir(io: Io, leaf: []u8) -> !void {
     if !(try std::fs::exists(io, "target")) {
         try std::fs::create_dir(io, "target");
@@ -207,10 +300,31 @@ fn ensure_hosted_artifact_dir(io: Io, leaf: []u8) -> !void {
     if !(try std::fs::exists(io, "target/selfhost")) {
         try std::fs::create_dir(io, "target/selfhost");
     }
+    if std::mem::equal_bytes(leaf, run_artifact_dir()) and
+        !(try std::fs::exists(io, run_artifact_cache_dir())) {
+        try std::fs::create_dir(io, run_artifact_cache_dir());
+    }
     if !(try std::fs::exists(io, leaf)) {
         try std::fs::create_dir(io, leaf);
     }
     return;
+}
+
+fn write_run_metadata(
+    allocator: Allocator,
+    io: Io,
+    source_path: []u8,
+    ll_path: &[]u8,
+    metadata_path: &[]u8,
+    hosted: &data::HostedExecutable
+) -> !i64 {
+    var metadata = std::string::String(allocator);
+    try append_line(metadata, run_metadata_title());
+    try append_line(metadata, run_metadata_issue());
+    try append_common_metadata(metadata, source_path, ll_path, hosted);
+    let metadata_len = try write_metadata(io, metadata_path, metadata);
+    metadata.deinit();
+    return metadata_len;
 }
 
 fn write_test_artifact(
@@ -278,22 +392,6 @@ fn hosted_executable_with_payload(
     };
 }
 
-fn hosted_executable_from_codegen(
-    template: data::HostedExecutable,
-    program: codegen::Program
-) -> data::HostedExecutable {
-    return data::HostedExecutable {
-        comment: template.comment,
-        entry: template.entry,
-        global: template.global,
-        codegen_ir: codegen::metadata_line(),
-        output_stream: template.output_stream,
-        output_payload: program.string_constant,
-        append_newline: template.append_newline,
-        exit_code: template.exit_code
-    };
-}
-
 fn write_hosted_module(
     allocator: Allocator,
     io: Io,
@@ -311,23 +409,6 @@ fn write_hosted_module(
     );
     module.deinit();
     return module_len;
-}
-
-fn write_run_metadata(
-    allocator: Allocator,
-    io: Io,
-    source_path: []u8,
-    ll_path: &[]u8,
-    metadata_path: &[]u8,
-    hosted: &data::HostedExecutable
-) -> !i64 {
-    var metadata = std::string::String(allocator);
-    try append_line(metadata, run_metadata_title());
-    try append_line(metadata, run_metadata_issue());
-    try append_common_metadata(metadata, source_path, ll_path, hosted);
-    let metadata_len = try write_metadata(io, metadata_path, metadata);
-    metadata.deinit();
-    return metadata_len;
 }
 
 fn write_test_metadata(
@@ -440,6 +521,7 @@ fn render_hosted_llvm(
         try append_hosted_global(out, global, output_payload, append_newline, output_len);
         try append_hosted_output_body(out, entry, global, output_stream, output_len, exit_code);
     }
+    try append_host_main(out, entry);
     return out;
 }
 
@@ -560,6 +642,23 @@ fn append_exit(out: &var std::string::String, exit_code: i64) -> !void {
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     try append_line(out, "  ret i64 %code");
+    try append_line(out, "}");
+    return;
+}
+
+fn append_host_main(out: &var std::string::String, entry: []u8) -> !void {
+    try append_line(out, "");
+    try append_line(out, "declare void @kizu_host_init(i32, ptr)");
+    try append_line(out, "");
+    try append_line(out, "define i32 @main(i32 %argc, ptr %argv) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  call void @kizu_host_init(i32 %argc, ptr %argv)");
+    try out.append_bytes("  %code = call i64 @");
+    try out.append_bytes(entry);
+    try out.append_bytes("()");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  %exit = trunc i64 %code to i32");
+    try append_line(out, "  ret i32 %exit");
     try append_line(out, "}");
     return;
 }

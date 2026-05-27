@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -71,7 +70,7 @@ func TestSelfhostRunParityRecipes(t *testing.T) {
 	requireRecipeFragment(t, fromScratch, "just selfhost-run-parity-gate")
 }
 
-// runSelfhostRunParity executes the #569 manifest with the hosted artifact.
+// runSelfhostRunParity executes the #569 manifest with the hosted compiler.
 func runSelfhostRunParity(t *testing.T) (string, int) {
 	t.Helper()
 	restore, err := chdirRepoRoot()
@@ -178,7 +177,7 @@ func countRunParityCaseFailures(
 	return failures
 }
 
-// runRunParityCase emits, links, and executes one hosted run artifact case.
+// runRunParityCase executes one run case through the hosted artifact path.
 func runRunParityCase(
 	t *testing.T,
 	clang string,
@@ -196,13 +195,13 @@ func runRunParityCase(
 		t.Errorf("run parity %s unsupported artifact mode %q", item.name, item.artifactMode)
 		return result, 1
 	}
+	compilerFailures := compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr)
 	if item.exitCode != 0 {
-		return result, compareRunCompilerResult(t, item, result.compiler, expectedOut, expectedErr) +
-			countUnexpectedRunArtifacts(t, item)
+		return result, compilerFailures + countUnexpectedRunArtifacts(t, item)
 	}
 	linkFailures := linkAndRunRunParityArtifact(t, clang, item, &result)
-	checkFailures := compareRunProgramResult(t, item, result, expectedOut, expectedErr)
-	return result, linkFailures + checkFailures
+	programFailures := compareRunProgramResult(t, item, result, expectedOut, expectedErr)
+	return result, compilerFailures + linkFailures + programFailures
 }
 
 // countUnexpectedRunArtifacts rejects artifact emission after frontend failure.
@@ -210,8 +209,8 @@ func countUnexpectedRunArtifacts(t *testing.T, item runParityCase) int {
 	t.Helper()
 	failures := 0
 	for _, path := range []string{
-		filepath.Join("target/selfhost/run", item.name+".ll"),
-		filepath.Join("target/selfhost/run", item.name+".ll.meta"),
+		filepath.Join("target/selfhost/cache/run", item.name+".ll"),
+		filepath.Join("target/selfhost/cache/run", item.name+".ll.meta"),
 	} {
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("run parity %s emitted unexpected artifact %s", item.name, path)
@@ -249,13 +248,9 @@ func linkAndRunRunParityArtifact(
 		t.Errorf("run parity %s missing artifact stem", item.name)
 		return 1
 	}
-	result.llPath = filepath.Join("target/selfhost/run", item.artifactStem+".ll")
+	result.llPath = filepath.Join("target/selfhost/cache/run", item.artifactStem+".ll")
 	result.metadataPath = result.llPath + ".meta"
-	result.exePath = filepath.Join("target/selfhost/run", item.name)
-	if result.compiler.code != 0 || result.compiler.stdout != "" || result.compiler.stderr != "" {
-		t.Errorf("run parity %s compiler output mismatch", item.name)
-		return 1
-	}
+	result.exePath = filepath.Join("target/selfhost/cache/run", item.name+".check")
 	var err error
 	result.llBytes, err = fileSize(result.llPath)
 	if err != nil {
@@ -288,7 +283,7 @@ func countRunCodegenMetadataFailures(t *testing.T, item runParityCase, metadataP
 	}
 	metadata := string(metadataBytes)
 	required := []string{
-		"codegen_ir selfhost::ir::codegen::Program main-print-v0\n",
+		"codegen_ir selfhost::ir::codegen::Program function-block-instruction-v0\n",
 		"run.codegen-ir enabled\n",
 		"go.cmd-kizu-fallback none\n",
 	}
@@ -301,22 +296,14 @@ func countRunCodegenMetadataFailures(t *testing.T, item runParityCase, metadataP
 	return 0
 }
 
-// compareRunProgramResult checks executable output against checked-in goldens.
-func compareRunProgramResult(
-	t *testing.T,
-	item runParityCase,
-	result runParityResult,
-	expectedOut string,
-	expectedErr string,
-) int {
-	t.Helper()
-	if result.program.code != item.exitCode ||
-		result.program.stdout != expectedOut ||
-		result.program.stderr != expectedErr {
-		t.Errorf("run parity %s program mismatch", item.name)
-		return 1
-	}
-	return 0
+// linkRunParityExecutable links one emitted run artifact with the host runtime.
+func linkRunParityExecutable(clang string, llPath string, exePath string) error {
+	return linkRunParityExecutableWithHost(
+		clang,
+		llPath,
+		"target/selfhost/stage2/selfhost.host.ll",
+		exePath,
+	)
 }
 
 // readRunParityGoldens loads the expected stdout and stderr bytes.
@@ -334,83 +321,10 @@ func readRunParityGoldens(item runParityCase) (string, string, error) {
 
 // prepareRunParityDir removes bounded run artifacts without precreating the leaf.
 func prepareRunParityDir() error {
-	if err := os.RemoveAll("target/selfhost/run"); err != nil {
+	if err := os.RemoveAll("target/selfhost/cache/run"); err != nil {
 		return err
 	}
 	return os.MkdirAll("target/selfhost/reports", 0o755)
-}
-
-// linkRunParityExecutable links one emitted run artifact with the host runtime.
-func linkRunParityExecutable(clang string, llPath string, exePath string) error {
-	return linkRunParityExecutableWithHost(
-		clang,
-		llPath,
-		"target/selfhost/stage2/selfhost.host.ll",
-		exePath,
-	)
-}
-
-// linkRunParityExecutableWithHost links one emitted run artifact with a host runtime.
-func linkRunParityExecutableWithHost(
-	clang string,
-	llPath string,
-	hostLLPath string,
-	exePath string,
-) error {
-	harnessPath := filepath.Join(filepath.Dir(exePath), "hosted_run_main.c")
-	if err := os.WriteFile(harnessPath, []byte(hostedRunHarnessSource), 0o644); err != nil {
-		return err
-	}
-	compile := exec.Command(
-		clang,
-		"-Wno-override-module",
-		llPath,
-		hostLLPath,
-		"selfhost/runtime/selfhost.hosted.c",
-		harnessPath,
-		"-o",
-		exePath,
-	)
-	if out, err := compile.CombinedOutput(); err != nil {
-		return fmt.Errorf("%w\n%s", err, out)
-	}
-	return nil
-}
-
-// runRunParityExecutable captures stdout, stderr, and exit code for run output.
-func runRunParityExecutable(t *testing.T, exePath string) bootstrapCommandResult {
-	t.Helper()
-	start := time.Now()
-	absExe, err := filepath.Abs(exePath)
-	if err != nil {
-		t.Errorf("resolve %s: %v", exePath, err)
-	}
-	run := exec.Command(absExe)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	run.Stdout = &stdout
-	run.Stderr = &stderr
-	err = run.Run()
-	return bootstrapCommandResult{
-		name:    filepath.Base(exePath),
-		command: absExe,
-		stdout:  stdout.String(),
-		stderr:  stderr.String(),
-		code:    exitCode(err),
-		elapsed: time.Since(start),
-	}
-}
-
-// fileSize returns the size of a regular file.
-func fileSize(path string) (int64, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	if info.IsDir() {
-		return 0, fmt.Errorf("%s is a directory", path)
-	}
-	return info.Size(), nil
 }
 
 // countRunParityGuardFailures checks usage and unsupported-command stability.
@@ -474,9 +388,9 @@ func appendRunParityHeader(out *strings.Builder, count int) {
 	fmt.Fprintf(out, "manifest selfhost/tests/cli/run-parity.tsv\n")
 	fmt.Fprintf(out, "runner target/selfhost/stage2/selfhost\n")
 	fmt.Fprintf(out, "bootstrap.report target/selfhost/reports/bootstrap.txt\n")
-	fmt.Fprintf(out, "validation.path hosted-stage2-artifact\n")
+	fmt.Fprintf(out, "validation.path hosted-stage2-artifact-run\n")
 	fmt.Fprintf(out, "go.cmd-kizu-fallback none\n")
-	fmt.Fprintf(out, "artifact.dir target/selfhost/run\n")
+	fmt.Fprintf(out, "artifact.dir target/selfhost/cache/run\n")
 	fmt.Fprintf(out, "cases %d\n", count)
 }
 
@@ -572,15 +486,3 @@ func appendRunParityFooter(out *strings.Builder, start time.Time, failures int) 
 func writeRunParityReport(report string) error {
 	return os.WriteFile("target/selfhost/reports/run-parity.txt", []byte(report), 0o644)
 }
-
-const hostedRunHarnessSource = `
-#include <stdint.h>
-
-void kizu_host_init(int argc, char **argv);
-int64_t kizu_run_main(void);
-
-int main(int argc, char **argv) {
-    kizu_host_init(argc, argv);
-    return (int)kizu_run_main();
-}
-`

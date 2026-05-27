@@ -969,49 +969,95 @@ func TestSelfhostFrontendResponsibilitiesStaySplit(t *testing.T) {
 	assertSelfhostRootOmitsResponsibilities(t)
 }
 
-// TestSelfhostHostedRunConsumesCodegenIR keeps the first backend slice behind
-// an explicit selfhost-owned codegen boundary.
+// TestSelfhostRunConsumesCodegenIR keeps run execution behind an explicit
+// selfhost-owned codegen boundary.
 func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	hosted := readSelfhostFile(t, "../../selfhost/src/backend/hosted.kizu")
 	execute := readSelfhostFile(t, "../../selfhost/src/cli/execute.kizu")
 	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	cliRun := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
+	cliFrontend := readSelfhostFile(t, "../../selfhost/src/backend/cli_frontend_llvm.kizu")
+	cliCodegen := readSelfhostFile(t, "../../selfhost/src/backend/cli_codegen_llvm.kizu")
+	cliHostedRenderer := readSelfhostFile(
+		t,
+		"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu",
+	)
+	assertExecuteRoutesRunThroughCodegenIR(t, execute)
+	assertHostedOmitsRunCodegenArtifact(t, hosted)
+	assertCodegenIRShape(t, codegen)
+	assertCodegenIRForbiddenBridges(t, hosted, codegen)
+	assertHostedRunLLVMResponsibilities(t, cliRun, cliFrontend, cliCodegen, cliHostedRenderer)
+}
+
+// assertExecuteRoutesRunThroughCodegenIR checks the CLI layer hands run input
+// to the selfhost codegen boundary.
+func assertExecuteRoutesRunThroughCodegenIR(t *testing.T, execute string) {
+	t.Helper()
 	requiredExecute := []string{
 		"backend::lower_run_codegen_program(file_text, parsed.ast, parsed.root)",
 		"backend::emit_run_codegen_artifact(",
+		"artifact.bytes > 0 and artifact.metadata_bytes > 0",
+		"backend::run_artifact_ll_path(allocator, path)",
+		"backend::run_artifact_executable_path(allocator, path)",
+		"backend::link_run_artifact(ll_path_bytes, executable_path_bytes)",
+		"backend::execute_run_artifact(executable_path_bytes)",
 	}
 	for _, fragment := range requiredExecute {
 		if !strings.Contains(execute, fragment) {
 			t.Fatalf("execute module does not route run through codegen IR with %q", fragment)
 		}
 	}
-	requiredHosted := []string{
-		"import selfhost::ir::codegen;",
-		"try codegen::require_main_print(&program);",
-		"let hosted = hosted_executable_from_codegen(run_print_executable(), program);",
-		"codegen_ir: codegen::metadata_line(),",
-		"try append_key_value(metadata, \"codegen_ir \", hosted.codegen_ir);",
-	}
-	for _, fragment := range requiredHosted {
-		if !strings.Contains(hosted, fragment) {
-			t.Fatalf("hosted backend does not consume codegen IR through %q", fragment)
-		}
-	}
+}
+
+// assertHostedOmitsRunCodegenArtifact checks run no longer writes fixture-shaped
+// hosted LLVM artifacts.
+func assertHostedOmitsRunCodegenArtifact(t *testing.T, hosted string) {
+	t.Helper()
 	for _, forbidden := range []string{
 		"codegen::main_print_program(executable.payload)",
 		"hosted_executable_from_codegen(run_print_executable(), executable",
+		"run_ll_prefix",
+		"run_ll_middle",
+		"target/selfhost/run/run_hello.ll",
 	} {
 		if strings.Contains(hosted, forbidden) {
 			t.Fatalf("hosted backend keeps static executable-to-codegen bridge %q", forbidden)
 		}
 	}
+}
+
+// assertCodegenIRShape keeps the selfhost codegen boundary on the concrete
+// function/block/instruction/value model.
+func assertCodegenIRShape(t *testing.T, codegen string) {
+	t.Helper()
 	requiredCodegen := []string{
+		"pub enum ValueKind",
+		"pub enum InstructionKind",
+		"pub struct Value",
+		"pub struct Instruction",
+		"pub struct CodegenBlock",
+		"pub struct CodegenFunction",
 		"pub struct Program",
+		"pub struct RunAst",
+		"pub from_codegen_lowering: bool",
+		"pub fn lower_run_ast(",
+		"fn lower_run_ast_to_program(",
+		"fn run_ast_supported(",
 		"pub fn main_print_program(payload: []u8) -> Program",
-		"function_name: \"main\"",
-		"calls_print: true",
-		"returns_void: true",
+		"fn lowered_main_print_program(payload: []u8) -> Program",
+		"name: \"main\"",
+		"function_name: function.name",
+		"block_label: block.label",
+		"first_kind: first.kind",
+		"second_callee: second.callee",
+		"third_kind: third.kind",
+		"from_codegen_lowering: from_codegen_lowering",
 		"pub fn require_main_print(program: &Program) -> !void",
-		"return \"selfhost::ir::codegen::Program main-print-v0\";",
+		"pub fn lowered_program_supported(program: &Program) -> bool",
+		"pub fn require_lowered_main_print(program: &Program) -> !void",
+		"pub fn stdout_payload(program: &Program) -> ![]u8",
+		"pub fn metadata_for_program(program: &Program) -> []u8",
+		"return \"selfhost::ir::codegen::Program function-block-instruction-v0\";",
 	}
 	for _, fragment := range requiredCodegen {
 		if !strings.Contains(codegen, fragment) {
@@ -1019,11 +1065,92 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"pub enum ProgramKind",
+		"ProgramKind::MainPrint",
+		"calls_print",
+		"returns_void",
+		"string_constant",
+		"main-print-v0",
+	} {
+		if strings.Contains(codegen, forbidden) {
+			t.Fatalf("codegen IR boundary keeps obsolete ProgramKind shape %q", forbidden)
+		}
+	}
+}
+
+// assertCodegenIRForbiddenBridges rejects fixture and source-dispatch bridges
+// around the codegen IR boundary.
+func assertCodegenIRForbiddenBridges(t *testing.T, hosted string, codegen string) {
+	t.Helper()
+	for _, forbidden := range []string{
 		"selfhost/tests/cli/run_hello.kizu",
 		"std::fs::read_file(io, \"examples/hello.kizu\")",
 	} {
 		if strings.Contains(hosted, forbidden) || strings.Contains(codegen, forbidden) {
 			t.Fatalf("codegen slice keeps fixture/source dispatch %q", forbidden)
+		}
+	}
+}
+
+// assertHostedRunLLVMResponsibilities keeps the stage2 hosted run path split:
+// run orchestrates, frontend lowers checked source to RunAst, codegen lowers
+// RunAst to Program, and hosted renderer owns the LLVM module rendering.
+func assertHostedRunLLVMResponsibilities(
+	t *testing.T,
+	cliRun string,
+	cliFrontend string,
+	cliCodegen string,
+	cliHostedRenderer string,
+) {
+	t.Helper()
+	requiredRun := []string{
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_selfhost__cli_emit_run_codegen_artifact",
+		"@kizu_selfhost__cli_hosted_write_stdout_ll",
+		"@kizu_rt_process_spawn_wait8",
+	}
+	for _, fragment := range requiredRun {
+		if !strings.Contains(cliRun, fragment) {
+			t.Fatalf("run LLVM path missing responsibility boundary %q", fragment)
+		}
+	}
+	requiredFrontend := []string{
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"define %kizu.selfhost.codegen.binding @kizu_selfhost__cli_frontend_parse_let_binding",
+		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_frontend_parse_print_statement",
+	}
+	for _, fragment := range requiredFrontend {
+		if !strings.Contains(cliFrontend, fragment) {
+			t.Fatalf("frontend LLVM path missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"run_module_prefix",
+		"run_module_len_middle",
+		"run_module_payload_middle",
+		"run_module_slice_middle",
+		"run_module_suffix",
+		"@kizu_selfhost__cli_codegen_parse_checked_run_ast",
+		"@kizu_selfhost__cli_codegen_parse_let_binding",
+		"@kizu_selfhost__cli_codegen_parse_print_statement",
+		"@kizu_selfhost__parse_next_semantic_token_index",
+		"cli_token_word_eq",
+		"cli_token_char_eq",
+	} {
+		if strings.Contains(cliRun, forbidden) {
+			t.Fatalf("run LLVM path owns forbidden frontend/static detail %q", forbidden)
+		}
+		if strings.Contains(cliCodegen, forbidden) {
+			t.Fatalf("codegen LLVM path owns forbidden frontend/static detail %q", forbidden)
+		}
+	}
+	for _, fragment := range []string{
+		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
+		"hosted::run_print_executable()",
+	} {
+		if !strings.Contains(cliHostedRenderer, fragment) {
+			t.Fatalf("hosted renderer missing %q", fragment)
 		}
 	}
 }
@@ -1132,8 +1259,13 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/ir/codegen.kizu": {
 		"pub struct Program",
+		"pub struct RunAst",
+		"pub fn lower_run_ast(",
 		"pub fn main_print_program(",
 		"pub fn require_main_print(",
+		"pub fn lowered_program_supported(",
+		"pub fn require_lowered_main_print(",
+		"pub fn metadata_for_program(",
 		"pub fn metadata_line(",
 	},
 	"../../selfhost/src/backend/runtime.kizu": {
@@ -1141,15 +1273,15 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn render_host_metadata(",
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
-		"import selfhost::ir::codegen;",
-		"pub fn run_artifact_dir(",
 		"pub fn metadata_runtime_line(",
-		"pub fn run_print_executable(",
+		"pub fn run_artifact_ll_path(",
+		"pub fn run_artifact_executable_path(",
+		"pub fn link_run_artifact(",
+		"pub fn execute_run_artifact(",
 		"pub fn test_ok_executable(",
 		"pub fn test_failure_executable(",
 		"fn ensure_hosted_artifact_dir(",
 		"fn lower_test_hosted_executable(",
-		"fn hosted_executable_from_codegen(",
 		"fn render_hosted_llvm(",
 	},
 	"../../selfhost/src/backend/data.kizu": {
@@ -1166,6 +1298,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"cli_artifact_dir_llvm::append_globals(",
 		"cli_artifact_dir_llvm::append_functions(",
+		"cli_frontend_llvm::append_functions(",
+		"cli_hosted_renderer_llvm::append_functions(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1205,16 +1339,68 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
+		"@kizu_selfhost__cli_codegen_stdout_payload",
 		"cli_check_gate_llvm::append_static_check_gate(",
-		"br label %usage",
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"@kizu_selfhost__cli_codegen_lower_run_ast",
+	},
+	"../../selfhost/src/backend/cli_frontend_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+		"fn append_frontend_lower_checked_run_ast_function(",
+		"fn append_frontend_parse_let_binding_function(",
+		"fn append_frontend_parse_print_statement_function(",
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+	},
+	"../../selfhost/src/backend/cli_codegen_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+		"fn append_codegen_const_string_value_function(",
+		"fn append_codegen_const_string_instruction_function(",
+		"fn append_codegen_call_instruction_function(",
+		"fn append_codegen_return_void_instruction_function(",
+		"fn append_codegen_lowered_main_print_program_function(",
+		"fn append_codegen_lower_run_ast_function(",
+		"fn append_codegen_program_supported_function(",
+		"fn append_codegen_stdout_payload_function(",
+		"fn append_codegen_payload_llvm_c_string_function(",
+		"fn append_write_llvm_escape_function(",
+		"%kizu.selfhost.codegen.value",
+		"%kizu.selfhost.codegen.instruction",
+		"%kizu.selfhost.codegen.block",
+		"%kizu.selfhost.codegen.function",
+		"%kizu.selfhost.codegen.run_ast %ast",
+		"%kizu.selfhost.codegen.program %program",
+		"@kizu_selfhost__cli_codegen_const_string_value",
+		"@kizu_selfhost__cli_codegen_const_string_instruction",
+		"@kizu_selfhost__cli_codegen_call_instruction",
+		"@kizu_selfhost__cli_codegen_return_void_instruction",
+		"@kizu_selfhost__cli_codegen_lowered_main_print_program",
+		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_selfhost__cli_codegen_stdout_payload",
+	},
+	"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+		"fn append_write_stdout_ll_function(",
+		"@kizu_selfhost__cli_hosted_write_stdout_ll",
 	},
 	"../../selfhost/src/backend/cli_test_llvm.kizu": {
 		"pub fn append_globals(",
+		"pub fn append_functions(",
 		"pub fn append_cli_test_blocks(",
+		"cli_test_executable_llvm::append_functions(",
 		"fn executable_kind_tag(",
 		"fn append_executable_kind_compare(",
 		"fn append_test_ok_emit_block(",
 		"@kizu_selfhost__ensure_artifact_dir",
+	},
+	"../../selfhost/src/backend/cli_test_executable_llvm.kizu": {
+		"pub fn append_functions(",
+		"cli_executable_body_parsing_llvm::append_functions(",
+		"fn append_cli_test_executable_function(",
+		"executable::unsupported_executable_kind_tag(",
+		"executable::call_executable_kind_tag(",
 	},
 	"../../selfhost/src/backend/cli_match_llvm.kizu": {
 		"pub fn append_functions(",
@@ -1226,11 +1412,6 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_cli_run_main_body_start_function(",
 		"fn append_cli_test_block_body_start_function(",
 		"fn append_cli_test_main_body_start_function(",
-	},
-	"../../selfhost/src/backend/cli_executable_llvm.kizu": {
-		"pub fn append_functions(",
-		"cli_executable_body_parsing_llvm::append_functions(",
-		"fn append_cli_test_executable_function(",
 	},
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
@@ -1272,6 +1453,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_executable_helper_body_facts(",
 		"fn append_hosted_function_facts(",
 		"function_signature::append(",
+		"selfhost::ir::codegen::const_string_value",
+		"selfhost::ir::codegen::const_string_instruction",
+		"selfhost::ir::codegen::call_instruction",
+		"selfhost::ir::codegen::return_void_instruction",
 		"fn append_selected_function_with_body(",
 		"fn function_node(",
 		"executable_body::append_function_body_ir(",
@@ -1507,7 +1692,10 @@ func readHostedExecutableContractSources(t *testing.T) hostedExecutableContractS
 			t,
 			"../../selfhost/src/backend/cli_executable_parser_token_llvm.kizu",
 		),
-		ast:     readSelfhostFile(t, "../../selfhost/src/backend/cli_executable_llvm.kizu"),
+		ast: readSelfhostFile(
+			t,
+			"../../selfhost/src/backend/cli_test_executable_llvm.kizu",
+		),
 		lowerer: "",
 		run:     readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu"),
 		test:    readSelfhostFile(t, "../../selfhost/src/backend/cli_test_llvm.kizu"),
@@ -2189,12 +2377,13 @@ func assertExecutableIRThreading(
 	}
 	for _, fragment := range []string{
 		"try cli_llvm::append_functions(out, ir_bytes)",
-		"try cli_executable_llvm::append_functions(out, ir_bytes)",
+		"try cli_test_llvm::append_functions(out, ir_bytes)",
+		"try cli_test_executable_llvm::append_functions(out, ir_bytes)",
 		"try cli_executable_body_parsing_llvm::append_functions(out, ir_bytes)",
 		"try cli_test_llvm::append_cli_test_blocks(out, ir_bytes)",
 		"try cli_run_llvm::append_cli_run_blocks(out, ir_bytes)",
 	} {
-		combined := llvm + cli + parser + ast
+		combined := llvm + cli + parser + ast + test
 		if !strings.Contains(combined, fragment) {
 			t.Fatalf("IR bytes are not threaded to hosted executable lowerer with %q", fragment)
 		}
@@ -2223,10 +2412,24 @@ func hostedExecutableSelectedSignatureDetailFacts() []string {
 			"lower_run_codegen_program !codegen::Program",
 		"function-signature-param selfhost::backend::" +
 			"lower_run_codegen_program 1 ast:runtime:std::kizu::ast::Ast",
-		"function-signature-return selfhost::backend::hosted::" +
-			"emit_run_codegen_artifact !data::RunArtifact",
-		"function-signature-param selfhost::backend::hosted::" +
-			"emit_run_codegen_artifact 3 program:runtime:codegen::Program",
+		"function-signature-return selfhost::ir::codegen::" +
+			"lower_run_program !Program",
+		"function-signature-param selfhost::ir::codegen::" +
+			"lower_run_program 1 ast:runtime:std::kizu::ast::Ast",
+		"function-signature-return selfhost::ir::codegen::" +
+			"lower_run_ast !RunAst",
+		"function-signature-param selfhost::ir::codegen::" +
+			"lower_run_ast 1 ast:runtime:std::kizu::ast::Ast",
+		"function-signature-return selfhost::ir::codegen::" +
+			"lower_run_ast_to_program Program",
+		"function-signature-return selfhost::ir::codegen::" +
+			"main_print_program Program",
+		"function-signature-param selfhost::ir::codegen::" +
+			"main_print_program 0 payload:runtime:[]u8",
+		"function-signature-return selfhost::ir::codegen::" +
+			"stdout_payload ![]u8",
+		"function-signature-param selfhost::ir::codegen::" +
+			"stdout_payload 0 program:runtime:&Program",
 		"function-signature-param selfhost::backend::executable::" +
 			"lower_test_executable 1 ast:runtime:std::kizu::ast::Ast",
 	}
@@ -2240,12 +2443,58 @@ func hostedExecutableBodyContractFragments() []string {
 		`"selfhost::cli::execute::run_file_cli"`,
 		`"check::checked_ast_node"`,
 		`"backend::lower_run_codegen_program"`,
-		`"backend::emit_run_codegen_artifact"`,
+		`"codegen::stdout_payload"`,
+		`"selfhost::ir::codegen::lower_run_program"`,
+		`"codegen::lower_run_program"`,
+		`"lower_run_ast"`,
+		`"lower_run_ast_to_program"`,
+		`"selfhost::ir::codegen::lower_run_ast"`,
+		`"lower_run_ast_declarations"`,
+		`"selfhost::ir::codegen::lower_run_ast_declarations"`,
+		`"lower_run_ast_function"`,
+		`"run_ast_supported"`,
+		"require_codegen_program_builder_body(bytes)",
+		"fn require_struct_literal_int_field(",
+		"fn require_struct_literal_field_expr(",
+		"fn require_struct_literal_var_field(",
+		"ir_contract::body_struct_literal_of_type(",
+		"ir_contract::body_struct_field_value(",
+		"ir_contract::body_field_expr_name(",
+		`"from_codegen_lowering"`,
+		`"function_name"`,
+		`"second_argument_payload"`,
+		`"selfhost::ir::codegen::lower_run_ast_to_program"`,
+		`"selfhost::ir::codegen::lower_run_ast_function"`,
+		`"lower_run_ast_block"`,
+		`"selfhost::ir::codegen::lower_run_ast_block"`,
+		`"lower_let_binding"`,
+		`"selfhost::ir::codegen::lower_let_binding"`,
+		`"lower_print_statement"`,
+		`"selfhost::ir::codegen::lower_print_statement"`,
+		`"lower_print_call"`,
+		`"selfhost::ir::codegen::lower_print_call"`,
+		`"print_run_ast"`,
+		`"print_payload"`,
+		`"selfhost::ir::codegen::print_payload"`,
+		`"string_literal_span"`,
+		`"selfhost::ir::codegen::string_literal_span"`,
+		`"local_payload_span"`,
+		`"selfhost::ir::codegen::local_payload_span"`,
+		`"selfhost::ir::codegen::main_print_program"`,
+		`"build_main_print_program"`,
+		`"selfhost::ir::codegen::lowered_main_print_program"`,
+		`"selfhost::ir::codegen::build_main_print_program"`,
+		`"const_string_value"`,
+		`"const_string_instruction"`,
+		`"call_instruction"`,
+		`"return_void_instruction"`,
+		`"selfhost::ir::codegen::stdout_payload"`,
+		`"main_print_payload"`,
+		`"codegen::stdout_payload"`,
 		`"selfhost::cli::execute::test_file_cli"`,
 		`"backend::lower_test_executable"`,
 		`"selfhost::backend::executable::lower_test_executable"`,
 		`"executable_lowering::lower_test_executable"`,
-		`"selfhost::backend::hosted::emit_run_codegen_artifact"`,
 		`"selfhost::backend::hosted::emit_test_executable_artifact"`,
 		`"write_test_artifact"`,
 	}

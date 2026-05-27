@@ -90,3 +90,5 @@ Kizu の設計判断は、仕様本文とは別にこのディレクトリで管
 - [ADR-0069: raw pointer dereference syntax](0069-raw-pointer-dereference-syntax.md)
 - [ADR-0070: package export surface](0070-package-export-surface.md)
 - [ADR-0071: unsafe capability blocks](0071-unsafe-capability-blocks.md)
+- [ADR-0072: diagnostic message style](0072-diagnostic-message-style.md)
+- [ADR-0073: selfhost run artifact and host runtime boundary](0073-selfhost-run-artifact-and-host-runtime-boundary.md)
