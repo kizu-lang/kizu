@@ -1155,6 +1155,7 @@ func assertHostedRunLLVMResponsibilities(
 	}
 	assertMetadataLineBodyDerivedCodegen(t, cliCodegen)
 	assertConstStringValueBodyDerivedCodegen(t, cliCodegen)
+	assertConstStringInstructionBodyDerivedCodegen(t, cliCodegen)
 	assertReturnVoidInstructionBodyDerivedCodegen(t, cliCodegen)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
@@ -1200,6 +1201,38 @@ func assertConstStringValueBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	}
 	if strings.Contains(cliCodegen, "return 1;") {
 		t.Fatal("const_string_value LLVM generator still hardcodes the value kind tag helper")
+	}
+}
+
+// assertConstStringInstructionBodyDerivedCodegen keeps the const instruction slice active.
+func assertConstStringInstructionBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"fn const_string_instruction_kind_tag_from_body(",
+		"fn const_string_instruction_none_tag_from_body(",
+		"fn require_const_string_instruction_value_field(",
+		"fn require_const_string_instruction_empty_slice_field(",
+		"selfhost::ir::codegen::const_string_instruction",
+		"selfhost::ir::codegen::InstructionKind",
+		"ir_contract::enum_variant_tag(",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_const_string_instruction",
+	} {
+		if !strings.Contains(cliCodegen, fragment) {
+			t.Fatalf(
+				"codegen LLVM path does not derive const_string_instruction from body facts with %q",
+				fragment,
+			)
+		}
+	}
+	oldInstructionKindRoute := "%field0 = insertvalue " +
+		"%kizu.selfhost.codegen.instruction poison, i64 1, 0"
+	if strings.Contains(cliCodegen, oldInstructionKindRoute) {
+		t.Fatal(
+			"const_string_instruction LLVM generator directly hardcodes the instruction kind tag",
+		)
+	}
+	if strings.Contains(cliCodegen, "return 1;") {
+		t.Fatal("const_string_instruction LLVM generator hardcodes the instruction kind tag helper")
 	}
 }
 
@@ -1435,8 +1468,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_globals(",
 		"pub fn append_functions(",
 		"fn append_codegen_const_string_value_function(",
-		"fn append_codegen_return_void_instruction_function(",
 		"fn append_codegen_const_string_instruction_function(",
+		"fn const_string_instruction_kind_tag_from_body(",
+		"fn append_codegen_return_void_instruction_function(",
 		"fn append_codegen_call_instruction_function(",
 		"fn return_void_instruction_kind_tag_from_body(",
 		"fn append_codegen_lowered_main_print_program_function(",
