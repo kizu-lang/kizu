@@ -1410,6 +1410,23 @@ fn kizu_type_to_llvm(
     module_prefix: []u8,
     kizu_type: []u8
 ) -> ![]u8 {
+    let type_len = std::mem::len(kizu_type);
+    if type_len == 0 {
+        return error("compiled function: empty type");
+    }
+    if kizu_type[0] == cast<u8>(38) {
+        return try kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type[1..type_len]);
+    }
+    if kizu_type[0] == cast<u8>(33) {
+        let inner = kizu_type[1..type_len];
+        if std::mem::equal_bytes(inner, "void") {
+            return "%kizu.error.void";
+        }
+        if std::mem::equal_bytes(inner, "[]u8") {
+            return "%kizu.error.slice.u8";
+        }
+        return error("compiled function: unsupported error type");
+    }
     if std::mem::equal_bytes(kizu_type, "i64") {
         return "i64";
     }
@@ -2431,6 +2448,38 @@ fn emit_expr(
             module_prefix, locals_spec, params_spec,
             expr_node, temp_counter, string_counter
         );
+    }
+    if std::mem::equal_bytes(kind, "String") {
+        let token = try ir_contract::body_token_or_empty(
+            ir_bytes, function_name, expr_node
+        );
+        let token_len = std::mem::len(token);
+        let payload_len = token_len - 2;
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_ptr = getelementptr [");
+        try std::fmt::append_i64(out, payload_len);
+        try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+        try out.append_bytes(llvm_symbol);
+        try out.append_bytes(".s");
+        try std::fmt::append_i64(out, string_counter);
+        try out.append_bytes(", i64 0, i64 0");
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_ptr, 0");
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes(" = insertvalue %kizu.slice.u8 %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_base, i64 ");
+        try std::fmt::append_i64(out, payload_len);
+        try out.append_bytes(", 1");
+        try out.append_byte(cast<u8>(10));
+        return temp_counter + 1;
     }
     return error("compiled function: unsupported expression kind");
 }

@@ -1105,7 +1105,7 @@ func assertHostedRunLLVMResponsibilities(
 	t.Helper()
 	requiredRun := []string{
 		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
-		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_compiled__ir_codegen_lower_run_ast_to_program",
 		"@kizu_selfhost__cli_emit_run_codegen_artifact",
 		"@kizu_selfhost__cli_hosted_write_stdout_ll",
 		"@kizu_rt_process_spawn_wait8",
@@ -1249,34 +1249,10 @@ func assertLoweredMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen st
 // assertLowerRunAstBodyDerivedCodegen keeps the lower_run_ast shape checks body-fact derived.
 func assertLowerRunAstBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	t.Helper()
-	for _, fragment := range []string{
-		"fn append_codegen_lower_run_ast_function(",
-		"fn print_run_ast_statement_kind_tag_from_body(",
-		"fn print_run_ast_argument_kind_tag_from_body(",
-		"fn print_run_ast_return_literal(",
-		"fn print_run_ast_int_field(",
-		"selfhost::ir::codegen::print_run_ast",
-		"selfhost::ir::codegen::RunStatementKind",
-		"selfhost::ir::codegen::RunArgumentKind",
-	} {
-		if !strings.Contains(cliCodegen, fragment) {
-			t.Fatalf(
-				"codegen LLVM path does not derive lower_run_ast from body facts with %q",
-				fragment,
-			)
-		}
-	}
-	for _, forbidden := range []string{
-		`append_global_slice(out, "main", "codegen_main", 4)`,
-		`append_global_slice(out, "print", "codegen_print", 5)`,
-		"%print_statement = icmp eq i64 %final_kind, 1",
-		"%const_arg = icmp eq i64 %arg_kind, 1",
-		"%one_function = icmp eq i64 %function_count, 1",
-		"%one_block = icmp eq i64 %block_count, 1",
-	} {
-		if strings.Contains(cliCodegen, forbidden) {
-			t.Fatalf("lower_run_ast LLVM path still owns hardcoded route %q", forbidden)
-		}
+	if strings.Contains(cliCodegen,
+		"define %kizu.selfhost.codegen.program "+
+			"@kizu_selfhost__cli_codegen_lower_run_ast") {
+		t.Fatal("lower_run_ast hand-written generator should be removed")
 	}
 }
 
@@ -1605,7 +1581,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"@kizu_selfhost__cli_codegen_stdout_payload",
 		"cli_check_gate_llvm::append_static_check_gate(",
 		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
-		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_compiled__ir_codegen_lower_run_ast_to_program",
 	},
 	"../../selfhost/src/backend/cli_frontend_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1621,18 +1597,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn const_string_instruction_kind_tag_from_body(",
 		"fn call_instruction_kind_tag_from_body(",
 		"fn return_void_instruction_kind_tag_from_body(",
-		"fn append_codegen_lower_run_ast_function(",
-		"fn print_run_ast_statement_kind_tag_from_body(",
-		"fn print_run_ast_argument_kind_tag_from_body(",
-		"fn print_run_ast_int_field(",
-		"fn print_run_ast_return_literal(",
 		"fn append_codegen_program_supported_function(",
 		"fn append_codegen_stdout_payload_function(",
 		"fn append_codegen_payload_llvm_c_string_function(",
 		"fn append_write_llvm_escape_function(",
-		"%kizu.selfhost.codegen.run_ast %ast",
 		"%kizu.selfhost.codegen.program %program",
-		"@kizu_selfhost__cli_codegen_lower_run_ast",
 		"@kizu_selfhost__cli_codegen_stdout_payload",
 	},
 	"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu": {
