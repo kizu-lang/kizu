@@ -1161,6 +1161,7 @@ func assertHostedRunLLVMResponsibilities(
 	assertBuildMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
 	assertLoweredMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
 	assertStdoutPayloadBodyDerivedCodegen(t, cliCodegen)
+	assertLowerRunAstBodyDerivedCodegen(t, cliCodegen)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
 	}
@@ -1327,6 +1328,40 @@ func assertLoweredMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen st
 		"@kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 true)"
 	if strings.Contains(cliCodegen, oldLoweredCallRoute) {
 		t.Fatal("lowered_main_print_program LLVM generator still directly hardcodes true")
+	}
+}
+
+// assertLowerRunAstBodyDerivedCodegen keeps the lower_run_ast shape checks body-fact derived.
+func assertLowerRunAstBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"fn append_codegen_lower_run_ast_function(",
+		"fn print_run_ast_statement_kind_tag_from_body(",
+		"fn print_run_ast_argument_kind_tag_from_body(",
+		"fn print_run_ast_return_literal(",
+		"fn print_run_ast_int_field(",
+		"selfhost::ir::codegen::print_run_ast",
+		"selfhost::ir::codegen::RunStatementKind",
+		"selfhost::ir::codegen::RunArgumentKind",
+	} {
+		if !strings.Contains(cliCodegen, fragment) {
+			t.Fatalf(
+				"codegen LLVM path does not derive lower_run_ast from body facts with %q",
+				fragment,
+			)
+		}
+	}
+	for _, forbidden := range []string{
+		`append_global_slice(out, "main", "codegen_main", 4)`,
+		`append_global_slice(out, "print", "codegen_print", 5)`,
+		"%print_statement = icmp eq i64 %final_kind, 1",
+		"%const_arg = icmp eq i64 %arg_kind, 1",
+		"%one_function = icmp eq i64 %function_count, 1",
+		"%one_block = icmp eq i64 %block_count, 1",
+	} {
+		if strings.Contains(cliCodegen, forbidden) {
+			t.Fatalf("lower_run_ast LLVM path still owns hardcoded route %q", forbidden)
+		}
 	}
 }
 
@@ -1605,6 +1640,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_codegen_lowered_main_print_program_function(",
 		"fn lowered_main_print_program_flag_from_body(",
 		"fn append_codegen_lower_run_ast_function(",
+		"fn print_run_ast_statement_kind_tag_from_body(",
+		"fn print_run_ast_argument_kind_tag_from_body(",
+		"fn print_run_ast_int_field(",
+		"fn print_run_ast_return_literal(",
 		"fn append_codegen_program_supported_function(",
 		"fn append_codegen_stdout_payload_function(",
 		"fn append_codegen_payload_llvm_c_string_function(",

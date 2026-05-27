@@ -35,7 +35,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try append_codegen_return_void_instruction_function(out, ir_bytes);
     try append_codegen_build_main_print_program_function(out, ir_bytes);
     try append_codegen_lowered_main_print_program_function(out, ir_bytes);
-    try append_codegen_lower_run_ast_function(out);
+    try append_codegen_lower_run_ast_function(out, ir_bytes);
     try append_codegen_program_supported_function(out);
     try append_codegen_stdout_payload_function(out, ir_bytes);
     try append_codegen_payload_llvm_c_string_function(out);
@@ -1135,13 +1135,28 @@ fn return_void_instruction_return_literal(ir_bytes: []u8) -> !i64 {
     return value;
 }
 
-fn append_codegen_lower_run_ast_function(out: &var std::string::String) -> !void {
+fn append_codegen_lower_run_ast_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let main_len = try string_token_decoded_len(
+        try build_main_print_program_string_field(ir_bytes, "CodegenFunction", "name"),
+        "invalid build_main_print_program body"
+    );
+    let print_len = try string_token_decoded_len(
+        try build_main_print_program_call_string_arg(ir_bytes, "call_instruction", 0, 0),
+        "invalid build_main_print_program body"
+    );
+    let function_count = try print_run_ast_int_field(ir_bytes, "function_count");
+    let block_count = try print_run_ast_int_field(ir_bytes, "block_count");
+    let statement_kind_tag = try print_run_ast_statement_kind_tag_from_body(ir_bytes);
+    let argument_kind_tag = try print_run_ast_argument_kind_tag_from_body(ir_bytes);
     try append_line(out, "define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lower_run_ast(");
     try append_line(out, "  %kizu.selfhost.codegen.run_ast %ast");
     try append_line(out, ") {");
     try append_line(out, "entry:");
-    try append_global_slice(out, "main", "codegen_main", 4);
-    try append_global_slice(out, "print", "codegen_print", 5);
+    try append_global_slice(out, "main", "codegen_main", main_len);
+    try append_global_slice(out, "print", "codegen_print", print_len);
     try append_line(out, "  %ok = extractvalue %kizu.selfhost.codegen.run_ast %ast, 0");
     try append_line(out, "  %function_count = extractvalue %kizu.selfhost.codegen.run_ast %ast, 1");
     try append_line(out, "  %function_name = extractvalue %kizu.selfhost.codegen.run_ast %ast, 2");
@@ -1151,13 +1166,21 @@ fn append_codegen_lower_run_ast_function(out: &var std::string::String) -> !void
     try append_line(out, "  %callee = extractvalue %kizu.selfhost.codegen.run_ast %ast, 6");
     try append_line(out, "  %arg_kind = extractvalue %kizu.selfhost.codegen.run_ast %ast, 7");
     try append_line(out, "  %payload = extractvalue %kizu.selfhost.codegen.run_ast %ast, 8");
-    try append_line(out, "  %one_function = icmp eq i64 %function_count, 1");
+    try out.append_bytes("  %one_function = icmp eq i64 %function_count, ");
+    try std::fmt::append_i64(out, function_count);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %main_name = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %function_name, %kizu.slice.u8 %main_slice)");
-    try append_line(out, "  %one_block = icmp eq i64 %block_count, 1");
+    try out.append_bytes("  %one_block = icmp eq i64 %block_count, ");
+    try std::fmt::append_i64(out, block_count);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %has_statement = icmp sge i64 %statement_count, 1");
-    try append_line(out, "  %print_statement = icmp eq i64 %final_kind, 1");
+    try out.append_bytes("  %print_statement = icmp eq i64 %final_kind, ");
+    try std::fmt::append_i64(out, statement_kind_tag);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %print_callee = call i1 @kizu_selfhost__slice_equal(%kizu.slice.u8 %callee, %kizu.slice.u8 %print_slice)");
-    try append_line(out, "  %const_arg = icmp eq i64 %arg_kind, 1");
+    try out.append_bytes("  %const_arg = icmp eq i64 %arg_kind, ");
+    try std::fmt::append_i64(out, argument_kind_tag);
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %shape_01 = and i1 %ok, %one_function");
     try append_line(out, "  %shape_02 = and i1 %shape_01, %main_name");
     try append_line(out, "  %shape_03 = and i1 %shape_02, %one_block");
@@ -1175,6 +1198,77 @@ fn append_codegen_lower_run_ast_function(out: &var std::string::String) -> !void
     try append_line(out, "}");
     try append_line(out, "");
     return;
+}
+
+fn print_run_ast_statement_kind_tag_from_body(ir_bytes: []u8) -> !i64 {
+    let function_name = "selfhost::ir::codegen::print_run_ast";
+    let literal = try print_run_ast_return_literal(ir_bytes);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, "final_statement_kind");
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "FieldExpr") {
+        return error("invalid print_run_ast body");
+    }
+    let receiver = try ir_contract::body_child_sequence(ir_bytes, function_name, value, "receiver", 0);
+    let receiver_name = try ir_contract::body_token_or_empty(ir_bytes, function_name, receiver);
+    let variant = try ir_contract::body_field_expr_name(ir_bytes, function_name, value, "namespace");
+    if !std::mem::equal_bytes(receiver_name, "RunStatementKind") or
+        !std::mem::equal_bytes(variant, "Print") {
+        return error("invalid print_run_ast body");
+    }
+    return try ir_contract::enum_variant_tag(
+        ir_bytes,
+        "selfhost::ir::codegen::RunStatementKind",
+        variant
+    );
+}
+
+fn print_run_ast_argument_kind_tag_from_body(ir_bytes: []u8) -> !i64 {
+    let function_name = "selfhost::ir::codegen::print_run_ast";
+    let literal = try print_run_ast_return_literal(ir_bytes);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, "final_argument_kind");
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "FieldExpr") {
+        return error("invalid print_run_ast body");
+    }
+    let receiver = try ir_contract::body_child_sequence(ir_bytes, function_name, value, "receiver", 0);
+    let receiver_name = try ir_contract::body_token_or_empty(ir_bytes, function_name, receiver);
+    let variant = try ir_contract::body_field_expr_name(ir_bytes, function_name, value, "namespace");
+    if !std::mem::equal_bytes(receiver_name, "RunArgumentKind") or
+        !std::mem::equal_bytes(variant, "ConstString") {
+        return error("invalid print_run_ast body");
+    }
+    return try ir_contract::enum_variant_tag(
+        ir_bytes,
+        "selfhost::ir::codegen::RunArgumentKind",
+        variant
+    );
+}
+
+fn print_run_ast_int_field(ir_bytes: []u8, field_name: []u8) -> !i64 {
+    let function_name = "selfhost::ir::codegen::print_run_ast";
+    let literal = try print_run_ast_return_literal(ir_bytes);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    return try ir_contract::body_int_value(ir_bytes, function_name, value);
+}
+
+fn print_run_ast_return_literal(ir_bytes: []u8) -> !i64 {
+    let function_name = "selfhost::ir::codegen::print_run_ast";
+    let statement = try ir_contract::body_child_sequence(ir_bytes, function_name, 0, "statement", 0);
+    let statement_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+    if !std::mem::equal_bytes(statement_kind, "Return") {
+        return error("invalid print_run_ast body");
+    }
+    let value = try ir_contract::body_child_sequence(ir_bytes, function_name, statement, "value", 0);
+    let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+        return error("invalid print_run_ast body");
+    }
+    let type_name = try ir_contract::body_child_sequence(ir_bytes, function_name, value, "type", 0);
+    let actual_type = try ir_contract::body_token_or_empty(ir_bytes, function_name, type_name);
+    if !std::mem::equal_bytes(actual_type, "RunAst") {
+        return error("invalid print_run_ast body");
+    }
+    return value;
 }
 
 fn append_codegen_program_supported_function(out: &var std::string::String) -> !void {
