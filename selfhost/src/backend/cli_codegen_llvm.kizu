@@ -34,7 +34,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try append_codegen_call_instruction_function(out, ir_bytes);
     try append_codegen_return_void_instruction_function(out, ir_bytes);
     try append_codegen_build_main_print_program_function(out, ir_bytes);
-    try append_codegen_lowered_main_print_program_function(out);
+    try append_codegen_lowered_main_print_program_function(out, ir_bytes);
     try append_codegen_lower_run_ast_function(out);
     try append_codegen_program_supported_function(out);
     try append_codegen_stdout_payload_function(out);
@@ -191,17 +191,61 @@ fn hex_digit_value(byte: u8) -> !i64 {
     return error("invalid metadata_line body");
 }
 
-fn append_codegen_lowered_main_print_program_function(out: &var std::string::String) -> !void {
+fn append_codegen_lowered_main_print_program_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let lowering_flag = try lowered_main_print_program_flag_from_body(ir_bytes);
     try append_line(out, "define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lowered_main_print_program(");
     try append_line(out, "  %kizu.slice.u8 %payload");
     try append_line(out, ") {");
     try append_line(out, "entry:");
-    try append_line(out,
-        "  %program = call %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 true)");
+    try out.append_bytes(
+        "  %program = call %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 ");
+    try out.append_bytes(lowering_flag);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  ret %kizu.selfhost.codegen.program %program");
     try append_line(out, "}");
     try append_line(out, "");
     return;
+}
+
+fn lowered_main_print_program_flag_from_body(ir_bytes: []u8) -> ![]u8 {
+    let function_name = "selfhost::ir::codegen::lowered_main_print_program";
+    let statement = try ir_contract::body_child_sequence(ir_bytes, function_name, 0, "statement", 0);
+    let statement_kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+    if !std::mem::equal_bytes(statement_kind, "Return") {
+        return error("invalid lowered_main_print_program body");
+    }
+    let call = try ir_contract::body_child_sequence(ir_bytes, function_name, statement, "value", 0);
+    let call_kind = try ir_contract::body_node_kind(ir_bytes, function_name, call);
+    if !std::mem::equal_bytes(call_kind, "Call") {
+        return error("invalid lowered_main_print_program body");
+    }
+    let callee = try ir_contract::body_call_callee_or_empty(ir_bytes, function_name, call);
+    if !std::mem::equal_bytes(callee, "build_main_print_program") {
+        return error("invalid lowered_main_print_program body");
+    }
+    let payload_arg = try ir_contract::body_child_sequence(ir_bytes, function_name, call, "arg", 0);
+    let payload_arg_kind = try ir_contract::body_node_kind(ir_bytes, function_name, payload_arg);
+    if !std::mem::equal_bytes(payload_arg_kind, "Var") {
+        return error("invalid lowered_main_print_program body");
+    }
+    let payload_arg_name = try ir_contract::body_token_or_empty(ir_bytes, function_name, payload_arg);
+    if !std::mem::equal_bytes(payload_arg_name, "payload") {
+        return error("invalid lowered_main_print_program body");
+    }
+    let flag_arg = try ir_contract::body_child_sequence(ir_bytes, function_name, call, "arg", 1);
+    let flag_arg_kind = try ir_contract::body_node_kind(ir_bytes, function_name, flag_arg);
+    if !std::mem::equal_bytes(flag_arg_kind, "Bool") {
+        return error("invalid lowered_main_print_program body");
+    }
+    let token = try ir_contract::body_token_or_empty(ir_bytes, function_name, flag_arg);
+    if !std::mem::equal_bytes(token, "true") {
+        return error("invalid lowered_main_print_program body");
+    }
+    return token;
 }
 
 fn append_codegen_build_main_print_program_function(
