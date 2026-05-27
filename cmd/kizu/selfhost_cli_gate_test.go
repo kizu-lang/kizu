@@ -285,7 +285,7 @@ func selfhostCLIFrontendRunHappyCases(
 		{
 			name:    "run_temp_source",
 			args:    []string{"run", fixtures.runSource},
-			wantOut: "exit-code\n0\n",
+			wantOut: "hello, kizu\nexit-code\n0\n",
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runSource,
 				selfhostArtifactStem(fixtures.runSource),
@@ -294,7 +294,7 @@ func selfhostCLIFrontendRunHappyCases(
 		{
 			name:    "run_temp_custom_source",
 			args:    []string{"run", fixtures.runCustom},
-			wantOut: "exit-code\n0\n",
+			wantOut: "from selfhost\nexit-code\n0\n",
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runCustom,
 				selfhostArtifactStem(fixtures.runCustom),
@@ -303,7 +303,7 @@ func selfhostCLIFrontendRunHappyCases(
 		{
 			name:    "run_temp_backslash_source",
 			args:    []string{"run", fixtures.runBackslash},
-			wantOut: "exit-code\n0\n",
+			wantOut: "path\\value\nexit-code\n0\n",
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runBackslash,
 				selfhostArtifactStem(fixtures.runBackslash),
@@ -318,7 +318,7 @@ func selfhostCLIFrontendRunHappyCases(
 		{
 			name:    "run_temp_explicit_void_no_return",
 			args:    []string{"run", fixtures.runExplicitVoid},
-			wantOut: "exit-code\n0\n",
+			wantOut: "hello, kizu\nexit-code\n0\n",
 			wantFiles: selfhostRunArtifactExpectations(
 				fixtures.runExplicitVoid,
 				selfhostArtifactStem(fixtures.runExplicitVoid),

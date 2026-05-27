@@ -975,10 +975,18 @@ func TestSelfhostHostedRunConsumesCodegenIR(t *testing.T) {
 	hosted := readSelfhostFile(t, "../../selfhost/src/backend/hosted.kizu")
 	execute := readSelfhostFile(t, "../../selfhost/src/cli/execute.kizu")
 	codegen := readSelfhostFile(t, "../../selfhost/src/ir/codegen.kizu")
+	cliRun := readSelfhostFile(t, "../../selfhost/src/backend/cli_run_llvm.kizu")
+	cliFrontend := readSelfhostFile(t, "../../selfhost/src/backend/cli_frontend_llvm.kizu")
+	cliCodegen := readSelfhostFile(t, "../../selfhost/src/backend/cli_codegen_llvm.kizu")
+	cliHostedRenderer := readSelfhostFile(
+		t,
+		"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu",
+	)
 	assertExecuteRoutesRunThroughCodegenIR(t, execute)
 	assertHostedOmitsRunCodegenArtifact(t, hosted)
 	assertCodegenIRShape(t, codegen)
 	assertCodegenIRForbiddenBridges(t, hosted, codegen)
+	assertHostedRunLLVMResponsibilities(t, cliRun, cliFrontend, cliCodegen, cliHostedRenderer)
 }
 
 // assertExecuteRoutesRunThroughCodegenIR checks the CLI layer hands run input
@@ -989,6 +997,10 @@ func assertExecuteRoutesRunThroughCodegenIR(t *testing.T, execute string) {
 		"backend::lower_run_codegen_program(file_text, parsed.ast, parsed.root)",
 		"backend::emit_run_codegen_artifact(",
 		"artifact.bytes > 0 and artifact.metadata_bytes > 0",
+		"backend::run_artifact_ll_path(allocator, path)",
+		"backend::run_artifact_executable_path(allocator, path)",
+		"backend::link_run_artifact(ll_path_bytes, executable_path_bytes)",
+		"backend::execute_run_artifact(executable_path_bytes)",
 	}
 	for _, fragment := range requiredExecute {
 		if !strings.Contains(execute, fragment) {
@@ -1076,6 +1088,69 @@ func assertCodegenIRForbiddenBridges(t *testing.T, hosted string, codegen string
 	} {
 		if strings.Contains(hosted, forbidden) || strings.Contains(codegen, forbidden) {
 			t.Fatalf("codegen slice keeps fixture/source dispatch %q", forbidden)
+		}
+	}
+}
+
+// assertHostedRunLLVMResponsibilities keeps the stage2 hosted run path split:
+// run orchestrates, frontend lowers checked source to RunAst, codegen lowers
+// RunAst to Program, and hosted renderer owns the LLVM module rendering.
+func assertHostedRunLLVMResponsibilities(
+	t *testing.T,
+	cliRun string,
+	cliFrontend string,
+	cliCodegen string,
+	cliHostedRenderer string,
+) {
+	t.Helper()
+	requiredRun := []string{
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"@kizu_selfhost__cli_codegen_lower_run_ast",
+		"@kizu_selfhost__cli_emit_run_codegen_artifact",
+		"@kizu_selfhost__cli_hosted_write_stdout_ll",
+		"@kizu_rt_process_spawn_wait8",
+	}
+	for _, fragment := range requiredRun {
+		if !strings.Contains(cliRun, fragment) {
+			t.Fatalf("run LLVM path missing responsibility boundary %q", fragment)
+		}
+	}
+	requiredFrontend := []string{
+		"define %kizu.selfhost.codegen.run_ast @kizu_selfhost__cli_frontend_lower_checked_run_ast",
+		"define %kizu.selfhost.codegen.binding @kizu_selfhost__cli_frontend_parse_let_binding",
+		"define %kizu.selfhost.codegen.payload @kizu_selfhost__cli_frontend_parse_print_statement",
+	}
+	for _, fragment := range requiredFrontend {
+		if !strings.Contains(cliFrontend, fragment) {
+			t.Fatalf("frontend LLVM path missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"run_module_prefix",
+		"run_module_len_middle",
+		"run_module_payload_middle",
+		"run_module_slice_middle",
+		"run_module_suffix",
+		"@kizu_selfhost__cli_codegen_parse_checked_run_ast",
+		"@kizu_selfhost__cli_codegen_parse_let_binding",
+		"@kizu_selfhost__cli_codegen_parse_print_statement",
+		"@kizu_selfhost__parse_next_semantic_token_index",
+		"cli_token_word_eq",
+		"cli_token_char_eq",
+	} {
+		if strings.Contains(cliRun, forbidden) {
+			t.Fatalf("run LLVM path owns forbidden frontend/static detail %q", forbidden)
+		}
+		if strings.Contains(cliCodegen, forbidden) {
+			t.Fatalf("codegen LLVM path owns forbidden frontend/static detail %q", forbidden)
+		}
+	}
+	for _, fragment := range []string{
+		"define %kizu.error.void @kizu_selfhost__cli_hosted_write_stdout_ll",
+		"hosted::run_print_executable()",
+	} {
+		if !strings.Contains(cliHostedRenderer, fragment) {
+			t.Fatalf("hosted renderer missing %q", fragment)
 		}
 	}
 }
@@ -1199,6 +1274,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/hosted.kizu": {
 		"pub fn metadata_runtime_line(",
+		"pub fn run_artifact_ll_path(",
+		"pub fn run_artifact_executable_path(",
+		"pub fn link_run_artifact(",
+		"pub fn execute_run_artifact(",
 		"pub fn test_ok_executable(",
 		"pub fn test_failure_executable(",
 		"fn ensure_hosted_artifact_dir(",
@@ -1219,6 +1298,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_functions(",
 		"cli_artifact_dir_llvm::append_globals(",
 		"cli_artifact_dir_llvm::append_functions(",
+		"cli_frontend_llvm::append_functions(",
+		"cli_hosted_renderer_llvm::append_functions(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1259,10 +1340,17 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
 		"@kizu_selfhost__cli_codegen_stdout_payload",
-		"@kizu_rt_io_write_stdout",
 		"cli_check_gate_llvm::append_static_check_gate(",
-		"@kizu_selfhost__cli_codegen_parse_checked_run_ast",
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
 		"@kizu_selfhost__cli_codegen_lower_run_ast",
+	},
+	"../../selfhost/src/backend/cli_frontend_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+		"fn append_frontend_lower_checked_run_ast_function(",
+		"fn append_frontend_parse_let_binding_function(",
+		"fn append_frontend_parse_print_statement_function(",
+		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
 	},
 	"../../selfhost/src/backend/cli_codegen_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1272,10 +1360,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_codegen_call_instruction_function(",
 		"fn append_codegen_return_void_instruction_function(",
 		"fn append_codegen_lowered_main_print_program_function(",
-		"fn append_codegen_parse_checked_run_ast_function(",
 		"fn append_codegen_lower_run_ast_function(",
-		"fn append_codegen_parse_let_binding_function(",
-		"fn append_codegen_parse_print_statement_function(",
 		"fn append_codegen_program_supported_function(",
 		"fn append_codegen_stdout_payload_function(",
 		"fn append_codegen_payload_llvm_c_string_function(",
@@ -1291,9 +1376,14 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"@kizu_selfhost__cli_codegen_call_instruction",
 		"@kizu_selfhost__cli_codegen_return_void_instruction",
 		"@kizu_selfhost__cli_codegen_lowered_main_print_program",
-		"@kizu_selfhost__cli_codegen_parse_checked_run_ast",
 		"@kizu_selfhost__cli_codegen_lower_run_ast",
 		"@kizu_selfhost__cli_codegen_stdout_payload",
+	},
+	"../../selfhost/src/backend/cli_hosted_renderer_llvm.kizu": {
+		"pub fn append_globals(",
+		"pub fn append_functions(",
+		"fn append_write_stdout_ll_function(",
+		"@kizu_selfhost__cli_hosted_write_stdout_ll",
 	},
 	"../../selfhost/src/backend/cli_test_llvm.kizu": {
 		"pub fn append_globals(",

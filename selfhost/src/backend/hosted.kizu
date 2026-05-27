@@ -187,6 +187,61 @@ pub fn emit_run_codegen_artifact(
     };
 }
 
+pub fn run_artifact_ll_path(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    return try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        artifact_ll_suffix()
+    );
+}
+
+pub fn run_artifact_executable_path(
+    allocator: Allocator,
+    source_path: []u8
+) -> !std::string::String {
+    return try artifact_path(
+        allocator,
+        run_artifact_path_prefix(),
+        source_path,
+        ""
+    );
+}
+
+pub fn link_run_artifact(
+    ll_path: &[]u8,
+    executable_path: &[]u8
+) -> !i64 {
+    return try std::process::spawn_wait8(
+        7,
+        run_linker_tool(),
+        run_linker_llvm_module_flag(),
+        ll_path,
+        "target/selfhost/stage2/selfhost.host.ll",
+        run_host_runtime_source(),
+        run_linker_output_flag(),
+        executable_path,
+        ""
+    );
+}
+
+pub fn execute_run_artifact(executable_path: &[]u8) -> !i64 {
+    return try std::process::spawn_wait8(
+        1,
+        executable_path,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+    );
+}
+
 pub fn emit_test_executable_artifact(
     allocator: Allocator,
     io: Io,
@@ -466,6 +521,7 @@ fn render_hosted_llvm(
         try append_hosted_global(out, global, output_payload, append_newline, output_len);
         try append_hosted_output_body(out, entry, global, output_stream, output_len, exit_code);
     }
+    try append_host_main(out, entry);
     return out;
 }
 
@@ -586,6 +642,23 @@ fn append_exit(out: &var std::string::String, exit_code: i64) -> !void {
     try out.append_bytes(")");
     try out.append_byte(cast<u8>(10));
     try append_line(out, "  ret i64 %code");
+    try append_line(out, "}");
+    return;
+}
+
+fn append_host_main(out: &var std::string::String, entry: []u8) -> !void {
+    try append_line(out, "");
+    try append_line(out, "declare void @kizu_host_init(i32, ptr)");
+    try append_line(out, "");
+    try append_line(out, "define i32 @main(i32 %argc, ptr %argv) {");
+    try append_line(out, "entry:");
+    try append_line(out, "  call void @kizu_host_init(i32 %argc, ptr %argv)");
+    try out.append_bytes("  %code = call i64 @");
+    try out.append_bytes(entry);
+    try out.append_bytes("()");
+    try out.append_byte(cast<u8>(10));
+    try append_line(out, "  %exit = trunc i64 %code to i32");
+    try append_line(out, "  ret i32 %exit");
     try append_line(out, "}");
     return;
 }
