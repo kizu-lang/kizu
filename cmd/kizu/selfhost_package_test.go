@@ -1309,6 +1309,10 @@ func assertCompiledSubModules(t *testing.T) {
 		"pub fn append_call_args(")
 	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_llvm_const.kizu",
 		"pub fn append_const_string_return(", "pub fn append_const_int_return(")
+	assertFileContains(t, "../../selfhost/src/backend/compiled_mir_function.kizu",
+		"pub fn single_const_string_return_function(",
+		"pub fn single_call_return_function(",
+		"pub fn multi_statement_function(")
 }
 
 // assertCompiledModulesNoHardcoding checks no function-specific literals leak.
@@ -1329,6 +1333,7 @@ func assertCompiledModulesNoHardcoding(t *testing.T, compiled string) {
 		"../../selfhost/src/backend/compiled_mir_llvm.kizu",
 		"../../selfhost/src/backend/compiled_mir_llvm_call.kizu",
 		"../../selfhost/src/backend/compiled_mir_llvm_const.kizu",
+		"../../selfhost/src/backend/compiled_mir_function.kizu",
 	} {
 		allCompiled += readSelfhostFile(t, path)
 	}
@@ -1762,6 +1767,11 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/compiled_mir_llvm_const.kizu": {
 		"pub fn append_const_string_return(",
 		"pub fn append_const_int_return(",
+	},
+	"../../selfhost/src/backend/compiled_mir_function.kizu": {
+		"pub fn single_const_string_return_function(",
+		"pub fn single_call_return_function(",
+		"pub fn multi_statement_function(",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
