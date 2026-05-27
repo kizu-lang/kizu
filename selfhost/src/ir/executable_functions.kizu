@@ -68,6 +68,14 @@ fn append_codegen_function_facts(
     let parsed = try parser::parse_checked_file(allocator, file.path, file.text);
     defer parsed.deinit();
 
+    try append_selected_enum_variant_facts(
+        out,
+        file.text,
+        parsed.ast,
+        parsed.root,
+        "ValueKind",
+        "selfhost::ir::codegen::ValueKind"
+    );
     try append_selected_function_with_body(
         out,
         file.text,
@@ -314,6 +322,51 @@ fn append_codegen_function_facts(
     return;
 }
 
+fn append_selected_enum_variant_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    local_name: []u8,
+    qualified_name: []u8
+) -> !void {
+    let enum_node_id = try enum_node(text, ast, root, local_name);
+    let node = ast.get(enum_node_id);
+    match node.data {
+        EnumDecl(enum_decl) => try append_enum_variant_facts(
+            out,
+            text,
+            ast,
+            enum_decl.tags,
+            qualified_name
+        );,
+        _ => return error("missing selected executable enum");,
+    }
+    return;
+}
+
+fn append_enum_variant_facts(
+    out: &var std::string::String,
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    tags: std::kizu::ast::ChildRange,
+    qualified_name: []u8
+) -> !void {
+    var index = 0;
+    while index < tags.len {
+        let tag = try ast.child_at(tags, index);
+        try out.append_bytes("enum-variant ");
+        try out.append_bytes(qualified_name);
+        try out.append_byte(cast<u8>(32));
+        try out.append_bytes(ast_node_text(text, ast, tag));
+        try out.append_byte(cast<u8>(32));
+        try std::fmt::append_i64(out, index);
+        try out.append_byte(cast<u8>(10));
+        index = index + 1;
+    }
+    return;
+}
+
 fn append_execute_function_facts(
     allocator: Allocator,
     out: &var std::string::String,
@@ -539,6 +592,57 @@ fn function_node(
         );,
         _ => return error("missing selected executable function body");,
     }
+}
+
+fn enum_node(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    root: std::kizu::ast::NodeId,
+    enum_name: []u8
+) -> !std::kizu::ast::NodeId {
+    let node = ast.get(root);
+    match node.data {
+        Program(program) => return enum_node_in_program(
+            text,
+            ast,
+            program.declarations,
+            enum_name
+        );,
+        _ => return error("missing selected executable enum");,
+    }
+}
+
+fn enum_node_in_program(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    declarations: std::kizu::ast::ChildRange,
+    enum_name: []u8
+) -> !std::kizu::ast::NodeId {
+    var index = 0;
+    while index < declarations.len {
+        let child = try ast.child_at(declarations, index);
+        if enum_node_matches(text, ast, child, enum_name) {
+            return child;
+        }
+        index = index + 1;
+    }
+    return error("missing selected executable enum");
+}
+
+fn enum_node_matches(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    node_id: std::kizu::ast::NodeId,
+    name: []u8
+) -> bool {
+    let node = ast.get(node_id);
+    return match node.data {
+        EnumDecl(enum_decl) => std::mem::equal_bytes(
+            ast_node_text(text, ast, enum_decl.name),
+            name
+        ),
+        _ => false,
+    };
 }
 
 fn function_node_in_program(

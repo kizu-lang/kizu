@@ -1153,6 +1153,16 @@ func assertHostedRunLLVMResponsibilities(
 			t.Fatalf("hosted renderer missing %q", fragment)
 		}
 	}
+	assertMetadataLineBodyDerivedCodegen(t, cliCodegen)
+	assertConstStringValueBodyDerivedCodegen(t, cliCodegen)
+	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
+		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
+	}
+}
+
+// assertMetadataLineBodyDerivedCodegen keeps the first body-fact slice active.
+func assertMetadataLineBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+	t.Helper()
 	for _, fragment := range []string{
 		"pub fn metadata_line_body_decoded_len(",
 		"pub fn append_metadata_line_body_payload(",
@@ -1163,8 +1173,32 @@ func assertHostedRunLLVMResponsibilities(
 			t.Fatalf("codegen LLVM path does not derive metadata_line from body facts with %q", fragment)
 		}
 	}
-	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
-		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
+}
+
+// assertConstStringValueBodyDerivedCodegen keeps the value builder slice active.
+func assertConstStringValueBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"fn const_string_value_kind_tag_from_body(",
+		"fn require_const_string_value_var_field(",
+		"selfhost::ir::codegen::const_string_value",
+		"ir_contract::body_struct_field_value(",
+		"ir_contract::enum_variant_tag(",
+		"define %kizu.selfhost.codegen.value @kizu_selfhost__cli_codegen_const_string_value",
+	} {
+		if !strings.Contains(cliCodegen, fragment) {
+			t.Fatalf(
+				"codegen LLVM path does not derive const_string_value from body facts with %q",
+				fragment,
+			)
+		}
+	}
+	oldValueKindRoute := "%field0 = insertvalue %kizu.selfhost.codegen.value poison, i64 1, 0"
+	if strings.Contains(cliCodegen, oldValueKindRoute) {
+		t.Fatal("const_string_value LLVM generator still directly hardcodes the value kind tag")
+	}
+	if strings.Contains(cliCodegen, "return 1;") {
+		t.Fatal("const_string_value LLVM generator still hardcodes the value kind tag helper")
 	}
 }
 
@@ -1439,6 +1473,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn require_named_line_fact(",
 		"pub fn named_i64_fact(",
 		"pub fn require_named_i64_fact(",
+		"pub fn enum_variant_tag(",
 		"pub fn sequence_fact_value(",
 		"pub fn sequence_fact_line_value(",
 		"pub fn sequence_fact_second_value(",
@@ -1465,6 +1500,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_executable_function_facts(",
 		"fn append_executable_helper_body_facts(",
 		"fn append_hosted_function_facts(",
+		"fn append_selected_enum_variant_facts(",
+		"enum-variant ",
 		"function_signature::append(",
 		"selfhost::ir::codegen::const_string_value",
 		"selfhost::ir::codegen::const_string_instruction",

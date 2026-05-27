@@ -318,6 +318,7 @@ fn require_selected_executable_body_ir(bytes: []u8) -> !void {
         "main_print_payload"
     );
     try require_metadata_line_body(bytes);
+    try require_const_string_value_body(bytes);
     try ir_contract::require_body_call(
         bytes,
         "selfhost::cli::execute::test_file_cli",
@@ -366,6 +367,87 @@ fn require_metadata_line_body(bytes: []u8) -> !void {
     let token = try ir_contract::body_token_or_empty(bytes, function_name, value);
     if std::mem::len(token) < 2 {
         return error("invalid metadata line body");
+    }
+    return;
+}
+
+fn require_const_string_value_body(bytes: []u8) -> !void {
+    let function_name = "selfhost::ir::codegen::const_string_value";
+    let statement = try ir_contract::body_child_sequence(bytes, function_name, 0, "statement", 0);
+    let statement_kind = try ir_contract::body_node_kind(bytes, function_name, statement);
+    if !std::mem::equal_bytes(statement_kind, "Return") {
+        return error("invalid const_string_value body");
+    }
+    let value = try ir_contract::body_child_sequence(bytes, function_name, statement, "value", 0);
+    let value_kind = try ir_contract::body_node_kind(bytes, function_name, value);
+    if !std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+        return error("invalid const_string_value body");
+    }
+    let type_name = try ir_contract::body_child_sequence(bytes, function_name, value, "type", 0);
+    let actual_type = try ir_contract::body_token_or_empty(bytes, function_name, type_name);
+    if !std::mem::equal_bytes(actual_type, "Value") {
+        return error("invalid const_string_value body");
+    }
+    try require_struct_literal_namespace_expr(
+        bytes,
+        function_name,
+        "Value",
+        0,
+        "kind",
+        "ValueKind",
+        "ConstString"
+    );
+    try require_struct_literal_var_field(bytes, function_name, "Value", 0, "name", "name");
+    try require_struct_literal_var_field(
+        bytes,
+        function_name,
+        "Value",
+        0,
+        "string_payload",
+        "payload"
+    );
+    let const_string_tag = try ir_contract::enum_variant_tag(
+        bytes,
+        "selfhost::ir::codegen::ValueKind",
+        "ConstString"
+    );
+    if const_string_tag < 0 {
+        return error("invalid const_string_value body");
+    }
+    return;
+}
+
+fn require_struct_literal_namespace_expr(
+    bytes: []u8,
+    function_name: []u8,
+    type_name: []u8,
+    ordinal: i64,
+    field_name: []u8,
+    expected_receiver: []u8,
+    expected_field: []u8
+) -> !void {
+    let value = try struct_literal_field_value(
+        bytes,
+        function_name,
+        type_name,
+        ordinal,
+        field_name
+    );
+    let actual_field = try ir_contract::body_field_expr_name(bytes, function_name, value, "namespace");
+    if !std::mem::equal_bytes(actual_field, expected_field) {
+        return error("invalid codegen program builder body");
+    }
+
+    let receiver = try ir_contract::body_child_sequence(
+        bytes,
+        function_name,
+        value,
+        "receiver",
+        0
+    );
+    let actual_receiver = try ir_contract::body_token_or_empty(bytes, function_name, receiver);
+    if !std::mem::equal_bytes(actual_receiver, expected_receiver) {
+        return error("invalid codegen program builder body");
     }
     return;
 }
