@@ -1159,6 +1159,7 @@ func assertHostedRunLLVMResponsibilities(
 	assertCallInstructionBodyDerivedCodegen(t, cliCodegen)
 	assertReturnVoidInstructionBodyDerivedCodegen(t, cliCodegen)
 	assertBuildMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
+	assertLoweredMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
 	}
@@ -1284,7 +1285,6 @@ func assertBuildMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen stri
 		"fn require_build_main_print_program_var_field(",
 		"selfhost::ir::codegen::build_main_print_program",
 		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_build_main_print_program",
-		"@kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 true)",
 	} {
 		if !strings.Contains(cliCodegen, fragment) {
 			t.Fatalf(
@@ -1303,6 +1303,29 @@ func assertBuildMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen stri
 		if strings.Contains(cliCodegen, forbidden) {
 			t.Fatalf("build_main_print_program LLVM path still owns hardcoded route %q", forbidden)
 		}
+	}
+}
+
+// assertLoweredMainPrintProgramBodyDerivedCodegen keeps the lowered wrapper slice active.
+func assertLoweredMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"fn lowered_main_print_program_flag_from_body(",
+		"selfhost::ir::codegen::lowered_main_print_program",
+		"body_call_callee_or_empty(",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_lowered_main_print_program",
+	} {
+		if !strings.Contains(cliCodegen, fragment) {
+			t.Fatalf(
+				"codegen LLVM path does not derive lowered_main_print_program from body facts with %q",
+				fragment,
+			)
+		}
+	}
+	oldLoweredCallRoute := "%program = call %kizu.selfhost.codegen.program " +
+		"@kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 true)"
+	if strings.Contains(cliCodegen, oldLoweredCallRoute) {
+		t.Fatal("lowered_main_print_program LLVM generator still directly hardcodes true")
 	}
 }
 
@@ -1546,6 +1569,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn return_void_instruction_kind_tag_from_body(",
 		"fn append_codegen_build_main_print_program_function(",
 		"fn append_codegen_lowered_main_print_program_function(",
+		"fn lowered_main_print_program_flag_from_body(",
 		"fn append_codegen_lower_run_ast_function(",
 		"fn append_codegen_program_supported_function(",
 		"fn append_codegen_stdout_payload_function(",
