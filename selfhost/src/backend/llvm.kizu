@@ -320,6 +320,7 @@ fn require_selected_executable_body_ir(bytes: []u8) -> !void {
     try require_metadata_line_body(bytes);
     try require_const_string_value_body(bytes);
     try require_const_string_instruction_body(bytes);
+    try require_call_instruction_body(bytes);
     try require_return_void_instruction_body(bytes);
     try ir_contract::require_body_call(
         bytes,
@@ -509,6 +510,96 @@ fn require_const_string_instruction_body(bytes: []u8) -> !void {
     return;
 }
 
+fn require_call_instruction_body(bytes: []u8) -> !void {
+    let function_name = "selfhost::ir::codegen::call_instruction";
+    let statement = try ir_contract::body_child_sequence(bytes, function_name, 0, "statement", 0);
+    let statement_kind = try ir_contract::body_node_kind(bytes, function_name, statement);
+    if !std::mem::equal_bytes(statement_kind, "Return") {
+        return error("invalid call_instruction body");
+    }
+    let value = try ir_contract::body_child_sequence(bytes, function_name, statement, "value", 0);
+    let value_kind = try ir_contract::body_node_kind(bytes, function_name, value);
+    if !std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+        return error("invalid call_instruction body");
+    }
+    let type_name = try ir_contract::body_child_sequence(bytes, function_name, value, "type", 0);
+    let actual_type = try ir_contract::body_token_or_empty(bytes, function_name, type_name);
+    if !std::mem::equal_bytes(actual_type, "Instruction") {
+        return error("invalid call_instruction body");
+    }
+    try require_struct_literal_namespace_expr(
+        bytes,
+        function_name,
+        "Instruction",
+        0,
+        "kind",
+        "InstructionKind",
+        "Call"
+    );
+    try require_struct_literal_namespace_expr(
+        bytes,
+        function_name,
+        "Instruction",
+        0,
+        "result_kind",
+        "ValueKind",
+        "None"
+    );
+    try require_struct_literal_var_empty_slice_field(
+        bytes,
+        function_name,
+        "Instruction",
+        0,
+        "result_name",
+        "callee"
+    );
+    try require_struct_literal_var_empty_slice_field(
+        bytes,
+        function_name,
+        "Instruction",
+        0,
+        "result_payload",
+        "callee"
+    );
+    try require_struct_literal_var_field(bytes, function_name, "Instruction", 0, "callee", "callee");
+    try require_struct_literal_named_field_expr(
+        bytes,
+        function_name,
+        "Instruction",
+        0,
+        "argument_kind",
+        "argument",
+        "kind"
+    );
+    try require_struct_literal_named_field_expr(
+        bytes,
+        function_name,
+        "Instruction",
+        0,
+        "argument_name",
+        "argument",
+        "name"
+    );
+    try require_struct_literal_named_field_expr(
+        bytes,
+        function_name,
+        "Instruction",
+        0,
+        "argument_payload",
+        "argument",
+        "string_payload"
+    );
+    let call_tag = try ir_contract::enum_variant_tag(
+        bytes,
+        "selfhost::ir::codegen::InstructionKind",
+        "Call"
+    );
+    if call_tag < 0 {
+        return error("invalid call_instruction body");
+    }
+    return;
+}
+
 fn require_return_void_instruction_body(bytes: []u8) -> !void {
     let function_name = "selfhost::ir::codegen::return_void_instruction";
     let statement = try ir_contract::body_child_sequence(bytes, function_name, 0, "statement", 0);
@@ -652,6 +743,82 @@ fn require_struct_literal_empty_slice_field(
     try require_value_field_expr(bytes, function_name, target, expected_value_field);
     try require_int_child(bytes, function_name, value, "start", 0);
     try require_int_child(bytes, function_name, value, "end", 0);
+    return;
+}
+
+fn require_struct_literal_var_empty_slice_field(
+    bytes: []u8,
+    function_name: []u8,
+    type_name: []u8,
+    ordinal: i64,
+    field_name: []u8,
+    expected_var: []u8
+) -> !void {
+    let value = try struct_literal_field_value(
+        bytes,
+        function_name,
+        type_name,
+        ordinal,
+        field_name
+    );
+    let kind = try ir_contract::body_node_kind(bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "IndexExpr") {
+        return error("invalid codegen program builder body");
+    }
+    let target = try ir_contract::body_child_sequence(bytes, function_name, value, "target", 0);
+    let target_kind = try ir_contract::body_node_kind(bytes, function_name, target);
+    if !std::mem::equal_bytes(target_kind, "Var") {
+        return error("invalid codegen program builder body");
+    }
+    let actual = try ir_contract::body_token_or_empty(bytes, function_name, target);
+    if !std::mem::equal_bytes(actual, expected_var) {
+        return error("invalid codegen program builder body");
+    }
+    try require_int_child(bytes, function_name, value, "start", 0);
+    try require_int_child(bytes, function_name, value, "end", 0);
+    return;
+}
+
+fn require_struct_literal_named_field_expr(
+    bytes: []u8,
+    function_name: []u8,
+    type_name: []u8,
+    ordinal: i64,
+    field_name: []u8,
+    expected_receiver: []u8,
+    expected_field: []u8
+) -> !void {
+    let value = try struct_literal_field_value(
+        bytes,
+        function_name,
+        type_name,
+        ordinal,
+        field_name
+    );
+    try require_named_field_expr(bytes, function_name, value, expected_receiver, expected_field);
+    return;
+}
+
+fn require_named_field_expr(
+    bytes: []u8,
+    function_name: []u8,
+    value: i64,
+    expected_receiver: []u8,
+    expected_field: []u8
+) -> !void {
+    let kind = try ir_contract::body_node_kind(bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "FieldExpr") {
+        return error("invalid codegen program builder body");
+    }
+    let actual_field = try ir_contract::body_field_expr_name(bytes, function_name, value, "field");
+    if !std::mem::equal_bytes(actual_field, expected_field) {
+        return error("invalid codegen program builder body");
+    }
+    let receiver = try ir_contract::body_child_sequence(bytes, function_name, value, "receiver", 0);
+    let actual_receiver = try ir_contract::body_token_or_empty(bytes, function_name, receiver);
+    if !std::mem::equal_bytes(actual_receiver, expected_receiver) {
+        return error("invalid codegen program builder body");
+    }
     return;
 }
 

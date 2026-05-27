@@ -1156,6 +1156,7 @@ func assertHostedRunLLVMResponsibilities(
 	assertMetadataLineBodyDerivedCodegen(t, cliCodegen)
 	assertConstStringValueBodyDerivedCodegen(t, cliCodegen)
 	assertConstStringInstructionBodyDerivedCodegen(t, cliCodegen)
+	assertCallInstructionBodyDerivedCodegen(t, cliCodegen)
 	assertReturnVoidInstructionBodyDerivedCodegen(t, cliCodegen)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
@@ -1233,6 +1234,41 @@ func assertConstStringInstructionBodyDerivedCodegen(t *testing.T, cliCodegen str
 	}
 	if strings.Contains(cliCodegen, "return 1;") {
 		t.Fatal("const_string_instruction LLVM generator hardcodes the instruction kind tag helper")
+	}
+}
+
+// assertCallInstructionBodyDerivedCodegen keeps the call instruction slice active.
+func assertCallInstructionBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"fn call_instruction_kind_tag_from_body(",
+		"fn call_instruction_none_tag_from_body(",
+		"fn require_call_instruction_callee_empty_slice_field(",
+		"fn require_call_instruction_argument_field(",
+		"selfhost::ir::codegen::call_instruction",
+		"selfhost::ir::codegen::InstructionKind",
+		"ir_contract::enum_variant_tag(",
+		"define %kizu.selfhost.codegen.instruction @kizu_selfhost__cli_codegen_call_instruction",
+	} {
+		if !strings.Contains(cliCodegen, fragment) {
+			t.Fatalf(
+				"codegen LLVM path does not derive call_instruction from body facts with %q",
+				fragment,
+			)
+		}
+	}
+	oldInstructionKindRoute := "%field0 = insertvalue " +
+		"%kizu.selfhost.codegen.instruction poison, i64 2, 0"
+	if strings.Contains(cliCodegen, oldInstructionKindRoute) {
+		t.Fatal("call_instruction LLVM generator directly hardcodes the instruction kind tag")
+	}
+	oldResultKindRoute := "%field1 = insertvalue " +
+		"%kizu.selfhost.codegen.instruction %field0, i64 0, 1"
+	if strings.Contains(cliCodegen, oldResultKindRoute) {
+		t.Fatal("call_instruction LLVM generator directly hardcodes the result kind tag")
+	}
+	if strings.Contains(cliCodegen, "return 2;") {
+		t.Fatal("call_instruction LLVM generator hardcodes the instruction kind tag helper")
 	}
 }
 
@@ -1470,8 +1506,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn append_codegen_const_string_value_function(",
 		"fn append_codegen_const_string_instruction_function(",
 		"fn const_string_instruction_kind_tag_from_body(",
-		"fn append_codegen_return_void_instruction_function(",
 		"fn append_codegen_call_instruction_function(",
+		"fn call_instruction_kind_tag_from_body(",
+		"fn append_codegen_return_void_instruction_function(",
 		"fn return_void_instruction_kind_tag_from_body(",
 		"fn append_codegen_lowered_main_print_program_function(",
 		"fn append_codegen_lower_run_ast_function(",
