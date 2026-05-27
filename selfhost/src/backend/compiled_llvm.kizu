@@ -1,0 +1,123 @@
+import selfhost::backend::ir_contract;
+
+pub fn append_compiled_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8
+) -> !void {
+    let statement = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        0,
+        "statement",
+        0
+    );
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, statement);
+    if !std::mem::equal_bytes(kind, "Return") {
+        return error("compiled function: body must start with return");
+    }
+    let value = try ir_contract::body_child_sequence(
+        ir_bytes,
+        function_name,
+        statement,
+        "value",
+        0
+    );
+    let value_kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if std::mem::equal_bytes(value_kind, "String") {
+        try append_string_return_function(
+            out,
+            ir_bytes,
+            function_name,
+            llvm_symbol,
+            value
+        );
+        return;
+    }
+    return error("compiled function: unsupported return value kind");
+}
+
+fn append_string_return_function(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    value_node: i64
+) -> !void {
+    let token = try ir_contract::body_token_or_empty(
+        ir_bytes,
+        function_name,
+        value_node
+    );
+    let token_len = std::mem::len(token);
+    if token_len < 2 {
+        return error("compiled function: invalid string token");
+    }
+    let quote = cast<u8>(34);
+    if token[0] != quote or token[token_len - 1] != quote {
+        return error("compiled function: string token must be quoted");
+    }
+    let payload = token[1..token_len - 1];
+    let payload_len = token_len - 2;
+    try out.append_bytes("@.kizu.compiled.");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes(" = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(" x i8] c");
+    try out.append_byte(quote);
+    try append_llvm_c_string_payload(out, payload);
+    try out.append_byte(quote);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("define %kizu.slice.u8 @");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes("() {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %ptr = getelementptr [");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+    try out.append_bytes(llvm_symbol);
+    try out.append_bytes(", i64 0, i64 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes(
+        "  %base = insertvalue %kizu.slice.u8 poison, ptr %ptr, 0");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  %slice = insertvalue %kizu.slice.u8 %base, i64 ");
+    try std::fmt::append_i64(out, payload_len);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret %kizu.slice.u8 %slice");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn append_llvm_c_string_payload(
+    out: &var std::string::String,
+    payload: []u8
+) -> !void {
+    var index = 0;
+    let length = std::mem::len(payload);
+    while index < length {
+        let byte = payload[index];
+        if byte == cast<u8>(34) {
+            try out.append_bytes("\22");
+        } else {
+            if byte == cast<u8>(92) {
+                try out.append_bytes("\5C");
+            } else {
+                if byte == cast<u8>(10) {
+                    try out.append_bytes("\0A");
+                } else {
+                    try out.append_byte(byte);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}

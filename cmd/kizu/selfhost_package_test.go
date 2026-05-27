@@ -1162,6 +1162,7 @@ func assertHostedRunLLVMResponsibilities(
 	assertLoweredMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
 	assertStdoutPayloadBodyDerivedCodegen(t, cliCodegen)
 	assertLowerRunAstBodyDerivedCodegen(t, cliCodegen)
+	assertCompiledFunctionGeneric(t)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
 	}
@@ -1362,6 +1363,40 @@ func assertLowerRunAstBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 		if strings.Contains(cliCodegen, forbidden) {
 			t.Fatalf("lower_run_ast LLVM path still owns hardcoded route %q", forbidden)
 		}
+	}
+}
+
+// assertCompiledFunctionGeneric verifies the compiled_llvm module is a generic
+// body-fact-to-LLVM compiler that does not hardcode any specific function names
+// or string literals from the target function.
+func assertCompiledFunctionGeneric(t *testing.T) {
+	t.Helper()
+	compiled := readSelfhostFile(t, "../../selfhost/src/backend/compiled_llvm.kizu")
+	cliLlvm := readSelfhostFile(t, "../../selfhost/src/backend/cli_llvm.kizu")
+	for _, fragment := range []string{
+		"pub fn append_compiled_function(",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_node_kind(",
+		"ir_contract::body_token_or_empty(",
+	} {
+		if !strings.Contains(compiled, fragment) {
+			t.Fatalf("compiled_llvm missing generic compiler fragment %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"metadata_line",
+		"codegen_metadata_line",
+		"function-block-instruction",
+	} {
+		if strings.Contains(compiled, forbidden) {
+			t.Fatalf("compiled_llvm hardcodes function-specific literal %q", forbidden)
+		}
+	}
+	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function(") {
+		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function")
+	}
+	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_metadata_line") {
+		t.Fatal("cli_llvm does not emit compiled metadata_line symbol")
 	}
 }
 
@@ -1574,6 +1609,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"cli_artifact_dir_llvm::append_functions(",
 		"cli_frontend_llvm::append_functions(",
 		"cli_hosted_renderer_llvm::append_functions(",
+		"compiled_llvm::append_compiled_function(",
 	},
 	"../../selfhost/src/backend/cli_artifact_dir_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1699,6 +1735,13 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_executable_body_parsing_llvm.kizu": {
 		"pub fn append_functions(",
 		"fn append_cli_parse_test_expect_value_function(",
+	},
+	"../../selfhost/src/backend/compiled_llvm.kizu": {
+		"pub fn append_compiled_function(",
+		"fn append_string_return_function(",
+		"ir_contract::body_child_sequence(",
+		"ir_contract::body_node_kind(",
+		"ir_contract::body_token_or_empty(",
 	},
 	"../../selfhost/src/backend/ir_contract.kizu": {
 		"pub fn require_fact(",
