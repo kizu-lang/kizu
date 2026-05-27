@@ -1,0 +1,571 @@
+import selfhost::backend::compiled_util;
+import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::compiled_type_lower;
+import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_call_emit;
+import selfhost::backend::ir_contract;
+
+pub fn emit_if_statement(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    llvm_return_type: []u8,
+    if_node: i64,
+    temp_counter: i64,
+    string_counter: i64,
+    if_index: i64
+) -> !i64 {
+    let cond_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, if_node, "condition", 0
+    );
+    let then_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, if_node, "then", 0
+    );
+    let else_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, if_node, "else", 0
+    );
+    var tc = temp_counter;
+    tc = try emit_expr(
+        out, ir_bytes, function_name, llvm_symbol,
+        module_prefix, locals_spec, params_spec,
+        cond_node, tc, string_counter
+    );
+    let cond_reg = tc - 1;
+    try out.append_bytes("  br i1 %t");
+    try std::fmt::append_i64(out, cond_reg);
+    try out.append_bytes(", label %if");
+    try std::fmt::append_i64(out, if_index);
+    try out.append_bytes("_then, label %if");
+    try std::fmt::append_i64(out, if_index);
+    try out.append_bytes("_cont");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("if");
+    try std::fmt::append_i64(out, if_index);
+    try out.append_bytes("_then:");
+    try out.append_byte(cast<u8>(10));
+    try emit_then_block(
+        out, ir_bytes, function_name, llvm_symbol,
+        module_prefix, locals_spec, params_spec,
+        llvm_return_type, then_node, tc
+    );
+    try out.append_bytes("if");
+    try std::fmt::append_i64(out, if_index);
+    try out.append_bytes("_cont:");
+    try out.append_byte(cast<u8>(10));
+    return tc;
+}
+
+pub fn emit_then_block(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    llvm_return_type: []u8,
+    then_node: i64,
+    temp_counter: i64
+) -> !void {
+    let then_kind = try ir_contract::body_node_kind(ir_bytes, function_name, then_node);
+    if std::mem::equal_bytes(then_kind, "Block") {
+        let stmt = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, then_node, "statement", 0
+        );
+        let stmt_kind = try ir_contract::body_node_kind(ir_bytes, function_name, stmt);
+        if std::mem::equal_bytes(stmt_kind, "Return") {
+            let ret_value = try ir_contract::body_child_sequence(
+                ir_bytes, function_name, stmt, "value", 0
+            );
+            let ret_kind = try ir_contract::body_node_kind(ir_bytes, function_name, ret_value);
+            if std::mem::equal_bytes(ret_kind, "Bool") {
+                let token = try ir_contract::body_token_or_empty(
+                    ir_bytes, function_name, ret_value
+                );
+                try out.append_bytes("  ret ");
+                try out.append_bytes(llvm_return_type);
+                try out.append_bytes(" ");
+                if std::mem::equal_bytes(token, "true") {
+                    try out.append_bytes("true");
+                } else {
+                    try out.append_bytes("false");
+                }
+                try out.append_byte(cast<u8>(10));
+                return;
+            }
+            if std::mem::equal_bytes(ret_kind, "Call") {
+                let call_type = try compiled_signature::resolve_call_return_type(
+                    ir_bytes, function_name, module_prefix, ret_value
+                );
+                var tc = temp_counter;
+                tc = try emit_call_expr(
+                    out, ir_bytes, function_name, llvm_symbol,
+                    module_prefix, locals_spec, params_spec,
+                    ret_value, tc, 0
+                );
+                try out.append_bytes("  ret ");
+                try out.append_bytes(call_type);
+                try out.append_bytes(" %t");
+                try std::fmt::append_i64(out, tc - 1);
+                try out.append_byte(cast<u8>(10));
+                return;
+            }
+            var tc = temp_counter;
+            tc = try emit_expr(
+                out, ir_bytes, function_name, llvm_symbol,
+                module_prefix, locals_spec, params_spec,
+                ret_value, tc, 0
+            );
+            try out.append_bytes("  ret ");
+            try out.append_bytes(llvm_return_type);
+            try out.append_bytes(" %t");
+            try std::fmt::append_i64(out, tc - 1);
+            try out.append_byte(cast<u8>(10));
+            return;
+        }
+    }
+    return error("compiled function: unsupported then block");
+}
+
+pub fn emit_expr(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    temp_counter: i64,
+    string_counter: i64
+) -> !i64 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, expr_node);
+    if std::mem::equal_bytes(kind, "Prefix") {
+        return try emit_prefix_expr(
+            out, ir_bytes, function_name, llvm_symbol,
+            module_prefix, locals_spec, params_spec,
+            expr_node, temp_counter, string_counter
+        );
+    }
+    if std::mem::equal_bytes(kind, "Binary") {
+        return try emit_binary_expr(
+            out, ir_bytes, function_name, llvm_symbol,
+            module_prefix, locals_spec, params_spec,
+            expr_node, temp_counter, string_counter
+        );
+    }
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        return try emit_field_expr(
+            out, ir_bytes, function_name, llvm_symbol,
+            module_prefix, locals_spec, params_spec,
+            expr_node, temp_counter
+        );
+    }
+    if std::mem::equal_bytes(kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty(
+            ir_bytes, function_name, expr_node
+        );
+        let var_type = try compiled_signature::find_param_type(locals_spec, var_name);
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes(" = select i1 true, ");
+        try out.append_bytes(var_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(var_name);
+        try out.append_bytes(", ");
+        try out.append_bytes(var_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(var_name);
+        try out.append_byte(cast<u8>(10));
+        return temp_counter + 1;
+    }
+    if std::mem::equal_bytes(kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty(
+            ir_bytes, function_name, expr_node
+        );
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes(" = select i1 true, i1 ");
+        if std::mem::equal_bytes(token, "true") {
+            try out.append_bytes("true, i1 true");
+        } else {
+            try out.append_bytes("false, i1 false");
+        }
+        try out.append_byte(cast<u8>(10));
+        return temp_counter + 1;
+    }
+    if std::mem::equal_bytes(kind, "Int") {
+        let int_value = try ir_contract::body_int_value(
+            ir_bytes, function_name, expr_node
+        );
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes(" = add i64 0, ");
+        try std::fmt::append_i64(out, int_value);
+        try out.append_byte(cast<u8>(10));
+        return temp_counter + 1;
+    }
+    if std::mem::equal_bytes(kind, "Call") {
+        return try emit_call_expr(
+            out, ir_bytes, function_name, llvm_symbol,
+            module_prefix, locals_spec, params_spec,
+            expr_node, temp_counter, string_counter
+        );
+    }
+    if std::mem::equal_bytes(kind, "String") {
+        let token = try ir_contract::body_token_or_empty(
+            ir_bytes, function_name, expr_node
+        );
+        let token_len = std::mem::len(token);
+        let payload_len = token_len - 2;
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_ptr = getelementptr [");
+        try std::fmt::append_i64(out, payload_len);
+        try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+        try out.append_bytes(llvm_symbol);
+        try out.append_bytes(".s");
+        try std::fmt::append_i64(out, string_counter);
+        try out.append_bytes(", i64 0, i64 0");
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_ptr, 0");
+        try out.append_byte(cast<u8>(10));
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes(" = insertvalue %kizu.slice.u8 %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes("_base, i64 ");
+        try std::fmt::append_i64(out, payload_len);
+        try out.append_bytes(", 1");
+        try out.append_byte(cast<u8>(10));
+        return temp_counter + 1;
+    }
+    return error("compiled function: unsupported expression kind");
+}
+
+pub fn emit_prefix_expr(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    temp_counter: i64,
+    string_counter: i64
+) -> !i64 {
+    let op = try ir_contract::sequence_fact_value(
+        ir_bytes, "body-prefix ", function_name, expr_node
+    );
+    let right_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, expr_node, "right", 0
+    );
+    var tc = try emit_expr(
+        out, ir_bytes, function_name, llvm_symbol,
+        module_prefix, locals_spec, params_spec,
+        right_node, temp_counter, string_counter
+    );
+    let operand_reg = tc - 1;
+    if std::mem::equal_bytes(op, "not") {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, tc);
+        try out.append_bytes(" = xor i1 %t");
+        try std::fmt::append_i64(out, operand_reg);
+        try out.append_bytes(", true");
+        try out.append_byte(cast<u8>(10));
+        return tc + 1;
+    }
+    return error("compiled function: unsupported prefix op");
+}
+
+pub fn emit_binary_expr(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    temp_counter: i64,
+    string_counter: i64
+) -> !i64 {
+    let op = try ir_contract::sequence_fact_value(
+        ir_bytes, "body-binary ", function_name, expr_node
+    );
+    let left_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, expr_node, "left", 0
+    );
+    let right_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, expr_node, "right", 0
+    );
+    var tc = try emit_expr(
+        out, ir_bytes, function_name, llvm_symbol,
+        module_prefix, locals_spec, params_spec,
+        left_node, temp_counter, string_counter
+    );
+    let left_reg = tc - 1;
+    tc = try emit_expr(
+        out, ir_bytes, function_name, llvm_symbol,
+        module_prefix, locals_spec, params_spec,
+        right_node, tc, string_counter
+    );
+    let right_reg = tc - 1;
+    if std::mem::equal_bytes(op, "and") or std::mem::equal_bytes(op, "or") {
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, tc);
+        try out.append_bytes(" = ");
+        try out.append_bytes(op);
+        try out.append_bytes(" i1 %t");
+        try std::fmt::append_i64(out, left_reg);
+        try out.append_bytes(", %t");
+        try std::fmt::append_i64(out, right_reg);
+        try out.append_byte(cast<u8>(10));
+        return tc + 1;
+    }
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, tc);
+    try out.append_bytes(" = icmp ");
+    if std::mem::equal_bytes(op, "eq") {
+        try out.append_bytes("eq");
+    } else {
+        if std::mem::equal_bytes(op, "not-eq") {
+            try out.append_bytes("ne");
+        } else {
+            if std::mem::equal_bytes(op, "lt") {
+                try out.append_bytes("slt");
+            } else {
+                if std::mem::equal_bytes(op, "lte") {
+                    try out.append_bytes("sle");
+                } else {
+                    if std::mem::equal_bytes(op, "gt") {
+                        try out.append_bytes("sgt");
+                    } else {
+                        if std::mem::equal_bytes(op, "gte") {
+                            try out.append_bytes("sge");
+                        } else {
+                            return error("compiled function: unsupported binary op");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    try out.append_bytes(" i64 %t");
+    try std::fmt::append_i64(out, left_reg);
+    try out.append_bytes(", %t");
+    try std::fmt::append_i64(out, right_reg);
+    try out.append_byte(cast<u8>(10));
+    return tc + 1;
+}
+
+pub fn emit_field_expr(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    temp_counter: i64
+) -> !i64 {
+    let mode = try ir_contract::sequence_fact_second_value(
+        ir_bytes, "body-field-expr ", function_name, expr_node
+    );
+    if std::mem::equal_bytes(mode, "namespace") {
+        let variant_name = try ir_contract::body_field_expr_name(
+            ir_bytes, function_name, expr_node, "namespace"
+        );
+        let receiver = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, expr_node, "receiver", 0
+        );
+        let receiver_token = try ir_contract::body_token_or_empty(
+            ir_bytes, function_name, receiver
+        );
+        let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+            ir_bytes, module_prefix, receiver_token, variant_name
+        );
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes(" = add i64 0, ");
+        try std::fmt::append_i64(out, tag);
+        try out.append_byte(cast<u8>(10));
+        return temp_counter + 1;
+    }
+    let field_name = try ir_contract::body_field_expr_name(
+        ir_bytes, function_name, expr_node, "field"
+    );
+    let receiver = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, expr_node, "receiver", 0
+    );
+    let receiver_kind = try ir_contract::body_node_kind(
+        ir_bytes, function_name, receiver
+    );
+    if std::mem::equal_bytes(receiver_kind, "Var") {
+        let receiver_name = try ir_contract::body_token_or_empty(
+            ir_bytes, function_name, receiver
+        );
+        let receiver_type = try compiled_signature::find_param_type(locals_spec, receiver_name);
+        let kizu_type = try compiled_signature::find_param_kizu_type(
+            ir_bytes, module_prefix, receiver_name, locals_spec
+        );
+        let field_index = try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+            ir_bytes, module_prefix, kizu_type, field_name
+        );
+        try out.append_bytes("  %t");
+        try std::fmt::append_i64(out, temp_counter);
+        try out.append_bytes(" = extractvalue ");
+        try out.append_bytes(receiver_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(receiver_name);
+        try out.append_bytes(", ");
+        try std::fmt::append_i64(out, field_index);
+        try out.append_byte(cast<u8>(10));
+        return temp_counter + 1;
+    }
+    return error("compiled function: unsupported field expr receiver");
+}
+
+pub fn emit_call_expr(
+    out: &var std::string::String,
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    temp_counter: i64,
+    string_counter: i64
+) -> !i64 {
+    let callee_name = try ir_contract::body_call_callee_or_empty(
+        ir_bytes, function_name, call_node
+    );
+    let arg_count = try compiled_call_emit::count_call_args(ir_bytes, function_name, call_node);
+    let is_stdlib = compiled_fact_lookup::is_stdlib_callee(callee_name);
+    var callee_symbol_prefix = "";
+    var callee_ret_type = "";
+    if is_stdlib {
+        callee_symbol_prefix = try compiled_fact_lookup::lookup_stdlib_symbol(ir_bytes, callee_name);
+        let stdlib_ret = try compiled_fact_lookup::lookup_stdlib_return(ir_bytes, callee_name);
+        callee_ret_type = try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, stdlib_ret);
+    } else {
+        callee_ret_type = try compiled_signature::resolve_call_return_type(
+            ir_bytes, function_name, module_prefix, call_node
+        );
+    }
+    var tc = temp_counter;
+    var arg_index = 0;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, call_node, "arg", arg_index
+        );
+        tc = try emit_expr(
+            out, ir_bytes, function_name, llvm_symbol,
+            module_prefix, locals_spec, params_spec,
+            arg_node, tc, string_counter
+        );
+        arg_index = arg_index + 1;
+    }
+    try out.append_bytes("  %t");
+    try std::fmt::append_i64(out, tc);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(callee_ret_type);
+    try out.append_bytes(" @");
+    if is_stdlib {
+        try out.append_bytes(callee_symbol_prefix);
+    } else {
+        try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee_name);
+    }
+    try out.append_bytes("(");
+    arg_index = 0;
+    var arg_tc = temp_counter;
+    while arg_index < arg_count {
+        if arg_index > 0 {
+            try out.append_bytes(", ");
+        }
+        let arg_node = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, call_node, "arg", arg_index
+        );
+        let arg_kind = try ir_contract::body_node_kind(ir_bytes, function_name, arg_node);
+        var arg_type = "";
+        if is_stdlib {
+            arg_type = "%kizu.slice.u8";
+        } else {
+            arg_type = try compiled_signature::resolve_call_arg_type(
+                ir_bytes, module_prefix, callee_name, arg_index
+            );
+        }
+        try out.append_bytes(arg_type);
+        try out.append_bytes(" %t");
+        try std::fmt::append_i64(out, arg_tc);
+        arg_tc = arg_tc + 1;
+        let next_kind = try ir_contract::body_node_kind(ir_bytes, function_name, arg_node);
+        if std::mem::equal_bytes(next_kind, "Binary") or
+            std::mem::equal_bytes(next_kind, "Prefix") or
+            std::mem::equal_bytes(next_kind, "Call") {
+            let sub_count = try count_expr_temps(ir_bytes, function_name, arg_node);
+            arg_tc = arg_tc + sub_count - 1;
+        }
+        arg_index = arg_index + 1;
+    }
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    return tc + 1;
+}
+
+pub fn count_expr_temps(
+    ir_bytes: []u8,
+    function_name: []u8,
+    expr_node: i64
+) -> !i64 {
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, expr_node);
+    if std::mem::equal_bytes(kind, "Var") or
+        std::mem::equal_bytes(kind, "Bool") or
+        std::mem::equal_bytes(kind, "Int") {
+        return 1;
+    }
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        return 1;
+    }
+    if std::mem::equal_bytes(kind, "Prefix") {
+        let right = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, expr_node, "right", 0
+        );
+        return 1 + try count_expr_temps(ir_bytes, function_name, right);
+    }
+    if std::mem::equal_bytes(kind, "Binary") {
+        let left = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, expr_node, "left", 0
+        );
+        let right = try ir_contract::body_child_sequence(
+            ir_bytes, function_name, expr_node, "right", 0
+        );
+        return 1 + try count_expr_temps(ir_bytes, function_name, left)
+            + try count_expr_temps(ir_bytes, function_name, right);
+    }
+    if std::mem::equal_bytes(kind, "Call") {
+        let arg_count = try compiled_call_emit::count_call_args(ir_bytes, function_name, expr_node);
+        var total = 1;
+        var i = 0;
+        while i < arg_count {
+            let arg = try ir_contract::body_child_sequence(
+                ir_bytes, function_name, expr_node, "arg", i
+            );
+            total = total + try count_expr_temps(ir_bytes, function_name, arg);
+            i = i + 1;
+        }
+        return total;
+    }
+    return 1;
+}

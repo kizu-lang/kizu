@@ -1,0 +1,283 @@
+import selfhost::backend::compiled_util;
+import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::compiled_type_lower;
+import selfhost::backend::ir_contract;
+
+pub fn append_params_signature(
+    out: &var std::string::String,
+    params_spec: []u8
+) -> !void {
+    let spec_len = std::mem::len(params_spec);
+    if spec_len == 0 {
+        return;
+    }
+    try out.append_byte(cast<u8>(10));
+    let semicolon = cast<u8>(59);
+    let space = cast<u8>(32);
+    var pos = 0;
+    var param_index = 0;
+    while pos < spec_len {
+        let entry_end = compiled_util::find_byte(params_spec, semicolon, pos);
+        let space_pos = compiled_util::find_byte(params_spec, space, pos);
+        if space_pos >= entry_end {
+            return error("compiled function: invalid params_spec");
+        }
+        let param_type = params_spec[pos..space_pos];
+        let param_name = params_spec[space_pos + 1..entry_end];
+        if param_index > 0 {
+            try out.append_bytes(",");
+            try out.append_byte(cast<u8>(10));
+        }
+        try out.append_bytes("  ");
+        try out.append_bytes(param_type);
+        try out.append_bytes(" %");
+        try out.append_bytes(param_name);
+        param_index = param_index + 1;
+        if entry_end < spec_len {
+            pos = entry_end + 1;
+        } else {
+            pos = spec_len;
+        }
+    }
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+pub fn find_param_type(params_spec: []u8, name: []u8) -> ![]u8 {
+    let spec_len = std::mem::len(params_spec);
+    let semicolon = cast<u8>(59);
+    let space = cast<u8>(32);
+    var pos = 0;
+    while pos < spec_len {
+        let entry_end = compiled_util::find_byte(params_spec, semicolon, pos);
+        let space_pos = compiled_util::find_byte(params_spec, space, pos);
+        if space_pos < entry_end {
+            let param_type = params_spec[pos..space_pos];
+            let param_name = params_spec[space_pos + 1..entry_end];
+            if std::mem::equal_bytes(param_name, name) {
+                return param_type;
+            }
+        }
+        if entry_end < spec_len {
+            pos = entry_end + 1;
+        } else {
+            pos = spec_len;
+        }
+    }
+    return error("compiled function: param not found");
+}
+
+pub fn find_param_kizu_type(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    var_name: []u8,
+    params_spec: []u8
+) -> ![]u8 {
+    let llvm_type = try find_param_type(params_spec, var_name);
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "function-signature-param ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    var index = 0;
+    while index + prefix_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let after_prefix = index + prefix_len;
+            if after_prefix + mp_len < byte_len and
+                std::mem::equal_bytes(ir_bytes[after_prefix..after_prefix + mp_len], module_prefix) {
+                let kizu_type = try extract_param_kizu_type_from_line(
+                    ir_bytes, after_prefix, var_name
+                );
+                if std::mem::len(kizu_type) > 0 {
+                    return kizu_type;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: param kizu type not found");
+}
+
+fn extract_param_kizu_type_from_line(
+    ir_bytes: []u8,
+    fn_start: i64,
+    var_name: []u8
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    var pos = fn_start;
+    while pos < byte_len and ir_bytes[pos] != cast<u8>(32) {
+        pos = pos + 1;
+    }
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    while pos < byte_len and ir_bytes[pos] >= cast<u8>(48) and ir_bytes[pos] <= cast<u8>(57) {
+        pos = pos + 1;
+    }
+    while pos < byte_len and ir_bytes[pos] == cast<u8>(32) {
+        pos = pos + 1;
+    }
+    let entry_start = pos;
+    let line_end_pos = compiled_util::find_line_end(ir_bytes, pos);
+    let entry = ir_bytes[entry_start..line_end_pos];
+    let colon1 = compiled_util::find_byte(entry, cast<u8>(58), 0);
+    let entry_len = std::mem::len(entry);
+    if colon1 >= entry_len {
+        return ir_bytes[0..0];
+    }
+    let param_name = entry[0..colon1];
+    if !std::mem::equal_bytes(param_name, var_name) {
+        return ir_bytes[0..0];
+    }
+    let colon2 = compiled_util::find_byte(entry, cast<u8>(58), colon1 + 1);
+    if colon2 >= entry_len {
+        return ir_bytes[0..0];
+    }
+    return entry[colon2 + 1..entry_len];
+}
+
+pub fn struct_field_index_by_name(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    var_name: []u8,
+    params_spec: []u8,
+    field_name: []u8
+) -> !i64 {
+    let kizu_type = try find_param_kizu_type(ir_bytes, module_prefix, var_name, params_spec);
+    return try compiled_fact_lookup::lookup_struct_field_index_by_prefix(
+        ir_bytes, module_prefix, kizu_type, field_name
+    );
+}
+
+pub fn struct_field_llvm_type(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    var_name: []u8,
+    params_spec: []u8,
+    field_index: i64
+) -> ![]u8 {
+    let kizu_type = try find_param_kizu_type(ir_bytes, module_prefix, var_name, params_spec);
+    let field_type = try compiled_fact_lookup::lookup_struct_field_type_by_prefix(
+        ir_bytes, module_prefix, kizu_type, field_index
+    );
+    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, field_type);
+}
+
+pub fn resolve_call_return_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    call_node: i64
+) -> ![]u8 {
+    let callee_name = try ir_contract::body_call_callee_or_empty(
+        ir_bytes, function_name, call_node
+    );
+    let ret_type = try compiled_fact_lookup::lookup_fact_value_by_prefix(
+        ir_bytes, "function-signature-return ", module_prefix, callee_name
+    );
+    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, ret_type);
+}
+
+pub fn resolve_struct_literal_type(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    struct_literal_node: i64
+) -> ![]u8 {
+    let type_node = try ir_contract::body_child_sequence(
+        ir_bytes, function_name, struct_literal_node, "type", 0
+    );
+    let type_name = try ir_contract::body_token_or_empty(
+        ir_bytes, function_name, type_node
+    );
+    return try compiled_fact_lookup::lookup_type_llvm_by_prefix(ir_bytes, module_prefix, type_name);
+}
+
+pub fn resolve_call_arg_type(
+    ir_bytes: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    arg_index: i64
+) -> ![]u8 {
+    let byte_len = std::mem::len(ir_bytes);
+    let prefix = "function-signature-param ";
+    let prefix_len = std::mem::len(prefix);
+    let mp_len = std::mem::len(module_prefix);
+    let name_len = std::mem::len(callee_name);
+    var index = 0;
+    var matched = 0;
+    while index + prefix_len + mp_len + name_len < byte_len {
+        if compiled_util::is_line_start(ir_bytes, index) and
+            std::mem::equal_bytes(ir_bytes[index..index + prefix_len], prefix) {
+            let mp_start = index + prefix_len;
+            let mp_end = mp_start + mp_len;
+            let cn_end = mp_end + name_len;
+            if cn_end < byte_len and
+                std::mem::equal_bytes(ir_bytes[mp_start..mp_end], module_prefix) and
+                std::mem::equal_bytes(ir_bytes[mp_end..cn_end], callee_name) and
+                ir_bytes[cn_end] == cast<u8>(32) {
+                if matched == arg_index {
+                    let line_end_pos = compiled_util::find_line_end(ir_bytes, cn_end);
+                    let entry = ir_bytes[cn_end..line_end_pos];
+                    let entry_len = std::mem::len(entry);
+                    let colon2 = compiled_util::find_last_colon(entry);
+                    if colon2 < entry_len {
+                        let kizu_type = entry[colon2 + 1..entry_len];
+                        return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_type);
+                    }
+                }
+                matched = matched + 1;
+            }
+        }
+        index = index + 1;
+    }
+    return error("compiled function: call arg type not found");
+}
+
+pub fn derive_callee_llvm_symbol(
+    out: &var std::string::String,
+    module_prefix: []u8,
+    callee_name: []u8
+) -> !void {
+    try out.append_bytes("kizu_compiled__");
+    let prefix_len = std::mem::len(module_prefix);
+    if prefix_len > 11 and std::mem::equal_bytes(module_prefix[0..11], "selfhost::") {
+        var pos = 11;
+        while pos < prefix_len {
+            let byte = module_prefix[pos];
+            if byte == cast<u8>(58) {
+                pos = pos + 1;
+            } else {
+                try out.append_byte(byte);
+                pos = pos + 1;
+            }
+        }
+    } else {
+        try out.append_bytes(module_prefix);
+    }
+    try out.append_bytes(callee_name);
+    return;
+}
+
+pub fn extend_locals_spec(
+    ir_bytes: []u8,
+    current_spec: []u8,
+    name: []u8,
+    llvm_type: []u8
+) -> ![]u8 {
+    return current_spec;
+}
+
+pub fn derive_return_type(
+    ir_bytes: []u8,
+    function_name: []u8
+) -> ![]u8 {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let mp_len = std::mem::len(module_prefix);
+    let fn_len = std::mem::len(function_name);
+    let short_name = function_name[mp_len..fn_len];
+    let kizu_return_type = try compiled_fact_lookup::lookup_fact_value_by_prefix(
+        ir_bytes, "function-signature-return ", module_prefix, short_name
+    );
+    return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_return_type);
+}
