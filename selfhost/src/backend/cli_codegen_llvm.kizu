@@ -6,10 +6,24 @@ pub fn append_globals(out: &var std::string::String, ir_bytes: []u8) -> !void {
         "codegen_metadata_line",
         ir_bytes
     );
-    try append_llvm_constant(out, "codegen_main", "4", "main");
-    try append_llvm_constant(out, "codegen_entry", "5", "entry");
-    try append_llvm_constant(out, "codegen_s0", "2", "s0");
-    try append_llvm_constant(out, "codegen_print", "5", "print");
+    try append_build_main_print_string_constant(out, "codegen_main", ir_bytes, "CodegenFunction", "name");
+    try append_build_main_print_string_constant(out, "codegen_entry", ir_bytes, "CodegenBlock", "label");
+    try append_build_main_print_call_string_constant(
+        out,
+        "codegen_s0",
+        ir_bytes,
+        "const_string_value",
+        0,
+        0
+    );
+    try append_build_main_print_call_string_constant(
+        out,
+        "codegen_print",
+        ir_bytes,
+        "call_instruction",
+        0,
+        0
+    );
     return;
 }
 
@@ -19,6 +33,7 @@ pub fn append_functions(out: &var std::string::String, ir_bytes: []u8) -> !void 
     try append_codegen_const_string_instruction_function(out, ir_bytes);
     try append_codegen_call_instruction_function(out, ir_bytes);
     try append_codegen_return_void_instruction_function(out, ir_bytes);
+    try append_codegen_build_main_print_program_function(out, ir_bytes);
     try append_codegen_lowered_main_print_program_function(out);
     try append_codegen_lower_run_ast_function(out);
     try append_codegen_program_supported_function(out);
@@ -181,18 +196,76 @@ fn append_codegen_lowered_main_print_program_function(out: &var std::string::Str
     try append_line(out, "  %kizu.slice.u8 %payload");
     try append_line(out, ") {");
     try append_line(out, "entry:");
-    try append_global_slice(out, "main", "codegen_main", 4);
-    try append_global_slice(out, "entry", "codegen_entry", 5);
-    try append_global_slice(out, "s0", "codegen_s0", 2);
-    try append_global_slice(out, "print", "codegen_print", 5);
+    try append_line(out,
+        "  %program = call %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 true)");
+    try append_line(out, "  ret %kizu.selfhost.codegen.program %program");
+    try append_line(out, "}");
+    try append_line(out, "");
+    return;
+}
+
+fn append_codegen_build_main_print_program_function(
+    out: &var std::string::String,
+    ir_bytes: []u8
+) -> !void {
+    let function_block_count = try build_main_print_program_int_field(
+        ir_bytes,
+        "CodegenFunction",
+        "block_count"
+    );
+    let block_instruction_count = try build_main_print_program_int_field(
+        ir_bytes,
+        "CodegenBlock",
+        "instruction_count"
+    );
+    let function_count = try build_main_print_program_int_field(
+        ir_bytes,
+        "Program",
+        "function_count"
+    );
+    let main_len = try string_token_decoded_len(
+        try build_main_print_program_string_field(ir_bytes, "CodegenFunction", "name"),
+        "invalid build_main_print_program body"
+    );
+    let entry_len = try string_token_decoded_len(
+        try build_main_print_program_string_field(ir_bytes, "CodegenBlock", "label"),
+        "invalid build_main_print_program body"
+    );
+    let s0_len = try string_token_decoded_len(
+        try build_main_print_program_call_string_arg(ir_bytes, "const_string_value", 0, 0),
+        "invalid build_main_print_program body"
+    );
+    let print_len = try string_token_decoded_len(
+        try build_main_print_program_call_string_arg(ir_bytes, "call_instruction", 0, 0),
+        "invalid build_main_print_program body"
+    );
+    try require_build_main_print_program_call(ir_bytes, "const_string_value", 0);
+    try require_build_main_print_program_call(ir_bytes, "const_string_instruction", 0);
+    try require_build_main_print_program_call(ir_bytes, "const_string_value", 1);
+    try require_build_main_print_program_call(ir_bytes, "call_instruction", 0);
+    try require_build_main_print_program_call(ir_bytes, "return_void_instruction", 0);
+    try require_build_main_print_program_var_field(ir_bytes, "from_codegen_lowering", "from_codegen_lowering");
+    try append_line(out, "define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_build_main_print_program(");
+    try append_line(out, "  %kizu.slice.u8 %payload,");
+    try append_line(out, "  i1 %from_codegen_lowering");
+    try append_line(out, ") {");
+    try append_line(out, "entry:");
+    try append_global_slice(out, "main", "codegen_main", main_len);
+    try append_global_slice(out, "entry", "codegen_entry", entry_len);
+    try append_global_slice(out, "s0", "codegen_s0", s0_len);
+    try append_global_slice(out, "print", "codegen_print", print_len);
     try append_line(out,
         "  %function0 = insertvalue %kizu.selfhost.codegen.function poison, %kizu.slice.u8 %main_slice, 0");
-    try append_line(out,
-        "  %function = insertvalue %kizu.selfhost.codegen.function %function0, i64 1, 1");
+    try out.append_bytes("  %function = insertvalue %kizu.selfhost.codegen.function %function0, i64 ");
+    try std::fmt::append_i64(out, function_block_count);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
     try append_line(out,
         "  %block0 = insertvalue %kizu.selfhost.codegen.block poison, %kizu.slice.u8 %entry_slice, 0");
-    try append_line(out,
-        "  %block = insertvalue %kizu.selfhost.codegen.block %block0, i64 3, 1");
+    try out.append_bytes("  %block = insertvalue %kizu.selfhost.codegen.block %block0, i64 ");
+    try std::fmt::append_i64(out, block_instruction_count);
+    try out.append_bytes(", 1");
+    try out.append_byte(cast<u8>(10));
     try append_line(out,
         "  %value = call %kizu.selfhost.codegen.value @kizu_selfhost__cli_codegen_const_string_value(%kizu.slice.u8 %s0_slice, %kizu.slice.u8 %payload)");
     try append_line(out,
@@ -217,7 +290,10 @@ fn append_codegen_lowered_main_print_program_function(out: &var std::string::Str
     try append_line(out, "  %second_argument_name = extractvalue %kizu.selfhost.codegen.instruction %second, 6");
     try append_line(out, "  %second_argument_payload = extractvalue %kizu.selfhost.codegen.instruction %second, 7");
     try append_line(out, "  %third_kind = extractvalue %kizu.selfhost.codegen.instruction %third, 0");
-    try append_line(out, "  %field0 = insertvalue %kizu.selfhost.codegen.program poison, i64 1, 0");
+    try out.append_bytes("  %field0 = insertvalue %kizu.selfhost.codegen.program poison, i64 ");
+    try std::fmt::append_i64(out, function_count);
+    try out.append_bytes(", 0");
+    try out.append_byte(cast<u8>(10));
     try append_line(out, "  %field1 = insertvalue %kizu.selfhost.codegen.program %field0, %kizu.slice.u8 %function_name, 1");
     try append_line(out, "  %field2 = insertvalue %kizu.selfhost.codegen.program %field1, i64 %function_block_count, 2");
     try append_line(out, "  %field3 = insertvalue %kizu.selfhost.codegen.program %field2, %kizu.slice.u8 %block_label, 3");
@@ -232,10 +308,172 @@ fn append_codegen_lowered_main_print_program_function(out: &var std::string::Str
     try append_line(out, "  %field12 = insertvalue %kizu.selfhost.codegen.program %field11, %kizu.slice.u8 %second_argument_name, 12");
     try append_line(out, "  %field13 = insertvalue %kizu.selfhost.codegen.program %field12, %kizu.slice.u8 %second_argument_payload, 13");
     try append_line(out, "  %field14 = insertvalue %kizu.selfhost.codegen.program %field13, i64 %third_kind, 14");
-    try append_line(out, "  %field15 = insertvalue %kizu.selfhost.codegen.program %field14, i1 true, 15");
+    try append_line(out, "  %field15 = insertvalue %kizu.selfhost.codegen.program %field14, i1 %from_codegen_lowering, 15");
     try append_line(out, "  ret %kizu.selfhost.codegen.program %field15");
     try append_line(out, "}");
     try append_line(out, "");
+    return;
+}
+
+fn append_build_main_print_string_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    type_name: []u8,
+    field_name: []u8
+) -> !void {
+    let token = try build_main_print_program_string_field(ir_bytes, type_name, field_name);
+    try append_llvm_constant_from_string_token(out, name, token, "invalid build_main_print_program body");
+    return;
+}
+
+fn append_build_main_print_call_string_constant(
+    out: &var std::string::String,
+    name: []u8,
+    ir_bytes: []u8,
+    callee: []u8,
+    call_ordinal: i64,
+    arg_ordinal: i64
+) -> !void {
+    let token = try build_main_print_program_call_string_arg(
+        ir_bytes,
+        callee,
+        call_ordinal,
+        arg_ordinal
+    );
+    try append_llvm_constant_from_string_token(out, name, token, "invalid build_main_print_program body");
+    return;
+}
+
+fn append_llvm_constant_from_string_token(
+    out: &var std::string::String,
+    name: []u8,
+    token: []u8,
+    error_message: []u8
+) -> !void {
+    let size = try string_token_decoded_len(token, error_message);
+    try out.append_bytes("@.kizu.cli.");
+    try out.append_bytes(name);
+    try out.append_bytes(" = private unnamed_addr constant [");
+    try std::fmt::append_i64(out, size);
+    try out.append_bytes(" x i8] c");
+    try out.append_byte(cast<u8>(34));
+    try append_string_token_payload(out, token, error_message);
+    try out.append_byte(cast<u8>(34));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+fn string_token_decoded_len(token: []u8, error_message: []u8) -> !i64 {
+    let token_len = std::mem::len(token);
+    if token_len < 2 or token[0] != cast<u8>(34) or token[token_len - 1] != cast<u8>(34) {
+        return error(error_message);
+    }
+    return token_len - 2;
+}
+
+fn append_string_token_payload(
+    out: &var std::string::String,
+    token: []u8,
+    error_message: []u8
+) -> !void {
+    let token_len = std::mem::len(token);
+    if token_len < 2 or token[0] != cast<u8>(34) or token[token_len - 1] != cast<u8>(34) {
+        return error(error_message);
+    }
+    try append_llvm_c_string_payload(out, token[1..token_len - 1]);
+    return;
+}
+
+fn build_main_print_program_string_field(
+    ir_bytes: []u8,
+    type_name: []u8,
+    field_name: []u8
+) -> ![]u8 {
+    let function_name = "selfhost::ir::codegen::build_main_print_program";
+    let literal = try ir_contract::body_struct_literal_of_type(ir_bytes, function_name, type_name, 0);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "String") {
+        return error("invalid build_main_print_program body");
+    }
+    return try ir_contract::body_token_or_empty(ir_bytes, function_name, value);
+}
+
+fn build_main_print_program_int_field(
+    ir_bytes: []u8,
+    type_name: []u8,
+    field_name: []u8
+) -> !i64 {
+    let function_name = "selfhost::ir::codegen::build_main_print_program";
+    let literal = try ir_contract::body_struct_literal_of_type(ir_bytes, function_name, type_name, 0);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    return try ir_contract::body_int_value(ir_bytes, function_name, value);
+}
+
+fn build_main_print_program_call_string_arg(
+    ir_bytes: []u8,
+    callee: []u8,
+    call_ordinal: i64,
+    arg_ordinal: i64
+) -> ![]u8 {
+    let function_name = "selfhost::ir::codegen::build_main_print_program";
+    let call = try build_main_print_program_call_sequence(ir_bytes, callee, call_ordinal);
+    let arg = try ir_contract::body_child_sequence(ir_bytes, function_name, call, "arg", arg_ordinal);
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, arg);
+    if !std::mem::equal_bytes(kind, "String") {
+        return error("invalid build_main_print_program body");
+    }
+    return try ir_contract::body_token_or_empty(ir_bytes, function_name, arg);
+}
+
+fn require_build_main_print_program_call(
+    ir_bytes: []u8,
+    callee: []u8,
+    call_ordinal: i64
+) -> !void {
+    let ignored = try build_main_print_program_call_sequence(ir_bytes, callee, call_ordinal);
+    return;
+}
+
+fn build_main_print_program_call_sequence(
+    ir_bytes: []u8,
+    callee: []u8,
+    call_ordinal: i64
+) -> !i64 {
+    let function_name = "selfhost::ir::codegen::build_main_print_program";
+    let count = try ir_contract::body_node_count(ir_bytes, function_name);
+    var sequence = 0;
+    var matched = 0;
+    while sequence < count {
+        let actual = try ir_contract::body_call_callee_or_empty(ir_bytes, function_name, sequence);
+        if std::mem::equal_bytes(actual, callee) {
+            if matched == call_ordinal {
+                return sequence;
+            }
+            matched = matched + 1;
+        }
+        sequence = sequence + 1;
+    }
+    return error("invalid build_main_print_program body");
+}
+
+fn require_build_main_print_program_var_field(
+    ir_bytes: []u8,
+    field_name: []u8,
+    expected_var: []u8
+) -> !void {
+    let function_name = "selfhost::ir::codegen::build_main_print_program";
+    let literal = try ir_contract::body_struct_literal_of_type(ir_bytes, function_name, "Program", 0);
+    let value = try ir_contract::body_struct_field_value(ir_bytes, function_name, literal, field_name);
+    let kind = try ir_contract::body_node_kind(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(kind, "Var") {
+        return error("invalid build_main_print_program body");
+    }
+    let actual = try ir_contract::body_token_or_empty(ir_bytes, function_name, value);
+    if !std::mem::equal_bytes(actual, expected_var) {
+        return error("invalid build_main_print_program body");
+    }
     return;
 }
 

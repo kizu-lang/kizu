@@ -1158,6 +1158,7 @@ func assertHostedRunLLVMResponsibilities(
 	assertConstStringInstructionBodyDerivedCodegen(t, cliCodegen)
 	assertCallInstructionBodyDerivedCodegen(t, cliCodegen)
 	assertReturnVoidInstructionBodyDerivedCodegen(t, cliCodegen)
+	assertBuildMainPrintProgramBodyDerivedCodegen(t, cliCodegen)
 	if strings.Contains(cliRun, "selfhost::ir::codegen::Program function-block-instruction-v0") {
 		t.Fatal("run metadata path still directly hardcodes codegen metadata literal")
 	}
@@ -1269,6 +1270,39 @@ func assertCallInstructionBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	}
 	if strings.Contains(cliCodegen, "return 2;") {
 		t.Fatal("call_instruction LLVM generator hardcodes the instruction kind tag helper")
+	}
+}
+
+// assertBuildMainPrintProgramBodyDerivedCodegen keeps the program builder slice active.
+func assertBuildMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen string) {
+	t.Helper()
+	for _, fragment := range []string{
+		"fn append_codegen_build_main_print_program_function(",
+		"fn build_main_print_program_string_field(",
+		"fn build_main_print_program_call_string_arg(",
+		"fn build_main_print_program_int_field(",
+		"fn require_build_main_print_program_var_field(",
+		"selfhost::ir::codegen::build_main_print_program",
+		"define %kizu.selfhost.codegen.program @kizu_selfhost__cli_codegen_build_main_print_program",
+		"@kizu_selfhost__cli_codegen_build_main_print_program(%kizu.slice.u8 %payload, i1 true)",
+	} {
+		if !strings.Contains(cliCodegen, fragment) {
+			t.Fatalf(
+				"codegen LLVM path does not derive build_main_print_program from body facts with %q",
+				fragment,
+			)
+		}
+	}
+	for _, forbidden := range []string{
+		`append_llvm_constant(out, "codegen_main", "4", "main")`,
+		`append_llvm_constant(out, "codegen_entry", "5", "entry")`,
+		`append_llvm_constant(out, "codegen_s0", "2", "s0")`,
+		`append_llvm_constant(out, "codegen_print", "5", "print")`,
+		"%field15 = insertvalue %kizu.selfhost.codegen.program %field14, i1 true, 15",
+	} {
+		if strings.Contains(cliCodegen, forbidden) {
+			t.Fatalf("build_main_print_program LLVM path still owns hardcoded route %q", forbidden)
+		}
 	}
 }
 
@@ -1510,6 +1544,7 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"fn call_instruction_kind_tag_from_body(",
 		"fn append_codegen_return_void_instruction_function(",
 		"fn return_void_instruction_kind_tag_from_body(",
+		"fn append_codegen_build_main_print_program_function(",
 		"fn append_codegen_lowered_main_print_program_function(",
 		"fn append_codegen_lower_run_ast_function(",
 		"fn append_codegen_program_supported_function(",
