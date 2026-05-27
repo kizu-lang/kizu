@@ -1175,11 +1175,15 @@ func assertMetadataLineBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 		"pub fn metadata_line_body_decoded_len(",
 		"pub fn append_metadata_line_body_payload(",
 		"ir_contract::body_child_sequence(",
-		"define %kizu.slice.u8 @kizu_selfhost__ir_codegen_metadata_line()",
 	} {
 		if !strings.Contains(cliCodegen, fragment) {
 			t.Fatalf("codegen LLVM path does not derive metadata_line from body facts with %q", fragment)
 		}
+	}
+	oldHandWritten := "define %kizu.slice.u8 " +
+		"@kizu_selfhost__ir_codegen_metadata_line()"
+	if strings.Contains(cliCodegen, oldHandWritten) {
+		t.Fatal("hand-written metadata_line should be replaced by compiled version")
 	}
 }
 
