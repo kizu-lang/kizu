@@ -87,6 +87,29 @@ func TestCheckRejectsActivePayloadCleanupOutsideDeinit(t *testing.T) {
 	assertMoveError(t, source, "`String.deinit` requires owned String receiver")
 }
 
+// TestCheckRejectsOwnerUnionReuseAfterDeinitDispatch proves the deinit dispatch
+// consumes the union: re-matching `self` after the active payload was cleaned is
+// a use-after-move, so deinitialized payload storage can never be read.
+func TestCheckRejectsOwnerUnionReuseAfterDeinitDispatch(t *testing.T) {
+	source := `union Node {
+    Left(std::string::String),
+    Right(std::array::Array<i64>),
+}
+impl Node {
+    fn deinit(self: Node) -> void {
+        match self {
+            Left(s) => s.deinit(),
+            Right(a) => a.deinit(),
+        }
+        match self {
+            Left(s) => print(0),
+            Right(a) => print(1),
+        }
+    }
+}`
+	assertMoveError(t, source, "moved value `self` was used")
+}
+
 // assertMoveError fails unless move-checking source reports an error with want.
 func assertMoveError(t *testing.T, source string, want string) {
 	t.Helper()
