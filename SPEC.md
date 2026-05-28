@@ -1031,6 +1031,30 @@ named owner aggregate を standalone owner として構築、返却、値渡し�
 container 内部の structural element cleanup は、`array.deinit()` のような明示 cleanup 呼び出しの
 実装 detail としてだけ許可します。これは callable な implicit destructor を合成しません。
 
+owner payload を持つ `union` も owner aggregate です。その `deinit` は active variant の
+payload だけを、通常は exhaustive な `match` で cleanup します。inactive variant の
+payload storage は cleanup しません。tag が初期化済みと示す payload だけを処理します。
+selfhost backend の tagged-union payload layout と所有 payload の cleanup 規約は
+`docs/selfhost-runtime-abi.md` の Tagged-Union Payload Layout で定めます。
+
+```kizu
+union MirStmt {
+    LetCall(MirLetCall),
+    ReturnExpr(MirReturnExpr),
+    If(MirIf),
+}
+
+impl MirStmt {
+    fn deinit(self: MirStmt) -> void {
+        match self {
+            LetCall(stmt) => stmt.deinit(),
+            ReturnExpr(stmt) => stmt.deinit(),
+            If(stmt) => stmt.deinit(),
+        };
+    }
+}
+```
+
 ## 9. borrow
 
 borrow は一時的に値を参照するための仕組みです。
