@@ -1105,7 +1105,7 @@ func assertHostedRunLLVMResponsibilities(
 	t.Helper()
 	requiredRun := []string{
 		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
-		"@kizu_compiled__ir_codegen_lower_run_ast_to_program",
+		"@kizu_selfhost__cli_codegen_lower_run_ast",
 		"@kizu_selfhost__cli_emit_run_codegen_artifact",
 		"@kizu_selfhost__cli_hosted_write_stdout_ll",
 		"@kizu_rt_process_spawn_wait8",
@@ -1249,10 +1249,9 @@ func assertLoweredMainPrintProgramBodyDerivedCodegen(t *testing.T, cliCodegen st
 // assertLowerRunAstBodyDerivedCodegen keeps the lower_run_ast shape checks body-fact derived.
 func assertLowerRunAstBodyDerivedCodegen(t *testing.T, cliCodegen string) {
 	t.Helper()
-	if strings.Contains(cliCodegen,
-		"define %kizu.selfhost.codegen.program "+
-			"@kizu_selfhost__cli_codegen_lower_run_ast") {
-		t.Fatal("lower_run_ast hand-written generator should be removed")
+	if !strings.Contains(cliCodegen,
+		"@kizu_selfhost__ir_codegen_lower_run_ast_to_program") {
+		t.Fatal("cli_codegen_lower_run_ast must delegate to body-derived lower_run_ast_to_program")
 	}
 }
 
@@ -1264,8 +1263,8 @@ func assertCompiledEntryModule(t *testing.T, compiled string) {
 		"pub fn append_compiled_function_typed(",
 		"pub fn append_compiled_function_params(",
 		"pub fn append_compiled_function_auto(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_node_kind(",
+		"ir_contract::body_child_sequence_from(",
+		"ir_contract::body_node_kind_from(",
 	} {
 		if !strings.Contains(compiled, fragment) {
 			t.Fatalf("compiled_llvm missing generic compiler fragment %q", fragment)
@@ -1431,25 +1430,25 @@ func assertCliCompiledSymbols(t *testing.T, cliLlvm string) {
 	if !strings.Contains(cliLlvm, "compiled_llvm::append_compiled_function_auto(") {
 		t.Fatal("cli_llvm does not call compiled_llvm::append_compiled_function_auto")
 	}
-	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_metadata_line") {
+	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_metadata_line") {
 		t.Fatal("cli_llvm does not emit compiled metadata_line symbol")
 	}
-	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_return_void_instruction") {
+	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_return_void_instruction") {
 		t.Fatal("cli_llvm does not emit compiled return_void_instruction symbol")
 	}
-	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_const_string_value") {
+	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_const_string_value") {
 		t.Fatal("cli_llvm does not emit compiled const_string_value symbol")
 	}
-	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_const_string_instruction") {
+	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_const_string_instruction") {
 		t.Fatal("cli_llvm does not emit compiled const_string_instruction symbol")
 	}
-	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_call_instruction") {
+	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_call_instruction") {
 		t.Fatal("cli_llvm does not emit compiled call_instruction symbol")
 	}
-	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_build_main_print_program") {
+	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_build_main_print_program") {
 		t.Fatal("cli_llvm does not emit compiled build_main_print_program symbol")
 	}
-	if !strings.Contains(cliLlvm, "kizu_compiled__ir_codegen_lowered_main_print_program") {
+	if !strings.Contains(cliLlvm, "kizu_selfhost__ir_codegen_lowered_main_print_program") {
 		t.Fatal("cli_llvm does not emit compiled lowered_main_print_program symbol")
 	}
 }
@@ -1659,10 +1658,10 @@ var selfhostSplitFileExpectations = map[string][]string{
 	"../../selfhost/src/backend/cli_run_llvm.kizu": {
 		"pub fn append_globals(",
 		"pub fn append_cli_run_blocks(",
-		"@kizu_compiled__ir_codegen_stdout_payload",
+		"@kizu_selfhost__ir_codegen_stdout_payload",
 		"cli_check_gate_llvm::append_static_check_gate(",
 		"@kizu_selfhost__cli_frontend_lower_checked_run_ast",
-		"@kizu_compiled__ir_codegen_lower_run_ast_to_program",
+		"@kizu_selfhost__cli_codegen_lower_run_ast",
 	},
 	"../../selfhost/src/backend/cli_frontend_llvm.kizu": {
 		"pub fn append_globals(",
@@ -1718,8 +1717,8 @@ var selfhostSplitFileExpectations = map[string][]string{
 	},
 	"../../selfhost/src/backend/compiled_llvm.kizu": {
 		"pub fn append_compiled_function(",
-		"ir_contract::body_child_sequence(",
-		"ir_contract::body_node_kind(",
+		"ir_contract::body_child_sequence_from(",
+		"ir_contract::body_node_kind_from(",
 	},
 	"../../selfhost/src/backend/compiled_mir.kizu": {
 		"pub struct MirFunction",
@@ -1740,9 +1739,9 @@ var selfhostSplitFileExpectations = map[string][]string{
 		"pub fn lower_struct_return_function(",
 		"pub fn lower_expr_return_function(",
 		"pub fn lower_multi_statement_function(",
-		"ir_contract::body_token_or_empty(",
-		"ir_contract::body_int_value(",
-		"ir_contract::body_field_expr_name(",
+		"ir_contract::body_token_or_empty_from(",
+		"ir_contract::body_int_value_from(",
+		"ir_contract::body_field_expr_name_from(",
 	},
 	"../../selfhost/src/backend/compiled_mir_lower_struct.kizu": {
 		"pub fn lower_struct_fields(",
