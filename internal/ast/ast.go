@@ -429,6 +429,20 @@ func (s *DeferStmt) String() string {
 	return "defer " + s.Expr.String() + ";"
 }
 
+// ErrDeferStmt registers one cleanup expression that runs only when the current
+// lexical block exits through an error-return path.
+type ErrDeferStmt struct {
+	Expr Expression
+}
+
+// statementNode marks ErrDeferStmt as a statement node.
+func (*ErrDeferStmt) statementNode() {}
+
+// String returns a compact debug representation of the errdefer statement.
+func (s *ErrDeferStmt) String() string {
+	return "errdefer " + s.Expr.String() + ";"
+}
+
 // IfStmt represents a conditional branch.
 type IfStmt struct {
 	Condition   Expression

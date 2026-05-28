@@ -274,7 +274,7 @@ func (l *lowerer) lowerLoopBranch(kind string, label string) error {
 			env:   l.copyEnv(l.env),
 		})
 	}
-	l.emitCleanups(l.cleanupsFrom(loop.deferDepth))
+	l.emitCleanups(l.cleanupsFrom(loop.deferDepth, false))
 	l.block.Terminator = Terminator{Op: "jump", Target: target}
 	return nil
 }

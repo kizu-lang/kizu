@@ -306,6 +306,67 @@ fn main() {
 	}
 }
 
+// TestRunErrDeferSkippedOnSuccess checks errdefer does not run on a normal
+// return while a sibling defer still runs.
+func TestRunErrDeferSkippedOnSuccess(t *testing.T) {
+	got := runSource(t, `struct Trace {
+    label: []u8,
+}
+impl Trace {
+    fn deinit(self: Trace) -> void {
+        print(self.label);
+    }
+}
+fn build() -> !i64 {
+    let guard = Trace { label: "errdefer-skipped" };
+    let always = Trace { label: "defer-ran" };
+    defer always.deinit();
+    errdefer guard.deinit();
+    return 7;
+}
+fn main() -> !i64 {
+    return try build();
+}`)
+	want := "defer-ran\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestRunErrDeferRunsOnErrorPath checks errdefer and defer both run on an error
+// return, in reverse registration order.
+func TestRunErrDeferRunsOnErrorPath(t *testing.T) {
+	out, err := parseAndRun(`struct Trace {
+    label: []u8,
+}
+impl Trace {
+    fn deinit(self: Trace) -> void {
+        print(self.label);
+    }
+}
+fn boom() -> !i64 {
+    return error("boom");
+}
+fn build() -> !i64 {
+    let guard = Trace { label: "errdefer-ran" };
+    let always = Trace { label: "defer-ran" };
+    defer always.deinit();
+    errdefer guard.deinit();
+    let value = try boom();
+    return value;
+}
+fn main() -> !i64 {
+    return try build();
+}`)
+	if err == nil {
+		t.Fatalf("expected error return, got nil (out %q)", out)
+	}
+	want := "errdefer-ran\ndefer-ran\n"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 // TestRunArrayPopMovesAndDeinitDropsRemaining checks resource Array cleanup.
 func TestRunArrayPopMovesAndDeinitDropsRemaining(t *testing.T) {
 	got := runSource(t, `struct Trace {

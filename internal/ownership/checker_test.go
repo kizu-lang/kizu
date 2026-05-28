@@ -770,6 +770,89 @@ fn main() {
 	runErrorCases(t, cases)
 }
 
+// TestCheckAcceptsErrDeferReturnedOwner checks errdefer does not block the
+// success-path move of the owner it guards.
+func TestCheckAcceptsErrDeferReturnedOwner(t *testing.T) {
+	source := `struct User { name: []u8 }
+fn build() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    return users;
+}`
+	if err := checkSource(source); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckRejectsInvalidErrDeferCleanup keeps errdefer to cleanup method calls.
+func TestCheckRejectsInvalidErrDeferCleanup(t *testing.T) {
+	source := `fn main() {
+    errdefer print("not cleanup");
+}`
+	err := checkSource(source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "errdefer expects cleanup method call") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestCheckRejectsErrDeferReceiverInvalidOnErrorPath checks the errdefer
+// receiver must stay valid at every error path that can run the cleanup.
+func TestCheckRejectsErrDeferReceiverInvalidOnErrorPath(t *testing.T) {
+	runErrorCases(t, []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "moved before error path",
+			source: `struct User { name: []u8 }
+fn step() -> !void { return; }
+fn build() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    let moved = users;
+    try step();
+    return moved;
+}`,
+			want: "errdefer cleanup receiver `users` was moved before an error path",
+		},
+		{
+			name: "deinitialized before error path",
+			source: `struct User { name: []u8 }
+fn step() -> !void { return; }
+fn build() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    users.deinit();
+    try step();
+    return users;
+}`,
+			want: "errdefer cleanup receiver `users` was deinitialized before an error path",
+		},
+		{
+			name: "borrowed on error path",
+			source: `struct User { name: []u8 }
+fn step() -> !void { return; }
+fn build() -> !std::arena::Arena<User> {
+    let allocator = std::builtin::mem_page_allocator();
+    let users = std::arena::Arena<User>(allocator);
+    errdefer users.deinit();
+    let borrowed = &users;
+    try step();
+    print(borrowed);
+    return users;
+}`,
+			want: "errdefer cleanup receiver `users` is borrowed on an error path",
+		},
+	})
+}
+
 // TestCheckBranchMoveMarksOuterValueMoved checks possible moves escape branches.
 func TestCheckBranchMoveMarksOuterValueMoved(t *testing.T) {
 	source := `struct Name { value: []u8 }

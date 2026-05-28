@@ -19,10 +19,22 @@ func (l *lowerer) popDeferFrame() {
 
 // lowerDeferStmt records a checked deferred cleanup without emitting it now.
 func (l *lowerer) lowerDeferStmt(stmt *ast.DeferStmt) error {
-	cleanup, err := l.cleanupFromExpr(stmt.Expr)
+	return l.recordCleanup(stmt.Expr, false)
+}
+
+// lowerErrDeferStmt records an error-path cleanup into the shared cleanup stack.
+func (l *lowerer) lowerErrDeferStmt(stmt *ast.ErrDeferStmt) error {
+	return l.recordCleanup(stmt.Expr, true)
+}
+
+// recordCleanup resolves a cleanup expression and registers it in the current
+// frame. onError marks errdefer entries that run only on error-return paths.
+func (l *lowerer) recordCleanup(expr ast.Expression, onError bool) error {
+	cleanup, err := l.cleanupFromExpr(expr)
 	if err != nil {
 		return err
 	}
+	cleanup.OnError = onError
 	frame := len(l.deferFrames) - 1
 	l.deferFrames[frame] = append(l.deferFrames[frame], cleanup)
 	return nil
@@ -74,32 +86,54 @@ func (l *lowerer) cleanupFromMethod(receiver Value, method string) (Cleanup, err
 	return Cleanup{}, fmt.Errorf("ir error: unknown cleanup method `%s`", method)
 }
 
-// activeCleanups returns all currently active cleanups in execution order.
-func (l *lowerer) activeCleanups() []Cleanup {
-	return l.cleanupsFrom(0)
+// errorCleanups returns all active cleanups that run on an error-return path,
+// including both defer and errdefer entries, in execution order.
+func (l *lowerer) errorCleanups() []Cleanup {
+	return l.cleanupsFrom(0, true)
 }
 
-// cleanupsFrom returns cleanups from the requested frame depth inward.
-func (l *lowerer) cleanupsFrom(depth int) []Cleanup {
+// normalCleanups returns active defer cleanups for a success exit. errdefer
+// entries are skipped because they do not run when the block exits normally.
+func (l *lowerer) normalCleanups() []Cleanup {
+	return l.cleanupsFrom(0, false)
+}
+
+// cleanupsFrom returns cleanups from the requested frame depth inward. When
+// includeError is false, errdefer (error-path) entries are skipped.
+func (l *lowerer) cleanupsFrom(depth int, includeError bool) []Cleanup {
 	cleanups := []Cleanup{}
 	for frame := len(l.deferFrames) - 1; frame >= depth; frame-- {
 		for index := len(l.deferFrames[frame]) - 1; index >= 0; index-- {
-			cleanups = append(cleanups, l.deferFrames[frame][index])
+			cleanup := l.deferFrames[frame][index]
+			if cleanup.OnError && !includeError {
+				continue
+			}
+			cleanups = append(cleanups, cleanup)
 		}
 	}
 	return cleanups
 }
 
-// emitActiveCleanups emits all currently active cleanups before function exit.
-func (l *lowerer) emitActiveCleanups() {
-	l.emitCleanups(l.activeCleanups())
+// emitNormalCleanups emits success-path cleanups before a normal function exit.
+func (l *lowerer) emitNormalCleanups() {
+	l.emitCleanups(l.normalCleanups())
+}
+
+// emitErrorCleanups emits error-path cleanups before an error-return exit.
+func (l *lowerer) emitErrorCleanups() {
+	l.emitCleanups(l.errorCleanups())
 }
 
 // emitCleanupFrame emits normal fallthrough cleanups for one lexical block.
+// errdefer entries are skipped because the block exited without an error.
 func (l *lowerer) emitCleanupFrame(frame int) {
 	cleanups := []Cleanup{}
 	for index := len(l.deferFrames[frame]) - 1; index >= 0; index-- {
-		cleanups = append(cleanups, l.deferFrames[frame][index])
+		cleanup := l.deferFrames[frame][index]
+		if cleanup.OnError {
+			continue
+		}
+		cleanups = append(cleanups, cleanup)
 	}
 	l.emitCleanups(cleanups)
 }

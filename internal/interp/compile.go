@@ -39,7 +39,8 @@ func (i *Interpreter) runBody(fn *ast.FunctionDecl, env *Env) (Value, bool, erro
 // defer-free block runs its compiled statements inline.
 func (i *Interpreter) compileBlock(block *ast.BlockStmt) stmtEval {
 	for _, stmt := range block.Statements {
-		if _, ok := stmt.(*ast.DeferStmt); ok {
+		switch stmt.(type) {
+		case *ast.DeferStmt, *ast.ErrDeferStmt:
 			return func(env *Env) (Value, bool, error) { return i.evalBlock(block, env) }
 		}
 	}

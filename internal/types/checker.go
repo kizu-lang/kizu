@@ -1324,6 +1324,8 @@ func (c *Checker) checkStmt(
 		return c.checkReturnStmt(s, env, wantReturn, unsafe)
 	case *ast.DeferStmt:
 		return c.checkDeferStmt(s, env, unsafe)
+	case *ast.ErrDeferStmt:
+		return c.checkErrDeferStmt(s, env, unsafe)
 	case *ast.ExprStmt:
 		_, err := c.checkExpr(s.Expr, env, unsafe)
 		return false, err
@@ -1340,11 +1342,7 @@ func (c *Checker) checkStmt(
 	case *ast.MatchStmt:
 		return c.checkMatchStmt(s, env, wantReturn, unsafe)
 	case *ast.UnsafeStmt:
-		caps, err := unsafe.with(s.Capabilities)
-		if err != nil {
-			return false, err
-		}
-		return c.checkBlock(s.Body, env.child(), wantReturn, caps)
+		return c.checkUnsafeStmt(s, env, wantReturn, unsafe)
 	case *ast.ComptimeIfStmt:
 		return c.checkComptimeIfStmt(s, env, wantReturn, unsafe)
 	default:
@@ -1369,13 +1367,53 @@ func (c *Checker) checkDeferStmt(stmt *ast.DeferStmt, env *scope, unsafe unsafeC
 
 // validateDeferCleanupExpr restricts defer to explicit cleanup method calls.
 func validateDeferCleanupExpr(expr ast.Expression) error {
+	return validateCleanupCallExpr("defer", expr)
+}
+
+// checkUnsafeStmt validates an unsafe capability block body.
+func (c *Checker) checkUnsafeStmt(
+	stmt *ast.UnsafeStmt,
+	env *scope,
+	wantReturn Type,
+	unsafe unsafeCaps,
+) (bool, error) {
+	caps, err := unsafe.with(stmt.Capabilities)
+	if err != nil {
+		return false, err
+	}
+	return c.checkBlock(stmt.Body, env.child(), wantReturn, caps)
+}
+
+// checkErrDeferStmt validates an error-path cleanup registration. It shares the
+// cleanup-call shape with defer; the path-sensitive timing difference is handled
+// by lowering and the runtime, not by the type surface.
+func (c *Checker) checkErrDeferStmt(
+	stmt *ast.ErrDeferStmt,
+	env *scope,
+	unsafe unsafeCaps,
+) (bool, error) {
+	if err := validateCleanupCallExpr("errdefer", stmt.Expr); err != nil {
+		return false, err
+	}
+	got, err := c.checkExpr(stmt.Expr, env, unsafe)
+	if err != nil {
+		return false, err
+	}
+	if got != typeVoid {
+		return false, errorf("type error: errdefer cleanup must return void, got %s", got)
+	}
+	return false, nil
+}
+
+// validateCleanupExpr restricts defer/errdefer to explicit cleanup method calls.
+func validateCleanupCallExpr(keyword string, expr ast.Expression) error {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
-		return errorf("type error: defer expects cleanup method call")
+		return errorf("type error: %s expects cleanup method call", keyword)
 	}
 	field, ok := call.Callee.(*ast.FieldExpr)
 	if !ok || field.Name != "deinit" {
-		return errorf("type error: defer expects cleanup method call")
+		return errorf("type error: %s expects cleanup method call", keyword)
 	}
 	return nil
 }

@@ -230,6 +230,43 @@ func TestParseRejectsDeferredStatements(t *testing.T) {
 	}
 }
 
+// TestParseErrDeferCleanup checks errdefer parses as a distinct statement.
+func TestParseErrDeferCleanup(t *testing.T) {
+	input := `fn main() -> !void {
+    errdefer values.deinit();
+    return;
+}`
+	p := New(lexer.New(input))
+	program := p.ParseProgram()
+	if len(p.Errors()) != 0 {
+		t.Fatalf("parser errors: %v", p.Errors())
+	}
+	want := `fn main() -> !void { errdefer values.deinit(); return; }`
+	if got := program.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestParseRejectsErrDeferredStatements keeps errdefer to expression statements.
+func TestParseRejectsErrDeferredStatements(t *testing.T) {
+	cases := []string{
+		`fn main() { errdefer let value = 1; }`,
+		`fn main() { errdefer return; }`,
+		`fn main() { errdefer { print("cleanup"); } }`,
+		`fn main() { errdefer errdefer values.deinit(); }`,
+	}
+	for _, input := range cases {
+		p := New(lexer.New(input))
+		p.ParseProgram()
+		if len(p.Errors()) == 0 {
+			t.Fatalf("expected parser error for %q", input)
+		}
+		if !strings.Contains(strings.Join(p.Errors(), "\n"), "errdefer expects an expression statement") {
+			t.Fatalf("got parser errors %v", p.Errors())
+		}
+	}
+}
+
 // TestParseFieldAndDerefAssignment checks assignment targets beyond identifiers.
 func TestParseFieldAndDerefAssignment(t *testing.T) {
 	input := `fn rename(user: &var User) -> void {

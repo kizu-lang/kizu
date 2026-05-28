@@ -53,6 +53,7 @@ const (
 	Var      Type = "var"
 	Return   Type = "return"
 	Defer    Type = "defer"
+	ErrDefer Type = "errdefer"
 	If       Type = "if"
 	Else     Type = "else"
 	While    Type = "while"
@@ -93,6 +94,7 @@ var keywords = map[string]Type{
 	"var":      Var,
 	"return":   Return,
 	"defer":    Defer,
+	"errdefer": ErrDefer,
 	"if":       If,
 	"else":     Else,
 	"while":    While,
