@@ -839,6 +839,90 @@ func TestEmitUnionRejectsUnsupportedPayloadWidth(t *testing.T) {
 	}
 }
 
+// TestEmitUnionRejectsUnknownPayloadType checks a union payload that names an
+// undefined type fails visibly instead of being silently treated as a pointer.
+func TestEmitUnionRejectsUnknownPayloadType(t *testing.T) {
+	module := &ir.Module{
+		Unions: map[string]ir.Union{
+			"Bad": {Name: "Bad", Variants: map[string]ir.UnionVariant{
+				"Value": {Name: "Value", Index: 0, Payload: "Undefined"},
+			}},
+		},
+		Functions: []*ir.Function{{
+			Name:   "main",
+			Return: "void",
+			Blocks: []*ir.Block{{
+				Name:       "entry",
+				Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
+			}},
+		}},
+	}
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject an unknown union payload type")
+	}
+	if !strings.Contains(err.Error(), "union `Bad` has an unsupported tagged-union payload shape") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestEmitUnionNewRejectsMissingPayload checks union.new for a payload variant
+// without a payload operand fails rather than emitting an uninitialized payload.
+func TestEmitUnionNewRejectsMissingPayload(t *testing.T) {
+	module := unionNewModule(ir.Instr{
+		Result:    ir.Value{Name: "%1", Type: "Shape"},
+		Op:        "union.new",
+		Immediate: "Circle",
+	})
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject union.new without the active payload")
+	}
+	if !strings.Contains(err.Error(), "union variant `Shape::Circle` requires a `i64` payload") {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// TestEmitUnionNewRejectsPayloadTypeMismatch checks union.new whose payload type
+// does not match the variant payload fails with a visible diagnostic.
+func TestEmitUnionNewRejectsPayloadTypeMismatch(t *testing.T) {
+	module := unionNewModule(ir.Instr{
+		Result:    ir.Value{Name: "%1", Type: "Shape"},
+		Op:        "union.new",
+		Immediate: "Circle",
+		Args:      []ir.Value{{Name: "%m", Type: "[]u8"}},
+	})
+	_, err := Emit(module)
+	if err == nil {
+		t.Fatal("expected emit to reject a mismatched union.new payload type")
+	}
+	want := "union variant `Shape::Circle` expects payload `i64`, got `[]u8`"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %q", err.Error())
+	}
+}
+
+// unionNewModule wraps one union.new instruction over a `Shape::Circle(i64)`
+// union for malformed-IR rejection tests.
+func unionNewModule(instr ir.Instr) *ir.Module {
+	return &ir.Module{
+		Unions: map[string]ir.Union{
+			"Shape": {Name: "Shape", Variants: map[string]ir.UnionVariant{
+				"Circle": {Name: "Circle", Index: 0, Payload: "i64"},
+			}},
+		},
+		Functions: []*ir.Function{{
+			Name:   "main",
+			Return: "void",
+			Blocks: []*ir.Block{{
+				Name:       "entry",
+				Instrs:     []*ir.Instr{&instr},
+				Terminator: ir.Terminator{Op: "return", Value: ir.Value{Name: "void", Type: "void"}},
+			}},
+		}},
+	}
+}
+
 // lowerSource parses, checks, and lowers a source snippet.
 func lowerSource(t *testing.T, source string) *ir.Module {
 	t.Helper()

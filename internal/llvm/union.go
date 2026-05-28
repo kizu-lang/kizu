@@ -33,10 +33,6 @@ func (e *emitter) writeUnionNew(instr *ir.Instr) error {
 	}
 	var payload *ir.Value
 	if len(instr.Args) == 1 {
-		if variant.Payload == "" {
-			return fmt.Errorf("llvm error: union variant `%s::%s` stores no payload",
-				instr.Result.Type, variant.Name)
-		}
 		payload = &instr.Args[0]
 	}
 	resultName := localName(instr.Result.Name)
@@ -57,6 +53,18 @@ func (e *emitter) writeInlineUnion(
 	variant ir.UnionVariant,
 	payload *ir.Value,
 ) error {
+	if variant.Payload == "" && payload != nil {
+		return fmt.Errorf("llvm error: union variant `%s::%s` stores no payload, got `%s`",
+			unionIRType, variant.Name, payload.Type)
+	}
+	if variant.Payload != "" && payload == nil {
+		return fmt.Errorf("llvm error: union variant `%s::%s` requires a `%s` payload",
+			unionIRType, variant.Name, variant.Payload)
+	}
+	if payload != nil && payload.Type != variant.Payload {
+		return fmt.Errorf("llvm error: union variant `%s::%s` expects payload `%s`, got `%s`",
+			unionIRType, variant.Name, variant.Payload, payload.Type)
+	}
 	unionType := e.llvmType(unionIRType)
 	slotName := resultName + ".slot"
 	tagPtr := resultName + ".tag.ptr"

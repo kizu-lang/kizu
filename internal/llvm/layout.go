@@ -17,10 +17,37 @@ func (e *emitter) typeLayout(typ string) (size int, align int, ok bool) {
 }
 
 // typeLayoutVisiting computes a type layout while tracking the named aggregates
-// already on the recursion path so a by-value cycle is rejected, not looped.
+// already on the recursion path so a by-value cycle is rejected, not looped. It
+// only accepts the shapes the #991 value layout table defines inline; every
+// other type (error unions, raw pointers, non-i64/u8 integer widths, and
+// unknown type names) reports ok=false so it fails visibly rather than being
+// silently treated as a pointer.
 func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool) {
+	switch typ {
+	case "void":
+		return 0, 1, true
+	case "bool":
+		return 1, 1, true
+	case "i8", "u8":
+		return 1, 1, true
+	case "i64":
+		return 8, 8, true
+	case "[]u8":
+		return 16, 8, true
+	case "std::string::String":
+		return 8, 8, true // owned container handle lowers to ptr
+	}
+	if isArenaHandleType(typ) {
+		return 8, 8, true // arena handle lowers to i64
+	}
+	if isArrayLLVMType(typ) || isMapLLVMType(typ) || isArenaLLVMType(typ) {
+		return 8, 8, true // owned container / arena handle lowers to ptr
+	}
 	if st, ok := e.module.Structs[typ]; ok {
 		return e.structLayout(typ, st, seen)
+	}
+	if _, ok := e.module.Enums[typ]; ok {
+		return 8, 8, true // enum tag lowers to i64
 	}
 	if union, ok := e.module.Unions[typ]; ok {
 		payload, _, ok := e.unionPayloadStorage(typ, union, seen)
@@ -29,7 +56,7 @@ func (e *emitter) typeLayoutVisiting(typ string, seen []string) (int, int, bool)
 		}
 		return roundUp(8+payload, maxInlinePayloadAlign), maxInlinePayloadAlign, true
 	}
-	return primitiveLayout(e.llvmType(typ))
+	return 0, 0, false
 }
 
 // structLayout computes the C-style layout LLVM uses for a non-packed struct.
@@ -81,26 +108,6 @@ func (e *emitter) unionPayloadStorage(
 		}
 	}
 	return capacity, align, true
-}
-
-// primitiveLayout returns the size and alignment of a leaf LLVM value-layout
-// type. Integer widths and shapes outside the #991 value layout table report
-// ok=false so an unsupported union payload fails visibly at lowering time.
-func primitiveLayout(llvmType string) (int, int, bool) {
-	switch llvmType {
-	case "void":
-		return 0, 1, true
-	case "i1", "i8":
-		return 1, 1, true
-	case "i64":
-		return 8, 8, true
-	case "ptr":
-		return 8, 8, true
-	case "%kizu.slice.u8":
-		return 16, 8, true
-	default:
-		return 0, 0, false
-	}
 }
 
 // roundUp rounds n up to the next multiple of align.
