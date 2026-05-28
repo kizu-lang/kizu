@@ -698,7 +698,7 @@ fn lower_int_declarations(
         let child = try ast.child_at(declarations, index);
         let node = ast.get(child);
         let program = match node.data {
-            FnDecl(fn_decl) => try lower_int_function(scratch, text, ast, fn_decl.name, fn_decl.body),
+            FnDecl(fn_decl) => try lower_int_function(scratch, text, ast, declarations, fn_decl.name, fn_decl.body),
             _ => unsupported_program(text[0..0]),
         };
         if program_supported(&program) {
@@ -713,6 +713,7 @@ fn lower_int_function(
     scratch: &var std::string::String,
     text: []u8,
     ast: std::kizu::ast::Ast,
+    decls: std::kizu::ast::ChildRange,
     name: std::kizu::ast::NodeId,
     body: std::kizu::ast::NodeId
 ) -> !Program {
@@ -721,7 +722,7 @@ fn lower_int_function(
     }
     let node = ast.get(body);
     return match node.data {
-        Block(block) => try lower_const_block(scratch, text, ast, block.statements, empty_int_env(text)),
+        Block(block) => try lower_const_block(scratch, text, ast, block.statements, empty_int_env(text, decls)),
         _ => unsupported_program(text[0..0]),
     };
 }
@@ -752,7 +753,7 @@ fn lower_const_block(
         }
         let next = match node.data {
             Let(let_node) => try extend_int_env(text, ast, &current, let_node.name, let_node.value),
-            _ => overflow_int_env(text),
+            _ => overflow_from(&current),
         };
         if next.count < 0 {
             return unsupported_program(text[0..0]);
@@ -815,6 +816,7 @@ fn lower_const_print_call(
         String(string_node) => lower_const_string_print(text, ast, arg),
         Int(int_node) => try lower_const_int_print(scratch, text, ast, arg, env),
         Binary(binary) => try lower_const_int_print(scratch, text, ast, arg, env),
+        Call(call_node) => try lower_const_int_print(scratch, text, ast, arg, env),
         _ => unsupported_program(text[0..0]),
     };
 }
@@ -854,10 +856,12 @@ fn lower_const_int_print(
     return lowered_main_print_program(payload_text);
 }
 
-// IntEnv is a bounded compile-time environment of integer locals. A negative
-// count marks an environment that overflowed the supported slot budget.
+// IntEnv is a bounded compile-time environment of integer locals plus the
+// program's top-level declarations (so calls can resolve user functions). A
+// negative count marks an environment that overflowed the supported slot budget.
 struct IntEnv {
     count: i64,
+    decls: std::kizu::ast::ChildRange,
     name0: []u8,
     value0: i64,
     name1: []u8,
@@ -869,6 +873,7 @@ struct IntEnv {
 fn copy_int_env(env: &IntEnv) -> IntEnv {
     return IntEnv {
         count: env.count,
+        decls: env.decls,
         name0: env.name0,
         value0: env.value0,
         name1: env.name1,
@@ -878,9 +883,10 @@ fn copy_int_env(env: &IntEnv) -> IntEnv {
     };
 }
 
-fn empty_int_env(text: []u8) -> IntEnv {
+fn empty_int_env(text: []u8, decls: std::kizu::ast::ChildRange) -> IntEnv {
     return IntEnv {
         count: 0,
+        decls: decls,
         name0: text[0..0],
         value0: 0,
         name1: text[0..0],
@@ -890,16 +896,57 @@ fn empty_int_env(text: []u8) -> IntEnv {
     };
 }
 
-fn overflow_int_env(text: []u8) -> IntEnv {
+fn overflow_from(env: &IntEnv) -> IntEnv {
     return IntEnv {
         count: -1,
-        name0: text[0..0],
-        value0: 0,
-        name1: text[0..0],
-        value1: 0,
-        name2: text[0..0],
-        value2: 0
+        decls: env.decls,
+        name0: env.name0,
+        value0: env.value0,
+        name1: env.name1,
+        value1: env.value1,
+        name2: env.name2,
+        value2: env.value2
     };
+}
+
+fn int_env_put(env: &IntEnv, name: []u8, value: i64) -> IntEnv {
+    if env.count == 0 {
+        return IntEnv {
+            count: 1,
+            decls: env.decls,
+            name0: name,
+            value0: value,
+            name1: env.name1,
+            value1: env.value1,
+            name2: env.name2,
+            value2: env.value2
+        };
+    }
+    if env.count == 1 {
+        return IntEnv {
+            count: 2,
+            decls: env.decls,
+            name0: env.name0,
+            value0: env.value0,
+            name1: name,
+            value1: value,
+            name2: env.name2,
+            value2: env.value2
+        };
+    }
+    if env.count == 2 {
+        return IntEnv {
+            count: 3,
+            decls: env.decls,
+            name0: env.name0,
+            value0: env.value0,
+            name1: env.name1,
+            value1: env.value1,
+            name2: name,
+            value2: value
+        };
+    }
+    return overflow_from(env);
 }
 
 fn extend_int_env(
@@ -911,40 +958,7 @@ fn extend_int_env(
 ) -> !IntEnv {
     let local_name = ast_node_text(text, ast, name);
     let local_value = try eval_int_expr(text, ast, value, env);
-    if env.count == 0 {
-        return IntEnv {
-            count: 1,
-            name0: local_name,
-            value0: local_value,
-            name1: env.name1,
-            value1: env.value1,
-            name2: env.name2,
-            value2: env.value2
-        };
-    }
-    if env.count == 1 {
-        return IntEnv {
-            count: 2,
-            name0: env.name0,
-            value0: env.value0,
-            name1: local_name,
-            value1: local_value,
-            name2: env.name2,
-            value2: env.value2
-        };
-    }
-    if env.count == 2 {
-        return IntEnv {
-            count: 3,
-            name0: env.name0,
-            value0: env.value0,
-            name1: env.name1,
-            value1: env.value1,
-            name2: local_name,
-            value2: local_value
-        };
-    }
-    return overflow_int_env(text);
+    return int_env_put(env, local_name, local_value);
 }
 
 fn int_env_value(env: &IntEnv, name: []u8) -> !i64 {
@@ -960,9 +974,10 @@ fn int_env_value(env: &IntEnv, name: []u8) -> !i64 {
     return error("unknown integer local in run codegen");
 }
 
-// eval_int_expr evaluates an integer literal, local reference, or arithmetic
-// expression to a constant i64. The parser already encodes operator precedence
-// in the tree shape, so a direct post-order fold yields the value.
+// eval_int_expr evaluates an integer literal, local reference, arithmetic
+// expression, or direct call to a user function to a constant i64. The parser
+// already encodes operator precedence in the tree shape, so a direct post-order
+// fold yields the value.
 fn eval_int_expr(
     text: []u8,
     ast: std::kizu::ast::Ast,
@@ -974,12 +989,145 @@ fn eval_int_expr(
         Int(int_node) => try parse_int_literal(ast_node_text(text, ast, node_id)),
         Var(var_node) => try int_env_value(env, ast_node_text(text, ast, node_id)),
         Binary(binary) => try eval_int_binary(text, ast, binary.op, binary.left, binary.right, env),
+        Call(call_node) => try eval_call(text, ast, env, call_node.callee, call_node.args),
         _ => try unsupported_int_expr(),
     };
 }
 
 fn unsupported_int_expr() -> !i64 {
     return error("unsupported integer expression in run codegen");
+}
+
+// eval_call evaluates a direct call to a user-declared function by binding its
+// evaluated arguments to its parameters and evaluating the function body. The
+// callee must be a plain identifier naming a function in the program's
+// declarations; argument expressions are evaluated in the caller's environment.
+fn eval_call(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    caller_env: &IntEnv,
+    callee: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !i64 {
+    let name = ast_node_text(text, ast, callee);
+    var index = 0;
+    while index < caller_env.decls.len {
+        let child = try ast.child_at(caller_env.decls, index);
+        let node = ast.get(child);
+        let matched = match node.data {
+            FnDecl(fn_decl) => std::mem::equal_bytes(ast_node_text(text, ast, fn_decl.name), name),
+            _ => false,
+        };
+        if matched {
+            return try eval_fn_decl(text, ast, caller_env, child, args);
+        }
+        index = index + 1;
+    }
+    return error("unknown function in run codegen");
+}
+
+fn eval_fn_decl(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    caller_env: &IntEnv,
+    fn_node: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !i64 {
+    let node = ast.get(fn_node);
+    return match node.data {
+        FnDecl(fn_decl) => try eval_fn_body(text, ast, caller_env, fn_decl.params, fn_decl.body, args),
+        _ => try unsupported_int_expr(),
+    };
+}
+
+fn eval_fn_body(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    caller_env: &IntEnv,
+    params: std::kizu::ast::ChildRange,
+    body: std::kizu::ast::NodeId,
+    args: std::kizu::ast::ChildRange
+) -> !i64 {
+    if params.len != args.len {
+        return error("argument count mismatch in run codegen");
+    }
+    var param_env = empty_int_env(text, caller_env.decls);
+    var index = 0;
+    while index < params.len {
+        let param = try ast.child_at(params, index);
+        let arg = try ast.child_at(args, index);
+        let pname = param_name(text, ast, param);
+        if std::mem::len(pname) == 0 {
+            return error("unsupported parameter in run codegen");
+        }
+        let pvalue = try eval_int_expr(text, ast, arg, caller_env);
+        let extended = int_env_put(&param_env, pname, pvalue);
+        if extended.count < 0 {
+            return error("too many parameters in run codegen");
+        }
+        param_env = extended;
+        index = index + 1;
+    }
+    return try eval_function_body(text, ast, body, &param_env);
+}
+
+fn param_name(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    param: std::kizu::ast::NodeId
+) -> []u8 borrows text {
+    let node = ast.get(param);
+    match node.data {
+        Param(param_node) => return ast_node_text(text, ast, param_node.name);,
+        _ => return text[0..0];,
+    }
+}
+
+fn eval_function_body(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    body: std::kizu::ast::NodeId,
+    env: &IntEnv
+) -> !i64 {
+    let node = ast.get(body);
+    return match node.data {
+        Block(block) => try eval_block_return(text, ast, block.statements, env),
+        _ => try unsupported_int_expr(),
+    };
+}
+
+// eval_block_return evaluates a function body block: optional leading integer
+// let bindings extend the environment, and the terminal statement must be a
+// return of an integer expression.
+fn eval_block_return(
+    text: []u8,
+    ast: std::kizu::ast::Ast,
+    statements: std::kizu::ast::ChildRange,
+    env: &IntEnv
+) -> !i64 {
+    var current = copy_int_env(env);
+    var index = 0;
+    while index < statements.len {
+        let statement = try ast.child_at(statements, index);
+        let node = ast.get(statement);
+        let terminal = index + 1 == statements.len;
+        if terminal {
+            return match node.data {
+                Return(return_node) => try eval_int_expr(text, ast, return_node.value, &current),
+                _ => try unsupported_int_expr(),
+            };
+        }
+        let next = match node.data {
+            Let(let_node) => try extend_int_env(text, ast, &current, let_node.name, let_node.value),
+            _ => overflow_from(&current),
+        };
+        if next.count < 0 {
+            return error("unsupported function body in run codegen");
+        }
+        current = next;
+        index = index + 1;
+    }
+    return error("function body has no return in run codegen");
 }
 
 fn eval_int_binary(
