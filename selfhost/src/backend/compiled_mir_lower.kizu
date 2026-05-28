@@ -1,0 +1,924 @@
+import selfhost::backend::compiled_mir;
+import selfhost::backend::compiled_mir_function;
+import selfhost::backend::compiled_mir_lower_struct;
+import selfhost::backend::compiled_mir_types;
+import selfhost::backend::compiled_util;
+import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_type_lower;
+import selfhost::backend::ir_contract;
+pub fn lower_string_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    value_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    if !std::mem::equal_bytes(llvm_return_type, "%kizu.slice.u8") {
+        return error("compiled mir: string return requires []u8");
+    }
+    let token = try ir_contract::body_token_or_empty_from(
+        ir_bytes,
+        function_name,
+        value_node,
+        bs
+    );
+    let _payload_len = try compiled_util::string_token_decoded_len(
+        token,
+        "compiled mir: invalid string token"
+    );
+    return compiled_mir_function::single_const_string_return_function(llvm_symbol, token);
+}
+pub fn lower_int_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    value_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    if !std::mem::equal_bytes(llvm_return_type, "i64") {
+        return error("compiled mir: int return requires i64");
+    }
+    let value = try ir_contract::body_int_value_from(
+        ir_bytes,
+        function_name,
+        value_node,
+        bs
+    );
+    return compiled_mir_function::single_const_int_return_function(llvm_symbol, value);
+}
+pub fn lower_enum_field_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    value_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    if !std::mem::equal_bytes(llvm_return_type, "i64") {
+        return error("compiled mir: enum field return requires i64");
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes,
+        function_name,
+        value_node,
+        "namespace",
+        bs
+    );
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes,
+        function_name,
+        value_node,
+        "receiver",
+        0,
+        bs
+    );
+    let receiver_token = try ir_contract::body_token_or_empty_from(
+        ir_bytes,
+        function_name,
+        receiver,
+        bs
+    );
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+        ir_bytes,
+        module_prefix,
+        receiver_token,
+        field_name
+    );
+    return compiled_mir_function::single_const_int_return_function(llvm_symbol, tag);
+}
+pub fn lower_call_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let callee_name = try compiled_mir_types::lower_call_callee_name(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        call_node,
+        bs
+    );
+    let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let call_result_type = try compiled_mir_types::lower_call_return_type(
+        ir_bytes, function_name, module_prefix, call_node, bs
+    );
+    let args = try lower_call_args(
+        ir_bytes, function_name, module_prefix, params_spec, call_node, 0, bs
+    );
+    return compiled_mir_function::single_call_return_function(
+        llvm_symbol,
+        call_result_type,
+        params_spec,
+        callee_module_prefix,
+        callee_name,
+        args
+    );
+}
+pub fn lower_struct_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    value_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    let fields = try compiled_mir_lower_struct::lower_struct_fields(
+        ir_bytes, function_name, module_prefix, params_spec, value_node, bs
+    );
+    return compiled_mir_function::single_struct_return_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        fields
+    );
+}
+pub fn lower_expr_return_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    value_node: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        value_node,
+        0,
+        0,
+        &var insts,
+        bs
+    );
+    return compiled_mir_function::single_expr_return_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        result_id,
+        insts
+    );
+}
+pub fn lower_multi_statement_function(
+    ir_bytes: []u8,
+    function_name: []u8,
+    llvm_symbol: []u8,
+    llvm_return_type: []u8,
+    params_spec: []u8,
+    statement_count: i64,
+    bs: i64
+) -> !compiled_mir::MirFunction {
+    if statement_count < 2 {
+        return error("compiled mir: multi-statement function requires multiple statements");
+    }
+    let module_prefix = compiled_util::module_prefix_of(function_name);
+    var stmts = std::array::Array<compiled_mir::MirStmt>(std::mem::page_allocator());
+    var locals_spec = params_spec;
+    var string_counter = 0;
+    var temp_counter = 0;
+    var stmt_index = 0;
+    while stmt_index < statement_count {
+        let statement = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, 0, "statement", stmt_index, bs
+        );
+        let stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, statement, bs);
+        if std::mem::equal_bytes(stmt_kind, "Let") {
+            let let_result = try lower_multi_let_statement(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                statement,
+                string_counter,
+                &var stmts,
+                bs
+            );
+            locals_spec = let_result.locals_spec;
+            string_counter = let_result.string_counter;
+        } else {
+            if std::mem::equal_bytes(stmt_kind, "Return") {
+                try stmts.append(try lower_multi_return_statement(
+                    ir_bytes,
+                    function_name,
+                    module_prefix,
+                    llvm_return_type,
+                    locals_spec,
+                    statement,
+                    string_counter,
+                    temp_counter,
+                    bs
+                ));
+            } else {
+                if std::mem::equal_bytes(stmt_kind, "If") {
+                    let if_result = try lower_multi_if_statement(
+                        ir_bytes,
+                        function_name,
+                        module_prefix,
+                        llvm_return_type,
+                        locals_spec,
+                        statement,
+                        string_counter,
+                        temp_counter,
+                        stmt_index,
+                        &var stmts,
+                        bs
+                    );
+                    temp_counter = if_result.temp_counter;
+                    string_counter = if_result.string_counter;
+                } else {
+                    return error("compiled mir: unsupported statement kind");
+                }
+            }
+        }
+        stmt_index = stmt_index + 1;
+    }
+    return compiled_mir_function::multi_statement_function(
+        llvm_symbol,
+        llvm_return_type,
+        params_spec,
+        stmts
+    );
+}
+pub struct MultiLowerResult {
+    pub locals_spec: []u8,
+    pub string_counter: i64,
+}
+pub struct MultiIfLowerResult {
+    pub temp_counter: i64,
+    pub string_counter: i64,
+}
+fn lower_multi_let_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiLowerResult {
+    let let_name_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "name", 0, bs
+    );
+    let let_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, let_name_node, bs
+    );
+    let let_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    let let_value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, let_value, bs);
+    if std::mem::equal_bytes(let_value_kind, "Call") {
+        let call_type = try compiled_mir_types::lower_call_return_type(
+            ir_bytes, function_name, module_prefix, let_value, bs
+        );
+        let callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, let_value, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, let_value, bs
+        );
+        let args = try lower_call_args(
+            ir_bytes, function_name, module_prefix, locals_spec, let_value, string_counter, bs
+        );
+        let new_locals = try compiled_signature::extend_locals_spec(
+            ir_bytes, locals_spec, let_name, call_type
+        );
+        let new_counter = string_counter + try count_string_args(&args);
+        try stmts.append(compiled_mir::let_call_stmt(
+            let_name, call_type, string_counter, callee_module_prefix, callee_name, args
+        ));
+        return MultiLowerResult {
+            locals_spec: new_locals,
+            string_counter: new_counter
+        };
+    }
+    if std::mem::equal_bytes(let_value_kind, "StructLiteralExpr") {
+        let struct_type = try compiled_signature::resolve_struct_literal_type(
+            ir_bytes, function_name, module_prefix, let_value, bs
+        );
+        let fields = try compiled_mir_lower_struct::lower_struct_fields(
+            ir_bytes, function_name, module_prefix, locals_spec, let_value, bs
+        );
+        let field_count = fields.len();
+        let new_locals = try compiled_signature::extend_locals_spec(
+            ir_bytes, locals_spec, let_name, struct_type
+        );
+        try stmts.append(compiled_mir::let_struct_stmt(
+            let_name, struct_type, string_counter, fields
+        ));
+        return MultiLowerResult {
+            locals_spec: new_locals,
+            string_counter: string_counter + field_count
+        };
+    }
+    return error("compiled mir: unsupported let value kind");
+}
+fn lower_multi_return_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    bs: i64
+) -> !compiled_mir::MirStmt {
+    let value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "value", 0, bs
+    );
+    let value_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, value, bs);
+    if std::mem::equal_bytes(value_kind, "Call") {
+        if try is_error_call(ir_bytes, function_name, value, bs) {
+            return compiled_mir::return_error_stmt();
+        }
+        let call_type = try compiled_mir_types::lower_call_return_type(
+            ir_bytes, function_name, module_prefix, value, bs
+        );
+        let callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, value, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, value, bs
+        );
+        let args = try lower_call_args(
+            ir_bytes, function_name, module_prefix, locals_spec, value, string_counter, bs
+        );
+        return compiled_mir::return_call_stmt(
+            call_type, string_counter, callee_module_prefix, callee_name, args
+        );
+    }
+    if std::mem::equal_bytes(value_kind, "StructLiteralExpr") {
+        let fields = try compiled_mir_lower_struct::lower_struct_fields(
+            ir_bytes, function_name, module_prefix, locals_spec, value, bs
+        );
+        return compiled_mir::return_struct_stmt(string_counter, fields);
+    }
+    var insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let result_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        value,
+        string_counter,
+        temp_counter,
+        &var insts,
+        bs
+    );
+    return compiled_mir::return_expr_stmt(string_counter, result_id, insts);
+}
+fn lower_multi_if_statement(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    llvm_return_type: []u8,
+    locals_spec: []u8,
+    statement: i64,
+    string_counter: i64,
+    temp_counter: i64,
+    if_index: i64,
+    stmts: &var std::array::Array<compiled_mir::MirStmt>,
+    bs: i64
+) -> !MultiIfLowerResult {
+    let cond_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "condition", 0, bs
+    );
+    let then_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, statement, "then", 0, bs
+    );
+    var cond_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    let cond_result = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        locals_spec,
+        cond_node,
+        string_counter,
+        temp_counter,
+        &var cond_insts,
+        bs
+    );
+    let cond_strings = try count_strings_in_insts(&cond_insts);
+    let then_string_base = string_counter + cond_strings;
+    let then_base = cond_result + 1;
+    let then_stmt = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_node, "statement", 0, bs
+    );
+    let then_stmt_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, then_stmt, bs);
+    if !std::mem::equal_bytes(then_stmt_kind, "Return") {
+        return error("compiled mir: unsupported then block");
+    }
+    let ret_value = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, then_stmt, "value", 0, bs
+    );
+    let ret_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, ret_value, bs);
+    var then_kind = compiled_mir::MirIfThenKind::ReturnExpr;
+    var bool_value = false;
+    var call_type = llvm_return_type;
+    var then_module_prefix = "";
+    var callee_name = "";
+    var call_args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var then_result = -1;
+    var then_insts = std::array::Array<compiled_mir::MirExprInst>(std::mem::page_allocator());
+    if std::mem::equal_bytes(ret_kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes, function_name, ret_value, bs
+        );
+        then_kind = compiled_mir::MirIfThenKind::ReturnBool;
+        bool_value = std::mem::equal_bytes(token, "true");
+    } else {
+        if std::mem::equal_bytes(ret_kind, "Call") {
+            if try is_error_call(ir_bytes, function_name, ret_value, bs) {
+                then_kind = compiled_mir::MirIfThenKind::ReturnError;
+            } else {
+            call_type = try compiled_mir_types::lower_call_return_type(
+                ir_bytes, function_name, module_prefix, ret_value, bs
+            );
+            callee_name = try compiled_mir_types::lower_call_callee_name(
+                ir_bytes, function_name, module_prefix, ret_value, bs
+            );
+            call_args = try lower_call_args(
+                ir_bytes, function_name, module_prefix, locals_spec, ret_value, then_string_base, bs
+            );
+            then_kind = compiled_mir::MirIfThenKind::ReturnCall;
+            then_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+                ir_bytes, function_name, module_prefix, ret_value, bs
+            );
+            }
+        } else {
+            then_result = try lower_expr_into(
+                ir_bytes,
+                function_name,
+                module_prefix,
+                locals_spec,
+                ret_value,
+                then_string_base,
+                then_base,
+                &var then_insts,
+                bs
+            );
+        }
+    }
+    let then_call_strings = try count_string_args(&call_args);
+    let then_expr_strings = try count_strings_in_insts(&then_insts);
+    let new_string_counter = then_string_base + then_call_strings + then_expr_strings;
+    var next_temp = then_base;
+    if then_kind == compiled_mir::MirIfThenKind::ReturnCall {
+        next_temp = then_base + 1;
+    }
+    if then_kind == compiled_mir::MirIfThenKind::ReturnExpr {
+        next_temp = then_result + 1;
+    }
+    try stmts.append(compiled_mir::if_stmt(
+            if_index,
+            string_counter,
+            cond_result,
+            cond_insts,
+            then_kind,
+            bool_value,
+            call_type,
+            then_module_prefix,
+            callee_name,
+            call_args,
+            then_result,
+            then_insts
+    ));
+    return MultiIfLowerResult {
+        temp_counter: next_temp,
+        string_counter: new_string_counter
+    };
+}
+fn lower_call_args(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    call_node: i64,
+    first_string_index: i64,
+    bs: i64
+) -> !std::array::Array<compiled_mir::MirCallArg> {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    let arg_count = try compiled_mir_types::count_call_args(
+        ir_bytes, function_name, call_node, bs
+    );
+    var args = std::array::Array<compiled_mir::MirCallArg>(std::mem::page_allocator());
+    var arg_index = 0;
+    var string_index = first_string_index;
+    while arg_index < arg_count {
+        let arg_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, call_node, "arg", arg_index, bs
+        );
+        let arg_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, arg_node, bs);
+        let arg_type = try compiled_mir_types::lower_call_arg_type(
+            ir_bytes, module_prefix, callee_name, arg_index
+        );
+        if std::mem::equal_bytes(arg_kind, "Var") {
+            let var_name = try ir_contract::body_token_or_empty_from(
+                ir_bytes, function_name, arg_node, bs
+            );
+            try args.append(compiled_mir::var_call_arg(arg_type, var_name));
+        } else {
+            if std::mem::equal_bytes(arg_kind, "FieldExpr") {
+                try args.append(try lower_call_field_arg(
+                    ir_bytes, function_name, module_prefix, params_spec, arg_type, arg_node, bs
+                ));
+            } else {
+                if std::mem::equal_bytes(arg_kind, "IndexExpr") {
+                    try args.append(try lower_call_index_arg(
+                        ir_bytes, function_name, arg_type, arg_node, bs
+                    ));
+                } else {
+                    if std::mem::equal_bytes(arg_kind, "String") {
+                let token = try ir_contract::body_token_or_empty_from(
+                    ir_bytes, function_name, arg_node, bs
+                );
+                let _payload_len = try compiled_util::string_token_decoded_len(
+                    token,
+                    "compiled mir: invalid call string token"
+                );
+                try args.append(compiled_mir::string_call_arg(
+                    arg_type,
+                    token,
+                    string_index
+                ));
+                string_index = string_index + 1;
+                    } else {
+                        if std::mem::equal_bytes(arg_kind, "Bool") {
+                            let token = try ir_contract::body_token_or_empty_from(
+                                ir_bytes, function_name, arg_node, bs
+                            );
+                            try args.append(compiled_mir::bool_call_arg(
+                                arg_type,
+                                std::mem::equal_bytes(token, "true")
+                            ));
+                        } else {
+                            return error("compiled mir: unsupported call arg kind");
+                        }
+                    }
+                }
+            }
+        }
+        arg_index = arg_index + 1;
+    }
+    return args;
+}
+fn is_error_call(ir_bytes: []u8, function_name: []u8, call_node: i64, bs: i64) -> !bool {
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
+    );
+    return std::mem::equal_bytes(callee_name, "error");
+}
+fn count_string_args(args: &std::array::Array<compiled_mir::MirCallArg>) -> !i64 {
+    var count = 0;
+    var index = 0;
+    while index < args.len() {
+        let arg = try args.at(index);
+        if arg.kind == compiled_mir::MirCallArgKind::String {
+            count = count + 1;
+        }
+        index = index + 1;
+    }
+    return count;
+}
+
+fn count_strings_in_insts(
+    insts: &std::array::Array<compiled_mir::MirExprInst>
+) -> !i64 {
+    var count = 0;
+    var index = 0;
+    while index < insts.len() {
+        let inst = try insts.at(index);
+        if inst.kind == compiled_mir::MirExprInstKind::ConstString {
+            count = count + 1;
+        }
+        if inst.kind == compiled_mir::MirExprInstKind::Call {
+            count = count + try count_string_args(&inst.call_args);
+        }
+        index = index + 1;
+    }
+    return count;
+}
+fn lower_call_index_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    bs: i64
+) -> !compiled_mir::MirCallArg {
+    let start_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "start", 0, bs
+    );
+    let end_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "end", 0, bs
+    );
+    let start_val = try ir_contract::body_int_value_from(ir_bytes, function_name, start_node, bs);
+    let end_val = try ir_contract::body_int_value_from(ir_bytes, function_name, end_node, bs);
+    if start_val != 0 or end_val != 0 {
+        return error("compiled mir: only [0..0] call index arg supported");
+    }
+    return compiled_mir::empty_slice_call_arg(arg_type);
+}
+
+fn lower_call_field_arg(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    arg_type: []u8,
+    arg_node: i64,
+    bs: i64
+) -> !compiled_mir::MirCallArg {
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, arg_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: call field arg receiver must be Var");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, arg_node, bs
+    );
+    return compiled_mir::field_access_call_arg(
+        arg_type, field.receiver_llvm_type, receiver_name, field.field_index
+    );
+}
+
+fn lower_expr_into(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    string_index: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    bs: i64
+) -> !i64 {
+    let kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, expr_node, bs);
+    let id = id_base + insts.len();
+    if std::mem::equal_bytes(kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        let var_type = try compiled_mir_types::resolve_value_llvm_type(
+            ir_bytes, function_name, module_prefix, params_spec, var_name, bs
+        );
+        try insts.append(compiled_mir::var_expr_inst(id, var_type, var_name));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        try insts.append(compiled_mir::bool_expr_inst(
+            id,
+            std::mem::equal_bytes(token, "true")
+        ));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "Int") {
+        let int_value = try ir_contract::body_int_value_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        try insts.append(compiled_mir::int_expr_inst(id, int_value));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "String") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            bs
+        );
+        let _payload_len = try compiled_util::string_token_decoded_len(
+            token,
+            "compiled mir: invalid expression string token"
+        );
+        try insts.append(compiled_mir::string_expr_inst(
+            id,
+            token,
+            string_index
+        ));
+        return id;
+    }
+    if std::mem::equal_bytes(kind, "Prefix") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-prefix ", function_name, expr_node, bs
+        );
+        if !std::mem::equal_bytes(op, "not") {
+            return error("compiled mir: unsupported prefix op");
+        }
+        let right_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "right", 0, bs
+        );
+        let operand = try lower_expr_into(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            right_node,
+            string_index,
+            id_base,
+            insts,
+            bs
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::prefix_not_expr_inst(result_id, operand));
+        return result_id;
+    }
+    if std::mem::equal_bytes(kind, "Binary") {
+        let op = try ir_contract::sequence_fact_value_from(
+            ir_bytes, "body-binary ", function_name, expr_node, bs
+        );
+        let left_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "left", 0, bs
+        );
+        let right_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, expr_node, "right", 0, bs
+        );
+        let left = try lower_expr_into(
+            ir_bytes, function_name, module_prefix, params_spec, left_node,
+            string_index, id_base, insts, bs
+        );
+        let right = try lower_expr_into(
+            ir_bytes, function_name, module_prefix, params_spec, right_node,
+            string_index, id_base, insts, bs
+        );
+        let result_id = id_base + insts.len();
+        try insts.append(compiled_mir::binary_expr_inst(result_id, op, left, right));
+        return result_id;
+    }
+    if std::mem::equal_bytes(kind, "FieldExpr") {
+        return try lower_expr_field(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            expr_node,
+            id_base,
+            insts,
+            bs
+        );
+    }
+    if std::mem::equal_bytes(kind, "Call") {
+        let callee_name = try ir_contract::body_call_callee_or_empty_from(
+            ir_bytes, function_name, expr_node, bs
+        );
+        let call_type = try compiled_mir_types::lower_call_return_type(
+            ir_bytes, function_name, module_prefix, expr_node, bs
+        );
+        let lowered_callee_name = try compiled_mir_types::lower_call_callee_name(
+            ir_bytes, function_name, module_prefix, expr_node, bs
+        );
+        let callee_module_prefix = try compiled_mir_types::lower_call_module_prefix(
+            ir_bytes, function_name, module_prefix, expr_node, bs
+        );
+        let args = try lower_call_args(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, string_index, bs
+        );
+        try insts.append(compiled_mir::call_expr_inst(
+            id,
+            call_type,
+            callee_module_prefix,
+            lowered_callee_name,
+            args
+        ));
+        return id;
+    }
+    return error("compiled mir: unsupported expression kind");
+}
+
+fn lower_expr_field(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    expr_node: i64,
+    id_base: i64,
+    insts: &var std::array::Array<compiled_mir::MirExprInst>,
+    bs: i64
+) -> !i64 {
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes, "body-field-expr ", function_name, expr_node, bs
+    );
+    if std::mem::equal_bytes(mode, "namespace") {
+        let id = id_base + insts.len();
+        let variant_name = try ir_contract::body_field_expr_name_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            "namespace",
+            bs
+        );
+        let receiver = try ir_contract::body_child_sequence_from(
+            ir_bytes,
+            function_name,
+            expr_node,
+            "receiver",
+            0,
+            bs
+        );
+        let receiver_token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            receiver,
+            bs
+        );
+        let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+            ir_bytes,
+            module_prefix,
+            receiver_token,
+            variant_name
+        );
+        try insts.append(compiled_mir::enum_tag_expr_inst(id, tag));
+        return id;
+    }
+    let field_name = try ir_contract::body_field_expr_name_from(
+        ir_bytes, function_name, expr_node, "field", bs
+    );
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, expr_node, "receiver", 0, bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes, function_name, receiver, bs
+    );
+    if std::mem::equal_bytes(receiver_kind, "Var") {
+        let receiver_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            receiver,
+            bs
+        );
+        let field = try compiled_mir_types::resolve_field_expr(
+            ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+        );
+        let id = id_base + insts.len();
+        try insts.append(compiled_mir::field_access_expr_inst(
+            id,
+            field.field_llvm_type,
+            receiver_name,
+            field.receiver_llvm_type,
+            field.field_index
+        ));
+        return id;
+    }
+    if !std::mem::equal_bytes(receiver_kind, "FieldExpr") and
+        !std::mem::equal_bytes(receiver_kind, "Call") {
+        return error("compiled mir: unsupported field expr receiver");
+    }
+    let receiver_id = try lower_expr_into(
+        ir_bytes,
+        function_name,
+        module_prefix,
+        params_spec,
+        receiver,
+        0,
+        id_base,
+        insts,
+        bs
+    );
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, expr_node, bs
+    );
+    let id = id_base + insts.len();
+    try insts.append(compiled_mir::field_access_temp_expr_inst(
+        id,
+        field.field_llvm_type,
+        receiver_id,
+        field.receiver_llvm_type,
+        field.field_index
+    ));
+    return id;
+}

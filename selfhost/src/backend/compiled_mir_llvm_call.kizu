@@ -1,0 +1,223 @@
+import selfhost::backend::compiled_mir;
+import selfhost::backend::compiled_signature;
+import selfhost::backend::compiled_util;
+
+pub fn append_call_return(
+    out: &var std::string::String,
+    function: &compiled_mir::MirFunction
+) -> !void {
+    try append_call_string_globals(out, function.name, &function.call_args);
+    try out.append_bytes("define ");
+    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(" @");
+    try out.append_bytes(function.name);
+    try out.append_bytes("(");
+    try compiled_signature::append_params_signature(out, function.params_spec);
+    try out.append_bytes(") {");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("entry:");
+    try out.append_byte(cast<u8>(10));
+    try append_call_arg_setup(out, function.name, &function.call_args);
+    try out.append_bytes("  %");
+    try out.append_bytes(function.entry.first_instruction.result.payload);
+    try out.append_bytes(" = call ");
+    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(" @");
+    try append_callee_symbol(
+        out,
+        function.entry.first_instruction.module_prefix,
+        function.entry.first_instruction.callee_name
+    );
+    try out.append_bytes("(");
+    try append_call_args(out, &function.call_args);
+    try out.append_bytes(")");
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("  ret ");
+    try out.append_bytes(function.return_type.llvm_name);
+    try out.append_bytes(" %");
+    try out.append_bytes(function.entry.terminator.value.payload);
+    try out.append_byte(cast<u8>(10));
+    try out.append_bytes("}");
+    try out.append_byte(cast<u8>(10));
+    try out.append_byte(cast<u8>(10));
+    return;
+}
+
+pub fn append_call_string_globals(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    args: &std::array::Array<compiled_mir::MirCallArg>
+) -> !void {
+    var index = 0;
+    while index < args.len() {
+        let arg = try args.at(index);
+        if arg.kind == compiled_mir::MirCallArgKind::String {
+            let quote = cast<u8>(34);
+            let payload_len = try compiled_util::string_token_decoded_len(
+                arg.value,
+                "compiled mir llvm: invalid call string token"
+            );
+            try out.append_bytes("@.kizu.compiled.");
+            try out.append_bytes(llvm_symbol);
+            try out.append_bytes(".s");
+            try std::fmt::append_i64(out, arg.string_index);
+            try out.append_bytes(" = private unnamed_addr constant [");
+            try std::fmt::append_i64(out, payload_len);
+            try out.append_bytes(" x i8] c");
+            try out.append_byte(quote);
+            try compiled_util::append_string_token_payload(
+                out,
+                arg.value,
+                "compiled mir llvm: invalid call string token"
+            );
+            try out.append_byte(quote);
+            try out.append_byte(cast<u8>(10));
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+pub fn append_call_arg_setup(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    args: &std::array::Array<compiled_mir::MirCallArg>
+) -> !void {
+    try append_call_arg_setup_with_prefix(out, llvm_symbol, args, 0);
+    return;
+}
+
+pub fn append_call_arg_setup_with_prefix(
+    out: &var std::string::String,
+    llvm_symbol: []u8,
+    args: &std::array::Array<compiled_mir::MirCallArg>,
+    call_prefix: i64
+) -> !void {
+    var index = 0;
+    while index < args.len() {
+        let arg = try args.at(index);
+        if arg.kind == compiled_mir::MirCallArgKind::String {
+            let payload_len = try compiled_util::string_token_decoded_len(
+                arg.value,
+                "compiled mir llvm: invalid call string token"
+            );
+            try out.append_bytes("  ");
+            try append_arg_local_name(out, call_prefix, index);
+            try out.append_bytes("_ptr = getelementptr [");
+            try std::fmt::append_i64(out, payload_len);
+            try out.append_bytes(" x i8], ptr @.kizu.compiled.");
+            try out.append_bytes(llvm_symbol);
+            try out.append_bytes(".s");
+            try std::fmt::append_i64(out, arg.string_index);
+            try out.append_bytes(", i64 0, i64 0");
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  ");
+            try append_arg_local_name(out, call_prefix, index);
+            try out.append_bytes("_base = insertvalue %kizu.slice.u8 poison, ptr ");
+            try append_arg_local_name(out, call_prefix, index);
+            try out.append_bytes("_ptr, 0");
+            try out.append_byte(cast<u8>(10));
+            try out.append_bytes("  ");
+            try append_arg_local_name(out, call_prefix, index);
+            try out.append_bytes("_slice = insertvalue %kizu.slice.u8 ");
+            try append_arg_local_name(out, call_prefix, index);
+            try out.append_bytes("_base, i64 ");
+            try std::fmt::append_i64(out, payload_len);
+            try out.append_bytes(", 1");
+            try out.append_byte(cast<u8>(10));
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::FieldAccess {
+                try out.append_bytes("  ");
+                try append_arg_local_name(out, call_prefix, index);
+                try out.append_bytes("_ex = extractvalue ");
+                try out.append_bytes(arg.source_type);
+                try out.append_bytes(" %");
+                try out.append_bytes(arg.value);
+                try out.append_bytes(", ");
+                try std::fmt::append_i64(out, arg.source_field_index);
+                try out.append_byte(cast<u8>(10));
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+fn append_arg_local_name(
+    out: &var std::string::String,
+    call_prefix: i64,
+    index: i64
+) -> !void {
+    try out.append_bytes("%arg");
+    try std::fmt::append_i64(out, call_prefix);
+    try out.append_bytes("_");
+    try std::fmt::append_i64(out, index);
+    return;
+}
+
+pub fn append_call_args(
+    out: &var std::string::String,
+    args: &std::array::Array<compiled_mir::MirCallArg>
+) -> !void {
+    try append_call_args_with_prefix(out, args, 0);
+    return;
+}
+
+pub fn append_call_args_with_prefix(
+    out: &var std::string::String,
+    args: &std::array::Array<compiled_mir::MirCallArg>,
+    call_prefix: i64
+) -> !void {
+    var index = 0;
+    while index < args.len() {
+        if index > 0 {
+            try out.append_bytes(", ");
+        }
+        let arg = try args.at(index);
+        try out.append_bytes(arg.ty);
+        try out.append_bytes(" ");
+        if arg.kind == compiled_mir::MirCallArgKind::Var {
+            try out.append_bytes("%");
+            try out.append_bytes(arg.value);
+        } else {
+            if arg.kind == compiled_mir::MirCallArgKind::String {
+                try append_arg_local_name(out, call_prefix, index);
+                try out.append_bytes("_slice");
+            } else {
+                if arg.kind == compiled_mir::MirCallArgKind::Bool {
+                    if arg.bool_value {
+                        try out.append_bytes("true");
+                    } else {
+                        try out.append_bytes("false");
+                    }
+                } else {
+                    if arg.kind == compiled_mir::MirCallArgKind::FieldAccess {
+                        try append_arg_local_name(out, call_prefix, index);
+                        try out.append_bytes("_ex");
+                    } else {
+                        if arg.kind == compiled_mir::MirCallArgKind::EmptySlice {
+                            try out.append_bytes("zeroinitializer");
+                        } else {
+                            return error("compiled mir llvm: unsupported call arg");
+                        }
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return;
+}
+
+pub fn append_callee_symbol(
+    out: &var std::string::String,
+    module_prefix: []u8,
+    callee_name: []u8
+) -> !void {
+    if std::mem::len(module_prefix) == 0 {
+        try out.append_bytes(callee_name);
+        return;
+    }
+    try compiled_signature::derive_callee_llvm_symbol(out, module_prefix, callee_name);
+    return;
+}

@@ -1,0 +1,935 @@
+pub enum MirTypeKind {
+    SliceU8,
+    I64,
+    Llvm,
+}
+
+pub struct MirType {
+    pub kind: MirTypeKind,
+    pub llvm_name: []u8,
+}
+
+pub enum MirValKind {
+    ConstString,
+    ConstInt,
+    CallResult,
+    StructResult,
+    ExprResult,
+    MultiResult,
+}
+
+pub struct MirValue {
+    pub id: i64,
+    pub ty: MirType,
+    pub kind: MirValKind,
+    pub payload: []u8,
+    pub int_value: i64,
+}
+
+pub enum MirInstKind {
+    ConstString,
+    ConstInt,
+    Call,
+    StructLiteral,
+    Expr,
+    MultiStatement,
+}
+
+pub enum MirCallArgKind {
+    Var,
+    String,
+    Bool,
+    FieldAccess,
+    EmptySlice,
+}
+
+pub struct MirCallArg {
+    pub ty: []u8,
+    pub kind: MirCallArgKind,
+    pub value: []u8,
+    pub bool_value: bool,
+    pub string_index: i64,
+    pub source_type: []u8,
+    pub source_field_index: i64,
+}
+
+pub enum MirStructFieldKind {
+    Var,
+    ConstString,
+    ConstInt,
+    ConstBool,
+    ConstEnumTag,
+    FieldAccess,
+    EmptySlice,
+}
+
+pub struct MirStructField {
+    pub index: i64,
+    pub kind: MirStructFieldKind,
+    pub llvm_type: []u8,
+    pub value: []u8,
+    pub int_value: i64,
+    pub bool_value: bool,
+    pub source_type: []u8,
+    pub source_field_index: i64,
+    pub nested_source_type: []u8,
+}
+
+pub enum MirExprInstKind {
+    Var,
+    ConstString,
+    ConstBool,
+    ConstInt,
+    PrefixNot,
+    Binary,
+    ConstEnumTag,
+    FieldAccess,
+    Call,
+}
+
+pub struct MirExprInst {
+    pub id: i64,
+    pub kind: MirExprInstKind,
+    pub llvm_type: []u8,
+    pub value: []u8,
+    pub int_value: i64,
+    pub bool_value: bool,
+    pub left: i64,
+    pub right: i64,
+    pub op: []u8,
+    pub source_type: []u8,
+    pub source_field_index: i64,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
+}
+
+pub enum MirStmtKind {
+    LetCall,
+    LetStruct,
+    ReturnCall,
+    ReturnStruct,
+    ReturnExpr,
+    ReturnError,
+    If,
+}
+
+pub enum MirIfThenKind {
+    ReturnBool,
+    ReturnCall,
+    ReturnExpr,
+    ReturnError,
+}
+
+pub struct MirStmt {
+    pub kind: MirStmtKind,
+    pub name: []u8,
+    pub llvm_type: []u8,
+    pub string_index: i64,
+    pub if_index: i64,
+    pub expr_result_id: i64,
+    pub if_then_kind: MirIfThenKind,
+    pub bool_value: bool,
+    pub call_module_prefix: []u8,
+    pub call_callee_name: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
+    pub struct_fields: std::array::Array<MirStructField>,
+    pub expr_insts: std::array::Array<MirExprInst>,
+    pub then_call_module_prefix: []u8,
+    pub then_call_callee_name: []u8,
+    pub then_call_args: std::array::Array<MirCallArg>,
+    pub then_expr_result_id: i64,
+    pub then_expr_insts: std::array::Array<MirExprInst>,
+}
+
+pub struct MirInstruction {
+    pub kind: MirInstKind,
+    pub result: MirValue,
+    pub module_prefix: []u8,
+    pub callee_name: []u8,
+    pub args: std::array::Array<MirCallArg>,
+}
+
+pub enum MirTerminatorKind {
+    Return,
+}
+
+pub struct MirTerminator {
+    pub kind: MirTerminatorKind,
+    pub value: MirValue,
+}
+
+pub struct MirBlock {
+    pub label: []u8,
+    pub instruction_count: i64,
+    pub first_instruction: MirInstruction,
+    pub terminator: MirTerminator,
+}
+
+pub struct MirFunction {
+    pub name: []u8,
+    pub return_type: MirType,
+    pub params_spec: []u8,
+    pub call_args: std::array::Array<MirCallArg>,
+    pub struct_fields: std::array::Array<MirStructField>,
+    pub expr_insts: std::array::Array<MirExprInst>,
+    pub multi_stmts: std::array::Array<MirStmt>,
+    pub block_count: i64,
+    pub entry: MirBlock,
+}
+
+pub fn slice_u8_type() -> MirType {
+    return MirType {
+        kind: MirTypeKind::SliceU8,
+        llvm_name: "%kizu.slice.u8"
+    };
+}
+
+pub fn i64_type() -> MirType {
+    return MirType {
+        kind: MirTypeKind::I64,
+        llvm_name: "i64"
+    };
+}
+
+pub fn llvm_type(name: []u8) -> MirType {
+    return MirType {
+        kind: MirTypeKind::Llvm,
+        llvm_name: name
+    };
+}
+
+pub fn mir_string_const_value(id: i64, payload: []u8) -> MirValue {
+    return MirValue {
+        id: id,
+        ty: slice_u8_type(),
+        kind: MirValKind::ConstString,
+        payload: payload,
+        int_value: 0
+    };
+}
+
+pub fn const_int_value(id: i64, value: i64) -> MirValue {
+    return MirValue {
+        id: id,
+        ty: i64_type(),
+        kind: MirValKind::ConstInt,
+        payload: "",
+        int_value: value
+    };
+}
+
+pub fn call_result_value(id: i64, ty: MirType, name: []u8) -> MirValue {
+    return MirValue {
+        id: id,
+        ty: ty,
+        kind: MirValKind::CallResult,
+        payload: name,
+        int_value: 0
+    };
+}
+
+pub fn struct_result_value(id: i64, ty: MirType, name: []u8) -> MirValue {
+    return MirValue {
+        id: id,
+        ty: ty,
+        kind: MirValKind::StructResult,
+        payload: name,
+        int_value: 0
+    };
+}
+
+pub fn expr_result_value(id: i64, ty: MirType, name: []u8) -> MirValue {
+    return MirValue {
+        id: id,
+        ty: ty,
+        kind: MirValKind::ExprResult,
+        payload: name,
+        int_value: 0
+    };
+}
+
+pub fn multi_result_value(id: i64, ty: MirType, name: []u8) -> MirValue {
+    return MirValue {
+        id: id,
+        ty: ty,
+        kind: MirValKind::MultiResult,
+        payload: name,
+        int_value: 0
+    };
+}
+
+pub fn var_call_arg(ty: []u8, name: []u8) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::Var,
+        value: name,
+        bool_value: false,
+        string_index: -1,
+        source_type: "",
+        source_field_index: -1
+    };
+}
+
+pub fn string_call_arg(ty: []u8, payload: []u8, string_index: i64) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::String,
+        value: payload,
+        bool_value: false,
+        string_index: string_index,
+        source_type: "",
+        source_field_index: -1
+    };
+}
+
+pub fn bool_call_arg(ty: []u8, value: bool) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::Bool,
+        value: "",
+        bool_value: value,
+        string_index: -1,
+        source_type: "",
+        source_field_index: -1
+    };
+}
+
+pub fn field_access_call_arg(
+    ty: []u8,
+    source_type: []u8,
+    source_name: []u8,
+    source_field_index: i64
+) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::FieldAccess,
+        value: source_name,
+        bool_value: false,
+        string_index: -1,
+        source_type: source_type,
+        source_field_index: source_field_index
+    };
+}
+
+pub fn empty_slice_call_arg(ty: []u8) -> MirCallArg {
+    return MirCallArg {
+        ty: ty,
+        kind: MirCallArgKind::EmptySlice,
+        value: "",
+        bool_value: false,
+        string_index: -1,
+        source_type: "",
+        source_field_index: -1
+    };
+}
+
+pub fn var_struct_field(index: i64, ty: []u8, name: []u8) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::Var,
+        llvm_type: ty,
+        value: name,
+        int_value: 0,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: ""
+    };
+}
+
+pub fn string_struct_field(index: i64, payload: []u8) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::ConstString,
+        llvm_type: "%kizu.slice.u8",
+        value: payload,
+        int_value: 0,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: ""
+    };
+}
+
+pub fn int_struct_field(index: i64, value: i64) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::ConstInt,
+        llvm_type: "i64",
+        value: "",
+        int_value: value,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: ""
+    };
+}
+
+pub fn bool_struct_field(index: i64, value: bool) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::ConstBool,
+        llvm_type: "i1",
+        value: "",
+        int_value: 0,
+        bool_value: value,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: ""
+    };
+}
+
+pub fn enum_tag_struct_field(index: i64, tag: i64) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::ConstEnumTag,
+        llvm_type: "i64",
+        value: "",
+        int_value: tag,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: ""
+    };
+}
+
+pub fn field_access_struct_field(
+    index: i64,
+    field_type: []u8,
+    receiver_name: []u8,
+    receiver_type: []u8,
+    source_field_index: i64
+) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::FieldAccess,
+        llvm_type: field_type,
+        value: receiver_name,
+        int_value: -1,
+        bool_value: false,
+        source_type: receiver_type,
+        source_field_index: source_field_index,
+        nested_source_type: ""
+    };
+}
+
+pub fn nested_field_access_struct_field(
+    index: i64,
+    field_type: []u8,
+    receiver_name: []u8,
+    receiver_type: []u8,
+    source_field_index: i64,
+    nested_type: []u8,
+    nested_field_index: i64
+) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::FieldAccess,
+        llvm_type: field_type,
+        value: receiver_name,
+        int_value: nested_field_index,
+        bool_value: false,
+        source_type: receiver_type,
+        source_field_index: source_field_index,
+        nested_source_type: nested_type
+    };
+}
+
+pub fn empty_slice_struct_field(index: i64) -> MirStructField {
+    return MirStructField {
+        index: index,
+        kind: MirStructFieldKind::EmptySlice,
+        llvm_type: "%kizu.slice.u8",
+        value: "",
+        int_value: 0,
+        bool_value: false,
+        source_type: "",
+        source_field_index: -1,
+        nested_source_type: ""
+    };
+}
+
+pub fn var_expr_inst(id: i64, ty: []u8, name: []u8) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::Var,
+        llvm_type: ty,
+        value: name,
+        int_value: 0,
+        bool_value: false,
+        left: -1,
+        right: -1,
+        op: "",
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn string_expr_inst(id: i64, payload: []u8, string_index: i64) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::ConstString,
+        llvm_type: "%kizu.slice.u8",
+        value: payload,
+        int_value: string_index,
+        bool_value: false,
+        left: -1,
+        right: -1,
+        op: "",
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn bool_expr_inst(id: i64, value: bool) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::ConstBool,
+        llvm_type: "i1",
+        value: "",
+        int_value: 0,
+        bool_value: value,
+        left: -1,
+        right: -1,
+        op: "",
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn int_expr_inst(id: i64, value: i64) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::ConstInt,
+        llvm_type: "i64",
+        value: "",
+        int_value: value,
+        bool_value: false,
+        left: -1,
+        right: -1,
+        op: "",
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn prefix_not_expr_inst(id: i64, operand: i64) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::PrefixNot,
+        llvm_type: "i1",
+        value: "",
+        int_value: 0,
+        bool_value: false,
+        left: operand,
+        right: -1,
+        op: "not",
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn binary_expr_inst(id: i64, op: []u8, left: i64, right: i64) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::Binary,
+        llvm_type: "i1",
+        value: "",
+        int_value: 0,
+        bool_value: false,
+        left: left,
+        right: right,
+        op: op,
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn enum_tag_expr_inst(id: i64, tag: i64) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::ConstEnumTag,
+        llvm_type: "i64",
+        value: "",
+        int_value: tag,
+        bool_value: false,
+        left: -1,
+        right: -1,
+        op: "",
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn field_access_expr_inst(
+    id: i64,
+    field_type: []u8,
+    receiver_name: []u8,
+    receiver_type: []u8,
+    source_field_index: i64
+) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::FieldAccess,
+        llvm_type: field_type,
+        value: receiver_name,
+        int_value: 0,
+        bool_value: false,
+        left: -1,
+        right: -1,
+        op: "",
+        source_type: receiver_type,
+        source_field_index: source_field_index,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn field_access_temp_expr_inst(
+    id: i64,
+    field_type: []u8,
+    receiver_id: i64,
+    receiver_type: []u8,
+    source_field_index: i64
+) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::FieldAccess,
+        llvm_type: field_type,
+        value: "",
+        int_value: 0,
+        bool_value: false,
+        left: receiver_id,
+        right: -1,
+        op: "",
+        source_type: receiver_type,
+        source_field_index: source_field_index,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn call_expr_inst(
+    id: i64,
+    llvm_type: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirExprInst {
+    return MirExprInst {
+        id: id,
+        kind: MirExprInstKind::Call,
+        llvm_type: llvm_type,
+        value: "",
+        int_value: 0,
+        bool_value: false,
+        left: -1,
+        right: -1,
+        op: "",
+        source_type: "",
+        source_field_index: -1,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args
+    };
+}
+
+pub fn let_call_stmt(
+    name: []u8,
+    llvm_type: []u8,
+    string_index: i64,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt {
+        kind: MirStmtKind::LetCall,
+        name: name,
+        llvm_type: llvm_type,
+        string_index: string_index,
+        if_index: -1,
+        expr_result_id: -1,
+        if_then_kind: MirIfThenKind::ReturnBool,
+        bool_value: false,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args,
+        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
+        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        then_expr_result_id: -1,
+        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
+    };
+}
+
+pub fn let_struct_stmt(
+    name: []u8,
+    llvm_type: []u8,
+    string_index: i64,
+    fields: std::array::Array<MirStructField>
+) -> MirStmt {
+    return MirStmt {
+        kind: MirStmtKind::LetStruct,
+        name: name,
+        llvm_type: llvm_type,
+        string_index: string_index,
+        if_index: -1,
+        expr_result_id: -1,
+        if_then_kind: MirIfThenKind::ReturnBool,
+        bool_value: false,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        struct_fields: fields,
+        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        then_expr_result_id: -1,
+        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
+    };
+}
+
+pub fn return_call_stmt(
+    llvm_type: []u8,
+    string_index: i64,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirStmt {
+    return MirStmt {
+        kind: MirStmtKind::ReturnCall,
+        name: "ret_val",
+        llvm_type: llvm_type,
+        string_index: string_index,
+        if_index: -1,
+        expr_result_id: -1,
+        if_then_kind: MirIfThenKind::ReturnBool,
+        bool_value: false,
+        call_module_prefix: module_prefix,
+        call_callee_name: callee_name,
+        call_args: args,
+        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
+        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        then_expr_result_id: -1,
+        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
+    };
+}
+
+pub fn return_struct_stmt(
+    string_index: i64,
+    fields: std::array::Array<MirStructField>
+) -> MirStmt {
+    return MirStmt {
+        kind: MirStmtKind::ReturnStruct,
+        name: "",
+        llvm_type: "",
+        string_index: string_index,
+        if_index: -1,
+        expr_result_id: -1,
+        if_then_kind: MirIfThenKind::ReturnBool,
+        bool_value: false,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        struct_fields: fields,
+        expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator()),
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        then_expr_result_id: -1,
+        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
+    };
+}
+
+pub fn return_expr_stmt(
+    string_index: i64,
+    result_id: i64,
+    insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt {
+        kind: MirStmtKind::ReturnExpr,
+        name: "",
+        llvm_type: "",
+        string_index: string_index,
+        if_index: -1,
+        expr_result_id: result_id,
+        if_then_kind: MirIfThenKind::ReturnBool,
+        bool_value: false,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
+        expr_insts: insts,
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        then_expr_result_id: -1,
+        then_expr_insts: std::array::Array<MirExprInst>(std::mem::page_allocator())
+    };
+}
+
+pub fn return_error_stmt() -> MirStmt {
+    var fields = std::array::Array<MirStructField>(std::mem::page_allocator());
+    var args = std::array::Array<MirCallArg>(std::mem::page_allocator());
+    var then_args = std::array::Array<MirCallArg>(std::mem::page_allocator());
+    var expr_insts = std::array::Array<MirExprInst>(std::mem::page_allocator());
+    var then_expr_insts = std::array::Array<MirExprInst>(std::mem::page_allocator());
+    return MirStmt {
+        kind: MirStmtKind::ReturnError,
+        name: "",
+        llvm_type: "",
+        string_index: 0,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: args,
+        struct_fields: fields,
+        expr_result_id: -1,
+        expr_insts: expr_insts,
+        if_index: -1,
+        bool_value: false,
+        then_call_module_prefix: "",
+        then_call_callee_name: "",
+        then_call_args: then_args,
+        then_expr_result_id: -1,
+        then_expr_insts: then_expr_insts,
+        if_then_kind: MirIfThenKind::ReturnError
+    };
+}
+
+pub fn if_stmt(
+    if_index: i64,
+    string_index: i64,
+    cond_result_id: i64,
+    cond_insts: std::array::Array<MirExprInst>,
+    then_kind: MirIfThenKind,
+    bool_value: bool,
+    call_type: []u8,
+    module_prefix: []u8,
+    callee_name: []u8,
+    call_args: std::array::Array<MirCallArg>,
+    then_result_id: i64,
+    then_insts: std::array::Array<MirExprInst>
+) -> MirStmt {
+    return MirStmt {
+        kind: MirStmtKind::If,
+        name: "",
+        llvm_type: call_type,
+        string_index: string_index,
+        if_index: if_index,
+        expr_result_id: cond_result_id,
+        if_then_kind: then_kind,
+        bool_value: bool_value,
+        call_module_prefix: "",
+        call_callee_name: "",
+        call_args: std::array::Array<MirCallArg>(std::mem::page_allocator()),
+        struct_fields: std::array::Array<MirStructField>(std::mem::page_allocator()),
+        expr_insts: cond_insts,
+        then_call_module_prefix: module_prefix,
+        then_call_callee_name: callee_name,
+        then_call_args: call_args,
+        then_expr_result_id: then_result_id,
+        then_expr_insts: then_insts
+    };
+}
+
+pub fn mir_string_const_instruction(result: MirValue) -> MirInstruction {
+    return MirInstruction {
+        kind: MirInstKind::ConstString,
+        result: result,
+        module_prefix: "",
+        callee_name: "",
+        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn const_int_instruction(result: MirValue) -> MirInstruction {
+    return MirInstruction {
+        kind: MirInstKind::ConstInt,
+        result: result,
+        module_prefix: "",
+        callee_name: "",
+        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn struct_literal_instruction(result: MirValue) -> MirInstruction {
+    return MirInstruction {
+        kind: MirInstKind::StructLiteral,
+        result: result,
+        module_prefix: "",
+        callee_name: "",
+        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn expr_instruction(result: MirValue) -> MirInstruction {
+    return MirInstruction {
+        kind: MirInstKind::Expr,
+        result: result,
+        module_prefix: "",
+        callee_name: "",
+        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn multi_statement_instruction(result: MirValue) -> MirInstruction {
+    return MirInstruction {
+        kind: MirInstKind::MultiStatement,
+        result: result,
+        module_prefix: "",
+        callee_name: "",
+        args: std::array::Array<MirCallArg>(std::mem::page_allocator())
+    };
+}
+
+pub fn call_instruction(
+    result: MirValue,
+    module_prefix: []u8,
+    callee_name: []u8,
+    args: std::array::Array<MirCallArg>
+) -> MirInstruction {
+    return MirInstruction {
+        kind: MirInstKind::Call,
+        result: result,
+        module_prefix: module_prefix,
+        callee_name: callee_name,
+        args: args
+    };
+}
+
+pub fn return_value(value: MirValue) -> MirTerminator {
+    return MirTerminator {
+        kind: MirTerminatorKind::Return,
+        value: value
+    };
+}

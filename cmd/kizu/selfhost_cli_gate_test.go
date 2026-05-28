@@ -120,6 +120,7 @@ func runSelfhostCLIFileFrontendGate(
 	defer restore()
 
 	fixtures := writeSelfhostCLIFrontendFixtures(t)
+	ensureSelfhostStage2HostArtifact(t)
 
 	_, program, err := loadPackageProgram("selfhost")
 	if err != nil {
@@ -979,6 +980,26 @@ func selfhostCLIFrontendCheckAggregateParseFailureCases(
 			wantOut: "exit-code\n1\n",
 			wantErr: "error: expected type name, got } at 1:22\nerror: parse failed\n",
 		},
+	}
+}
+
+// ensureSelfhostStage2HostArtifact provides the hosted-stage2 host runtime that
+// the interpreted run command links generated executables against. The run path
+// links against target/selfhost/stage2/selfhost.host.ll, which mirrors the
+// checked-in host capability template, so we stage that template here.
+func ensureSelfhostStage2HostArtifact(t *testing.T) {
+	t.Helper()
+	target := "target/selfhost/stage2/selfhost.host.ll"
+	source := "selfhost/runtime/selfhost.host.ll"
+	bytes, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read host capability template: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("create stage2 dir: %v", err)
+	}
+	if err := os.WriteFile(target, bytes, 0o644); err != nil {
+		t.Fatalf("stage host capability artifact: %v", err)
 	}
 }
 

@@ -1,0 +1,279 @@
+import selfhost::backend::compiled_fact_lookup;
+import selfhost::backend::compiled_mir;
+import selfhost::backend::compiled_mir_types;
+import selfhost::backend::compiled_util;
+import selfhost::backend::ir_contract;
+
+pub fn lower_struct_fields(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    value_node: i64,
+    bs: i64
+) -> !std::array::Array<compiled_mir::MirStructField> {
+    let field_count = try count_struct_fields(ir_bytes, function_name, value_node, bs);
+    var fields = std::array::Array<compiled_mir::MirStructField>(std::mem::page_allocator());
+    var field_index = 0;
+    while field_index < field_count {
+        let field_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, value_node, "field", field_index, bs
+        );
+        let field_value = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, field_node, "value", 0, bs
+        );
+        let field_value_kind = try ir_contract::body_node_kind_from(
+            ir_bytes, function_name, field_value, bs
+        );
+        try fields.append(try lower_struct_field(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            field_index,
+            field_value,
+            field_value_kind,
+            bs
+        ));
+        field_index = field_index + 1;
+    }
+    return fields;
+}
+
+fn count_struct_fields(
+    ir_bytes: []u8,
+    function_name: []u8,
+    struct_node: i64,
+    bs: i64
+) -> !i64 {
+    var count = 0;
+    while true {
+        let child = try ir_contract::body_child_sequence_or_minus_one_from(
+            ir_bytes,
+            function_name,
+            struct_node,
+            "field",
+            count,
+            bs
+        );
+        if child < 0 {
+            return count;
+        }
+        count = count + 1;
+    }
+    return count;
+}
+
+fn lower_struct_field(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    field_index: i64,
+    field_value: i64,
+    field_value_kind: []u8,
+    bs: i64
+) -> !compiled_mir::MirStructField {
+    if std::mem::equal_bytes(field_value_kind, "Var") {
+        let var_name = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            field_value,
+            bs
+        );
+        let var_type = try compiled_mir_types::resolve_value_llvm_type(
+            ir_bytes, function_name, module_prefix, params_spec, var_name, bs
+        );
+        return compiled_mir::var_struct_field(field_index, var_type, var_name);
+    }
+    if std::mem::equal_bytes(field_value_kind, "String") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            field_value,
+            bs
+        );
+        let _payload_len = try compiled_util::string_token_decoded_len(
+            token,
+            "compiled mir: invalid string token in struct field"
+        );
+        return compiled_mir::string_struct_field(field_index, token);
+    }
+    if std::mem::equal_bytes(field_value_kind, "Int") {
+        let int_value = try ir_contract::body_int_value_from(
+            ir_bytes,
+            function_name,
+            field_value,
+            bs
+        );
+        return compiled_mir::int_struct_field(field_index, int_value);
+    }
+    if std::mem::equal_bytes(field_value_kind, "Bool") {
+        let token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            field_value,
+            bs
+        );
+        return compiled_mir::bool_struct_field(
+            field_index,
+            std::mem::equal_bytes(token, "true")
+        );
+    }
+    if std::mem::equal_bytes(field_value_kind, "IndexExpr") {
+        let start_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, field_value, "start", 0, bs
+        );
+        let end_node = try ir_contract::body_child_sequence_from(
+            ir_bytes, function_name, field_value, "end", 0, bs
+        );
+        let start_val = try ir_contract::body_int_value_from(ir_bytes, function_name, start_node, bs);
+        let end_val = try ir_contract::body_int_value_from(ir_bytes, function_name, end_node, bs);
+        if start_val != 0 or end_val != 0 {
+            return error("compiled mir: only [0..0] index expr supported");
+        }
+        return compiled_mir::empty_slice_struct_field(field_index);
+    }
+    if std::mem::equal_bytes(field_value_kind, "FieldExpr") {
+        return try lower_struct_field_expr(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            field_index,
+            field_value,
+            bs
+        );
+    }
+    return error("compiled mir: unsupported struct field value kind");
+}
+
+fn lower_struct_field_expr(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    field_index: i64,
+    field_value: i64,
+    bs: i64
+) -> !compiled_mir::MirStructField {
+    let mode = try ir_contract::sequence_fact_second_value_from(
+        ir_bytes,
+        "body-field-expr ",
+        function_name,
+        field_value,
+        bs
+    );
+    if std::mem::equal_bytes(mode, "namespace") {
+        let variant_name = try ir_contract::body_field_expr_name_from(
+            ir_bytes,
+            function_name,
+            field_value,
+            "namespace",
+            bs
+        );
+        let receiver = try ir_contract::body_child_sequence_from(
+            ir_bytes,
+            function_name,
+            field_value,
+            "receiver",
+            0,
+            bs
+        );
+        let receiver_token = try ir_contract::body_token_or_empty_from(
+            ir_bytes,
+            function_name,
+            receiver,
+            bs
+        );
+        let tag = try compiled_fact_lookup::enum_variant_tag_by_prefix(
+            ir_bytes,
+            module_prefix,
+            receiver_token,
+            variant_name
+        );
+        return compiled_mir::enum_tag_struct_field(field_index, tag);
+    }
+    let receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes,
+        function_name,
+        field_value,
+        "receiver",
+        0,
+        bs
+    );
+    let receiver_kind = try ir_contract::body_node_kind_from(
+        ir_bytes,
+        function_name,
+        receiver,
+        bs
+    );
+    if std::mem::equal_bytes(receiver_kind, "FieldExpr") {
+        return try lower_nested_struct_field_expr(
+            ir_bytes,
+            function_name,
+            module_prefix,
+            params_spec,
+            field_index,
+            field_value,
+            receiver,
+            bs
+        );
+    }
+    if !std::mem::equal_bytes(receiver_kind, "Var") {
+        return error("compiled mir: field access receiver must be Var");
+    }
+    let receiver_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes,
+        function_name,
+        receiver,
+        bs
+    );
+    let field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+    );
+    return compiled_mir::field_access_struct_field(
+        field_index,
+        field.field_llvm_type,
+        receiver_name,
+        field.receiver_llvm_type,
+        field.field_index
+    );
+}
+
+fn lower_nested_struct_field_expr(
+    ir_bytes: []u8,
+    function_name: []u8,
+    module_prefix: []u8,
+    params_spec: []u8,
+    field_index: i64,
+    field_value: i64,
+    receiver: i64,
+    bs: i64
+) -> !compiled_mir::MirStructField {
+    let root_receiver = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, receiver, "receiver", 0, bs
+    );
+    let root_kind = try ir_contract::body_node_kind_from(ir_bytes, function_name, root_receiver, bs);
+    if !std::mem::equal_bytes(root_kind, "Var") {
+        return error("compiled mir: nested field access receiver must start with Var");
+    }
+    let root_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, root_receiver, bs
+    );
+    let first_field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, receiver, bs
+    );
+    let second_field = try compiled_mir_types::resolve_field_expr(
+        ir_bytes, function_name, module_prefix, params_spec, field_value, bs
+    );
+    return compiled_mir::nested_field_access_struct_field(
+        field_index,
+        second_field.field_llvm_type,
+        root_name,
+        first_field.receiver_llvm_type,
+        first_field.field_index,
+        first_field.field_llvm_type,
+        second_field.field_index
+    );
+}

@@ -78,6 +78,105 @@ pub fn append_llvm_c_string_payload(
     return;
 }
 
+pub fn string_token_decoded_len(token: []u8, error_message: []u8) -> !i64 {
+    let token_len = std::mem::len(token);
+    if token_len >= 4 and std::mem::equal_bytes(token[0..4], "hex:") {
+        let decoded_len = try hex_token_decoded_len(token, error_message);
+        if decoded_len < 2 {
+            return error(error_message);
+        }
+        if try hex_pair_byte(token, 4) != cast<u8>(34) or
+            try hex_pair_byte(token, 4 + (decoded_len - 1) * 2) != cast<u8>(34) {
+            return error(error_message);
+        }
+        return decoded_len - 2;
+    }
+    if token_len < 2 or token[0] != cast<u8>(34) or token[token_len - 1] != cast<u8>(34) {
+        return error(error_message);
+    }
+    return token_len - 2;
+}
+
+pub fn append_string_token_payload(
+    out: &var std::string::String,
+    token: []u8,
+    error_message: []u8
+) -> !void {
+    let token_len = std::mem::len(token);
+    if token_len >= 4 and std::mem::equal_bytes(token[0..4], "hex:") {
+        let decoded_len = try hex_token_decoded_len(token, error_message);
+        if decoded_len < 2 {
+            return error(error_message);
+        }
+        var index = 0;
+        while index < decoded_len {
+            let byte = try hex_pair_byte(token, 4 + index * 2);
+            if index == 0 or index + 1 == decoded_len {
+                if byte != cast<u8>(34) {
+                    return error(error_message);
+                }
+            } else {
+                try append_llvm_c_string_byte(out, byte);
+            }
+            index = index + 1;
+        }
+        return;
+    }
+    if token_len < 2 or token[0] != cast<u8>(34) or token[token_len - 1] != cast<u8>(34) {
+        return error(error_message);
+    }
+    try append_llvm_c_string_payload(out, token[1..token_len - 1]);
+    return;
+}
+
+fn append_llvm_c_string_byte(out: &var std::string::String, byte: u8) -> !void {
+    if byte == cast<u8>(34) {
+        try out.append_bytes("\22");
+    } else {
+        if byte == cast<u8>(92) {
+            try out.append_bytes("\5C");
+        } else {
+            if byte == cast<u8>(10) {
+                try out.append_bytes("\0A");
+            } else {
+                try out.append_byte(byte);
+            }
+        }
+    }
+    return;
+}
+
+fn hex_token_decoded_len(token: []u8, error_message: []u8) -> !i64 {
+    let token_len = std::mem::len(token);
+    if token_len < 4 or !std::mem::equal_bytes(token[0..4], "hex:") {
+        return error(error_message);
+    }
+    let hex_len = token_len - 4;
+    if hex_len < 2 or (hex_len / 2) * 2 != hex_len {
+        return error(error_message);
+    }
+    return hex_len / 2;
+}
+
+fn hex_pair_byte(token: []u8, index: i64) -> !u8 {
+    let high = try hex_digit_value(token[index]);
+    let low = try hex_digit_value(token[index + 1]);
+    return cast<u8>(high * 16 + low);
+}
+
+fn hex_digit_value(byte: u8) -> !i64 {
+    if byte >= cast<u8>(48) and byte <= cast<u8>(57) {
+        return cast<i64>(byte - cast<u8>(48));
+    }
+    if byte >= cast<u8>(97) and byte <= cast<u8>(102) {
+        return cast<i64>(byte - cast<u8>(97)) + 10;
+    }
+    if byte >= cast<u8>(65) and byte <= cast<u8>(70) {
+        return cast<i64>(byte - cast<u8>(65)) + 10;
+    }
+    return error("invalid hex digit");
+}
+
 pub fn append_insertvalue_line(
     out: &var std::string::String,
     llvm_type: []u8,
@@ -85,7 +184,23 @@ pub fn append_insertvalue_line(
     field_type: []u8,
     struct_field_index: i64
 ) -> !void {
+    try append_insertvalue_line_with_prefix(
+        out, llvm_type, field_index, field_type, struct_field_index, 0
+    );
+    return;
+}
+
+pub fn append_insertvalue_line_with_prefix(
+    out: &var std::string::String,
+    llvm_type: []u8,
+    field_index: i64,
+    field_type: []u8,
+    struct_field_index: i64,
+    prefix: i64
+) -> !void {
     try out.append_bytes("  %v");
+    try std::fmt::append_i64(out, prefix);
+    try out.append_bytes("_");
     try std::fmt::append_i64(out, field_index);
     try out.append_bytes(" = insertvalue ");
     try out.append_bytes(llvm_type);
@@ -94,6 +209,8 @@ pub fn append_insertvalue_line(
         try out.append_bytes("poison");
     } else {
         try out.append_bytes("%v");
+        try std::fmt::append_i64(out, prefix);
+        try out.append_bytes("_");
         try std::fmt::append_i64(out, field_index - 1);
     }
     try out.append_bytes(", ");

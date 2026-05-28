@@ -93,7 +93,7 @@ pub fn find_param_kizu_type(
                 }
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: param kizu type not found");
 }
@@ -167,14 +167,18 @@ pub fn resolve_call_return_type(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
-    call_node: i64
+    call_node: i64,
+    bs: i64
 ) -> ![]u8 {
-    let callee_name = try ir_contract::body_call_callee_or_empty(
-        ir_bytes, function_name, call_node
+    let callee_name = try ir_contract::body_call_callee_or_empty_from(
+        ir_bytes, function_name, call_node, bs
     );
-    let ret_type = try compiled_fact_lookup::lookup_fact_value_by_prefix(
+    let ret_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
         ir_bytes, "function-signature-return ", module_prefix, callee_name
     );
+    if std::mem::len(ret_type) == 0 {
+        return error("compiled signature: call return type not found");
+    }
     return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, ret_type);
 }
 
@@ -182,13 +186,14 @@ pub fn resolve_struct_literal_type(
     ir_bytes: []u8,
     function_name: []u8,
     module_prefix: []u8,
-    struct_literal_node: i64
+    struct_literal_node: i64,
+    bs: i64
 ) -> ![]u8 {
-    let type_node = try ir_contract::body_child_sequence(
-        ir_bytes, function_name, struct_literal_node, "type", 0
+    let type_node = try ir_contract::body_child_sequence_from(
+        ir_bytes, function_name, struct_literal_node, "type", 0, bs
     );
-    let type_name = try ir_contract::body_token_or_empty(
-        ir_bytes, function_name, type_node
+    let type_name = try ir_contract::body_token_or_empty_from(
+        ir_bytes, function_name, type_node, bs
     );
     return try compiled_fact_lookup::lookup_type_llvm_by_prefix(ir_bytes, module_prefix, type_name);
 }
@@ -229,7 +234,7 @@ pub fn resolve_call_arg_type(
                 matched = matched + 1;
             }
         }
-        index = index + 1;
+        index = compiled_util::find_line_end(ir_bytes, index) + 1;
     }
     return error("compiled function: call arg type not found");
 }
@@ -239,14 +244,15 @@ pub fn derive_callee_llvm_symbol(
     module_prefix: []u8,
     callee_name: []u8
 ) -> !void {
-    try out.append_bytes("kizu_compiled__");
+    try out.append_bytes("kizu_selfhost__");
     let prefix_len = std::mem::len(module_prefix);
-    if prefix_len > 11 and std::mem::equal_bytes(module_prefix[0..11], "selfhost::") {
-        var pos = 11;
+    if prefix_len > 10 and std::mem::equal_bytes(module_prefix[0..10], "selfhost::") {
+        var pos = 10;
         while pos < prefix_len {
             let byte = module_prefix[pos];
             if byte == cast<u8>(58) {
-                pos = pos + 1;
+                try out.append_byte(cast<u8>(95));
+                pos = pos + 2;
             } else {
                 try out.append_byte(byte);
                 pos = pos + 1;
@@ -276,8 +282,11 @@ pub fn derive_return_type(
     let mp_len = std::mem::len(module_prefix);
     let fn_len = std::mem::len(function_name);
     let short_name = function_name[mp_len..fn_len];
-    let kizu_return_type = try compiled_fact_lookup::lookup_fact_value_by_prefix(
+    let kizu_return_type = compiled_fact_lookup::lookup_fact_value_by_prefix_or_empty(
         ir_bytes, "function-signature-return ", module_prefix, short_name
     );
+    if std::mem::len(kizu_return_type) == 0 {
+        return error("compiled signature: function return type not found");
+    }
     return try compiled_type_lower::kizu_type_to_llvm(ir_bytes, module_prefix, kizu_return_type);
 }
